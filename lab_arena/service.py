@@ -5729,7 +5729,17 @@ class ArenaService:
                     else:
                         entry["completed"][submission_id] = result
 
+        results = {}
+        generation_matches = True
         try:
+            # The compact public SELECT has no private scoring plans. Fetch
+            # them only after a cache miss has acquired a refresh slot.
+            if ("stage1_scoring_plan_doc" not in row
+                    and "stage2_scoring_plan_doc" not in row):
+                row = self._round(round_id)
+                generation_matches = int(row.get("status_generation") or 0) == entry["generation"]
+            if not generation_matches or not current():
+                return
             results = self._read_completed_submission_scores(row, on_completed=record, should_continue=current)
         except Exception as exc:
             logger.warning("Completed model score refresh unavailable: round=%s type=%s", round_id, type(exc).__name__)
@@ -5738,7 +5748,7 @@ class ArenaService:
             with self._completed_scores_lock:
                 if self._completed_scores_cache.get(round_id) is entry:
                     entry["completed"] = results
-                    entry["refreshed_at"] = time.monotonic()
+                    entry["refreshed_at"] = time.monotonic() if generation_matches else 0.0
                     entry["refreshing"] = False
             self._completed_scores_refresh_slots.release()
 

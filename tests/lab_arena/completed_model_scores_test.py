@@ -158,6 +158,91 @@ def test_polling_cache_expires_and_round_transition_invalidates_it(completed, mo
     assert read.call_count == 3
 
 
+def test_compact_refresh_rejects_full_round_generation_mismatch(completed):
+    service, row, _, _, _ = completed
+    compact = {key: value for key, value in row.items() if not key.endswith("_scoring_plan_doc")}
+    newer = {**row, "status_generation": row["status_generation"] + 1}
+    service._round = Mock(return_value=newer)
+    service._read_completed_submission_scores = Mock(return_value={"miner": {"final_score": 60}})
+    assert service.completed_submission_scores(compact) == {}
+    for _ in range(100):
+        if (not service._completed_scores_cache[row["round_id"]]["refreshing"]
+                and service._completed_scores_refresh_slots._value == 2):
+            break
+        time.sleep(0.01)
+    entry = service._completed_scores_cache[row["round_id"]]
+    assert entry["completed"] == {}
+    assert entry["refreshed_at"] == 0.0
+    service._read_completed_submission_scores.assert_not_called()
+    compact["status_generation"] = newer["status_generation"]
+    assert _wait_for_scores(service, compact, lambda scores: scores.get("miner") == {"final_score": 60})
+    assert service._round.call_count == 2
+
+
+def test_compact_full_round_fetch_failure_releases_slot_and_retries(completed):
+    service, row, _, _, _ = completed
+    compact = {key: value for key, value in row.items() if not key.endswith("_scoring_plan_doc")}
+    service._round = Mock(side_effect=[OSError("temporary round read failure"), row])
+    service._read_completed_submission_scores = Mock(return_value={"miner": {"final_score": 60}})
+    assert service.completed_submission_scores(compact) == {}
+    for _ in range(100):
+        if (not service._completed_scores_cache[row["round_id"]]["refreshing"]
+                and service._completed_scores_refresh_slots._value == 2):
+            break
+        time.sleep(0.01)
+    entry = service._completed_scores_cache[row["round_id"]]
+    assert entry["refreshing"] is False
+    assert service._completed_scores_refresh_slots._value == 2
+    service._read_completed_submission_scores.assert_not_called()
+    entry["refreshed_at"] -= 16
+    assert _wait_for_scores(service, compact, lambda scores: scores.get("miner") == {"final_score": 60})
+    assert service._round.call_count == 2
+    for _ in range(100):
+        if service._completed_scores_refresh_slots._value == 2:
+            break
+        time.sleep(0.01)
+    assert service._completed_scores_refresh_slots._value == 2
+
+
+def test_old_compact_refresh_cannot_write_after_new_generation(completed):
+    service, row, _, _, _ = completed
+    compact = {key: value for key, value in row.items() if not key.endswith("_scoring_plan_doc")}
+    newer = {**row, "status_generation": row["status_generation"] + 1}
+    service._round = Mock(side_effect=[row, newer])
+    first_started, release_first, old_finished = threading.Event(), threading.Event(), threading.Event()
+    original_refresh = service._refresh_completed_submission_scores
+
+    def observed_refresh(refresh_row, entry):
+        try:
+            return original_refresh(refresh_row, entry)
+        finally:
+            if entry["generation"] == row["status_generation"]:
+                old_finished.set()
+
+    service._refresh_completed_submission_scores = observed_refresh
+
+    def read(full_row, *, on_completed, should_continue):
+        if full_row["status_generation"] == row["status_generation"]:
+            first_started.set()
+            assert release_first.wait(2)
+            on_completed("miner", {"final_score": 10})
+            return {"miner": {"final_score": 10}}
+        on_completed("miner", {"final_score": 60})
+        return {"miner": {"final_score": 60}}
+
+    service._read_completed_submission_scores = Mock(side_effect=read)
+    try:
+        assert service.completed_submission_scores(compact) == {}
+        assert first_started.wait(2)
+        newer_compact = {**compact, "status_generation": newer["status_generation"]}
+        assert _wait_for_scores(service, newer_compact, lambda scores: scores.get("miner") == {"final_score": 60})
+    finally:
+        release_first.set()
+    assert old_finished.wait(2)
+    assert service._read_completed_submission_scores.call_count == 2
+    assert service.completed_submission_scores(newer_compact) == {"miner": {"final_score": 60}}
+
+
 def test_slow_refresh_does_not_block_public_reads_and_releases_each_model(completed):
     service, row, _, _, _ = completed
     started = threading.Event()

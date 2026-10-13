@@ -2,6 +2,8 @@
 
 from copy import deepcopy
 import json
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -83,7 +85,8 @@ def _row(day="2026-10-09", **configuration):
         for index in range(145)
     ]
     return {
-        "round_id": "arena-" + day, "status": "published", "created_at": day + "T00:00:00Z",
+        "round_id": "arena-" + day, "status": "published", "status_generation": 0,
+        "created_at": day + "T00:00:00Z",
         "evaluation_date": day, "icp_set_date": None, "published_at": day + "T15:00:00Z",
         "arena_network_name": "finney", "arena_netuid": 71,
         "promotion_required": True, "baseline_promoted_at": None, "cancel_reason": None,
@@ -207,19 +210,63 @@ def test_competition_projection_keeps_archive_pagination_scope_fallback_and_full
     assert shadow_service.public_competition()["latest_completed_round"]["mode"] == "shadow"
 
 
-def test_completed_score_selection_still_loads_full_round():
+def test_completed_score_selection_passes_compact_round_to_cache():
     row = _row(execution_sequence_policy=contracts.BASELINE_SCORED_FIRST_POLICY,
                sourcing_cost_eligibility_policy=contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY)
     row.update(status="stage2_scoring", stage1_scoring_plan_doc={"private": True})
     service = SimpleNamespace(_round=Mock(return_value=row), completed_submission_scores=Mock(return_value={"model-0": {"final_score": 0}}))
     projected = dashboard._competition_round(_project(row, dashboard._COMPETITION_ROUND_COLUMNS))
     assert dashboard._completed_scores(service, projected) == {"model-0": {"final_score": 0}}
-    service._round.assert_called_once_with(row["round_id"])
-    service.completed_submission_scores.assert_called_once_with(row)
+    service._round.assert_not_called()
+    service.completed_submission_scores.assert_called_once_with(projected)
     row["configuration_doc"].pop("execution_sequence_policy")
     projected = dashboard._competition_round(_project(row, dashboard._COMPETITION_ROUND_COLUMNS))
     assert dashboard._completed_scores(service, projected) == {}
+    service._round.assert_not_called()
+
+
+def test_public_competition_cold_refresh_is_async_and_warm_cache_skips_full_row():
+    row = _row(execution_sequence_policy=contracts.BASELINE_SCORED_FIRST_POLICY,
+               sourcing_cost_eligibility_policy=contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY)
+    row.update(status="stage2_scoring", status_generation=9,
+               stage1_scoring_plan_doc={}, stage2_scoring_plan_doc={})
+    service, transport = _service([row])
+    service._completed_scores_lock = threading.Lock()
+    service._completed_scores_cache = {}
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(2)
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def full_round(round_id):
+        assert round_id == row["round_id"]
+        started.set()
+        assert release.wait(2)
+        return row
+
+    service._round = Mock(side_effect=full_round)
+    service._read_completed_submission_scores = Mock(return_value={"model-0": {"final_score": 25}})
+    started_at = time.monotonic()
+    try:
+        cold = service.public_competition()
+        assert time.monotonic() - started_at < 1
+        assert cold["latest_round"]["round_id"] == row["round_id"]
+        assert "status_generation" not in json.dumps(cold)
+        assert started.wait(2)
+        assert service._round.call_count == 1
+        assert service._read_completed_submission_scores.call_count == 0
+    finally:
+        release.set()
+    for _ in range(100):
+        if not service._completed_scores_cache[row["round_id"]]["refreshing"]:
+            finished.set()
+            break
+        time.sleep(0.01)
+    assert finished.is_set()
+    service.public_competition()
+    service.public_competition()
     assert service._round.call_count == 1
+    assert service._read_completed_submission_scores.call_count == 1
+    assert all(call["columns"] != "*" for call in transport.calls)
+    assert "status_generation" in transport.calls[0]["columns"].split(",")
 
 
 def test_per_icp_cost_projection_keeps_frozen_stage_counts():

@@ -281,6 +281,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_completion_request_hash", "text"),
     ),
     "lab_arena_expire_leases": (("p_round_id", "text"),),
+    "lab_arena_recover_baseline_v1": (("p_round_id", "text"), ("p_work_items", "jsonb")),
     "lab_arena_close_stage": (("p_round_id", "text"), ("p_stage", "smallint")),
     "lab_arena_open_scoring": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
     "lab_arena_open_scoring_v2": (("p_round_id", "text"), ("p_stage", "smallint"), ("p_work_items", "jsonb")),
@@ -2276,6 +2277,13 @@ class ArenaStore:
         if not isinstance(result, bool):
             raise ArenaStoreError("operator hold state is malformed")
         return result
+
+    def recover_baseline(self, round_id: str, work_items: Sequence[Mapping[str, Any]] = ()) -> Dict[str, Any]:
+        """Queue the one bounded infrastructure recovery using original assignments."""
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_recover_baseline_v1",
+            {"p_round_id": round_id, "p_work_items": [dict(item) for item in work_items]},
+        ), "recover_baseline")
 
     def close_stage(self, round_id: str, stage: int) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_close_stage", {"p_round_id": round_id, "p_stage": int(stage)}), "close_stage")

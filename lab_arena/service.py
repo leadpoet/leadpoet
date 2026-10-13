@@ -2498,6 +2498,9 @@ class ArenaService:
             stage=None if parallel_twenty and stage == 1 else stage,
             kind="execute",
         )
+        if stage == 2 and configuration.get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY:
+            original = self._store.list_runs(round_id, stage=1, kind="execute")
+            runs += [run for run in original if self._is_baseline_recovery(run, original, round_row)]
         if (
             not runs
             and stage == 2
@@ -2570,6 +2573,21 @@ class ArenaService:
         if round_row["status"] != "stage%d_closed" % stage:
             return {"status": "stale", "round_status": round_row["status"]}
         plan = self._load_scoring_plan(round_row, stage)
+        items = self._scoring_work_items(round_row, stage, plan)
+        company_quality_cache = quality_policy.enabled(round_row.get("configuration_doc") or {})
+        integrity_cache = integrity.enabled(round_row.get("configuration_doc") or {}) and not company_quality_cache
+        result = self._store.open_scoring(
+            round_id,
+            stage,
+            items,
+            integrity_cache=integrity_cache,
+            **({"company_quality_cache": True} if company_quality_cache else {}),
+        )
+        return {"status": result.get("status"), "round_status": result.get("round_status"), "assignments": result.get("assignments"), "work_items": len(plan["work_items"])}
+
+    def _scoring_work_items(self, round_row: Mapping[str, Any], stage: int, plan: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        """Build ordinary frozen scoring inputs, including cache authority checks."""
+        round_id = str(round_row["round_id"])
         for submission_id in {item["submission_id"] for item in plan["work_items"]}:
             self._require_code_review(submission_id, round_row)
         accepted = {}
@@ -2715,17 +2733,116 @@ class ArenaService:
                 for index, item in enumerate(sorted(pending, key=lambda row: str(row["scored_run_id"]))):
                     item["judgment_group_leader"] = index == 0
                     item["judgment_group_miner_hotkeys"] = group_miners
-        result = self._store.open_scoring(
-            round_id,
-            stage,
-            items,
-            integrity_cache=integrity_cache,
-            **({"company_quality_cache": True} if company_quality_cache else {}),
-        )
-        return {"status": result.get("status"), "round_status": result.get("round_status"), "assignments": result.get("assignments"), "work_items": len(plan["work_items"])}
+        return items
+
+    @staticmethod
+    def _is_baseline_recovery(run: Mapping[str, Any], runs: Sequence[Mapping[str, Any]], row: Mapping[str, Any]) -> bool:
+        configuration = row.get("configuration_doc") or {}
+        baselines = [p for p in row.get("participants") or [] if p.get("is_king")]
+        if (configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
+            or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            or configuration.get("integrity_policy") != integrity.POLICY
+            or quality_policy.enabled(configuration)
+            or configuration.get("max_attempts_per_assignment") != 2
+            or len(baselines) != 1 or run.get("stage") != 1
+            or run.get("round_id") != row.get("round_id")
+            or run.get("submission_id") != baselines[0].get("submission_id")
+            or run.get("miner_hotkey") != baselines[0].get("miner_hotkey")):
+            return False
+        assignment = "%s:%s:1:%s%s" % (row["round_id"], run["submission_id"], run["icp_position"],
+            ":score" if run.get("kind") == "score" else "")
+        if (run.get("assignment_id") != assignment
+            or run.get("run_id") != assignment + ":" + str(run.get("attempt"))
+            or run.get("champion_restart_required")):
+            return False
+        if run.get("kind") == "score" and run.get("attempt") in (1, 2):
+            source = next((r for r in runs if r.get("run_id") == run.get("scored_run_id")), {})
+            return (source.get("kind") == "execute" and source.get("status") == "accepted"
+                and source.get("terminal_cause") == "accepted" and bool(source.get("output_ref"))
+                and all(source.get(k) == run.get(k) for k in ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position"))
+                and ArenaService._is_baseline_recovery(source, runs, row))
+        if run.get("attempt") != 3:
+            return False
+        parents = [r for r in runs if r.get("assignment_id") == assignment and r.get("attempt") in (1, 2)]
+        causes = {"provider_error", "lease_expired"} if run.get("kind") == "execute" else {"judge_error", "judge_timeout", "lease_expired"}
+        return len(parents) == 2 and all(
+            r.get("status") == "failed" and r.get("terminal_cause") in causes
+            and not r.get("champion_restart_required")
+            and r.get("run_id") == assignment + ":" + str(r["attempt"])
+            and all(r.get(k) == run.get(k) for k in ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "kind", "scored_run_id"))
+            for r in parents)
+
+    def _baseline_recovery_plan(self, row: Mapping[str, Any], runs: Sequence[Mapping[str, Any]], judgments: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+        """Verify complete original baseline membership before any late score write."""
+        baseline = next((p for p in row.get("participants") or [] if p.get("is_king")), {})
+        positions = set(contracts.execution_positions(1, contracts.BASELINE_SCORED_FIRST_POLICY, row["configuration_doc"]))
+        accepted = [r for r in runs if r.get("submission_id") == baseline.get("submission_id") and r.get("stage") == 1 and r.get("status") == "accepted"]
+        if len(accepted) != len(positions) or {r.get("icp_position") for r in accepted} != positions:
+            return None
+        chosen = self._select_scoring_outputs(judgments)
+        for run in accepted:
+            assignment = "%s:%s:1:%s" % (row["round_id"], baseline["submission_id"], run["icp_position"])
+            judge = chosen.get(run["run_id"], {})
+            if (run.get("round_id") != row["round_id"] or run.get("miner_hotkey") != baseline.get("miner_hotkey")
+                or run.get("terminal_cause") != "accepted" or not run.get("output_ref")
+                or run.get("assignment_id") != assignment or run.get("run_id") != assignment + ":" + str(run["attempt"])
+                or judge.get("assignment_id") != assignment + ":score"
+                or judge.get("run_id") != assignment + ":score:" + str(judge.get("attempt"))
+                or not judge.get("output_ref") or judge.get("terminal_cause") != "accepted"
+                or not self._same_scoring_membership(judge, run, round_id=str(row["round_id"]))):
+                return None
+        return scoring.build_scoring_plan(round_id=str(row["round_id"]), stage=1, runs=list(accepted),
+            execution_sequence_policy=contracts.BASELINE_SCORED_FIRST_POLICY, configuration=row["configuration_doc"])
+
+    def _recover_baseline(self, row: Mapping[str, Any]) -> None:
+        if ((row.get("configuration_doc") or {}).get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
+            or quality_policy.enabled(row.get("configuration_doc") or {})):
+            return
+        round_id = str(row["round_id"])
+        self._store.recover_baseline(round_id)
+        runs = self._store.list_runs(round_id, stage=1, kind="execute")
+        judges = self._store.list_runs(round_id, stage=1, kind="score")
+        pending = [run for run in runs if run.get("status") == "accepted"
+            and self._is_baseline_recovery(run, runs, row)
+            and not any(j.get("scored_run_id") == run["run_id"] for j in judges)]
+        if pending:
+            plan = {"work_items": [{"scored_run_id": r["run_id"], "submission_id": r["submission_id"],
+                "icp_position": r["icp_position"], "output_ref": r["output_ref"]} for r in pending]}
+            self._store.recover_baseline(round_id, self._scoring_work_items(row, 1, plan))
+
+    def _score_recovered_baseline(self, row: Mapping[str, Any]) -> None:
+        round_id = str(row["round_id"])
+        runs = self._store.list_runs(round_id, stage=1, kind="execute")
+        judges = self._store.list_runs(round_id, stage=1, kind="score")
+        if not any(self._is_baseline_recovery(r, runs + judges, row) for r in runs + judges):
+            return
+        plan = self._baseline_recovery_plan(row, runs, judges)
+        if plan is None:
+            return  # Miner scores persist; final authority remains held by the baseline gate.
+        outputs = self._outputs_by_run(round_id, 1)
+        chosen = self._select_scoring_outputs(judges)
+        icps = self.evaluation_icps(round_id)
+        policy = row["configuration_doc"]["scorer_policy"]
+        breakdowns = {item["scored_run_id"]: self._verified_breakdowns(chosen[item["scored_run_id"]],
+            icp=icps[item["icp_position"]], companies=outputs[item["scored_run_id"]], policy=policy)
+            for item in plan["work_items"]}
+        scores = scoring.build_stage_scores(plan=plan, policy=policy, icps_by_position=dict(enumerate(icps)),
+            outputs_by_run=outputs, breakdowns_by_item=breakdowns, configuration=row["configuration_doc"])
+        recorded = self._store.record_run_scores(round_id, 1, scoring.run_scores_for_store(scores, runs))
+        if recorded.get("status") != "ok":
+            raise ServiceError("baseline_recovery_scores_not_recorded", 500)
+
+    def _scoring_runs_for_stage(self, round_id: str, stage: int) -> List[Dict[str, Any]]:
+        runs = self._store.list_runs(round_id, stage=stage, kind="score")
+        if stage == 2:
+            row = self._round(round_id)
+            if (row.get("configuration_doc") or {}).get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY:
+                original = self._store.list_runs(round_id, stage=1)
+                runs += [r for r in original if r.get("kind") == "score" and self._is_baseline_recovery(r, original, row)]
+        return runs
 
     def scoring_is_complete(self, round_id: str, stage: int) -> bool:
-        runs = self._store.list_runs(round_id, stage=stage, kind="score")
+        runs = self._scoring_runs_for_stage(round_id, stage)
         return all(run["status"] in ("accepted", "failed") for run in runs)
 
     def close_scoring(self, round_id: str, stage: int) -> Dict[str, Any]:
@@ -3324,6 +3441,7 @@ class ArenaService:
                 "ineligible_submissions": [],
                 "finalists": finalists,
             }
+        self._score_recovered_baseline(round_row)
         transition = self._store.transition_round(round_id, "stage2_judged", "scored", {})
         return {
             "status": transition.get("status"),
@@ -5654,6 +5772,8 @@ class ArenaService:
             if status == "committed":
                 with telemetry.stage("advance_open_stage"):
                     return self.open_stage(round_id, 1)
+            if status in ("stage2", "stage2_closed", "stage2_scoring"):
+                self._recover_baseline(round_row)
             if status in ("stage1", "stage2"):
                 stage = int(status[-1])
                 with telemetry.stage("advance_expire_leases"):
@@ -5674,9 +5794,7 @@ class ArenaService:
                 with telemetry.stage("advance_expire_leases"):
                     self._store.expire_leases(round_id)
                 with telemetry.stage("advance_list_scoring_runs") as observed:
-                    scoring_runs = self._store.list_runs(
-                        round_id, stage=stage, kind="score"
-                    )
+                    scoring_runs = self._scoring_runs_for_stage(round_id, stage)
                     observed.count = len(scoring_runs)
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
                 if now >= _parse_iso(window) or all(
@@ -5825,7 +5943,8 @@ class ArenaService:
         configuration = row["configuration_doc"]
         positions = set(range(contracts.benchmark_icp_count(configuration)))
         execution_runs = self._store.list_runs(round_id, kind="execute")
-        judges = self._select_scoring_outputs(self._store.list_runs(round_id, kind="score"))
+        judgment_runs = self._store.list_runs(round_id, kind="score")
+        judges = self._select_scoring_outputs(judgment_runs)
         completed = {}
         icps = None
         for participant in row.get("participants") or []:
@@ -5833,7 +5952,9 @@ class ArenaService:
                 break
             submission_id = str(participant["submission_id"])
             stage = 1 if participant.get("is_king") else 2
-            plan = row.get("stage%d_scoring_plan_doc" % stage)
+            plan = (self._baseline_recovery_plan(row, execution_runs, judgment_runs)
+                    if stage == 1 and configuration.get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY
+                    else row.get("stage%d_scoring_plan_doc" % stage))
             if not plan:
                 if on_completed is not None:
                     on_completed(submission_id, None)

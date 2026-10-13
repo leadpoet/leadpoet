@@ -134,7 +134,7 @@ _ROUND_COLUMNS = (
 )
 _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
     "configuration_doc", PUBLIC_CONFIGURATION_COLUMN,
-).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1")
+).replace("publication_doc", "publication_doc:lab_arena_competition_publication_v1") + ",status_generation"
 
 
 def _competition_round(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -587,9 +587,7 @@ def _completed_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, Any]:
         or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
         or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY):
         return {}
-    # The summary SELECT deliberately excludes private scoring plans.
-    full_row = row if "stage1_scoring_plan_doc" in row else service._round(str(row["round_id"]))
-    return service.completed_submission_scores(full_row)
+    return service.completed_submission_scores(row)
 
 
 def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:

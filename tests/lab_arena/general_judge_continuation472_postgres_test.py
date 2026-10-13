@@ -159,6 +159,96 @@ def test_accepted_judge_completion_is_idempotent_and_stops_retry(database):
             assert cursor.fetchone() == (3, 3)
 
 
+@pytest.mark.parametrize("baseline", [True, False])
+def test_sixth_judge_attempt_keeps_provider_and_score_path(database, baseline):
+    with database[0].connect(**database[1]) as conn:
+        assignment, source_id, _ = prepare(conn)
+        if not baseline:
+            other_hotkey = "5" + "G" * 47
+            with conn.cursor() as cursor:
+                cursor.execute("SET LOCAL session_replication_role=replica")
+                cursor.execute("UPDATE public.lab_arena_submissions SET is_king=false WHERE submission_id=%s",
+                               (previous.SUB,))
+                cursor.execute("""UPDATE public.lab_arena_rounds SET
+                  participants=jsonb_build_array(
+                    jsonb_build_object('submission_id',%s,'miner_hotkey',%s,'is_king',false),
+                    jsonb_build_object('submission_id','other-baseline','miner_hotkey',%s,'is_king',true)),
+                  configuration_doc=jsonb_set(configuration_doc,'{baseline_hotkey}',to_jsonb(%s::text))
+                  WHERE round_id=%s""",
+                  (previous.SUB, previous.MINER, other_hotkey, other_hotkey,
+                   previous.ROUND))
+                cursor.execute("SET LOCAL session_replication_role=origin")
+            conn.commit()
+        assert previous.rpc(conn, "lab_arena_expire_leases(%s)",
+                            (previous.ROUND,))["retried"] == 1
+        for attempt in (3, 4, 5):
+            with conn.cursor() as cursor:
+                cursor.execute("SET LOCAL session_replication_role=replica")
+                cursor.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=%s",
+                               (f"{assignment}:{attempt}",))
+                cursor.execute("SET LOCAL session_replication_role=origin")
+            conn.commit()
+            lease = previous.claim(conn, suffix={3: "c", 4: "d", 5: "e"}[attempt])
+            assert (lease["status"], lease["attempt"], lease["scored_run_id"],
+                    lease["miner_hotkey"]) == (
+                "leased", attempt, source_id, previous.MINER), lease
+            failed = previous.rpc(conn,
+                "lab_arena_complete_attempt(%s,%s,%s::jsonb,%s,%s)",
+                (lease["run_id"], previous.TOKEN,
+                 json.dumps({"terminal_status": "judge_error"}),
+                 "judge_error", ""))
+            assert failed["confirmation_attempt"] == attempt + 1, failed
+        assert previous.rpc(conn, "lab_arena_expire_leases(%s)",
+                            (previous.ROUND,))["retried"] == 0
+        with conn.cursor() as cursor:
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=%s",
+                           (assignment + ":6",))
+            cursor.execute("SET LOCAL session_replication_role=origin")
+        conn.commit()
+        lease = previous.claim(conn, suffix="f")
+        assert (lease["status"], lease["attempt"], lease["scored_run_id"],
+                lease["submission_id"], lease["miner_hotkey"]) == (
+            "leased", 6, source_id, previous.SUB, previous.MINER), lease
+        identity = "sha256:" + "e" * 64
+        funding = "host" if baseline else "miner_key"
+        reserved = previous.rpc(conn,
+            "lab_arena_reserve_call(%s,%s,%s,'openrouter.chat','openrouter',%s,100,'{}'::jsonb,4500)",
+            (lease["run_id"], previous.TOKEN, identity, funding))
+        assert reserved["status"] == "reserved", reserved
+        assert previous.rpc(conn, "lab_arena_mark_dispatched(%s,%s,%s)",
+                            (lease["run_id"], previous.TOKEN, identity))["status"] == "dispatched"
+        settled = previous.rpc(conn, "lab_arena_settle_call(%s,%s,%s,100,%s::jsonb,4500)",
+            (lease["run_id"], previous.TOKEN, identity,
+             json.dumps({"call_succeeded": True, "status": 200})))
+        assert settled["status"] == "settled", settled
+        accepted = previous.rpc(conn,
+            "lab_arena_complete_attempt(%s,%s,%s::jsonb,%s,%s)",
+            (lease["run_id"], previous.TOKEN,
+             json.dumps({"terminal_status": "accepted"}), "accepted",
+             "valid-judge-output"))
+        assert accepted["status"] == "accepted", accepted
+        scored = previous.rpc(conn,
+            "lab_arena_record_run_scores(%s,1::smallint,%s::jsonb)",
+            (previous.ROUND, json.dumps([{"run_id": source_id,
+              "per_icp_score": 0, "qualification_doc": {"companies": []}}])))
+        assert scored["status"] == "ok" and scored["recorded"] == 1, scored
+        with conn.cursor() as cursor:
+            cursor.execute("""SELECT entry_kind,funding_source,miner_hotkey
+              FROM public.lab_arena_ledger WHERE run_id=%s ORDER BY entry_id""",
+              (lease["run_id"],))
+            assert cursor.fetchall() == [(kind, funding, previous.MINER)
+                for kind in ("reservation", "dispatch", "settlement")]
+            cursor.execute("""SELECT source.status,source.output_ref,source.per_icp_score,
+              judge.status,judge.output_ref,judge.attempt
+              FROM public.lab_arena_runs source
+              JOIN public.lab_arena_runs judge ON judge.scored_run_id=source.run_id
+              WHERE source.run_id=%s AND judge.run_id=%s""",
+              (source_id, lease["run_id"]))
+            assert cursor.fetchone() == (
+                "accepted", "source-output", 0, "accepted", "valid-judge-output", 6)
+
+
 def test_ambiguous_call_blocks_retry_and_final_authority(database):
     with database[0].connect(**database[1]) as conn:
         assignment, _, _ = prepare(conn, cause="credential_error")

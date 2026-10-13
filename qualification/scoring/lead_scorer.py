@@ -4947,6 +4947,7 @@ async def _refresh_linkedin_employee_size_observation(
                 await _fetch_structured_linkedin_profile_once(
                     verified_homepage_identity,
                     invocation_cache,
+                    collect_identity=collect_structured_conflict,
                 )
                 # This is a secondary conflict check. Its failure cannot erase
                 # complete direct evidence or become a provider failure.
@@ -5095,6 +5096,7 @@ async def _refresh_linkedin_employee_size_observation(
         await _fetch_structured_linkedin_profile_once(
             verified_homepage_identity,
             invocation_cache,
+            collect_identity=collect_structured_conflict,
         )
         if invocation_cache.get("structured_failure"):
             invocation_cache["refresh_outcome"] = "retryable_failure"
@@ -5266,8 +5268,10 @@ def _investigator_identity_context(
     homepage_identity: Mapping[str, Any],
     web_identity: Mapping[str, Any],
     transport_domain: str,
+    *,
+    structured_identity: Optional[Mapping[str, Any]] = None,
 ) -> tuple[Mapping[str, Any], str]:
-    """Carry one proven numeric LinkedIn alias into the investigator."""
+    """Carry independently bound structured identity into the investigator."""
 
     submitted_slug = linkedin_company_page_slug(submitted_linkedin)
     homepage_slug = str(
@@ -5315,6 +5319,40 @@ def _investigator_identity_context(
             resolved_identity,
             f"https://www.linkedin.com/company/{resolved_slug}",
         )
+    evidence = structured_identity if isinstance(structured_identity, Mapping) else {}
+    observed_slug = str(web_identity.get("observed_linkedin_slug") or "")
+    if (
+        not homepage_identity
+        and not submitted_slug.isdigit()
+        and set(evidence) == {"name", "provider", "source_field", "url", "website"}
+        and all(isinstance(value, str) for value in evidence.values())
+        and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and evidence.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        and web_identity.get("decision") == COMPANY_FIT_MATCH
+        and web_identity.get("evidence_source") == "company_web_reverification"
+        and transport_domain
+        and _valid_web_evidence_url(evidence.get("website"))
+        and _canonical_company_domain(evidence.get("website")) == transport_domain
+        and web_identity.get("submitted_domain") == transport_domain
+        and web_identity.get("observed_domain") == transport_domain
+        and _company_name(evidence.get("name"))
+        and _company_name(evidence.get("name"))
+        == _company_name(web_identity.get("submitted_name"))
+        == _company_name(web_identity.get("observed_name"))
+        and observed_slug
+        and not observed_slug.isdigit()
+        and (not submitted_slug or submitted_slug == observed_slug)
+        and web_identity.get("submitted_linkedin_slug") == submitted_slug
+        and _strict_linkedin_company_profile_url(evidence.get("url"))
+        and linkedin_company_page_slug(evidence.get("url")) == observed_slug
+    ):
+        # This private receipt comes from the root of the existing provider
+        # response. Model observations only constrain its independent identity.
+        return {
+            "normalized_name": evidence["name"],
+            "registrable_dns_domain": transport_domain,
+            "linkedin_company_slug": observed_slug,
+        }, str(submitted_linkedin or "")
     return homepage_identity, str(submitted_linkedin or "")
 
 
@@ -7441,6 +7479,7 @@ async def _run_targeted_company_evidence_investigation(
             verified_identity,
             investigation_web_identity,
             verified_transport_domain,
+            structured_identity=structured_profile_identity_evidence,
         )
     )
     headcount_conflict_context = (
@@ -8504,6 +8543,10 @@ async def _llm_reverify_company(
             profile_identity,
             current_profile_cache,
             collect_employee_size=require_company_fit_dimensions,
+            collect_identity=evidence_investigator,
+        )
+        structured_profile_identity_evidence = current_profile_cache.get(
+            "structured_company_identity_evidence"
         )
         # The same exact-domain/profile-bound reply can prove company size.
         # Retain it even when the earlier model cited an unusable profile.

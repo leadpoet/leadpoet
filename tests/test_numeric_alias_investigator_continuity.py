@@ -254,6 +254,23 @@ def _run_real_investigation(
     active_icp = icp or _icp()
     requests = []
     responses = [_tool_response(finding)]
+    investigation_targets = ("industry",)
+    if repair_required_attribute:
+        investigation_targets = ("industry", "required_attribute")
+        # Production requests separate attribute proof; an industry judgment
+        # no longer implicitly qualifies a required attribute.
+        responses[0]["choices"][0]["message"]["tool_calls"][0][
+            "function"
+        ]["arguments"] = json.dumps({"findings": [
+            finding,
+            {
+                **finding,
+                "target": "required_attribute",
+                "observed_industry": "",
+                "observed_subindustry": "",
+                "activity_role": "unresolved",
+            },
+        ]})
     if finding["status"] == "VERIFIED":
         responses.extend([
             _tool_response(_unproven_finding()),
@@ -281,7 +298,7 @@ def _run_real_investigation(
             company=_company(),
             icp=active_icp,
             verdict=verdict,
-            investigation_targets=("industry",),
+            investigation_targets=investigation_targets,
             icp_attribute=str(active_icp.required_attribute or ""),
             icp_stage="Public",
             verified_identity=(
@@ -420,11 +437,14 @@ def test_proven_alias_carries_verified_industry_into_attribute_repair(
 
     projected, repaired, claims = result[:3]
     assert claims["industry"]["status"] == "VERIFIED"
+    assert claims["required_attribute"]["status"] == "VERIFIED"
     assert projected["attribute_satisfied"] is True
     assert projected["required_attribute_evidence_url"] == PRODUCT_URL
     assert repaired.details["required_attribute_decision"] == COMPANY_FIT_MATCH
-    assert source_cache[PRODUCT_URL]["final_url"] == PRODUCT_URL
-    assert source_cache[PRODUCT_URL]["text"] == PRODUCT_PAGE
+    grounding = projected[lead_scorer._REQUIRED_ATTRIBUTE_GROUNDING]
+    assert grounding["status"] == "grounded"
+    assert grounding["cache_hit"] is True
+    assert grounding["source_url_sha256"] == grounding["final_url_sha256"]
     assert prior_result.details["identity_receipt"][
         "submitted_linkedin_slug"
     ] == "39624"

@@ -329,6 +329,14 @@ def _firecrawl_response(
     status = metadata.get("statusCode")
     if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
         raise CompatibilityResponseError("missing_firecrawl_target_status")
+    if 200 <= status < 300 and (
+        not raw_html.strip()
+        or re.sub(r"\s+", " ", raw_html).strip().casefold()
+        == "provider account capacity details redacted."
+    ):
+        # A completed provider job can still return a transport diagnostic
+        # instead of the requested page. Never turn that text into evidence.
+        raise CompatibilityResponseError("firecrawl_source_content_unavailable")
     return (
         status,
         {"content-type": "text/html; charset=utf-8"},

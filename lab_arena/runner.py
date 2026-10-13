@@ -4188,9 +4188,12 @@ def _check_runtime_image(image_reference: str, image_digest: str) -> None:
 # Claim loop
 # ---------------------------------------------------------------------------
 
-# The round statuses in which assignments can be leased: both execution and
-# scoring windows in the two-stage competition.
-WORKING_STATUSES = ("stage1", "stage1_scoring", "stage2", "stage2_scoring")
+# Keep polling unfinished judging after a stage closes. The gateway remains
+# responsible for deciding which execution or recovery assignment is eligible.
+WORKING_STATUSES = (
+    "stage1", "stage1_scoring", "stage1_judged", "stage1_scored",
+    "stage2", "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
+)
 
 
 class Runner:

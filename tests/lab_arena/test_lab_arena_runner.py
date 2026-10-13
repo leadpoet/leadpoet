@@ -2386,6 +2386,30 @@ def test_an_unpinned_runner_follows_every_execution_and_scoring_window(tmp_path,
     assert runner_.round_ids == [ROUND]
 
 
+@pytest.mark.parametrize("status", [
+    "stage1_judged", "stage1_scored", "stage2_closed", "stage2_judged", "scored",
+])
+def test_runner_keeps_prior_round_judging_visible_during_next_day(tmp_path, status):
+    api = FollowApi([], rounds={ROUND: {"schedule": {}}})
+    api.current = lambda: {"running_rounds": [
+        {"round_id": ROUND, "status": status},
+        {"round_id": "arena-2026-09-03", "status": "open"},
+        {"round_id": "arena-2026-09-01", "status": "published"},
+        {"round_id": "arena-2026-08-31", "status": "cancelled"},
+    ]}
+    (tmp_path / "work").mkdir()
+    config = make_config(tmp_path, api, BridgingRuntime(output={"companies": []}))
+    config.round_id = None
+    runner_ = rn.Runner(config)
+    try:
+        assert runner_.run_once() == 0
+        assert runner_.round_ids == [ROUND]
+        assert [claim["round_id"] for claim in api.claims] == [ROUND]
+        assert api.completions == []
+    finally:
+        runner_.close()
+
+
 def test_a_model_speaks_plain_http_over_the_worker_socket(tmp_path):
     """The runtime-neutral contract: the provider's own request, sent to the socket without a credential."""
 

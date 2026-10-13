@@ -128,7 +128,7 @@ def test_snapshot_uses_two_compact_reads_scoped_to_public_rows_and_never_leaks_p
         calls.append(('starts', round_id, kwargs))
         return [start(run(), provider_response='private-provider'), start(run(submission_id='not-public', runner_hotkey=AUDITOR))]
 
-    service = SimpleNamespace(_round=lambda _: row, now=lambda: NOW,
+    service = SimpleNamespace(_public_submissions_round=lambda _: row, now=lambda: NOW,
         _store=SimpleNamespace(list_runs=list_runs, list_runtime_starts=list_starts,
                                list_submissions=lambda *_a, **_k: records))
     with patch.object(public_dashboard, '_participants', return_value=[

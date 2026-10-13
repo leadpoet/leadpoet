@@ -942,7 +942,7 @@ def _attach_evaluations(service: Any, round_id: str, entries: Sequence[dict]) ->
 
 
 def submissions_snapshot(service: Any, round_id: str) -> dict:
-    row = service._round(round_id)
+    row = service._public_submissions_round(round_id)
     round_status = str(row.get("status") or "")
     stage1_scores = _stage1_scores(service, row)
     final_scores = _rankings(row, "final_ranking") if round_status == "published" else {}

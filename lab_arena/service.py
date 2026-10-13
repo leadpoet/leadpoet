@@ -873,6 +873,21 @@ class ArenaService:
         }
         return self._require_round_mode({**row, "configuration_doc": configuration})
 
+    def _public_submissions_round(self, round_id: str) -> Dict[str, Any]:
+        read_public = getattr(self._store, "get_public_submissions_round", None)
+        if read_public is None:
+            return self._round(round_id)
+        self._require_round_ownership(round_id)
+        row = read_public(round_id)
+        if row is None:
+            raise ServiceError("round_missing", 404)
+        configuration = dict(row.get("configuration_doc") or {})
+        # The public configuration omits the scorer policy. Keep the existing
+        # adapter validation, including absent keys versus explicit JSON null.
+        if row.get("cfg_scorer_policy") is not None:
+            configuration["scorer_policy"] = json.loads(row["cfg_scorer_policy"])
+        return self._require_round_mode({**row, "configuration_doc": configuration})
+
     def _pinned_round_id(self) -> Optional[str]:
         return getattr(getattr(self, "_config", None), "pinned_round_id", None)
 

@@ -10,9 +10,13 @@ unpublished evaluation as incomplete solely because its judge failed. Preserve
 execution windows and caps, frozen models/scorers/policies, accepted work,
 miner-scoped funding and baseline credentials, and published history. This
 authorizes narrow source changes, exact committed migrations, tests, push/merge,
-canonical restarts, and production recovery of unfinished October 13 judgments.
-It supersedes the earlier judge retry/window limits only; no execution replay,
-credential substitution, scoring-rule changes or forced champion is authorized.
+canonical restarts, and isolated production validation before October 14.
+The user's later October 13 instruction prohibits rejudging or rescoring that
+day, or crowning/promoting a champion from its partial results. Preserve its
+current results, champion and rewards; activate the general recovery policy
+for October 14 and later evaluations. It supersedes earlier October 13 recovery
+authority. No execution replay, credential substitution, scoring-rule changes
+or forced champion is authorized.
 
 ## Scoped production authorization: October 13 baseline final authority and recovery
 

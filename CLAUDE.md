@@ -1,5 +1,23 @@
 # Agent Instructions
 
+## Scoped production authorization: general unfinished judge recovery
+
+On 2026-10-13 the user authorized permanent recovery of unfinished baseline
+and miner judgments until a valid final decision is produced. Use the existing
+queue, leases, backoff, authenticated checkpoints and provider accounting.
+Judge attempt counts and scoring/publication cutoffs must not finalize an
+unpublished evaluation as incomplete solely because its judge failed. Preserve
+execution windows and caps, frozen models/scorers/policies, accepted work,
+miner-scoped funding and baseline credentials, and published history. This
+authorizes narrow source changes, exact committed migrations, tests, push/merge,
+canonical restarts, and isolated production validation before October 14.
+The user's later October 13 instruction prohibits rejudging or rescoring that
+day, or crowning/promoting a champion from its partial results. Preserve its
+current results, champion and rewards; activate the general recovery policy
+for October 14 and later evaluations. It supersedes earlier October 13 recovery
+authority. No execution replay, credential substitution, scoring-rule changes
+or forced champion is authorized.
+
 ## Scoped production authorization: October 13 baseline final authority and recovery
 
 The user authorized bounded recovery of failed October 13 baseline ICPs and

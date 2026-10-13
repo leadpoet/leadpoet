@@ -181,6 +181,20 @@ def _warn_trajectory_failure(phase: str, exc: BaseException) -> None:
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
 TERMINAL_STATUSES = ("published", "cancelled")
+JUDGE_CONTINUATION_EVALUATION_DATE = "2026-10-14"
+JUDGE_CONTINUATION_SHADOW_CREATED_AT = datetime(2026, 10, 13, 16, 30, tzinfo=timezone.utc)
+
+
+def _judge_continuation_enabled(row: Mapping[str, Any]) -> bool:
+    if str(row.get("evaluation_date") or "") >= JUDGE_CONTINUATION_EVALUATION_DATE:
+        return True
+    if ((row.get("configuration_doc") or {}).get("mode") != "shadow"
+        or row.get("rewards_enabled") is not False):
+        return False
+    try:
+        return _parse_iso(str(row["created_at"])) >= JUDGE_CONTINUATION_SHADOW_CREATED_AT
+    except (KeyError, TypeError, ValueError):
+        return False
 ACTIVE_ROUND_STATUSES = tuple(
     status for status in contracts.ROUND_STATUSES if status not in TERMINAL_STATUSES
 )
@@ -3325,6 +3339,9 @@ class ArenaService:
             if run["status"] == "accepted":
                 continue
             cause = str(run.get("terminal_cause") or "")
+            if run["status"] in ("pending", "leased", "submitted"):
+                incomplete_items[scored_run_id] = "judge_pending"
+                continue
             if (
                 run["status"] != "failed"
                 or cause not in contracts.TERMINAL_CAUSES
@@ -3333,12 +3350,19 @@ class ArenaService:
                 return self._store.cancel_round(
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
-            if cause in ("stage_closed", "judge_error", "judge_timeout"):
+            if cause in ("stage_closed", "judge_error", "judge_timeout",
+                         "lease_expired", "credential_error"):
                 incomplete_items[scored_run_id] = cause
                 continue
-            # Miner-account failures retain the frozen zero rule. A judge
-            # infrastructure failure has no measured score for this ICP.
+            # Only an explicit terminal score failure receives a frozen zero.
             failed_items[scored_run_id] = cause
+        if incomplete_items and (
+            stage != 1 or
+            round_row["configuration_doc"].get("execution_sequence_policy")
+                != contracts.BASELINE_SCORED_FIRST_POLICY
+        ):
+            return {"status": "retry", "round_status": round_row["status"],
+                    "reason": "judge_incomplete", "remaining": len(incomplete_items)}
         baseline_judge_incomplete = any(
             item["submission_id"] in baseline_ids
             and incomplete_items.get(item["scored_run_id"]) == "stage_closed"
@@ -3943,12 +3967,89 @@ class ArenaService:
             "eligibility_reason": reason,
         }
 
+    def _unfinished_judgments(self, row: Mapping[str, Any]) -> bool:
+        """An accepted execution has no final authority without its own judge."""
+
+        round_id = str(row["round_id"])
+        sources = [run for run in self._store.list_runs(round_id, kind="execute")
+                   if run.get("stage") in (1, 2) and run.get("status") == "accepted"]
+        score_runs = self._store.list_runs(round_id, kind="score")
+        judges = self._select_scoring_outputs(score_runs)
+        for source in sources:
+            judge = judges.get(str(source["run_id"]))
+            if (source.get("per_icp_score") is None
+                or judge is None or judge.get("status") != "accepted"
+                or judge.get("terminal_cause") != "accepted"
+                or not judge.get("output_ref")
+                or not self._same_scoring_membership(judge, source, round_id=round_id)
+                or judge.get("miner_hotkey") != source.get("miner_hotkey")
+                or (judge.get("judgment_scope_doc") or {}).get("scorer_image_digest")
+                    != (row.get("configuration_doc") or {}).get("scorer_image_digest")
+                or (judge.get("judgment_scope_doc") or {}).get("scorer_image_reference")
+                    != (row.get("configuration_doc") or {}).get("scorer_image_reference")):
+                return True
+        return False
+
+    def _record_recovered_judgment_scores(self, row: Mapping[str, Any]) -> None:
+        """Record verified decisions that arrived after a stage was scored."""
+
+        round_id = str(row["round_id"])
+        configuration = row["configuration_doc"]
+        policy = contracts.validate_scorer_policy(configuration["scorer_policy"])
+        icps = self.evaluation_icps(round_id)
+        for stage in (1, 2):
+            sources = self._store.list_runs(round_id, stage=stage, kind="execute")
+            score_runs = self._store.list_runs(round_id, stage=stage, kind="score")
+            judges = self._select_scoring_outputs(score_runs)
+            ready = [source for source in sources
+                if source.get("status") == "accepted"
+                and source.get("per_icp_score") is None
+                and judges.get(str(source["run_id"]), {}).get("status") == "accepted"]
+            if not ready:
+                continue
+            outputs = self._outputs_by_run(round_id, stage)
+            rows = []
+            for source in ready:
+                judge = judges[str(source["run_id"])]
+                if (judge.get("terminal_cause") != "accepted"
+                    or not judge.get("output_ref")
+                    or not self._same_scoring_membership(judge, source, round_id=round_id)
+                    or judge.get("miner_hotkey") != source.get("miner_hotkey")
+                    or (judge.get("judgment_scope_doc") or {}).get("scorer_image_digest")
+                        != configuration.get("scorer_image_digest")
+                    or (judge.get("judgment_scope_doc") or {}).get("scorer_image_reference")
+                        != configuration.get("scorer_image_reference")):
+                    raise ServiceError("recovered_judgment_binding_invalid", 500)
+                position = int(source["icp_position"])
+                companies = outputs[str(source["run_id"])]
+                breakdowns = self._verified_breakdowns(
+                    judge, icp=icps[position], companies=companies, policy=policy)
+                rows.append(verify.scored_row(str(source["submission_id"]),
+                    position, str(source["run_id"]), icps[position], companies,
+                    breakdowns, policy))
+            records = scoring.run_scores_for_store({
+                "rows": rows,
+                **({"integrity_policy": "arena_integrity_v1"}
+                    if configuration.get("integrity_policy") == "arena_integrity_v1" else {}),
+            }, ready)
+            result = self._store.record_run_scores(round_id, stage, records)
+            if result.get("status") != "ok":
+                raise ServiceError("recovered_judgment_scores_not_recorded", 500)
+
     # -- publication and downstream reward activation -------------------------
 
     def publish(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}
+        evaluation_date = str(round_row.get("evaluation_date") or "")
+        if _judge_continuation_enabled(round_row):
+            self._record_recovered_judgment_scores(round_row)
+        if evaluation_date and self._unfinished_judgments(round_row):
+            return {"status": "retry", "round_status": "scored",
+                    "reason": ("baseline_incomplete"
+                        if not self._baseline_fully_succeeded(round_row)
+                        else "judge_incomplete")}
         configuration = round_row.get("configuration_doc") or {}
         # An infrastructure zero is not a measured baseline. Keep the round
         # recoverable until its frozen final deadline, without comparing miners
@@ -5446,10 +5547,9 @@ class ArenaService:
                         and output["failure"] != terminal_status)
                 ))):
                 raise ServiceError("output_invalid", 400)
-            if terminal_status == "accepted" and (
-                contact_policy.enabled(round_row["configuration_doc"])
-                or company_quality_run
-            ):
+            if terminal_status == "accepted":
+                policy = contracts.validate_scorer_policy(
+                    round_row["configuration_doc"]["scorer_policy"])
                 executed = self._store.get_run(str(run["scored_run_id"]))
                 if executed is None or not executed.get("output_ref"):
                     raise ServiceError("scored_run_missing", 500)
@@ -5463,7 +5563,9 @@ class ArenaService:
                     scoring.validate_breakdowns_for_item(
                         output["breakdowns"], icp=self.evaluation_icps(round_id)[int(run["icp_position"])],
                         companies=companies,
-                        integrity_policy=True,
+                        max_scored_companies=int(policy["max_scored_companies"]),
+                        integrity_policy=contact_policy.integrity_adapter(
+                            policy["scoring_adapter_version"]),
                         contacts_required=contact_policy.enabled(
                             round_row["configuration_doc"]
                         ),
@@ -5807,6 +5909,8 @@ class ArenaService:
             if status in ("stage1_judged", "stage2_judged"):
                 stage = int(status[5])
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
+                with telemetry.stage("advance_expire_leases"):
+                    self._store.expire_leases(round_id)
                 try:
                     with telemetry.stage("advance_score_stage"):
                         return self.score_stage(round_id, stage)
@@ -5818,6 +5922,9 @@ class ArenaService:
                 with telemetry.stage("advance_open_stage"):
                     return self.open_stage(round_id, 2)
             if status == "scored":
+                if _judge_continuation_enabled(round_row):
+                    with telemetry.stage("advance_expire_leases"):
+                        self._store.expire_leases(round_id)
                 try:
                     with telemetry.stage("advance_publish"):
                         return self.publish(round_id)

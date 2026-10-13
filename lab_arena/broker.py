@@ -5816,12 +5816,18 @@ class Broker:
                 "failure_stage": failure_stage,
                 "error_class": _safe_exception_class(exc),
             }
+            deepline_compat_failure = (
+                effective_operation.provider == "deepline"
+                and failure_stage == "response_adaptation"
+                and isinstance(exc, scoring_provider_compat.CompatibilityResponseError)
+            )
             if failure_stage == "settlement" or (
                 effective_operation.provider == "openrouter"
                 and failure_stage == "response_adaptation"
-            ):
+            ) or deepline_compat_failure:
                 uncertain_doc = _missing_provider_cost_call_doc(
-                    response, raw_document, call_succeeded=call_succeeded,
+                    response, raw_document,
+                    call_succeeded=False if deepline_compat_failure else call_succeeded,
                     deepline_request_id=deepline_request_id,
                     deepline_response_request_id=deepline_response_request_id,
                     deepline_execution_key=deepline_execution_key,
@@ -5837,7 +5843,7 @@ class Broker:
                     "failure_stage": failure_stage,
                     "error_class": _safe_exception_class(exc),
                 })
-                if failure_stage == "settlement":
+                if failure_stage == "settlement" or deepline_compat_failure:
                     uncertain_doc["reason"] = "settle_failure"
                 if raw_actual is not None:
                     uncertain_doc["known_actual_microusd"] = raw_actual

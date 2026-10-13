@@ -74,6 +74,91 @@ def test_old_failure_rejoins_existing_queue_after_close(database):
         assert result["confirmation_attempt"] == 4
 
 
+def test_retry_waits_for_backoff_after_close(database):
+    with database[0].connect(**database[1]) as conn:
+        assignment, _, _ = prepare(conn)
+        assert previous.rpc(conn, "lab_arena_expire_leases(%s)",
+                            (previous.ROUND,))["retried"] == 1
+        assert previous.claim(conn) == {"status": "no_pending"}
+        with conn.cursor() as cursor:
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=%s",
+                           (assignment + ":3",))
+            cursor.execute("SET LOCAL session_replication_role=origin")
+        conn.commit()
+        assert previous.claim(conn)["run_id"] == assignment + ":3"
+
+
+def test_expired_score_lease_keeps_partial_refs_in_successor(database):
+    with database[0].connect(**database[1]) as conn:
+        assignment, source_id, _ = prepare(conn)
+        assert previous.rpc(conn, "lab_arena_expire_leases(%s)",
+                            (previous.ROUND,))["retried"] == 1
+        refs = [{"company_index": 0, "cache_key": "sha256:" + "c" * 64,
+                 "company_input_hash": "sha256:" + "d" * 64}]
+        with conn.cursor() as cursor:
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute("""UPDATE public.lab_arena_runs SET
+              created_at=clock_timestamp()-interval '20 minutes',
+              company_judgment_refs=%s::jsonb WHERE run_id=%s""",
+              (json.dumps(refs), assignment + ":3"))
+            cursor.execute("SET LOCAL session_replication_role=origin")
+        conn.commit()
+        lease = previous.claim(conn)
+        assert (lease["run_id"], lease["scored_run_id"], lease["miner_hotkey"]) == (
+            assignment + ":3", source_id, previous.MINER)
+        with conn.cursor() as cursor:
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute("UPDATE public.lab_arena_runs SET lease_expires_at=clock_timestamp()-interval '1 second' WHERE run_id=%s",
+                           (lease["run_id"],))
+            cursor.execute("SET LOCAL session_replication_role=origin")
+        conn.commit()
+        expired = previous.rpc(conn, "lab_arena_expire_leases(%s)", (previous.ROUND,))
+        assert (expired["expired"], expired["retried"]) == (1, 1), expired
+        with conn.cursor() as cursor:
+            cursor.execute("""SELECT attempt,status,terminal_cause,company_judgment_refs,
+              scored_run_id,miner_hotkey FROM public.lab_arena_runs
+              WHERE assignment_id=%s ORDER BY attempt""", (assignment,))
+            rows = cursor.fetchall()
+        assert rows[-2][1:4] == ("failed", "lease_expired", refs)
+        assert rows[-1][:2] == (4, "pending")
+        assert rows[-1][3:] == (refs, source_id, previous.MINER)
+        assert previous.rpc(conn, "lab_arena_expire_leases(%s)",
+                            (previous.ROUND,))["retried"] == 0
+
+
+def test_accepted_judge_completion_is_idempotent_and_stops_retry(database):
+    with database[0].connect(**database[1]) as conn:
+        assignment, source_id, _ = prepare(conn, cause="credential_error")
+        assert previous.rpc(conn, "lab_arena_expire_leases(%s)",
+                            (previous.ROUND,))["retried"] == 1
+        with conn.cursor() as cursor:
+            cursor.execute("SET LOCAL session_replication_role=replica")
+            cursor.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=%s",
+                           (assignment + ":3",))
+            cursor.execute("SET LOCAL session_replication_role=origin")
+        conn.commit()
+        lease = previous.claim(conn)
+        assert (lease["run_id"], lease["scored_run_id"], lease["miner_hotkey"],
+                lease["submission_id"]) == (
+            assignment + ":3", source_id, previous.MINER, previous.SUB)
+        args = (lease["run_id"], previous.TOKEN,
+                json.dumps({"terminal_status": "accepted"}), "accepted",
+                "accepted-judge-output")
+        first = previous.rpc(conn,
+            "lab_arena_complete_attempt(%s,%s,%s::jsonb,%s,%s)", args)
+        again = previous.rpc(conn,
+            "lab_arena_complete_attempt(%s,%s,%s::jsonb,%s,%s)", args)
+        assert first["status"] == "accepted"
+        assert again["status"] == "accepted" and again["idempotent"] is True
+        assert previous.rpc(conn, "lab_arena_expire_leases(%s)",
+                            (previous.ROUND,))["retried"] == 0
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT count(*),max(attempt) FROM public.lab_arena_runs WHERE assignment_id=%s",
+                           (assignment,))
+            assert cursor.fetchone() == (3, 3)
+
+
 def test_ambiguous_call_blocks_retry_and_final_authority(database):
     with database[0].connect(**database[1]) as conn:
         assignment, _, _ = prepare(conn, cause="credential_error")

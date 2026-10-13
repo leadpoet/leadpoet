@@ -63,6 +63,7 @@ def _score_stage_stub(monkeypatch, *, incomplete_submission="baseline", zero=Fal
         "zero_rows": ([{"submission_id": "baseline", "icp_position": 1, "cause": "model_error"}] if zero else []),
     }
     round_row = {
+        "round_id": ROUND,
         "status": "stage%d_judged" % stage,
         "participants": [{"submission_id": "baseline", "is_king": True},
                          {"submission_id": "candidate", "is_king": False}],
@@ -75,7 +76,8 @@ def _score_stage_stub(monkeypatch, *, incomplete_submission="baseline", zero=Fal
                          "stage_1_scoring_close": "2026-10-10T04:00:00Z"},
         },
     }
-    fake = SimpleNamespace(
+    fake = object.__new__(service.ArenaService)
+    fake.__dict__.update(
         _round=lambda _rid: round_row,
         _load_scoring_plan=lambda _row, _stage: plan,
         evaluation_icps=lambda _rid: [{}],

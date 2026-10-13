@@ -31,7 +31,7 @@ def _route():
 
 def _envelope(raw_html, *, source_url=URL, status=200):
     return {
-        "job_id": "public-execute:firecrawl-diagnostic-test",
+        "job_id": "public-execute:e3dd106e-aed5-4816-b899-1166d4624c82",
         "status": "completed",
         "result": {"data": {
             "rawHtml": raw_html,
@@ -138,7 +138,106 @@ def test_diagnostic_with_delayed_billing_keeps_full_reservation():
     assert "actual_microusd" not in result.call
     saved = store.calls[result.call["call_identity"]]
     assert saved["kind"] == "uncertain" and saved["amount"] == 49_945_650
+    assert saved["uncertain_doc"]["reason"] == "settle_failure"
+    assert saved["uncertain_doc"]["call_succeeded"] is False
     assert saved["uncertain_doc"]["failure_stage"] == "response_adaptation"
     assert saved["uncertain_doc"]["error_class"] == "CompatibilityResponseError"
+    for field in ("deepline_request_id", "deepline_execution_key", "credential_fingerprint"):
+        assert saved["uncertain_doc"][field] == saved["call_doc"][field]
+    assert saved["uncertain_doc"]["deepline_operation"] == "firecrawl_scrape"
+    assert saved["uncertain_doc"]["deepline_job_id"] == payload["job_id"]
     assert store.log == ["reserve", "dispatch", "uncertain"]
     assert len([request for request in transport.sent if request["method"] == "POST"]) == 1
+
+    class ExactBillTransport:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, **request):
+            self.sent.append(request)
+            assert request["method"] == "GET"
+            if "/executions/by-key/" in request["url"]:
+                document = {
+                    "toolId": "firecrawl_scrape", "requestId": payload["job_id"],
+                    "executionRecovery": {
+                        "idempotencyKey": saved["uncertain_doc"]["deepline_execution_key"],
+                        "state": "completed",
+                    },
+                }
+                return br.ProviderResponse(
+                    200, {"x-deepline-idempotency-supported": "true"},
+                    json.dumps(document).encode(),
+                )
+            entry = {
+                "id": "exact-charge", "request_id": payload["job_id"],
+                "provider": "firecrawl", "operation": "firecrawl_scrape",
+                "credits": 0.02, "delta": -0.02,
+                "charge_state": "posted", "charge_finality": "final", "metadata": {},
+            }
+            return br.ProviderResponse(
+                200, {"content-type": "application/json"},
+                json.dumps({"recent": {
+                    "request_id": payload["job_id"], "entries": [entry],
+                }}).encode(),
+            )
+
+    exact = ExactBillTransport()
+    broker._transport = exact
+    settled = []
+
+    def settle_exact(**kwargs):
+        settled.append(kwargs)
+        assert kwargs["call_identity"] == result.call["call_identity"]
+        assert kwargs["request_id"] == saved["uncertain_doc"]["deepline_request_id"]
+        assert kwargs["execution_key"] == saved["uncertain_doc"]["deepline_execution_key"]
+        assert kwargs["credential_fingerprint"] == saved["uncertain_doc"]["credential_fingerprint"]
+        assert kwargs["recovered_request_id"] == payload["job_id"]
+        assert kwargs["actual_microusd"] == 2_000
+        saved.update(kind="settlement", actual=kwargs["actual_microusd"])
+        return {"status": "settled", "actual_microusd": kwargs["actual_microusd"]}
+
+    store.reconcile_deepline_cost = settle_exact
+    context = _score_context()
+    candidate = {
+        "uncertain_entry_id": 41, "round_id": context.round_id,
+        "run_id": context.run_id, "submission_id": context.submission_id,
+        "miner_hotkey": context.miner_hotkey,
+        "assignment_id": context.assignment_id, "stage": context.stage,
+        "icp_position": context.icp_position, "attempt": context.attempt,
+        "kind": context.kind, "call_identity": result.call["call_identity"],
+        "request_id": saved["uncertain_doc"]["deepline_request_id"],
+        "credential_fingerprint": saved["uncertain_doc"]["credential_fingerprint"],
+        "funding_source": "miner_key", "run_status": "leased",
+        "lease_expires_at": "2026-10-13T11:00:00Z",
+        "uncertain_at": "2026-10-13T10:50:00Z",
+        "reservation_at": "2026-10-13T10:49:00Z",
+        "operation": "firecrawl_scrape",
+        "execution_key": saved["uncertain_doc"]["deepline_execution_key"],
+        "billing_provider": "firecrawl",
+        "operation_aliases": ["firecrawl_scrape", "scrape"],
+    }
+    assert broker.reconcile_deepline_cost(candidate)["status"] == "settled"
+    assert saved["actual"] == 2_000 and len(settled) == 1
+    assert [request["method"] for request in exact.sent] == ["GET", "GET"]
+    assert len([request for request in transport.sent if request["method"] == "POST"]) == 1
+
+
+@pytest.mark.parametrize("raw_html,target_status", [
+    ("Short but valid page text.", 200),
+    (DIAGNOSTIC, 404),
+])
+def test_zero_cost_or_failed_target_status_is_not_reclassified(raw_html, target_status):
+    payload = _envelope(raw_html, status=target_status)
+    payload["billing"] = {"credits_charged": 0}
+    broker, store, _transport = make_broker(
+        transport=FakeTransport([(200, payload)]),
+        credential_for=lambda _context, _provider: DL_KEY,
+        funding_source_for=lambda _context: "miner_key",
+    )
+    result = broker.execute(
+        _score_context(), operation_id="scrapingdog.scrape",
+        parameters={"url": URL}, action_sequence=0, timeout_ms=30_000,
+    )
+    assert result.status == target_status and result.call["outcome"] == "settled"
+    assert result.call["actual_microusd"] == 0
+    assert store.calls[result.call["call_identity"]]["actual"] == 0

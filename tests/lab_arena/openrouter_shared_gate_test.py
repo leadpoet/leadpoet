@@ -1,4 +1,4 @@
-"""Shared OpenRouter Responses admission across concurrent Arena rounds."""
+"""Shared OpenRouter admission across concurrent Arena rounds and judges."""
 
 from __future__ import annotations
 
@@ -160,14 +160,24 @@ class FirstCallBlockingTransport:
         )
 
 
-def test_one_gate_is_shared_across_round_brokers_before_any_reservation():
+@pytest.mark.parametrize("first_operation,second_operation", [
+    ("openrouter.responses", "openrouter.responses"),
+    ("openrouter.responses", "openrouter.chat"),
+    ("openrouter.chat", "openrouter.responses"),
+    ("openrouter.chat", "openrouter.chat"),
+])
+def test_one_gate_is_shared_across_round_brokers_before_any_reservation(
+    first_operation, second_operation
+):
     gate = br.OpenRouterSharedGate(max_concurrency=1)
     transport = FirstCallBlockingTransport()
     first, first_store, _ = make_broker(
-        store=FakeLedgerStore(), transport=transport, openrouter_shared_gate=gate
+        store=FakeLedgerStore(), transport=transport, openrouter_shared_gate=gate,
+        judge_models=(CHAT["model"],),
     )
     second, second_store, _ = make_broker(
-        store=FakeLedgerStore(), transport=transport, openrouter_shared_gate=gate
+        store=FakeLedgerStore(), transport=transport, openrouter_shared_gate=gate,
+        judge_models=(CHAT["model"],),
     )
     results = {}
 
@@ -175,8 +185,9 @@ def test_one_gate_is_shared_across_round_brokers_before_any_reservation():
         target=lambda: results.setdefault(
             1,
             first.execute(
-                context(1), operation_id="openrouter.responses",
-                parameters=PARAMETERS, action_sequence=1, timeout_ms=120_000,
+                replace(context(1), kind="score"), operation_id=first_operation,
+                parameters=CHAT if first_operation == "openrouter.chat" else PARAMETERS,
+                action_sequence=1, timeout_ms=30_000,
             ),
         )
     )
@@ -184,8 +195,9 @@ def test_one_gate_is_shared_across_round_brokers_before_any_reservation():
         target=lambda: results.setdefault(
             2,
             second.execute(
-                context(2), operation_id="openrouter.responses",
-                parameters=PARAMETERS, action_sequence=1, timeout_ms=120_000,
+                replace(context(2), kind="score"), operation_id=second_operation,
+                parameters=CHAT if second_operation == "openrouter.chat" else PARAMETERS,
+                action_sequence=1, timeout_ms=120_000 if second_operation == "openrouter.responses" else 30_000,
             ),
         )
     )
@@ -330,18 +342,21 @@ def test_two_hundredth_gate_slot_admits_and_next_waits_for_release():
         assert gate._states[key].active == 0
 
 
-def test_queued_cancellation_removes_waiter_without_ledger_or_provider_call():
+@pytest.mark.parametrize("operation_id", ["openrouter.responses", "openrouter.chat"])
+def test_queued_cancellation_removes_waiter_without_ledger_or_provider_call(operation_id):
     gate = br.OpenRouterSharedGate(max_concurrency=1)
     held = gate.acquire(fingerprint(), deadline=time.monotonic() + 2)
     assert held is not None
     cancelled = threading.Event()
-    broker, store, transport = make_broker(openrouter_shared_gate=gate)
+    broker, store, transport = make_broker(openrouter_shared_gate=gate,
+                                         judge_models=(CHAT["model"],))
     result = []
     thread = threading.Thread(
         target=lambda: result.append(
             broker.execute(
-                context(3), operation_id="openrouter.responses",
-                parameters=PARAMETERS, action_sequence=1, timeout_ms=120_000,
+                replace(context(3), kind="score"), operation_id=operation_id,
+                parameters=CHAT if operation_id == "openrouter.chat" else PARAMETERS,
+                action_sequence=1, timeout_ms=30_000 if operation_id == "openrouter.chat" else 120_000,
                 cancel_requested=cancelled.is_set,
             )
         )
@@ -1120,7 +1135,7 @@ def test_idle_gate_preserves_short_responses_timeout():
     assert 0 < transport.sent[0]["timeout"] <= 0.025
 
 
-def test_nongated_chat_keeps_full_post_admission_provider_timeout(monkeypatch):
+def test_gated_chat_keeps_existing_absolute_provider_deadline(monkeypatch):
     class SlowStore(FakeLedgerStore):
         def reserve_call(self, **kwargs):
             result = super().reserve_call(**kwargs)
@@ -1148,7 +1163,142 @@ def test_nongated_chat_keeps_full_post_admission_provider_timeout(monkeypatch):
 
     assert result.status == 200
     assert store.log == ["reserve", "dispatch", "settle"]
-    assert 0.04 <= transport.sent[0]["timeout"] <= 0.05
+    assert 0 < transport.sent[0]["timeout"] <= 0.035
+
+
+@pytest.mark.parametrize("native_status,retry_after,expected_generation", [
+    (429, None, 1),
+    (429, "2", 1),
+    (429, "invalid", 0),
+    (502, None, 0),
+])
+def test_score_chat_native_throttle_controls_same_credential_only(
+    native_status, retry_after, expected_generation
+):
+    gate = br.OpenRouterSharedGate(1, fallback_seconds=(0.02, 0.04))
+    headers = {} if retry_after is None else {"retry-after": retry_after}
+    payload = {"error": {"code": native_status, "message": "synthetic failure"},
+               "usage": {"cost": "0"}}
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(native_status, payload, headers)]),
+        openrouter_shared_gate=gate, judge_models=(CHAT["model"],),
+    )
+    result = broker.execute(
+        replace(context(16), kind="score"), operation_id="openrouter.chat",
+        parameters=CHAT, action_sequence=1, timeout_ms=30_000,
+    )
+    assert result.status == 502
+    assert result.call["provider_status"] == native_status
+    assert result.call["actual_microusd"] == 0
+    assert result.call["outcome"] == "settled"
+    assert store.log == ["reserve", "dispatch", "settle"]
+    assert len(transport.sent) == 1
+    with gate._condition:
+        state = gate._states[fingerprint()]
+        assert state.active == 0 and not state.waiters
+        assert state.cooldown_generation == expected_generation
+        if retry_after == "2":
+            assert state.cooldown_until - time.monotonic() > 1.8
+
+    # The same host's second credential does not inherit this cooldown.
+    other, other_store, other_transport = make_broker(
+        transport=FakeTransport([(200, response(id="gen-other-key"))]),
+        openrouter_shared_gate=gate,
+        credential_for=lambda _context, _provider: "synthetic-other-credential",
+    )
+    assert other.execute(
+        context(17), operation_id="openrouter.responses", parameters=PARAMETERS,
+        action_sequence=1, timeout_ms=25,
+    ).status == 200
+    assert other_store.log == ["reserve", "dispatch", "settle"]
+    assert len(other_transport.sent) == 1
+
+
+@pytest.mark.parametrize("operation_id", ["openrouter.chat", "openrouter.responses"])
+def test_score_chat_429_delays_next_broker_then_preserves_successful_cost(operation_id):
+    gate = br.OpenRouterSharedGate(1, fallback_seconds=(0.04, 0.08))
+    limited, _, _ = make_broker(
+        transport=FakeTransport([(429, {"error": {"code": 429}, "usage": {"cost": "0"}})]),
+        openrouter_shared_gate=gate, judge_models=(CHAT["model"],),
+    )
+    assert limited.execute(
+        replace(context(18), kind="score"), operation_id="openrouter.chat",
+        parameters=CHAT, action_sequence=1, timeout_ms=30_000,
+    ).call["provider_status"] == 429
+    payload = {"id": "gen-paid-chat", "choices": [], "usage": {"cost": "0.000012"}}
+    succeeding, store, transport = make_broker(
+        transport=FakeTransport([(200, payload)]), openrouter_shared_gate=gate,
+        judge_models=(CHAT["model"],),
+    )
+    started = time.monotonic()
+    result = succeeding.execute(
+        replace(context(19), kind="score"), operation_id=operation_id,
+        parameters=CHAT if operation_id == "openrouter.chat" else PARAMETERS,
+        action_sequence=1, timeout_ms=30_000 if operation_id == "openrouter.chat" else 120_000,
+    )
+    assert time.monotonic() - started >= 0.025
+    assert result.status == 200 and result.call["actual_microusd"] == 12
+    assert store.log == ["reserve", "dispatch", "settle"] and len(transport.sent) == 1
+    with gate._condition:
+        assert gate._states[fingerprint()].active == 0
+        assert gate._states[fingerprint()].throttle_count == 0
+
+
+def test_chat_gate_and_reservation_share_existing_admission_allowance(monkeypatch):
+    class BusyStore(FakeLedgerStore):
+        def reserve_call(self, **_kwargs):
+            self.log.append("reserve")
+            return {"status": "budget_busy"}
+
+    now = [100.0]
+    gate = br.OpenRouterSharedGate(1)
+    acquire = gate.acquire
+
+    def slow_acquire(*args, **kwargs):
+        lease = acquire(*args, **kwargs)
+        now[0] = 118.0
+        return lease
+
+    monkeypatch.setattr(gate, "acquire", slow_acquire)
+    monkeypatch.setattr(br.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(br.time, "sleep", lambda _delay: now.__setitem__(0, now[0] + 1.0))
+    broker, store, transport = make_broker(
+        store=BusyStore(), openrouter_shared_gate=gate,
+    )
+    result = broker.execute(
+        context(20), operation_id="openrouter.chat", parameters=CHAT,
+        action_sequence=1, timeout_ms=30_000,
+    )
+    assert now[0] == 120.0
+    assert result.call["outcome"] == "not_dispatched"
+    assert store.log == ["reserve"] * 3 and transport.sent == []
+    with gate._condition:
+        assert gate._states[fingerprint()].active == 0
+
+
+def test_chat_gate_wait_preserves_full_thirty_second_provider_window(monkeypatch):
+    now = [100.0]
+    gate = br.OpenRouterSharedGate(1)
+    acquire = gate.acquire
+
+    def slow_acquire(*args, **kwargs):
+        lease = acquire(*args, **kwargs)
+        now[0] = 120.0
+        return lease
+
+    monkeypatch.setattr(gate, "acquire", slow_acquire)
+    monkeypatch.setattr(br.time, "monotonic", lambda: now[0])
+    broker, store, transport = make_broker(
+        transport=FakeTransport([(200, {"choices": [], "usage": {"cost": "0.000012"}})]),
+        openrouter_shared_gate=gate, judge_models=(CHAT["model"],),
+    )
+    result = broker.execute(
+        replace(context(21), kind="score"), operation_id="openrouter.chat",
+        parameters=CHAT, action_sequence=1, timeout_ms=30_000,
+    )
+    assert result.status == 200 and result.call["actual_microusd"] == 12
+    assert transport.sent[0]["timeout"] == 30.0
+    assert store.log == ["reserve", "dispatch", "settle"]
 
 
 def test_invalid_operation_and_action_precede_bad_timeout_conversion():
@@ -1169,7 +1319,13 @@ def test_invalid_operation_and_action_precede_bad_timeout_conversion():
     assert store.log == [] and transport.sent == []
 
 
-def test_full_185_second_budget_sets_90_second_queue_boundary(monkeypatch):
+@pytest.mark.parametrize("operation_id,timeout_ms,queue_seconds,total_seconds", [
+    ("openrouter.responses", 120_000, 90.0, 185.0),
+    ("openrouter.chat", 30_000, 20.0, 95.0),
+])
+def test_existing_api_budget_bounds_queue(
+    monkeypatch, operation_id, timeout_ms, queue_seconds, total_seconds
+):
     class DeadlineGate:
         def __init__(self):
             self.deadline = None
@@ -1183,25 +1339,27 @@ def test_full_185_second_budget_sets_90_second_queue_boundary(monkeypatch):
     broker, store, transport = make_broker(openrouter_shared_gate=gate)
 
     result = broker.execute(
-        context(14), operation_id="openrouter.responses", parameters=PARAMETERS,
-        action_sequence=1, timeout_ms=120_000,
+        context(14), operation_id=operation_id,
+        parameters=CHAT if operation_id == "openrouter.chat" else PARAMETERS,
+        action_sequence=1, timeout_ms=timeout_ms,
     )
 
-    assert gate.deadline == 190.0
-    full_api_deadline = gate.deadline + 20.0 + 30.0 + 30.0 + 15.0
-    assert full_api_deadline == 285.0
+    assert gate.deadline == 100.0 + queue_seconds
+    assert 20.0 + timeout_ms / 1000.0 + 30.0 + 15.0 == total_seconds
     assert result.call["reason"] == "provider_admission_deadline"
     assert store.log == [] and transport.sent == []
 
 
-def test_expired_api_deadline_rejects_even_when_gate_is_idle(monkeypatch):
+@pytest.mark.parametrize("operation_id", ["openrouter.responses", "openrouter.chat"])
+def test_expired_api_deadline_rejects_even_when_gate_is_idle(monkeypatch, operation_id):
     clock = iter((100.0, 100.0, 286.0))
     monkeypatch.setattr(br.time, "monotonic", lambda: next(clock))
     gate = br.OpenRouterSharedGate(1)
     broker, store, transport = make_broker(openrouter_shared_gate=gate)
 
     result = broker.execute(
-        context(15), operation_id="openrouter.responses", parameters=PARAMETERS,
+        context(15), operation_id=operation_id,
+        parameters=CHAT if operation_id == "openrouter.chat" else PARAMETERS,
         action_sequence=1, timeout_ms=120_000,
     )
 

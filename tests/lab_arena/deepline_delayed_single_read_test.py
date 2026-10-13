@@ -160,4 +160,3 @@ def test_idle_full_batch_checks_score_tail_and_wraps_without_skips():
         checked = broker.seen[before:]
         assert len(set(checked)) == 96
         assert set(range(1001, 1094)) <= set(checked)
-

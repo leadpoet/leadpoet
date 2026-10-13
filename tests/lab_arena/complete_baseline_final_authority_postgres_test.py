@@ -30,7 +30,10 @@ def database():
 def normal_database():
     # Each normal flow owns its baseline funding history. A winner from a
     # previous parameter must not replace this fixture's host-funded baseline.
-    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS + (MIGRATION.name,))
+    # The current service also calls the bounded recovery RPC during stage 2.
+    # Use the complete deployed schema for this normal transition proof.
+    from tests.lab_arena.bounded_baseline_recovery470_postgres_test import database as current_database
+    yield from current_database.__wrapped__()
 
 
 @pytest.fixture()

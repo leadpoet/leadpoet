@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: October 13 baseline final authority and recovery
+
+The user authorized bounded recovery of failed October 13 baseline ICPs and
+requires a complete, legitimate published baseline before champion selection,
+promotion, new incentives, or final round weight authority. Use the overnight
+procedures for protected inspection, narrow final-authority guards, targeted
+failed-baseline retries, focused tests, exact committed migrations, safe
+push/merge, and canonical deployment. Preserve the frozen configuration,
+model, scorer, deadlines, accepted work, provider accounting, prior valid
+weights, and historical publications and activated rewards. Do not extend
+round deadlines, change credentials, reset the round, or alter completed work.
+Fail the round safely if baseline recovery cannot finish within its frozen
+windows. This authority ends after deployment and live verification.
+
 ## Scoped production authorization: October 12 full-cycle monitoring
 
 The user authorized monitoring both baseline and all miner work through

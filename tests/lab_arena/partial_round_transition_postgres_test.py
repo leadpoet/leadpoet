@@ -1,4 +1,4 @@
-"""Run a partial Arena day through signed HTTP, broker, PostgreSQL, and publication."""
+"""Preserve a partial Arena day without granting final baseline authority."""
 
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def _project_closed_stage_to_real_clock(connect, round_id, field):
     return cutoff
 
 
-def test_partial_baseline_and_challenger_publish_without_unjust_promotion(integrated, tmp_path):
+def test_partial_baseline_fails_at_final_deadline_and_preserves_miners(integrated, tmp_path):
     psycopg, dsn = integrated
     connect = lambda: psycopg.connect(**dsn)
     harness = QualityHarness(
@@ -186,25 +186,30 @@ def test_partial_baseline_and_challenger_publish_without_unjust_promotion(integr
             assert len(stage2["incomplete_rows"]) == 1
             assert stage2["incomplete_rows"][0]["submission_id"] == incomplete_submission
             assert len(stage2["work_items"]) == 19 and stage2["zero_rows"] == []
-            _advance_with_http_scores(harness, runner, "published")
+            _advance_with_http_scores(harness, runner, "scored")
+            assert harness.service.publish(round_id)["reason"] == "baseline_incomplete"
+            harness.clock.advance_to(harness.schedule()["publication_deadline"])
+            assert harness.service.publish(round_id)["status"] == "cancelled"
         finally:
             runner.close()
 
     published = harness.service.store.get_round(round_id)
-    assert published["status"] == "published"
+    assert published["status"] == "cancelled"
+    assert published["cancel_reason"] == "scoring_incomplete"
     assert {key: value for key, value in published["configuration_doc"].items() if key != "schedule"} == {
         key: value for key, value in frozen.items() if key != "schedule"}
-    assert published["publication_doc"]["king_decision"]["outcome"] == "no_king"
-    ranking = {r["submission_id"]: r for r in published["publication_doc"]["final_ranking"]}
+    assert published["publication_doc"] is None
+    assert published["baseline_promoted_at"] is None
+    assert published["reward_activated_at"] is None
+    assert published["reward_basis_doc"] is None
+    ranking = {r["submission_id"]: r for r in harness.service._score_entries_from_runs(
+        published, range(10), "final_score")}
     assert ranking[baseline_id]["final_score"] is None
     assert ranking[incomplete_submission]["final_score"] is None
     for submission_id in (baseline_id, incomplete_submission):
-        assert ranking[submission_id]["eligible"] is False
-        assert ranking[submission_id]["eligibility_reason"] == "execution_incomplete"
-        assert ranking[submission_id]["cost_summary"] is None
+        assert ranking[submission_id]["execution_incomplete"] is True
     full_submission = next(s for s in ranking if s not in (baseline_id, incomplete_submission))
     assert ranking[full_submission]["final_score"] is not None
-    assert ranking[full_submission]["eligible"] is True
     assert evidence.successful_charged_calls == 28
     assert len(harness.service.store.list_runs(round_id, kind="score")) == 28
     assert all(r["status"] == "accepted" for r in harness.service.store.list_runs(round_id, kind="score"))

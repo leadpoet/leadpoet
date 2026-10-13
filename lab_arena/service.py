@@ -3832,6 +3832,11 @@ class ArenaService:
         if round_row["status"] != "scored":
             return {"status": "stale", "round_status": round_row["status"]}
         configuration = round_row.get("configuration_doc") or {}
+        # An infrastructure zero is not a measured baseline. Keep the round
+        # recoverable until its frozen final deadline, without comparing miners
+        # or creating a new reward authority against unfinished baseline work.
+        if not self._baseline_fully_succeeded(round_row):
+            return self._hold_incomplete_baseline(round_row)
         baseline_first = (
             configuration.get("execution_sequence_policy")
             == contracts.BASELINE_SCORED_FIRST_POLICY
@@ -3872,6 +3877,11 @@ class ArenaService:
         }
         effective_final_entries = [dict(entry) for entry in final_entries]
         king_entry = next(entry for entry in effective_final_entries if entry["is_king"])
+        if eligibility[str(king_entry["submission_id"])]["eligibility_reason"] not in (
+            "eligible", "historical_round", "cost_per_company_exceeded",
+            "execution_cap_exceeded",
+        ):
+            return self._hold_incomplete_baseline(round_row)
         if (
             king_entry["final_score"] is not None
             and integrity.enabled(round_row.get("configuration_doc") or {})
@@ -3934,7 +3944,7 @@ class ArenaService:
             network_name=network_name, netuid=netuid,
         ):
             result = self.promote_baseline(str(row["round_id"]))
-            if result.get("status") == "superseded":
+            if result.get("status") in ("superseded", "waiting_for_baseline"):
                 continue
             if result.get("status") not in ("promoted", "existing"):
                 return {"status": result.get("status", "pending"), "promoted": promoted}
@@ -3993,6 +4003,8 @@ class ArenaService:
             row = self._store.get_round(str(item["round_id"]))
             if row is None:
                 raise ServiceError("promotion_round_missing", 500)
+            if not self._baseline_final_ready(row):
+                continue
             if latest is None or latest <= self._evaluation_day(row):
                 return True
         return False
@@ -4014,6 +4026,8 @@ class ArenaService:
             return {"status": "not_required"}
         if self._superseded_by_published_day(row):
             return {"status": "superseded"}
+        if not self._baseline_final_ready(row):
+            return {"status": "waiting_for_baseline"}
         factory = self._config.baseline_promoter_factory
         if factory is None:
             raise ServiceError("baseline_promoter_unavailable", 503)
@@ -4097,7 +4111,7 @@ class ArenaService:
         activated = 0
         for row in pending:
             result = self.activate_reward(str(row["round_id"]))
-            if result.get("status") == "superseded":
+            if result.get("status") in ("superseded", "waiting_for_baseline"):
                 continue
             if result.get("status") not in ("activated", "existing"):
                 return {"status": str(result.get("status") or "stale"), "activated": activated}
@@ -4149,14 +4163,13 @@ class ArenaService:
     def _baseline_fully_succeeded(self, row: Mapping[str, Any]) -> bool:
         """Whether all configured baseline executions and judgments succeeded."""
 
-        baseline_ids = {
-            str(participant.get("submission_id") or "")
-            for participant in row.get("participants") or []
-            if participant.get("is_king")
-        }
-        if len(baseline_ids) != 1 or "" in baseline_ids:
+        baselines = [participant for participant in row.get("participants") or []
+                     if participant.get("is_king")]
+        if len(baselines) != 1 or not baselines[0].get("submission_id"):
             return False
-        baseline_id = next(iter(baseline_ids))
+        baseline_id = str(baselines[0]["submission_id"])
+        baseline_hotkey = str(baselines[0].get("miner_hotkey") or "")
+        round_id = str(row["round_id"])
         policy = (row.get("configuration_doc") or {}).get(
             "execution_sequence_policy"
         )
@@ -4177,31 +4190,65 @@ class ArenaService:
         ):
             if (
                 str(run.get("submission_id") or "") != baseline_id
+                or run.get("round_id") != round_id
+                or run.get("miner_hotkey") != baseline_hotkey
                 or run.get("status") != "accepted"
+                or run.get("terminal_cause") != "accepted"
                 or run.get("per_icp_score") is None
+                or not run.get("output_ref")
+                or not isinstance(run.get("result_doc"), Mapping)
             ):
                 continue
             key = (int(run.get("stage") or 0), int(run.get("icp_position") or 0))
             if key not in expected:
                 continue
-            current = accepted_executions.get(key)
-            if current is None or int(run.get("attempt") or 0) > int(
-                current.get("attempt") or 0
-            ):
-                accepted_executions[key] = run
+            if key in accepted_executions:
+                return False
+            accepted_executions[key] = run
         if set(accepted_executions) != expected:
             return False
-        accepted_scored_run_ids = {
-            str(run.get("scored_run_id") or "")
-            for run in self._store.list_runs(
-                str(row["round_id"]), kind="score"
-            )
-            if run.get("status") == "accepted"
-        }
-        return all(
-            str(run.get("run_id") or "") in accepted_scored_run_ids
-            for run in accepted_executions.values()
+        judgments = self._store.list_runs(round_id, kind="score")
+        return all(any(
+            judge.get("status") == "accepted"
+            and judge.get("terminal_cause") == "accepted"
+            and judge.get("round_id") == round_id
+            and judge.get("submission_id") == baseline_id
+            and judge.get("miner_hotkey") == baseline_hotkey
+            and judge.get("stage") == execution.get("stage")
+            and judge.get("icp_position") == execution.get("icp_position")
+            and judge.get("scored_run_id") == execution.get("run_id")
+            and bool(judge.get("output_ref"))
+            and isinstance(judge.get("result_doc"), Mapping)
+            for judge in judgments
+        ) for execution in accepted_executions.values())
+
+    def _baseline_final_ready(self, row: Mapping[str, Any]) -> bool:
+        if not self._baseline_fully_succeeded(row):
+            return False
+        baseline_id = next(str(p["submission_id"]) for p in row["participants"] if p.get("is_king"))
+        eligibility = self._submission_cost_eligibility(
+            row, baseline_id, self._store.list_runs(str(row["round_id"]), kind="execute"),
         )
+        return eligibility["eligibility_reason"] in (
+            "eligible", "historical_round", "cost_per_company_exceeded",
+            "execution_cap_exceeded",
+        )
+
+    def _hold_incomplete_baseline(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        deadline = _parse_iso(row["configuration_doc"]["schedule"]["publication_deadline"])
+        if self.now() >= deadline:
+            runs = self._store.list_runs(str(row["round_id"]))
+            active = any(run.get("status") in ("leased", "submitted") for run in runs)
+            # Cancellation must not terminate a still-dispatched provider call.
+            # Known failed fees remain durable and do not prolong this gate.
+            for participant in row.get("participants") or []:
+                costs = self._store.submission_costs(str(participant["submission_id"]))
+                active = active or any(int(provider.get("inflight_calls", 0)) > 0
+                                       for provider in costs["providers"])
+            if not active:
+                return self._store.cancel_round(str(row["round_id"]), CANCEL_REASONS["scoring_incomplete"])
+        return {"status": "retry", "round_status": row["status"],
+                "reason": "baseline_incomplete"}
 
     def activate_reward(self, round_id: str) -> Dict[str, Any]:
         """Sign and atomically activate one already-published live result."""
@@ -4216,6 +4263,8 @@ class ArenaService:
             return {"status": "disabled"}
         if self._superseded_by_published_day(row):
             return {"status": "superseded"}
+        if not self._baseline_final_ready(row):
+            return {"status": "waiting_for_baseline"}
         # A later no-winner round must not activate while an earlier accepted
         # baseline in the same chain scope is still unpublished.
         network_name, netuid = self._chain_scope()

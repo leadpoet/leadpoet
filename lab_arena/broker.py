@@ -1630,6 +1630,7 @@ def _deepline_ledger_readback(
     operation: str,
     since_at: int,
     reconciliation_deadline: float,
+    poll: bool = True,
 ) -> Optional[provider_costs.ProviderCost]:
     """Read exact request billing; never repeat a provider execution."""
 
@@ -1668,10 +1669,14 @@ def _deepline_ledger_readback(
                 timeout_seconds=max(0.001, deadline - now),
             )
         except ProviderTransportError:
+            if not poll:
+                return None
             continue
         if _response_contains_credential(response, secret):
             return None
         if response.status != 200:
+            if not poll:
+                return None
             continue
         try:
             document = json.loads(response.body.decode("utf-8"))
@@ -1690,6 +1695,8 @@ def _deepline_ledger_readback(
             seen_cursors.add(next_cursor)
             cursor = next_cursor
         else:
+            if not poll:
+                return None
             cursor = None
             seen_cursors.clear()
     return None
@@ -3363,7 +3370,11 @@ class Broker:
         *,
         timeout_seconds: float = DEEPLINE_DELAYED_RECONCILIATION_TIMEOUT_SECONDS,
     ) -> Dict[str, Any]:
-        """Settle one retained Deepline request without repeating its POST."""
+        """Read one retained bill; later driver passes retry an unknown charge.
+
+        Historical ledger pages share the same deadline. Neither path polls
+        an absent charge within this pass or repeats the paid POST.
+        """
 
         required = {
             "uncertain_entry_id",
@@ -3489,6 +3500,7 @@ class Broker:
                         else None
                     ),
                     reconciliation_deadline=time.monotonic() + timeout,
+                    poll=False,
                 )
             else:
                 # Historical reservations predate execution keys and retain
@@ -3500,6 +3512,7 @@ class Broker:
                     request_id=request_id, operation=operation,
                     since_at=max(0, int(reservation_at.timestamp() * 1000) - 1000),
                     reconciliation_deadline=time.monotonic() + timeout,
+                    poll=False,
                 )
         except (BrokerError, KeyError, TypeError, ValueError):
             return {"status": "unavailable"}

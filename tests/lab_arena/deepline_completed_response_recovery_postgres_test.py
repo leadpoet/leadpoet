@@ -91,3 +91,55 @@ def test_initial_key_404_never_persists_trace_and_later_exact_bill_recovers(data
     # Billing recovery alone cannot claim the lost research was delivered.
     assert terminal['call_succeeded'] is False
     assert terminal['provider_cost']['request_id'] == NATIVE
+
+
+def test_http_completed_evidence_keeps_unknown_bill_then_settles_once(database, tmp_path, monkeypatch):
+    """Lease-authenticated HTTP, real broker and append-only settlement RPC."""
+    from fastapi.testclient import TestClient
+    from lab_arena.api import create_app
+    from lab_arena.runner import HttpArenaApiClient
+    from tests.lab_arena.deepline_score_billing_latency_test import CompletedTransport
+
+    transport = CompletedTransport()
+    h, lease, token, connect, broker = setup(database, tmp_path, '19', transport)
+    # Match the signed HTTP fixtures: exercise routes without starting the
+    # unrelated background driver against this historical migration schema.
+    client = TestClient(create_app(h.service))
+    try:
+        api = HttpArenaApiClient('http://localhost', client=client)
+        # Original execute billing still polls. Bound only that fixture setup
+        # to one attempt, as the existing lost-response fixture does above.
+        with monkeypatch.context() as initial:
+            initial.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
+            result = api.provider(lease['run_id'], token, frame())
+        monkeypatch.setattr(br.time, 'sleep', lambda _: pytest.fail('retained billing must not poll'))
+        evidence = result['body_b64']
+        identity = result['call']['call_identity']
+        assert result['status'] == 200 and result['call']['outcome'] == 'uncertain'
+        assert 'actual_microusd' not in result['call']
+        candidate = h.service.store.list_deepline_cost_reconciliations(
+            h.round_id, run_id=lease['run_id'])[0]
+        before = len(transport.requests)
+        assert broker.reconcile_deepline_cost(candidate) == {'status': 'pending'}
+        assert len(transport.requests) == before + 1
+        with connect() as connection, connection.cursor() as cur:
+            cur.execute("SELECT entry_kind FROM public.lab_arena_ledger WHERE call_identity=%s ORDER BY entry_id", (identity,))
+            assert 'uncertain' in [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT count(*) FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (identity,))
+            assert cur.fetchone() == (0,)
+        transport.bill_final = True
+        settled = broker.reconcile_deepline_cost(candidate)
+        assert settled['status'] == 'settled' and settled['actual_microusd'] == 2000
+        assert broker.reconcile_deepline_cost(candidate)['idempotent'] is True
+        replay = api.provider(lease['run_id'], token, frame())
+        assert replay['body_b64'] == evidence and replay['call']['idempotent'] is True
+        assert sum(request['method'] == 'POST' for request in transport.requests) == 1
+        assert h.service.store.list_deepline_cost_reconciliations(h.round_id, run_id=lease['run_id']) == []
+    finally:
+        client.close()
+    with connect() as connection, connection.cursor() as cur:
+        cur.execute("SELECT amount_microusd,terminal_response FROM public.lab_arena_ledger WHERE call_identity=%s AND entry_kind='settlement'", (identity,))
+        rows = cur.fetchall()
+    assert len(rows) == 1 and rows[0][0] == 2000
+    assert rows[0][1]['call_succeeded'] is True
+    assert rows[0][1]['provider_cost']['request_id'] == NATIVE

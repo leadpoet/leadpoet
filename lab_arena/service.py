@@ -3967,6 +3967,51 @@ class ArenaService:
             "eligibility_reason": reason,
         }
 
+    def _judgment_matches_execution(
+        self, row: Mapping[str, Any], judge: Mapping[str, Any],
+        source: Mapping[str, Any],
+    ) -> bool:
+        """Check the judgment authority used by this round's frozen scorer."""
+
+        round_id = str(row["round_id"])
+        configuration = row.get("configuration_doc") or {}
+        if (judge.get("status") != "accepted"
+            or judge.get("terminal_cause") != "accepted"
+            or not judge.get("output_ref")
+            or not self._same_scoring_membership(judge, source, round_id=round_id)
+            or judge.get("miner_hotkey") != source.get("miner_hotkey")):
+            return False
+        if quality_policy.enabled(configuration):
+            refs = judge.get("company_judgment_refs")
+            if not isinstance(refs, list):
+                return False
+            try:
+                scopes = [company_judgments.validate_company_ref(ref)["scope_doc"]
+                          for ref in refs]
+                if not refs:
+                    raw = self._objects.get_bounded(
+                        str(source.get("output_ref") or ""), MAX_OUTPUT_BYTES)
+                    output = validate_output_document(json.loads(raw),
+                        expected_schema_version=contact_policy.output_schema(configuration))
+                    if output["companies"]:
+                        return False
+            except (company_judgments.CompanyJudgmentError, OutputInvalid,
+                    TypeError, ValueError, UnicodeDecodeError):
+                return False
+        elif integrity.enabled(configuration):
+            scope = judge.get("judgment_scope_doc")
+            if not isinstance(scope, Mapping):
+                return False
+            scopes = [scope]
+        else:
+            # Legacy scoring assignments have no judgment-cache scope. Their
+            # accepted output and execution membership are the final authority.
+            return True
+        return all(scope.get("round_id") == round_id and all(
+            scope.get(key) == configuration.get(key)
+            for key in ("scorer_image_digest", "scorer_image_reference")
+        ) for scope in scopes)
+
     def _unfinished_judgments(self, row: Mapping[str, Any]) -> bool:
         """An accepted execution has no final authority without its own judge."""
 
@@ -3978,15 +4023,8 @@ class ArenaService:
         for source in sources:
             judge = judges.get(str(source["run_id"]))
             if (source.get("per_icp_score") is None
-                or judge is None or judge.get("status") != "accepted"
-                or judge.get("terminal_cause") != "accepted"
-                or not judge.get("output_ref")
-                or not self._same_scoring_membership(judge, source, round_id=round_id)
-                or judge.get("miner_hotkey") != source.get("miner_hotkey")
-                or (judge.get("judgment_scope_doc") or {}).get("scorer_image_digest")
-                    != (row.get("configuration_doc") or {}).get("scorer_image_digest")
-                or (judge.get("judgment_scope_doc") or {}).get("scorer_image_reference")
-                    != (row.get("configuration_doc") or {}).get("scorer_image_reference")):
+                or judge is None
+                or not self._judgment_matches_execution(row, judge, source)):
                 return True
         return False
 
@@ -4011,14 +4049,7 @@ class ArenaService:
             rows = []
             for source in ready:
                 judge = judges[str(source["run_id"])]
-                if (judge.get("terminal_cause") != "accepted"
-                    or not judge.get("output_ref")
-                    or not self._same_scoring_membership(judge, source, round_id=round_id)
-                    or judge.get("miner_hotkey") != source.get("miner_hotkey")
-                    or (judge.get("judgment_scope_doc") or {}).get("scorer_image_digest")
-                        != configuration.get("scorer_image_digest")
-                    or (judge.get("judgment_scope_doc") or {}).get("scorer_image_reference")
-                        != configuration.get("scorer_image_reference")):
+                if not self._judgment_matches_execution(row, judge, source):
                     raise ServiceError("recovered_judgment_binding_invalid", 500)
                 position = int(source["icp_position"])
                 companies = outputs[str(source["run_id"])]

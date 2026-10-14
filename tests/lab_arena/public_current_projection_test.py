@@ -1,6 +1,7 @@
 """Current polling uses compact reads; driver and signed weight reads do not."""
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import json
 from types import SimpleNamespace
 
@@ -48,7 +49,10 @@ def _active(index=0, **configuration):
         "created_at": "2026-10-09T%02d:00:00Z" % index,
         "arena_network_name": "finney", "arena_netuid": 71,
         "configuration_doc": {
-            "mode": "live", "schedule": {"submission_cutoff": "2026-10-10T00:00:00Z"},
+            "mode": "live", "schedule": {
+                "submission_open": "2026-10-09T00:00:00Z",
+                "submission_cutoff": "2026-10-10T00:00:00Z",
+            },
             "deepline_catalog": {"private-catalog": "x" * 100_000}, **configuration,
         },
     }
@@ -79,6 +83,7 @@ def _reward(*, epoch=100, outcome="crowned", baseline=BASELINE, legacy=False, sl
 
 def _service(rows, *, full=False, epoch=101, mode="live", pinned=None):
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 10, 9, 12, tzinfo=timezone.utc)
     transport = CurrentTransport(rows, full=full)
     service._store = ArenaStore(transport)
 

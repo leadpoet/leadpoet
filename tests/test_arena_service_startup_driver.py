@@ -66,6 +66,7 @@ def test_api_starts_while_initial_scoring_cycle_is_pending(monkeypatch, driver_r
     service = SimpleNamespace(
         startup_checks=lambda: {"database_identity": {"current_user": "test"}},
         review_pending_submissions=lambda: None,
+        _config=SimpleNamespace(defaults=SimpleNamespace(daily_cutoff_hour_utc=0)),
     )
     monkeypatch.setenv("LAB_ARENA_MODE", "live")
     monkeypatch.setattr(wiring, "build_service_from_environment", lambda mode: (service, app))

@@ -378,15 +378,13 @@ def test_broad_subindustry_label_keeps_explicit_product_conjuncts():
 
     assert "industry and sub-industry labels name sector categories" in prompt
     assert "Do not turn the category label into a second, narrower AND gate" in prompt
-    assert "directly sold B2B workflow platform" in prompt
-    assert "subscription model and business customer scope are proven" in prompt
-    assert "without the requested capability is insufficient" in prompt
-    assert "customer or internal use of another vendor's tool" in prompt
-    assert "explicitly requires the company to supply both" in prompt
-    assert (
-        "Keep every separate product/service and required-attribute conjunct "
-        "mandatory"
-    ) in prompt
+    assert "company fit still requires that the subscription model" not in prompt
+    assert "A directly sold B2B workflow platform can satisfy a broad infrastructure/workflow criterion without a separate infrastructure product" in prompt
+    assert "when it proves the requested capability and any requested customer scope" in prompt
+    assert "Examples never add subscription, sale, customer-scope, or capability requirements" in prompt
+    assert "An adjacent activity for the same customer group is UNPROVEN" in prompt
+    assert "Customer use of another vendor's platform" in prompt
+    assert "Do not convert an explicit BOTH, ALL, or separately required capability into an OR" in prompt
 
 
 @pytest.mark.parametrize(
@@ -17878,3 +17876,132 @@ def test_empty_exhausted_forced_search_preserves_original_tool_contract(
     assert result["failure_reason"] == (
         "" if obey_search_contract else MALFORMED_RESPONSE_FAILURE_REASON
     )
+
+
+@pytest.mark.parametrize('case', [
+    'knowledgehook_or', 'explicit_and_missing', 'subscription_missing',
+    'subscription_proven', 'wrong_industry', 'wrong_entity',
+])
+def test_requested_criterion_scope_round_trip(monkeypatch, case):
+    """Exact saved request stays intact; mocked findings retain normal gates.
+
+    This proves the rendered prompt/input and finding contract, not that a
+    live reasoning model will always follow the instructions.
+    """
+    name, domain = 'Knowledgehook', 'knowledgehook.com'
+    product = (
+        'A software platform that schools, training providers, or employers '
+        'use to deliver online learning, assessments, and learner management workflows'
+    )
+    attribute = (
+        'Runs a software platform used by schools or training providers to '
+        'manage online learning, assessment delivery, or learner engagement workflows'
+    )
+    industry, subindustry = 'Education', 'K-12 and workforce learning software'
+    url = 'https://www.knowledgehook.com/classos.html'
+    quote = (
+        'Assign missions for students to complete at their own pace, with in-app '
+        'rewards. Track progress with detailed Mission Reports and convert '
+        'missions into assessments for feedback.'
+    )
+    expected = 'VERIFIED'
+    if case.startswith('subscription'):
+        name, domain = 'FinLedger', 'finledger.example'
+        industry, subindustry = 'Financial Services', 'Payments software'
+        product = 'A recurring-subscription platform for account reconciliation'
+        attribute = 'Sells account reconciliation software on a recurring subscription'
+        url = 'https://finledger.example/product'
+        quote = 'FinLedger supplies account reconciliation software.'
+        if case == 'subscription_proven':
+            quote += ' The platform costs $20 per month.'
+        else:
+            expected = 'UNPROVEN'
+    elif case == 'explicit_and_missing':
+        attribute = 'Provides assessment delivery AND online course delivery'
+        expected = 'UNPROVEN'
+    elif case == 'wrong_industry':
+        industry, subindustry = 'Financial Services', 'Payments software'
+        expected = 'UNPROVEN'
+    elif case == 'wrong_entity':
+        url = 'https://other.example/product'
+        quote = 'OtherCo supplies an assessment delivery platform for schools.'
+        expected = 'UNPROVEN'
+    # An unsupported semantic condition remains UNPROVEN, not a forced pass.
+    claimed_status = 'VERIFIED' if case == 'wrong_entity' else expected
+    requests = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        arena_operations.validate_operation_request('openrouter.chat', payload)
+        requests.append(payload)
+        finding = _finding(
+            'required_attribute', status=claimed_status,
+            observed_value=quote if claimed_status == 'VERIFIED' else None,
+            activity_role='supplier_operator' if claimed_status == 'VERIFIED' else 'unresolved',
+            evidence_url=url if claimed_status == 'VERIFIED' else '',
+            evidence_quote=quote if claimed_status == 'VERIFIED' else '',
+        )
+        return 200, {'choices': [{'message': {'tool_calls': [{
+            'id': 'criterion-scope', 'type': 'function', 'function': {
+                'name': 'submit_findings',
+                'arguments': json.dumps({'findings': [finding]}),
+            },
+        }]}}]}
+
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-key')
+    monkeypatch.setenv('EXA_API_KEY', 'test-key')
+    monkeypatch.setattr(investigator, 'MAX_REASONING_TURNS', 1)
+    monkeypatch.setattr(investigator, 'MAX_SEARCH_CALLS', 0)
+    monkeypatch.setattr(investigator, '_post_json', fake_post)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={
+            'name': name, 'website': 'https://' + domain,
+            'linkedin': 'https://www.linkedin.com/company/' + name.lower(),
+        },
+        targets=('required_attribute',), requested_industry=industry,
+        requested_subindustry=subindustry, requested_product_service=product,
+        requested_attribute=attribute, positive_semantic_review=True,
+        prior_observations={
+            'submitted_source_urls': [url],
+            'observed_company_name': name,
+            'observed_company_website': 'https://' + domain,
+            'observed_company_linkedin': 'https://www.linkedin.com/company/' + name.lower(),
+        },
+        prefetched_pages={url: {
+            'final_url': url,
+            'text': quote if case == 'wrong_entity' else name + '\n' + quote,
+        }},
+        verified_homepage_identity={
+            'normalized_name': name, 'registrable_dns_domain': domain,
+            'linkedin_company_slug': name.lower(),
+        },
+    ))
+    sent = json.loads(requests[0]['messages'][1]['content'].split('\n', 1)[1])
+    assert sent['requested_product_service'] == product
+    assert sent['requested_attribute'] == attribute
+    assert sent['requested_industry'] == industry
+    prompt = ' '.join(requests[0]['messages'][0]['content'].split())
+    assert 'Examples never add subscription, sale, customer-scope, or capability requirements to the requested criteria' in prompt
+    assert 'For an explicit OR, prove one allowed alternative and all shared qualifiers; for AND, prove every conjunct' in prompt
+    assert 'Keep independent product/service requirements in their own check' in prompt
+    assert 'the requested criteria require those conditions' in prompt
+    assert 'a pay-once license alone do not prove paid product subscriptions' in prompt
+    assert 'explicit BOTH, ALL, or separately required capability' in prompt
+    assert result['claims']['required_attribute']['status'] == expected, result['claims']['required_attribute']['reason']
+
+
+@pytest.mark.parametrize('bound_company', [True, False])
+def test_criterion_scope_change_keeps_linkedin_headcount_identity_gate(bound_company):
+    url = 'https://www.linkedin.com/company/knowledgehook'
+    quote = 'Knowledgehook | LinkedIn. Company size 51-200 employees'
+    finding = _finding('headcount', observed_value='51-200 employees',
+                       evidence_url=url, evidence_quote=quote)
+    result = _validated_findings(
+        {'findings': [finding]}, targets=('headcount',), fetched_pages={url: quote},
+        first_party_domains={'knowledgehook.com'},
+        identity_names={'knowledgehook' if bound_company else 'otherco'},
+    )
+    assert result['headcount']['status'] == ('VERIFIED' if bound_company else 'UNPROVEN')
+    prompt = ' '.join(investigator._SYSTEM_PROMPT.split())
+    assert 'exact entity-bound LinkedIn Company size/employeeCountRange is primary' in prompt
+    assert 'current company-wide headcount' in prompt
+    assert 'Other conflicts are UNPROVEN' in prompt

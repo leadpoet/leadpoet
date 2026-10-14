@@ -9283,11 +9283,29 @@ async def _llm_reverify_company(
         for dimension in repaired_incomplete
         if dimension != "required_attribute"
     )
-    quote_absent_is_company_local = bool(
+    # Exhausting successful source fetches is missing proof, not a broken judge.
+    # Keep source faults and unresolved independent dimensions retryable.
+    attribute_evidence_exhausted_is_company_local = bool(
         repaired_result.decision == COMPANY_FIT_UNAVAILABLE
         and "required_attribute" in repaired_incomplete
         and isinstance(required_attribute_grounding, Mapping)
-        and required_attribute_grounding.get("status") == "quote_absent"
+        and (
+            required_attribute_grounding.get("status") == "quote_absent"
+            or (
+                required_attribute_grounding.get("status") == "url_limit"
+                and len(required_attribute_source_cache)
+                == _MAX_REQUIRED_ATTRIBUTE_SOURCE_URLS
+                and all(
+                    isinstance(entry, Mapping)
+                    and entry.get("status") == "fetched"
+                    and bool(_valid_web_evidence_url(entry.get("final_url")))
+                    and isinstance(entry.get("text"), str)
+                    and bool(entry["text"])
+                    and not entry.get(VERIFIER_FAILURE_DETAIL_KEY)
+                    for entry in required_attribute_source_cache.values()
+                )
+            )
+        )
         and not (
             "employee_size" in other_incomplete
             and linkedin_refresh_outcome == "retryable_failure"
@@ -9319,13 +9337,15 @@ async def _llm_reverify_company(
             )
         )
     )
-    if quote_absent_is_company_local:
+    if attribute_evidence_exhausted_is_company_local:
         return company_fit_unavailable(
             repaired_result.reason,
             details={
                 **repaired_result.details,
                 "failure_class": (
-                    REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
+                    INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
+                    if required_attribute_grounding.get("status") == "url_limit"
+                    else REQUIRED_ATTRIBUTE_QUOTE_ABSENT_FAILURE_CLASS
                 ),
             },
         )

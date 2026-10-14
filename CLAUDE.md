@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: infrastructure retry sourcing costs
+
+On 2026-10-14 the user authorized a general fix that retains all actual
+provider expenses but excludes proved infrastructure-failed execution attempts
+from the miner's competition sourcing costs. Apply the policy through new
+frozen round configuration only. Preserve published October 13 and October 14
+results, raw ledger history, genuine model and credential errors, unresolved
+billing, provider call caps, qualification, rewards, and concurrent work.
+Authority includes narrow code and committed migrations, focused tests, safe
+push and merge, canonical paired deployment, and isolated production proof.
+This authority ends when deployment and verification complete.
+
 ## Scoped production authorization: October 14 full-cycle monitoring
 
 On 2026-10-13 the user authorized monitoring October 14 baseline and miner

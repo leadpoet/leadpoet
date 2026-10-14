@@ -942,8 +942,9 @@ def test_per_icp_startup_requires_its_database_capability():
         probes.append(True)
 
     service._store.per_icp_cost_schema = available
+    service._store.infrastructure_retry_cost_schema = available
     assert service.startup_checks()["current_round"] is None
-    assert probes == [True]
+    assert probes == [True, True]
 
     def unavailable():
         raise ArenaStoreError("function is unavailable")

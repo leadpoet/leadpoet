@@ -237,6 +237,7 @@ PROVIDER_CALL_SCHEMA_VERSION = "leadpoet.lab_arena.provider_call.v1"
 SUBMISSION_COSTS_SCHEMA_VERSION = "leadpoet.lab_arena.submission_costs.v1"
 SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_v1"
 PER_ICP_SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_per_icp_v1"
+INFRASTRUCTURE_RETRY_COST_POLICY = "trusted_infrastructure_v1"
 PER_ICP_POLICY_BUDGET_STOP_REASONS = frozenset(
     {"money_cap", "per_icp_quota", "stage_quota"}
 )
@@ -908,6 +909,8 @@ ROUND_CONFIGURATION_FIELDS = (
         minimum=1,
         maximum=JSON_SAFE_INTEGER_MAX,
     ),
+    F("infrastructure_retry_cost_policy", "str", required=False,
+      choices=(INFRASTRUCTURE_RETRY_COST_POLICY,)),
     F("scoring_cap_microusd", "int", minimum=1),
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
@@ -976,6 +979,9 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
             != PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
         ):
             raise ArenaContractError("per-ICP cost policy requires fixed cost limits")
+    if (config.get("infrastructure_retry_cost_policy") is not None
+        and config.get("sourcing_cost_eligibility_policy") != PER_ICP_SUCCESSFUL_CALLS_COST_POLICY):
+        raise ArenaContractError("infrastructure retry cost policy requires per-ICP costs")
     if (
         "benchmark_disclosure_policy" in config
         and config["benchmark_disclosure_policy"] is None

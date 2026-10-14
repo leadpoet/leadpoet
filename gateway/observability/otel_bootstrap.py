@@ -122,6 +122,9 @@ ARENA_TASK_STAGES = frozenset(
         "reconcile_provider_costs",
         "reconcile_active_deepline_costs",
         "review_submissions",
+        "service_startup",
+        "service_shutdown",
+        "service_preflight",
         # Steps inside one advance_round. The parent stage reports only that
         # the whole transition failed, which is not enough to tell a slow
         # billing read from a blocked service lock from a slow SQL function.
@@ -557,6 +560,13 @@ TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 }
 
 TASK_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(TASK_SPAN_ATTRIBUTE_TYPES)
+ARENA_LIFECYCLE_STAGES = frozenset(
+    {"service_startup", "service_shutdown", "service_preflight"}
+)
+LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    **TASK_SPAN_ATTRIBUTE_TYPES,
+    "arena.source_sha": (str,),
+}
 
 # The Arena sidecar's HTTP envelope: the gateway's four, plus the refusal code
 # the sidecar itself produced. The gateway's own envelope is UNCHANGED — this
@@ -979,9 +989,15 @@ def _validating_exporter(
         return None
 
     def _task_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
-        if not _attributes_conform(attributes, TASK_SPAN_ATTRIBUTE_TYPES):
+        stage = attributes.get("arena.stage")
+        if stage in ARENA_LIFECYCLE_STAGES:
+            if not _attributes_conform(attributes, LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES):
+                return "attributes"
+            source_sha = attributes["arena.source_sha"]
+            if source_sha != "unknown" and not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+                return "source_sha"
+        elif not _attributes_conform(attributes, TASK_SPAN_ATTRIBUTE_TYPES):
             return "attributes"
-        stage = attributes["arena.stage"]
         if stage not in ARENA_TASK_STAGES:
             return "stage"
         if attributes["arena.outcome"] not in ARENA_TASK_OUTCOMES:
@@ -1525,6 +1541,7 @@ class ArenaTelemetry:
         count: int = 0,
         duration_ms: float = 0.0,
         start_ns: Optional[int] = None,
+        source_sha: Optional[str] = None,
     ) -> None:
         try:
             self._record(
@@ -1534,6 +1551,7 @@ class ArenaTelemetry:
                 count=count,
                 duration_ms=duration_ms,
                 start_ns=start_ns,
+                source_sha=source_sha,
             )
         except BaseException as exc:
             # Telemetry is observational only — the pipeline must not notice.
@@ -1548,6 +1566,7 @@ class ArenaTelemetry:
         count: int,
         duration_ms: float,
         start_ns: Optional[int],
+        source_sha: Optional[str],
     ) -> None:
         from opentelemetry.trace import Status, StatusCode
 
@@ -1557,6 +1576,8 @@ class ArenaTelemetry:
         span.set_attribute("arena.error_type", str(error_type))
         span.set_attribute("arena.count", int(count))
         span.set_attribute("duration_ms", float(duration_ms))
+        if source_sha is not None:
+            span.set_attribute("arena.source_sha", str(source_sha))
         if outcome == "failed":
             span.set_status(Status(StatusCode.ERROR))
         span.end()

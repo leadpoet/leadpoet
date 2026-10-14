@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: October 14 gateway outage recovery
+
+On 2026-10-14 the user authorized inspection and a general, durable fix for
+the gateway outage from 18:16:58 through 18:37:21 UTC. This includes narrow
+restart and lifecycle changes, focused checks, safe push and merge, canonical
+gateway and normal-validator deployment, and live verification. Preserve
+published October 13 and October 14 results, scoring, rewards, provider costs,
+exact release identity, attestation, epoch gates, and concurrent work. Do not
+rescore or promote October 13. Normal guarded cancellation of a stale October
+13 orphan is permitted, while all run, submission, ledger, promotion, and
+reward history remains intact. Do not change October 14 outcomes. This
+authority ends after deployment and live verification.
+
 ## Scoped production authorization: infrastructure retry sourcing costs
 
 On 2026-10-14 the user authorized a general fix that retains all actual

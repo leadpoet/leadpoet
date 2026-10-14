@@ -29,6 +29,8 @@ from gateway.observability.otel_bootstrap import (
     ARENA_SERVICE_NAME,
     ARENA_TASK_SCOPE,
     ARENA_TASK_STAGES,
+    ARENA_LIFECYCLE_STAGES,
+    LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES,
     PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST,
     RUN_IDENTITY_ATTRIBUTE_ALLOWLIST,
     RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST,
@@ -144,8 +146,35 @@ def test_recorded_stage_names_match_the_pipeline_seam():
     exp = InMemorySpanExporter()
     recorder = configure_arena_otel(None, span_exporter=exp)
     for stage in sorted(ARENA_TASK_STAGES):
-        recorder.record(stage, "ok")
+        recorder.record(
+            stage, "ok", source_sha="a" * 40 if stage in ARENA_LIFECYCLE_STAGES else None
+        )
     assert len(exp.get_finished_spans()) == len(ARENA_TASK_STAGES)
+
+
+def test_lifecycle_spans_export_only_validated_source_version():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record("service_startup", "ok", source_sha="a" * 40)
+    recorder.record("service_shutdown", "failed", source_sha="a" * 40)
+    recorder.record("service_preflight", "failed", source_sha="a" * 40)
+    spans = exp.get_finished_spans()
+    assert [span.name for span in spans] == [
+        "arena.service_startup", "arena.service_shutdown", "arena.service_preflight"
+    ]
+    for span in spans:
+        assert set(span.attributes) == set(LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES)
+        assert span.attributes["arena.source_sha"] == "a" * 40
+        assert span.resource.attributes == {"service.name": ARENA_SERVICE_NAME}
+
+
+def test_lifecycle_version_cannot_escape_on_other_stages_or_malformed_sha():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record("driver_tick", "ok", source_sha="a" * 40)
+    recorder.record("service_startup", "ok", source_sha="secret")
+    recorder.record("service_startup", "ok")
+    assert exp.get_finished_spans() == ()
 
 
 def test_pipeline_seam_is_a_no_op_until_a_recorder_is_installed():

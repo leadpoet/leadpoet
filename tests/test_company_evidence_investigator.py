@@ -379,6 +379,8 @@ def test_broad_subindustry_label_keeps_explicit_product_conjuncts():
     assert "industry and sub-industry labels name sector categories" in prompt
     assert "Do not turn the category label into a second, narrower AND gate" in prompt
     assert "company fit still requires that the subscription model" not in prompt
+    assert "A directly sold B2B workflow platform can satisfy a broad infrastructure/workflow criterion without a separate infrastructure product" in prompt
+    assert "when it proves the requested capability and any requested customer scope" in prompt
     assert "Examples never add subscription, sale, customer-scope, or capability requirements" in prompt
     assert "An adjacent activity for the same customer group is UNPROVEN" in prompt
     assert "Customer use of another vendor's platform" in prompt

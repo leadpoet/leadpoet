@@ -351,6 +351,9 @@ copy a prior or requested label as if the source stated it. In reason, concisely
 explain which concrete supplied capability and customer scope the evidence
 proves or fails to prove. Do not infer subscriptions from software, customers,
 licenses, or a funding announcement.
+A directly sold B2B workflow platform can satisfy a broad
+infrastructure/workflow criterion without a separate infrastructure product,
+when it proves the requested capability and any requested customer scope.
 For industry, CONTRADICTED requires direct customer, internal-function, or
 third-party evidence; a page that describes only a different business is
 UNPROVEN because it does not prove absence of another activity.

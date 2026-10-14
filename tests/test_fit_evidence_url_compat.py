@@ -1159,3 +1159,111 @@ def test_homepage_identity_mismatch_remains_terminal_before_hint_use(monkeypatch
     assert result.details["company_fit_dimensions"]["identity"] == (
         COMPANY_FIT_MISMATCH
     )
+
+
+@pytest.mark.parametrize("repair", ["corrected", "unchanged", "provider_error", "malformed_response"])
+def test_verified_domain_conflict_repairs_before_targeted_investigation(
+    monkeypatch, repair,
+):
+    """A wrong web-model domain must not require proof of an invented rebrand."""
+    from qualification.scoring import lead_scorer, company_evidence_investigator
+
+    company = _company(company_name="fal", company_website="https://fal.ai/", company_linkedin="")
+    homepage = _verified_homepage_identity(
+        observed_name="fal", observed_domain="fal.ai",
+        observed_linkedin_slug="features-and-labels",
+    )
+    observed = _complete_verdict(name="fal", website="http://falai.ai")
+    observed["observed_company_linkedin"] = (
+        "https://www.linkedin.com/company/features-and-labels"
+    )
+    calls = []
+    investigations = []
+
+    async def request(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        if len(calls) == 1:
+            return dict(observed), ""
+        assert len(calls) == 2
+        assert "IDENTITY CONFLICT REPAIR" in kwargs["prompt"]
+        if repair in {"provider_error", "malformed_response"}:
+            kwargs["diagnostic"][lead_scorer.VERIFIER_FAILURE_REASON_KEY] = repair
+            return None, "retained response unavailable"
+        result = dict(observed)
+        if repair == "corrected":
+            result["observed_company_website"] = "https://fal.ai/"
+        return result, ""
+
+    async def refresh(verdict, *_args, **_kwargs):
+        return verdict
+
+    async def investigate(**kwargs):
+        # The pre-fix path enters here after only the first, wrong observation.
+        assert calls == ["lead_scorer_reverify", "lead_scorer_reverify_schema_repair"]
+        investigations.append(kwargs)
+        assert ("rebrand" in kwargs["targets"]) == (repair == "unchanged")
+        assert kwargs["prior_observations"]["observed_company_website"] == (
+            "http://falai.ai" if repair == "unchanged" else "https://fal.ai/"
+        )
+        return {
+            "claims": company_evidence_investigator._unproven_findings(
+                kwargs["targets"], "bounded evidence did not prove the requested fact",
+            ),
+            "_completed_submit": True,
+            "failure_reason": "",
+            "usage": {"reasoning_turns": 1, "search_calls": 1, "fetch_calls": 0, "fetch_outcomes": []},
+        }
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", request)
+    monkeypatch.setattr(lead_scorer, "_refresh_linkedin_employee_size_observation", refresh)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", investigate)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        company, _icp(), require_company_fit_dimensions=True,
+        verified_homepage_identity=homepage, evidence_investigator=True,
+    ))
+    assert calls == ["lead_scorer_reverify", "lead_scorer_reverify_schema_repair"]
+    assert result.decision != COMPANY_FIT_MATCH
+    if repair in {"provider_error", "malformed_response"}:
+        assert not investigations
+        assert result.details[lead_scorer.VERIFIER_FAILURE_DETAIL_KEY] == repair
+    else:
+        assert len(investigations) == 1
+        if repair == "corrected":
+            assert result.details["identity_decision"] == COMPANY_FIT_MATCH
+        else:
+            assert result.details["identity_decision"] == COMPANY_FIT_UNAVAILABLE
+
+
+def test_verified_homepage_does_not_repair_a_different_entity_in_investigator_mode(monkeypatch):
+    from qualification.scoring import lead_scorer
+
+    calls = []
+
+    async def request(**kwargs):
+        calls.append(kwargs["telemetry_purpose"])
+        return _complete_verdict(name="Other Company", website="https://other.example.com"), ""
+
+    async def normal_investigation(**kwargs):
+        from qualification.scoring.company_evidence_investigator import _unproven_findings
+        assert calls == ["lead_scorer_reverify"]
+        assert "rebrand" in kwargs["targets"]
+        return {"claims": _unproven_findings(kwargs["targets"], "continuity unproven"),
+                "_completed_submit": True, "failure_reason": "",
+                "usage": {"search_calls": 1, "fetch_outcomes": []}}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", request)
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", normal_investigation)
+
+    async def no_redirect(*_args, **_kwargs):
+        raise lead_scorer.aiohttp.ClientError("offline redirect lookup")
+
+    monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", no_redirect)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(), _icp(), require_company_fit_dimensions=True,
+        verified_homepage_identity=_verified_homepage_identity(), evidence_investigator=True,
+    ))
+    assert calls == ["lead_scorer_reverify"]
+    assert result.details["identity_decision"] != COMPANY_FIT_MATCH
+    assert result.details["identity_receipt"]["observed_domain"] == "other.example.com"

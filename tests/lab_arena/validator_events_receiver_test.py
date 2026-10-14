@@ -21,7 +21,7 @@ from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_service_round import FakeChain, wallet_verify
 
-MIGRATION = '434-lab-arena-validator-events.sql'
+MIGRATION = '475-lab-arena-validator-claim-capacity-observations.sql'
 PRIMARY = Keypair.create_from_uri('//events-primary')
 EXTERNAL = Keypair.create_from_uri('//events-external')
 OUTSIDER = Keypair.create_from_uri('//events-outsider')
@@ -31,7 +31,9 @@ RUN = 'validator-events-run'
 
 @pytest.fixture(scope='module')
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS + (MIGRATION,))
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS + (
+        '434-lab-arena-validator-events.sql', MIGRATION,
+    ))
 
 
 @pytest.fixture()
@@ -100,6 +102,28 @@ def test_primary_and_external_preclaim_error_then_correlated_run_and_replay(setu
     assert saved[2][7]
 
 
+def test_signed_external_state_retains_bounded_capacity_and_claim_result(setup):
+    http, _, _, connect, _ = setup
+    for key, usable, quarantined, status in (
+        (PRIMARY, 7, 0, 'paused'),
+        (EXTERNAL, 0, 13, 'no_local_capacity'),
+    ):
+        event = validator_events.event('validator.state', {
+            'ready_slots': 13, 'usable_slots': usable,
+            'quarantined_slots': quarantined, 'last_claim_status': status,
+            'last_claim_round_id': ROUND,
+        })
+        assert post(http, key, [event]).status_code == 200
+    saved = rows(connect)
+    assert [row[0] for row in saved] == [PRIMARY.ss58_address, EXTERNAL.ss58_address]
+    assert saved[0][6]['usable_slots'] == 7
+    assert saved[0][6]['last_claim_status'] == 'paused'
+    assert saved[1][6]['ready_slots'] == 13
+    assert saved[1][6]['quarantined_slots'] == 13
+    assert saved[1][6]['last_claim_status'] == 'no_local_capacity'
+    assert saved[1][6]['last_claim_round_id'] == ROUND
+
+
 def test_forged_identity_bad_signature_scope_and_run_ownership_denied(setup):
     http,_,_,connect,chain = setup
     event = validator_events.event('validator.startup',{'state':'starting'})
@@ -158,7 +182,7 @@ def test_migration_replay_privileges_and_sql_bounds(setup):
         cur.execute("SELECT has_table_privilege('lab_arena_service','public.lab_arena_validator_events','INSERT'),has_table_privilege('anon','public.lab_arena_validator_events','SELECT'),has_function_privilege('anon','public.lab_arena_append_validator_events_v1(text,text,integer,jsonb,text)','EXECUTE')")
         assert cur.fetchone() == (False,False,False)
     document = validator_events.event('validator.error',{'phase':'claim'})
-    for bad in ({**document,'content':{'api_key':'secret'}},{**document,'content':{'phase':{'nested':'no'}}},{**document,'content':{'launch_stderr':'x'*5000}},{**document,'event_id':None},{**document,'occurred_at':'infinity'}):
+    for bad in ({**document,'content':{'api_key':'secret'}},{**document,'content':{'phase':{'nested':'no'}}},{**document,'content':{'launch_stderr':'x'*5000}},{**document,'content':{'usable_slots':-1}},{**document,'content':{'quarantined_slots':252}},{**document,'content':{'last_claim_status':'secret=DO-NOT-LOG'}},{**document,'content':{'last_claim_round_id':'secret=DO-NOT-LOG'}},{**document,'event_id':None},{**document,'occurred_at':'infinity'}):
         with pytest.raises(ArenaStoreError):
             store.append_validator_events(EXTERNAL.ss58_address,'finney',71,[bad],'unknown')
     assert not rows(connect)

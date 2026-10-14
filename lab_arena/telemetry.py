@@ -65,6 +65,7 @@ def record(
     count: int = 0,
     duration_ms: float = 0.0,
     start_ns: Optional[int] = None,
+    source_sha: Optional[str] = None,
 ) -> None:
     """Record one stage outcome. Never raises."""
     recorder = _recorder
@@ -78,6 +79,7 @@ def record(
             count=count,
             duration_ms=duration_ms,
             start_ns=start_ns,
+            source_sha=source_sha,
         )
     except BaseException:
         pass

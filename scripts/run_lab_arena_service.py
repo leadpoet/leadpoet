@@ -16,6 +16,7 @@ import re
 import shlex
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +24,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lab_arena import telemetry  # noqa: E402
-from lab_arena.driver import drive_once  # noqa: E402
+from lab_arena.driver import drive_once, next_tick_delay  # noqa: E402
+from lab_arena.runtime_version import SOURCE_METADATA  # noqa: E402
 from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS  # noqa: E402
 
 
@@ -152,6 +154,43 @@ def load_otel_environment(path: Path) -> None:
             os.environ.setdefault(name, value)
 
 
+def _record_service_lifecycle(event: str, outcome: str) -> None:
+    """Report the actual Arena process transition through existing telemetry."""
+    source_sha = SOURCE_METADATA.get("validator_source_commit", "")
+    if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+        source_sha = "unknown"
+    invocation_id = os.getenv("GATEWAY_RESTART_INVOCATION_ID", "")
+    if not re.fullmatch(r"gateway-[0-9]{1,20}-[0-9]{1,20}", invocation_id):
+        invocation_id = "unknown"
+    try:
+        print(
+            "ARENA_SERVICE_LIFECYCLE "
+            f"event={event} outcome={outcome} source_sha={source_sha} "
+            f"invocation_id={invocation_id}",
+            flush=True,
+        )
+    except BaseException:
+        pass
+    try:
+        telemetry.record(f"service_{event}", outcome, source_sha=source_sha)
+    except BaseException:
+        pass
+    try:
+        from leadpoet_observability import record_stage
+
+        record_stage(
+            component="arena-service",
+            stage=f"service_{event}",
+            status="ready" if outcome == "ok" and event == "startup" else (
+                "completed" if outcome == "ok" else "failed"
+            ),
+            candidate_sha=source_sha,
+            restart_invocation_id=invocation_id,
+        )
+    except BaseException:
+        pass
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if args.environment_file is not None:
@@ -167,14 +206,21 @@ def main(argv=None) -> int:
         init_sentry(component="arena-service")
     except Exception as exc:
         print("arena sentry unavailable", type(exc).__name__, file=sys.stderr)
-    from lab_arena.wiring import build_service_from_environment  # lazy: production dependencies
+    try:
+        from lab_arena.wiring import build_service_from_environment  # lazy: production dependencies
 
-    service, app = build_service_from_environment(mode)
-    _install_arena_telemetry(app)
-    checks = service.startup_checks()
+        service, app = build_service_from_environment(mode)
+        _install_arena_telemetry(app)
+        checks = service.startup_checks()
+    except BaseException:
+        if "app" not in locals():
+            _install_arena_telemetry(None)
+        _record_service_lifecycle("preflight" if args.check_only else "startup", "failed")
+        raise
     print("lab arena service identity", {k: v for k, v in checks.items() if k != "database_identity"}, "role", checks["database_identity"].get("current_user"))
     if args.check_only:
         return 0
+    _record_service_lifecycle("startup", "ok")
     stop = threading.Event()
 
     def review_submissions() -> None:
@@ -197,12 +243,20 @@ def main(argv=None) -> int:
     def driver() -> None:
         # A full scoring/publication cycle can take longer than API startup.
         # Run the initial cycle in the existing worker, just like later ticks.
+        started = datetime.now(timezone.utc)
         initial = drive_once(service)
         if "failed" in initial:
             print("initial driver tick", initial, file=sys.stderr)
         elif initial != "idle":
             print("initial driver tick", initial)
-        while not stop.wait(max(5, int(args.tick_seconds))):
+        while True:
+            delay = next_tick_delay(
+                args.tick_seconds, service._config.defaults.daily_cutoff_hour_utc,
+                started=started, now=datetime.now(timezone.utc),
+            )
+            if stop.wait(delay):
+                break
+            started = datetime.now(timezone.utc)
             outcome = drive_once(service)
             if "failed" in outcome:
                 print("driver tick", outcome, file=sys.stderr)
@@ -214,6 +268,12 @@ def main(argv=None) -> int:
             driver()
         except KeyboardInterrupt:
             stop.set()
+            _record_service_lifecycle("shutdown", "ok")
+        except BaseException:
+            _record_service_lifecycle("shutdown", "failed")
+            raise
+        else:
+            _record_service_lifecycle("shutdown", "ok")
         return 0
     driver_thread = None
     if not args.no_driver:
@@ -225,6 +285,11 @@ def main(argv=None) -> int:
 
     try:
         uvicorn.run(app, host=args.host, port=int(args.port), log_level="info")
+    except BaseException:
+        _record_service_lifecycle("shutdown", "failed")
+        raise
+    else:
+        _record_service_lifecycle("shutdown", "ok")
     finally:
         stop.set()
         if driver_thread is not None:

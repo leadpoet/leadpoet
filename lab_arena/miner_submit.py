@@ -11,6 +11,7 @@ import tempfile
 import time
 import warnings
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -244,29 +245,45 @@ def find_open_round(api_base_url: str, *, session: Any = requests) -> str:
 
     base = _api_base_url(api_base_url)
     response = None
-    for attempt in range(3):
+    transport_failures = 0
+    while True:
         try:
             response = session.get(base + "/arena/v1/current", timeout=30)
         except requests.RequestException as exc:
-            if attempt == 2:
+            transport_failures += 1
+            if transport_failures == 3:
                 raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
-            time.sleep(1 << attempt)
+            time.sleep(1 << (transport_failures - 1))
             continue
         status = int(getattr(response, "status_code", 0))
-        if status not in {502, 503, 504}:
-            break
-        if attempt == 2:
-            raise MinerSubmissionError("arena_unreachable", "http_%d" % status)
-        time.sleep(1 << attempt)
-    assert response is not None
-    document = _json_response(response, "current_round")
-    open_round = document.get("open_round")
-    if not isinstance(open_round, Mapping) or open_round.get("status") != "open":
-        raise MinerSubmissionError("submission_window_closed")
-    round_id = open_round.get("round_id")
-    if not isinstance(round_id, str) or not contracts.ROUND_ID_RE.match(round_id):
-        raise MinerSubmissionError("arena_response_invalid", "open_round")
-    return round_id
+        if status in {502, 503, 504}:
+            transport_failures += 1
+            if transport_failures == 3:
+                raise MinerSubmissionError("arena_unreachable", "http_%d" % status)
+            time.sleep(1 << (transport_failures - 1))
+            continue
+        document = _json_response(response, "current_round")
+        open_round = document.get("open_round")
+        if isinstance(open_round, Mapping) and open_round.get("status") == "open":
+            round_id = open_round.get("round_id")
+            if not isinstance(round_id, str) or not contracts.ROUND_ID_RE.match(round_id):
+                raise MinerSubmissionError("arena_response_invalid", "open_round")
+            return round_id
+        # The prior round may still be closing while the next one is created.
+        # Retry only beside its published cutoff, never during an operator hold.
+        prior = document.get("round")
+        schedule = (prior.get("schedule") or {}
+                    if isinstance(prior, Mapping) else {})
+        try:
+            cutoff = datetime.fromisoformat(str(schedule["submission_cutoff"]).replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError):
+            raise MinerSubmissionError("submission_window_closed") from None
+        if cutoff.tzinfo is None:
+            raise MinerSubmissionError("submission_window_closed")
+        now = datetime.now(timezone.utc)
+        if not cutoff <= now < cutoff + timedelta(seconds=90):
+            raise MinerSubmissionError("submission_window_closed")
+        time.sleep(min(2.0, (cutoff + timedelta(seconds=90) - now).total_seconds()))
 
 
 def _signed_request(
@@ -283,6 +300,32 @@ def _signed_request(
         )
     except (AttributeError, TypeError, contracts.ArenaContractError) as exc:
         raise MinerSubmissionError("wallet_signing_failed", type(exc).__name__) from exc
+
+
+def _post_presign_with_opening_retry(session: Any, base: str,
+                                     presign: Mapping[str, Any]) -> Any:
+    """Retry only a confirmed round-opening refusal for at most 90 seconds."""
+
+    opening_deadline = time.monotonic() + 90
+    while True:
+        try:
+            response = session.post(
+                base + "/arena/v1/submissions/presign",
+                json=presign, timeout=60, allow_redirects=False,
+            )
+        except requests.RequestException as exc:
+            raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
+        if int(response.status_code) == 503:
+            try:
+                opening = response.json()
+            except (TypeError, ValueError):
+                opening = None
+            remaining = opening_deadline - time.monotonic()
+            if (isinstance(opening, Mapping) and opening.get("code") == "round_opening"
+                    and remaining > 0):
+                time.sleep(min(2.0, remaining))
+                continue
+        return response
 
 
 def retry_credit_failures(
@@ -420,15 +463,7 @@ def submit_agent_source(
             keypair=keypair,
             now=now,
         )
-        try:
-            response = session.post(
-                base + "/arena/v1/submissions/presign",
-                json=presign,
-                timeout=60,
-                allow_redirects=False,
-            )
-        except requests.RequestException as exc:
-            raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
+        response = _post_presign_with_opening_retry(session, base, presign)
         target = _json_response(response, "submission_presign")
         submission_id = str(target.get("submission_id") or "")
         source_ref = str(target.get("source_ref") or "")

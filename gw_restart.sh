@@ -576,7 +576,8 @@ with open(path, "a", encoding="utf-8") as handle:
 os.chmod(path, 0o600)
 print(
     "GATEWAY_RESTART_TIMING "
-    f"stage={stage} status={status} elapsed_seconds={record['elapsed_seconds']}"
+    f"stage={stage} status={status} elapsed_seconds={record['elapsed_seconds']} "
+    f"commit_sha={commit or 'unknown'}"
 )
 PY
   then
@@ -609,6 +610,36 @@ emit_gateway_restart_sentry_summary() {
     --evidence "$GATEWAY_OFFLINE_ARTIFACT_PREPARE_LOG" \
     "${shutdown_flag[@]}" >/dev/null 2>&1 || true
   return 0
+}
+
+report_gateway_recovery_target() {
+  # A failed candidate cannot be restored by bypassing the canonical controller.
+  # Report only a prior SHA that the existing last-good receipt proves valid.
+  [ "${GATEWAY_DESTRUCTIVE_PHASE_STARTED:-0}" = "1" ] || return 0
+  "$GATEWAY_PYTHON_BIN" - "$GATEWAY_DEPLOY_PLAN_FILE" "$GATEWAY_LAST_GOOD_MANIFEST" <<'PY' || true
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        plan = json.load(handle)
+    with open(sys.argv[2], encoding="utf-8") as handle:
+        last_good = json.load(handle)
+    sha = plan.get("previous_sha")
+    if (
+        isinstance(sha, str)
+        and re.fullmatch(r"[0-9a-f]{40}", sha)
+        and last_good.get("status") == "succeeded"
+        and last_good.get("target_sha") == sha
+        and last_good.get("repo_root") == plan.get("repo_root")
+    ):
+        print(f"GATEWAY_RESTART_RECOVERY canonical_last_good_sha={sha}")
+    else:
+        print("GATEWAY_RESTART_RECOVERY canonical_last_good_sha=unverified")
+except (OSError, ValueError, TypeError, AttributeError):
+    print("GATEWAY_RESTART_RECOVERY canonical_last_good_sha=unavailable")
+PY
 }
 
 wait_for_gateway_owned_process_group() {
@@ -1079,6 +1110,7 @@ on_gateway_restart_exit() {
     abort_lab_arena_restart_guard_before_destructive
     record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
       >/dev/null 2>&1 || true
+    report_gateway_recovery_target
   fi
   emit_gateway_restart_sentry_summary "$status"
   cancel_gateway_offline_artifact_prepare
@@ -1482,6 +1514,21 @@ run_bounded_restart_artifact_cleanup() {
       --max-candidates "$GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES" \
       --allowed-owner-uid "$(id -u)"; then
     echo "WARNING: bounded restart artifact cleanup failed closed" >&2
+  fi
+}
+
+preflight_gateway_restart_disk() {
+  local required_kb="$1" free_kb
+  echo "Checking disk capacity before gateway shutdown"
+  # The bounded helper excludes open paths, mounts, and retained release
+  # artifacts. Docker daemon and storage cleanup remain after shutdown.
+  run_bounded_restart_artifact_cleanup
+  free_kb="$(root_free_kb)" || return 1
+  [[ "$free_kb" =~ ^[0-9]+$ ]] || return 1
+  if [ "${free_kb:-0}" -lt "$required_kb" ]; then
+    echo "ERROR: insufficient free disk after cleanup: $(df -h / | tail -1)" >&2
+    echo "Need at least ${required_kb} KiB free before gateway Arena Docker workloads." >&2
+    return 1
   fi
 }
 
@@ -2208,6 +2255,26 @@ if ! run_prepared_gateway_module gateway.tee.restart_preflight_v2 \
   echo "ERROR: prepared V2 release failed before-shutdown validation" >&2
   exit 1
 fi
+
+# Exercise the candidate's real Arena startup contract while the old service
+# still owns the port.  --check-only performs the same startup checks as launch.
+GATEWAY_DEPLOY_STAGE="lab_arena_startup_preflight"
+export GATEWAY_DEPLOY_STAGE
+if ! (
+  cd "$GATEWAY_PREFLIGHT_TREE" || exit 1
+  set -a
+  . "$ENV_CLONE" || exit 1
+  set +a
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" \
+    "$GATEWAY_PREFLIGHT_TREE/scripts/run_lab_arena_service.py" \
+    --environment-file "$GATEWAY_ENV_FILE" --check-only
+); then
+  echo "ERROR: prepared Lab Arena startup checks failed before shutdown" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+record_gateway_restart_timing "lab_arena_startup_preflight_complete"
+
 DOCKER_LOCK_HELPER="$GATEWAY_PREFLIGHT_TREE/validator_tee/scripts/docker_operation_lock_v2.sh"
 if [ ! -r "$DOCKER_LOCK_HELPER" ]; then
   echo "ERROR: prepared Docker operation lock helper is unavailable" >&2
@@ -2221,6 +2288,15 @@ run_prepared_gateway_module validator_tee.host.docker_operation_guard_v2 \
   --interval-seconds 3
 wait_for_foreign_docker_builds
 wait_for_gateway_build_memory 1
+GATEWAY_DEPLOY_STAGE="pre_shutdown_disk_capacity"
+export GATEWAY_DEPLOY_STAGE
+# Reserve 128 MiB for activation metadata and logs before the existing 10 GiB
+# post-activation floor. A capacity failure leaves the old service alive.
+if ! preflight_gateway_restart_disk "$((MIN_FREE_KB + 128 * 1024))"; then
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
+fi
+record_gateway_restart_timing "pre_shutdown_disk_ready"
 record_gateway_restart_timing "pre_shutdown_checks_complete"
 
 GATEWAY_DEPLOY_STAGE="lab_arena_claim_drain"
@@ -2250,11 +2326,13 @@ fi
 echo "Stopping existing gateway and Lab Arena processes"
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
 export GATEWAY_DESTRUCTIVE_PHASE_STARTED
+record_gateway_restart_timing "shutdown_started"
 pkill -9 -f "python3 main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u main.py" 2>/dev/null || true
 pkill -9 -f "python3 -u -m gateway.main" 2>/dev/null || true
 pkill -9 -f "uvicorn" 2>/dev/null || true
 stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"
+record_gateway_restart_timing "shutdown_complete"
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
 
@@ -2408,17 +2486,17 @@ sudo docker container prune -f 2>/dev/null || true
 sudo docker builder prune -af 2>/dev/null || true
 sudo docker system prune -af --volumes 2>/dev/null || true
 
-FREE_KB_AFTER_PRUNE="$(df --output=avail / | tail -1 | tr -d ' ')"
+FREE_KB_AFTER_PRUNE="$(root_free_kb)"
 reset_orphaned_docker_storage_if_needed "$FREE_KB_AFTER_PRUNE" "stale Docker storage after cleanup"
 
 echo "Disk after cleanup"
 df -h / /var/lib/docker 2>/dev/null || df -h /
 sudo docker system df 2>/dev/null || true
 
-FREE_KB="$(df --output=avail / | tail -1 | tr -d ' ')"
-if [ "${FREE_KB:-0}" -lt "$MIN_FREE_KB" ]; then
-  echo "ERROR: insufficient free disk after cleanup: $(df -h / | tail -1)"
-  echo "Need at least 10GiB free before starting gateway Arena Docker workloads."
+FREE_KB="$(root_free_kb)"
+if ! [[ "$FREE_KB" =~ ^[0-9]+$ ]] || [ "$FREE_KB" -lt "$MIN_FREE_KB" ]; then
+  echo "ERROR: insufficient free disk after activation: $(df -h / | tail -1)" >&2
+  echo "Need at least 10GiB free before starting gateway Arena Docker workloads." >&2
   exit 1
 fi
 

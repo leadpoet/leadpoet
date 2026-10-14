@@ -640,12 +640,14 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'echo "Capturing the official subnet restart window before release acquisition"',
             'echo "Preparing exact hash-locked enclave dependencies during release acquisition"',
             'echo "Validating the prepared V2 release before production shutdown"',
+            'GATEWAY_DEPLOY_STAGE="lab_arena_startup_preflight"',
+            'preflight_gateway_restart_disk "$((MIN_FREE_KB + 128 * 1024))"',
             'echo "Stopping existing gateway and Lab Arena processes"',
             'echo "Waiting for :8000 to free"',
             'echo "Activating prepared gateway Git commit after process shutdown"',
             'GATEWAY_RESTART_PHASE=post_activate',
             'echo "Clearing Python caches"',
-            'echo "Preflight disk cleanup for Docker/PCR0/Arena builds"',
+            'FREE_KB="$(root_free_kb)"',
             'echo "Loading gateway runtime env for AWS/ECR checks"',
             'echo "Building/restarting TEE enclave"',
             'bash "$GATEWAY_ROOT/tee/stage_attested_runtime.sh"',
@@ -874,6 +876,151 @@ def test_gateway_restart_v2_preflight_runs_target_commit_before_shutdown() -> No
     assert materialize < restart_window < artifact_prepare < preflight < shutdown
     assert "verify_weight_submission_ready_v2" not in script
     assert "bootstrap_active_ancestry_checkpoints_v2" not in script
+
+
+def test_gateway_restart_checks_arena_and_disk_before_destructive_cutover() -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    main_flow = script[script.index('echo "Preparing exact gateway commit') :]
+    startup = main_flow.index('GATEWAY_DEPLOY_STAGE="lab_arena_startup_preflight"')
+    check_only = main_flow.index('--environment-file "$GATEWAY_ENV_FILE" --check-only', startup)
+    disk_stage = main_flow.index('GATEWAY_DEPLOY_STAGE="pre_shutdown_disk_capacity"', check_only)
+    disk = main_flow.index('preflight_gateway_restart_disk "$((MIN_FREE_KB + 128 * 1024))"', check_only)
+    drain = main_flow.index('drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"', disk)
+    shutdown = main_flow.index('record_gateway_restart_timing "shutdown_started"', drain)
+    assert startup < check_only < disk_stage < disk < drain < shutdown
+    assert main_flow.index('record_gateway_restart_timing "shutdown_complete"', shutdown) > shutdown
+
+
+def test_gateway_candidate_startup_failure_exits_before_shutdown(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    start = script.index('GATEWAY_DEPLOY_STAGE="lab_arena_startup_preflight"')
+    end_marker = 'record_gateway_restart_timing "lab_arena_startup_preflight_complete"'
+    end = script.index(end_marker, start) + len(end_marker)
+    preflight = script[start:end]
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    python_stub = tmp_path / "candidate-python"
+    python_stub.write_text("#!/bin/bash\nexit \"$PREFLIGHT_EXIT\"\n", encoding="utf-8")
+    python_stub.chmod(0o755)
+    clone = tmp_path / "env-clone"
+    clone.write_text("export LAB_ARENA_MODE=live\n", encoding="utf-8")
+    marker = tmp_path / "shutdown"
+    harness = tmp_path / "candidate-preflight.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"GATEWAY_PREFLIGHT_TREE={shlex.quote(str(candidate))}\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(str(python_stub))}\n"
+        f"ENV_CLONE={shlex.quote(str(clone))}\n"
+        "GATEWAY_ENV_FILE=/protected/gateway.env\n"
+        "record_gateway_restart_timing() { :; }\n"
+        + preflight
+        + f"\ntouch {shlex.quote(str(marker))}\n",
+        encoding="utf-8",
+    )
+    failed = subprocess.run(
+        ["bash", str(harness)], env={**os.environ, "PREFLIGHT_EXIT": "1"},
+        check=False, capture_output=True, text=True, timeout=5,
+    )
+    assert failed.returncode == 1
+    assert "before shutdown" in failed.stderr
+    assert not marker.exists()
+
+    healthy = subprocess.run(
+        ["bash", str(harness)], env={**os.environ, "PREFLIGHT_EXIT": "0"},
+        check=False, capture_output=True, text=True, timeout=5,
+    )
+    assert healthy.returncode == 0, healthy.stderr
+    assert marker.exists()
+
+
+def test_gateway_restart_disk_failure_preserves_running_service(tmp_path: Path) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    disk_function = _shell_function_source(script, "preflight_gateway_restart_disk")
+    harness = tmp_path / "disk-preflight.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        "run_bounded_restart_artifact_cleanup() { :; }\n"
+        "root_free_kb() { printf '9000\\n'; }\n"
+        + disk_function
+        + "\nif preflight_gateway_restart_disk 10000; then exit 9; fi\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["bash", str(harness)], check=False, capture_output=True, text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "insufficient free disk" in completed.stderr
+
+
+def test_gateway_restart_disk_preflight_allows_healthy_capacity(tmp_path: Path) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    disk_function = _shell_function_source(script, "preflight_gateway_restart_disk")
+    harness = tmp_path / "disk-healthy.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        "run_bounded_restart_artifact_cleanup() { :; }\n"
+        "root_free_kb() { printf '11000\\n'; }\n"
+        + disk_function
+        + "\npreflight_gateway_restart_disk 10000\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        ["bash", str(harness)], check=False, capture_output=True, text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_gateway_restart_recovery_hint_requires_matching_last_good(
+    tmp_path: Path,
+) -> None:
+    script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
+    report_function = _shell_function_source(script, "report_gateway_recovery_target")
+    plan = tmp_path / "plan.json"
+    last_good = tmp_path / "last-good.json"
+    previous_sha = "a" * 40
+    plan.write_text(
+        json.dumps({"previous_sha": previous_sha, "repo_root": "/repo"}),
+        encoding="utf-8",
+    )
+    harness = tmp_path / "recovery-hint.sh"
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
+        f"GATEWAY_DEPLOY_PLAN_FILE={shlex.quote(str(plan))}\n"
+        f"GATEWAY_LAST_GOOD_MANIFEST={shlex.quote(str(last_good))}\n"
+        "GATEWAY_DESTRUCTIVE_PHASE_STARTED=1\n"
+        + report_function
+        + "\nreport_gateway_recovery_target\n",
+        encoding="utf-8",
+    )
+    last_good.write_text(
+        json.dumps({"status": "succeeded", "target_sha": previous_sha,
+                    "repo_root": "/repo"}),
+        encoding="utf-8",
+    )
+    valid = subprocess.run(
+        ["bash", str(harness)], check=False, capture_output=True, text=True,
+        timeout=5,
+    )
+    assert valid.returncode == 0, valid.stderr
+    assert f"canonical_last_good_sha={previous_sha}" in valid.stdout
+
+    last_good.write_text(
+        json.dumps({"status": "succeeded", "target_sha": "b" * 40,
+                    "repo_root": "/repo"}),
+        encoding="utf-8",
+    )
+    mismatch = subprocess.run(
+        ["bash", str(harness)], check=False, capture_output=True, text=True,
+        timeout=5,
+    )
+    assert mismatch.returncode == 0, mismatch.stderr
+    assert "canonical_last_good_sha=unverified" in mismatch.stdout
+    assert previous_sha not in mismatch.stdout
 
 
 

@@ -259,3 +259,58 @@ def test_real_sender_persists_scoring_setup_failure_while_weights_continue(setup
     assert any(row[1] == 'validator.state' and row[6]['weights_state'] == 'state_unavailable' for row in saved)
     assert 'must-not-persist' not in str(saved)
     assert all(code == 200 for code in responses)
+
+
+@pytest.mark.parametrize('key', (PRIMARY, EXTERNAL), ids=('primary', 'external'))
+def test_wrapped_weight_failure_cause_reaches_database_without_blocking_scoring(setup, key):
+    from types import SimpleNamespace
+    from urllib.error import URLError
+    from lab_arena import validator
+    from lab_arena.validator_logging import ValidatorOperationalLogger
+
+    http, _, _, connect, _ = setup
+    delivered = threading.Event()
+    scored = []
+
+    def transport(envelope):
+        response = http.post('/arena/v1/validators/events', json=envelope)
+        response.raise_for_status()
+        if any(item['kind'] == 'validator.error' for item in envelope['body']['events']):
+            delivered.set()
+
+    log = ValidatorOperationalLogger('https://gateway.invalid', keypair=key,
+                                    network='finney', netuid=71, transport=transport)
+
+    class Orchestrator:
+        def run_once(self, epoch):
+            try:
+                try:
+                    raise TimeoutError('https://private.invalid/?api_key=DO-NOT-LOG')
+                except TimeoutError as exc:
+                    raise URLError('DO-NOT-LOG') from exc
+            except URLError as exc:
+                raise RuntimeError('DO-NOT-LOG') from exc
+
+        def poll_prior_outcomes(self, epoch):
+            pass
+
+    runner = SimpleNamespace(run_once=lambda **kw: scored.append(True) or 0,
+                             close=lambda: None)
+    validator.run_validator_loops(orchestrator=Orchestrator(),
+                                  runner_factory=lambda: runner,
+                                  epoch_supplier=lambda: 1, stop=threading.Event(),
+                                  once=True, operational_logger=log)
+    log.start()
+    try:
+        assert delivered.wait(3)
+    finally:
+        log.close()
+    saved = rows(connect)
+    error = next(row for row in saved if row[1] == 'validator.error')
+    assert scored == [True]
+    assert error[0] == key.ss58_address
+    assert error[6]['phase'] == 'weights'
+    assert error[6]['error_class'] == 'RuntimeError'
+    assert error[6]['reason'] == 'caused_by:TimeoutError'
+    assert 'DO-NOT-LOG' not in str(saved)
+    assert 'private.invalid' not in str(saved)

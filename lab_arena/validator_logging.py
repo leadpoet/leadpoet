@@ -25,6 +25,21 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _cause_reason(exc):
+    """Keep only a bounded exception type; never inspect its message or args."""
+    seen = {id(exc)}
+    cause = None
+    for _ in range(8):
+        nested = exc.__cause__
+        if nested is None and not exc.__suppress_context__:
+            nested = exc.__context__
+        if nested is None or id(nested) in seen:
+            break
+        seen.add(id(nested))
+        cause = exc = nested
+    return "caused_by:" + type(cause).__name__[:128] if cause is not None else None
+
+
 class ValidatorOperationalLogger:
     QUEUE_LIMIT = 64
     BATCH_LIMIT = 16
@@ -109,6 +124,10 @@ class ValidatorOperationalLogger:
             fields["reason"] = exc.reason
         elif reason:
             fields["reason"] = reason
+        else:
+            cause_reason = _cause_reason(exc)
+            if cause_reason:
+                fields["reason"] = cause_reason
         if type(http_status) is int and 100 <= http_status <= 599:
             fields["http_status"] = http_status
         if denial_code:

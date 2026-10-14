@@ -85,6 +85,17 @@ def record(
         pass
 
 
+def flush(timeout_millis: int = 1000) -> None:
+    """Bound the final export attempt during graceful service shutdown."""
+    recorder = _recorder
+    if recorder is None:
+        return
+    try:
+        recorder.flush(timeout_millis=timeout_millis)
+    except BaseException:
+        pass
+
+
 def note_denial(code: str) -> None:
     """Name the refusal the sidecar is returning for the current request."""
     recorder = _recorder

@@ -1278,15 +1278,16 @@ def configure_gateway_otel(app: Any, *, span_exporter: Optional[Any] = None) -> 
 
 
 class ArenaTelemetry:
-    """Records Arena spans. Never raises, never blocks, never reorders work.
+    """Records Arena spans without raising or blocking normal work.
 
     Five INTERNAL envelopes, each a root span with its own exact allowlist:
     pipeline stages, provider calls, run outcomes, runtime uploads, and
     provider-gate waits.
     The caller supplies values from the frozen vocabularies; anything else is
     dropped whole by the same fail-closed validator that guards the HTTP
-    envelope. Every public method swallows its own failures — an exporter
-    problem can never surface as an Arena failure.
+    envelope. A separate bounded flush is available at graceful shutdown.
+    Every public method swallows its own failures — an exporter problem can
+    never surface as an Arena failure.
     """
 
     def __init__(
@@ -1297,12 +1298,14 @@ class ArenaTelemetry:
         run_tracer: Any = None,
         runtime_tracer: Any = None,
         gate_tracer: Any = None,
+        flush_spans: Optional[Callable[[int], bool]] = None,
     ) -> None:
         self._tracer = tracer
         self._provider_tracer = provider_tracer
         self._run_tracer = run_tracer
         self._runtime_tracer = runtime_tracer
         self._gate_tracer = gate_tracer
+        self._flush_spans = flush_spans
         # Per-request refusal code, read back by the Arena HTTP middleware.
         # A raw ASGI chain shares one context per request, so this is set and
         # read within a single request and never crosses between them.
@@ -1311,6 +1314,14 @@ class ArenaTelemetry:
         # A worker thread receives a copy of the request context. Sharing one
         # mutable value lets a sync route report its denial back to ASGI.
         self._denial = contextvars.ContextVar("arena_denial", default=None)
+
+    def flush(self, *, timeout_millis: int = 1000) -> None:
+        """Flush queued spans within a bounded graceful-shutdown window."""
+        try:
+            if self._flush_spans is not None:
+                self._flush_spans(timeout_millis)
+        except BaseException:
+            pass
 
     # -- refusal code ----------------------------------------------------
 
@@ -1673,6 +1684,7 @@ def configure_arena_otel(
             run_tracer=provider.get_tracer(ARENA_RUN_SCOPE),
             runtime_tracer=provider.get_tracer(ARENA_RUNTIME_SCOPE),
             gate_tracer=provider.get_tracer(ARENA_GATE_SCOPE),
+            flush_spans=lambda timeout: provider.force_flush(timeout_millis=timeout),
         )
 
         if app is not None:

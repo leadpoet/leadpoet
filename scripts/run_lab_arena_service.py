@@ -189,6 +189,8 @@ def _record_service_lifecycle(event: str, outcome: str) -> None:
         )
     except BaseException:
         pass
+    if event == "shutdown":
+        telemetry.flush()
 
 
 def main(argv=None) -> int:
@@ -283,13 +285,25 @@ def main(argv=None) -> int:
         driver_thread.start()
     import uvicorn
 
+    shutdown_recorded = False
+
+    def record_shutdown(outcome: str) -> None:
+        nonlocal shutdown_recorded
+        if not shutdown_recorded:
+            shutdown_recorded = True
+            _record_service_lifecycle("shutdown", outcome)
+
+    # Uvicorn restores and re-raises SIGTERM after the ASGI shutdown event.
+    # The outer wrapper cannot observe that signal before process exit.
+    app.add_event_handler("shutdown", lambda: record_shutdown("ok"))
+
     try:
         uvicorn.run(app, host=args.host, port=int(args.port), log_level="info")
     except BaseException:
-        _record_service_lifecycle("shutdown", "failed")
+        record_shutdown("failed")
         raise
     else:
-        _record_service_lifecycle("shutdown", "ok")
+        record_shutdown("ok")
     finally:
         stop.set()
         if driver_thread is not None:

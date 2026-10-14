@@ -1,12 +1,20 @@
 from __future__ import annotations
 
+import os
+import signal
+import socket
+import subprocess
 import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
 
 from lab_arena import telemetry
 from scripts import run_lab_arena_service as entrypoint
+from gateway.observability.otel_bootstrap import ArenaTelemetry
 import leadpoet_observability
 import lab_arena.wiring
 
@@ -59,13 +67,20 @@ def test_arena_clean_exit_emits_start_and_stop_with_version(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     spans, stages = _capture_lifecycle(monkeypatch)
+    flushes = []
+    monkeypatch.setattr(telemetry, "flush", lambda: flushes.append(True))
+    shutdown_handlers = []
+    app = SimpleNamespace(add_event_handler=lambda event, handler: shutdown_handlers.append(handler))
     service = SimpleNamespace(startup_checks=lambda: {"database_identity": {"current_user": "service_role"}})
     monkeypatch.setattr(
         lab_arena.wiring,
         "build_service_from_environment",
-        lambda mode: (service, object()),
+        lambda mode: (service, app),
     )
-    monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(run=lambda *args, **kwargs: None))
+    def run(*args, **kwargs):
+        shutdown_handlers[0]()
+
+    monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(run=run))
     assert entrypoint.main(["--no-driver"]) == 0
     assert spans == [
         ("service_startup", "ok", {"source_sha": "a" * 40}),
@@ -73,10 +88,96 @@ def test_arena_clean_exit_emits_start_and_stop_with_version(
     ]
     assert [stage["status"] for stage in stages] == ["ready", "completed"]
     assert {stage["candidate_sha"] for stage in stages} == {"a" * 40}
+    assert flushes == [True]
     output = capsys.readouterr().out
     assert "event=startup outcome=ok" in output
     assert "event=shutdown outcome=ok" in output
     assert "do-not-export-secret" not in output
+
+
+def test_arena_server_error_emits_one_failed_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spans, _ = _capture_lifecycle(monkeypatch)
+    service = SimpleNamespace(startup_checks=lambda: {"database_identity": {"current_user": "service_role"}})
+    app = SimpleNamespace(add_event_handler=lambda event, handler: None)
+    monkeypatch.setattr(
+        lab_arena.wiring, "build_service_from_environment", lambda mode: (service, app)
+    )
+    def fail_run(*args, **kwargs):
+        raise RuntimeError("server failed")
+
+    monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(run=fail_run))
+    with pytest.raises(RuntimeError, match="server failed"):
+        entrypoint.main(["--no-driver"])
+    assert [(stage, outcome) for stage, outcome, _ in spans] == [
+        ("service_startup", "ok"), ("service_shutdown", "failed")
+    ]
+
+
+def test_arena_sigterm_emits_shutdown_from_real_uvicorn() -> None:
+    code = """
+import os
+from fastapi import FastAPI
+from types import SimpleNamespace
+import lab_arena.wiring
+from scripts import run_lab_arena_service as entrypoint
+service = SimpleNamespace(startup_checks=lambda: {"database_identity": {"current_user": "service_role"}})
+lab_arena.wiring.build_service_from_environment = lambda mode: (service, FastAPI())
+raise SystemExit(entrypoint.main(["--no-driver", "--port", os.environ["ARENA_TEST_PORT"]]))
+"""
+    received = []
+
+    class Collector(BaseHTTPRequestHandler):
+        def do_POST(self):
+            received.append(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    collector = ThreadingHTTPServer(("127.0.0.1", 0), Collector)
+    collector_thread = threading.Thread(target=collector.serve_forever, daemon=True)
+    collector_thread.start()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {name: value for name, value in os.environ.items() if not name.startswith("OTEL_")}
+    env.update(
+        LAB_ARENA_MODE="live", ARENA_TEST_PORT=str(port), PYTHONDONTWRITEBYTECODE="1",
+        GATEWAY_OTEL_ENABLED="1",
+        GATEWAY_OTEL_ENDPOINT=f"http://127.0.0.1:{collector.server_port}/v1/traces",
+        GATEWAY_OTEL_TOKEN="fixture-ingest-token",
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", code],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and process.poll() is None:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                    break
+            except OSError:
+                time.sleep(0.05)
+        else:
+            pytest.fail("Arena test server did not start")
+        process.send_signal(signal.SIGTERM)
+        output, _ = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=5)
+        collector.shutdown()
+        collector.server_close()
+        collector_thread.join(timeout=5)
+    assert process.returncode == -signal.SIGTERM
+    assert output.count("ARENA_SERVICE_LIFECYCLE event=startup outcome=ok") == 1
+    assert output.count("ARENA_SERVICE_LIFECYCLE event=shutdown outcome=ok") == 1
+    assert any(b"arena.service_shutdown" in body for body in received)
 
 
 def test_arena_check_only_does_not_claim_a_service_start(
@@ -110,3 +211,20 @@ def test_broken_telemetry_does_not_mask_startup_failure(
     )
     with pytest.raises(NameError, match="contracts"):
         entrypoint.main(["--check-only"])
+
+
+def test_arena_flush_uses_bounded_provider_flush_and_is_fail_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        telemetry, "_recorder",
+        ArenaTelemetry(None, flush_spans=lambda timeout: calls.append(timeout) or True),
+    )
+    telemetry.flush(timeout_millis=750)
+    assert calls == [750]
+    monkeypatch.setattr(
+        telemetry, "_recorder",
+        ArenaTelemetry(None, flush_spans=lambda timeout: (_ for _ in ()).throw(RuntimeError("export failed"))),
+    )
+    telemetry.flush(timeout_millis=750)

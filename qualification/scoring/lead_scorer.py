@@ -7028,11 +7028,9 @@ def _project_investigator_headcount(
         observed_value, (str, int)
     ):
         return projected
-    observed_bucket = (
-        _normalize_linkedin_employee_bucket(observed_value)
-        or normalize_observed_employee_count_bucket(
-            observed_value, default=None
-        )
+    normalized_range = _normalize_linkedin_employee_bucket(observed_value)
+    observed_bucket = normalized_range or normalize_observed_employee_count_bucket(
+        observed_value, default=None
     )
     targets, targets_verified = _normalize_icp_employee_buckets(icp.employee_count)
     url = _valid_web_evidence_url(value.get("evidence_url"))
@@ -7040,7 +7038,7 @@ def _project_investigator_headcount(
     if not observed_bucket or not targets_verified or not url or not quote:
         return projected
     projected.update(
-        observed_employee_count=observed_value,
+        observed_employee_count=normalized_range or observed_value,
         employee_size_matches=observed_bucket in targets,
         employee_size_evidence_url=url,
         employee_size_evidence_quote=quote,

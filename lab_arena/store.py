@@ -74,6 +74,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_events", "jsonb"),
     ),
     "lab_arena_per_icp_cost_schema_v1": (),
+    "lab_arena_infrastructure_retry_cost_schema_v1": (),
     "lab_arena_deepline_catalog_schema_v1": (),
     "lab_arena_next_closed_deepline_reconciliation_v1": (
         ("p_mode", "text"), ("p_network_name", "text"),
@@ -1244,6 +1245,15 @@ class ArenaStore:
             "policy": "successful_calls_per_icp_v1",
         }:
             raise ArenaStoreError("per-ICP cost schema mismatch")
+        return result
+
+    def infrastructure_retry_cost_schema(self) -> Dict[str, Any]:
+        result = _require_mapping(self._transport.rpc(
+            "lab_arena_infrastructure_retry_cost_schema_v1", {}
+        ), "infrastructure_retry_cost_schema")
+        if result != {"schema_version": "leadpoet.lab_arena.infrastructure_retry_cost_schema.v1",
+                      "version": 478, "policy": contracts.INFRASTRUCTURE_RETRY_COST_POLICY}:
+            raise ArenaStoreError("infrastructure retry cost schema mismatch")
         return result
 
     def parallel_execution_schema(self, max_parallel_icps: int = 20) -> Dict[str, Any]:

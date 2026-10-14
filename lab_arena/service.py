@@ -1077,6 +1077,10 @@ class ArenaService:
                 self._store.per_icp_cost_schema()
             except ArenaStoreError as exc:
                 raise ServiceError("per_icp_cost_schema_unavailable", 500) from exc
+            try:
+                self._store.infrastructure_retry_cost_schema()
+            except ArenaStoreError as exc:
+                raise ServiceError("infrastructure_retry_cost_schema_unavailable", 500) from exc
         try:
             self._store.submission_replacement_schema()
         except ArenaStoreError as exc:
@@ -1324,6 +1328,9 @@ class ArenaService:
         if defaults.per_icp_cost_policy:
             document["execution_icp_cap_microusd"] = (
                 defaults.execution_icp_cap_microusd
+            )
+            document["infrastructure_retry_cost_policy"] = (
+                contracts.INFRASTRUCTURE_RETRY_COST_POLICY
             )
         if defaults.checkpoint_deadline_enabled:
             document["checkpoint_deadline_policy"] = checkpoint_policy

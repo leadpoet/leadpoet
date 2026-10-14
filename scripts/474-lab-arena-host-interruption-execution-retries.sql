@@ -2,6 +2,7 @@
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='30s';
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
 -- Keep physical attempts and ledger history. Only authenticated host losses are
 -- excluded from the two normal execution outcomes, for October 14 onward.
 CREATE OR REPLACE FUNCTION public.lab_arena_execution_attempt_count(p_run public.lab_arena_runs)
@@ -268,5 +269,6 @@ BEGIN
  IF encode(extensions.digest(pg_get_functiondef('lab_arena_reserve_call(text,text,text,text,text,text,bigint,jsonb,integer)'::regprocedure),'sha256'),'hex')<>'4da081265076dda69d237f11dafd1d790771e659503d8eedb6f550ff7d3f3211' THEN RAISE EXCEPTION 'Host retry474 readback differs'; END IF;
 END;
 $patch474_3$;
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 NOTIFY pgrst,'reload schema';
 COMMIT;

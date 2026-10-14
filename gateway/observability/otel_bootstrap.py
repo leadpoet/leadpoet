@@ -4,9 +4,9 @@ Scope is deliberately narrow and privacy-preserving:
 
 - It emits ONE server span per HTTP request capturing only operational
   metadata: request method, the matched route *template* (never the concrete
-  path, so ids/hotkeys/epochs do not leak), response status class, and
-  duration. It never records request/response bodies, query strings, headers,
-  database statements, or any LLM prompt/completion content.
+  path, so ids/hotkeys/epochs do not leak), response status class, duration,
+  and a fixed pair for capacity shedding. It never records bodies, queries,
+  headers, database statements, or any LLM prompt/completion content.
 - It does NOT auto-instrument the database, outbound HTTP clients, or the
   Research Lab / scoring / model / Langfuse code paths. Training data and model
   I/O are never touched.
@@ -32,7 +32,8 @@ The boundary is CODE-ENFORCED, not discipline-enforced:
 2. Every span passes a FAIL-CLOSED schema validator that checks the COMPLETE
    span envelope before export: the ``gateway.http`` instrumentation scope
    with no version/schema metadata, ``SERVER`` kind, a root span (no parent,
-   empty trace state), EXACTLY the four approved attributes with the
+   empty trace state), the four approved HTTP attributes and an optional
+   fixed capacity-shed admission/class pair, with the
    approved types, a standard HTTP method, a span name equal to exactly
    ``<method> <route>``, no events, no links, no status description, the
    fixed resource, and a route label that is either a registered route
@@ -528,8 +529,8 @@ _ALLOWED_HTTP_METHODS = frozenset(
     {"GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH"}
 )
 
-# The ONLY attributes a span may carry out of this process, with their
-# required types (bool is explicitly rejected for the numeric fields).
+# Base HTTP fields. Only gateway capacity shedding may add the fixed pair below.
+# Bool is explicitly rejected for the numeric fields.
 SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "http.request.method": (str,),
     "http.route": (str,),
@@ -538,6 +539,12 @@ SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 }
 
 SPAN_ATTRIBUTE_ALLOWLIST = frozenset(SPAN_ATTRIBUTE_TYPES)
+
+GATEWAY_ADMISSION_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    "gateway.admission": (str,),
+    "gateway.priority_class": (str,),
+}
+GATEWAY_PRIORITY_CLASSES = frozenset({"miner", "validator", "other"})
 
 # The ONLY attributes an Arena pipeline-stage span may carry. A separate,
 # equally exact allowlist — the HTTP four do not apply to a task span.
@@ -828,7 +835,7 @@ def _validating_exporter(
     Each kind has its own exact attribute allowlist and its own frozen
     vocabularies:
 
-    ``http``        SERVER span, the four approved gateway HTTP attributes
+    ``http``        SERVER span, four HTTP fields plus optional capacity pair
     ``arena_http``  SERVER span, those four plus the Arena refusal code
     ``task``        INTERNAL span, the five approved pipeline-stage attributes
     ``provider``    INTERNAL span, the ten approved provider-call attributes
@@ -850,7 +857,16 @@ def _validating_exporter(
 
     def _http_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
         if not _attributes_conform(attributes):
-            return "attributes"
+            if not _attributes_conform(attributes, {
+                **SPAN_ATTRIBUTE_TYPES, **GATEWAY_ADMISSION_ATTRIBUTE_TYPES,
+            }):
+                return "attributes"
+            if (
+                attributes["gateway.admission"] != "capacity_shed"
+                or attributes["gateway.priority_class"] not in GATEWAY_PRIORITY_CLASSES
+                or attributes["http.response.status_code"] != 503
+            ):
+                return "admission"
         method = attributes["http.request.method"]
         if method not in _ALLOWED_HTTP_METHODS:
             return "method"
@@ -1208,11 +1224,18 @@ def configure_gateway_otel(app: Any, *, span_exporter: Optional[Any] = None) -> 
                 context=Context(),
                 start_time=start_ns,
             )
-            # Only method / route template / status / duration — nothing else.
+            # Keep request content private, including failures before routing.
             span.set_attribute("http.request.method", method)
             span.set_attribute("http.route", route)
             span.set_attribute("http.response.status_code", int(status_code))
             span.set_attribute("duration_ms", (time.monotonic() - start_mono) * 1000.0)
+            if "_gateway_capacity_shed_class" in scope:
+                span.set_attribute("gateway.admission", "capacity_shed")
+                # Set only by PriorityMiddleware on its own 503 response.
+                # This class names a request pool, not a verified identity.
+                span.set_attribute(
+                    "gateway.priority_class", scope["_gateway_capacity_shed_class"]
+                )
             if int(status_code) >= 500:
                 span.set_status(Status(StatusCode.ERROR))
             span.end()

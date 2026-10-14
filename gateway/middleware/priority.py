@@ -230,6 +230,7 @@ class PriorityMiddleware:
             await self.app(scope, receive, send)
             return
 
+        scope.pop("_gateway_capacity_shed_class", None)
         path = scope.get("path", "")
         route_class = classify_scope(scope)
         pool = self.pools[route_class]
@@ -248,6 +249,8 @@ class PriorityMiddleware:
                 content={"detail": "Gateway at capacity - retry shortly"},
                 headers={"Retry-After": "15"},
             )
+            # Request pool classification, never an authenticated caller role.
+            scope["_gateway_capacity_shed_class"] = route_class
             await response(scope, receive, send)
             return
 

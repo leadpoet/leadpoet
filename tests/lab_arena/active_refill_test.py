@@ -17,6 +17,7 @@ from lab_arena import contracts, runner as rn
     [
         ("no_pending", True),
         ("no_free_slot", True),
+        ("paused", True),
         ("transport", True),
         ("availability", True),
         ("server", True),
@@ -33,14 +34,21 @@ def test_active_refill_preserves_claim_retries_and_denials(
     _check_active_refill(tmp_path, monkeypatch, failure, refills=refills)
 
 
-def test_stop_during_active_claim_wait_prevents_refill(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status", ["no_free_slot", "paused"])
+def test_stop_during_active_claim_wait_prevents_refill(tmp_path, monkeypatch, status):
     _check_active_refill(
-        tmp_path, monkeypatch, "no_free_slot", refills=False, stop_at_wait=True
+        tmp_path, monkeypatch, status, refills=False, stop_at_wait=True
+    )
+
+
+def test_active_refill_waits_while_pause_remains(tmp_path, monkeypatch):
+    _check_active_refill(
+        tmp_path, monkeypatch, "paused", refills=True, refusals=3
     )
 
 
 def _check_active_refill(
-    tmp_path, monkeypatch, failure, *, refills, stop_at_wait=False
+    tmp_path, monkeypatch, failure, *, refills, stop_at_wait=False, refusals=1
 ):
     release_first = threading.Event()
     first_started = threading.Event()
@@ -49,10 +57,12 @@ def _check_active_refill(
     stop = threading.Event()
     calls = []
     waits = []
+    refill_waits = []
     retry_sleeps = []
-    failures = 3 if failure in {
+    http_retry_failure = failure in {
         "transport", "availability", "server", "contract_server", "invalid_json"
-    } else 1
+    }
+    failures = 3 if http_retry_failure else refusals
     poll_seconds = 0.08
 
     def transport(request):
@@ -62,6 +72,8 @@ def _check_active_refill(
         calls.append((time.monotonic(), json.loads(request.content)))
         position = len(calls)
         if position == 1 or position > 1 + failures:
+            if position > 1:
+                refill_waits.extend(waits)
             return httpx.Response(200, json={
                 "status": "leased", "run_id": "first" if position == 1 else "second",
                 "lease_token": "test-lease", "icp": {},
@@ -132,7 +144,10 @@ def _check_active_refill(
             assert second_started.wait(1)
             assert not release_first.is_set()
             assert calls[-1][0] - calls[failures][0] >= poll_seconds * 0.8
-            assert waits == [poll_seconds]
+            expected_waits = failures if failure == "paused" else 1
+            # Snapshot at the claim boundary: the worker may already be waiting
+            # on both executions when the test thread observes second_started.
+            assert refill_waits == [poll_seconds] * expected_waits
             assert len(calls) == failures + 2
         else:
             assert not second_started.wait(poll_seconds * 2)
@@ -141,11 +156,13 @@ def _check_active_refill(
         release_first.set()
         assert result.result(1) == (2 if refills else 1)
         assert len(calls) == failures + (2 if refills else 1)
-        assert retry_sleeps == ([0.0, 0.0] if failures == 3 else [])
+        assert retry_sleeps == ([0.0, 0.0] if http_retry_failure else [])
         # The existing same-envelope retries recover an uncertain claim. Only
         # the later bounded scan creates a fresh request for new assignment work.
-        if failures == 3:
+        if http_retry_failure:
             assert calls[1][1] == calls[2][1] == calls[3][1]
+        if failure == "paused":
+            assert len({body["request_id"] for _, body in calls}) == len(calls)
         if refills:
             assert calls[-1][1]["request_id"] != calls[1][1]["request_id"]
         assert all(item[1]["body"]["declared_parallelism"] == 2 for item in calls)

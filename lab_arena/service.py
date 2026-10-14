@@ -1413,7 +1413,10 @@ class ArenaService:
         """
 
         defaults = self._config.defaults
-        open_round = self.open_round()
+        # A round made after a late startup can have tomorrow's submission
+        # opening. It must block another creation without being advertised to
+        # miners or accepting work before that opening.
+        open_round = self.open_round(include_future=True)
         if open_round is not None:
             return {"status": "existing", "round_id": open_round["round_id"], "round_status": open_round["status"]}
         if defaults.daily_cutoff_hour_utc is None:
@@ -1585,13 +1588,16 @@ class ArenaService:
             for row in reversed(rows)
         ]
 
-    def open_round(self) -> Optional[Dict[str, Any]]:
-        """The round whose frozen submission window currently accepts work."""
+    def open_round(self, *, include_future: bool = False) -> Optional[Dict[str, Any]]:
+        """Find the active intake round, or an existing future open row for the driver."""
 
         now = self.now()
         if self._pinned_round_id() is not None:
             row = self._pinned_round()
-            return row if row is not None and self._round_accepts_submissions(row, now) else None
+            return row if row is not None and (
+                self._round_pending_submission(row, now) if include_future
+                else self._round_accepts_submissions(row, now)
+            ) else None
         network_name, netuid = self._chain_scope()
         for row in self._store.list_rounds(
             status="open",
@@ -1601,10 +1607,22 @@ class ArenaService:
             limit=20,
             columns="round_id,status,created_at,configuration_doc",
         ):
-            if (self._round_accepts_submissions(row, now)
+            if ((self._round_pending_submission(row, now) if include_future
+                 else self._round_accepts_submissions(row, now))
                     and (row.get("configuration_doc") or {}).get("mode") == self._config.mode):
                 return self._round(row["round_id"])
         return None
+
+    @staticmethod
+    def _round_pending_submission(row: Mapping[str, Any], now: datetime) -> bool:
+        if row.get("status") != "open":
+            return False
+        schedule = (row.get("configuration_doc") or {}).get("schedule") or {}
+        try:
+            return now < _parse_iso(schedule["submission_cutoff"])
+        except (KeyError, TypeError, ValueError):
+            # An invalid open row needs repair, never a second daily row.
+            return True
 
     @staticmethod
     def _round_accepts_submissions(row: Mapping[str, Any], now: datetime) -> bool:

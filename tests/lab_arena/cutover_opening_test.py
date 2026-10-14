@@ -62,6 +62,30 @@ def test_expired_open_row_does_not_block_new_daily_creation():
     assert not ArenaService._round_accepts_submissions(prior, moment(14))
 
 
+def test_future_open_row_remains_single_creation_target():
+    service = bare_service(moment(14, 21))
+    rows = {}
+    service._chain_scope = lambda: ("finney", 71)
+    service._store = SimpleNamespace(
+        list_rounds=lambda **_kwargs: list(rows.values()),
+        get_round=lambda round_id: rows.get(round_id),
+    )
+
+    def create(cutoff):
+        round_id = "arena-" + cutoff.strftime("%Y-%m-%d")
+        rows[round_id] = round_row(round_id, cutoff - timedelta(days=1), cutoff)
+        return {"round_id": round_id}
+
+    service.create_round = create
+    first = service.ensure_daily_round()
+    assert first["round_id"] == "arena-2026-10-16"
+    assert service.open_round() is None  # Intake cannot open a day early.
+    second = service.ensure_daily_round()
+    assert second["status"] == "existing"
+    assert second["round_id"] == first["round_id"]
+    assert len(rows) == 1
+
+
 def test_only_due_canonical_presign_gets_retryable_refusal():
     service = bare_service(moment(14, 0, 1))
     service._store = SimpleNamespace(get_round=lambda _round_id: None)
@@ -122,6 +146,18 @@ def test_public_current_hides_expired_open_row():
     assert service.public_current()["open_round"] is None
 
 
+def test_public_current_hides_future_open_row():
+    service = bare_service(moment(14, 21))
+    future = round_row("arena-2026-10-16", moment(15), moment(16))
+    service.active_rounds = lambda **_kwargs: [future]
+    service.latest_published_round = lambda **_kwargs: None
+    service._config.mode = "shadow"
+    service._config.chain = SimpleNamespace(current_settlement_epoch=lambda: None)
+    assert service.public_current()["open_round"] is None
+    service.now = lambda: moment(15)
+    assert service.public_current()["open_round"]["round_id"] == future["round_id"]
+
+
 def test_driver_creates_due_round_before_advancing_old_work():
     calls = []
     service = SimpleNamespace(
@@ -171,6 +207,29 @@ def test_client_retries_only_round_opening_presign(monkeypatch):
     unrelated = Session([Response(503, "provider_unavailable")])
     assert miner_submit._post_presign_with_opening_retry(unrelated, "https://example.test", {}).status_code == 503
     assert unrelated.calls == 1
+
+
+def test_presign_does_not_retry_after_opening_budget(monkeypatch):
+    class Response:
+        status_code = 503
+
+        def json(self):
+            return {"code": "round_opening"}
+
+    class Session:
+        calls = 0
+
+        def post(self, *_args, **_kwargs):
+            self.calls += 1
+            return Response()
+
+    observed = iter((0.0, 91.0))
+    monkeypatch.setattr(miner_submit.time, "monotonic", lambda: next(observed))
+    session = Session()
+    response = miner_submit._post_presign_with_opening_retry(
+        session, "https://example.test", {})
+    assert response.status_code == 503
+    assert session.calls == 1
 
 
 def test_client_waits_for_current_round_only_near_cutoff(monkeypatch):

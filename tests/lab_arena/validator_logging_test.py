@@ -1,10 +1,12 @@
 """Operational reporting does not control validator work or expose raw errors."""
 import threading
 import time
+from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts, validator
+from lab_arena import contracts, validator, validator_events
 from lab_arena.runtime_host import RuntimeHostError
 from lab_arena.validator_logging import ValidatorOperationalLogger
 
@@ -80,6 +82,62 @@ def test_active_work_is_not_a_stalled_poll():
     clock[0] = 7200
     assert log.snapshot()['scoring_state'] == 'active'
     assert log.snapshot()['active_runs'] == 1
+
+
+def test_claim_observations_track_effective_capacity_and_bounded_result(tmp_path):
+    from lab_arena import runner
+    from tests.lab_arena.test_lab_arena_runner import FakeApi, make_config
+
+    log = logger()
+    pool = SimpleNamespace(capacity=5, quarantined=0)
+    api = FakeApi([{'status': 'no_free_slot'}, {'status': 'no_pending'},
+                   {'status': 'paused'}, {'status': 'leased'},
+                   {'status': 'secret=DO-NOT-LOG'}])
+    config = replace(make_config(tmp_path, api, None, parallel=5),
+                     proxy_worker_pool=pool, operational_logger=log)
+    worker = runner.Runner(config)
+    try:
+        assert log.snapshot()['usable_slots'] == 5
+        assert log.snapshot()['quarantined_slots'] == 0
+        pool.quarantined = 4
+        assert worker.claim_one()['status'] == 'no_free_slot'
+        assert log.snapshot()['usable_slots'] == 1
+        assert log.snapshot()['quarantined_slots'] == 4
+        assert log.snapshot()['last_claim_status'] == 'no_free_slot'
+        assert log.snapshot()['last_claim_round_id'] == config.round_id
+        pool.quarantined = 3
+        assert worker.claim_one()['status'] == 'no_pending'
+        assert log.snapshot()['usable_slots'] == 2
+        assert log.snapshot()['last_claim_status'] == 'no_pending'
+        pool.quarantined = 0
+        assert worker.claim_one()['status'] == 'paused'
+        assert log.snapshot()['usable_slots'] == 5
+        assert log.snapshot()['last_claim_status'] == 'paused'
+        assert worker.claim_one()['status'] == 'leased'
+        assert log.snapshot()['usable_slots'] == 5
+        assert log.snapshot()['last_claim_status'] == 'leased'
+        assert worker.claim_one()['status'] == 'secret=DO-NOT-LOG'
+        assert log.snapshot()['last_claim_status'] == 'other'
+        assert 'DO-NOT-LOG' not in str(log.snapshot())
+        assert [item['body']['declared_parallelism'] for item in api.claims] == [1, 2, 5, 5, 5]
+        pool.quarantined = 5
+        assert worker.run_once() == 0
+        assert len(api.claims) == 5
+        assert log.snapshot()['usable_slots'] == 0
+        assert log.snapshot()['quarantined_slots'] == 5
+        assert log.snapshot()['last_claim_status'] == 'no_local_capacity'
+        assert log.snapshot()['last_claim_round_id'] == config.round_id
+        assert validator_events.event('validator.state', log.snapshot())['content']['usable_slots'] == 0
+    finally:
+        worker.close()
+
+
+def test_claim_observation_rejects_unbounded_values():
+    for content in ({'usable_slots': -1}, {'quarantined_slots': 252},
+                    {'last_claim_status': 'secret=DO-NOT-LOG'},
+                    {'last_claim_round_id': 'secret=DO-NOT-LOG'}):
+        with pytest.raises(validator_events.ValidatorEventError):
+            validator_events.event('validator.state', content)
 
 
 def test_scoring_broken_weights_continue_with_error_state():

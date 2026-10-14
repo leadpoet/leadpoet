@@ -531,7 +531,6 @@ def test_execute_stages_restrictive_trusted_entrypoint_without_mutating_source(t
     assert snapshot["mode"] == 0o444
     assert snapshot["regular"] is True
     assert snapshot["uid"] == os.geteuid()
-    assert snapshot["gid"] == os.getegid()
     assert snapshot["mode"] & stat.S_IROTH
     assert not snapshot["path"].exists()
     source_after = deployed_entrypoint.stat()

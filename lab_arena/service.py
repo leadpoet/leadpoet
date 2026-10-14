@@ -2613,7 +2613,10 @@ class ArenaService:
         plan = scoring.build_scoring_plan(
             round_id=round_id,
             stage=stage,
-            runs=self._store.list_runs(round_id, stage=stage, kind="execute"),
+            runs=self._store.list_runs(
+                round_id, stage=stage, kind="execute",
+                columns="*,execution_attempt:lab_arena_execution_attempt_count",
+            ),
             execution_sequence_policy=(round_row.get("configuration_doc") or {}).get(
                 "execution_sequence_policy"
             ),

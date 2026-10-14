@@ -223,14 +223,16 @@ def build_scoring_plan(
         provider_error_exhausted = (
             cause == "provider_error"
             and latest_run.get("status") == "failed"
-            and int(latest_run.get("attempt") or 0)
+            # The database excludes authenticated host interruptions. Physical
+            # attempt IDs remain authoritative for ordering and output identity.
+            and int(latest_run.get("execution_attempt", latest_run.get("attempt")) or 0)
             >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
         )
         terminal_doc = latest_run.get("terminal_doc")
         deadline_provider_retry_exhausted = (
             cause == "stage_closed"
             and latest_run.get("status") == "failed"
-            and int(latest_run.get("attempt") or 0)
+            and int(latest_run.get("execution_attempt", latest_run.get("attempt")) or 0)
             >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
             and isinstance(terminal_doc, Mapping)
             and terminal_doc.get("previous_status") == "leased"

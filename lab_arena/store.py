@@ -328,8 +328,10 @@ PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
     "integrity_policy", "contact_policy", "company_quality_policy",
     "intent_details_policy", "scorer_policy",
 )
-# Fixed public audit projections. Never fetch source or provider documents.
+# Fixed computed projections for direct SQL and PostgREST transports.
 _RUNTIME_JSON_COLUMNS = {
+    "execution_attempt:lab_arena_execution_attempt_count":
+        "public.lab_arena_execution_attempt_count(lab_arena_runs) AS execution_attempt",
     PUBLIC_CONFIGURATION_COLUMN:
         "public.lab_arena_public_configuration_v1(lab_arena_rounds) AS configuration_doc",
     "publication_doc:lab_arena_competition_publication_v1":

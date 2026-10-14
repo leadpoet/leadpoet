@@ -1,6 +1,7 @@
 """Operator archive transport keeps the canonical historical proof checks."""
 
 import json
+import io
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -14,6 +15,58 @@ from tests.test_validator_chain_source_v2 import (
     _stateful_rpc,
 )
 from lab_arena.chain_source import ValidatorChainSourceV2Error
+
+
+@pytest.mark.parametrize(
+    ("tampered_block", "message"),
+    [(None, None), (0, "genesis differs"),
+     (STATEFUL_LAST_EPOCH_BLOCK, "cutover block hash differs")],
+)
+def test_https_archive_path_keeps_canonical_anchor_checks(tampered_block, message):
+    _, rpc = _stateful_rpc()
+    calls = []
+    endpoint = "https://archive.operator.example/RPC/%2F/public/"
+
+    def open_request(request, *, timeout):
+        assert request.full_url == endpoint
+        assert request.method == "POST"
+        item = json.loads(request.data)
+        calls.append((item["method"], item["params"]))
+        result = rpc(
+            method=item["method"], params=item["params"], request_id=item["id"],
+            job_id="archive-path-test", purpose="validator.subnet_epoch_snapshot.v2",
+            logical_operation_id="archive-path-test:%s" % item["id"],
+        )
+        if item["method"] == "chain_getBlockHash" and item["params"] == [tampered_block]:
+            result = "0x" + "99" * 32
+        response = io.BytesIO(json.dumps({"jsonrpc": "2.0", "id": item["id"], "result": result}).encode())
+        response.headers = {}
+        response.getcode = lambda: 200
+        return response
+
+    class LiveTransport:
+        def call(self, **kwargs):
+            return rpc(**kwargs)
+
+    source = HostValidatorChainSource(
+        live_transport=LiveTransport(),
+        archive_transport=HttpsJsonRpcTransport(
+            endpoint, timeout_seconds=4, opener=open_request, allow_https_path=True,
+        ),
+        cutover_manifest=_stateful_cutover(), finalization_sleep=lambda _: None,
+    )
+    try:
+        if message:
+            with pytest.raises(ValidatorChainSourceV2Error, match=message):
+                source.read_finalized_snapshot(netuid=71, epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID)
+        else:
+            result = source.read_finalized_snapshot(netuid=71, epoch_id=STATEFUL_SETTLEMENT_EPOCH_ID)
+            assert result["epoch_authority"]["settlement_epoch_id"] == STATEFUL_SETTLEMENT_EPOCH_ID
+        assert ("chain_getBlockHash", [0]) in calls
+        if tampered_block != 0:
+            assert ("chain_getBlockHash", [STATEFUL_LAST_EPOCH_BLOCK]) in calls
+    finally:
+        source.close()
 
 
 @pytest.mark.parametrize(

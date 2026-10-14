@@ -8657,6 +8657,16 @@ async def _llm_reverify_company(
         # attribute. Use it only to recover independently fetched exact-source
         # text; do not reopen or replace an already grounded industry match.
         investigation_targets = ("industry",)
+    if (
+        not verified_rebrand_redirect
+        and (result.details.get("identity_receipt") or {}).get("reason_code")
+        == "web_domain_conflicts_with_verified_homepage"
+    ):
+        # Resolve this model-owned domain conflict with the existing single
+        # identity repair before asking for rebrand proof. A verified redirect
+        # still follows the normal rebrand investigation. The repair cannot
+        # replace source-bound identity or any independent fit proof.
+        investigation_targets = ()
     claims: Mapping[str, Any] = {}
     if investigation_targets:
         (

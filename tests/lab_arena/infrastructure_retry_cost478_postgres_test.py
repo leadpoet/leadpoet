@@ -226,6 +226,15 @@ def test_late_failure_fee_keeps_original_transient_proof_and_exact_cost(database
 
 
 def test_schema_and_private_helpers_keep_service_only_authority(database):
+    from lab_arena.store import ArenaStore, PsycopgTransport
+    transport = PsycopgTransport(lambda: database[0].connect(**database[1]))
+    try:
+        assert ArenaStore(transport).infrastructure_retry_cost_schema() == {
+            'schema_version': 'leadpoet.lab_arena.infrastructure_retry_cost_schema.v1',
+            'version': 478, 'policy': POLICY,
+        }
+    finally:
+        transport.close()
     with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
         cur.execute("SELECT public.lab_arena_infrastructure_retry_cost_schema_v1()")
         assert cur.fetchone()[0]['policy'] == POLICY

@@ -25,6 +25,7 @@ import httpx
 
 from lab_arena.contracts import (
     ArenaContractError,
+    INFRASTRUCTURE_RETRY_COST_POLICY,
     LEASE_TTL_SECONDS,
     RUNNER_SLOT_CEILING,
     canonical_json,
@@ -1252,7 +1253,7 @@ class ArenaStore:
             "lab_arena_infrastructure_retry_cost_schema_v1", {}
         ), "infrastructure_retry_cost_schema")
         if result != {"schema_version": "leadpoet.lab_arena.infrastructure_retry_cost_schema.v1",
-                      "version": 478, "policy": contracts.INFRASTRUCTURE_RETRY_COST_POLICY}:
+                      "version": 478, "policy": INFRASTRUCTURE_RETRY_COST_POLICY}:
             raise ArenaStoreError("infrastructure retry cost schema mismatch")
         return result
 

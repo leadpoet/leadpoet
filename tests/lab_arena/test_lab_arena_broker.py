@@ -951,9 +951,34 @@ def deepline_generic_http_denial(request_id="iad1::generic-http-denied"):
     }
 
 
-def test_deepline_generic_http_403_is_a_replayable_request_refusal():
+def deepline_generic_http_401_denial(request_id="iad1::generic-http-denied"):
+    # Allowlisted error provenance from the exact saved October 14 execution.
+    # Request identity supports the existing exact billing test fixture.
+    return {
+        "requestId": request_id,
+        "credential_owner": "none",
+        "code": "PROVIDER_AUTHORIZATION_FAILED",
+        "failure_origin": "provider",
+        "error_category": "provider_auth",
+        "upstream_status": 401,
+        "provider": "generic_http",
+        "operation": "generic_http_request",
+        "tool_error": {
+            "provider": "generic_http",
+            "operation": "generic_http_request",
+            "code": "PROVIDER_AUTHORIZATION_FAILED",
+            "statusCode": 401,
+        },
+    }
+
+
+@pytest.mark.parametrize("provider_status", [401, 403])
+def test_deepline_generic_http_authorization_is_a_replayable_request_refusal(provider_status):
     request_id = "iad1::generic-http-denied"
-    denial = deepline_generic_http_denial(request_id)
+    denial = (
+        deepline_generic_http_401_denial(request_id)
+        if provider_status == 401 else deepline_generic_http_denial(request_id)
+    )
     history_entry = deepline_history_entry(
         request_id,
         "generic_http_request",
@@ -965,7 +990,7 @@ def test_deepline_generic_http_403_is_a_replayable_request_refusal():
     marked = []
     broker, store, transport = make_broker(
         transport=FakeTransport(
-            [(403, denial), (200, deepline_history(history_entry))]
+            [(provider_status, denial), (200, deepline_history(history_entry))]
         ),
         credential_for=lambda _context, provider: HOST_KEYS[provider],
         provider_funding_source_for=lambda _context, _provider: "miner_key",
@@ -993,7 +1018,7 @@ def test_deepline_generic_http_403_is_a_replayable_request_refusal():
         "error": {"code": "provider_request_refused"}
     }
     assert result.call["error_code"] == "provider_request_refused"
-    assert result.call["provider_status"] == 403
+    assert result.call["provider_status"] == provider_status
     assert result.call["actual_microusd"] == 0
     assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
     assert "champion_credential_attempts" not in result.call
@@ -1001,27 +1026,32 @@ def test_deepline_generic_http_403_is_a_replayable_request_refusal():
     assert marked == []
     assert replay.call["idempotent"] is True
     assert replay.call["error_code"] == "provider_request_refused"
+    # Replays use the existing sanitized request-refusal terminal response.
     assert replay.call["provider_status"] == 403
     assert replay.body == result.body and replay.status == result.status
     assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
     terminal = store.calls[result.call["call_identity"]]["terminal"]
     assert "account_failure_evidence" not in terminal
     for private_text in (
-        denial["error"],
-        denial["failure_description"],
-        denial["message"],
-        denial["operator_hint"],
+        value for name, value in denial.items()
+        if name in ("error", "failure_description", "message", "operator_hint")
     ):
         assert private_text not in repr(result.to_document())
         assert private_text not in repr(store.calls)
 
 
-def test_deepline_generic_http_403_without_exact_cost_stays_uncertain():
+@pytest.mark.parametrize("provider_status", [401, 403])
+def test_deepline_generic_http_authorization_without_exact_cost_stays_uncertain(provider_status):
     request_id = "iad1::generic-http-cost-pending"
+    denial = (
+        deepline_generic_http_401_denial(request_id)
+        if provider_status == 401 else deepline_generic_http_denial(request_id)
+    )
     broker, store, transport = make_broker(
         transport=FakeTransport(
-            [(403, deepline_generic_http_denial(request_id)), (200, deepline_history())]
-        )
+            [(provider_status, denial), (200, deepline_history())]
+        ),
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
     )
 
     result = broker.execute(
@@ -1039,9 +1069,81 @@ def test_deepline_generic_http_403_without_exact_cost_stays_uncertain():
     assert json.loads(result.body) == {"error": {"code": "provider_request_refused"}}
     assert result.call["error_code"] == "provider_request_refused"
     assert result.call["outcome"] == "uncertain"
+    assert result.call["provider_status"] == provider_status
+    assert "account_failure_evidence" not in repr(store.calls)
     assert store.log == ["reserve", "dispatch", "uncertain"]
     assert transport.sent[0]["method"] == "POST"
     assert all(sent["method"] == "GET" for sent in transport.sent[1:])
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"credential_owner": "workspace"},
+        {"credential_owner": None},
+        {"failure_origin": "gateway"},
+        {"failure_origin": None},
+        {"error_category": "authentication"},
+        {"error_category": None},
+        {"code": "ACCOUNT_UNAUTHORIZED"},
+        {"provider": "other"},
+        {"operation": "other"},
+        {"upstream_status": 403},
+        {"upstream_status": "401"},
+        {"tool_error": None},
+        {"tool_error": {"statusCode": 401}},
+        {"tool_error": {**deepline_generic_http_401_denial()["tool_error"], "statusCode": 403}},
+        {"tool_error": {**deepline_generic_http_401_denial()["tool_error"], "provider": "other"}},
+        {"tool_error": {**deepline_generic_http_401_denial()["tool_error"], "operation": "other"}},
+        {"tool_error": {**deepline_generic_http_401_denial()["tool_error"], "code": "ACCOUNT_UNAUTHORIZED"}},
+    ],
+)
+def test_deepline_generic_http_401_requires_exact_target_provenance(change):
+    payload = {**deepline_generic_http_401_denial(), **change}
+    broker, _, _ = make_broker(
+        transport=FakeTransport([(401, payload), (200, deepline_history())]),
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": "generic_http_request", "payload": {"url": "https://example.com/"}},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == 402
+    assert result.call["provider_status"] == 401
+    assert result.call["error_code"] == "miner_credentials_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("provider_status", "tool", "payload", "expected_error"),
+    [
+        (401, "generic_http_request", {"error": "invalid API key"}, "miner_credentials_unavailable"),
+        (402, "generic_http_request", deepline_generic_http_401_denial(), "miner_credentials_unavailable"),
+        (401, "exa_search", deepline_generic_http_401_denial(), "miner_credentials_unavailable"),
+        (401, "generic_http_request", [], "miner_credentials_unavailable"),
+        (401, "generic_http_request", b"non-JSON authentication error", "miner_credentials_unavailable"),
+        (401, "generic_http_request", {
+            **deepline_generic_http_401_denial(),
+            "credential_owner": "deepline_managed",
+        }, "provider_unavailable"),
+    ],
+    ids=("miner-401", "miner-402", "other-tool", "non-object", "non-json", "managed-provider"),
+)
+def test_generic_http_target_refusal_preserves_other_account_classification(
+    provider_status, tool, payload, expected_error,
+):
+    broker, _, _ = make_broker(
+        transport=FakeTransport([(provider_status, payload), (200, deepline_history())]),
+        provider_funding_source_for=lambda _context, _provider: "miner_key",
+    )
+    result = broker.execute(
+        CONTEXT, operation_id="deepline.execute",
+        parameters={"tool": tool, "payload": {"url": "https://example.com/"} if tool == "generic_http_request" else {"query": "example"}},
+        action_sequence=0, timeout_ms=5000,
+    )
+    assert result.status == (402 if expected_error == "miner_credentials_unavailable" else 502)
+    assert result.call["provider_status"] == provider_status
+    assert result.call["error_code"] == expected_error
 
 
 @pytest.mark.parametrize(

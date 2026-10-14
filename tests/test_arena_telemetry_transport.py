@@ -58,6 +58,9 @@ def test_real_http_export_keeps_only_approved_operational_metadata(monkeypatch, 
         recorder.record("fixture-private-prompt", "ok")
         monkeypatch.setattr(telemetry, "_recorder", recorder)
         store = QueueStore()
+        # Keep this transport fixture independent of the live batch limit.
+        store.items = [item for item in store.items
+                       if item["uncertain_entry_id"] in {1, 2, 3, 4, 5, 6, 1000, 1002}]
         service, _ = service_for(store, RecordingBroker(
             store, statuses={entry_id: "settled" for entry_id in settled_entries},
         ))

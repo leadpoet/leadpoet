@@ -620,7 +620,13 @@ def test_gate_outcomes_outside_the_vocabulary_are_dropped_whole():
 # -- naming the refusal on a request span -------------------------------------
 
 
-def test_a_refusal_code_names_the_4xx_without_its_message():
+@pytest.mark.parametrize("denial_code", [
+    "run_result_invalid",
+    "baseline_recovery_scores_not_recorded",
+    "infrastructure_retry_cost_schema_unavailable",
+    "validator_events_scope_invalid",
+])
+def test_a_refusal_code_names_the_4xx_without_its_message(denial_code):
     """``ServiceError.code`` can interpolate an exception message.
 
     At the gateway a refused Arena call is an anonymous 4xx. The request span
@@ -631,7 +637,7 @@ def test_a_refusal_code_names_the_4xx_without_its_message():
 
     @app.get("/arena/v1/claim")
     def _claim():
-        telemetry.note_denial("run_result_invalid:round-7 hotkey 5F3s rejected")
+        telemetry.note_denial(denial_code + ":round-7 hotkey 5F3s rejected")
         return JSONResponse(status_code=409, content={"status": "rejected"})
 
     recorder = configure_arena_otel(app, span_exporter=exp)
@@ -643,7 +649,7 @@ def test_a_refusal_code_names_the_4xx_without_its_message():
         telemetry.install_recorder(None)
 
     (span,) = exp.get_finished_spans()
-    assert span.attributes["arena.denial"] == "run_result_invalid"
+    assert span.attributes["arena.denial"] == denial_code
     assert "5F3s" not in repr(dict(span.attributes))
 
 

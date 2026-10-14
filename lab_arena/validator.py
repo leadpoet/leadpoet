@@ -624,7 +624,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--netuid", type=int)
     parser.add_argument("--subtensor.network", "--subtensor_network", dest="subtensor_network", default=os.environ.get("LAB_ARENA_NETWORK", "finney"), help="Chain identity (finney or test); use --subtensor.chain_endpoint for a local node")
     parser.add_argument("--subtensor.chain_endpoint", dest="chain_endpoint", default=os.environ.get("LAB_ARENA_CHAIN_ENDPOINT", ""), help="Explicit ws:// or wss:// RPC URL; defaults to the selected network's public endpoint")
-    parser.add_argument("--arena-archive-endpoint", dest="archive_endpoint", default=os.environ.get("LAB_ARENA_ARCHIVE_ENDPOINT", ""), help="Explicit archive WebSocket or HTTP RPC origin; defaults to the official Finney archive or the selected test endpoint")
+    parser.add_argument("--arena-archive-endpoint", dest="archive_endpoint", default=os.environ.get("LAB_ARENA_ARCHIVE_ENDPOINT", ""), help="Explicit trusted archive RPC origin or HTTPS URL with a path; defaults to the official Finney archive or the selected test endpoint")
     parser.add_argument("--wallet.name", dest="wallet_name", default=os.environ.get("LAB_ARENA_WALLET_NAME", "default"))
     parser.add_argument("--wallet.hotkey", dest="hotkey_name", default=os.environ.get("LAB_ARENA_HOTKEY", "default"))
     parser.add_argument("--wallet.path", dest="wallet_path", default=os.environ.get("LAB_ARENA_WALLET_PATH", "~/.bittensor/wallets"))
@@ -865,7 +865,7 @@ def main(argv=None) -> int:
     args.archive_endpoint = args.archive_endpoint.strip()
     if args.archive_endpoint:
         # Reject an unsafe archive before wallet access or any network call.
-        _http_rpc_endpoint(args.archive_endpoint)
+        _http_rpc_endpoint(args.archive_endpoint, allow_https_path=True)
     config = chain_module.ArenaChainConfig(
         endpoint=args.chain_endpoint.strip() or profile["chain_endpoint"],
         netuid=int(args.netuid), network_name=network,

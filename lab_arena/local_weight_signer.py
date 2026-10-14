@@ -55,10 +55,10 @@ class LocalWeightSignerError(RuntimeError):
     """Local signer configuration or an external host boundary is invalid."""
 
 
-def _http_rpc_endpoint(endpoint: str) -> str:
-    """Convert one credential-free WebSocket/HTTP origin to HTTP JSON-RPC."""
+def _http_rpc_endpoint(endpoint: str, *, allow_https_path: bool = False) -> str:
+    """Convert an RPC origin, or an explicitly allowed HTTPS archive URL."""
 
-    value = str(endpoint or "").strip().rstrip("/")
+    value = str(endpoint or "").strip()
     parsed = urlsplit(value)
     schemes = {"wss": "https", "ws": "http", "https": "https", "http": "http"}
     if (
@@ -66,14 +66,15 @@ def _http_rpc_endpoint(endpoint: str) -> str:
         or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.path not in ("", "/")
+        or (parsed.path.rstrip("/") and not (allow_https_path and parsed.scheme == "https"))
         or parsed.query
         or parsed.fragment
     ):
         raise LocalWeightSignerError("chain RPC endpoint must be a credential-free origin")
     if schemes[parsed.scheme] == "http" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
         raise LocalWeightSignerError("plaintext chain RPC is allowed only on loopback")
-    return urlunsplit((schemes[parsed.scheme], parsed.netloc, "/", "", ""))
+    path = parsed.path if allow_https_path and parsed.scheme == "https" else "/"
+    return urlunsplit((schemes[parsed.scheme], parsed.netloc, path or "/", "", ""))
 
 
 class HttpsJsonRpcTransport:
@@ -89,12 +90,13 @@ class HttpsJsonRpcTransport:
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
         sleep: Callable[[float], None] = time.sleep,
+        allow_https_path: bool = False,
     ) -> None:
         if isinstance(timeout_seconds, bool) or not 1 <= int(timeout_seconds) <= 600:
             raise LocalWeightSignerError("chain RPC timeout is invalid")
         if isinstance(max_response_bytes, bool) or not 1 <= int(max_response_bytes) <= CHAIN_MAX_RPC_RESPONSE_BYTES:
             raise LocalWeightSignerError("chain RPC response limit is invalid")
-        self.endpoint = _http_rpc_endpoint(endpoint)
+        self.endpoint = _http_rpc_endpoint(endpoint, allow_https_path=allow_https_path)
         self.timeout_seconds = int(timeout_seconds)
         self.max_response_bytes = int(max_response_bytes)
         self._opener = opener
@@ -474,9 +476,9 @@ def build_local_weight_signer(
     selected_archive_endpoint = archive_endpoint or (
         OFFICIAL_BITTENSOR_ARCHIVE_ENDPOINT if network == "finney" else endpoint
     )
-    # An operator-selected archive is also only a transport. Its origin must
+    # An operator-selected archive is also only a transport. Its URL must
     # remain safe even when tests or callers inject the transport itself.
-    _http_rpc_endpoint(selected_archive_endpoint)
+    _http_rpc_endpoint(selected_archive_endpoint, allow_https_path=True)
 
     if isinstance(cutover, SubnetEpochCutover):
         normalized_cutover = cutover.to_dict()
@@ -514,7 +516,7 @@ def build_local_weight_signer(
         archive = archive_transport
     else:
         archive = HttpsJsonRpcTransport(
-            selected_archive_endpoint, timeout_seconds=int(timeout)
+            selected_archive_endpoint, timeout_seconds=int(timeout), allow_https_path=True,
         )
     source = HostValidatorChainSource(
         live_transport=live,

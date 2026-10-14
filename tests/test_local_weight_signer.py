@@ -91,6 +91,52 @@ def test_https_transport_converts_wss_and_binds_strict_json_rpc():
         transport.call(method="chain_getBlockHash", params=[3], request_id=7)
 
 
+@pytest.mark.parametrize("path", ["/public", "/public/", "/RPC/%2F/v1", "/rpc//v1/"])
+def test_explicit_https_archive_path_is_preserved_in_rpc_request(path):
+    observed = []
+
+    def open_request(request, *, timeout):
+        observed.append((request.full_url, request.method, json.loads(request.data)))
+        return _Response(b'{"jsonrpc":"2.0","id":7,"result":"0xabc"}')
+
+    endpoint = "https://archive.operator.example:443" + path
+    transport = HttpsJsonRpcTransport(
+        endpoint, timeout_seconds=4, opener=open_request, allow_https_path=True,
+    )
+    assert transport.call(method="chain_getBlockHash", params=[3], request_id=7) == "0xabc"
+    assert observed == [(endpoint, "POST", {
+        "jsonrpc": "2.0", "id": 7, "method": "chain_getBlockHash", "params": [3],
+    })]
+
+
+def test_https_path_remains_invalid_for_default_live_transport():
+    with pytest.raises(LocalWeightSignerError, match="credential-free origin"):
+        HttpsJsonRpcTransport("https://rpc.operator.example/public", timeout_seconds=4)
+
+
+@pytest.mark.parametrize("endpoint", [
+    "wss://archive.operator.example/public", "ws://127.0.0.1:9944/public",
+    "http://127.0.0.1:9944/public", "http://archive.operator.example/public",
+    "https://user:secret@archive.operator.example/public",
+    "https://archive.operator.example/public?key=secret",
+    "https://archive.operator.example/public#fragment",
+])
+def test_archive_path_option_does_not_allow_unsafe_urls(endpoint):
+    with pytest.raises(LocalWeightSignerError):
+        HttpsJsonRpcTransport(endpoint, timeout_seconds=4, allow_https_path=True)
+
+
+@pytest.mark.parametrize("endpoint,expected", [
+    ("wss://archive.operator.example:443/", "https://archive.operator.example:443/"),
+    ("ws://127.0.0.1:9944/", "http://127.0.0.1:9944/"),
+    ("https://archive.operator.example:443/", "https://archive.operator.example:443/"),
+])
+def test_archive_path_option_preserves_existing_origin_conversion(endpoint, expected):
+    assert HttpsJsonRpcTransport(
+        endpoint, timeout_seconds=4, allow_https_path=True,
+    ).endpoint == expected
+
+
 def test_https_transport_rejects_plaintext_wan_and_oversized_reply():
     with pytest.raises(LocalWeightSignerError, match="loopback"):
         HttpsJsonRpcTransport("ws://chain.example", timeout_seconds=1)
@@ -423,6 +469,7 @@ def test_public_profile_selection_is_network_and_cutover_bound():
         ("ws://rpc.operator.example:9944", "loopback"),
         ("wss://user:password@rpc.operator.example:443", "credential-free origin"),
         ("wss://rpc.operator.example:443/rpc", "credential-free origin"),
+        ("https://rpc.operator.example:443/public", "credential-free origin"),
     ],
 )
 def test_builder_validates_custom_endpoint_with_injected_transports(endpoint, message):
@@ -506,7 +553,11 @@ def test_custom_chain_transport_readiness_rejects_wrong_chain_identity(runtime, 
         client.close()
 
 
-def test_builder_allows_an_explicit_safe_finney_archive():
+@pytest.mark.parametrize("endpoint,expected", [
+    ("wss://archive.operator.example:443", "https://archive.operator.example:443/"),
+    ("https://archive.operator.example:443/public/", "https://archive.operator.example:443/public/"),
+])
+def test_builder_allows_an_explicit_safe_finney_archive(endpoint, expected):
     from bittensor_wallet import Keypair
 
     signing_key, signing_key_hash = _arena_key()
@@ -523,18 +574,25 @@ def test_builder_allows_an_explicit_safe_finney_archive():
         signing_key_hash,
         load_arena_cutover({}),
         burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
-        archive_endpoint="wss://archive.operator.example:443",
+        archive_endpoint=endpoint,
         live_transport=_Transport(),
         drand_backend=object(),
     )
     assert (
         client._chain_source._host_archive_transport.endpoint
-        == "https://archive.operator.example:443/"
+        == expected
     )
     client.close()
 
 
-def test_builder_validates_explicit_archive_with_injected_transport():
+@pytest.mark.parametrize("endpoint", [
+    "wss://user:secret@archive.operator.example:443",
+    "https://user:secret@archive.operator.example/public",
+    "https://archive.operator.example/public?key=secret",
+    "https://archive.operator.example/public#fragment",
+    "wss://archive.operator.example/public",
+])
+def test_builder_validates_explicit_archive_with_injected_transport(endpoint):
     from bittensor_wallet import Keypair
 
     signing_key, signing_key_hash = _arena_key()
@@ -552,7 +610,7 @@ def test_builder_validates_explicit_archive_with_injected_transport():
             signing_key_hash,
             load_arena_cutover({}),
             burn_hotkey="5FNVgRnrxMibhcBGEAaajGrYjsaCn441a5HuGUBUNnxEBLo9",
-            archive_endpoint="wss://user:secret@archive.operator.example:443",
+            archive_endpoint=endpoint,
             live_transport=_Transport(),
             archive_transport=_Transport(),
             drand_backend=object(),

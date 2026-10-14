@@ -1187,14 +1187,23 @@ def test_compact_publication_combines_persisted_ten_plus_twenty_scores_without_o
                 "stage": 1 if position < contracts.STAGE_1_ICP_COUNT else 2,
                 "attempt": 1,
                 "terminal_cause": "accepted",
+                "kind": "execute",
+                "status": "accepted",
+                "miner_hotkey": participant["miner_hotkey"],
+                "output_ref": "outputs/%s/%d" % (participant["submission_id"], position),
+                "result_doc": {"terminal_status": "accepted"},
                 "per_icp_score": score,
             })
+    # Publication now requires each persisted score's accepted source and judge.
+    runs += [dict(run, run_id=run["run_id"] + "-judge", kind="score",
+                  scored_run_id=run["run_id"], per_icp_score=None,
+                  output_ref=run["output_ref"] + "-judge") for run in runs]
     writes = []
 
     class Store:
         @staticmethod
-        def list_runs(_round_id, **_filters):
-            return runs
+        def list_runs(_round_id, *, kind=None, **_filters):
+            return [run for run in runs if kind is None or run["kind"] == kind]
 
         @staticmethod
         def transition_round(_round_id, old, new, patch):
@@ -1214,6 +1223,7 @@ def test_compact_publication_combines_persisted_ten_plus_twenty_scores_without_o
     service._clock = lambda: datetime(2026, 9, 2, 2, 0, tzinfo=timezone.utc)
     service._round = lambda _round_id: {
         "round_id": round_id, "status": "scored", "participants": participants, "finalists": ["challenger"],
+        "configuration_doc": {"schedule": {"publication_deadline": "2026-09-02T20:30:00Z"}},
     }
     result = service.publish(round_id)
     assert result == {"status": "ok", "king_outcome": "crowned", "king_hotkey": challenger}
@@ -1312,7 +1322,7 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
         prior_bases=(),
         champion_hotkey="",
         fallback_providers=(),
-        complete_baseline=False,
+        current_funding_snapshot=False,
     ):
         signer = signing.LocalSigner.generate()
         prior = [
@@ -1353,34 +1363,41 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
         captured = {}
         baseline_id = "baseline-2026-09-02"
         run_rows = []
-        if complete_baseline:
-            for stage in (1, 2):
-                for position in contracts.stage_positions(stage):
-                    execute_id = "baseline-execute-%d-%d" % (stage, position)
-                    run_rows.extend(
-                        (
-                            {
-                                "run_id": execute_id,
-                                "submission_id": baseline_id,
-                                "stage": stage,
-                                "icp_position": position,
-                                "attempt": 1,
-                                "kind": "execute",
-                                "status": "accepted",
-                                "per_icp_score": 75.0,
-                            },
-                            {
-                                "run_id": "baseline-score-%d-%d" % (stage, position),
-                                "submission_id": baseline_id,
-                                "stage": stage,
-                                "icp_position": position,
-                                "attempt": 1,
-                                "kind": "score",
-                                "status": "accepted",
-                                "scored_run_id": execute_id,
-                            },
-                        )
+        for stage in (1, 2):
+            for position in contracts.stage_positions(stage):
+                execute_id = "baseline-execute-%d-%d" % (stage, position)
+                run_rows.extend(
+                    (
+                        {
+                            "run_id": execute_id,
+                            "submission_id": baseline_id,
+                            "stage": stage,
+                            "icp_position": position,
+                            "attempt": 1,
+                            "kind": "execute",
+                            "status": "accepted",
+                            "per_icp_score": 75.0,
+                        },
+                        {
+                            "run_id": "baseline-score-%d-%d" % (stage, position),
+                            "submission_id": baseline_id,
+                            "stage": stage,
+                            "icp_position": position,
+                            "attempt": 1,
+                            "kind": "score",
+                            "status": "accepted",
+                            "scored_run_id": execute_id,
+                        },
                     )
+                )
+
+        # A published reward fixture always has completed, source-bound baseline
+        # work. The funding snapshot separately controls restoration of a prior
+        # half-share factor, rather than relying on an incomplete baseline.
+        for run in run_rows:
+            run.update(round_id="arena-2026-09-02", miner_hotkey=baseline,
+                       terminal_cause="accepted", output_ref="outputs/" + run["run_id"],
+                       result_doc={"terminal_status": "accepted"})
 
         reward_queries = []
 
@@ -1431,7 +1448,7 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
             "status": "published",
             "reward_activated_at": None,
             "baseline_promoted_at": "2026-09-02T00:00:01Z" if daily_hotkey else None,
-            "champion_funding_frozen": True,
+            "champion_funding_frozen": current_funding_snapshot or bool(fallback_providers),
             "champion_hotkey": champion_hotkey or None,
             "champion_fallback_providers": list(fallback_providers),
             "participants": [
@@ -1511,7 +1528,7 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
         previous_hotkey=miner_a,
         previous_factor=500_000,
         champion_hotkey=miner_a,
-        complete_baseline=True,
+        current_funding_snapshot=True,
     )
     assert restored["champion_reward_factor_ppm"] == 1_000_000
     with pytest.raises(ServiceError, match="champion_funding_state_invalid"):

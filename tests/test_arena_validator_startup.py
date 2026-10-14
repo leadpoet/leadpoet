@@ -290,33 +290,39 @@ def test_environment_endpoint_is_used_when_flag_is_absent(monkeypatch, startup_h
     assert signer_config.endpoint == "wss://env.example:443"
 
 
-def test_archive_endpoint_flag_wins_over_environment(monkeypatch, startup_harness):
+@pytest.mark.parametrize("endpoint", [
+    "wss://archive-flag.example:443", "https://archive-flag.example:443/public/",
+])
+def test_archive_endpoint_flag_wins_over_environment(monkeypatch, startup_harness, endpoint):
     _clear_startup_environment(monkeypatch)
     monkeypatch.setenv("LAB_ARENA_ARCHIVE_ENDPOINT", "wss://archive-env.example:443")
 
     assert validator.main([
         "--check-only",
         "--arena-archive-endpoint",
-        "wss://archive-flag.example:443",
+        endpoint,
     ]) == 0
 
     assert (
         startup_harness.captured["signer_args"][-1]["archive_endpoint"]
-        == "wss://archive-flag.example:443"
+        == endpoint
     )
 
 
+@pytest.mark.parametrize("endpoint", [
+    "wss://archive-env.example:443", "https://archive-env.example:443/RPC/%2F/",
+])
 def test_archive_endpoint_environment_is_used_when_flag_is_absent(
-    monkeypatch, startup_harness
+    monkeypatch, startup_harness, endpoint
 ):
     _clear_startup_environment(monkeypatch)
-    monkeypatch.setenv("LAB_ARENA_ARCHIVE_ENDPOINT", "wss://archive-env.example:443")
+    monkeypatch.setenv("LAB_ARENA_ARCHIVE_ENDPOINT", endpoint)
 
     assert validator.main(["--check-only"]) == 0
 
     assert (
         startup_harness.captured["signer_args"][-1]["archive_endpoint"]
-        == "wss://archive-env.example:443"
+        == endpoint
     )
 
 
@@ -457,6 +463,10 @@ def test_unsafe_explicit_endpoint_is_rejected_before_chain_connect(
         ("ws://203.0.113.10:9944", "plaintext chain RPC"),
         ("wss://user:secret@archive.example:443", "credential-free origin"),
         ("wss://archive.example:443/rpc", "credential-free origin"),
+        ("http://127.0.0.1:9944/public", "credential-free origin"),
+        ("https://user:secret@archive.example/public", "credential-free origin"),
+        ("https://archive.example/public?key=secret", "credential-free origin"),
+        ("https://archive.example/public#fragment", "credential-free origin"),
     ],
 )
 def test_unsafe_archive_endpoint_is_rejected_before_wallet_or_network_io(

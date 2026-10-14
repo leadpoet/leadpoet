@@ -212,7 +212,10 @@ default. To use an operator-owned archive, set `LAB_ARENA_ARCHIVE_ENDPOINT` or
 pass `--arena-archive-endpoint`; the command-line flag takes precedence. Test
 networks use the selected live endpoint as the archive default.
 
-Archive endpoints must be credential-free WebSocket or HTTP origins. The signer
+Archive endpoints must be credential-free WebSocket or HTTP origins, or explicit
+trusted HTTPS URLs with a path. HTTPS archive paths retain their exact case,
+escaping and trailing slash; paths on other schemes remain invalid. Userinfo,
+query strings and fragments are not permitted. The signer
 converts `wss://` to `https://` and `ws://` to `http://` for JSON-RPC, so the
 same endpoint must accept HTTP POST requests. Remote endpoints require TLS with
 normal certificate verification. There is no insecure TLS bypass. Plaintext is

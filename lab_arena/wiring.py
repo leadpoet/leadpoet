@@ -693,10 +693,13 @@ def build_runner_from_environment(args, *, keypair=None, operational_logger=None
             runner_config.evaluation_date = round_id.replace("arena-", "")[:10]
         runner = runner_module.Runner(runner_config)
         if operational_logger is not None:
+            usable, quarantined = runner._capacity_snapshot()
             fields = {"phase": "scoring_setup", "ready_slots": startup.parallelism,
-                      "proxy_count": startup.verified_proxies.webshare_worker_count}
+                      "proxy_count": startup.verified_proxies.webshare_worker_count,
+                      "usable_slots": usable, "quarantined_slots": quarantined}
             operational_logger.state(scoring_state="ready", progress=True,
-                                     ready_slots=startup.parallelism, proxy_count=fields["proxy_count"])
+                                     ready_slots=startup.parallelism, proxy_count=fields["proxy_count"],
+                                     usable_slots=usable, quarantined_slots=quarantined)
             operational_logger.emit("validator.ready", fields)
         return runner
     except BaseException:

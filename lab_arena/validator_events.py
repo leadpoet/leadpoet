@@ -20,14 +20,21 @@ KINDS = frozenset({
     'validator.startup', 'validator.ready', 'validator.state',
     'validator.error', 'validator.recovered', 'validator.stopping',
 })
+CLAIM_STATUSES = frozenset({
+    'leased', 'no_pending', 'no_open_round', 'no_free_slot', 'paused',
+    'stage_closed', 'cache_busy', 'request_id_reused', 'rejected',
+    'request_failed', 'no_local_capacity', 'other',
+})
 TEXT_KEYS = frozenset({
     'phase', 'state', 'reason', 'operation', 'error_class', 'denial_code',
     'scoring_state', 'weights_state', 'last_progress_at', 'last_poll_at',
     'last_completion_at', 'launch_stderr', 'validator_source_commit',
     'validator_source_dirty', 'validator_source_origin', 'session_id',
+    'last_claim_status', 'last_claim_round_id',
 })
 INTEGER_KEYS = frozenset({'http_status', 'attempt', 'active_runs', 'ready_slots',
-                          'proxy_count', 'launch_exit_code'})
+                          'proxy_count', 'launch_exit_code', 'usable_slots',
+                          'quarantined_slots'})
 BOOLEAN_KEYS = frozenset({'retryable', 'launch_timed_out', 'launch_stderr_truncated'})
 CONTENT_KEYS = TEXT_KEYS | INTEGER_KEYS | BOOLEAN_KEYS | {'delay_seconds'}
 _QUOTED_SECRET = re.compile(
@@ -79,12 +86,18 @@ def validate_event(value: Any) -> dict:
                     item = str(uuid.UUID(item))
                 except ValueError:
                     raise ValidatorEventError('validator session invalid') from None
+            if key == 'last_claim_status' and item not in CLAIM_STATUSES:
+                raise ValidatorEventError('validator claim status invalid')
+            if key == 'last_claim_round_id' and not _ID.fullmatch(item):
+                raise ValidatorEventError('validator claim round invalid')
             sanitized[key] = redact_text(item)
         elif key in BOOLEAN_KEYS and isinstance(item, bool):
             sanitized[key] = item
         elif key in INTEGER_KEYS and isinstance(item, int) and not isinstance(item, bool):
             if not -2147483648 <= item <= 2147483647:
                 raise ValidatorEventError('validator event integer out of bounds')
+            if key in {'usable_slots', 'quarantined_slots'} and not 0 <= item <= 251:
+                raise ValidatorEventError('validator slot count invalid')
             sanitized[key] = item
         elif key == 'delay_seconds' and isinstance(item, (int, float)) and not isinstance(item, bool) and 0 <= item <= 86400 and math.isfinite(item):
             sanitized[key] = item

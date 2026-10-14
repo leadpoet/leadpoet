@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
-from lab_arena import trajectory
+from lab_arena import trajectory, validator_events
 from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, runtime_version, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
 from lab_arena.broker import provider_credit_failure_reason
@@ -4213,6 +4213,35 @@ class Runner:
         self._round_ids: List[str] = [config.round_id] if config.round_id else []
         self._pending_completion_cursor = ""
         self._pending_completion_next_poll = 0.0
+        self._report_capacity()
+
+    def _capacity_snapshot(self) -> Tuple[int, int]:
+        # ready_slots records startup inventory. This reports the current
+        # claim ceiling after permanent worker quarantine; active_runs is separate.
+        pool = self._config.proxy_worker_pool
+        quarantined = pool.quarantined if pool is not None else 0
+        capacity = self._config.max_parallel_runs
+        if pool is not None:
+            capacity = min(capacity, pool.capacity - quarantined)
+        return max(0, capacity), quarantined
+
+    def _report_capacity(self) -> int:
+        usable, quarantined = self._capacity_snapshot()
+        log = self._config.operational_logger
+        if log is not None:
+            log.state(usable_slots=usable, quarantined_slots=quarantined)
+        return usable
+
+    def _report_claim_status(self, status: Any, round_id: Optional[str] = None) -> None:
+        log = self._config.operational_logger
+        if log is not None:
+            log.state(
+                last_claim_status=(
+                    status if isinstance(status, str)
+                    and status in validator_events.CLAIM_STATUSES else "other"
+                ),
+                last_claim_round_id=round_id,
+            )
 
     @property
     def round_id(self) -> Optional[str]:
@@ -4261,9 +4290,11 @@ class Runner:
         config = self._config
         round_id = round_id or self.round_id
         if round_id is None:
+            self._report_claim_status("no_open_round")
             return {"status": "no_open_round"}
-        capacity = self._usable_parallelism()
+        capacity = self._report_capacity()
         if capacity < 1:
+            self._report_claim_status("no_local_capacity", round_id)
             return {"status": "no_pending"}
         envelope = contracts.build_signed_request(
             scope=contracts.SCOPE_CLAIM,
@@ -4287,6 +4318,7 @@ class Runner:
         while True:
             try:
                 response = config.api.claim(envelope)
+                self._report_claim_status(response.get("status"), round_id)
                 if (config.operational_logger is not None and isinstance(response.get("status"), str)
                     and response["status"] in (_IDLE_CLAIM_STATUSES | {"leased"})):
                     config.operational_logger.recovered("claim", round_id=round_id)
@@ -4298,21 +4330,13 @@ class Runner:
                 try:
                     delay = next(retry_delays)
                 except StopIteration:
+                    self._report_claim_status("request_failed", round_id)
                     raise exc from None
                 time.sleep(max(0.0, float(delay)))
 
     def _usable_parallelism(self) -> int:
         """Return the current claim limit after permanent route quarantine."""
-
-        config = self._config
-        capacity = config.max_parallel_runs
-        if config.proxy_worker_pool is not None:
-            capacity = min(
-                capacity,
-                config.proxy_worker_pool.capacity
-                - config.proxy_worker_pool.quarantined,
-            )
-        return max(0, capacity)
+        return self._capacity_snapshot()[0]
 
     def _pending_completion_dir(self, *, create: bool = False) -> Optional[Path]:
         directory = self._config.work_dir / "pending-completions"
@@ -4537,6 +4561,7 @@ class Runner:
             if log is not None:
                 log.activity(-1)
             self._slots.release()
+            self._report_capacity()
 
     def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         with self._retain_completion(envelope) as path:
@@ -4674,6 +4699,8 @@ class Runner:
             return False
 
         round_ids = list(self._round_ids)
+        if not round_ids:
+            self._report_claim_status("no_open_round")
         round_index = 0
         rescan_while_active = False
         while round_index < len(round_ids):
@@ -4688,8 +4715,9 @@ class Runner:
                 futures.difference_update(done)
                 for future in done:
                     future.result()
-                usable_parallelism = self._usable_parallelism()
+                usable_parallelism = self._report_capacity()
                 if usable_parallelism < 1:
+                    self._report_claim_status("no_local_capacity", round_id)
                     break
                 if not self._slots.acquire(blocking=False):
                     if not wait_for_completion():
@@ -4783,6 +4811,7 @@ class Runner:
                     future.result()
                 break
         if log is not None:
+            self._report_capacity()
             log.state(scoring_state="unavailable" if pickup_failed else "idle", progress=not pickup_failed)
         return taken
 

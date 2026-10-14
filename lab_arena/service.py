@@ -1458,6 +1458,68 @@ class ArenaService:
         }
         return {**row, "configuration_doc": configuration}
 
+    def _frozen_unfinished_judgment(self, row: Mapping[str, Any]) -> bool:
+        """Prove an old score is unfinished using only compact run authority."""
+        if row["status"] != "scored":
+            return False
+        # An absent or invalid evaluation day is not proof that this round
+        # predates the continuation rollout.
+        try:
+            self._evaluation_day(row)
+        except ServiceError:
+            return False
+        if _judge_continuation_enabled(row):
+            return False
+        deadline = ((row.get("configuration_doc") or {}).get("schedule") or {}).get(
+            "publication_deadline")
+        try:
+            if not deadline or self.now() < _parse_iso(deadline):
+                return False
+        except (TypeError, ValueError):
+            return False
+        round_id = str(row["round_id"])
+        runs = self._store.list_runs(
+            round_id,
+            columns="run_id,kind,stage,status,scored_run_id,per_icp_score",
+        )
+        if any(run.get("status") in ("pending", "leased", "submitted") for run in runs):
+            return False
+        accepted_judges = {
+            str(run.get("scored_run_id")) for run in runs
+            if run.get("kind") == "score" and run.get("status") == "accepted"
+        }
+        return any(
+            run.get("per_icp_score") is None
+            or str(run.get("run_id")) not in accepted_judges
+            for run in runs
+            if run.get("kind") == "execute" and run.get("stage") in (1, 2)
+            and run.get("status") == "accepted"
+        )
+
+    def _round_needs_active_poll(
+        self, row: Mapping[str, Any], *, public_only: bool = False,
+    ) -> bool:
+        """Keep billing active while omitting frozen judges from worker polling."""
+
+        try:
+            frozen = self._frozen_unfinished_judgment(row)
+        except (ArenaStoreError, ArenaStoreUnavailable, ServiceError):
+            return True
+        if not frozen:
+            return True
+        if public_only:
+            return False
+        round_id = str(row["round_id"])
+        # Only the existing bounded reconciliation reads may keep this round
+        # in the driver. Closed-round billing does not select scored rounds.
+        try:
+            if (self._store.list_openrouter_cost_reconciliations(round_id, limit=1)
+                or self._store.list_deepline_cost_reconciliations(round_id, limit=1)):
+                return True
+        except (ArenaStoreError, ArenaStoreUnavailable):
+            return True
+        return False
+
     def active_rounds(self, *, public_only: bool = False) -> List[Dict[str, Any]]:
         """Every active round, oldest first, with its public pinned output policy.
 
@@ -1467,7 +1529,8 @@ class ArenaService:
 
         if self._pinned_round_id() is not None:
             row = self._pinned_round()
-            if row is None or row["status"] in TERMINAL_STATUSES:
+            if (row is None or row["status"] in TERMINAL_STATUSES
+                or not self._round_needs_active_poll(row, public_only=public_only)):
                 return []
             return [{
                 "round_id": row["round_id"],
@@ -1489,7 +1552,7 @@ class ArenaService:
                 limit=page_size,
                 offset=offset,
                 columns=(
-                    "round_id,status,created_at,"
+                    "round_id,status,created_at,evaluation_date,rewards_enabled,"
                     + (PUBLIC_CONFIGURATION_COLUMN if public_only else "configuration_doc")
                 ),
             )
@@ -1500,6 +1563,7 @@ class ArenaService:
                 for row in page
                 if row["status"] not in TERMINAL_STATUSES
                 and (row.get("configuration_doc") or {}).get("mode") == self._config.mode
+                and self._round_needs_active_poll(row, public_only=public_only)
             )
             if len(page) < page_size:
                 break
@@ -5956,6 +6020,9 @@ class ArenaService:
                 if _judge_continuation_enabled(round_row):
                     with telemetry.stage("advance_expire_leases"):
                         self._store.expire_leases(round_id)
+                if self._frozen_unfinished_judgment(round_row):
+                    return {"status": "waiting", "round_status": status,
+                            "reason": "frozen_judgment_incomplete"}
                 try:
                     with telemetry.stage("advance_publish"):
                         return self.publish(round_id)

@@ -209,7 +209,9 @@ def test_default_driver_reward_and_weight_reads_keep_full_configuration():
     row, _ = _reward()
     service, transport = _service([_active(), row])
     service.active_rounds()
-    assert transport.calls[-1]["columns"] == "round_id,status,created_at,configuration_doc"
+    assert transport.calls[-1]["columns"] == (
+        "round_id,status,created_at,evaluation_date,rewards_enabled,configuration_doc"
+    )
     service.latest_published_round()
     assert transport.calls[-1]["columns"] == "round_id,status,published_at,configuration_doc,king_outcome,king_hotkey,effective_reward_epoch,reward_basis_hash"
     assert service.public_reward_basis(101) == row["reward_basis_doc"]

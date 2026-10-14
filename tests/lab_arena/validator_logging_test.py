@@ -47,6 +47,69 @@ def test_error_suppression_redaction_and_recovery():
     assert [e['kind'] for e in queued(log)] == ['validator.error', 'validator.error', 'validator.recovered']
 
 
+@pytest.mark.parametrize('cause_type', (TimeoutError, ConnectionError))
+def test_wrapped_errors_keep_underlying_type_without_private_messages(cause_type):
+    from urllib.error import URLError
+
+    private = 'https://private.invalid/?api_key=DO-NOT-LOG'
+    root = cause_type(private)
+    transport = URLError(private)
+    transport.__cause__ = root
+    error = RuntimeError(private)
+    error.__cause__ = transport
+    log = logger()
+    log.error('weights', error)
+    log.error('weights', error)
+    assert len(queued(log)) == 1
+    content = queued(log)[0]['content']
+    assert content['error_class'] == 'RuntimeError'
+    assert content['reason'] == 'caused_by:' + cause_type.__name__
+    assert 'private.invalid' not in str(queued(log))
+    assert 'DO-NOT-LOG' not in str(queued(log))
+
+
+def test_cause_logging_preserves_explicit_reason_and_suppressed_context():
+    error = RuntimeError('private message')
+    error.__context__ = TimeoutError('private URL')
+    log = logger()
+    log.error('weights', error, reason='prior_epoch_25770')
+    assert queued(log)[0]['content']['reason'] == 'prior_epoch_25770'
+    log.error('other', error)
+    assert queued(log)[1]['content']['reason'] == 'caused_by:TimeoutError'
+    error.__suppress_context__ = True
+    log.error('suppressed', error)
+    assert 'reason' not in queued(log)[2]['content']
+
+
+def test_cause_logging_bounds_cycles_depth_and_type_length():
+    from lab_arena.validator_logging import _cause_reason
+
+    error = RuntimeError('private')
+    cause = TimeoutError('private')
+    error.__cause__ = cause
+    cause.__cause__ = error
+    assert _cause_reason(error) == 'caused_by:TimeoutError'
+    deep = error = RuntimeError('private')
+    for _ in range(8):
+        deep.__cause__ = ValueError('private')
+        deep = deep.__cause__
+    deep.__cause__ = TimeoutError('private')
+    assert _cause_reason(error) == 'caused_by:ValueError'
+    error.__cause__ = type('Long' * 60, (Exception,), {})('private')
+    assert len(_cause_reason(error)) == len('caused_by:') + 128
+
+
+def test_changed_underlying_failure_is_not_hidden_by_error_deduplication():
+    log = logger()
+    for cause in (TimeoutError(), ConnectionError()):
+        error = RuntimeError('private')
+        error.__cause__ = cause
+        log.error('weights', error)
+    assert [item['content']['reason'] for item in queued(log)] == [
+        'caused_by:TimeoutError', 'caused_by:ConnectionError',
+    ]
+
+
 def test_gateway_unavailable_keeps_queue_bounded_and_close_bounded():
     attempted = threading.Event()
 

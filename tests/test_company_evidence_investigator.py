@@ -42,6 +42,7 @@ from qualification.scoring.linkedin_company_size import (
     VERIFIER_FAILURE_REASON_KEY,
 )
 from qualification.scoring.lead_scorer import (
+    _decision_from_observed_employee_size,
     _employee_size_sources_conflict,
     _project_investigator_geography,
     _project_investigator_headcount,
@@ -17468,6 +17469,105 @@ def test_headcount_count_unit_grounding_and_deterministic_range(status, bands, e
         identity_names={"other"},
     )
     assert wrong_company is None or wrong_company["headcount"]["status"] == "UNPROVEN"
+
+
+def test_saved_oct14_kerv_headcount_reaches_final_size_decision():
+    # Exact headcount finding from baseline-2026-10-14, ICP position 7.
+    url = "https://www.linkedin.com/company/kerv-ai"
+    quote = (
+        "KERV.ai | LinkedIn\n\n \n\n \n\n### Austin, Texas 5,782 followers \n\n"
+        "#### Content. Context. Commerce. \n\n## About us \n\n "
+        "KERV.ai is powering the convergence of AI-video content, context, and commerce "
+        "for the world's leading brands, agencies, and publishers. Our patented AI "
+        "technology captures metadata across every video frame at the pixel edge to "
+        "identify, analyze and match context and objects to interactive and shoppable "
+        "advertising, driving unparalleled performance for advertisers and monetization "
+        "opportunities for content owners. \n\n Website \n\n https://kerv.ai/ \n\n"
+        "External link for KERV.ai\n\n Industry \n\n Advertising Services \n\n"
+        " Company size \n\n 51-200 employees"
+    )
+    finding = _finding(
+        "headcount", observed_value="51-200 employees", evidence_url=url,
+        evidence_quote=quote, old_name="KERV", new_name="KERV.ai",
+        old_domain="kerv.ai", new_domain="kerv.ai",
+        shared_linkedin_slug="kervinteractive",
+        reason=(
+            "The fetched LinkedIn company profile identifies KERV.ai and gives its "
+            "company-wide size band as 51-200 employees, which is within a requested band."
+        ),
+    )
+    grounded = _validated_findings(
+        {"findings": [finding]}, targets=("headcount",),
+        fetched_pages={url: quote}, first_party_domains={"kerv.ai"},
+        identity_names={"kerv", "kervai"},
+    )
+    assert grounded["headcount"]["status"] == "VERIFIED"
+    icp = _icp(employee_count="51-200 or 201-500 or 501-1,000 or 1,001-5,000")
+    projected = _project_investigator_headcount(
+        {}, grounded["headcount"], icp=icp, existing_conflict=False,
+    )
+    assert projected["observed_employee_count"] == "51-200"
+    assert projected["employee_size_matches"] is True
+    assert projected["employee_size_evidence_quote"] == quote
+    assert finding["observed_value"] == "51-200 employees"
+    assert _decision_from_observed_employee_size(projected, icp) == COMPANY_FIT_MATCH
+    assert _reverify_decision(projected, "", "", icp=icp).details[
+        "dimension_decisions"
+    ]["employee_size"] == COMPANY_FIT_MATCH
+
+    unbound = _validated_findings(
+        {"findings": [finding]}, targets=("headcount",),
+        fetched_pages={url: quote}, first_party_domains={"kerv.ai"},
+        identity_names={"other_company"},
+    )
+    assert unbound is None or unbound["headcount"]["status"] == "UNPROVEN"
+    assert _project_investigator_headcount(
+        {}, unbound.get("headcount") if unbound else None,
+        icp=icp, existing_conflict=False,
+    ) == {}
+    assert _project_investigator_headcount(
+        {}, grounded["headcount"], icp=icp, existing_conflict=True,
+    ) == {}
+
+
+@pytest.mark.parametrize(
+    ("observed", "quote", "expected_observed", "expected_decision"),
+    [
+        ("51-200", "Acme Company size 51-200 employees", "51-200", COMPANY_FIT_MATCH),
+        ("51-200 employees", "Acme Company size 51-200 employees", "51-200", COMPANY_FIT_MATCH),
+        (127, "Acme has 127 employees company-wide.", 127, COMPANY_FIT_MATCH),
+        ("127", "Acme has 127 employees company-wide.", "127", COMPANY_FIT_MATCH),
+        ("11-50 employees", "Acme Company size 11-50 employees", "11-50", COMPANY_FIT_MISMATCH),
+    ],
+)
+def test_investigator_headcount_projection_preserves_final_size_semantics(
+    observed, quote, expected_observed, expected_decision,
+):
+    icp = _icp(employee_count="51-200")
+    finding = _finding(
+        "headcount", observed_value=observed,
+        evidence_url="https://www.linkedin.com/company/acme",
+        evidence_quote=quote,
+    )
+    projected = _project_investigator_headcount(
+        {}, finding, icp=icp, existing_conflict=False,
+    )
+    assert projected["observed_employee_count"] == expected_observed
+    assert projected["employee_size_evidence_quote"] == quote
+    assert _decision_from_observed_employee_size(projected, icp) == expected_decision
+
+
+@pytest.mark.parametrize("observed", ["51ish-200ish", "100000-200000"])
+def test_investigator_headcount_projection_rejects_malformed_range(observed):
+    finding = _finding(
+        "headcount", observed_value=observed,
+        evidence_url="https://www.linkedin.com/company/acme",
+        evidence_quote="Acme Company size 51-200 employees",
+    )
+    assert _project_investigator_headcount(
+        {}, finding, icp=_icp(employee_count="51-200"),
+        existing_conflict=False,
+    ) == {}
 
 
 def test_saved_soneil_count_unit_findings_preserve_identity_binding():

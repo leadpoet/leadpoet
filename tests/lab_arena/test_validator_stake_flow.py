@@ -9,8 +9,9 @@ from lab_arena import contracts, runner as rn
 from lab_arena.api import create_app
 from lab_arena.validator import run_validator_loops
 from tests.lab_arena.test_lab_arena_service_round import (
-    Harness, _start_round, _run_stage_one_to_scoring, connect, database, keypair,
+    Harness, _start_round, _run_stage_one_to_scoring, connect, keypair,
 )
+from tests.lab_arena.test_lab_arena_normal_weight_flow import integrated_database as database
 from tests.test_arena_validator_local_runtime import _ImmediateStop, _WeightRecorder
 
 

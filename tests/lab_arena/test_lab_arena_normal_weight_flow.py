@@ -19,6 +19,7 @@ from bittensor_wallet import Keypair
 from fastapi.testclient import TestClient
 
 from lab_arena import broker, contracts, rewards, scoring, signing, submission_runtime
+from lab_arena import verify
 from leadpoet_canonical import arena_weights
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
@@ -44,6 +45,9 @@ from tests.lab_arena.test_lab_arena_service_round import (
     Harness, _run_stage_one_to_scoring, _start_round, promotion_repository,
     assert_canary_absent, CANARY_KEYS, FakeProviderTransport, price_table, daily_icps,
 )
+from tests.lab_arena import test_lab_arena_service_round as service_fixtures
+from tests.lab_arena.test_integrity_round import IntegrityHarness
+from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.postgres_migration_harness import SCRIPTS
 from lab_arena.weight_signer import ArenaWeightSigner
 
@@ -95,6 +99,77 @@ RETIRED_EPOCH_WRITE_FUNCTIONS = (
 TEMPORARY_WEIGHT_TRIGGER_FUNCTIONS = (
     "enforce_temporary_testnet401_execution_result_epoch_scope_v1",
     "enforce_temporary_testnet401_weight_submission_epoch_scope_v1",
+)
+
+
+# Keep the historical retirement setup below intact, then install the same
+# ordered current RPC tail as host_interruption_retry474_postgres_test.
+# Later provider/reward bodies and partial checkpoints must not precede their
+# hash-bound lease/claim upgrades. All files are executed verbatim.
+CURRENT_NORMAL_WEIGHT_TAIL = (
+    '329-lab-arena-explicit-90m-lease.sql',
+    '354-lab-arena-60m-lease.sql',
+    '359-lab-arena-setup-failure-model-retry.sql',
+    '360-lab-arena-zero-setup-runner-handoff.sql',
+    '365-lab-arena-trajectories.sql',
+    '366-lab-arena-trajectory-capacity.sql',
+    '390-lab-arena-expired-retry-runner-handoff.sql',
+    '396-lab-arena-execute-host-cooldown.sql',
+    '397-lab-arena-active-host-fault-claim-guard.sql',
+    '398-lab-arena-zero-call-score-host-retry.sql',
+    '399-lab-arena-untransitioned-host-fault-guard.sql',
+    '401-lab-arena-proxy-model-capacity.sql',
+    '406-lab-arena-round-host-fault-quarantine.sql',
+    '407-lab-arena-cost-run-lookup.sql',
+    '408-lab-arena-cost-run-index.sql',
+    '409-lab-arena-publication-cost-document-reuse.sql',
+    '410-lab-arena-publication-transition-timeout.sql',
+    '411-lab-arena-settlement-success-json-once.sql',
+    '412-lab-arena-abandoned-host-recovery.sql',
+    '404-lab-arena-restart-closed-ledger-expiry.sql',
+    '413-lab-arena-closed-openrouter-judge-billing.sql',
+    '414-lab-arena-abandoned-host-restart-guard.sql',
+    '415-lab-arena-deepline-budget-only-exact-recovery.sql',
+    '416-lab-arena-idle-worker-claims.sql',
+    '417-lab-arena-deepline-response-recovery.sql',
+    '342-lab-arena-reward-predecessor-barrier.sql',
+    '377-lab-arena-monotonic-day-authority.sql',
+    '420-lab-arena-bounded-stage-cutoff-drain.sql',
+    '421-lab-arena-bound-account-refusal.sql',
+    '422-lab-arena-partial-execution-close.sql',
+    '423-lab-arena-partial-publication.sql',
+    '424-lab-arena-partial-baseline-stage-transition.sql',
+    '425-lab-arena-successful-deepline-cost-priority.sql',
+    '426-lab-arena-deepline-response-missing-guard.sql',
+    '427-lab-arena-stage-creation-timeout.sql',
+    '428-lab-arena-reward-slots.sql',
+    '429-lab-arena-cumulative-reward-pot.sql',
+    '430-lab-arena-unscored-judge-infrastructure.sql',
+    '431-lab-arena-slot-decay.sql',
+    '432-lab-arena-closed-host-score-billing.sql',
+    '434-lab-arena-validator-events.sql',
+    '435-lab-arena-deepline-candidate-query.sql',
+    '436-lab-arena-closed-provider-candidate-query.sql',
+    '437-lab-arena-publication-transition-timeout.sql',
+    '438-lab-arena-accepted-host-score-billing.sql',
+    '439-lab-arena-closed-miner-success-score-billing.sql',
+    '441-lab-arena-settled-score-host-recovery.sql',
+    '442-lab-arena-settled-execute-host-recovery.sql',
+    '450-lab-arena-completed-score-host-recovery.sql',
+    '454-lab-arena-owner-authorized-stopped-score-drain.sql',
+    '461-lab-arena-owner-authorized-stopped-execute-drain.sql',
+    '463-lab-arena-owner-overdue-lease-expiry.sql',
+    '465-lab-arena-partial-company-judgments.sql',
+    '467-lab-arena-zero-call-setup-host-recovery.sql',
+    '455-lab-arena-confirmed-score-parallel.sql',
+    '458-lab-arena-score-claim-cutoff.sql',
+    '459-lab-arena-close-scoring-lock-order.sql',
+    '468-lab-arena-legacy-review-checkpoint.sql',
+    '469-lab-arena-complete-baseline-final-authority.sql',
+    '470-lab-arena-bounded-baseline-recovery.sql',
+    '472-lab-arena-general-judge-continuation.sql',
+    '473-lab-arena-recovered-execution-judge-continuation.sql',
+    '474-lab-arena-host-interruption-execution-retries.sql',
 )
 
 
@@ -217,8 +292,10 @@ def integrated_database():
                 LAB_ARENA_OPTIONAL_SCRAPINGDOG_CREDENTIAL_MIGRATION,
             )
             for migration in CURRENT_REWARD_SERVICE_MIGRATIONS:
-                if migration not in applied_migrations:
+                if migration not in applied_migrations and migration not in CURRENT_NORMAL_WEIGHT_TAIL:
                     cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
+            for migration in CURRENT_NORMAL_WEIGHT_TAIL:
+                cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
             cursor.execute(
                 "SELECT to_regclass('public.' || name) FROM unnest(%s::text[]) name",
                 (list(RETIRED_INCENTIVE_TABLES),),
@@ -450,11 +527,49 @@ def _public_api(key, clock):
     )
 
 
-class _NormalWeightHarness(Harness):
+@pytest.fixture(autouse=True)
+def frozen_image_judge_contract(monkeypatch):
+    """Retain fixture scores while using the current frozen-image verdict shape."""
+    original = service_fixtures.deterministic_scorer
+
+    def judge(companies, icp, is_reference_model):
+        rows = original(companies, icp, is_reference_model)
+        indexes, _ = verify.bucket_skip(icp, companies)
+        for index, row in zip(indexes, rows):
+            row.update(
+                company_index=index,
+                company_identity_key=canonical_company_identity(companies[index]).key,
+                company_qualified=True,
+                duplicate_company=False,
+                verifier_gate_receipts=[{"gate": "company_fit", "decision": "match"}],
+            )
+        return rows
+
+    monkeypatch.setattr(service_fixtures, "deterministic_scorer", judge)
+
+
+class _NormalWeightHarness(IntegrityHarness):
     """Use the normal per-provider payer path after the first real crown."""
 
     def build_service(self):
         service = super().build_service()
+        registered_metagraph = self.chain.metagraph
+
+        def metagraph(*, finalized=True):
+            # Preserve the weight tests' dynamic stake/permit/identity controls,
+            # alongside the registered company identities used by integrity.
+            dynamic = service_fixtures.FakeChain.metagraph(self.chain, finalized=finalized)
+            registered = registered_metagraph(finalized=finalized)
+            extra = [index for index, hotkey in enumerate(registered.hotkeys)
+                     if hotkey not in dynamic.hotkeys]
+            return replace(dynamic, **{
+                field: tuple(getattr(dynamic, field)) + tuple(
+                    getattr(registered, field)[index] for index in extra
+                )
+                for field in ("hotkeys", "coldkeys", "validator_permit", "stake", "active")
+            })
+
+        self.chain.metagraph = metagraph
         payer = submission_runtime.SubmissionProviderKeys(
             store=service.store, credentials=service.config.credential_manager,
             organizer_keys=CANARY_KEYS,

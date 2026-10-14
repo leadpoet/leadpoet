@@ -2960,7 +2960,10 @@ def _deepline_generic_http_request_refusal(
 ) -> bool:
     """Identify the observed per-request Deepline generic HTTP denial."""
 
-    if response.status != 403 or parameters.get("tool") != "generic_http_request":
+    if (
+        response.status not in (401, 403)
+        or parameters.get("tool") != "generic_http_request"
+    ):
         return False
     try:
         document = json.loads(response.body.decode("utf-8"))
@@ -2968,15 +2971,24 @@ def _deepline_generic_http_request_refusal(
         return False
     if not isinstance(document, Mapping):
         return False
+    # A target page can require authentication even when the Deepline key is
+    # valid. Only the observed credential-free upstream provenance exempts a
+    # 401 from the miner-account failure path. Keep existing 403 recognition.
+    if response.status == 401 and not (
+        document.get("credential_owner") == "none"
+        and document.get("failure_origin") == "provider"
+        and document.get("error_category") == "provider_auth"
+    ):
+        return False
     tool_error = document.get("tool_error")
     return (
         document.get("code") == "PROVIDER_AUTHORIZATION_FAILED"
         and document.get("provider") == "generic_http"
         and document.get("operation") == "generic_http_request"
-        and document.get("upstream_status") == 403
+        and document.get("upstream_status") == response.status
         and isinstance(tool_error, Mapping)
         and tool_error.get("code") == "PROVIDER_AUTHORIZATION_FAILED"
-        and tool_error.get("statusCode") == 403
+        and tool_error.get("statusCode") == response.status
         and tool_error.get("provider") == "generic_http"
         and tool_error.get("operation") == "generic_http_request"
     )

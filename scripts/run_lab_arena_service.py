@@ -16,6 +16,7 @@ import re
 import shlex
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,7 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lab_arena import telemetry  # noqa: E402
-from lab_arena.driver import drive_once  # noqa: E402
+from lab_arena.driver import drive_once, next_tick_delay  # noqa: E402
 from lab_arena.runtime_version import SOURCE_METADATA  # noqa: E402
 from leadpoet_observability.sentry_bootstrap import INGEST_ENVIRONMENT_KEYS  # noqa: E402
 
@@ -242,12 +243,20 @@ def main(argv=None) -> int:
     def driver() -> None:
         # A full scoring/publication cycle can take longer than API startup.
         # Run the initial cycle in the existing worker, just like later ticks.
+        started = datetime.now(timezone.utc)
         initial = drive_once(service)
         if "failed" in initial:
             print("initial driver tick", initial, file=sys.stderr)
         elif initial != "idle":
             print("initial driver tick", initial)
-        while not stop.wait(max(5, int(args.tick_seconds))):
+        while True:
+            delay = next_tick_delay(
+                args.tick_seconds, service._config.defaults.daily_cutoff_hour_utc,
+                started=started, now=datetime.now(timezone.utc),
+            )
+            if stop.wait(delay):
+                break
+            started = datetime.now(timezone.utc)
             outcome = drive_once(service)
             if "failed" in outcome:
                 print("driver tick", outcome, file=sys.stderr)

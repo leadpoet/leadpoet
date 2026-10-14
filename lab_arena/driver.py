@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 
 from lab_arena import telemetry
 
@@ -13,6 +14,11 @@ def drive_once(service) -> str:
     tick_start_ns = time.time_ns()
     tick_start_mono = time.monotonic()
     parts = []
+    # Round creation freezes configuration, not the next baseline. Baseline
+    # admission still waits for any pending promotion before source freeze.
+    outcome = _ensure_daily_round(service)
+    if outcome != "idle":
+        parts.append(outcome)
     try:
         with telemetry.stage("promote_baselines") as observed:
             promotion = service.promote_pending_baselines()
@@ -82,20 +88,40 @@ def _advance_active(service) -> str:
             )
         else:
             outcomes.append("advanced %s" % row["round_id"])
-    # Advancing the open round can commit it during this tick. The snapshot in
-    # ``active`` is then stale, so always use the service's idempotent open-round
-    # check to create its successor without waiting for another driver tick.
+    return "; ".join(outcomes) if outcomes else "idle"
+
+
+def _ensure_daily_round(service) -> str:
+    """Create a due round before older-round work can delay submissions."""
+
     try:
         with telemetry.stage("ensure_daily_round") as observed:
             ensured = service.ensure_daily_round()
             observed.idle = ensured.get("status") != "created"
             observed.count = 0 if observed.idle else 1
     except Exception as exc:
-        outcomes.append("failed ensure_daily_round: %s" % type(exc).__name__)
+        return "failed ensure_daily_round: %s" % type(exc).__name__
     else:
         if ensured.get("status") == "created":
-            outcomes.append("created %s" % ensured.get("round_id"))
-    return "; ".join(outcomes) if outcomes else "idle"
+            return "created %s" % ensured.get("round_id")
+    return "idle"
 
 
-__all__ = ["drive_once"]
+def next_tick_delay(seconds: int, cutoff_hour: int | None, *,
+                    started: datetime, now: datetime) -> float:
+    """Wake at a daily cutoff, including when the last tick crossed it."""
+
+    delay = float(max(5, int(seconds)))
+    if cutoff_hour is None:
+        return delay
+    started = started.astimezone(timezone.utc)
+    now = now.astimezone(timezone.utc)
+    cutoff = now.replace(hour=int(cutoff_hour), minute=0, second=0, microsecond=0)
+    if started < cutoff <= now:
+        return 0.0
+    if cutoff <= now:
+        cutoff += timedelta(days=1)
+    return min(delay, max(0.0, (cutoff - now).total_seconds()))
+
+
+__all__ = ["drive_once", "next_tick_delay"]

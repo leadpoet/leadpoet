@@ -89,6 +89,8 @@ def create_app(service: ArenaService) -> FastAPI:
             telemetry.note_denial(exc.code)
             if exc.code == "validator_events_rate_limited":
                 headers["Retry-After"] = "60"
+            if exc.code == "round_opening":
+                headers["Retry-After"] = "2"
             return JSONResponse(
                 status_code=exc.status,
                 content={"status": "rejected", "code": exc.code},
@@ -125,7 +127,8 @@ def create_app(service: ArenaService) -> FastAPI:
                 "even if upload or validation fails. This hotkey has already used its attempt. "
                 "The last accepted submission is unchanged."
             )
-        return JSONResponse(status_code=exc.status, content=content)
+        headers = {"Retry-After": "2"} if exc.code == "round_opening" else None
+        return JSONResponse(status_code=exc.status, content=content, headers=headers)
 
     @app.exception_handler(ArenaContractError)
     async def _contract_error(request: Request, exc: ArenaContractError) -> JSONResponse:

@@ -1586,11 +1586,12 @@ class ArenaService:
         ]
 
     def open_round(self) -> Optional[Dict[str, Any]]:
-        """The round open for submissions, if any (at most one at a time)."""
+        """The round whose frozen submission window currently accepts work."""
 
+        now = self.now()
         if self._pinned_round_id() is not None:
             row = self._pinned_round()
-            return row if row is not None and row["status"] == "open" else None
+            return row if row is not None and self._round_accepts_submissions(row, now) else None
         network_name, netuid = self._chain_scope()
         for row in self._store.list_rounds(
             status="open",
@@ -1600,9 +1601,38 @@ class ArenaService:
             limit=20,
             columns="round_id,status,created_at,configuration_doc",
         ):
-            if row["status"] == "open" and (row.get("configuration_doc") or {}).get("mode") == self._config.mode:
+            if (self._round_accepts_submissions(row, now)
+                    and (row.get("configuration_doc") or {}).get("mode") == self._config.mode):
                 return self._round(row["round_id"])
         return None
+
+    @staticmethod
+    def _round_accepts_submissions(row: Mapping[str, Any], now: datetime) -> bool:
+        if row.get("status") != "open":
+            return False
+        schedule = (row.get("configuration_doc") or {}).get("schedule") or row.get("schedule") or {}
+        try:
+            return (_parse_iso(schedule["submission_open"]) <= now
+                    < _parse_iso(schedule["submission_cutoff"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _due_daily_round_opening(self, round_id: str) -> bool:
+        """Identify only the missing canonical round near its UTC opening."""
+
+        if self._pinned_round_id() is not None:
+            return False
+        hour = self._config.defaults.daily_cutoff_hour_utc
+        if hour is None:
+            return False
+        now = self.now().astimezone(timezone.utc)
+        opening = now.replace(hour=int(hour), minute=0, second=0, microsecond=0)
+        if now < opening:
+            opening -= timedelta(days=1)
+        # This only describes the bounded scheduler cutover, not a permanent
+        # alternative admission path if daily creation fails.
+        return (opening <= now < opening + timedelta(seconds=90)
+                and round_id == round_id_for_cutoff(opening + timedelta(days=1)))
 
     def _hot_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         """One round's row for runner-facing handlers, cached for a few seconds.
@@ -1639,6 +1669,9 @@ class ArenaService:
         self._require_round_ownership(round_id)
         round_row = self._hot_round(round_id) if hot else self._store.get_round(round_id)
         if round_row is None:
+            if (scope == contracts.SCOPE_SUBMISSION_PRESIGN
+                    and self._due_daily_round_opening(round_id)):
+                raise ServiceError("round_opening", 503)
             raise ServiceError("round_unknown", 404)
         round_row = self._require_round_mode(round_row)
         if validated["hotkey"] in self._banned_hotkeys(round_row):
@@ -6292,7 +6325,9 @@ class ArenaService:
     def public_current(self) -> Dict[str, Any]:
         active = self.active_rounds(public_only=True)
         current = active[-1] if active else None
-        open_round = next((row for row in active if row["status"] == "open"), None)
+        now = self.now()
+        open_round = next((row for row in reversed(active)
+                           if self._round_accepts_submissions(row, now)), None)
         running = [row for row in active if row["status"] != "open"]
         published = self.latest_published_round(public_only=True)
         published_round = (

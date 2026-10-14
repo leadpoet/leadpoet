@@ -442,6 +442,7 @@ ARENA_DENIAL_CODES = frozenset(
         "round_network_mismatch",
         "round_scope_mismatch",
         "round_unknown",
+        "round_opening",
         "run_missing",
         "run_result_budget_unproved",
         "run_result_cause_kind_mismatch",

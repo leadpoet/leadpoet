@@ -183,7 +183,7 @@ _PICKUP_FAILURE_REASONS = frozenset({"request_failed", "claim_denied"})
 _IDLE_CLAIM_STATUSES = frozenset({
     "no_pending", "no_open_round", "stage_closed", "paused", "no_free_slot", "cache_busy",
 })
-_ACTIVE_RESCAN_CLAIM_STATUSES = frozenset({"no_pending", "no_free_slot"})
+_ACTIVE_RESCAN_CLAIM_STATUSES = frozenset({"no_pending", "no_free_slot", "paused"})
 _CLAIM_AVAILABILITY_CODES = frozenset(
     {
         "arena_store_unavailable",

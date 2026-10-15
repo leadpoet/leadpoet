@@ -2104,6 +2104,10 @@ src = Path(sys.argv[1])
 dst = Path(sys.argv[2])
 raw = src.read_text()
 restart_only_keys = {
+    # Only the active controller may set its shutdown state and owned paths.
+    "GATEWAY_DESTRUCTIVE_PHASE_STARTED",
+    "GATEWAY_CONTROLLER_PROCESS_STATE_FILE",
+    "GATEWAY_PREFLIGHT_TREE",
     "GATEWAY_DEPLOY_COMMIT",
     "GATEWAY_ENV_FILE",
     "GATEWAY_RESTART_GIT_SSH_COMMAND",
@@ -2187,6 +2191,10 @@ from pathlib import Path
 env_path = Path(sys.argv[1])
 out_path = Path(sys.argv[2])
 skip_keys = {
+    # Parent-shell hydration must preserve the active controller's state.
+    "GATEWAY_DESTRUCTIVE_PHASE_STARTED",
+    "GATEWAY_CONTROLLER_PROCESS_STATE_FILE",
+    "GATEWAY_PREFLIGHT_TREE",
     "AWS_ACCESS_KEY_ID",
     "AWS_CA_BUNDLE",
     "AWS_CONFIG_FILE",
@@ -2336,6 +2344,10 @@ import sys
 pid = sys.argv[1]
 out_path = sys.argv[2]
 skip_keys = {
+    # The old runtime cannot supply the new controller's shutdown state.
+    "GATEWAY_DESTRUCTIVE_PHASE_STARTED",
+    "GATEWAY_CONTROLLER_PROCESS_STATE_FILE",
+    "GATEWAY_PREFLIGHT_TREE",
     "AWS_ACCESS_KEY_ID",
     "AWS_CA_BUNDLE",
     "AWS_CONFIG_FILE",

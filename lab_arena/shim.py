@@ -698,6 +698,7 @@ class _AiohttpResponse:
         self.status = int(status)
         self.headers = dict(headers)
         self.url = response_url or request_url
+        self._lab_arena_response_url_validated = bool(response_url)
         self.reason = "OK" if status < 400 else "lab arena provider error"
         self.history = ()
         self.request_info = SimpleNamespace(real_url=request_url)
@@ -790,7 +791,9 @@ def _aiohttp_request(aiohttp: Any, yarl_url: Any) -> Callable[..., Any]:
                 timeout_ms=_timeout_ms(timeout),
             )
         except ShimError as exc:
-            raise aiohttp.ClientConnectionError(str(exc)) from None
+            error = aiohttp.ClientConnectionError(str(exc))
+            error._lab_arena_response_url_validated = False
+            raise error from None
         response = _AiohttpResponse(
             request_url=str(url),
             response_url=response_url,

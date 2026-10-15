@@ -1125,6 +1125,10 @@ def _identity_result(
     return company_fit_unavailable(reason, details=details)
 
 
+class _ArenaProviderFetchError(aiohttp.ClientError):
+    """An Arena error response has no validated target response URL."""
+
+
 async def _fetch_bounded_html(
     session: aiohttp.ClientSession,
     url: str,
@@ -1135,6 +1139,13 @@ async def _fetch_bounded_html(
     async with session.get(
         url, allow_redirects=True, **request_kwargs,
     ) as resp:
+        if (
+            resp.status >= 400
+            and getattr(resp, "_lab_arena_response_url_validated", None) is False
+        ):
+            raise _ArenaProviderFetchError(
+                "website fetch error: Arena provider response unavailable"
+            )
         raw = bytearray()
         while len(raw) < _MAX_BYTES:
             chunk = await resp.content.read(_MAX_BYTES - len(raw))
@@ -1239,7 +1250,20 @@ async def verify_company_exists(
         return _identity_result(
             submitted_identity,
             f"website unreachable: {type(e).__name__}: {str(e)[:120]}",
-            source_fetch_failed=True,
+            source_fetch_failed=(
+                getattr(e, "_lab_arena_response_url_validated", None) is not False
+            ),
+            failure_reason_code=(
+                "provider_error"
+                if getattr(e, "_lab_arena_response_url_validated", None) is False
+                else ""
+            ),
+        )
+    except _ArenaProviderFetchError as e:
+        return _identity_result(
+            submitted_identity,
+            str(e),
+            failure_reason_code="provider_error",
         )
     except aiohttp.ClientError as e:
         return _identity_result(

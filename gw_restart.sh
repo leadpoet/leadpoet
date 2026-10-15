@@ -231,7 +231,7 @@ arena_runtime_tree() {
 }
 
 recover_arena_restart_owner() {
-  local previous_tree helper owner state
+  local previous_tree helper owner state required_phase="${1:-}"
   previous_tree="$(arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA")" || return 1
   if [ -L "$previous_tree" ] || [ ! -d "$previous_tree" ]; then
     echo "ERROR: previous Arena release archive is unavailable" >&2
@@ -259,7 +259,7 @@ PY
     "$GATEWAY_PREFLIGHT_TREE/scripts/lab_arena_restart_claim_guard.py" owned \
     --candidate "$ARENA_PREVIOUS_SHA" --invocation "$owner" \
     --environment-file "$GATEWAY_ENV_FILE")" || return 1
-  "$GATEWAY_PYTHON_BIN" - "$ARENA_PREVIOUS_SHA" "$GATEWAY_ACTIVE_RELEASE_COMPONENT" "$state" <<'PY' || return 1
+  "$GATEWAY_PYTHON_BIN" - "$ARENA_PREVIOUS_SHA" "$GATEWAY_ACTIVE_RELEASE_COMPONENT" "$state" "$required_phase" <<'PY' || return 1
 import json
 import sys
 state = json.loads(sys.argv[3])
@@ -268,6 +268,7 @@ if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
         or state.get("candidate_commit") != sys.argv[1]
         or state.get("restart_scope") != sys.argv[2]
         or state.get("restart_phase") not in ("gateway_destructive", "gateway_ready")
+        or (sys.argv[4] and state.get("restart_phase") != sys.argv[4])
         or type(state.get("guard_generation")) is not int
         or state["guard_generation"] <= 0):
     raise SystemExit("previous Arena guard is not an active exact-owner recovery state")
@@ -308,7 +309,7 @@ PY
 }
 
 prepare_arena_runtime_tree() {
-  local destination temporary
+  local destination temporary source_root="${1:-$GATEWAY_PREFLIGHT_TREE}"
   destination="$(arena_runtime_tree "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA")" || return 1
   mkdir -p "$ARENA_RUNTIME_ROOT"
   chmod 700 "$ARENA_RUNTIME_ROOT"
@@ -317,7 +318,7 @@ prepare_arena_runtime_tree() {
     return 1
   fi
   temporary="$(mktemp -d "$ARENA_RUNTIME_ROOT/.candidate.XXXXXX")" || return 1
-  if ! cp -a "$GATEWAY_PREFLIGHT_TREE/." "$temporary/"; then
+  if ! cp -a "$source_root/." "$temporary/"; then
     rm -rf -- "$temporary"
     return 1
   fi
@@ -385,9 +386,11 @@ start_arena_component() {
       PYTHONDONTWRITEBYTECODE=1 \
       setsid "${ARENA_COMPONENT_COMMAND[@]}" \
       >> "$ARENA_COMPONENT_LOG_FILE" 2>&1 < /dev/null \
-      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+      7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   else
-    env -u GATEWAY_CONTROLLER_PROCESS_HELPER -u LAB_ARENA_PROCESS_HELPER \
+    env -u LEADPOET_DOCKER_OPERATION_LOCK_HELD \
+      -u LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_HELD -u LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID \
+      -u GATEWAY_CONTROLLER_PROCESS_HELPER -u LAB_ARENA_PROCESS_HELPER \
       -u GATEWAY_RESTART_AUTHORITY_ROOT -u GATEWAY_RESTART_AUTHORITY_COMMIT \
       -u PREPARED_GATEWAY_SHA -u LAB_ARENA_RESTART_GUARD_GENERATION \
       GITHUB_SHA="$sha" \
@@ -398,7 +401,7 @@ start_arena_component() {
       LEADPOET_AWS_INSTANCE_ROLE_ONLY=true PYTHONDONTWRITEBYTECODE=1 \
       setsid "${ARENA_COMPONENT_COMMAND[@]}" \
       >> "$ARENA_COMPONENT_LOG_FILE" 2>&1 < /dev/null \
-      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+      7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   fi
   pid="$!"
   cd "$controller_cwd"
@@ -426,6 +429,233 @@ stop_arena_component() {
     --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" \
     --uid "$(id -u)" --term-seconds 6600 \
     --no-kill --signal-leader-only -- "${ARENA_COMPONENT_COMMAND[@]}"
+}
+
+arena_component_inherited_docker_locks() {
+  local component="$1" slot="$2" tree="$3" proof after status
+  arena_component_command "$component" "$slot" || return 2
+  proof="$("$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" verify \
+    --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" --uid "$(id -u)" \
+    -- "${ARENA_COMPONENT_COMMAND[@]}")" || return 2
+  if "$GATEWAY_PYTHON_BIN" - "$proof" "$LEADPOET_DOCKER_OPERATION_LOCK_FILE" \
+      "${LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE:-${LEADPOET_DOCKER_OPERATION_LOCK_FILE}.admission}" <<'PY'
+import json, os, stat, sys
+from pathlib import Path
+try:
+    proof = json.loads(sys.argv[1])
+    pid = proof.get("pid")
+    if proof.get("ok") is not True or type(pid) is not int or pid <= 1:
+        raise SystemExit(2)
+    held = []
+    for fd, raw in zip((7, 8), sys.argv[2:]):
+        path = os.path.realpath(raw)
+        saved = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISREG(saved.st_mode) or saved.st_uid != os.getuid() or stat.S_IMODE(saved.st_mode) != 0o600:
+            raise SystemExit(2)
+        descriptor = Path(f"/proc/{pid}/fd/{fd}")
+        try:
+            target = os.readlink(descriptor)
+        except FileNotFoundError:
+            held.append(False)
+            continue
+        if target != path:
+            held.append(False)
+            continue
+        opened = descriptor.stat()
+        with Path(f"/proc/{pid}/fdinfo/{fd}").open() as stream:
+            info = stream.read(4096)
+        if (opened.st_dev, opened.st_ino) != (saved.st_dev, saved.st_ino):
+            raise SystemExit(2)
+        held.append(any(line.startswith("lock:") and "FLOCK" in line.split() and "WRITE" in line.split()
+                        for line in info.splitlines()))
+    raise SystemExit(0 if any(held) else 1)
+except (OSError, ValueError, TypeError, AttributeError):
+    raise SystemExit(2)
+PY
+  then status=0; else status="$?"; fi
+  [ "$status" = 0 ] || [ "$status" = 1 ] || return 2
+  after="$("$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" verify \
+    --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" --uid "$(id -u)" \
+    -- "${ARENA_COMPONENT_COMMAND[@]}")" || return 2
+  [ "$proof" = "$after" ] || return 2
+  return "$status"
+}
+
+recover_arena_inherited_docker_locks() {
+  (
+    # Subshell variables stay available to EXIT cleanup even when errexit
+    # unwinds the function; function-local variables would already be unset.
+    ingress="" current_tree="" old_tree="" old_slot="" component="" status=0 leaking=0 crossed=0 ready=0
+    ARENA_PREVIOUS_MODE="" ARENA_PREVIOUS_SLOT="" ARENA_PREVIOUS_SHA="" ARENA_PREVIOUS_BACKEND=""
+    ARENA_CANDIDATE_TREE="" ARENA_CANDIDATE_SLOT="" ARENA_CONTINUITY_ENABLED=1 ARENA_REUSE_PREVIOUS=0
+    # Recovery has no live gateway env. Load the same hydrated configuration
+    # used by the normal candidate, without changing parent controller state.
+    set -a
+    . "$ENV_CLONE"
+    set +a
+    restore_gateway_restart_path_authority
+    cd "$GATEWAY_PREFLIGHT_TREE"
+    mode=""
+    mode="$(env -u LAB_ARENA_MODE PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+      "$GATEWAY_PYTHON_BIN" -B - "$GATEWAY_ENV_FILE" <<'PYMODE'
+import os, sys
+from pathlib import Path
+from scripts.run_lab_arena_service import load_scoped_environment
+load_scoped_environment(Path(sys.argv[1]))
+print(os.environ.get("LAB_ARENA_MODE", "off").strip().lower())
+PYMODE
+    )" || exit 1
+    case "$mode" in
+      off) exit 0 ;;
+      shadow|live) ;;
+      *) echo "ERROR: Arena mode is invalid for lock recovery" >&2; exit 1 ;;
+    esac
+    ingress="$(arena_ingress_tool "$GATEWAY_PREFLIGHT_TREE" --inspect)" || exit 1
+    read -r ARENA_PREVIOUS_MODE ARENA_PREVIOUS_SLOT ARENA_PREVIOUS_SHA ARENA_PREVIOUS_BACKEND <<< "$ingress"
+    if [ "$ARENA_PREVIOUS_MODE:$ARENA_PREVIOUS_BACKEND" != dual:closed ]; then exit 0; fi
+    current_tree="$(arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA")" || exit 1
+    PREPARED_GATEWAY_SHA="$ARENA_PREVIOUS_SHA"
+    old_slot=$((1 - ARENA_PREVIOUS_SLOT))
+    old_tree="$(arena_runtime_tree "$old_slot" "$ARENA_PREVIOUS_SHA")" || exit 1
+    trap 'status=$?; if [ "$status" -ne 0 ] && [ "$crossed" = 0 ]; then
+      rollback_arena_candidate_before_destructive || true
+    fi' EXIT
+    for component in api edge; do
+      if arena_component_inherited_docker_locks "$component" "$ARENA_PREVIOUS_SLOT" "$current_tree"; then
+        leaking=1
+      else status="$?"; [ "$status" = 1 ] || exit 1; fi
+    done
+    if [ "$leaking" = 0 ]; then
+      # A prior handoff can have switched ingress before retirement failed.
+      # Finish only the opposite, exact same-source owned slot that still leaks.
+      for component in api edge; do
+        arena_component_command "$component" "$old_slot"
+        if [ -e "$ARENA_COMPONENT_STATE_FILE" ] || [ -L "$ARENA_COMPONENT_STATE_FILE" ]; then
+          if arena_component_inherited_docker_locks "$component" "$old_slot" "$old_tree"; then
+            leaking=1
+          else status="$?"; [ "$status" = 1 ] || exit 1; fi
+        fi
+      done
+      [ "$leaking" = 1 ] || exit 0
+      crossed=1
+    fi
+    # This repair never moves a paid worker or removes a live driver's cwd.
+    for slot in "$ARENA_PREVIOUS_SLOT" "$old_slot"; do
+      arena_component_command driver "$slot"
+      if [ -e "$ARENA_COMPONENT_STATE_FILE" ] || [ -L "$ARENA_COMPONENT_STATE_FILE" ]; then
+        echo "ERROR: Arena lock recovery refuses a retained driver state" >&2; exit 1
+      fi
+      PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B - \
+          "$(arena_runtime_tree "$slot" "$PREPARED_GATEWAY_SHA")" "${ARENA_COMPONENT_COMMAND[@]}" <<'PY'
+import os, sys
+from scripts.manage_owned_process_group import _matching_processes
+if _matching_processes(argv=sys.argv[2:], cwd=sys.argv[1], uid=os.getuid()):
+    raise SystemExit("Arena lock recovery refuses a running owned driver")
+PY
+    done
+    [ "$GATEWAY_ACTIVE_RELEASE_COMPONENT" = gateway ] || exit 1
+    recover_arena_restart_owner gateway_destructive || exit 1
+    for component in api edge; do
+      arena_component_command "$component" "$ARENA_PREVIOUS_SLOT"
+      [ "$("$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" verify-invocation \
+        --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$current_tree" --uid "$(id -u)" \
+        --release-sha "$PREPARED_GATEWAY_SHA" -- "${ARENA_COMPONENT_COMMAND[@]}")" = \
+        "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" ] || exit 1
+    done
+    if [ "$crossed" = 0 ]; then
+      ARENA_CANDIDATE_SLOT="$old_slot"
+      prepare_arena_runtime_tree "$current_tree"
+      arena_slot_ports "$ARENA_CANDIDATE_SLOT"
+      "$GATEWAY_PYTHON_BIN" - "$ARENA_API_PORT" "$ARENA_EDGE_PORT" <<'PY'
+import socket, sys
+for value in sys.argv[1:]:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", int(value)))
+PY
+      start_arena_component api "$ARENA_CANDIDATE_SLOT" "$ARENA_CANDIDATE_TREE" "$PREPARED_GATEWAY_SHA"
+      start_arena_component edge "$ARENA_CANDIDATE_SLOT" "$ARENA_CANDIDATE_TREE" "$PREPARED_GATEWAY_SHA"
+      for component in api edge; do
+        if arena_component_inherited_docker_locks "$component" "$ARENA_CANDIDATE_SLOT" "$ARENA_CANDIDATE_TREE"; then
+          echo "ERROR: replacement Arena component inherited Docker locks" >&2; exit 1
+        else status="$?"; [ "$status" = 1 ] || exit 1; fi
+      done
+      for attempt in $(seq 1 60); do
+        if timeout 5 curl -fsS "http://127.0.0.1:$ARENA_API_PORT/arena/v1/current" >/dev/null 2>&1 \
+            && timeout 5 curl -fsS "http://127.0.0.1:$ARENA_EDGE_PORT/arena/v1/current" >/dev/null 2>&1; then
+          ready=1; break
+        fi
+        sleep 2
+      done
+      [ "$ready" = 1 ] || { echo "ERROR: Arena lock handoff candidate was not ready" >&2; exit 1; }
+      arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" dual "$ARENA_PREVIOUS_SLOT" "$PREPARED_GATEWAY_SHA" closed \
+        dual "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" closed
+      crossed=1
+      old_slot="$ARENA_PREVIOUS_SLOT"
+      old_tree="$current_tree"
+    else
+      ARENA_CANDIDATE_TREE="$current_tree"
+      ARENA_CANDIDATE_SLOT="$ARENA_PREVIOUS_SLOT"
+      # Verify the opposite archive before completing its partial retirement.
+      [ ! -L "$old_tree" ] && [ -d "$old_tree" ] || exit 1
+      PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B - \
+          "$LEADPOET_REPO_ROOT" "$old_tree" "$PREPARED_GATEWAY_SHA" <<'PY'
+from pathlib import Path
+import sys
+from scripts.gateway_git_deploy import verify_materialized_tree
+verify_materialized_tree(repo_root=Path(sys.argv[1]), materialized_root=Path(sys.argv[2]),
+                         target_sha=sys.argv[3], strict_extras=True)
+PY
+    fi
+    arena_slot_ports "$ARENA_CANDIDATE_SLOT"
+    timeout 5 curl -fsS "http://127.0.0.1:$ARENA_API_PORT/arena/v1/current" >/dev/null
+    timeout 5 curl -fsS "http://127.0.0.1:$ARENA_EDGE_PORT/arena/v1/current" >/dev/null
+    for component in edge api; do
+      arena_component_command "$component" "$old_slot"
+      if [ -e "$ARENA_COMPONENT_STATE_FILE" ] || [ -L "$ARENA_COMPONENT_STATE_FILE" ]; then
+        [ "$("$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" verify-invocation \
+          --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$old_tree" --uid "$(id -u)" \
+          --release-sha "$PREPARED_GATEWAY_SHA" -- "${ARENA_COMPONENT_COMMAND[@]}")" = \
+          "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" ] || exit 1
+        stop_arena_component "$component" "$old_slot" "$old_tree"
+      fi
+    done
+    [ "$(arena_ingress_tool "$GATEWAY_PREFLIGHT_TREE" --inspect)" = \
+      "dual $ARENA_CANDIDATE_SLOT $PREPARED_GATEWAY_SHA closed" ] || exit 1
+    # Recheck identity and every path immediately before deleting our retired
+    # immutable archive. Unknown additions are preserved by refusing cleanup.
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B - \
+        "$LEADPOET_REPO_ROOT" "$old_tree" "$PREPARED_GATEWAY_SHA" <<'PY'
+import os, stat, subprocess, sys
+from pathlib import Path
+from scripts.gateway_git_deploy import verify_materialized_tree
+root = Path(sys.argv[2])
+saved = root.lstat()
+if not stat.S_ISDIR(saved.st_mode) or saved.st_uid != os.getuid() or saved.st_mode & 0o222:
+    raise SystemExit("retired Arena archive is not an owned immutable directory")
+verify_materialized_tree(repo_root=Path(sys.argv[1]), materialized_root=root,
+                         target_sha=sys.argv[3], strict_extras=True)
+tracked = subprocess.check_output(["git", "-C", sys.argv[1], "ls-tree", "-rz", "--name-only",
+                                   sys.argv[3]], timeout=30).decode().split("\0")
+allowed = {Path(path) for path in tracked if path}
+for path in list(allowed):
+    allowed.update(parent for parent in path.parents if parent != Path("."))
+for path in root.rglob("*"):
+    relative = path.relative_to(root)
+    if relative in allowed:
+        continue
+    if path.name == "__pycache__" and relative.parent in allowed | {Path(".")} and path.is_dir() and not path.is_symlink():
+        continue
+    if path.suffix in {".pyc", ".pyo"} and path.is_file() and not path.is_symlink():
+        source = (relative.parent.parent / (path.name.split(".", 1)[0] + ".py")
+                  if path.parent.name == "__pycache__" else relative.with_suffix(".py"))
+        if source in allowed:
+            continue
+    raise SystemExit("retired Arena archive has unknown paths; preserved")
+PY
+    chmod -R u+w "$old_tree"
+    rm -rf -- "$old_tree"
+    echo "Retired exact owned Arena processes that inherited Docker locks; ingress remains closed"
+  )
 }
 
 wait_for_arena_driver_startup() {
@@ -541,7 +771,9 @@ start_lab_arena_service() {
   fi
   mkdir -p "$(dirname "$LAB_ARENA_SERVICE_LOG_FILE")"
   cd "$LEADPOET_REPO_ROOT"
-  env -u GATEWAY_CONTROLLER_PROCESS_HELPER \
+  env -u LEADPOET_DOCKER_OPERATION_LOCK_HELD \
+    -u LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_HELD -u LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID \
+    -u GATEWAY_CONTROLLER_PROCESS_HELPER \
     -u LAB_ARENA_PROCESS_HELPER \
     -u GATEWAY_RESTART_AUTHORITY_ROOT \
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
@@ -551,7 +783,7 @@ start_lab_arena_service() {
       --environment-file "$GATEWAY_ENV_FILE" \
       --host 127.0.0.1 --port 8792 \
       >> "$LAB_ARENA_SERVICE_LOG_FILE" 2>&1 < /dev/null \
-      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+      7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
   pid="$!"
   if ! "$GATEWAY_PYTHON_BIN" "$GATEWAY_CONTROLLER_PROCESS_HELPER" record \
       --state-file "$GATEWAY_CONTROLLER_PROCESS_STATE_FILE" \
@@ -2587,6 +2819,10 @@ if ! GATEWAY_RESTART_EPOCH_REPORT="$(
 fi
 printf '%s\n' "$GATEWAY_RESTART_EPOCH_REPORT"
 
+# Retire only proven inherited locks from an exact-owner closed recovery before
+# the first artifact worker can wait for Docker. Normal release gates follow.
+recover_arena_inherited_docker_locks
+
 echo "Preparing exact hash-locked enclave dependencies during release acquisition"
 if ! start_gateway_offline_artifact_prepare; then
   echo "Gateway remains running; production shutdown has not started." >&2
@@ -3339,7 +3575,9 @@ fi
 leadpoet_release_docker_operation_lock_v2
 
 cd "$LEADPOET_REPO_ROOT"
-env -u GATEWAY_GIT_HELPER \
+env -u LEADPOET_DOCKER_OPERATION_LOCK_HELD \
+  -u LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_HELD -u LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID \
+  -u GATEWAY_GIT_HELPER \
   -u GATEWAY_HOST_MEMORY_GUARD_PATH \
   -u GATEWAY_CONTROLLER_PROCESS_HELPER \
   -u LAB_ARENA_PROCESS_HELPER \
@@ -3351,7 +3589,7 @@ env -u GATEWAY_GIT_HELPER \
   -u LAB_ARENA_RESTART_GUARD_GENERATION \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
   >> "$GATEWAY_LOG_FILE" 2>&1 < /dev/null \
-  9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+  7>&- 8>&- 9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
 
 GATEWAY_LAUNCHER_PID="$!"
 GATEWAY_PID=""

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict
 
@@ -205,7 +206,9 @@ def test_provider_rpc_transport_timeout_is_sanitized_and_next_request_is_healthy
 def test_current_handles_failed_reward_basis_read(error_type, recovers):
     """Exercise the production /current -> reward-basis SELECT failure path."""
     reward_reads = []
-    configuration = {"mode": "live", "network_name": "finney", "netuid": 71}
+    configuration = {"mode": "live", "network_name": "finney", "netuid": 71,
+                     "schedule": {"submission_open": "2026-09-10T00:00:00Z",
+                                  "submission_cutoff": "2026-09-11T00:00:00Z"}}
     active = {"round_id": "arena-2026-09-11", "status": "open", "configuration_doc": configuration}
     published = {"round_id": "arena-2026-09-10", "status": "published", "configuration_doc": configuration, "published_at": "2026-09-10T11:15:32Z"}
 
@@ -234,6 +237,7 @@ def test_current_handles_failed_reward_basis_read(error_type, recovers):
             chain=SimpleNamespace(current_settlement_epoch=lambda: 25040),
             verify_signature=unused, daily_icp_source=unused,
             banned_hotkeys_source=unused, broker_factory=unused,
+            clock=lambda: datetime(2026, 9, 10, 12, tzinfo=timezone.utc),
         ))
         with TestClient(create_app(service)) as http:
             response = http.get("/arena/v1/current")

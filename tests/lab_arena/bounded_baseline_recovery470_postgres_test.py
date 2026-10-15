@@ -268,8 +268,29 @@ def test_partial_late_score_preserves_write_once_and_cannot_create_final_authori
         with conn.cursor() as cur:
             cur.execute("SELECT to_jsonb(r) FROM public.lab_arena_runs r WHERE run_id=%s",(lease['scored_run_id'],)); assert cur.fetchone()[0]['per_icp_score']==0
 
+@pytest.fixture(scope='module')
+def current_runner_database():
+    # Full latest-service proofs use the complete committed recovery chain.
+    # Keep the original 470 database for its historical bounded-policy tests.
+    from tests.lab_arena import paid_host_quarantine480_postgres_test as current
+    generator = current.database.__wrapped__()
+    db = next(generator)
+    try:
+        with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
+            cur.execute(current.SQL.read_text())
+        yield db
+    finally:
+        generator.close()
+
+
 @pytest.mark.parametrize('recover_successfully',[True,False])
-def test_normal_signed_runner_recovers_only_missing_baseline_work_and_preserves_miners(database,tmp_path,monkeypatch,recover_successfully):
+def test_normal_signed_runner_recovers_only_missing_baseline_work_and_preserves_miners(current_runner_database,tmp_path,monkeypatch,recover_successfully):
+    exercise_signed_baseline_recovery(current_runner_database, tmp_path, monkeypatch,
+                                     recover_successfully)
+
+
+def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_successfully):
+    """Real signed-runner proof using the caller's complete current migration chain."""
     from dataclasses import replace
     from lab_arena import contracts
     from tests.lab_arena import test_lab_arena_service_round as flows
@@ -277,17 +298,48 @@ def test_normal_signed_runner_recovers_only_missing_baseline_work_and_preserves_
     from tests.lab_arena.baseline_scored_first_postgres_test import _baseline_first_judge,_enable_verified_proxy_runtime
     from tests.lab_arena.icp_fixtures import daily_icps
     pg,dsn=database
+
+    class PaidRecoveryTransport(flows.FakeProviderTransport):
+        def send(self, **kwargs):
+            response = super().send(**kwargs)
+            # Post one real fixture charge per successful fake provider job.
+            # The ordinary exact-billing bridge reads and settles this record.
+            with self._deepline_lock:
+                for entry in self._deepline_jobs:
+                    entry.update(credits=1, delta=-1)
+            return response
+
+    monkeypatch.setattr(flows, 'FakeProviderTransport', PaidRecoveryTransport)
     with pg.connect(**dsn) as conn:
         seed(conn)  # Remove prior controlled fixture state and accounting.
         with conn.cursor() as cur:
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute('TRUNCATE public.lab_arena_rounds,public.lab_arena_ledger,public.lab_arena_trajectory_events RESTART IDENTITY CASCADE')
-    harness=IntegrityHarness(lambda:pg.connect(**dsn),tmp_path,challengers=['RecoveryMiner'],runners=['alpha'])
+    class RecoveryHarness(IntegrityHarness):
+        def objects_key(self):
+            # These disposable databases repeat round IDs. Their immutable
+            # artifacts must not share another database's fixture bucket.
+            return 'baseline-recovery-%s-%s' % (dsn['port'], tmp_path.name)
+
+    harness=RecoveryHarness(lambda:pg.connect(**dsn),tmp_path,challengers=['RecoveryMiner'],runners=['alpha'])
     harness.service.config.defaults=replace(harness.service.config.defaults,
         execution_sequence_from='2000-01-01T00:00:00Z',per_icp_cost_policy=True,
         rewards_enabled=False,benchmark_icp_count=10)
     harness.service.config.daily_icp_source=lambda **kw:dict(status='ready',set_id=int(kw['set_id']),icps=daily_icps()[:10])
     _enable_verified_proxy_runtime(harness)
+    normal_run = harness.run_stage_with_runners
+
+    def run_after_retry_backoff(count=1):
+        # Advance only the disposable retry timestamps, as the 472 tests do.
+        # The real claim RPC still checks backoff, signatures and every guard.
+        with pg.connect(**dsn) as conn, conn.cursor() as cur:
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' "
+                        "WHERE round_id=%s AND kind='score' AND status='pending' AND attempt>1",
+                        (harness.round_id,))
+        return normal_run(count)
+
+    monkeypatch.setattr(harness, 'run_stage_with_runners', run_after_retry_backoff)
     monkeypatch.setattr(flows,'deterministic_scorer',_baseline_first_judge)
     assert flows._start_round(harness,day=23 if recover_successfully else 24,epoch=62523 if recover_successfully else 62524)==2
     harness.clock.advance_to(harness.schedule()['stage_1_start'])
@@ -328,6 +380,12 @@ def test_normal_signed_runner_recovers_only_missing_baseline_work_and_preserves_
     all_judges=harness.service.store.list_runs(harness.round_id,kind='score')
     new_source=next(r for r in all_exec if r['submission_id']==baseline and r['icp_position']==0 and r['attempt']==3)
     assert new_source['status']=='accepted' and new_source['stage']==1
+    assert new_source['lease_token_hash'] and new_source['claim_request_id']
+    assert new_source['claim_response']['status']=='leased'
+    execution_ledger = harness.service.store.list_ledger(run_id=new_source['run_id'])
+    assert {'reservation','dispatch','settlement'} <= {item['entry_kind'] for item in execution_ledger}
+    assert any(item['entry_kind']=='settlement' and item['amount_microusd']>0
+               for item in execution_ledger)
     assert sum(r['submission_id']==baseline and r['icp_position']==3 for r in all_exec)==1
     assert next(r for r in all_exec if r['run_id']==failed_source['assignment_id']+':2')['per_icp_score']==0
     assert final['stage1_scoring_plan_doc']==frozen_plan
@@ -342,7 +400,10 @@ def test_normal_signed_runner_recovers_only_missing_baseline_work_and_preserves_
         assert new_source['per_icp_score'] is None
         assert not harness.service._baseline_final_ready(final)
         assert harness.service.publish(harness.round_id)['reason']=='baseline_incomplete'
-        assert max(r['attempt'] for r in all_judges if r['scored_run_id']==retained_source['run_id'])==3
+        assert final['published_at'] is None and final['reward_activated_at'] is None
+        retained_judges = [r for r in all_judges if r['scored_run_id']==retained_source['run_id']]
+        assert any(r['status']=='failed' and r['attempt']==3 for r in retained_judges)
+        assert any(r['status']=='pending' and r['attempt']>=4 for r in retained_judges)
     harness.service.store.close()
 
 @pytest.mark.parametrize('state',[None,{}, {'inflight_calls':0}, {'inflight_calls':None,'success_unresolved_calls':0}])

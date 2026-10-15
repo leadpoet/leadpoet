@@ -297,3 +297,18 @@ def test_replay_rejects_changed_owner_or_acl(database, mutation, restoration):
             finally:
                 cur.execute(restoration)
             assert _hash(cur) == POST
+
+
+@pytest.mark.parametrize('recover_successfully', [True, False])
+def test_priority_release_signed_runner_completes_or_blocks_publication(
+    database, tmp_path, monkeypatch, recover_successfully,
+):
+    # Use the exact 481-upgraded claim RPC through execution, provider billing,
+    # completion and judging. The negative keeps publication/rewards blocked.
+    with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
+        assert _hash(cur) == POST
+    recovery.exercise_signed_baseline_recovery(
+        database, tmp_path, monkeypatch, recover_successfully,
+    )
+    with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
+        assert _hash(cur) == POST

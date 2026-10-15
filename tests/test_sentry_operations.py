@@ -492,30 +492,42 @@ def test_completed_restart_with_slow_passive_wait_is_nonterminal(
     assert slow_wait[0]["data"]["fail_closed"] is False
 
 
-def test_failed_causal_stage_deadline_is_terminal(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("evidence_text", "expected_code"),
+    (
+        (None, "restart.terminal_failure"),
+        ("stage deadline exceeded after 300 attempts", "restart.stage_deadline_exceeded"),
+        ("NameError: name 'contracts' is not defined", "restart.terminal_failure"),
+    ),
+)
+def test_failed_restart_ledger_gap_requires_timeout_evidence(
+    tmp_path, monkeypatch, evidence_text, expected_code
+):
     ledger = tmp_path / "restart.jsonl"
-    passive_wait_stage = sentry_operations._RESTART_MILESTONES["gateway"][0]
-    failed_stage = "active_restart_work"
-    deadline_seconds = 900
+    failed_stage = "lab_arena_destructive_authorization"
+    # Production 6S timings: the gap includes unrecorded candidate overlap
+    # and claim drain work, not just the failed authorization stage.
     _write_ledger(
         ledger,
         (
             {
-                "stage": passive_wait_stage,
+                "stage": "pre_shutdown_checks_complete",
                 "status": "passed",
-                "elapsed_seconds": 1,
+                "elapsed_seconds": 66.464,
             },
             {
                 "stage": failed_stage,
                 "status": "failed",
-                "elapsed_seconds": deadline_seconds + 2,
+                "elapsed_seconds": 1079.729,
             },
         ),
     )
-    monkeypatch.setenv(
-        "LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS",
-        str(deadline_seconds),
-    )
+    monkeypatch.setenv("LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS", "900")
+    evidence_paths = []
+    if evidence_text is not None:
+        evidence = tmp_path / "restart.log"
+        evidence.write_text(evidence_text, encoding="utf-8")
+        evidence_paths.append(evidence)
     _, _, terminal_events = _collect_restart_summary_telemetry(monkeypatch)
     sentry_operations.emit_restart_summary(
         component="gateway",
@@ -524,11 +536,22 @@ def test_failed_causal_stage_deadline_is_terminal(tmp_path, monkeypatch):
         ledger_path=ledger,
         restart_invocation_id="restart:test",
         candidate_sha="ab" * 20,
+        evidence_paths=evidence_paths,
     )
     assert len(terminal_events) == 1
-    assert terminal_events[0]["failure_code"] == "restart.stage_deadline_exceeded"
-    assert terminal_events[0]["context"]["terminal"] is True
-    assert terminal_events[0]["context"]["fail_closed"] is True
+    event = terminal_events[0]
+    assert event["failure_code"] == expected_code
+    assert event["stage"] == failed_stage
+    assert event["context"]["terminal"] is True
+    assert event["context"]["fail_closed"] is True
+    assert event["context"]["shutdown_started"] is False
+    assert event["context"]["duration_seconds"] == 1079.729
+    assert event["context"]["stage_ledger"][-1] == {
+        "stage": failed_stage,
+        "status": "failed",
+        "elapsed_seconds": 1079.729,
+        "duration_seconds": 1013.265,
+    }
 
 
 def test_slow_passive_wait_does_not_relabel_later_failure(tmp_path, monkeypatch):

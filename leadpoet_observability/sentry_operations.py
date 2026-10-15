@@ -1049,20 +1049,8 @@ def emit_restart_summary(
         stage=stage,
         evidence_paths=evidence_paths,
     )
-    causal_failure = next(
-        (
-            item
-            for item in reversed(records)
-            if item.get("stage") == stage and item.get("status") == "failed"
-        ),
-        None,
-    )
-    if (
-        code == "restart.terminal_failure"
-        and causal_failure is not None
-        and float(causal_failure["duration_seconds"]) > stage_deadline
-    ):
-        code = "restart.stage_deadline_exceeded"
+    # Ledger gaps can include earlier work without its own timing record.
+    # They preserve latency evidence but do not prove an enforced timeout.
     capture_failure(
         code,
         component=component,

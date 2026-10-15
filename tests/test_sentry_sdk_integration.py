@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import socket
 import threading
@@ -11,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from leadpoet_observability import sentry_bootstrap
+from leadpoet_observability import sentry_cli
 from leadpoet_observability import sentry_operations
 
 
@@ -28,6 +30,61 @@ class _CaptureTransport(Transport):
             event = item.get_event() or item.get_transaction_event()
             if event is not None:
                 self._events.append(event)
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected_code"),
+    [
+        ("legacy Arena paid review is claimed", "restart.terminal_failure"),
+        ("NameError: name 'contracts' is not defined", "restart.terminal_failure"),
+        ("stage deadline exceeded after 300 attempts", "restart.stage_deadline_exceeded"),
+    ],
+)
+def test_restart_cli_keeps_real_failures_without_inventing_timeout(
+    monkeypatch, tmp_path, evidence, expected_code
+):
+    captured = []
+    real_init = sentry_sdk.init
+
+    def init_without_network(**options):
+        options["transport"] = _CaptureTransport(captured)
+        return real_init(**options)
+
+    def forbidden_network(*args, **kwargs):
+        raise AssertionError("restart classification contract must remain offline")
+
+    monkeypatch.setattr(socket.socket, "connect", forbidden_network)
+    monkeypatch.setattr(socket, "getaddrinfo", forbidden_network)
+    monkeypatch.setattr(sentry_sdk, "init", init_without_network)
+    monkeypatch.setenv(sentry_bootstrap.ENABLED_ENV, "1")
+    monkeypatch.setenv(sentry_bootstrap.DSN_ENV, "https://public@example.invalid/1")
+    monkeypatch.setenv("LEADPOET_SENTRY_RESTART_STAGE_DEADLINE_SECONDS", "900")
+    ledger = tmp_path / "restart.jsonl"
+    ledger.write_text("\n".join(json.dumps(row) for row in [
+        {"stage": "pre_shutdown_checks_complete", "status": "reached", "elapsed_seconds": 66.464},
+        {"stage": "lab_arena_destructive_authorization", "status": "failed", "elapsed_seconds": 1079.729},
+    ]) + "\n", encoding="utf-8")
+    log = tmp_path / "restart.log"
+    log.write_text(evidence, encoding="utf-8")
+    sentry_bootstrap._reset_for_tests()
+    sentry_operations._reset_for_tests()
+    try:
+        with sentry_sdk.isolation_scope():
+            assert sentry_cli.main([
+                "restart-summary", "--component", "gateway", "--status", "failed",
+                "--stage", "lab_arena_destructive_authorization", "--ledger", str(ledger),
+                "--restart-invocation-id", "restart:test", "--candidate-sha", "ab" * 20,
+                "--evidence", str(log),
+            ]) == 0
+        events = [event for event in captured if event.get("level") == "error"]
+        assert len(events) == 1
+        assert events[0]["tags"]["leadpoet.failure_code"] == expected_code
+        assert events[0]["tags"]["leadpoet.terminal"] == "True"
+        assert events[0]["contexts"]["leadpoet.operation"]["duration_seconds"] == 1079.729
+    finally:
+        real_init(dsn=None, default_integrations=False)
+        sentry_bootstrap._reset_for_tests()
+        sentry_operations._reset_for_tests()
 
 
 @pytest.mark.parametrize("component", ["arena-service", "arena-validator"])

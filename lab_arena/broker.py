@@ -5398,6 +5398,7 @@ class Broker:
             ),
         )
         failure_stage = "response_adaptation"
+        observed_provider_http_status = response.status
         adapted_response_url = ""
         call_succeeded = False
         judgment_cache_eligible = False
@@ -5828,8 +5829,17 @@ class Broker:
                                 "outcome": "settled",
                                 "actual_microusd": raw_actual,
                                 "error_code": "provider_unavailable",
+                                "failure_stage": failure_stage,
+                                "error_class": _safe_exception_class(exc),
                             }
                         )
+                        if (
+                            type(observed_provider_http_status) is int
+                            and 100 <= observed_provider_http_status <= 599
+                        ):
+                            summary["observed_provider_http_status"] = (
+                                observed_provider_http_status
+                            )
                         return BrokerResult(
                             refused.status, refused.headers, refused.body, summary
                         )

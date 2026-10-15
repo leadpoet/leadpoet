@@ -134,12 +134,24 @@ def _provider_telemetry_fields(
         operation_id if isinstance(operation_id, str) else ""
     )
     provider_status = call.get("provider_status")
+    observed_status = call.get("observed_provider_http_status")
+    if (
+        provider_status is None
+        and type(observed_status) is int
+        and 100 <= observed_status <= 599
+    ):
+        provider_status = observed_status
+    error_class = call.get("error_class")
     cost = call.get("actual_microusd")
     return {
         "provider": provider,
         "operation": operation,
         "outcome": outcome,
         "error_code": error_code or telemetry.NO_ERROR,
+        **({"error_type": error_class} if (
+            isinstance(error_class, str)
+            and error_class in (broker_module._SAFE_EXCEPTION_CLASSES | {"Exception"})
+        ) else {}),
         "http_status": max(0, min(int(http_status), 999)) if isinstance(http_status, int) and not isinstance(http_status, bool) else 0,
         "provider_status": max(0, min(int(provider_status), 999)) if isinstance(provider_status, int) and not isinstance(provider_status, bool) else 0,
         "attempts": max(1, min(int(attempts), 4)),

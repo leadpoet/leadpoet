@@ -154,13 +154,20 @@ def bootstrap(*, repo: Path, source_commit: str, expected_controller_commit: str
         if not path.is_absolute() or ".." in path.parts:
             raise BootstrapError("absolute paths without traversal are required")
         _parents(path)
+    metadata = repo.lstat()
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o022):
+        raise BootstrapError("canonical repository path is unsafe")
     if _git(repo, "remote", "get-url", "origin").decode().strip() not in ORIGINS:
         raise BootstrapError("unknown repository origin")
     _git(repo, "fetch", "--no-tags", "origin")
     if _git(repo, "rev-parse", "origin/main").decode().strip() != source_commit:
         raise BootstrapError("source commit is not the current fetched origin/main")
     _git(repo, "merge-base", "--is-ancestor", expected_controller_commit, source_commit)
-    if helper_path.is_symlink() or helper_path.read_bytes() != _git(repo, "show", f"{source_commit}:{SELF_PATH}"):
+    helper_metadata = helper_path.lstat()
+    if (not stat.S_ISREG(helper_metadata.st_mode) or helper_metadata.st_uid != os.getuid()
+            or helper_metadata.st_mode & 0o022
+            or helper_path.read_bytes() != _git(repo, "show", f"{source_commit}:{SELF_PATH}")):
         raise BootstrapError("bootstrap helper differs from exact main")
     old = _blobs(repo, expected_controller_commit)
     new = _blobs(repo, source_commit)
@@ -219,14 +226,17 @@ def bootstrap(*, repo: Path, source_commit: str, expected_controller_commit: str
                 break
             except (OSError, RuntimeError):
                 pass
+        bootstrap_exit = (1 if canonical_exit == 0 and installed_state != "candidate"
+                          else canonical_exit)
         print(json.dumps({"schema_version": "leadpoet.gateway_controller_bootstrap.v1",
                           "source_commit": source_commit,
                           "previous_controller_commit": expected_controller_commit,
                           "candidate_tree_hash": proof["tree_hash"],
                           "canonical_exit_code": canonical_exit,
+                          "bootstrap_exit_code": bootstrap_exit,
                           "installed_controller": installed_state,
                           "runtime_deployment_verified": False}), flush=True)
-        return canonical_exit
+        return bootstrap_exit
     finally:
         if canonical is None or canonical.poll() is not None:
             shutil.rmtree(work)

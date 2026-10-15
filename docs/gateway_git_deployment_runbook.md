@@ -75,13 +75,17 @@ repair helper from that exact commit into an owner-only temporary file:
 cd /home/ec2-user/leadpoet_repo
 git fetch origin
 # Use the full reviewed source SHA and the full inspected installed SHA below.
+source_sha="<full-reviewed-source-sha>"
+installed_controller_sha="<full-inspected-controller-sha>"
 repair_helper="$(mktemp /tmp/gateway-controller-repair.XXXXXX.py)"
 chmod 600 "$repair_helper"
-git show <source-sha>:scripts/bootstrap_gateway_restart_controller.py > "$repair_helper"
 repair_status=0
-python3 "$repair_helper" \
-  --source-commit <source-sha> \
-  --expected-controller-commit <installed-controller-sha> || repair_status=$?
+git show "$source_sha:scripts/bootstrap_gateway_restart_controller.py" > "$repair_helper" || repair_status=$?
+if [ "$repair_status" -eq 0 ]; then
+  python3 "$repair_helper" \
+    --source-commit "$source_sha" \
+    --expected-controller-commit "$installed_controller_sha" || repair_status=$?
+fi
 rm -f "$repair_helper"
 (exit "$repair_status")
 ```
@@ -101,6 +105,9 @@ the canonical controller installs its successor; preserve that state and use
 the normal exact-SHA recovery flow. The helper never rolls back canonical
 runtime, ingress, or guard changes. If the observer is interrupted while the
 controller still runs, it retains and reports the private authority path.
+If the canonical command returns zero but the candidate installed identity
+cannot be verified, the helper returns one and preserves the canonical exit
+code in its receipt.
 
 A controller identity receipt does not verify runtime deployment. Complete the
 normal live checks below, including guard release and terminal restart success.

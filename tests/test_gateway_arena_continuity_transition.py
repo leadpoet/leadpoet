@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 from pathlib import Path
 import shlex
 import socket

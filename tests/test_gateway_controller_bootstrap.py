@@ -76,6 +76,7 @@ def host(tmp_path, monkeypatch):
         for gate in release epoch ownership drain; do printf 'gate:%s\\n' "$gate" >> canonical-events; done
         stage="$(cat canonical-control)"
         if [ "$stage" = early ]; then exit 23; fi
+        if [ "$stage" = no-install ]; then exit 0; fi
         printf 'gate:readiness\\n' >> canonical-events
         python3 -B - <<'PY'
         import os, pathlib, shutil
@@ -100,6 +101,7 @@ def host(tmp_path, monkeypatch):
         temporary.replace(target)
         PY
         if [ "$stage" = late ]; then exit 24; fi
+        if [ "$stage" = unknown ]; then printf 'unexpected third state' > "$GATEWAY_HOST_RESTART_SCRIPT"; exit 0; fi
         printf 'guard:release\\n' >> canonical-events
     '''))
     controller.chmod(0o755)
@@ -135,11 +137,13 @@ def host(tmp_path, monkeypatch):
     assert not list(tmp_path.glob("gateway-restart-controller-bootstrap.*"))
 
 
-@pytest.mark.parametrize("stage,code,identity", [("success", 0, "candidate"),
-                                                ("early", 23, "previous"),
-                                                ("late", 24, "candidate")])
+@pytest.mark.parametrize("stage,code,bootstrap_code,identity", [
+    ("success", 0, 0, "candidate"), ("early", 23, 23, "previous"),
+    ("late", 24, 24, "candidate"), ("no-install", 0, 1, "previous"),
+    ("unknown", 0, 1, "unknown"),
+])
 def test_n_minus_one_runs_full_candidate_entrypoint_and_reports_observed_identity(
-    host, monkeypatch, capsys, stage, code, identity,
+    host, monkeypatch, capsys, stage, code, bootstrap_code, identity,
 ):
     (host["repo"] / "canonical-control").write_text(stage)
     for key in ("GATEWAY_RESTART_PHASE", "GATEWAY_RESTART_INVOCATION_ID", "GATEWAY_PREFLIGHT_TREE",
@@ -148,16 +152,17 @@ def test_n_minus_one_runs_full_candidate_entrypoint_and_reports_observed_identit
                 "AWS_ACCESS_KEY_ID", "LAB_ARENA_OPENROUTER_API_KEY", "GIT_SSH_COMMAND"):
         monkeypatch.setenv(key, "poisoned-fixture-value")
     previous_bytes = host["host_script"].read_bytes()
-    assert bootstrap.bootstrap(**host) == code
+    assert bootstrap.bootstrap(**host) == bootstrap_code
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["canonical_exit_code"] == code
+    assert receipt["bootstrap_exit_code"] == bootstrap_code
     assert receipt["installed_controller"] == identity
     assert receipt["runtime_deployment_verified"] is False
     events = (host["repo"] / "canonical-events").read_text().splitlines()
     assert events[:5] == [f"entry:{host['source_commit']}", "gate:release", "gate:epoch",
                           "gate:ownership", "gate:drain"]
     assert ("guard:release" in events) is (stage == "success")
-    if stage == "early":
+    if stage in ("early", "no-install"):
         assert host["host_script"].read_bytes() == previous_bytes
     assert (host["controller_root"] / "releases" / host["expected_controller_commit"]).exists()
 

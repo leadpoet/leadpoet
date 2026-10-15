@@ -2727,6 +2727,39 @@ def _openrouter_responses_error_status(
     return _OPENROUTER_RESPONSE_ERROR_TYPE_STATUSES[error_type]
 
 
+def _openrouter_in_flight_budget_response(response: ProviderResponse) -> bool:
+    """Recognize the typed pre-generation throttle documented in API limits.
+
+    https://openrouter.ai/docs/api_reference/limits#handling-402-errors
+    """
+
+    if response.status not in (402, 429) or response.internal_provenance is not None:
+        return False
+    try:
+        document = json.loads(response.body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    if not isinstance(document, Mapping) or not set(document) <= {"error", "openrouter_metadata"}:
+        return False
+    generation_present, _ = _openrouter_generation_identity(document, response.headers)
+    if generation_present:
+        return False
+    error = document.get("error")
+    if (
+        not isinstance(error, Mapping)
+        or type(error.get("code")) is not int
+        or error["code"] != 402
+        or not isinstance(error.get("message"), str)
+        or not error["message"].strip()
+    ):
+        return False
+    metadata = error.get("metadata")
+    return (
+        isinstance(metadata, Mapping)
+        and metadata.get("limit_source") == "openrouter_in_flight_budget"
+    )
+
+
 def _openrouter_effective_response(response: ProviderResponse) -> ProviderResponse:
     """Expose errors which OpenRouter reports inside an HTTP 2xx body.
 
@@ -2736,6 +2769,11 @@ def _openrouter_effective_response(response: ProviderResponse) -> ProviderRespon
     error envelope rather than passing it to submitted code as a completion.
     """
 
+    # OpenRouter's typed in-flight budget is temporary capacity, not exhausted
+    # miner funding. Keep the original body and status in the existing audit
+    # fields while reusing the rate-limit gate and bounded worker backoff.
+    if response.status == 402 and _openrouter_in_flight_budget_response(response):
+        return ProviderResponse(429, response.headers, response.body)
     if not 200 <= response.status < 300:
         return response
     try:
@@ -3120,6 +3158,7 @@ def _miner_credential_failure(
     response: ProviderResponse,
     *,
     champion_credential_retry: bool,
+    original_http_status: Optional[int] = None,
 ) -> bool:
     """Return true only for a failure tied to the submitted account.
 
@@ -3130,6 +3169,11 @@ def _miner_credential_failure(
     """
 
     if provider == "deepline" and _deepline_managed_provider_failure(response):
+        return False
+    if (
+        provider == "openrouter" and original_http_status == 402
+        and response.status == 429 and _openrouter_in_flight_budget_response(response)
+    ):
         return False
     if response.status in (401, 402):
         return True
@@ -5437,6 +5481,7 @@ class Broker:
                     effective_operation.provider,
                     response,
                     champion_credential_retry=champion_credential_retry,
+                    original_http_status=observed_provider_http_status,
                 )
             )
             # A known miner-account refusal may finish later score jobs via

@@ -279,6 +279,25 @@ class SubmissionCodeReviewer:
                         actual = broker.actual_openrouter_cost_microusd(
                             self._prices, prepared.parameters["model"], parsed,
                         )
+                    # Reuse the broker's established direct credit-refusal
+                    # proof. A complete HTTP 402 before any generation is not
+                    # a missing paid result. Embedded failures and ambiguous
+                    # usage remain uncertain, as do transport failures.
+                    if actual is None and response.status == 402:
+                        generation_present, _ = broker._openrouter_generation_identity(
+                            parsed, response.headers,
+                        )
+                        if (
+                            broker._openrouter_complete_provider_error(response, parsed, response)
+                            and set(parsed) <= {"error", "openrouter_metadata"}
+                            and broker._confirmed_credit_failure_proof(
+                                provider="openrouter", funding_source="miner_key",
+                                response=response, raw_document=parsed,
+                                raw_actual=None, actual=0, call_succeeded=False,
+                                openrouter_generation_present=generation_present,
+                            ) is not None
+                        ):
+                            actual = 0
                     try:
                         response = broker._openrouter_effective_response(response)
                     except operations.OperationResponseError as exc:
@@ -312,6 +331,8 @@ class SubmissionCodeReviewer:
                         document = code_review_policy.provider_http_diagnostic(
                             response.status
                         )
+                        if provider_http_status == 402 and response.status == 429:
+                            document["provider_http_status"] = provider_http_status
             except code_review.CodeReviewError as exc:
                 # A malformed successful generation may already have been paid.
                 # Retain the legacy three-attempt cap rather than expanding it.

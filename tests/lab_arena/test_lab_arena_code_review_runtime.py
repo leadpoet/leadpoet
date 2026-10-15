@@ -4,10 +4,13 @@ import gzip
 import io
 import json
 import tarfile
+from datetime import datetime, timedelta, timezone
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from lab_arena import broker, code_review, contracts
+from gateway.observability.otel_bootstrap import ARENA_REVIEW_SCOPE, REVIEW_SPAN_ATTRIBUTE_ALLOWLIST, configure_arena_otel
+from lab_arena import broker, code_review, contracts, telemetry
 from lab_arena.code_review_runtime import SubmissionCodeReviewer
 from lab_arena.submission_runtime import SubmissionProviderKeys
 
@@ -155,6 +158,143 @@ def _reviewer(payload, transport, *, store=None, credential_for=None):
     )
     row = {**SUBMISSION, "source_size_bytes": len(payload)}
     return reviewer, row, store, objects
+
+
+@pytest.mark.parametrize(("http_status", "expected_status", "error_code", "retryable"), [
+    (200, "passed", "-", False),
+    (402, "error", "code_review_provider_credit", False),
+    (429, "error", "code_review_provider_rate_limited", True),
+    (502, "error", "code_review_provider_unavailable", True),
+])
+def test_review_telemetry_tracks_only_committed_outcome(
+    http_status, expected_status, error_code, retryable,
+):
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    secret_prose = "private provider diagnostic and source text"
+    transport = ReviewTransport(lambda parameters: {
+        "status": http_status,
+        "body": _review_body(parameters) if http_status == 200
+        else {"error": {"message": secret_prose}},
+    })
+    reviewer, row, _store, _objects = _reviewer(_archive(_source()), transport)
+    try:
+        assert reviewer.review(row)["status"] == expected_status
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        span = spans[0]
+        assert span.instrumentation_scope.name == ARENA_REVIEW_SCOPE
+        assert span.name == "arena.review.decision"
+        assert set(span.attributes) == REVIEW_SPAN_ATTRIBUTE_ALLOWLIST
+        assert dict(span.attributes) == {
+            "arena.review_status": expected_status,
+            "arena.error_code": error_code,
+            "arena.provider_http_status": http_status,
+            "arena.retryable": retryable,
+            "arena.funding_route": "miner_key",
+            "arena.round_id": row["round_id"],
+            "arena.submission_id": row["submission_id"],
+            "arena.miner_hotkey": row["miner_hotkey"],
+            "arena.attempt": 1,
+        }
+        assert secret_prose not in repr(span.attributes)
+        assert MINER_KEY not in repr(span.attributes)
+        assert row["source_ref"] not in repr(span.attributes)
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_review_telemetry_skips_uncommitted_and_replayed_finish():
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    transport = ReviewTransport(lambda parameters: {"body": _review_body(parameters)})
+    try:
+        reviewer, row, store, _objects = _reviewer(_archive(_source()), transport)
+        store.finish_submission_review = lambda *_args: {
+            "status": "existing", "code_review_status": "passed", "attempt": 1,
+        }
+        assert reviewer.review(row)["status"] == "existing"
+        assert exporter.get_finished_spans() == ()
+
+        reviewer, row, store, _objects = _reviewer(_archive(_source()), transport)
+        def fail_finish(*_args):
+            raise RuntimeError("private database error")
+        store.finish_submission_review = fail_finish
+        with pytest.raises(RuntimeError, match="private database error"):
+            reviewer.review(row)
+        assert exporter.get_finished_spans() == ()
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_review_telemetry_names_a_retry_attempt_without_duplicate_decisions():
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    transport = ReviewTransport(lambda parameters: {
+        "status": 429, "body": {"error": {"message": "private retry text"}},
+    })
+    reviewer, row, store, _objects = _reviewer(_archive(_source()), transport)
+    row.update({
+        "code_review_status": "error",
+        "code_review_attempts": 1,
+        "code_review_doc": {"retryable": True},
+        "code_review_started_at": datetime.now(timezone.utc) - timedelta(hours=1),
+    })
+    original_begin = store.begin_submission_review
+    def begin_retry(*args):
+        return {**original_begin(*args), "attempt": 2}
+    store.begin_submission_review = begin_retry
+    try:
+        assert reviewer.review(row)["status"] == "error"
+        (span,) = exporter.get_finished_spans()
+        assert span.attributes["arena.attempt"] == 2
+        assert span.attributes["arena.retryable"] is True
+        assert len(transport.sent) == 1
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_review_telemetry_uses_committed_late_error():
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    transport = ReviewTransport(lambda parameters: {"body": _review_body(parameters)})
+    reviewer, row, store, _objects = _reviewer(_archive(_source()), transport)
+    original_finish = store.finish_submission_review
+    def finish_late(*args):
+        original_finish(*args)
+        return {"status": "deadline", "code_review_status": "error", "attempt": 1}
+    store.finish_submission_review = finish_late
+    try:
+        assert reviewer.review(row)["status"] == "deadline"
+        (span,) = exporter.get_finished_spans()
+        assert span.attributes["arena.review_status"] == "error"
+        assert span.attributes["arena.error_code"] == "code_review_deadline_exceeded"
+        assert span.attributes["arena.funding_route"] == "miner_key"
+        assert span.attributes["arena.provider_http_status"] == 200
+        assert span.attributes["arena.retryable"] is False
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_review_telemetry_reports_no_provider_route_when_credential_absent():
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    transport = ReviewTransport(lambda _parameters: pytest.fail("no provider dispatch"))
+    reviewer, row, _store, _objects = _reviewer(
+        _archive(_source()), transport,
+        credential_for=lambda _row: (_ for _ in ()).throw(
+            broker.BrokerError("miner_credentials_unavailable")
+        ),
+    )
+    try:
+        assert reviewer.review(row)["status"] == "error"
+        (span,) = exporter.get_finished_spans()
+        assert span.attributes["arena.error_code"] == "code_review_provider_authentication"
+        assert span.attributes["arena.funding_route"] == "none"
+        assert span.attributes["arena.provider_http_status"] == 0
+        assert transport.sent == []
+    finally:
+        telemetry.install_recorder(None)
 
 
 def test_runtime_sends_every_file_and_only_the_submitting_miners_key():

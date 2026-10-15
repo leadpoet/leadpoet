@@ -67,6 +67,9 @@ identical fail-closed machinery under separate Arena scopes:
 - ``arena.runtime`` — one span for an accepted runtime event upload that
   inserted at least one event. Batch flags describe event kinds present in the
   upload; mixed new/replayed batches do not prove a fresh lifecycle transition.
+- ``arena.review`` — one span after a submission review attempt commits. It
+  carries only the bounded decision, safe diagnostic, provider HTTP status,
+  retry flag, proven funding route, and validated submission identity.
 
 All Arena scopes share the gateway's destination (the same private
 ``GATEWAY_OTEL_*`` values, read from the same protected env file) so enabling
@@ -170,6 +173,7 @@ ARENA_PROVIDER_SCOPE = "arena.provider"
 ARENA_RUN_SCOPE = "arena.run"
 ARENA_RUNTIME_SCOPE = "arena.runtime"
 ARENA_GATE_SCOPE = "arena.gate"
+ARENA_REVIEW_SCOPE = "arena.review"
 
 # ``lab_arena.contracts.PROVIDERS`` plus the fixed label used when an
 # operation is not in the table at all.
@@ -240,6 +244,33 @@ ARENA_TERMINAL_CAUSES = frozenset(
 
 # A run is either a miner execution or an Arena judge scoring pass.
 ARENA_RUN_KINDS = frozenset({"execute", "score"})
+ARENA_REVIEW_STATUSES = frozenset({"passed", "rejected", "error"})
+ARENA_REVIEW_FUNDING_ROUTES = frozenset({"miner_key", "none"})
+ARENA_REVIEW_ERROR_CODES = frozenset({
+    "-",
+    "code_review_source_size_mismatch", "code_review_source_digest_mismatch",
+    "review_context_limit_invalid", "review_model_invalid",
+    "review_output_cannot_report_coverage", "review_output_limit_invalid",
+    "review_source_empty", "review_source_exceeds_context",
+    "review_source_incomplete", "review_source_invalid",
+    "review_source_not_text", "review_source_not_utf8",
+    "review_source_unreadable", "source_archive_invalid",
+    "source_archive_failed", "source_archive_too_large",
+    "source_archive_unsafe", "source_contains_credentials",
+    "source_directory_missing", "source_empty",
+    "source_entry_type_invalid", "source_file_count_exceeded",
+    "source_git_automation_forbidden", "source_license_invalid",
+    "source_path_invalid", "source_unpacked_too_large",
+    "source_unreadable", "source_credentials_invalid",
+    "harness_file_missing", "harness_invalid", "harness_too_large",
+    "code_review_preparation_unavailable", "code_review_provider_authentication",
+    "code_review_provider_credit", "code_review_provider_rate_limited",
+    "code_review_provider_request_rejected", "code_review_provider_timeout",
+    "code_review_provider_unavailable", "code_review_transport_error",
+    "code_review_credential_echo", "code_review_cost_unavailable",
+    "code_review_deadline_exceeded", "code_review_round_closed",
+    "code_review_submission_ineligible", "review_response_invalid",
+})
 
 # How a wait on the shared OpenRouter concurrency gate ended. A call admitted
 # with no wait at all emits nothing, so gate spans appear only under
@@ -660,6 +691,19 @@ RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(
     RUNTIME_SPAN_ATTRIBUTE_TYPES
 ) | RUN_IDENTITY_ATTRIBUTE_ALLOWLIST
 
+REVIEW_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    "arena.review_status": (str,),
+    "arena.error_code": (str,),
+    "arena.provider_http_status": (int,),
+    "arena.retryable": (bool,),
+    "arena.funding_route": (str,),
+    "arena.round_id": (str,),
+    "arena.submission_id": (str,),
+    "arena.miner_hotkey": (str,),
+    "arena.attempt": (int,),
+}
+REVIEW_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(REVIEW_SPAN_ATTRIBUTE_TYPES)
+
 # The ONLY attributes a provider-gate span may carry.
 GATE_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.gate_outcome": (str,),
@@ -868,6 +912,7 @@ def _validating_exporter(
     ``run``         INTERNAL span, the four approved run-outcome attributes
     ``runtime``     INTERNAL span, a bounded accepted runtime-upload batch
     ``gate``        INTERNAL span, the two approved provider-gate attributes
+    ``review``      INTERNAL span, one committed submission review decision
 
     A span whose scope is not listed is dropped, so one process can never emit
     through another's envelope and one envelope can never borrow another's
@@ -1004,6 +1049,33 @@ def _validating_exporter(
             return "name"
         return None
 
+    def _review_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
+        if not _attributes_conform(attributes, REVIEW_SPAN_ATTRIBUTE_TYPES):
+            return "attributes"
+        if attributes["arena.review_status"] not in ARENA_REVIEW_STATUSES:
+            return "review_status"
+        if attributes["arena.error_code"] not in ARENA_REVIEW_ERROR_CODES:
+            return "error_code"
+        if attributes["arena.review_status"] != "error" and attributes["arena.error_code"] != "-":
+            return "error_code"
+        if attributes["arena.review_status"] == "error" and attributes["arena.error_code"] == "-":
+            return "error_code"
+        if attributes["arena.funding_route"] not in ARENA_REVIEW_FUNDING_ROUTES:
+            return "funding_route"
+        if not 0 <= attributes["arena.provider_http_status"] <= 599:
+            return "provider_http_status"
+        if not _ARENA_ROUND_ID_RE.fullmatch(attributes["arena.round_id"]):
+            return "review_identity"
+        if not _ARENA_SUBMISSION_ID_RE.fullmatch(attributes["arena.submission_id"]):
+            return "review_identity"
+        if not _ARENA_RUNNER_HOTKEY_RE.fullmatch(attributes["arena.miner_hotkey"]):
+            return "review_identity"
+        if not 1 <= attributes["arena.attempt"] <= _ARENA_MAX_COUNT:
+            return "review_identity"
+        if span.name != "arena.review.decision":
+            return "name"
+        return None
+
     def _task_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
         stage = attributes.get("arena.stage")
         if stage in ARENA_LIFECYCLE_STAGES:
@@ -1036,6 +1108,7 @@ def _validating_exporter(
         "run": _run_violation,
         "runtime": _runtime_violation,
         "gate": _gate_violation,
+        "review": _review_violation,
     }
 
     def _violation(span: Any) -> Optional[str]:
@@ -1295,9 +1368,9 @@ def configure_gateway_otel(app: Any, *, span_exporter: Optional[Any] = None) -> 
 class ArenaTelemetry:
     """Records Arena spans without raising or blocking normal work.
 
-    Five INTERNAL envelopes, each a root span with its own exact allowlist:
-    pipeline stages, provider calls, run outcomes, runtime uploads, and
-    provider-gate waits.
+    Six INTERNAL envelopes, each a root span with its own exact allowlist:
+    pipeline stages, provider calls, run outcomes, runtime uploads,
+    provider-gate waits, and submission reviews.
     The caller supplies values from the frozen vocabularies; anything else is
     dropped whole by the same fail-closed validator that guards the HTTP
     envelope. A separate bounded flush is available at graceful shutdown.
@@ -1313,6 +1386,7 @@ class ArenaTelemetry:
         run_tracer: Any = None,
         runtime_tracer: Any = None,
         gate_tracer: Any = None,
+        review_tracer: Any = None,
         flush_spans: Optional[Callable[[int], bool]] = None,
     ) -> None:
         self._tracer = tracer
@@ -1320,6 +1394,7 @@ class ArenaTelemetry:
         self._run_tracer = run_tracer
         self._runtime_tracer = runtime_tracer
         self._gate_tracer = gate_tracer
+        self._review_tracer = review_tracer
         self._flush_spans = flush_spans
         # Per-request refusal code, read back by the Arena HTTP middleware.
         # A raw ASGI chain shares one context per request, so this is set and
@@ -1513,6 +1588,34 @@ class ArenaTelemetry:
         except BaseException as exc:
             self._log_emit_failure(exc)
 
+    # -- committed submission reviews -----------------------------------
+
+    def record_review(
+        self, status: str, *, error_code: str,
+        provider_http_status: int, retryable: bool, funding_route: str,
+        round_id: str, submission_id: str, miner_hotkey: str, attempt: int,
+    ) -> None:
+        try:
+            if self._review_tracer is None:
+                return
+            from opentelemetry.trace import Status, StatusCode
+
+            span = self._start(self._review_tracer, "arena.review.decision", None)
+            span.set_attribute("arena.review_status", status)
+            span.set_attribute("arena.error_code", error_code)
+            span.set_attribute("arena.provider_http_status", provider_http_status)
+            span.set_attribute("arena.retryable", retryable)
+            span.set_attribute("arena.funding_route", funding_route)
+            span.set_attribute("arena.round_id", round_id)
+            span.set_attribute("arena.submission_id", submission_id)
+            span.set_attribute("arena.miner_hotkey", miner_hotkey)
+            span.set_attribute("arena.attempt", attempt)
+            if status == "error":
+                span.set_status(Status(StatusCode.ERROR))
+            span.end()
+        except BaseException as exc:
+            self._log_emit_failure(exc)
+
     # -- provider-gate contention ----------------------------------------
 
     def record_gate(
@@ -1681,6 +1784,7 @@ def configure_arena_otel(
                 ARENA_RUN_SCOPE: "run",
                 ARENA_RUNTIME_SCOPE: "runtime",
                 ARENA_GATE_SCOPE: "gate",
+                ARENA_REVIEW_SCOPE: "review",
             },
             log=_ARENA_LOG,
         )
@@ -1699,6 +1803,7 @@ def configure_arena_otel(
             run_tracer=provider.get_tracer(ARENA_RUN_SCOPE),
             runtime_tracer=provider.get_tracer(ARENA_RUNTIME_SCOPE),
             gate_tracer=provider.get_tracer(ARENA_GATE_SCOPE),
+            review_tracer=provider.get_tracer(ARENA_REVIEW_SCOPE),
             flush_spans=lambda timeout: provider.force_flush(timeout_millis=timeout),
         )
 

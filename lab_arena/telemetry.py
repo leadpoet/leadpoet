@@ -20,6 +20,8 @@ The same seam carries five other kinds of observation, all equally bounded:
   took, what it cost in micro-USD, and how long it ran.
 - ``record_run`` — one finished evaluation run: execution or scoring, and
   which of the thirteen terminal causes ended it.
+- ``record_review`` — one persisted submission review attempt outcome, with
+  only bounded decision, diagnostic, funding route, and submission identity.
 - ``record_runtime_upload`` — one accepted upload of runtime events that
   inserted at least one event. Its flags name lifecycle kinds present in the
   batch; ``has_error`` also covers a known failed ``runtime.finished`` status.
@@ -31,9 +33,11 @@ The same seam carries five other kinds of observation, all equally bounded:
   current request, so a 4xx stops being anonymous. Only the literal prefix
   before the first ":" is ever exported.
 
-Provider, committed-run, and accepted-runtime-upload spans may carry seven bounded identifiers copied
-from the gateway's authenticated run row. No ICP content, source bundle,
-prompt, completion, score, model output, URL, or credential is accepted.
+Provider, committed-run, and accepted-runtime-upload spans may carry seven
+bounded identifiers copied from the gateway's authenticated run row. Review
+spans carry four bounded identifiers from the accepted submission and committed
+attempt. No ICP content, source bundle, prompt, completion, score, model
+output, URL, or credential is accepted.
 Stage and gate spans remain aggregate.
 """
 
@@ -161,6 +165,38 @@ def record_run(
         return
     try:
         recorder.record_run(run_kind, terminal_cause, run_identity=run_identity)
+    except BaseException:
+        pass
+
+
+def record_review(
+    status: str,
+    *,
+    error_code: str,
+    provider_http_status: int,
+    retryable: bool,
+    funding_route: str,
+    round_id: str,
+    submission_id: str,
+    miner_hotkey: str,
+    attempt: int,
+) -> None:
+    """Record one committed review decision. Never raises."""
+    recorder = _recorder
+    if recorder is None:
+        return
+    try:
+        recorder.record_review(
+            status,
+            error_code=error_code,
+            provider_http_status=provider_http_status,
+            retryable=retryable,
+            funding_route=funding_route,
+            round_id=round_id,
+            submission_id=submission_id,
+            miner_hotkey=miner_hotkey,
+            attempt=attempt,
+        )
     except BaseException:
         pass
 

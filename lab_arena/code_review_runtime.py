@@ -8,7 +8,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity
+from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry
 
 
 class SubmissionCodeReviewer:
@@ -26,6 +26,49 @@ class SubmissionCodeReviewer:
         self._prices = broker.validate_price_table(price_table)
         self._transport = transport
         self._similarity_references_for = similarity_references_for
+
+    def _finish_review(
+        self, row: Mapping[str, Any], token: str, status: str,
+        document: Mapping[str, Any], actual: int | None,
+        *, attempt: Any, provider_http_status: int = 0,
+        funding_route: str = "none",
+    ) -> Mapping[str, Any]:
+        result = self._store.finish_submission_review(
+            str(row["submission_id"]), str(row["miner_hotkey"]),
+            token, status, document, actual,
+        )
+        try:
+            # The database may replace a late pass with a terminal error.
+            # Emit only its committed decision, never a stale or replay reply.
+            if result.get("status") not in ("passed", "rejected", "error", "deadline", "round_closed", "submission_ineligible"):
+                return result
+            committed = result.get("code_review_status")
+            if committed not in ("passed", "rejected", "error"):
+                return result
+            error_code = document.get("error_code", telemetry.NO_ERROR)
+            retryable = document.get("retryable") is True
+            if result["status"] in ("deadline", "round_closed", "submission_ineligible"):
+                error_code = {
+                    "deadline": "code_review_deadline_exceeded",
+                    "round_closed": "code_review_round_closed",
+                    "submission_ineligible": "code_review_submission_ineligible",
+                }[result["status"]]
+                retryable = False
+            telemetry.record_review(
+                committed,
+                error_code=error_code,
+                provider_http_status=int(document.get("provider_http_status") or provider_http_status),
+                retryable=retryable,
+                funding_route=funding_route,
+                round_id=str(row["round_id"]),
+                submission_id=str(row["submission_id"]),
+                miner_hotkey=str(row["miner_hotkey"]),
+                attempt=int(result.get("attempt") or attempt),
+            )
+        except BaseException:
+            # Observability cannot turn a persisted review into a worker error.
+            pass
+        return result
 
     def review(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
         state = row.get("code_review_status")
@@ -139,23 +182,27 @@ class SubmissionCodeReviewer:
         if claim.get("idempotent") is True:
             return claim
         if preparation_error:
-            return self._store.finish_submission_review(
-                submission_id, hotkey, token, "error",
+            return self._finish_review(
+                row, token, "error",
                 {**preparation_error, "model": code_review.DEFAULT_REVIEW_MODEL,
                  "file_count": len(prepared.reviewed_files) if prepared else 0,
                  "source_bytes": prepared.reviewed_file_bytes if prepared else 0}, 0,
+                attempt=claim.get("attempt"),
             )
         if exact_duplicate:
-            return self._store.finish_submission_review(
-                submission_id, hotkey, token, "rejected",
+            return self._finish_review(
+                row, token, "rejected",
                 {"passed": False, "verdict": "reject",
                  "categories": ["duplicate_submission"],
                  "model": code_review.DEFAULT_REVIEW_MODEL,
                  "file_count": len(prepared.reviewed_files),
                  "source_bytes": prepared.reviewed_file_bytes}, 0,
+                attempt=claim.get("attempt"),
             )
         actual = 0
         status = "error"
+        provider_http_status = 0
+        funding_route = "none"
         document: dict[str, Any] = code_review_policy.diagnostic(
             "code_review_provider_unavailable"
         )
@@ -187,14 +234,19 @@ class SubmissionCodeReviewer:
         if secret:
             actual = None
             try:
+                request_body = contracts.canonical_json(prepared.parameters).encode("utf-8")
+                # This is the owner's stored OpenRouter key; no organizer key
+                # is available on this review route.
+                funding_route = "miner_key"
                 response = self._transport.send(
                     method="POST", url="https://openrouter.ai/api/v1/chat/completions",
                     headers={"Authorization": "Bearer " + secret,
                              "Content-Type": "application/json",
                              "X-OpenRouter-Metadata": "enabled"},
-                    body=contracts.canonical_json(prepared.parameters).encode("utf-8"),
+                    body=request_body,
                     timeout_seconds=300,
                 )
+                provider_http_status = response.status
                 if broker._response_contains_credential(response, secret):
                     document = code_review_policy.diagnostic(
                         "code_review_credential_echo", retryable=False
@@ -271,6 +323,9 @@ class SubmissionCodeReviewer:
             "file_count": len(prepared.reviewed_files),
             "source_bytes": prepared.reviewed_file_bytes,
         })
-        return self._store.finish_submission_review(
-            submission_id, hotkey, token, status, document, actual,
+        return self._finish_review(
+            row, token, status, document, actual,
+            attempt=claim.get("attempt"),
+            provider_http_status=provider_http_status,
+            funding_route=funding_route,
         )

@@ -346,6 +346,7 @@ def test_arena_deep_capture_vocabularies_are_frozen_and_literal() -> None:
     for constant in (
         'ARENA_PROVIDER_SCOPE = "arena.provider"',
         'ARENA_RUN_SCOPE = "arena.run"',
+        'ARENA_REVIEW_SCOPE = "arena.review"',
         'ARENA_GATE_SCOPE = "arena.gate"',
     ):
         assert constant in source, f"missing fixed scope constant: {constant}"
@@ -356,6 +357,9 @@ def test_arena_deep_capture_vocabularies_are_frozen_and_literal() -> None:
         "ARENA_TERMINAL_CAUSES",
         "ARENA_RUN_KINDS",
         "ARENA_GATE_OUTCOMES",
+        "ARENA_REVIEW_STATUSES",
+        "ARENA_REVIEW_FUNDING_ROUTES",
+        "ARENA_REVIEW_ERROR_CODES",
     ):
         assert _frozen_literal(source, name), f"{name} must not be empty"
 
@@ -368,7 +372,7 @@ def test_bootstrap_vocabularies_match_the_arena_source_of_truth() -> None:
     that drifts would silently drop every span carrying the new member, so CI
     compares them instead of trusting the comment.
     """
-    from lab_arena import contracts
+    from lab_arena import code_review_policy, contracts
 
     source = _read(BOOTSTRAP)
     assert set(_frozen_literal(source, "ARENA_PROVIDERS")) == set(
@@ -377,6 +381,9 @@ def test_bootstrap_vocabularies_match_the_arena_source_of_truth() -> None:
     assert set(_frozen_literal(source, "ARENA_TERMINAL_CAUSES")) == set(
         contracts.TERMINAL_CAUSES
     )
+    assert set(_frozen_literal(source, "ARENA_REVIEW_ERROR_CODES")) == set(
+        code_review_policy.ERROR_CODES
+    ) | {"-"}
 
 
 def test_bootstrap_deepline_tool_vocabulary_matches_the_operation_table() -> None:

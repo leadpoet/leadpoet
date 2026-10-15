@@ -1872,16 +1872,25 @@ PY
 }
 
 run_bounded_restart_artifact_cleanup() {
-  local gateway_build_root validator_build_root
+  local gateway_build_root validator_build_root cleanup_source_root
+  local -a build_authority=()
+  # Before checkout, use the already-verified candidate archive. An absolute
+  # entrypoint also prevents the old working directory from shadowing -m.
+  cleanup_source_root="${GATEWAY_PREFLIGHT_TREE:-$LEADPOET_REPO_ROOT}"
+  if [ -n "${PREPARED_GATEWAY_SHA:-}" ]; then
+    build_authority=(--gateway-build-commit "$PREPARED_GATEWAY_SHA")
+  elif [ -n "${GATEWAY_DEPLOY_SHA:-}" ]; then
+    build_authority=(--gateway-build-commit "$GATEWAY_DEPLOY_SHA")
+  fi
   gateway_build_root="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}"
   validator_build_root="${VALIDATOR_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/validator-pcr0-normalizer-v2}"
-  if [ ! -r "$LEADPOET_REPO_ROOT/validator_tee/host/restart_artifact_cleanup_v2.py" ]; then
+  if [ ! -r "$cleanup_source_root/validator_tee/host/restart_artifact_cleanup_v2.py" ]; then
     echo "WARNING: bounded restart artifact cleanup helper is unavailable" >&2
     return 0
   fi
-  if ! sudo env PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
-      -m validator_tee.host.restart_artifact_cleanup_v2 \
-      --apply \
+  if ! sudo env PYTHONPATH="$cleanup_source_root" "$GATEWAY_PYTHON_BIN" -B \
+      "$cleanup_source_root/validator_tee/host/restart_artifact_cleanup_v2.py" \
+      --apply "${build_authority[@]}" \
       --temporary-root /tmp \
       --gateway-build-root "$gateway_build_root" \
       --validator-build-root "$validator_build_root" \

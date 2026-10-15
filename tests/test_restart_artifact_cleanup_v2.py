@@ -359,3 +359,173 @@ def test_apply_lock_identity_requires_live_owner_fd7(tmp_path: Path) -> None:
             owner_pid=124,
             proc_root=proc_root,
         )
+
+
+def _local_build(root: Path, commit: str = "a" * 40, *, role: str = "gateway_coordinator") -> Path:
+    workspace = root / (commit + "-local")
+    source = workspace / role / "source"
+    for relative in ("gateway/tee/Dockerfile.enclave", "gateway/tee/stage_attested_runtime.sh",
+                     "validator_tee/host/gateway_pcr0_builder.py"):
+        marker = source / relative
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("disposable archived build source\n")
+    _age(workspace)
+    return workspace
+
+
+def _local_run(root: Path, **overrides):
+    return _run(root / "tmp", gateway_build_root=root / "builds",
+                gateway_build_commit="f" * 40, **overrides)
+
+
+def test_local_build_layout_is_disposable_but_release_authority_is_preserved(tmp_path: Path):
+    build_root = tmp_path / "builds"
+    stale = _local_build(build_root)
+    historical = _local_build(build_root, "b" * 40, role="gateway_scoring")
+    current = _local_build(build_root, "f" * 40)
+    recent = _local_build(build_root, "c" * 40)
+    (recent / "gateway_coordinator" / "source" / "recent.txt").write_text("current work")
+    foreign = build_root / "other-task"
+    foreign.mkdir()
+    unscoped = build_root / ("d" * 40)
+    unscoped.mkdir()
+    archive = tmp_path / "tee" / "releases-v2" / ("1" * 64)
+    archive.mkdir(parents=True)
+    immutable = archive / "gateway.eif"
+    immutable.write_bytes(b"verified immutable release")
+    runtime = tmp_path / "arena-runtime" / ("slot1-" + "a" * 40)
+    runtime.mkdir(parents=True)
+    runtime_file = runtime / "service.py"
+    runtime_file.write_bytes(b"serving release")
+
+    report = _local_run(tmp_path, gateway_eif_root=tmp_path / "tee",
+                        gateway_archive_root=archive.parent)
+
+    assert {item["path"] for item in report["deleted"]} == {str(stale), str(historical)}
+    assert {item["kind"] for item in report["deleted"]} == {"gateway_local_build"}
+    assert current.exists() and recent.exists() and foreign.exists() and unscoped.exists()
+    assert immutable.read_bytes() == b"verified immutable release"
+    assert runtime_file.read_bytes() == b"serving release"
+
+
+@pytest.mark.parametrize("artifact", ["result.eif", "build-result.json", "other-role"])
+def test_local_build_with_unclassified_or_retained_output_is_preserved(tmp_path: Path, artifact):
+    stale = _local_build(tmp_path / "builds")
+    (stale / "gateway_coordinator" / artifact).write_bytes(b"retained artifact")
+    _age(stale)
+    report = _local_run(tmp_path)
+    assert stale.exists() and report["deleted"] == []
+    assert report["skipped"][0]["reason"] == "local build workspace has unrecognized or retained artifacts"
+
+
+@pytest.mark.parametrize("authority", ["gateway_eif_root", "gateway_archive_root", "gateway_last_good_manifest"])
+def test_local_build_never_removes_an_actual_authority_path(tmp_path: Path, authority):
+    stale = _local_build(tmp_path / "builds")
+    protected = stale / "gateway_coordinator" / "source" / "authority"
+    # Protect configured authority even if the referenced file is currently absent.
+    report = _local_run(tmp_path, **{authority: protected})
+    assert stale.exists() and report["deleted"] == []
+    assert report["skipped"][0]["reason"] == "local build overlaps retained gateway authority"
+
+
+def test_local_build_protects_last_good_and_fails_closed_for_invalid_record(tmp_path: Path):
+    import json
+    stale = _local_build(tmp_path / "builds")
+    marker = tmp_path / "last-good.json"
+    marker.write_text(json.dumps({"status": "succeeded", "target_sha": "a" * 40,
+                                  "role_pcr0s": {"gateway_coordinator": "1" * 96}}))
+    report = _local_run(tmp_path, gateway_last_good_manifest=marker)
+    assert stale.exists() and report["deleted"] == []
+    assert report["skipped"][0]["reason"] == "current or last-good gateway build is protected"
+    marker.write_text("{}")
+    report = _local_run(tmp_path, gateway_last_good_manifest=marker)
+    assert stale.exists() and report["deleted"] == []
+    assert report["skipped"][0]["reason"] == "gateway last-good build authority is invalid"
+
+
+def test_local_build_requires_exact_current_commit(tmp_path: Path):
+    stale = _local_build(tmp_path / "builds")
+    report = _run(tmp_path / "tmp", gateway_build_root=tmp_path / "builds")
+    assert stale.exists() and report["deleted"] == []
+    assert report["skipped"][0]["reason"] == "current gateway build commit is required"
+    with pytest.raises(cleanup.RestartArtifactCleanupV2Error, match="commit is invalid"):
+        _run(tmp_path / "tmp", gateway_build_root=tmp_path / "builds", gateway_build_commit="main")
+
+
+def test_local_build_open_path_mount_symlink_and_foreign_owner_are_preserved(tmp_path: Path, monkeypatch):
+    open_build = _local_build(tmp_path / "builds", "a" * 40)
+    mounted = _local_build(tmp_path / "builds", "b" * 40)
+    foreign = _local_build(tmp_path / "builds", "c" * 40)
+    link = tmp_path / "builds" / ("d" * 40 + "-local")
+    link.symlink_to(open_build, target_is_directory=True)
+    _age(link)
+    original = Path.lstat
+
+    def foreign_lstat(path):
+        observed = original(path)
+        if path == foreign:
+            values = list(observed)
+            values[4] = max(os.getuid() + 1, 1)
+            return os.stat_result(values)
+        return observed
+
+    monkeypatch.setattr(Path, "lstat", foreign_lstat)
+    report = _local_run(tmp_path, usage_provider=lambda: [open_build / "gateway_coordinator" / "source"],
+                        mount_points={mounted / "nested-mount"})
+    assert all(path.exists() for path in (open_build, mounted, foreign, link))
+    assert report["deleted"] == []
+    reasons = {item["path"]: item["reason"] for item in report["skipped"]}
+    assert reasons[str(open_build)] == "candidate is open or in use"
+    assert reasons[str(mounted)] == "candidate contains a mount point"
+    assert reasons[str(foreign)] == "candidate owner is not allowed"
+    assert reasons[str(link)] == "candidate is a symlink"
+
+
+def test_local_build_inode_swap_during_quarantine_is_preserved(tmp_path: Path, monkeypatch):
+    stale = _local_build(tmp_path / "builds")
+    original = os.rename
+    saved = stale.with_name("preserved-original")
+
+    def replace_before_rename(source, destination):
+        if Path(source) == stale and ".cleanup-" in str(destination):
+            original(source, saved)
+            replacement = _local_build(stale.parent)
+            original(replacement, destination)
+        else:
+            original(source, destination)
+
+    monkeypatch.setattr(os, "rename", replace_before_rename)
+    report = _local_run(tmp_path)
+    assert saved.exists() and stale.exists()
+    assert report["deleted"] == []
+    assert report["skipped"][0]["reason"] == "candidate identity changed during quarantine"
+
+
+def test_local_build_dry_run_and_oldest_first_bound(tmp_path: Path):
+    stale = _local_build(tmp_path / "builds", "a" * 40)
+    second = _local_build(tmp_path / "builds", "b" * 40)
+    _age(stale, OLD - 1)
+    dry = _local_run(tmp_path, apply=False, max_candidates=1)
+    assert [item["path"] for item in dry["would_delete"]] == [str(stale)]
+    assert stale.exists() and second.exists()
+    report = _local_run(tmp_path, max_candidates=1)
+    assert not stale.exists() and second.exists()
+    assert report["deleted"][0]["path"] == str(stale)
+
+
+def test_local_build_preserves_authority_symlink_and_source_symlink(tmp_path: Path):
+    protected = _local_build(tmp_path / "builds", "a" * 40)
+    authority = tmp_path / "archive-link"
+    authority.symlink_to(protected / "gateway_coordinator" / "source", target_is_directory=True)
+    linked = _local_build(tmp_path / "builds", "b" * 40)
+    source = linked / "gateway_coordinator" / "source"
+    outside = tmp_path / "outside-source"
+    source.rename(outside)
+    source.symlink_to(outside, target_is_directory=True)
+    _age(linked)
+    report = _local_run(tmp_path, gateway_archive_root=authority)
+    assert protected.exists() and linked.exists() and outside.exists()
+    assert report["deleted"] == []
+    reasons = {item["path"]: item["reason"] for item in report["skipped"]}
+    assert reasons[str(protected)] == "local build overlaps retained gateway authority"
+    assert reasons[str(linked)] == "local build workspace has unrecognized or retained artifacts"

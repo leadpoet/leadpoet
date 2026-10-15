@@ -25,7 +25,8 @@ SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
 # the judge's source for model literals against it.
 DEFAULT_JUDGE_MODELS = {
     "company_fit_reverification": "perplexity/sonar",
-    "intent_signal_judge": "anthropic/claude-sonnet-4.5",
+    "intent_signal_judge": "openai/gpt-6-luna",
+    "intent_details_review": "anthropic/claude-sonnet-4.5",
     "intent_three_stage_stage3": "perplexity/sonar-pro",
     "intent_fetched_evidence": "openai/gpt-6-luna",
     "role_batch_check": "google/gemini-2.5-flash",

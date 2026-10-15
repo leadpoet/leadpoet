@@ -2907,7 +2907,8 @@ class ArenaService:
             or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
             or configuration.get("integrity_policy") != integrity.POLICY
             or quality_policy.enabled(configuration)
-            or configuration.get("max_attempts_per_assignment") != 2
+            or type(configuration.get("max_attempts_per_assignment")) is not int
+            or configuration["max_attempts_per_assignment"] < 1
             or len(baselines) != 1 or run.get("stage") != 1
             or run.get("round_id") != row.get("round_id")
             or run.get("submission_id") != baselines[0].get("submission_id")
@@ -2919,22 +2920,34 @@ class ArenaService:
             or run.get("run_id") != assignment + ":" + str(run.get("attempt"))
             or run.get("champion_restart_required")):
             return False
-        if run.get("kind") == "score" and run.get("attempt") in (1, 2):
+        if run.get("kind") == "score":
             source = next((r for r in runs if r.get("run_id") == run.get("scored_run_id")), {})
-            return (source.get("kind") == "execute" and source.get("status") == "accepted"
+            if (source.get("kind") == "execute" and source.get("status") == "accepted"
                 and source.get("terminal_cause") == "accepted" and bool(source.get("output_ref"))
                 and all(source.get(k) == run.get(k) for k in ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position"))
-                and ArenaService._is_baseline_recovery(source, runs, row))
-        if run.get("attempt") != 3:
+                and ArenaService._is_baseline_recovery(source, runs, row)):
+                return True
+            if run.get("attempt") != 3:
+                return False
+        attempt = run.get("attempt")
+        if (run.get("kind") not in ("execute", "score") or type(attempt) is not int
+            or (run.get("kind") == "execute"
+                and attempt <= configuration["max_attempts_per_assignment"])):
             return False
-        parents = [r for r in runs if r.get("assignment_id") == assignment and r.get("attempt") in (1, 2)]
+        parents = [r for r in runs if r.get("assignment_id") == assignment
+            and type(r.get("attempt")) is int and 1 <= r["attempt"] < attempt]
         causes = {"provider_error", "lease_expired"} if run.get("kind") == "execute" else {"judge_error", "judge_timeout", "lease_expired"}
-        return len(parents) == 2 and all(
+        return (len(parents) == attempt - 1
+            and {r["attempt"] for r in parents} == set(range(1, attempt)) and all(
             r.get("status") == "failed" and r.get("terminal_cause") in causes
+            and (run.get("kind") != "execute" or r.get("output_ref") is None)
+            and (r.get("terminal_cause") == "lease_expired"
+                or (isinstance(r.get("result_doc"), Mapping)
+                    and r["result_doc"].get("terminal_status") == r.get("terminal_cause")))
             and not r.get("champion_restart_required")
             and r.get("run_id") == assignment + ":" + str(r["attempt"])
             and all(r.get(k) == run.get(k) for k in ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position", "kind", "scored_run_id"))
-            for r in parents)
+            for r in parents))
 
     def _baseline_recovery_plan(self, row: Mapping[str, Any], runs: Sequence[Mapping[str, Any]], judgments: Sequence[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
         """Verify complete original baseline membership before any late score write."""
@@ -3002,7 +3015,7 @@ class ArenaService:
             row = self._round(round_id)
             if (row.get("configuration_doc") or {}).get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY:
                 original = self._store.list_runs(round_id, stage=1)
-                runs += [r for r in original if r.get("kind") == "score" and self._is_baseline_recovery(r, original, row)]
+                runs += [r for r in original if self._is_baseline_recovery(r, original, row)]
         return runs
 
     def scoring_is_complete(self, round_id: str, stage: int) -> bool:
@@ -6091,6 +6104,21 @@ class ArenaService:
                     scoring_runs = self._scoring_runs_for_stage(round_id, stage)
                     observed.count = len(scoring_runs)
                 window = schedule["stage_1_scoring_close" if stage == 1 else "final_scoring_close"]
+                if stage == 2 and _judge_continuation_enabled(round_row) and now < _parse_iso(window):
+                    # Provider settlement or schema activation can delay the
+                    # queue tick. Keep eligible failed work recoverable until
+                    # the frozen execution claim boundary.
+                    original = self._store.list_runs(round_id, stage=1, kind="execute")
+                    if any(run.get("status") == "failed" and run["attempt"] < 2147483647
+                        and self._is_baseline_recovery(
+                        {**run, "attempt": run["attempt"] + 1,
+                         "run_id": run["assignment_id"] + ":" + str(run["attempt"] + 1)},
+                        original, round_row) and not any(
+                            later.get("assignment_id") == run.get("assignment_id")
+                            and later.get("attempt", 0) > run["attempt"] for later in original)
+                        for run in original):
+                        return {"status": "waiting", "round_status": status,
+                                "reason": "baseline_infrastructure_recovery"}
                 if now >= _parse_iso(window) or all(
                     run["status"] in ("accepted", "failed")
                     for run in scoring_runs

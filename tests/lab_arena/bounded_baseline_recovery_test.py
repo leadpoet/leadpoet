@@ -28,7 +28,8 @@ def fixture():
             attempt=1,scored_run_id=execution['run_id'],status='accepted'))
     for attempt in (1,2):
         executions.append(dict(executions[0],run_id=executions[0]['assignment_id']+f':{attempt}',attempt=attempt,
-            status='failed',terminal_cause='provider_error',per_icp_score=0,output_ref=None))
+            status='failed',terminal_cause='provider_error',per_icp_score=0,output_ref=None,
+            result_doc={'terminal_status':'provider_error'}))
     row['stage1_scoring_plan_doc']=dict(schema_version=contracts.SCORING_PLAN_SCHEMA_VERSION,round_id=rid,stage=1,
         execution_sequence_policy=contracts.BASELINE_SCORED_FIRST_POLICY,
         work_items=[dict(scored_run_id=executions[1]['run_id'],submission_id=sid,icp_position=1,output_ref='output')],

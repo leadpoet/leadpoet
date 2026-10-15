@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: general baseline infrastructure continuation
+
+On 2026-10-15 the user authorized recovery of unfinished infrastructure-failed
+baseline execution after the normal Stage 1 and Stage 2 dispatch windows.
+Use the existing recovery queue, leases, provider accounting and judge chain.
+Allow further attempts only for proved provider or lease infrastructure failure,
+with backoff and the frozen final scoring close as the new execution claim
+boundary. Preserve the frozen ICPs, model, scorer and policies, accepted work,
+provider budgets and call caps, raw and unresolved costs, credentials, operator
+controls, host quarantine, publication, promotion, reward guards and history.
+This includes narrow source changes, exact committed migrations, focused tests,
+safe push and merge, canonical deployment and production verification. No
+accepted execution replay, attempt reset, credential substitution or new
+scheduler is authorized. This authority ends after recovery and verification.
+
 ## Scoped production authorization: Sentry alert classification
 
 On 2026-10-14 the user authorized investigation and narrow fixes for Sentry

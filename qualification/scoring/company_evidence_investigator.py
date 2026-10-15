@@ -41,6 +41,9 @@ from qualification.scoring.company_verification import (
 from qualification.scoring.evaluation_clock import evaluation_date
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
+    PROFILE_MAX_CHARACTERS,
+    STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD,
+    STRUCTURED_PROFILE_PROVIDER,
     PROVIDER_ERROR_FAILURE_REASON,
     UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
@@ -393,6 +396,11 @@ count from associated members or accept either conflicting range by default.
 If the profile cannot be fetched or its evidence remains conflicting, return
 UNPROVEN. All ordinary fetched-text, identity and quote checks still apply.
 For geography, find the current headquarters of the investigated company.
+A server-prefetched structured profile projection labelled
+"harvestapi_get_company locations.headquarter=true" supplies already fetched,
+exact company-bound HQ facts. You may quote that projection for geography;
+do not infer HQ from other profile locations or submitted source claims.
+The current first-party priority and conflict rules below still apply.
 Prefer a known current first-party contact or about navigation locator and
 fetch it before relying on a generic profile location. A navigation label is
 only a locator: its page must contain an explicit company-bound HQ statement.
@@ -2401,6 +2409,52 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bound_structured_headquarters_finding(
+    finding: Mapping[str, Any],
+    evidence: Optional[Mapping[str, Any]],
+    identity_anchor: Optional[Mapping[str, Any]],
+) -> bool:
+    """Admit only the private server HQ projection for its exact company/fact."""
+
+    source = evidence or {}
+    anchor = identity_anchor or {}
+    url = source.get("url")
+    country = source.get("country")
+    state = source.get("state")
+    text = source.get("text")
+    if not (
+        set(source) == {"name", "text", "provider", "source_field", "url",
+                        "website", "country", "state"}
+        and source.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and source.get("source_field") == STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD
+        and isinstance(url, str)
+        and _strict_linkedin_company_profile_url(url) == url
+        and _strict_linkedin_company_profile_url(finding.get("evidence_url")) == url
+        and linkedin_company_page_slug(url) == anchor.get("verified_linkedin_slug")
+        and anchor.get("verified_domain")
+        and _registrable_domain(source.get("website")) == anchor["verified_domain"]
+        and _company_name(source.get("name"))
+        and _company_name(source.get("name"))
+        == _company_name(anchor.get("verified_name"))
+        and isinstance(text, str) and 0 < len(text) <= PROFILE_MAX_CHARACTERS
+        and isinstance(country, str) and _resolve_country(country)
+        and _resolve_country(country)
+        == _resolve_country(finding.get("observed_country"))
+        and isinstance(state, str)
+        and _quote_occurs(finding["evidence_quote"], text)
+    ):
+        return False
+    if _resolve_country(country) == "united states":
+        from qualification.company_quality import canonical_us_state
+
+        return (
+            canonical_us_state(state)
+            == canonical_us_state(finding.get("observed_state"))
+            if state else not finding.get("observed_state")
+        ) and (not state or bool(canonical_us_state(state)))
+    return state.casefold() == str(finding.get("observed_state") or "").casefold()
+
+
 def _validated_findings(
     arguments: Any,
     *,
@@ -2411,6 +2465,7 @@ def _validated_findings(
     identity_names: Optional[set[str]] = None,
     identity_anchor: Optional[Mapping[str, Any]] = None,
     priority_headquarters_url: str = "",
+    structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
 ) -> Optional[dict[str, dict[str, Any]]]:
     if not isinstance(arguments, Mapping) or set(arguments) != {"findings"}:
         return None
@@ -2500,6 +2555,12 @@ def _validated_findings(
                     identity_anchor or {},
                 )
                 or _registrable_domain(evidence_url) in proven_rebrand_domains
+                or (
+                    target == "geography"
+                    and _bound_structured_headquarters_finding(
+                        finding, structured_headquarters_evidence, identity_anchor,
+                    )
+                )
             ):
                 finding.update(
                     status="UNPROVEN",
@@ -3054,6 +3115,7 @@ async def investigate_company_evidence(
     prefetched_pages: Optional[Mapping[str, Any]] = None,
     verified_navigation_identity: Optional[Mapping[str, Any]] = None,
     verified_structured_alias_slug: str = "",
+    structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
     diagnostic: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Run one bounded tool loop and return validated tri-state findings."""
@@ -4180,6 +4242,7 @@ async def investigate_company_evidence(
                         first_party_domains=first_party_domains,
                         identity_names=identity_names,
                         identity_anchor=identity_anchor,
+                        structured_headquarters_evidence=structured_headquarters_evidence,
                         priority_headquarters_url=(
                             _priority_headquarters_navigation_source(
                                 requested_targets,

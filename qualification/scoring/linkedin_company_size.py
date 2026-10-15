@@ -24,6 +24,8 @@ from leadpoet_verifier.identity.normalization import (
     normalize_host,
 )
 from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
+from qualification.company_quality import canonical_us_state
+from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.company_fit_decision import _company_name
 
 
@@ -40,6 +42,7 @@ STRUCTURED_PROFILE_SOURCE_FIELD = "employeeCountRange"
 STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD = "companyType"
 STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD = "name"
 STRUCTURED_PROFILE_DESCRIPTION_SOURCE_FIELD = "description"
+STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD = "locations.headquarter"
 STRUCTURED_PROFILE_PUBLIC_COMPANY_TYPE = "Public Company"
 STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE = "Privately Held"
 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE: Literal[
@@ -670,6 +673,110 @@ def project_structured_linkedin_company_description(
     }
 
 
+def project_structured_linkedin_company_headquarters(
+    requested_domain: str,
+    requested_profile_url: str,
+    expected_company_name: str,
+    payload: Any,
+) -> Optional[dict[str, str]]:
+    """Project one explicit HQ, never infer it from a branch or array order."""
+
+    identity = project_structured_linkedin_company_identity(
+        requested_domain, requested_profile_url, payload,
+    )
+    elements = _structured_company_elements(payload)
+    if (
+        identity is None
+        or len(elements) != 1
+        or not _company_name(expected_company_name)
+        or _company_name(identity["name"]) != _company_name(expected_company_name)
+    ):
+        return None
+    locations = elements[0].get("locations")
+    if not isinstance(locations, list) or not 1 <= len(locations) <= 100:
+        return None
+    if any(
+        not isinstance(location, Mapping)
+        or ("headquarter" in location and type(location["headquarter"]) is not bool)
+        for location in locations
+    ):
+        return None
+    headquarters = [
+        location for location in locations if location.get("headquarter") is True
+    ]
+    if len(headquarters) != 1:
+        return None
+    location = headquarters[0]
+    parsed = location.get("parsed")
+    if parsed is None:
+        parsed = {}
+    if not isinstance(parsed, Mapping):
+        return None
+    # Keep only bounded scalar geography. Reject contradictory parsed/raw facts.
+    values = {
+        "country": location.get("country"),
+        "parsed_country": parsed.get("country"),
+        "country_code": parsed.get("countryCode"),
+        "country_full": parsed.get("countryFull"),
+        "state": location.get("geographicArea"),
+        "parsed_state": parsed.get("state"),
+        "city": location.get("city"),
+        "parsed_city": parsed.get("city"),
+    }
+    if any(
+        value not in (None, "") and (
+            not isinstance(value, str) or value != value.strip()
+            or len(value) > 100
+            or any(
+                unicodedata.category(character).startswith("C")
+                for character in value
+            )
+        )
+        for value in values.values()
+    ):
+        return None
+    countries = [
+        values[key]
+        for key in ("country", "parsed_country", "country_code", "country_full")
+        if values[key]
+    ]
+    resolved_countries = {_resolve_country(value) for value in countries}
+    if not countries or None in resolved_countries or len(resolved_countries) != 1:
+        return None
+    states = [values[key] for key in ("state", "parsed_state") if values[key]]
+    country = (
+        values["parsed_country"] or values["country_full"]
+        or values["country"] or values["country_code"]
+    )
+    if len(country) in (2, 3) and country.isupper():
+        country = next(iter(resolved_countries)).title()
+    if resolved_countries == {"united states"}:
+        resolved_states = {canonical_us_state(value) for value in states}
+        if states and ("" in resolved_states or len(resolved_states) != 1):
+            return None
+    elif len({value.casefold() for value in states}) > 1:
+        return None
+    if (
+        values["city"] and values["parsed_city"]
+        and values["city"].casefold() != values["parsed_city"].casefold()
+    ):
+        return None
+    state = values["parsed_state"] or values["state"]
+    city = values["parsed_city"] or values["city"]
+    text = (
+        f'{identity["name"]} headquarters: '
+        + ", ".join(value for value in (city, state, country) if value)
+        + ". (harvestapi_get_company locations.headquarter=true)"
+    )
+    return {
+        "name": identity["name"], "text": text,
+        "provider": STRUCTURED_PROFILE_PROVIDER,
+        "source_field": STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD,
+        "url": identity["url"], "website": identity["website"],
+        "country": country, "state": state or "",
+    }
+
+
 def project_structured_linkedin_public_company(
     requested_domain: str,
     requested_profile_url: str,
@@ -735,6 +842,7 @@ async def fetch_structured_linkedin_company_size(
     company_identity_evidence: Optional[dict[str, str]] = None,
     company_identity_observed_profile_url: str = "",
     company_description_evidence: Optional[dict[str, str]] = None,
+    company_headquarters_evidence: Optional[dict[str, str]] = None,
     expected_company_name: str = "",
     preserve_identity_website: bool = False,
 ) -> Optional[StructuredLinkedInCompanySizeEvidence]:
@@ -845,6 +953,14 @@ async def fetch_structured_linkedin_company_size(
         and description_evidence is not None
     ):
         company_description_evidence.update(description_evidence)
+    headquarters_evidence = project_structured_linkedin_company_headquarters(
+        domain, projected_profile, expected_company_name, projection_body,
+    )
+    if (
+        company_headquarters_evidence is not None
+        and headquarters_evidence is not None
+    ):
+        company_headquarters_evidence.update(headquarters_evidence)
     evidence = project_structured_linkedin_company_size(
         domain,
         projected_profile,

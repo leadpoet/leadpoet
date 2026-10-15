@@ -281,7 +281,7 @@ def run_all_prechecks(signal: Dict[str, Any],
 # Layer 4 — LLM judge
 # ---------------------------------------------------------------------------
 
-JUDGE_MODEL = "anthropic/claude-sonnet-4.5"
+JUDGE_MODEL = "openai/gpt-6-luna"
 
 JUDGE_SYSTEM_PROMPT = """You are a strict intent-signal auditor for a B2B sales platform. A miner submitted an intent signal — (URL, claim description, matched buyer ICP signal) — and you must judge whether the URL content genuinely supports the claim AND the claim genuinely fulfills the buyer's ICP signal.
 

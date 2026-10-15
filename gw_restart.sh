@@ -624,6 +624,7 @@ PY
 import socket, sys
 for value in sys.argv[1:]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("127.0.0.1", int(value)))
 PY
       start_arena_component api "$ARENA_CANDIDATE_SLOT" "$ARENA_CANDIDATE_TREE" "$PREPARED_GATEWAY_SHA"
@@ -3105,6 +3106,7 @@ import socket
 import sys
 for value in sys.argv[1:]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             listener.bind(("127.0.0.1", int(value)))
         except OSError:

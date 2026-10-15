@@ -21,7 +21,8 @@ The same seam carries five other kinds of observation, all equally bounded:
 - ``record_run`` — one finished evaluation run: execution or scoring, and
   which of the thirteen terminal causes ended it.
 - ``record_review`` — one persisted submission review attempt outcome, with
-  only bounded decision, diagnostic, funding route, and submission identity.
+  only bounded decision, rejection categories, diagnostic, funding route, and
+  submission identity.
 - ``record_runtime_upload`` — one accepted upload of runtime events that
   inserted at least one event. Its flags name lifecycle kinds present in the
   batch; ``has_error`` also covers a known failed ``runtime.finished`` status.
@@ -173,6 +174,7 @@ def record_review(
     status: str,
     *,
     error_code: str,
+    categories: str,
     provider_http_status: int,
     retryable: bool,
     funding_route: str,
@@ -189,6 +191,7 @@ def record_review(
         recorder.record_review(
             status,
             error_code=error_code,
+            categories=categories,
             provider_http_status=provider_http_status,
             retryable=retryable,
             funding_route=funding_route,

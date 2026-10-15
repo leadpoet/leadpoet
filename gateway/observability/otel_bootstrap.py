@@ -68,8 +68,9 @@ identical fail-closed machinery under separate Arena scopes:
   inserted at least one event. Batch flags describe event kinds present in the
   upload; mixed new/replayed batches do not prove a fresh lifecycle transition.
 - ``arena.review`` — one span after a submission review attempt commits. It
-  carries only the bounded decision, safe diagnostic, provider HTTP status,
-  retry flag, proven funding route, and validated submission identity.
+  carries only the bounded decision, rejection categories, safe diagnostic,
+  provider HTTP status, retry flag, proven funding route, and validated
+  submission identity.
 
 All Arena scopes share the gateway's destination (the same private
 ``GATEWAY_OTEL_*`` values, read from the same protected env file) so enabling
@@ -246,6 +247,10 @@ ARENA_TERMINAL_CAUSES = frozenset(
 ARENA_RUN_KINDS = frozenset({"execute", "score"})
 ARENA_REVIEW_STATUSES = frozenset({"passed", "rejected", "error"})
 ARENA_REVIEW_FUNDING_ROUTES = frozenset({"miner_key", "none"})
+ARENA_REVIEW_CATEGORIES = frozenset({
+    "hardcoded_prepared_answers", "fabricated_evidence", "malicious_behavior",
+    "reviewer_manipulation", "duplicate_submission",
+})
 ARENA_REVIEW_ERROR_CODES = frozenset({
     "-",
     "code_review_source_size_mismatch", "code_review_source_digest_mismatch",
@@ -694,6 +699,7 @@ RUNTIME_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(
 REVIEW_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.review_status": (str,),
     "arena.error_code": (str,),
+    "arena.review_categories": (str,),
     "arena.provider_http_status": (int,),
     "arena.retryable": (bool,),
     "arena.funding_route": (str,),
@@ -1060,6 +1066,16 @@ def _validating_exporter(
             return "error_code"
         if attributes["arena.review_status"] == "error" and attributes["arena.error_code"] == "-":
             return "error_code"
+        categories = attributes["arena.review_categories"]
+        if categories != "-":
+            values = categories.split(";")
+            if (
+                attributes["arena.review_status"] != "rejected"
+                or not 1 <= len(values) <= len(ARENA_REVIEW_CATEGORIES)
+                or values != sorted(set(values))
+                or any(value not in ARENA_REVIEW_CATEGORIES for value in values)
+            ):
+                return "review_categories"
         if attributes["arena.funding_route"] not in ARENA_REVIEW_FUNDING_ROUTES:
             return "funding_route"
         if not 0 <= attributes["arena.provider_http_status"] <= 599:
@@ -1591,7 +1607,7 @@ class ArenaTelemetry:
     # -- committed submission reviews -----------------------------------
 
     def record_review(
-        self, status: str, *, error_code: str,
+        self, status: str, *, error_code: str, categories: str,
         provider_http_status: int, retryable: bool, funding_route: str,
         round_id: str, submission_id: str, miner_hotkey: str, attempt: int,
     ) -> None:
@@ -1603,6 +1619,7 @@ class ArenaTelemetry:
             span = self._start(self._review_tracer, "arena.review.decision", None)
             span.set_attribute("arena.review_status", status)
             span.set_attribute("arena.error_code", error_code)
+            span.set_attribute("arena.review_categories", categories)
             span.set_attribute("arena.provider_http_status", provider_http_status)
             span.set_attribute("arena.retryable", retryable)
             span.set_attribute("arena.funding_route", funding_route)

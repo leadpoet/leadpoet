@@ -189,6 +189,7 @@ def test_review_telemetry_tracks_only_committed_outcome(
         assert dict(span.attributes) == {
             "arena.review_status": expected_status,
             "arena.error_code": error_code,
+            "arena.review_categories": "-",
             "arena.provider_http_status": http_status,
             "arena.retryable": retryable,
             "arena.funding_route": "miner_key",
@@ -223,6 +224,51 @@ def test_review_telemetry_skips_uncommitted_and_replayed_finish():
         with pytest.raises(RuntimeError, match="private database error"):
             reviewer.review(row)
         assert exporter.get_finished_spans() == ()
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_review_telemetry_reports_local_duplicate_category_without_dispatch():
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    payload = _archive(_source())
+    transport = ReviewTransport(lambda _parameters: pytest.fail("duplicate must not dispatch"))
+    reviewer, row, _store, _objects = _reviewer(payload, transport)
+    reviewer._similarity_references_for = lambda _row: [{
+        "row": {"submission_id": "earlier", "source_ref": "private/earlier",
+                "source_size_bytes": len(payload)},
+        "source_public": False,
+    }]
+    try:
+        assert reviewer.review(row)["status"] == "rejected"
+        (span,) = exporter.get_finished_spans()
+        assert span.attributes["arena.review_categories"] == "duplicate_submission"
+        assert span.attributes["arena.funding_route"] == "none"
+        assert transport.sent == []
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_review_telemetry_reports_policy_categories_without_provider_text():
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    private_explanation = "private model finding text"
+    findings = [{
+        "category": "fabricated_evidence", "file": "harness.py",
+        "evidence": "from src.agent import run_icp",
+        "explanation": private_explanation,
+    }]
+    transport = ReviewTransport(lambda parameters: {
+        "body": _review_body(parameters, verdict="reject", findings=findings),
+    })
+    reviewer, row, _store, _objects = _reviewer(_archive(_source()), transport)
+    try:
+        assert reviewer.review(row)["status"] == "rejected"
+        (span,) = exporter.get_finished_spans()
+        assert span.attributes["arena.review_categories"] == "fabricated_evidence"
+        assert span.attributes["arena.funding_route"] == "miner_key"
+        assert private_explanation not in repr(span.attributes)
+        assert "from src.agent" not in repr(span.attributes)
     finally:
         telemetry.install_recorder(None)
 

@@ -360,6 +360,7 @@ def test_arena_deep_capture_vocabularies_are_frozen_and_literal() -> None:
         "ARENA_REVIEW_STATUSES",
         "ARENA_REVIEW_FUNDING_ROUTES",
         "ARENA_REVIEW_ERROR_CODES",
+        "ARENA_REVIEW_CATEGORIES",
     ):
         assert _frozen_literal(source, name), f"{name} must not be empty"
 
@@ -372,7 +373,7 @@ def test_bootstrap_vocabularies_match_the_arena_source_of_truth() -> None:
     that drifts would silently drop every span carrying the new member, so CI
     compares them instead of trusting the comment.
     """
-    from lab_arena import code_review_policy, contracts
+    from lab_arena import code_review, code_review_policy, contracts
 
     source = _read(BOOTSTRAP)
     assert set(_frozen_literal(source, "ARENA_PROVIDERS")) == set(
@@ -384,6 +385,9 @@ def test_bootstrap_vocabularies_match_the_arena_source_of_truth() -> None:
     assert set(_frozen_literal(source, "ARENA_REVIEW_ERROR_CODES")) == set(
         code_review_policy.ERROR_CODES
     ) | {"-"}
+    assert set(_frozen_literal(source, "ARENA_REVIEW_CATEGORIES")) == set(
+        code_review.REVIEW_CATEGORIES
+    )
 
 
 def test_bootstrap_deepline_tool_vocabulary_matches_the_operation_table() -> None:

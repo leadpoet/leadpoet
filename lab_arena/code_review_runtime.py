@@ -61,9 +61,21 @@ class SubmissionCodeReviewer:
                     "submission_ineligible": "code_review_submission_ineligible",
                 }[result["status"]]
                 retryable = False
+            raw_categories = document.get("categories") if committed == "rejected" else None
+            categories = (
+                ";".join(sorted(set(raw_categories)))
+                if isinstance(raw_categories, list)
+                and raw_categories
+                and all(
+                    isinstance(category, str) and category in code_review.REVIEW_CATEGORIES
+                    for category in raw_categories
+                )
+                else telemetry.NO_ERROR
+            )
             telemetry.record_review(
                 committed,
                 error_code=error_code,
+                categories=categories,
                 provider_http_status=int(document.get("provider_http_status") or provider_http_status),
                 retryable=retryable,
                 funding_route=funding_route,

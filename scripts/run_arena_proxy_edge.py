@@ -110,7 +110,7 @@ def create_app() -> FastAPI:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, choices=(18800, 18801), required=True)
+    parser.add_argument("--port", type=int, choices=(8890, 8891), required=True)
     parser.add_argument("--sidecar-port", type=int, choices=(8792, 8794), required=True)
     parser.add_argument("--environment-file", type=Path, required=True)
     args = parser.parse_args()

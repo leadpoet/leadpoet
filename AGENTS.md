@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: Sentry alert classification
+
+On 2026-10-14 the user authorized investigation and narrow fixes for Sentry
+issues 7792675775, 7793475204 and 7793527666. This includes protected read-only
+inspection, focused regression checks, safe push and merge, and canonical
+deployment and verification of confirmed alert-classification fixes. Preserve
+real failure alerts, restart safety gates, source identity, active work, frozen
+results, provider accounting, credentials and concurrent recovery ownership.
+Do not silence an issue merely because it occurred before shutdown or later
+recovered. This authority ends after verification.
+
 ## Scoped production authorization: October 15 full-cycle monitoring
 
 The user authorized monitoring October 15 baseline and miner work through

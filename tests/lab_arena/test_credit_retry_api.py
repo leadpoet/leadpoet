@@ -38,6 +38,9 @@ class Store:
     def get_submission(self, submission_id):
         return {"round_id": self.round_id, "miner_hotkey": self.owner}
 
+    def list_runs(self, *args, **kwargs):
+        return []
+
     def retry_credit_failures(self, *args):
         self.calls.append(args)
         return self.receipt

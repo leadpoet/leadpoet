@@ -45,6 +45,9 @@ def _score_stage_stub(monkeypatch, *, incomplete_submission="baseline", zero=Fal
     events = []
 
     class Store:
+        def miner_credit_judgment_terminal(self, _source_id):
+            return False
+
         def list_runs(self, *args, **kwargs):
             return [{"run_id": "execution-1", "submission_id": "baseline", "icp_position": 0, "status": "accepted"}]
 

@@ -3467,6 +3467,7 @@ class ArenaService:
         )
         failed_items: Dict[str, str] = {}
         incomplete_items: Dict[str, str] = {}
+        terminal_credit_items: set[str] = set()
         for item in plan["work_items"]:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
@@ -3491,10 +3492,13 @@ class ArenaService:
             if cause in ("stage_closed", "judge_error", "judge_timeout",
                          "lease_expired", "credential_error"):
                 incomplete_items[scored_run_id] = cause
+                if (_judge_continuation_enabled(round_row)
+                    and self._terminal_miner_credit_judgment(scored_run_id)):
+                    terminal_credit_items.add(scored_run_id)
                 continue
             # Only an explicit terminal score failure receives a frozen zero.
             failed_items[scored_run_id] = cause
-        if incomplete_items and (
+        if incomplete_items.keys() - terminal_credit_items and (
             stage != 1 or
             round_row["configuration_doc"].get("execution_sequence_policy")
                 != contracts.BASELINE_SCORED_FIRST_POLICY
@@ -4150,8 +4154,12 @@ class ArenaService:
             for key in ("scorer_image_digest", "scorer_image_reference")
         ) for scope in scopes)
 
+    def _terminal_miner_credit_judgment(self, source_id: str) -> bool:
+        """Only the database's bound credit proof can end an unmeasured judge."""
+        return self._store.miner_credit_judgment_terminal(source_id)
+
     def _unfinished_judgments(self, row: Mapping[str, Any]) -> bool:
-        """An accepted execution has no final authority without its own judge."""
+        """Unmeasured work waits unless its miner funding is proved terminal."""
 
         round_id = str(row["round_id"])
         sources = [run for run in self._store.list_runs(round_id, kind="execute")
@@ -4163,6 +4171,9 @@ class ArenaService:
             if (source.get("per_icp_score") is None
                 or judge is None
                 or not self._judgment_matches_execution(row, judge, source)):
+                if (_judge_continuation_enabled(row)
+                    and self._terminal_miner_credit_judgment(str(source["run_id"]))):
+                    continue
                 return True
         return False
 

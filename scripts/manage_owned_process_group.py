@@ -206,14 +206,23 @@ def _wait_for_group_exit(pgid: int, timeout_seconds: float) -> bool:
 def _stop_state(
     path: Path, state: dict[str, Any], term_seconds: float, kill_seconds: float,
     *, no_kill: bool = False, signal_leader_only: bool = False,
+    verified_state_sha256: str | None = None,
 ) -> None:
+    def remove_state() -> None:
+        if verified_state_sha256 is not None:
+            raw, _ = _read_verify_state(path, _expected_identity(
+                argv=state["argv"], cwd=state["cwd"], uid=state["uid"]))
+            if hashlib.sha256(raw).hexdigest() != verified_state_sha256:
+                raise OwnershipError("process state changed while the verified process stopped")
+        path.unlink()
+
     process = _read_process(state["pid"])
     if process is None or process["state"] == "Z":
         if _active_group_members(state["pgid"]):
             raise OwnershipError(
                 "owned leader is gone but its process group is still active"
             )
-        path.unlink()
+        remove_state()
         return
     if not _same_process(process, state):
         raise OwnershipError("saved PID was reused or its process identity changed")
@@ -227,7 +236,7 @@ def _stop_state(
         os.killpg(state["pgid"], signal.SIGKILL)
         if not _wait_for_group_exit(state["pgid"], kill_seconds):
             raise OwnershipError("owned process group remained active after SIGKILL")
-    path.unlink()
+    remove_state()
 
 
 def _discover_one(
@@ -256,6 +265,21 @@ def _record(args: argparse.Namespace) -> None:
 
 def _stop(args: argparse.Namespace) -> None:
     expected = _expected_identity(argv=args.process_argv, cwd=args.cwd, uid=args.uid)
+    if getattr(args, "verified_state_sha256", None) is not None or getattr(args, "verified_invocation", None) is not None:
+        if (not re.fullmatch(r"[0-9a-f]{64}", args.verified_state_sha256 or "")
+                or not _RESTART_INVOCATION.fullmatch(args.verified_invocation or "")):
+            raise OwnershipError("strict stop requires an exact state hash and invocation")
+        raw, state = _read_verify_state(args.state_file, expected)
+        if hashlib.sha256(raw).hexdigest() != args.verified_state_sha256:
+            raise OwnershipError("process state changed after recovery verification")
+        current = _read_process(state["pid"])
+        if current is not None and current["state"] != "Z":
+            if _verified_invocation(args, state) != args.verified_invocation:
+                raise OwnershipError("process invocation changed after recovery verification")
+        _stop_state(args.state_file, state, args.term_seconds, args.kill_seconds,
+                    no_kill=args.no_kill, signal_leader_only=args.signal_leader_only,
+                    verified_state_sha256=args.verified_state_sha256)
+        return
     if args.state_file.exists() or args.state_file.is_symlink():
         state = _load_state(args.state_file, expected)
         _stop_state(
@@ -434,10 +458,14 @@ def _verify(args: argparse.Namespace) -> None:
 
 def _verify_invocation(args: argparse.Namespace) -> None:
     """Read only the owner ID from one exact, still-live release process."""
-    if not _RELEASE_SHA.fullmatch(args.release_sha or ""):
-        raise OwnershipError("release SHA is invalid")
     expected = _expected_identity(argv=args.process_argv, cwd=args.cwd, uid=args.uid)
     _raw, state = _read_verify_state(args.state_file, expected)
+    print(_verified_invocation(args, state))
+
+
+def _verified_invocation(args: argparse.Namespace, state: dict[str, Any]) -> str:
+    if not _RELEASE_SHA.fullmatch(args.release_sha or ""):
+        raise OwnershipError("release SHA is invalid")
     before = _read_process(state["pid"])
     if not _same_process(before, state) or before["state"] == "Z":
         raise OwnershipError("saved process identity changed")
@@ -484,7 +512,7 @@ def _verify_invocation(args: argparse.Namespace) -> None:
         or selected.get("LAB_ARENA_RELEASE_COMMIT") != args.release_sha
     ):
         raise OwnershipError("release process authority does not match its verified identity")
-    print(owner_invocation)
+    return owner_invocation
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -511,6 +539,8 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--no-kill", action="store_true")
         command.add_argument("--signal-leader-only", action="store_true")
         command.add_argument("--release-sha")
+        command.add_argument("--verified-state-sha256")
+        command.add_argument("--verified-invocation")
         command.add_argument("process_argv", nargs=argparse.REMAINDER)
     return parser
 

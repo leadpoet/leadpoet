@@ -26,8 +26,16 @@ def require_idle(service, *, now: datetime) -> None:
             raise ValueError("legacy Arena code review cutoff is too near")
         for status in ("accepted", "frozen"):
             for row in service._store.list_submissions(round_row["round_id"], status=status):
-                if row.get("code_review_claim") is not None:
+                # Finish retains the claim for idempotency and audit. Only a
+                # final decision with an explicitly cleared lease proves that
+                # retained claim no longer represents paid work.
+                completed = (row.get("code_review_status") in ("passed", "rejected")
+                             and "code_review_expires_at" in row
+                             and row["code_review_expires_at"] is None)
+                if row.get("code_review_claim") is not None and not completed:
                     raise ValueError("legacy Arena paid review is claimed")
+                if row.get("code_review_expires_at") is not None:
+                    raise ValueError("legacy Arena paid review has a lease")
                 if (not open_before_cutoff
                         and not service._is_daily_baseline(row, round_row)
                         and row.get("code_review_status") not in ("passed", "rejected")):

@@ -43,7 +43,7 @@ def test_gateway_restart_drains_arena_claims_before_shutdown() -> None:
     destructive = script.index("GATEWAY_DESTRUCTIVE_PHASE_STARTED=1", authorize)
     ready = script.index("--phase gateway_ready", destructive)
     attestation = script.index(
-        "http://localhost:8000/attestation/document >/dev/null", ready
+        '"$GATEWAY_BACKEND_HEALTH_URL/attestation/document" >/dev/null', ready
     )
     release = script.index(
         'GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"', attestation
@@ -655,7 +655,7 @@ def test_gateway_restart_activates_git_between_shutdown_and_existing_workflow() 
             'echo "Relaunching gateway with cloned runtime env"',
             'setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main',
             'for attempt in $(seq 1 120)',
-            'curl -fsS http://localhost:8000/health',
+            'curl -fsS "$GATEWAY_BACKEND_HEALTH_URL/health"',
             'if ! wait_for_gateway_v2_authority; then',
             'GATEWAY_DEPLOY_STAGE="host_restart_script_install"',
             'finalize_deployment_record succeeded',
@@ -741,11 +741,13 @@ def test_manifest_only_candidate_rotates_archive_before_controller_install() -> 
 
 def test_gateway_restart_fails_closed_on_all_authoritative_readiness_routes() -> None:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
-    assert "http://localhost:8000/health/v2-authority >/dev/null" in script
+    assert '"$health_url/health/v2-authority" >/dev/null' in script
+    assert 'health_url="http://127.0.0.1:8001"' in script
+    assert 'GATEWAY_BACKEND_HEALTH_URL="http://127.0.0.1:8001"' in script
     assert "wait_for_gateway_v2_authority" in script
     assert "http://localhost:8000/research-lab/status" not in script
-    assert "http://localhost:8000/attestation/document >/dev/null" in script
-    assert "http://localhost:8000/attestation/document || true" not in script
+    assert '"$GATEWAY_BACKEND_HEALTH_URL/attestation/document" >/dev/null' in script
+    assert '"$GATEWAY_BACKEND_HEALTH_URL/attestation/document" || true' not in script
 
 
 def test_gateway_restart_retries_v2_authority_after_base_health(
@@ -1599,7 +1601,8 @@ def test_gateway_restart_uses_one_canonical_checkout_for_host_processes() -> Non
         in script
     )
     assert 'GATEWAY_PID="$!"' not in script
-    assert 'pkill -9 -f "python3 -u -m gateway.main"' in script
+    assert '--state-file "/home/ec2-user/.config/leadpoet/gateway-process.json"' in script
+    assert 'pkill -9 -f "python3 -u -m gateway.main"' not in script
 
 
 def test_gateway_restart_runs_prepared_modules_from_candidate_checkout(
@@ -1820,7 +1823,7 @@ def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
     ):
         assert assignment in script
     assert 'printf \'%s\\n\' "$GATEWAY_DEPLOY_SHA" > "$GATEWAY_ROOT/.source_commit"' in script
-    assert 'http://localhost:8000/build-info' in script
+    assert '"$GATEWAY_BACKEND_HEALTH_URL/build-info"' in script
     # Preserve the current exact build evidence long enough to prove a
     # content-addressed same-release restore.  A cache miss performs the old
     # cold path, which deletes each output/measurement immediately before it

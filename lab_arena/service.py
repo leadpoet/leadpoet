@@ -1849,7 +1849,9 @@ class ArenaService:
         if not self._is_daily_baseline(row, round_row) and row.get("code_review_status") != "passed":
             raise ServiceError("code_review_required", 409)
 
-    def review_pending_submissions(self) -> Dict[str, Any]:
+    def review_pending_submissions(
+        self, *, should_continue: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
         """Called by a separate worker, never in the competition scheduler."""
         reviewer = self._config.code_reviewer
         if reviewer is None:
@@ -1866,9 +1868,20 @@ class ArenaService:
                     if self._is_daily_baseline(row, round_row) or row.get("code_review_status") in ("passed", "rejected"):
                         continue
                     candidates.append(row)
+        def review_if_active(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+            # A queued task has not reserved review spend yet. TERM or the
+            # restart guard can defer it while the four active calls finish.
+            if should_continue is not None and not should_continue():
+                return None
+            return reviewer.review(row)
+
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="arena-code-review") as pool:
-            results = list(pool.map(reviewer.review, candidates))
-        reviewed = sum(result.get("status") in ("passed", "rejected", "error", "ok") for result in results)
+            results = list(pool.map(review_if_active, candidates))
+        reviewed = sum(
+            isinstance(result, Mapping)
+            and result.get("status") in ("passed", "rejected", "error", "ok")
+            for result in results
+        )
         return {"reviewed": reviewed}
 
     def submission_similarity_references(self, row: Mapping[str, Any]) -> List[Dict[str, Any]]:

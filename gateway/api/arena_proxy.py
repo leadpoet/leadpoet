@@ -32,7 +32,13 @@ _MAX_REQUEST_BYTES = 1_100_000
 _MAX_COMPLETION_REQUEST_BYTES = (2 * 1_048_576) + 65_536
 _MAX_TRAJECTORY_REQUEST_BYTES = 64 * 1024
 _MAX_VALIDATOR_EVENTS_REQUEST_BYTES = 32 * 1024
-_SIDECAR_URL = "http://127.0.0.1:8792"
+# The two mainnet API ports are reserved for release overlap.  A deployment
+# selects one port for this process before it starts; the testnet destination
+# remains fixed and cannot fall back to mainnet.
+_MAIN_SIDECAR_PORT = os.environ.get("LAB_ARENA_PROXY_MAIN_PORT", "8792")
+if _MAIN_SIDECAR_PORT not in {"8792", "8794"}:
+    raise RuntimeError("Arena proxy main port is not an approved loopback port")
+_SIDECAR_URL = "http://127.0.0.1:" + _MAIN_SIDECAR_PORT
 _TESTNET_SIDECAR_URL = "http://127.0.0.1:8793"
 _FORWARDED_REQUEST_HEADERS = ("content-type", "x-lab-arena-lease")
 _FORWARDED_RESPONSE_HEADERS = (

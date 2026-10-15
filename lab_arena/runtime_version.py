@@ -40,6 +40,19 @@ def source_metadata(module_file: str) -> Dict[str, str]:
                 "validator_source_dirty": "unknown",
             }
 
+        # A restart can serve an exact, strictly verified Git archive while
+        # the canonical checkout changes. Its controller binds this process
+        # to the verified archive root and commit without adding an extra file
+        # that would weaken the strict Git-tree check.
+        archive_root = os.environ.get("LAB_ARENA_RELEASE_ROOT", "")
+        archive_commit = os.environ.get("LAB_ARENA_RELEASE_COMMIT", "")
+        if archive_root and Path(archive_root).resolve() == root and _COMMIT_RE.fullmatch(archive_commit):
+            return {
+                "validator_source_commit": archive_commit,
+                "validator_source_origin": "verified_archive_environment",
+                "validator_source_dirty": "unknown",
+            }
+
         # Ignore inherited Git routing variables so -C remains authoritative.
         git_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 

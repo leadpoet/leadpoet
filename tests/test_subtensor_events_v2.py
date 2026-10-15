@@ -40,6 +40,7 @@ CURRENT_RUNTIME_FIXTURES = {
     475: ROOT / "tests" / "fixtures" / "subtensor_events_spec475_block9234048.json",
     477: ROOT / "tests" / "fixtures" / "subtensor_events_spec477_block9267887.json",
     478: ROOT / "tests" / "fixtures" / "subtensor_events_spec478_block9277245.json",
+    479: ROOT / "tests" / "fixtures" / "subtensor_events_spec479_block9286245.json",
 }
 
 
@@ -247,6 +248,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "0x7e722b3aa5c9192c98665a5d65fa91364bf9055e21fc90efce6d59bf4ef414e1",
             254,
         ),
+        (
+            479,
+            "075ee9614fee27fb83a44bda737f6803bd3f6642d57ab492321aa47dad359080",
+            "0x44e952fd1cebe9bd15c0c55cee6e1d7c6c97b44d941b79127343118dbbd342bc",
+            223,
+        ),
     ),
 )
 def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
@@ -336,7 +343,7 @@ def test_current_runtime_archive_events_prove_exact_adjacent_reveal(
     assert proof["account_id_hex"] == expected["account_id_hex"]
 
 
-@pytest.mark.parametrize("spec_version", [464, 466, 467, 468, 469, 470, 472, 473, 475, 477, 478])
+@pytest.mark.parametrize("spec_version", [464, 466, 467, 468, 469, 470, 472, 473, 475, 477, 478, 479])
 def test_exact_runtime_and_reveal_tampering_fail_closed(spec_version):
     fixture = json.loads(
         CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8")
@@ -498,7 +505,7 @@ def test_spec477_missing_or_wrong_profile_fails_closed(monkeypatch):
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
         load_subtensor_events_profile_v2(spec_version=477)
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
-        load_subtensor_events_profile_v2(spec_version=479)
+        load_subtensor_events_profile_v2(spec_version=480)
 
 
 def test_spec477_measured_current_epoch_reveal_is_exact():
@@ -543,22 +550,23 @@ def test_spec477_measured_current_epoch_reveal_is_exact():
         _proof(validated, fixture, events_raw + b"\x00", count_raw)
 
 
-def test_spec478_missing_or_wrong_profile_fails_closed(monkeypatch):
-    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[478].read_text(encoding="utf-8"))
+@pytest.mark.parametrize("spec_version", [478, 479])
+def test_recent_missing_or_wrong_profile_fails_closed(monkeypatch, spec_version):
+    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8"))
     with pytest.raises(SubtensorEventsV2Error, match="observed spec version differs"):
         validate_subtensor_events_profile_v2(
-            load_subtensor_events_profile_v2(spec_version=477),
+            load_subtensor_events_profile_v2(spec_version=spec_version - 1),
             genesis_hash="0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
-            spec_version=478,
+            spec_version=spec_version,
             transaction_version=1,
             metadata_raw=bytes.fromhex(fixture["metadata_hex"][2:]),
             runtime_code_hash=fixture["runtime_code_storage_hash"],
         )
-    monkeypatch.delitem(event_module.DEFAULT_PROFILE_PATHS, 478)
+    monkeypatch.delitem(event_module.DEFAULT_PROFILE_PATHS, spec_version)
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
-        load_subtensor_events_profile_v2(spec_version=478)
+        load_subtensor_events_profile_v2(spec_version=spec_version)
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
-        load_subtensor_events_profile_v2(spec_version=479)
+        load_subtensor_events_profile_v2(spec_version=480)
 
 
 def test_spec478_measured_current_epoch_reveal_is_exact():

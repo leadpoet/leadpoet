@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 from contextlib import ExitStack
+from datetime import datetime
 import fcntl
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -31,6 +33,7 @@ ORIGINS = {"https://github.com/leadpoet/leadpoet.git",
            "git@github.com:leadpoet/leadpoet.git",
            "ssh://git@github.com/leadpoet/leadpoet.git"}
 SHA = re.compile(r"[0-9a-f]{40}")
+INVOCATION = re.compile(r"gateway-([1-9][0-9]{0,11})-([1-9][0-9]{0,9})")
 
 
 class BootstrapError(RuntimeError):
@@ -160,10 +163,84 @@ def _archive(repo: Path, commit: str, root: Path) -> None:
                     raise BootstrapError("candidate archive has an unsupported entry")
 
 
+def _resume_owner(*, repo: Path, source_commit: str, authority: Path,
+                  invocation: str, timing_dir: Path, environment_file: Path) -> str:
+    if not INVOCATION.fullmatch(invocation):
+        raise BootstrapError("resume invocation is invalid")
+    _owned(timing_dir, 0o700, directory=True)
+    ledger = timing_dir / f"{invocation}.jsonl"
+    before = _owned(ledger, 0o600)
+    with os.fdopen(os.open(ledger, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (metadata.st_dev, metadata.st_ino, metadata.st_mtime_ns, metadata.st_size) != before:
+            raise BootstrapError("resume timing ledger changed during read")
+        raw = stream.read(1024 * 1024 + 1)
+    if not raw or len(raw) > 1024 * 1024 or _owned(ledger, 0o600) != before:
+        raise BootstrapError("resume timing ledger is unavailable or changed")
+    try:
+        rows = [json.loads(line) for line in raw.decode("utf-8").splitlines()]
+        candidate = rows[0]["commit_sha"]
+        previous_elapsed = -1.0
+        for row in rows:
+            elapsed = row["elapsed_seconds"]
+            observed = datetime.fromisoformat(row["observed_at"].replace("Z", "+00:00"))
+            if (set(row) != {"schema_version", "stage", "status", "commit_sha", "observed_at", "elapsed_seconds"}
+                    or row["schema_version"] != "leadpoet.gateway_restart_timing.v1"
+                    or not isinstance(candidate, str) or not SHA.fullmatch(candidate)
+                    or row["commit_sha"] != candidate
+                    or not isinstance(row["stage"], str)
+                    or row["stage"] not in {
+                        "offline_artifact_prepare_started", "offline_artifact_prepare_complete",
+                        "local_release_ready", "dependency_preflight_complete",
+                        "lab_arena_startup_preflight_complete", "pre_shutdown_disk_ready",
+                        "pre_shutdown_checks_complete", "lab_arena_claim_drain",
+                        "lab_arena_destructive_authorization",
+                    }
+                    or row["status"] not in ("reached", "passed", "failed")
+                    or isinstance(elapsed, bool) or not isinstance(elapsed, (int, float))
+                    or not math.isfinite(elapsed) or elapsed < 0 or elapsed < previous_elapsed
+                    or observed.tzinfo is None
+                    or observed.timestamp() < int(invocation.split("-")[1])):
+                raise ValueError
+            previous_elapsed = elapsed
+        if (rows[-1]["status"] != "failed" or rows[-1]["stage"] not in
+                {"lab_arena_claim_drain", "lab_arena_destructive_authorization"}):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+        raise BootstrapError("resume timing ledger does not show a supported failed pre-shutdown attempt") from None
+    _git(repo, "merge-base", "--is-ancestor", candidate, source_commit)
+    _owned(environment_file, 0o600)
+    result = subprocess.run(
+        [sys.executable, "-B", str(authority / "scripts/lab_arena_restart_claim_guard.py"),
+         "owned", "--candidate", candidate, "--invocation", invocation,
+         "--environment-file", str(environment_file)],
+        env=_environment(), capture_output=True, timeout=30,
+    )
+    try:
+        state = json.loads(result.stdout)
+        drain = state["drain"]
+        generation = state["guard_generation"]
+        valid = (result.returncode == 0 and state["schema_version"] == "leadpoet.lab_arena.restart_guard_state.v1"
+                 and state["guard_present"] is True and state["guard_active"] is True
+                 and state["candidate_commit"] == candidate
+                 and state["restart_scope"] == "gateway"
+                 and state["restart_phase"] == "gateway_destructive"
+                 and type(generation) is int and generation > 0
+                 and drain["schema_version"] == "leadpoet.lab_arena.restart_drain_state.v1"
+                 and drain["preserved"] is True)
+    except (ValueError, KeyError, TypeError):
+        valid = False
+    if not valid or _owned(ledger, 0o600) != before:
+        raise BootstrapError("resume guard ownership or phase could not be verified")
+    return invocation
+
+
 def bootstrap(*, repo: Path, source_commit: str, expected_controller_commit: str,
               controller_root: Path, host_script: Path, lock_file: Path,
               recovery_lock_file: Path, helper_path: Path,
-              bootstrap_parent: Path = Path("/tmp")) -> int:
+              bootstrap_parent: Path = Path("/tmp"), resume_invocation: str = "",
+              timing_dir: Path = Path("/home/ec2-user/.config/leadpoet/restart-timings"),
+              environment_file: Path = Path("/home/ec2-user/.config/leadpoet/gateway.env")) -> int:
     if not SHA.fullmatch(source_commit) or not SHA.fullmatch(expected_controller_commit):
         raise BootstrapError("full source and installed controller commits are required")
     for path in (repo, controller_root, host_script, lock_file, recovery_lock_file, helper_path):
@@ -214,6 +291,10 @@ def bootstrap(*, repo: Path, source_commit: str, expected_controller_commit: str
                 repo_root=repo, materialized_root=authority, target_sha=source_commit,
                 strict_extras=True,
             )
+            if resume_invocation:
+                _resume_owner(repo=repo, source_commit=source_commit, authority=authority,
+                              invocation=resume_invocation, timing_dir=timing_dir,
+                              environment_file=environment_file)
             _git(repo, "fetch", "--no-tags", "origin")
             if _git(repo, "rev-parse", "origin/main").decode().strip() != source_commit:
                 raise BootstrapError("origin/main advanced during controller preparation")
@@ -230,6 +311,8 @@ def bootstrap(*, repo: Path, source_commit: str, expected_controller_commit: str
             "GATEWAY_RESTART_AUTHORITY_ROOT": str(authority),
             "GATEWAY_RESTART_AUTHORITY_COMMIT": source_commit,
         }
+        if resume_invocation:
+            environment["GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"] = resume_invocation
         canonical = subprocess.Popen(["/bin/bash", str(authority / "gw_restart.sh"),
                                       "--commit", source_commit], env=environment, cwd=repo)
         canonical_exit = canonical.wait()
@@ -271,6 +354,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--expected-controller-commit", required=True)
+    parser.add_argument("--resume-invocation", default="")
     parser.add_argument("--repo-root", type=Path, default=Path("/home/ec2-user/leadpoet_repo"))
     parser.add_argument("--controller-root", type=Path, default=Path("/home/ec2-user/.config/leadpoet/restart-controller/gateway"))
     parser.add_argument("--host-script", type=Path, default=Path("/home/ec2-user/gw_restart.sh"))
@@ -282,6 +366,7 @@ def main() -> int:
                          expected_controller_commit=args.expected_controller_commit,
                          controller_root=args.controller_root, host_script=args.host_script,
                          lock_file=args.lock_file, recovery_lock_file=args.recovery_lock_file,
+                         resume_invocation=args.resume_invocation,
                          helper_path=Path(__file__).absolute())
     except BootstrapError as exc:
         print(f"ERROR: gateway controller bootstrap refused: {exc}", file=sys.stderr)

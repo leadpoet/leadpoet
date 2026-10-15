@@ -103,7 +103,7 @@ def _runtime_clone(tmp_path: Path, origin: str) -> str:
 
 
 def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
-         runtime_clone: str = "") -> subprocess.CompletedProcess[str]:
+         runtime_clone: str = "", review_rows: list[dict] | None = None) -> subprocess.CompletedProcess[str]:
     preflight = tmp_path / "preflight"
     preflight.mkdir(exist_ok=True)
     (preflight / "marker").write_text("candidate\n", encoding="utf-8")
@@ -112,12 +112,31 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
     ingress = tmp_path / "ingress"
     if not ingress.exists():
         ingress.write_text("legacy 0 - legacy\n", encoding="utf-8")
+    if review_rows is not None:
+        (tmp_path / "review-rows.json").write_text(json.dumps(review_rows))
+        (tmp_path / "idle-review-probe.py").write_text(
+            "import json, os, sys\n"
+            "from datetime import datetime, timedelta, timezone\n"
+            "from types import SimpleNamespace\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "from scripts.arena_first_cutover_idle import require_idle\n"
+            "rows=json.load(open(os.environ['IDLE_REVIEW_FILE']))\n"
+            "now=datetime(2026, 10, 15, tzinfo=timezone.utc)\n"
+            "service=SimpleNamespace(active_rounds=lambda:[{'round_id':'r'}],\n"
+            " _round=lambda _id:{'round_id':'r','status':'stage2'},\n"
+            " _submission_replacement_cutoff=lambda _round:now+timedelta(hours=3),\n"
+            " _is_daily_baseline=lambda _row,_round:False,\n"
+            " _store=SimpleNamespace(list_submissions=lambda _id,*,status:[row for row in rows if row['status']==status]))\n"
+            "require_idle(service, now=now)\n",
+        )
     python = tmp_path / "mock-python"
     python.write_text(
         '#!/bin/bash\n'
         'printf "python:%s\\n" "$*" >> "$EVENTS"\n'
         'if [ "${FAIL_IDLE:-}" = 1 ] && [[ "$*" == *arena_first_cutover_idle.py* ]]; '
         'then exit 1; fi\n'
+        'if [ -n "${IDLE_REVIEW_FILE:-}" ] && [[ "$*" == *arena_first_cutover_idle.py* ]]; '
+        'then exec python3 "$TASK_TMP/idle-review-probe.py"; fi\n'
         'if [ "${FAIL:-}" = domain_gap ] && [[ "$*" == *gateway-process.json* ]]; then exit 1; fi\n'
         'if [[ "$*" == *"manage_owned_process_group.py stop "* ]] || '
         '[[ "$*" == *"manage_owned_process_group.py verify "* ]] || '
@@ -156,6 +175,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         "rollback_arena_candidate_before_destructive",
         "recover_arena_restart_owner", "restore_arena_recovery_guard_before_destructive",
         "wait_for_gateway_v2_authority", "wait_for_arena_driver_startup",
+        "abort_lab_arena_restart_guard_before_destructive",
     ))
     functions += _function("stop_arena_component").replace(
         "stop_arena_component() {", "actual_stop_arena_component() {", 1,
@@ -215,7 +235,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
             return 1
           fi
           record guard:drain
-          touch "$TASK_TMP/guard"
+          printf 'draining\\n' > "$TASK_TMP/guard"
         }
         run_lab_arena_restart_guard() {
           record "guard:$2"
@@ -226,16 +246,18 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
               printf '{"schema_version":"leadpoet.lab_arena.restart_guard_state.v1",'
               printf '"guard_present":%s}\n' "$present"
               ;;
-            drain) touch "$TASK_TMP/guard" ;;
+            drain) printf 'draining\\n' > "$TASK_TMP/guard" ;;
+            authorize) printf 'gateway_destructive\\n' > "$TASK_TMP/guard" ;;
+            abort)
+              if [ -f "$TASK_TMP/guard" ] && [ "$(cat "$TASK_TMP/guard")" != draining ]; then
+                record guard:abort-refused
+                return 1
+              fi
+              rm -f "$TASK_TMP/guard" ;;
             release)
               if [ "${FAIL:-}" = ready_gap ]; then return 1; fi
               rm -f "$TASK_TMP/guard" ;;
           esac
-        }
-        abort_lab_arena_restart_guard_before_destructive() {
-          if [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" = 1 ]; then return 0; fi
-          record guard:abort
-          rm -f "$TASK_TMP/guard"
         }
         timeout() { shift; "$@"; }
         curl() {
@@ -309,13 +331,72 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
     )
     env = {**os.environ, "TASK_TMP": str(tmp_path), "INGRESS_FILE": str(ingress),
            "EVENTS": str(tmp_path / "events"), "TEST_SHA": sha, "FAIL": fail,
-           "FAIL_IDLE": "1" if fail == "idle" else "0"}
+           "FAIL_IDLE": "1" if fail == "idle" else "0",
+           "IDLE_REVIEW_FILE": str(tmp_path / "review-rows.json") if review_rows is not None else ""}
     return subprocess.run(["bash", str(harness)], cwd=tmp_path, env=env,
                           capture_output=True, text=True, timeout=20)
 
 
 def _events(tmp_path: Path) -> list[str]:
     return (tmp_path / "events").read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize("decision", ["passed", "rejected"])
+def test_first_cutover_accepts_completed_audit_claims_before_authorization(tmp_path: Path, decision: str):
+    rows = [{"status": "frozen", "code_review_status": decision,
+             "code_review_claim": f"retained-finish-token-{index}", "code_review_expires_at": None,
+             "code_review_started_at": "2026-10-14T23:00:00+00:00"}
+            for index in range(24)]
+    result = _run(tmp_path, review_rows=rows)
+    assert result.returncode == 0, result.stderr
+    events = _events(tmp_path)
+    idle = next(i for i, event in enumerate(events) if "arena_first_cutover_idle.py" in event)
+    assert events.index("guard:drain") < idle < events.index("guard:authorize")
+    assert events.index("guard:authorize") < events.index("timing:shutdown_started")
+    assert "guard:release" in events
+    assert not (tmp_path / "guard").exists()
+
+
+@pytest.mark.parametrize("review", [
+    {"code_review_status": "reviewing", "code_review_expires_at": "2026-10-15T01:00:00+00:00"},
+    {"code_review_status": "pending", "code_review_expires_at": None},
+    {"code_review_status": "error", "code_review_expires_at": None},
+    {"code_review_status": "passed"},
+    {"code_review_status": "passed", "code_review_expires_at": "2026-10-15T01:00:00+00:00"},
+])
+def test_real_idle_refusal_aborts_only_draining_guard_before_shutdown(tmp_path: Path, review: dict):
+    live_worker = tmp_path / "old-worker.json"
+    live_worker.write_text("live legacy worker\n")
+    row = {"status": "frozen", "code_review_claim": "claimed-review", **review}
+    result = _run(tmp_path, review_rows=[row])
+    assert result.returncode != 0
+    assert "legacy Arena paid review" in result.stderr
+    events = _events(tmp_path)
+    assert "guard:drain" in events and "guard:abort" in events
+    assert "guard:abort-refused" not in events
+    assert "guard:authorize" not in events
+    assert "timing:shutdown_started" not in events
+    assert not any(event.startswith("python:") and
+                   ("old-worker.json" in event or "gateway-process.json" in event)
+                   for event in events)
+    assert live_worker.read_text() == "live legacy worker\n"
+    assert (tmp_path / "ingress").read_text().strip() == "legacy 0 - legacy"
+    assert not (tmp_path / "guard").exists()
+    assert not (tmp_path / "runtime" / f"slot1-{SHA}").exists()
+
+
+def test_failure_after_real_stop_keeps_destructive_guard(tmp_path: Path):
+    result = _run(tmp_path, fail="backend", review_rows=[{
+        "status": "frozen", "code_review_claim": "retained-finish-token",
+        "code_review_status": "passed", "code_review_expires_at": None,
+    }])
+    assert result.returncode != 0
+    events = _events(tmp_path)
+    assert "timing:shutdown_started" in events
+    assert "guard:authorize" in events
+    assert "guard:abort" not in events and "guard:release" not in events
+    assert (tmp_path / "guard").read_text().strip() == "gateway_destructive"
+    assert (tmp_path / "ingress").read_text().strip() == f"dual 1 {SHA} closed"
 
 
 @pytest.mark.parametrize("origin", ["live", "secret-json", "secret-dotenv", "secret-cache"])

@@ -2850,16 +2850,6 @@ if ! drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"; then
   exit 1
 fi
 
-GATEWAY_DEPLOY_STAGE="lab_arena_destructive_authorization"
-export GATEWAY_DEPLOY_STAGE
-if ! run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
-    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
-    --phase gateway_destructive >/dev/null; then
-  echo "ERROR: Lab Arena drain changed before gateway shutdown" >&2
-  echo "Gateway remains running; production shutdown has not started." >&2
-  exit 1
-fi
-
 GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
 if ! verify_controller_process_helper "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"; then
   echo "ERROR: verified controller Lab Arena stop helper is unavailable" >&2
@@ -2868,10 +2858,21 @@ if ! verify_controller_process_helper "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"; 
 fi
 if [ "$ARENA_CONTINUITY_ENABLED" = 1 ] \
     && { [ "$ARENA_PREVIOUS_MODE" = legacy ] || [ "$ARENA_PREVIOUS_MODE" = domain ]; }; then
-  # A failed idle proof still leaves the old gateway and worker untouched.
+  # Prove idle while the owned guard is still draining and can be aborted.
+  # A failed proof leaves the old gateway and worker untouched.
   PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B \
     "$GATEWAY_PREFLIGHT_TREE/scripts/arena_first_cutover_idle.py" \
     --environment-file "$GATEWAY_ENV_FILE"
+fi
+
+GATEWAY_DEPLOY_STAGE="lab_arena_destructive_authorization"
+export GATEWAY_DEPLOY_STAGE
+if ! run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
+    --phase gateway_destructive >/dev/null; then
+  echo "ERROR: Lab Arena drain changed before gateway shutdown" >&2
+  echo "Gateway remains running; production shutdown has not started." >&2
+  exit 1
 fi
 if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
   # The provider gate is process-local. Keep the old API serving until the

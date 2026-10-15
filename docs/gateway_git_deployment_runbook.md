@@ -109,6 +109,21 @@ If the canonical command returns zero but the candidate installed identity
 cannot be verified, the helper returns one and preserves the canonical exit
 code in its receipt.
 
+For a confirmed first-cutover failure that retained its owned destructive guard
+before any ingress switch or process stop, add
+`--resume-invocation gateway-<epoch>-<pid>` to the helper command. It requires the
+exact owned `0600` timing ledger in the private restart-timings directory, one
+consistent committed source, and a final failed pre-shutdown stage. Ingress,
+shutdown, or later timing evidence rejects this path. The existing read-only
+guard helper must prove the same owner, candidate, gateway scope, destructive
+phase, positive generation, and preserved drain. Only the active guard owner
+is carried into the full canonical controller; restart telemetry gets a fresh
+invocation. The canonical controller still revalidates, retargets, drains, and
+checks readiness. Do not reset the guard or reuse old phase variables.
+Timing writes are best effort. Independently verify the serving ingress and
+exact live process ownership; missing timing stages alone do not prove that
+no process stopped.
+
 A controller identity receipt does not verify runtime deployment. Complete the
 normal live checks below, including guard release and terminal restart success.
 Subsequent restarts use `/home/ec2-user/gw_restart.sh --commit <full-commit-sha>`.

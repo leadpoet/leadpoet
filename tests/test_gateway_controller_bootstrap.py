@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+from datetime import datetime, timedelta, timezone
 import fcntl
 import io
 import json
@@ -18,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import bootstrap_gateway_restart_controller as bootstrap
+from scripts import lab_arena_restart_claim_guard as guard
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +70,11 @@ def host(tmp_path, monkeypatch):
         [ -z "${AWS_ACCESS_KEY_ID+x}" ]
         [ -z "${LAB_ARENA_OPENROUTER_API_KEY+x}" ]
         [ -z "${GIT_SSH_COMMAND+x}" ]
+        if [ -f canonical-resume-owner ]; then
+          [ "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" = "$(cat canonical-resume-owner)" ]
+        else
+          [ -z "${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID+x}" ]
+        fi
         [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" == */gateway-restart-controller-bootstrap.*/authority ]]
         [ "$(stat -f '%Lp' "$GATEWAY_RESTART_AUTHORITY_ROOT" 2>/dev/null || stat -c '%a' "$GATEWAY_RESTART_AUTHORITY_ROOT")" = 700 ]
         python3 -B - <<'PY'
@@ -111,6 +119,8 @@ def host(tmp_path, monkeypatch):
     controller.chmod(0o755)
     helper = repo / bootstrap.SELF_PATH
     helper.write_bytes((ROOT / bootstrap.SELF_PATH).read_bytes())
+    (repo / "scripts/lab_arena_restart_claim_guard.py").write_bytes(
+        (ROOT / "scripts/lab_arena_restart_claim_guard.py").read_bytes())
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "candidate canonical controller")
     candidate = _git(repo, "rev-parse", "HEAD")
@@ -170,6 +180,7 @@ def test_n_minus_one_runs_full_candidate_entrypoint_and_reports_observed_identit
     for key in ("GATEWAY_RESTART_PHASE", "GATEWAY_RESTART_INVOCATION_ID", "GATEWAY_PREFLIGHT_TREE",
                 "GATEWAY_DESTRUCTIVE_PHASE_STARTED", "GATEWAY_RESTART_AUTHORITY_ROOT",
                 "GATEWAY_RESTART_AUTHORITY_COMMIT", "PREPARED_GATEWAY_SHA",
+                "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
                 "AWS_ACCESS_KEY_ID", "LAB_ARENA_OPENROUTER_API_KEY", "GIT_SSH_COMMAND"):
         monkeypatch.setenv(key, "poisoned-fixture-value")
     previous_bytes = host["host_script"].read_bytes()
@@ -251,6 +262,132 @@ def test_non_main_source_and_unknown_origin_refuse(host, monkeypatch):
     monkeypatch.setattr(bootstrap, "ORIGINS", set())
     with pytest.raises(RuntimeError, match="unknown repository origin"):
         bootstrap.bootstrap(**host)
+
+
+def _resume(host, monkeypatch):
+    invocation = "gateway-1792039691-1674776"
+    candidate = host["expected_controller_commit"]
+    timing_dir = host["bootstrap_parent"] / "restart-timings"
+    timing_dir.mkdir(mode=0o700)
+    ledger = timing_dir / f"{invocation}.jsonl"
+    started = datetime.fromtimestamp(1792039691, timezone.utc)
+    rows = [{"schema_version": "leadpoet.gateway_restart_timing.v1",
+             "stage": stage, "status": status, "commit_sha": candidate,
+             "observed_at": (started + timedelta(seconds=elapsed)).isoformat(),
+             "elapsed_seconds": elapsed}
+            for stage, status, elapsed in [("pre_shutdown_checks_complete", "reached", 1070.0),
+                                           ("lab_arena_destructive_authorization", "failed", 1079.729)]]
+    ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    ledger.chmod(0o600)
+    environment = host["bootstrap_parent"] / "gateway.env"
+    environment.write_text("LAB_ARENA_MODE=live\n")
+    environment.chmod(0o600)
+    identity, owner = guard._identity(candidate, invocation)
+    commitment, owner_commitment = guard._commitments(identity, owner)
+    # Exact guard489 response shape/counts, with opaque commitments redacted.
+    state = json.loads((ROOT / "tests/fixtures/arena_restart_guard489_pre_shutdown.json").read_text())
+    state.update(candidate_commit=candidate, guard_commitment=commitment, owner_commitment=owner_commitment)
+    calls = []
+    run = subprocess.run
+
+    def owned(command, **kwargs):
+        if not any(str(item).endswith("lab_arena_restart_claim_guard.py") for item in command):
+            return run(command, **kwargs)
+        assert command[2].endswith("lab_arena_restart_claim_guard.py")
+        assert command[3] == "owned"
+        assert command[-2:] == ["--environment-file", str(environment)]
+        calls.append((command, kwargs["env"]))
+        try:
+            proof = guard._owned(argparse.Namespace(
+                candidate=command[command.index("--candidate") + 1],
+                invocation=command[command.index("--invocation") + 1],
+            ))
+            return subprocess.CompletedProcess(command, 0, json.dumps(guard._safe(proof)).encode(), b"")
+        except guard.GuardError:
+            return subprocess.CompletedProcess(command, 1, b"", b"owned guard refused")
+
+    def request(function, payload):
+        assert function == "lab_arena_restart_guard_state_v1" and payload == {}
+        return state
+
+    monkeypatch.setattr(guard, "_request", request)
+    monkeypatch.setattr(subprocess, "run", owned)
+    args = host | {"resume_invocation": invocation, "timing_dir": timing_dir,
+                   "environment_file": environment}
+    return args, ledger, rows, state, calls
+
+
+def test_pre_shutdown_resume_validates_existing_owner_without_inheriting_restart_state(host, monkeypatch, capsys):
+    args, _ledger, _rows, _state, calls = _resume(host, monkeypatch)
+    (host["repo"] / "canonical-resume-owner").write_text(args["resume_invocation"])
+    for key in ("GATEWAY_RESTART_INVOCATION_ID", "GATEWAY_RESTART_PHASE", "GATEWAY_DESTRUCTIVE_PHASE_STARTED",
+                "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID", "AWS_ACCESS_KEY_ID", "LAB_ARENA_SERVICE_KEY"):
+        monkeypatch.setenv(key, "poisoned-fixture-value")
+    assert bootstrap.bootstrap(**args) == 0
+    assert len(calls) == 1
+    assert not any(key.startswith(("GATEWAY_", "LAB_ARENA_", "AWS_")) for key in calls[0][1])
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["installed_controller"] == "candidate" and receipt["canonical_exit_code"] == 0
+
+
+@pytest.mark.parametrize("change", ["owner", "guard-source", "generation-zero", "generation-string", "generation-bool",
+                                    "scope", "phase", "inactive", "drain-schema", "drain-count", "drain-not-preserved"])
+def test_pre_shutdown_resume_refuses_wrong_guard_proof(host, monkeypatch, change):
+    args, _ledger, _rows, state, _calls = _resume(host, monkeypatch)
+    key, value = {
+        "owner": ("owner_commitment", "sha256:" + "f" * 64),
+        "guard-source": ("candidate_commit", host["source_commit"]),
+        "generation-zero": ("guard_generation", 0),
+        "generation-string": ("guard_generation", "489"),
+        "generation-bool": ("guard_generation", True),
+        "scope": ("restart_scope", "all"),
+        "phase": ("restart_phase", "gateway_ready"),
+        "inactive": ("guard_active", False),
+        "drain-schema": ("schema_version", "unknown"),
+        "drain-count": ("current_leased_count", "0"),
+        "drain-not-preserved": ("preserved", False),
+    }[change]
+    (state["drain"] if change.startswith("drain-") else state)[key] = value
+    with pytest.raises(RuntimeError, match="resume guard"):
+        bootstrap.bootstrap(**args)
+    assert not (host["repo"] / "canonical-events").exists()
+
+
+@pytest.mark.parametrize("change", ["missing", "symlink", "world-writable", "shutdown", "ingress", "malformed", "malformed-row",
+                                    "source", "mixed-source", "not-failed", "wrong-schema", "bad-invocation"])
+def test_pre_shutdown_resume_refuses_unproved_ledger(host, monkeypatch, change):
+    args, ledger, rows, _state, calls = _resume(host, monkeypatch)
+    if change == "missing":
+        ledger.unlink()
+    elif change == "symlink":
+        target = ledger.with_suffix(".retained")
+        ledger.rename(target)
+        ledger.symlink_to(target)
+    elif change == "world-writable":
+        ledger.chmod(0o666)
+    elif change == "malformed":
+        ledger.write_text("{broken-json\n")
+    elif change == "bad-invocation":
+        args["resume_invocation"] = "../another-owner"
+    else:
+        if change in ("shutdown", "ingress"):
+            rows[0]["stage"] = "shutdown_started" if change == "shutdown" else "arena_candidate_ingress_ready"
+        elif change == "source":
+            for row in rows:
+                row["commit_sha"] = "f" * 40
+        elif change == "mixed-source":
+            rows[0]["commit_sha"] = host["source_commit"]
+        elif change == "not-failed":
+            rows[-1]["status"] = "reached"
+        elif change == "malformed-row":
+            rows.append([])
+        else:
+            rows[-1]["schema_version"] = "unknown"
+        ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    with pytest.raises((OSError, RuntimeError)):
+        bootstrap.bootstrap(**args)
+    assert not calls
+    assert not (host["repo"] / "canonical-events").exists()
 
 
 def test_private_install_boundary_does_not_relax_other_parent_checks(host):

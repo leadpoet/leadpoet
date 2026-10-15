@@ -1,0 +1,28 @@
+{
+  "candidate_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "drain": {
+    "accepted_receipt_count": 7,
+    "captured_count": 7,
+    "current_leased_count": 0,
+    "expired_receipt_count": 0,
+    "lost_or_mutated_count": 0,
+    "outcome_commitment": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "pending_retry_count": 0,
+    "preserved": true,
+    "reported_terminal_receipt_count": 0,
+    "schema_version": "leadpoet.lab_arena.restart_drain_state.v1",
+    "snapshot_commitment": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "still_leased_count": 0
+  },
+  "guard_active": true,
+  "guard_commitment": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "guard_expires_at": "2026-10-15T09:05:42.777767+00:00",
+  "guard_generation": 489,
+  "guard_present": true,
+  "operator_paused": false,
+  "owner_commitment": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "paused": true,
+  "restart_phase": "gateway_destructive",
+  "restart_scope": "gateway",
+  "schema_version": "leadpoet.lab_arena.restart_guard_state.v1"
+}

@@ -416,7 +416,8 @@ start_arena_component() {
 }
 
 stop_arena_component() {
-  local component="$1" slot="$2" tree="$3" process_helper
+  local component="$1" slot="$2" tree="$3" process_helper proof state_hash
+  local -a verified_stop_args=(--no-kill --signal-leader-only)
   arena_component_command "$component" "$slot" || return 1
   # Use the newly verified controller helper even when retiring a different
   # source SHA. The old runtime tree supplies only the exact process cwd.
@@ -425,10 +426,31 @@ stop_arena_component() {
     echo "ERROR: Arena release process helper is unavailable" >&2
     return 1
   fi
+  if [ -n "${4:-}" ]; then
+    # Recovery runs old source but stops through the exact new controller. Bind
+    # its fresh private receipt to this owner after the latest idle proof.
+    process_helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
+    verify_controller_process_helper "$process_helper" || return 1
+    proof="$("$GATEWAY_PYTHON_BIN" "$process_helper" verify \
+      --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" --uid "$(id -u)" \
+      -- "${ARENA_COMPONENT_COMMAND[@]}")" || return 1
+    state_hash="$("$GATEWAY_PYTHON_BIN" -B - "$proof" <<'PY'
+import json
+import re
+import sys
+proof = json.loads(sys.argv[1])
+value = proof.get("state_sha256")
+if proof.get("ok") is not True or not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+    raise SystemExit("Arena recovery process receipt proof is invalid")
+print(value)
+PY
+    )" || return 1
+    verified_stop_args+=(--verified-state-sha256 "$state_hash" --verified-invocation "$4" --release-sha "$5")
+  fi
   "$GATEWAY_PYTHON_BIN" "$process_helper" stop \
     --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" \
     --uid "$(id -u)" --term-seconds 6600 \
-    --no-kill --signal-leader-only -- "${ARENA_COMPONENT_COMMAND[@]}"
+    "${verified_stop_args[@]}" -- "${ARENA_COMPONENT_COMMAND[@]}"
 }
 
 arena_component_inherited_docker_locks() {
@@ -650,7 +672,8 @@ PY
           --release-sha "$PREPARED_GATEWAY_SHA" -- "${ARENA_COMPONENT_COMMAND[@]}")" = \
           "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" ] || exit 1
         require_arena_lock_recovery_idle || exit 1
-        stop_arena_component "$component" "$old_slot" "$old_tree"
+        stop_arena_component "$component" "$old_slot" "$old_tree" \
+          "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" "$PREPARED_GATEWAY_SHA"
       fi
     done
     [ "$(arena_ingress_tool "$GATEWAY_PREFLIGHT_TREE" --inspect)" = \

@@ -31,6 +31,7 @@ def fixture():
     costs = {"providers": [{"inflight_calls": 0, "uncertain_calls": 99}]}
     instance = object.__new__(service.ArenaService)
     instance._store = SimpleNamespace(
+        miner_credit_judgment_terminal=lambda _source_id: False,
         list_runs=lambda _rid, kind=None: executions if kind == "execute" else judgments if kind == "score" else executions + judgments,
         submission_costs=lambda _sid: costs,
         cancel_round=lambda rid, reason: writes.append((rid, reason)) or {"status": "cancelled"},

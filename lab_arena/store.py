@@ -69,6 +69,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_round_id", "text"), ("p_submission_id", "text"),
         ("p_miner_hotkey", "text"), ("p_request_hash", "text"),
     ),
+    "lab_arena__miner_credit_judgment_terminal_v1": (("p_source_id", "text"),),
     "lab_arena_operator_hold_active_v1": (),
     "lab_arena_append_trajectory_events_v1": (
         ("p_run_id", "text"),
@@ -2285,6 +2286,15 @@ class ArenaStore:
 
     def expire_leases(self, round_id: str) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_expire_leases", {"p_round_id": round_id}), "expire_leases")
+
+    def miner_credit_judgment_terminal(self, source_id: str) -> bool:
+        """Read the same owner-bound funding outcome used by SQL final guards."""
+        result = self._transport.rpc(
+            "lab_arena__miner_credit_judgment_terminal_v1", {"p_source_id": source_id},
+        )
+        if not isinstance(result, bool):
+            raise ArenaStoreError("miner credit judgment state is malformed")
+        return result
 
     def operator_hold_active(self) -> bool:
         result = self._transport.rpc("lab_arena_operator_hold_active_v1", {})

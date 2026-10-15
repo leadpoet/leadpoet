@@ -6,6 +6,7 @@ import pytest
 from tests.lab_arena import closed_adaptation_score_billing457_postgres_test as adaptation
 from tests.lab_arena import deepline_candidate_query_postgres_test as prior
 from tests.lab_arena import deepline_cost_priority_postgres_test as priority
+from tests.lab_arena import score_deepline_cost_priority456_postgres_test as score_lane
 from tests.lab_arena.closed_scoring_billing_postgres_test import _closed_call
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_PROVIDER_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
@@ -167,6 +168,13 @@ def test_real_candidate_exact_cost_get_settlement_and_frozen_publication(databas
 
 def test_failed_and_damaged_receipts_cannot_settle(database, tmp_path):
     adaptation.test_closed_adaptation_rejects_unrelated_and_damaged_binding(database, tmp_path)
+
+
+def test_existing_score_lane_controls_use_current_schema(database, tmp_path):
+    # The historical 456 fixture replays an obsolete 441/420 upgrade preimage.
+    # Exercise its unchanged behavioral controls on the exact-current schema.
+    score_lane.test_score_lane_preserves_bindings_failed_calls_and_cursor(
+        database, True, tmp_path)
 
 
 @pytest.mark.parametrize('applied', [False, True])

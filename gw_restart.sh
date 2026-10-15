@@ -8,6 +8,19 @@ GATEWAY_LOG_ROOT="${GATEWAY_LOG_ROOT:-/home/ec2-user/gateway}"
 GATEWAY_LOG_FILE="${GATEWAY_LOG_FILE:-$GATEWAY_LOG_ROOT/gateway.log}"
 LAB_ARENA_SERVICE_LOG_FILE="${LAB_ARENA_SERVICE_LOG_FILE:-$GATEWAY_LOG_ROOT/lab_arena_service.log}"
 LAB_ARENA_SERVICE_STATE_FILE="${LAB_ARENA_SERVICE_STATE_FILE:-/home/ec2-user/.config/leadpoet/lab-arena-service-process.json}"
+ARENA_RUNTIME_ROOT="/home/ec2-user/.config/leadpoet/arena-runtime"
+ARENA_INGRESS_STATE_FILE="/etc/caddy/arena-ingress-state.json"
+ARENA_CADDY_FILE="/etc/caddy/Caddyfile"
+ARENA_CONTINUITY_ENABLED="${ARENA_CONTINUITY_ENABLED:-0}"
+ARENA_CANDIDATE_SLOT="${ARENA_CANDIDATE_SLOT:-}"
+ARENA_CANDIDATE_TREE="${ARENA_CANDIDATE_TREE:-}"
+ARENA_PREVIOUS_MODE="${ARENA_PREVIOUS_MODE:-}"
+ARENA_PREVIOUS_SLOT="${ARENA_PREVIOUS_SLOT:-}"
+ARENA_PREVIOUS_SHA="${ARENA_PREVIOUS_SHA:-}"
+ARENA_PREVIOUS_BACKEND="${ARENA_PREVIOUS_BACKEND:-}"
+ARENA_RECOVERING=0
+ARENA_REUSE_PREVIOUS=0
+ARENA_INGRESS_SWITCHED=0
 GATEWAY_RESTART_GIT_SSH_COMMAND="${GATEWAY_RESTART_GIT_SSH_COMMAND:-}"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gateway.env}"
 LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
@@ -125,7 +138,11 @@ bind_gateway_restart_invocation_to_timing_file() {
 }
 
 wait_for_gateway_v2_authority() {
-  local attempt deadline
+  local attempt deadline health_url
+  health_url="http://localhost:8000"
+  if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
+    health_url="http://127.0.0.1:8001"
+  fi
   if ! [[ "$GATEWAY_V2_HEALTH_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: GATEWAY_V2_HEALTH_MAX_ATTEMPTS must be a positive integer" >&2
     return 1
@@ -148,7 +165,7 @@ wait_for_gateway_v2_authority() {
       echo "ERROR: gateway exited while authoritative V2 readiness was pending" >&2
       return 1
     fi
-    if timeout 5 curl -fsS http://localhost:8000/health/v2-authority >/dev/null 2>&1; then
+    if timeout 5 curl -fsS "$health_url/health/v2-authority" >/dev/null 2>&1; then
       echo "Gateway authoritative V2 health ready after attempt $attempt"
       return 0
     fi
@@ -177,6 +194,284 @@ stop_lab_arena_service() {
     "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
     --environment-file "$GATEWAY_ENV_FILE" \
     --host 127.0.0.1 --port 8792
+}
+
+arena_ingress_tool() {
+  local source_root="$1"
+  shift
+  sudo "$GATEWAY_PYTHON_BIN" -B "$source_root/scripts/arena_ingress_config.py" \
+    "$@" --state-file "$ARENA_INGRESS_STATE_FILE" --caddy-file "$ARENA_CADDY_FILE"
+}
+
+arena_ingress_transition() {
+  local source_root="$1" old_mode="$2" old_slot="$3" old_sha="$4" old_backend="$5"
+  local new_mode="$6" new_slot="$7" new_sha="$8" new_backend="$9"
+  arena_ingress_tool "$source_root" --activate \
+    --expect-mode "$old_mode" --expect-slot "$old_slot" \
+    --expect-sha "$old_sha" --expect-backend "$old_backend" \
+    --mode "$new_mode" --slot "$new_slot" \
+    --sha "$new_sha" --backend "$new_backend"
+}
+
+arena_slot_ports() {
+  case "$1" in
+    0) ARENA_API_PORT=8792; ARENA_EDGE_PORT=8800 ;;
+    1) ARENA_API_PORT=8794; ARENA_EDGE_PORT=8801 ;;
+    *) echo "ERROR: invalid Arena release slot" >&2; return 1 ;;
+  esac
+}
+
+arena_runtime_tree() {
+  local slot="$1" sha="$2"
+  if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "ERROR: Arena release SHA is invalid" >&2
+    return 1
+  fi
+  printf '%s/slot%s-%s\n' "$ARENA_RUNTIME_ROOT" "$slot" "$sha"
+}
+
+recover_arena_restart_owner() {
+  local previous_tree helper owner state
+  previous_tree="$(arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA")" || return 1
+  if [ -L "$previous_tree" ] || [ ! -d "$previous_tree" ]; then
+    echo "ERROR: previous Arena release archive is unavailable" >&2
+    return 1
+  fi
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B - \
+      "$LEADPOET_REPO_ROOT" "$previous_tree" "$ARENA_PREVIOUS_SHA" <<'PY' || return 1
+from pathlib import Path
+import sys
+from scripts.gateway_git_deploy import verify_materialized_tree
+verify_materialized_tree(
+    repo_root=Path(sys.argv[1]), materialized_root=Path(sys.argv[2]),
+    target_sha=sys.argv[3], strict_extras=True,
+)
+PY
+  helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
+  verify_controller_process_helper "$helper" || return 1
+  arena_component_command edge "$ARENA_PREVIOUS_SLOT" || return 1
+  owner="$("$GATEWAY_PYTHON_BIN" "$helper" verify-invocation \
+    --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$previous_tree" \
+    --uid "$(id -u)" --release-sha "$ARENA_PREVIOUS_SHA" \
+    -- "${ARENA_COMPONENT_COMMAND[@]}")" || return 1
+  state="$(env -u LAB_ARENA_SUPABASE_URL -u LAB_ARENA_SERVICE_KEY \
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" \
+    "$GATEWAY_PREFLIGHT_TREE/scripts/lab_arena_restart_claim_guard.py" owned \
+    --candidate "$ARENA_PREVIOUS_SHA" --invocation "$owner" \
+    --environment-file "$GATEWAY_ENV_FILE")" || return 1
+  "$GATEWAY_PYTHON_BIN" - "$ARENA_PREVIOUS_SHA" "$GATEWAY_ACTIVE_RELEASE_COMPONENT" "$state" <<'PY' || return 1
+import json
+import sys
+state = json.loads(sys.argv[3])
+if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
+        or state.get("guard_present") is not True
+        or state.get("candidate_commit") != sys.argv[1]
+        or state.get("restart_scope") != sys.argv[2]
+        or state.get("restart_phase") not in ("gateway_destructive", "gateway_ready")
+        or type(state.get("guard_generation")) is not int
+        or state["guard_generation"] <= 0):
+    raise SystemExit("previous Arena guard is not an active exact-owner recovery state")
+PY
+  GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$owner"
+  ARENA_RECOVERING=1
+  echo "Verified exact-owner Arena restart recovery from serving release"
+}
+
+restore_arena_recovery_guard_before_destructive() {
+  local helper state
+  helper="$GATEWAY_PREFLIGHT_TREE/scripts/lab_arena_restart_claim_guard.py"
+  if [ "$ARENA_RECOVERING" != 1 ] || [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" = 1 ]; then
+    return 1
+  fi
+  env -u LAB_ARENA_SUPABASE_URL -u LAB_ARENA_SERVICE_KEY \
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" "$helper" drain \
+    --candidate "$ARENA_PREVIOUS_SHA" \
+    --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    --scope "$GATEWAY_ACTIVE_RELEASE_COMPONENT" --timeout-seconds 30 \
+    --environment-file "$GATEWAY_ENV_FILE" >/dev/null || return 1
+  state="$(env -u LAB_ARENA_SUPABASE_URL -u LAB_ARENA_SERVICE_KEY \
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" "$helper" owned \
+    --candidate "$ARENA_PREVIOUS_SHA" \
+    --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    --environment-file "$GATEWAY_ENV_FILE")" || return 1
+  "$GATEWAY_PYTHON_BIN" - "$ARENA_PREVIOUS_SHA" "$state" <<'PY'
+import json
+import sys
+state = json.loads(sys.argv[2])
+if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
+        or state.get("guard_present") is not True
+        or state.get("guard_active") is not True
+        or state.get("candidate_commit") != sys.argv[1]
+        or state.get("restart_phase") not in ("gateway_destructive", "gateway_ready")):
+    raise SystemExit("prior serving Arena guard was not restored")
+PY
+}
+
+prepare_arena_runtime_tree() {
+  local destination temporary
+  destination="$(arena_runtime_tree "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA")" || return 1
+  mkdir -p "$ARENA_RUNTIME_ROOT"
+  chmod 700 "$ARENA_RUNTIME_ROOT"
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    echo "ERROR: Arena candidate runtime already exists" >&2
+    return 1
+  fi
+  temporary="$(mktemp -d "$ARENA_RUNTIME_ROOT/.candidate.XXXXXX")" || return 1
+  if ! cp -a "$GATEWAY_PREFLIGHT_TREE/." "$temporary/"; then
+    rm -rf -- "$temporary"
+    return 1
+  fi
+  if ! PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B - \
+      "$LEADPOET_REPO_ROOT" "$temporary" "$PREPARED_GATEWAY_SHA" <<'PY'
+from pathlib import Path
+import sys
+from scripts.gateway_git_deploy import verify_materialized_tree
+verify_materialized_tree(
+    repo_root=Path(sys.argv[1]), materialized_root=Path(sys.argv[2]),
+    target_sha=sys.argv[3], strict_extras=True,
+)
+PY
+  then
+    rm -rf -- "$temporary"
+    echo "ERROR: retained Arena runtime differs from exact candidate Git blobs" >&2
+    return 1
+  fi
+  chmod -R a-w "$temporary"
+  mv -T -- "$temporary" "$destination"
+  ARENA_CANDIDATE_TREE="$destination"
+}
+
+arena_component_command() {
+  local component="$1" slot="$2"
+  arena_slot_ports "$slot" || return 1
+  case "$component" in
+    api)
+      ARENA_COMPONENT_COMMAND=("$GATEWAY_PYTHON_BIN" -B -u scripts/run_lab_arena_service.py
+        --environment-file "$GATEWAY_ENV_FILE" --host 127.0.0.1
+        --port "$ARENA_API_PORT" --no-driver)
+      ;;
+    edge)
+      ARENA_COMPONENT_COMMAND=("$GATEWAY_PYTHON_BIN" -B -u scripts/run_arena_proxy_edge.py
+        --environment-file "$GATEWAY_ENV_FILE" --port "$ARENA_EDGE_PORT"
+        --sidecar-port "$ARENA_API_PORT")
+      ;;
+    driver)
+      ARENA_COMPONENT_COMMAND=("$GATEWAY_PYTHON_BIN" -B -u scripts/run_lab_arena_service.py
+        --environment-file "$GATEWAY_ENV_FILE" --driver-only)
+      ;;
+    *) echo "ERROR: invalid Arena component" >&2; return 1 ;;
+  esac
+  ARENA_COMPONENT_STATE_FILE="$ARENA_RUNTIME_ROOT/$component-slot$slot-process.json"
+  ARENA_COMPONENT_LOG_FILE="$GATEWAY_LOG_ROOT/arena-$component-slot$slot.log"
+}
+
+start_arena_component() {
+  local component="$1" slot="$2" tree="$3" sha="$4" pid process_helper controller_cwd
+  arena_component_command "$component" "$slot" || return 1
+  process_helper="$tree/scripts/manage_owned_process_group.py"
+  if ! verify_controller_process_helper "$process_helper"; then
+    echo "ERROR: verified Arena process helper is unavailable" >&2
+    return 1
+  fi
+  mkdir -p "$GATEWAY_LOG_ROOT"
+  controller_cwd="$PWD"
+  cd "$tree"
+  if [ "$component" = edge ]; then
+    env -i PATH="$PATH" HOME="$HOME" GITHUB_SHA="$sha" \
+      LAB_ARENA_RELEASE_ROOT="$tree" LAB_ARENA_RELEASE_COMMIT="$sha" \
+      GATEWAY_RESTART_INVOCATION_ID="$GATEWAY_RESTART_INVOCATION_ID" \
+      GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+      LEADPOET_RESTART_INVOCATION_ID="$GATEWAY_RESTART_INVOCATION_ID" \
+      PYTHONDONTWRITEBYTECODE=1 \
+      setsid "${ARENA_COMPONENT_COMMAND[@]}" \
+      >> "$ARENA_COMPONENT_LOG_FILE" 2>&1 < /dev/null \
+      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+  else
+    env -u GATEWAY_CONTROLLER_PROCESS_HELPER -u LAB_ARENA_PROCESS_HELPER \
+      -u GATEWAY_RESTART_AUTHORITY_ROOT -u GATEWAY_RESTART_AUTHORITY_COMMIT \
+      -u PREPARED_GATEWAY_SHA -u LAB_ARENA_RESTART_GUARD_GENERATION \
+      GITHUB_SHA="$sha" \
+      GATEWAY_RESTART_INVOCATION_ID="$GATEWAY_RESTART_INVOCATION_ID" \
+      LEADPOET_RESTART_INVOCATION_ID="$GATEWAY_RESTART_INVOCATION_ID" \
+      LAB_ARENA_RELEASE_ROOT="$tree" LAB_ARENA_RELEASE_COMMIT="$sha" \
+      AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 \
+      LEADPOET_AWS_INSTANCE_ROLE_ONLY=true PYTHONDONTWRITEBYTECODE=1 \
+      setsid "${ARENA_COMPONENT_COMMAND[@]}" \
+      >> "$ARENA_COMPONENT_LOG_FILE" 2>&1 < /dev/null \
+      9>&- 190>&- 191>&- 192>&- 193>&- 194>&- 195>&- &
+  fi
+  pid="$!"
+  cd "$controller_cwd"
+  if ! "$GATEWAY_PYTHON_BIN" "$process_helper" record \
+      --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" \
+      --uid "$(id -u)" --launch-pgid "$pid" --discover-timeout-seconds 5 \
+      -- "${ARENA_COMPONENT_COMMAND[@]}"; then
+    kill -TERM "$pid" 2>/dev/null || true
+    echo "ERROR: exact Arena component ownership was not recorded" >&2
+    return 1
+  fi
+}
+
+stop_arena_component() {
+  local component="$1" slot="$2" tree="$3" process_helper
+  arena_component_command "$component" "$slot" || return 1
+  # Use the newly verified controller helper even when retiring a different
+  # source SHA. The old runtime tree supplies only the exact process cwd.
+  process_helper="$ARENA_CANDIDATE_TREE/scripts/manage_owned_process_group.py"
+  if ! verify_controller_process_helper "$process_helper"; then
+    echo "ERROR: Arena release process helper is unavailable" >&2
+    return 1
+  fi
+  "$GATEWAY_PYTHON_BIN" "$process_helper" stop \
+    --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" \
+    --uid "$(id -u)" --term-seconds 6600 \
+    --no-kill --signal-leader-only -- "${ARENA_COMPONENT_COMMAND[@]}"
+}
+
+wait_for_arena_driver_startup() {
+  local log_offset="$1" attempt process_helper
+  arena_component_command driver "$ARENA_CANDIDATE_SLOT" || return 1
+  process_helper="$ARENA_CANDIDATE_TREE/scripts/manage_owned_process_group.py"
+  for attempt in $(seq 1 60); do
+    if ! "$GATEWAY_PYTHON_BIN" "$process_helper" verify \
+        --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$ARENA_CANDIDATE_TREE" \
+        --uid "$(id -u)" -- "${ARENA_COMPONENT_COMMAND[@]}" >/dev/null; then
+      echo "ERROR: Arena driver exited before startup completed" >&2
+      return 1
+    fi
+    if "$GATEWAY_PYTHON_BIN" - "$ARENA_COMPONENT_LOG_FILE" "$log_offset" \
+        "$GATEWAY_DEPLOY_SHA" "$GATEWAY_RESTART_INVOCATION_ID" <<'PY'
+import os
+from pathlib import Path
+import stat
+import sys
+path, offset, sha, invocation = sys.argv[1:]
+try:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        metadata = os.fstat(fd)
+        start = int(offset)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or start < 0 or metadata.st_size < start
+                or metadata.st_size - start > 1024 * 1024):
+            raise SystemExit(1)
+        os.lseek(fd, start, os.SEEK_SET)
+        lines = os.read(fd, metadata.st_size - start).decode("utf-8", "replace").splitlines()
+    finally:
+        os.close(fd)
+except (OSError, ValueError):
+    raise SystemExit(1)
+marker = (f"ARENA_SERVICE_LIFECYCLE event=startup outcome=ok source_sha={sha} "
+          f"physical_role=arena-driver invocation_id={invocation}")
+raise SystemExit(0 if marker in lines else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "ERROR: exact Arena driver startup was not recorded" >&2
+  return 1
 }
 
 verify_controller_process_helper() {
@@ -1104,10 +1399,97 @@ run_prepared_gateway_module() {
   )
 }
 
+rollback_arena_candidate_before_destructive() {
+  local live_ingress prior_ingress candidate_ingress
+  if [ "$ARENA_CONTINUITY_ENABLED" != 1 ] \
+      || [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" = 1 ] \
+      || [ -z "$ARENA_CANDIDATE_TREE" ]; then
+    return 0
+  fi
+  if [ "$ARENA_CANDIDATE_TREE" != "$(arena_runtime_tree "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA")" ]; then
+    echo "ERROR: refusing cleanup of an unexpected Arena runtime path" >&2
+    return 1
+  fi
+  if [ "$ARENA_REUSE_PREVIOUS" = 1 ]; then
+    # The verified prior archive and edge still serve the domain. There is
+    # no new process or archive to clean on an interrupted same-SHA retry.
+    return 0
+  fi
+  live_ingress="$(arena_ingress_tool "$GATEWAY_PREFLIGHT_TREE" --inspect)" || {
+    echo "ERROR: Arena ingress state is unverifiable; retaining serving candidate" >&2
+    return 1
+  }
+  if [ "$ARENA_PREVIOUS_MODE" = legacy ]; then
+    prior_ingress="legacy 0 - legacy"
+    candidate_ingress="domain $ARENA_CANDIDATE_SLOT $PREPARED_GATEWAY_SHA legacy"
+  elif [ "$ARENA_PREVIOUS_MODE" = domain ]; then
+    prior_ingress="domain $ARENA_PREVIOUS_SLOT $ARENA_PREVIOUS_SHA legacy"
+    candidate_ingress="domain $ARENA_CANDIDATE_SLOT $PREPARED_GATEWAY_SHA legacy"
+  elif [ "$ARENA_PREVIOUS_MODE" = dual ]; then
+    prior_ingress="dual $ARENA_PREVIOUS_SLOT $ARENA_PREVIOUS_SHA $ARENA_PREVIOUS_BACKEND"
+    candidate_ingress="dual $ARENA_CANDIDATE_SLOT $PREPARED_GATEWAY_SHA $ARENA_PREVIOUS_BACKEND"
+  else
+    echo "ERROR: prior Arena ingress state is invalid; retaining candidate" >&2
+    return 1
+  fi
+  if [ "$live_ingress" = "$candidate_ingress" ]; then
+    if [ "$ARENA_PREVIOUS_MODE" = legacy ]; then
+      if ! arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" \
+          domain "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" legacy \
+          legacy 0 - legacy; then
+        echo "ERROR: Arena ingress rollback failed; retaining serving candidate" >&2
+        return 1
+      fi
+    elif [ "$ARENA_PREVIOUS_MODE" = domain ]; then
+      if ! arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" \
+          domain "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" legacy \
+          domain "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA" legacy; then
+        echo "ERROR: Arena ingress rollback failed; retaining serving candidate" >&2
+        return 1
+      fi
+    elif [ "$ARENA_PREVIOUS_MODE" = dual ]; then
+      if ! arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" \
+          dual "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" "$ARENA_PREVIOUS_BACKEND" \
+          dual "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA" "$ARENA_PREVIOUS_BACKEND"; then
+        echo "ERROR: Arena ingress rollback failed; retaining serving candidate" >&2
+        return 1
+      fi
+    fi
+  elif [ "$live_ingress" != "$prior_ingress" ]; then
+    echo "ERROR: Arena ingress changed during rollback; retaining serving candidate" >&2
+    return 1
+  fi
+  if ! stop_arena_component edge "$ARENA_CANDIDATE_SLOT" "$ARENA_CANDIDATE_TREE" \
+      || ! stop_arena_component api "$ARENA_CANDIDATE_SLOT" "$ARENA_CANDIDATE_TREE"; then
+    echo "ERROR: candidate Arena process did not drain; retaining runtime" >&2
+    return 1
+  fi
+  if [ -L "$ARENA_CANDIDATE_TREE" ] || [ ! -d "$ARENA_CANDIDATE_TREE" ]; then
+    echo "ERROR: candidate Arena runtime is not an owned directory" >&2
+    return 1
+  fi
+  chmod -R u+w "$ARENA_CANDIDATE_TREE"
+  rm -rf -- "$ARENA_CANDIDATE_TREE"
+}
+
 on_gateway_restart_exit() {
   local status="$?"
   if [ "$status" -ne 0 ]; then
-    abort_lab_arena_restart_guard_before_destructive
+    if [ "$ARENA_RECOVERING" = 1 ] \
+        && [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" != 1 ]; then
+      if rollback_arena_candidate_before_destructive; then
+        restore_arena_recovery_guard_before_destructive || \
+          echo "ERROR: prior Arena guard could not be restored" >&2
+      else
+        echo "ERROR: Arena ingress could not be restored; retaining restart guard" >&2
+      fi
+    else
+      if rollback_arena_candidate_before_destructive; then
+        abort_lab_arena_restart_guard_before_destructive
+      else
+        echo "ERROR: Arena ingress could not be restored; retaining restart guard" >&2
+      fi
+    fi
     record_gateway_restart_timing "${GATEWAY_DEPLOY_STAGE:-unknown}" "failed" \
       >/dev/null 2>&1 || true
     report_gateway_recovery_target
@@ -1873,6 +2255,12 @@ skip_keys = {
     "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
+    "ARENA_CONTINUITY_ENABLED", "ARENA_CANDIDATE_SLOT",
+    "ARENA_CANDIDATE_TREE", "ARENA_PREVIOUS_MODE",
+    "ARENA_PREVIOUS_SLOT", "ARENA_PREVIOUS_SHA",
+    "ARENA_PREVIOUS_BACKEND", "ARENA_RECOVERING", "ARENA_REUSE_PREVIOUS",
+    "ARENA_INGRESS_SWITCHED", "ARENA_RUNTIME_ROOT",
+    "ARENA_INGRESS_STATE_FILE", "ARENA_CADDY_FILE",
     "GATEWAY_RESTART_STARTED_EPOCH",
     "GATEWAY_RESTART_TIMING_DIR",
     "GATEWAY_RESTART_TIMING_FILE",
@@ -2016,6 +2404,12 @@ skip_keys = {
     "LAB_ARENA_PROCESS_HELPER",
     "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT",
     "GATEWAY_RESTART_PHASE",
+    "ARENA_CONTINUITY_ENABLED", "ARENA_CANDIDATE_SLOT",
+    "ARENA_CANDIDATE_TREE", "ARENA_PREVIOUS_MODE",
+    "ARENA_PREVIOUS_SLOT", "ARENA_PREVIOUS_SHA",
+    "ARENA_PREVIOUS_BACKEND", "ARENA_RECOVERING", "ARENA_REUSE_PREVIOUS",
+    "ARENA_INGRESS_SWITCHED", "ARENA_RUNTIME_ROOT",
+    "ARENA_INGRESS_STATE_FILE", "ARENA_CADDY_FILE",
     "GATEWAY_RESTART_STARTED_EPOCH",
     "GATEWAY_RESTART_TIMING_DIR",
     "GATEWAY_RESTART_TIMING_FILE",
@@ -2299,6 +2693,134 @@ fi
 record_gateway_restart_timing "pre_shutdown_disk_ready"
 record_gateway_restart_timing "pre_shutdown_checks_complete"
 
+# Keep Arena's existing admission proxy and API available while the single
+# attested coordinator is replaced. This runs only for an active Arena mode.
+ARENA_CONFIGURED_MODE="$(
+  env -u LAB_ARENA_MODE PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+    "$GATEWAY_PYTHON_BIN" -B - "$GATEWAY_ENV_FILE" <<'PY'
+import os
+import sys
+from pathlib import Path
+from scripts.run_lab_arena_service import load_scoped_environment
+load_scoped_environment(Path(sys.argv[1]))
+print(os.environ.get("LAB_ARENA_MODE", "off").strip().lower())
+PY
+)" || exit 1
+case "$ARENA_CONFIGURED_MODE" in
+  off)
+    ARENA_CONTINUITY_ENABLED=0
+    ARENA_INGRESS_BEFORE="$(arena_ingress_tool "$GATEWAY_PREFLIGHT_TREE" --inspect)" || exit 1
+    if [ "$ARENA_INGRESS_BEFORE" != "legacy 0 - legacy" ]; then
+      echo "ERROR: Arena cannot disable while the stable ingress owns :8000" >&2
+      exit 1
+    fi
+    ;;
+  shadow|live) ARENA_CONTINUITY_ENABLED=1 ;;
+  *) echo "ERROR: Arena mode is invalid for ingress cutover" >&2; exit 1 ;;
+esac
+if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
+  GATEWAY_DEPLOY_STAGE="arena_candidate_overlap"
+  export GATEWAY_DEPLOY_STAGE
+  ARENA_INGRESS_BEFORE="$(arena_ingress_tool "$GATEWAY_PREFLIGHT_TREE" --inspect)" || exit 1
+  read -r ARENA_PREVIOUS_MODE ARENA_PREVIOUS_SLOT ARENA_PREVIOUS_SHA ARENA_PREVIOUS_BACKEND \
+    <<< "$ARENA_INGRESS_BEFORE"
+  case "$ARENA_PREVIOUS_MODE:$ARENA_PREVIOUS_BACKEND" in
+    legacy:legacy) ARENA_CANDIDATE_SLOT=1 ;;
+    domain:legacy)
+      if [ "$PREPARED_GATEWAY_SHA" != "$ARENA_PREVIOUS_SHA" ]; then
+        echo "ERROR: unfinished first Arena cutover must finish its exact release before another SHA" >&2
+        exit 1
+      fi
+      ARENA_CANDIDATE_SLOT="$ARENA_PREVIOUS_SLOT"
+      recover_arena_restart_owner || exit 1
+      ARENA_REUSE_PREVIOUS=1
+      ARENA_CANDIDATE_TREE="$(arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA")"
+      ;;
+    dual:closed|dual:ready)
+      ARENA_CANDIDATE_SLOT=$((1 - ARENA_PREVIOUS_SLOT))
+      if [ "$ARENA_PREVIOUS_BACKEND" = closed ]; then
+        recover_arena_restart_owner || exit 1
+      else
+        ARENA_READY_GUARD_STATE="$(run_lab_arena_restart_guard \
+          "$GATEWAY_PREFLIGHT_TREE" state)" || exit 1
+        if "$GATEWAY_PYTHON_BIN" - "$ARENA_READY_GUARD_STATE" <<'PY'
+import json
+import sys
+try:
+    state = json.loads(sys.argv[1])
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if (not isinstance(state, dict)
+        or state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
+        or type(state.get("guard_present")) is not bool):
+    raise SystemExit(2)
+raise SystemExit(0 if state.get("guard_present") is True else 1)
+PY
+        then
+          recover_arena_restart_owner || exit 1
+        else
+          state_status="$?"
+          if [ "$state_status" != 1 ]; then
+            echo "ERROR: Arena restart guard state is invalid" >&2
+            exit 1
+          fi
+        fi
+      fi
+      ;;
+    *) echo "ERROR: Arena ingress is not in a safe ready state" >&2; exit 1 ;;
+  esac
+  if [ "$ARENA_REUSE_PREVIOUS" != 1 ]; then
+    prepare_arena_runtime_tree
+  fi
+  if ! preflight_gateway_restart_disk "$((MIN_FREE_KB + 128 * 1024))"; then
+    echo "ERROR: retained Arena archive would violate the disk guard" >&2
+    exit 1
+  fi
+  set -a
+  . "$ENV_CLONE"
+  set +a
+  if [ "$ARENA_REUSE_PREVIOUS" = 1 ]; then
+    arena_component_command api "$ARENA_CANDIDATE_SLOT"
+    "$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" verify \
+      --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$ARENA_CANDIDATE_TREE" \
+      --uid "$(id -u)" -- "${ARENA_COMPONENT_COMMAND[@]}" >/dev/null
+  else
+    arena_slot_ports "$ARENA_CANDIDATE_SLOT"
+    "$GATEWAY_PYTHON_BIN" - "$ARENA_API_PORT" "$ARENA_EDGE_PORT" <<'PY'
+import socket
+import sys
+for value in sys.argv[1:]:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        try:
+            listener.bind(("127.0.0.1", int(value)))
+        except OSError:
+            raise SystemExit("candidate Arena port is already occupied")
+PY
+    start_arena_component api "$ARENA_CANDIDATE_SLOT" "$ARENA_CANDIDATE_TREE" "$PREPARED_GATEWAY_SHA"
+    start_arena_component edge "$ARENA_CANDIDATE_SLOT" "$ARENA_CANDIDATE_TREE" "$PREPARED_GATEWAY_SHA"
+  fi
+  arena_slot_ports "$ARENA_CANDIDATE_SLOT"
+  ARENA_CANDIDATE_READY=0
+  for attempt in $(seq 1 60); do
+    if timeout 5 curl -fsS "http://127.0.0.1:$ARENA_API_PORT/arena/v1/current" >/dev/null 2>&1 \
+        && timeout 5 curl -fsS "http://127.0.0.1:$ARENA_EDGE_PORT/arena/v1/current" >/dev/null 2>&1; then
+      ARENA_CANDIDATE_READY=1
+      break
+    fi
+    sleep 2
+  done
+  if [ "$ARENA_CANDIDATE_READY" != 1 ]; then
+    echo "ERROR: candidate Arena API and edge were not ready before cutover" >&2
+    exit 1
+  fi
+  for component in api edge; do
+    arena_component_command "$component" "$ARENA_CANDIDATE_SLOT"
+    "$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" verify \
+      --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$ARENA_CANDIDATE_TREE" \
+      --uid "$(id -u)" -- "${ARENA_COMPONENT_COMMAND[@]}" >/dev/null
+  done
+fi
+
 GATEWAY_DEPLOY_STAGE="lab_arena_claim_drain"
 export GATEWAY_DEPLOY_STAGE
 if ! drain_lab_arena_for_restart "$GATEWAY_PREFLIGHT_TREE"; then
@@ -2323,15 +2845,116 @@ if ! verify_controller_process_helper "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"; 
   echo "Gateway remains running; production shutdown has not started." >&2
   exit 1
 fi
+if [ "$ARENA_CONTINUITY_ENABLED" = 1 ] \
+    && { [ "$ARENA_PREVIOUS_MODE" = legacy ] || [ "$ARENA_PREVIOUS_MODE" = domain ]; }; then
+  # A failed idle proof still leaves the old gateway and worker untouched.
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B \
+    "$GATEWAY_PREFLIGHT_TREE/scripts/arena_first_cutover_idle.py" \
+    --environment-file "$GATEWAY_ENV_FILE"
+fi
+if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
+  # The provider gate is process-local. Keep the old API serving until the
+  # durable claim drain and guard authorize prove no active paid lease work.
+  if [ "$ARENA_PREVIOUS_MODE" = legacy ]; then
+    arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" \
+      legacy 0 - legacy domain "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" legacy
+  elif [ "$ARENA_PREVIOUS_MODE" = domain ]; then
+    if [ "$ARENA_REUSE_PREVIOUS" != 1 ]; then
+      arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" \
+        domain "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA" legacy \
+        domain "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" legacy
+    fi
+  else
+    arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" \
+      dual "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA" "$ARENA_PREVIOUS_BACKEND" \
+      dual "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" "$ARENA_PREVIOUS_BACKEND"
+  fi
+  ARENA_INGRESS_SWITCHED=1
+  record_gateway_restart_timing "arena_candidate_ingress_ready"
+fi
 echo "Stopping existing gateway and Lab Arena processes"
 GATEWAY_DESTRUCTIVE_PHASE_STARTED=1
 export GATEWAY_DESTRUCTIVE_PHASE_STARTED
 record_gateway_restart_timing "shutdown_started"
-pkill -9 -f "python3 main.py" 2>/dev/null || true
-pkill -9 -f "python3 -u main.py" 2>/dev/null || true
-pkill -9 -f "python3 -u -m gateway.main" 2>/dev/null || true
-pkill -9 -f "uvicorn" 2>/dev/null || true
-stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"
+if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
+  if [ "$ARENA_PREVIOUS_MODE" = legacy ] || [ "$ARENA_PREVIOUS_MODE" = domain ]; then
+    # Retire the legacy combined worker immediately after the idle proof.
+    # Its old binary cannot stop queued reviews after the guard arrives.
+    "$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" stop \
+      --state-file "$GATEWAY_CONTROLLER_PROCESS_STATE_FILE" \
+      --cwd "$LEADPOET_REPO_ROOT" --uid "$(id -u)" \
+      --term-seconds 6600 --no-kill --signal-leader-only -- \
+      "$GATEWAY_PYTHON_BIN" -u scripts/run_lab_arena_service.py \
+      --environment-file "$GATEWAY_ENV_FILE" --host 127.0.0.1 --port 8792
+    # The old gateway still proxies direct :8000 to :8792 until Caddy can
+    # bind that listener. Keep that route alive with a driver-free replica.
+    if [ "$ARENA_CANDIDATE_SLOT" != 0 ]; then
+      arena_component_command api 0
+      if [ -e "$ARENA_COMPONENT_STATE_FILE" ] || [ -L "$ARENA_COMPONENT_STATE_FILE" ]; then
+        "$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" verify \
+          --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$ARENA_CANDIDATE_TREE" \
+          --uid "$(id -u)" -- "${ARENA_COMPONENT_COMMAND[@]}" >/dev/null
+      else
+        start_arena_component api 0 "$ARENA_CANDIDATE_TREE" "$PREPARED_GATEWAY_SHA"
+      fi
+    fi
+    ARENA_TEMP_API_READY=0
+    for attempt in $(seq 1 30); do
+      if timeout 5 curl -fsS http://127.0.0.1:8792/arena/v1/current >/dev/null 2>&1; then
+        ARENA_TEMP_API_READY=1
+        break
+      fi
+      sleep 2
+    done
+    if [ "$ARENA_TEMP_API_READY" != 1 ]; then
+      echo "ERROR: temporary direct Arena API did not become ready" >&2
+      exit 1
+    fi
+  else
+    ARENA_PREVIOUS_TREE="$(arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA")"
+    stop_arena_component driver "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_TREE"
+    if [ "$ARENA_PREVIOUS_BACKEND" = ready ]; then
+      arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" \
+        dual "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" ready \
+        dual "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" closed
+    fi
+  fi
+  "$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" stop \
+    --state-file "/home/ec2-user/.config/leadpoet/gateway-process.json" \
+    --cwd "$LEADPOET_REPO_ROOT" --uid "$(id -u)" \
+    --term-seconds 6600 --no-kill --signal-leader-only -- \
+    "$GATEWAY_PYTHON_BIN" -u -m gateway.main
+  if [ "$ARENA_PREVIOUS_MODE" = legacy ] || [ "$ARENA_PREVIOUS_MODE" = domain ]; then
+    if [ "$ARENA_CANDIDATE_SLOT" != 0 ]; then
+      stop_arena_component api 0 "$ARENA_CANDIDATE_TREE"
+    fi
+    arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" \
+      domain "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" legacy \
+      dual "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" closed
+  fi
+  if [ "$ARENA_PREVIOUS_MODE" = dual ] \
+      || { [ "$ARENA_PREVIOUS_MODE" = domain ] && [ "$ARENA_REUSE_PREVIOUS" != 1 ]; }; then
+    # The new edge already serves both listeners. Drain old in-flight API
+    # requests before retiring its archive, including on a failed backend
+    # build; a later exact-owner retry can then reuse the inactive slot.
+    ARENA_PREVIOUS_TREE="$(arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA")"
+    stop_arena_component edge "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_TREE"
+    stop_arena_component api "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_TREE"
+    if [ -L "$ARENA_PREVIOUS_TREE" ] || [ ! -d "$ARENA_PREVIOUS_TREE" ]; then
+      echo "ERROR: previous Arena runtime is not an owned directory" >&2
+      exit 1
+    fi
+    chmod -R u+w "$ARENA_PREVIOUS_TREE"
+    rm -rf -- "$ARENA_PREVIOUS_TREE"
+  fi
+else
+  "$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" stop \
+    --state-file "/home/ec2-user/.config/leadpoet/gateway-process.json" \
+    --cwd "$LEADPOET_REPO_ROOT" --uid "$(id -u)" \
+    --term-seconds 6600 --no-kill --signal-leader-only -- \
+    "$GATEWAY_PYTHON_BIN" -u -m gateway.main
+  stop_lab_arena_service "$GATEWAY_LAB_ARENA_STOP_PROCESS_HELPER"
+fi
 record_gateway_restart_timing "shutdown_complete"
 rm -rf "$GATEWAY_PREFLIGHT_TREE"
 GATEWAY_PREFLIGHT_TREE=""
@@ -2349,14 +2972,16 @@ if ! wait_for_gateway_build_memory 0 10; then
   exit 1
 fi
 
-echo "Waiting for :8000 to free"
-for i in $(seq 1 25); do
-  if ! sudo ss -tulpn 2>/dev/null | grep -q ":8000 "; then
-    echo ":8000 free after ${i}s"
-    break
-  fi
-  sleep 1
-done
+if [ "$ARENA_CONTINUITY_ENABLED" != 1 ]; then
+  echo "Waiting for :8000 to free"
+  for i in $(seq 1 25); do
+    if ! sudo ss -tulpn 2>/dev/null | grep -q ":8000 "; then
+      echo ":8000 free after ${i}s"
+      break
+    fi
+    sleep 1
+  done
+fi
 
 echo "Activating prepared gateway Git commit after process shutdown"
 GATEWAY_DEPLOY_STAGE="git_activate"
@@ -2416,6 +3041,12 @@ exec env \
   GATEWAY_DESTRUCTIVE_PHASE_STARTED="$GATEWAY_DESTRUCTIVE_PHASE_STARTED" \
   PREPARED_GATEWAY_SHA="$PREPARED_GATEWAY_SHA" \
   LAB_ARENA_RESTART_GUARD_GENERATION="$LAB_ARENA_RESTART_GUARD_GENERATION" \
+  ARENA_CONTINUITY_ENABLED="$ARENA_CONTINUITY_ENABLED" \
+  ARENA_CANDIDATE_SLOT="$ARENA_CANDIDATE_SLOT" \
+  ARENA_CANDIDATE_TREE="$ARENA_CANDIDATE_TREE" \
+  ARENA_PREVIOUS_MODE="$ARENA_PREVIOUS_MODE" \
+  ARENA_PREVIOUS_SLOT="$ARENA_PREVIOUS_SLOT" \
+  ARENA_PREVIOUS_SHA="$ARENA_PREVIOUS_SHA" \
   GATEWAY_RESTART_TIMING_DIR="$GATEWAY_RESTART_TIMING_DIR" \
   GATEWAY_RESTART_TIMING_FILE="$GATEWAY_RESTART_TIMING_FILE" \
   GATEWAY_RESTART_TIMING_INITIALIZED="$GATEWAY_RESTART_TIMING_INITIALIZED" \
@@ -2433,6 +3064,27 @@ exec env \
 fi
 
 bind_activated_gateway_guard_candidate || exit 1
+if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
+  if [ "$ARENA_CANDIDATE_TREE" != "$(arena_runtime_tree "$ARENA_CANDIDATE_SLOT" "$GATEWAY_DEPLOY_SHA")" ]; then
+    echo "ERROR: retained Arena runtime path differs from activated candidate" >&2
+    exit 1
+  fi
+  ARENA_INGRESS_AFTER="$(arena_ingress_tool "$LEADPOET_REPO_ROOT" --inspect)" || exit 1
+  if [ "$ARENA_INGRESS_AFTER" != "dual $ARENA_CANDIDATE_SLOT $GATEWAY_DEPLOY_SHA closed" ]; then
+    echo "ERROR: protected ingress was not closed before coordinator replacement" >&2
+    exit 1
+  fi
+  PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -B - \
+      "$LEADPOET_REPO_ROOT" "$ARENA_CANDIDATE_TREE" "$GATEWAY_DEPLOY_SHA" <<'PY'
+from pathlib import Path
+import sys
+from scripts.gateway_git_deploy import verify_materialized_tree
+verify_materialized_tree(
+    repo_root=Path(sys.argv[1]), materialized_root=Path(sys.argv[2]),
+    target_sha=sys.argv[3], strict_extras=True,
+)
+PY
+fi
 record_gateway_restart_timing "candidate_activated"
 echo "Installing the preflighted gateway manifest"
 PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" \
@@ -2648,6 +3300,14 @@ export GATEWAY_ENV_FILE="${GATEWAY_ENV_FILE:-/home/ec2-user/.config/leadpoet/gat
 export LEADPOET_GATEWAY_ENV_SECRET_ID="${LEADPOET_GATEWAY_ENV_SECRET_ID:-leadpoet/prod/gateway/env}"
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_PROFILE AWS_SESSION_TOKEN AWS_SECURITY_TOKEN
 export LEADPOET_AWS_INSTANCE_ROLE_ONLY=true
+export GATEWAY_BIND_PORT=8000
+GATEWAY_BACKEND_HEALTH_URL="http://localhost:8000"
+if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
+  export GATEWAY_BIND_PORT=8001
+  arena_slot_ports "$ARENA_CANDIDATE_SLOT"
+  export LAB_ARENA_PROXY_MAIN_PORT="$ARENA_API_PORT"
+  GATEWAY_BACKEND_HEALTH_URL="http://127.0.0.1:8001"
+fi
 
 # Release the build lock after the protected gateway runtime is ready.
 . "$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
@@ -2696,7 +3356,7 @@ for attempt in $(seq 1 120); do
     echo "ERROR: gateway exited during startup" >&2
     exit 1
   fi
-  if timeout 5 curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+  if timeout 5 curl -fsS "$GATEWAY_BACKEND_HEALTH_URL/health" >/dev/null 2>&1; then
     GATEWAY_HEALTH_READY=1
     echo "Gateway base health ready after attempt $attempt"
     break
@@ -2715,7 +3375,21 @@ fi
 record_gateway_restart_timing "gateway_v2_health_ready"
 GATEWAY_DEPLOY_STAGE="lab_arena_service_start"
 export GATEWAY_DEPLOY_STAGE
-start_lab_arena_service
+if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
+  arena_component_command driver "$ARENA_CANDIDATE_SLOT"
+  ARENA_DRIVER_LOG_OFFSET=0
+  if [ -f "$ARENA_COMPONENT_LOG_FILE" ]; then
+    ARENA_DRIVER_LOG_OFFSET="$(wc -c < "$ARENA_COMPONENT_LOG_FILE")"
+  fi
+  start_arena_component driver "$ARENA_CANDIDATE_SLOT" \
+    "$ARENA_CANDIDATE_TREE" "$GATEWAY_DEPLOY_SHA"
+  wait_for_arena_driver_startup "$ARENA_DRIVER_LOG_OFFSET"
+  arena_slot_ports "$ARENA_CANDIDATE_SLOT"
+  timeout 5 curl -fsS "http://127.0.0.1:$ARENA_API_PORT/arena/v1/current" >/dev/null
+  timeout 5 curl -fsS "http://127.0.0.1:$ARENA_EDGE_PORT/arena/v1/current" >/dev/null
+else
+  start_lab_arena_service
+fi
 record_gateway_restart_timing "lab_arena_service_ready"
 if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" ready \
     --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" \
@@ -2723,7 +3397,7 @@ if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" ready \
   echo "ERROR: Lab Arena gateway readiness could not be recorded" >&2
   exit 1
 fi
-BUILD_INFO_RESPONSE="$(timeout 15 curl -fsS http://localhost:8000/build-info)"
+BUILD_INFO_RESPONSE="$(timeout 15 curl -fsS "$GATEWAY_BACKEND_HEALTH_URL/build-info")"
 python3 - "$GATEWAY_DEPLOY_SHA" "$BUILD_INFO_RESPONSE" <<'VERIFY_BUILD_INFO'
 import json
 import sys
@@ -2737,12 +3411,24 @@ print(f"verified gateway /build-info commit: {actual}")
 VERIFY_BUILD_INFO
 
 echo "Verifying gateway attestation status"
-timeout 30 curl -fsS http://localhost:8000/attestation/document >/dev/null
+timeout 30 curl -fsS "$GATEWAY_BACKEND_HEALTH_URL/attestation/document" >/dev/null
 
 GATEWAY_DEPLOY_STAGE="host_restart_script_install"
 export GATEWAY_DEPLOY_STAGE
 install_successful_restart_script
 
+if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
+  # Only the exact activated backend may receive protected gateway traffic.
+  arena_ingress_transition "$LEADPOET_REPO_ROOT" \
+    dual "$ARENA_CANDIDATE_SLOT" "$GATEWAY_DEPLOY_SHA" closed \
+    dual "$ARENA_CANDIDATE_SLOT" "$GATEWAY_DEPLOY_SHA" ready
+  timeout 15 curl -fsS http://127.0.0.1:8000/arena/v1/current >/dev/null
+  timeout 15 curl -fsS http://127.0.0.1:8000/build-info >/dev/null
+  timeout 15 curl -fsS --resolve gateway.subnet71.com:443:127.0.0.1 \
+    https://gateway.subnet71.com/arena/v1/current >/dev/null
+  timeout 15 curl -fsS --resolve gateway.subnet71.com:443:127.0.0.1 \
+    https://gateway.subnet71.com/build-info >/dev/null
+fi
 GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"
 export GATEWAY_DEPLOY_STAGE
 if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" release \

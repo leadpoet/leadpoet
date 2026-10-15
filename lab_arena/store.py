@@ -59,6 +59,7 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_restart_guard_state_v1": (),
     "lab_arena_append_validator_events_v1": (
         ("p_validator_hotkey", "text"), ("p_network", "text"),
         ("p_netuid", "integer"), ("p_events", "jsonb"),

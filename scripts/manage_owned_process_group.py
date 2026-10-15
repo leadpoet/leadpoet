@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import stat
 import sys
@@ -18,6 +19,9 @@ from typing import Any, Optional
 
 STATE_VERSION = 1
 MAX_VERIFY_STATE_BYTES = 64 * 1024
+MAX_VERIFIED_ENVIRONMENT_BYTES = 1024 * 1024
+_RESTART_INVOCATION = re.compile(r"gateway-[0-9]{1,20}-[0-9]{1,20}")
+_RELEASE_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class OwnershipError(RuntimeError):
@@ -200,7 +204,8 @@ def _wait_for_group_exit(pgid: int, timeout_seconds: float) -> bool:
 
 
 def _stop_state(
-    path: Path, state: dict[str, Any], term_seconds: float, kill_seconds: float
+    path: Path, state: dict[str, Any], term_seconds: float, kill_seconds: float,
+    *, no_kill: bool = False, signal_leader_only: bool = False,
 ) -> None:
     process = _read_process(state["pid"])
     if process is None or process["state"] == "Z":
@@ -212,8 +217,13 @@ def _stop_state(
         return
     if not _same_process(process, state):
         raise OwnershipError("saved PID was reused or its process identity changed")
-    os.killpg(state["pgid"], signal.SIGTERM)
+    if signal_leader_only:
+        os.kill(state["pid"], signal.SIGTERM)
+    else:
+        os.killpg(state["pgid"], signal.SIGTERM)
     if not _wait_for_group_exit(state["pgid"], term_seconds):
+        if no_kill:
+            raise OwnershipError("owned process group did not stop before the graceful deadline")
         os.killpg(state["pgid"], signal.SIGKILL)
         if not _wait_for_group_exit(state["pgid"], kill_seconds):
             raise OwnershipError("owned process group remained active after SIGKILL")
@@ -248,7 +258,10 @@ def _stop(args: argparse.Namespace) -> None:
     expected = _expected_identity(argv=args.process_argv, cwd=args.cwd, uid=args.uid)
     if args.state_file.exists() or args.state_file.is_symlink():
         state = _load_state(args.state_file, expected)
-        _stop_state(args.state_file, state, args.term_seconds, args.kill_seconds)
+        _stop_state(
+            args.state_file, state, args.term_seconds, args.kill_seconds,
+            no_kill=args.no_kill, signal_leader_only=args.signal_leader_only,
+        )
         return
 
     matches = _matching_processes(argv=args.process_argv, cwd=args.cwd, uid=args.uid)
@@ -260,7 +273,10 @@ def _stop(args: argparse.Namespace) -> None:
         )
     _write_state(args.state_file, matches[0])
     state = _load_state(args.state_file, expected)
-    _stop_state(args.state_file, state, args.term_seconds, args.kill_seconds)
+    _stop_state(
+        args.state_file, state, args.term_seconds, args.kill_seconds,
+        no_kill=args.no_kill, signal_leader_only=args.signal_leader_only,
+    )
 
 
 def _sha256_json(value: Any) -> str:
@@ -416,12 +432,67 @@ def _verify(args: argparse.Namespace) -> None:
     print(json.dumps(result, sort_keys=True))
 
 
+def _verify_invocation(args: argparse.Namespace) -> None:
+    """Read only the owner ID from one exact, still-live release process."""
+    if not _RELEASE_SHA.fullmatch(args.release_sha or ""):
+        raise OwnershipError("release SHA is invalid")
+    expected = _expected_identity(argv=args.process_argv, cwd=args.cwd, uid=args.uid)
+    _raw, state = _read_verify_state(args.state_file, expected)
+    before = _read_process(state["pid"])
+    if not _same_process(before, state) or before["state"] == "Z":
+        raise OwnershipError("saved process identity changed")
+    matches = _matching_processes(argv=args.process_argv, cwd=args.cwd, uid=args.uid)
+    if len(matches) != 1 or not _same_process(matches[0], state):
+        raise OwnershipError("exact release process is not unique and live")
+    path = Path("/proc") / str(state["pid"]) / "environ"
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            raw = os.read(descriptor, MAX_VERIFIED_ENVIRONMENT_BYTES + 1)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise OwnershipError("exact release process environment is unavailable") from exc
+    if len(raw) > MAX_VERIFIED_ENVIRONMENT_BYTES:
+        raise OwnershipError("exact release process environment exceeds the bounded read")
+    after = _read_process(state["pid"])
+    if not _same_process(after, state) or after["state"] == "Z":
+        raise OwnershipError("release process changed during identity read")
+    selected: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        key, separator, value = item.partition(b"=")
+        if separator and key in (
+            b"GATEWAY_RESTART_INVOCATION_ID", b"LEADPOET_RESTART_INVOCATION_ID",
+            b"GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
+            b"LAB_ARENA_RELEASE_ROOT", b"LAB_ARENA_RELEASE_COMMIT",
+        ):
+            name = key.decode("ascii")
+            if name in selected:
+                raise OwnershipError("release process authority is duplicated")
+            try:
+                selected[name] = value.decode("ascii")
+            except UnicodeDecodeError as exc:
+                raise OwnershipError("release process authority is invalid") from exc
+    invocation = selected.get("GATEWAY_RESTART_INVOCATION_ID", "")
+    owner_invocation = selected.get("GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID", "")
+    if (
+        not _RESTART_INVOCATION.fullmatch(invocation)
+        or not _RESTART_INVOCATION.fullmatch(owner_invocation)
+        or selected.get("LEADPOET_RESTART_INVOCATION_ID") != invocation
+        or selected.get("LAB_ARENA_RELEASE_ROOT") != os.path.realpath(args.cwd)
+        or selected.get("LAB_ARENA_RELEASE_COMMIT") != args.release_sha
+    ):
+        raise OwnershipError("release process authority does not match its verified identity")
+    print(owner_invocation)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Record, verify, or stop one exact detached process group"
     )
     actions = parser.add_subparsers(dest="action", required=True)
-    for action in ("record", "stop", "verify"):
+    for action in ("record", "stop", "verify", "verify-invocation"):
         command = actions.add_parser(
             action,
             help=(
@@ -437,6 +508,9 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--discover-timeout-seconds", type=float, default=0.0)
         command.add_argument("--term-seconds", type=float, default=5.0)
         command.add_argument("--kill-seconds", type=float, default=2.0)
+        command.add_argument("--no-kill", action="store_true")
+        command.add_argument("--signal-leader-only", action="store_true")
+        command.add_argument("--release-sha")
         command.add_argument("process_argv", nargs=argparse.REMAINDER)
     return parser
 
@@ -460,10 +534,14 @@ def main() -> int:
             if args.launch_pgid is not None:
                 raise OwnershipError("stop does not accept --launch-pgid")
             _stop(args)
-        else:
+        elif args.action == "verify":
             if args.launch_pgid is not None:
                 raise OwnershipError("verify does not accept --launch-pgid")
             _verify(args)
+        else:
+            if args.launch_pgid is not None:
+                raise OwnershipError("verify-invocation does not accept --launch-pgid")
+            _verify_invocation(args)
     except (OwnershipError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

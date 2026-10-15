@@ -350,6 +350,21 @@ def test_arena_archive_release_overrides_stale_secret_and_git_env(
     assert stub_sdk.init_calls[0]["release"] == "cd" * 20
 
 
+def test_strict_archive_source_identity_is_bound_to_exact_root(tmp_path, monkeypatch):
+    from lab_arena import runtime_version
+
+    root = tmp_path / "archive"
+    (root / "lab_arena").mkdir(parents=True)
+    monkeypatch.setenv("LAB_ARENA_RELEASE_ROOT", str(root))
+    monkeypatch.setenv("LAB_ARENA_RELEASE_COMMIT", "ab" * 20)
+    metadata = runtime_version.source_metadata(str(root / "lab_arena/service.py"))
+    assert metadata["validator_source_commit"] == "ab" * 20
+    assert metadata["validator_source_origin"] == "verified_archive_environment"
+    other = tmp_path / "other"
+    (other / "lab_arena").mkdir(parents=True)
+    assert runtime_version.source_metadata(str(other / "lab_arena/service.py"))["validator_source_commit"] == "unknown"
+
+
 def test_arena_unknown_release_does_not_use_stale_config(monkeypatch, enabled_env, stub_sdk):
     from lab_arena import runtime_version
 

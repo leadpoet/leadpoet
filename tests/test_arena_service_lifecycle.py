@@ -57,6 +57,7 @@ def test_arena_startup_failure_emits_version_without_started_event(
     assert spans == [("service_preflight", "failed", {"source_sha": "a" * 40})]
     assert [stage["status"] for stage in stages] == ["failed"]
     assert stages[0]["candidate_sha"] == "a" * 40
+    assert stages[0]["physical_role"] == "arena-combined"
     output = capsys.readouterr().out
     assert "event=preflight outcome=failed" in output
     assert "source_sha=" + "a" * 40 in output
@@ -88,6 +89,8 @@ def test_arena_clean_exit_emits_start_and_stop_with_version(
     ]
     assert [stage["status"] for stage in stages] == ["ready", "completed"]
     assert {stage["candidate_sha"] for stage in stages} == {"a" * 40}
+    assert {stage["physical_role"] for stage in stages} == {"arena-api-8792"}
+    assert {stage["restart_invocation_id"] for stage in stages} == {"gateway-1792000000-1234"}
     assert flushes == [True]
     output = capsys.readouterr().out
     assert "event=startup outcome=ok" in output
@@ -193,6 +196,32 @@ def test_arena_check_only_does_not_claim_a_service_start(
     assert entrypoint.main(["--check-only"]) == 0
     assert spans == []
     assert stages == []
+
+
+@pytest.mark.parametrize(
+    ("arguments", "role"),
+    [(["--no-driver", "--port", "8794"], "arena-api-8794"),
+     (["--driver-only"], "arena-driver")],
+)
+def test_split_process_failure_identifies_exact_role_and_invocation(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str], role: str,
+) -> None:
+    spans, stages = _capture_lifecycle(monkeypatch)
+    contexts = []
+    monkeypatch.setattr(
+        leadpoet_observability, "configure_sentry_context",
+        lambda **kwargs: contexts.append(kwargs),
+    )
+    monkeypatch.setattr(
+        lab_arena.wiring, "build_service_from_environment",
+        lambda mode: (_ for _ in ()).throw(RuntimeError("startup unavailable")),
+    )
+    with pytest.raises(RuntimeError, match="startup unavailable"):
+        entrypoint.main(arguments)
+    assert contexts[0]["physical_role"] == role
+    assert contexts[0]["restart_invocation_id"] == "gateway-1792000000-1234"
+    assert spans[0][2]["source_sha"] == "a" * 40
+    assert stages[0]["physical_role"] == role
 
 
 def test_broken_telemetry_does_not_mask_startup_failure(

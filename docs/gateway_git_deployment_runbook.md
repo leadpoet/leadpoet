@@ -23,6 +23,20 @@ with its local hotkey.
    runtime measurements, and readiness checks. Do not invoke inner controllers
    or replace a live source tree by hand. Respect a rejected epoch gate and
    retry when the canonical controller permits it.
+
+   Arena continuity uses a stable Caddy listener on direct port `8000` and the
+   public domain. It routes Arena requests to one API-only release slot while
+   the controller replaces the single gateway backend and enclave. The Arena
+   driver and reviewer run in one separate process; do not start a combined
+   Arena service on `8792` or bind `8000` by hand. The first migration can have
+   a short direct-port handoff gap. Later canonical restarts keep Arena intake
+   and reads on the serving slot while they prepare and check the next slot.
+
+   If a restart fails after Arena ingress moves, rerun the canonical command
+   for the **same full commit SHA**. It verifies the retained release, serving
+   process, and held restart guard before it resumes. An unfinished first
+   migration must finish its exact SHA before another release can start. Do
+   not edit Caddy state, release archives, or the guard to force a retry.
 5. If the validator changed, run the exact committed `validator_restart.sh`
    with `VALIDATOR_DEPLOY_COMMIT` set to the same full SHA. See
    [normal validator operations](arena_normal_validator_weights.md).

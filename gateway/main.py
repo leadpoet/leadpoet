@@ -543,6 +543,13 @@ async def v2_authority_health():
 
 if __name__ == "__main__":
     import uvicorn
+
+    # The stable public ingress owns :8000 after its one-time installation.
+    # The measured gateway then binds only the release-local backend socket.
+    _bind_port = os.getenv("GATEWAY_BIND_PORT", "8000")
+    if _bind_port not in {"8000", "8001"}:
+        raise RuntimeError("gateway bind port is not an approved release port")
+    _bind_host = "127.0.0.1" if _bind_port == "8001" else "0.0.0.0"
     
     print("=" * 60)
     print("🚀 Starting LeadPoet Trustless Gateway")
@@ -561,8 +568,8 @@ if __name__ == "__main__":
     
     uvicorn.run(
         app,
-        host="0.0.0.0",
-        port=8000,
+        host=_bind_host,
+        port=int(_bind_port),
         log_level="info",
         limit_concurrency=int(os.getenv("GATEWAY_UVICORN_LIMIT_CONCURRENCY", "300")),
         backlog=int(os.getenv("GATEWAY_UVICORN_BACKLOG", "2048")),

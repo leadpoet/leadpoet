@@ -111,7 +111,8 @@ def test_no_grant_for_other_failures_live_work_or_unknown_success(database,fault
         assert recover(conn)['queued']==0
 
 @pytest.mark.parametrize('kind',['execute','score'])
-def test_extra_attempt_failure_does_not_grant_four(database,kind):
+def test_historical470_extra_attempt_failure_does_not_grant_four(database,kind):
+    # Historical470 fixture stops here;485 proves the authorized general chain.
     with database[0].connect(**database[1]) as conn:
         assignment,cfg=seed(conn,kind=kind)
         assert recover(conn)['queued']==1

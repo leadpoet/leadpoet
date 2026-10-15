@@ -6615,26 +6615,9 @@ class ArenaService:
     def record_chain_outcome(self, document: Any) -> Dict[str, Any]:
         """Record an authenticated validator observation, never settlement authority."""
 
-        # A validator journals the exact signed report before POST. If the
-        # response is lost, that same report remains idempotent after its
-        # freshness window; no altered replay receives this exception.
-        if isinstance(document, Mapping):
-            try:
-                network, netuid = self._chain_scope()
-                epoch = int(document.get("epoch"))
-                validator_hotkey = str(document.get("validator_hotkey"))
-                request_id = str(document.get("request_id"))
-                row = self._store.get_chain_outcome(
-                    network, netuid, epoch, validator_hotkey, request_id
-                )
-                if row is not None:
-                    if row.get("outcome_doc") == dict(document):
-                        return {"status": "recorded"}
-                    raise ServiceError("chain_outcome_conflict", 409)
-            except ServiceError:
-                raise
-            except (TypeError, ValueError, ArenaStoreError):
-                pass
+        # Authenticate every retry before SQL compares finalized proof fields.
+        # A recovered observation may have a fresh signature without changing
+        # its request ID; SQL preserves the first authenticated receipt.
         validated = weight_state.validate_chain_outcome(document, now=self.now())
         network, netuid = self._chain_scope()
         if validated["network"] != network or int(validated["netuid"]) != netuid:

@@ -210,14 +210,15 @@ def test_semantic_retry_still_requires_normal_service_authentication(database, a
     assert rows(database) == canonical
 
 
-def test_same_request_id_retains_exact_document_conflict(database, app):
+def test_same_request_id_invalid_signature_is_rejected_before_sql(database, app):
     state = accepted(app)
     first = report(state)
     assert app.record_chain_outcome(first) == {'status': 'recorded'}
     canonical = rows(database)
     incoming = dict(first, signature='0x'+'00'*64)
-    with pytest.raises(ServiceError, match='chain_outcome_conflict'):
+    with pytest.raises(ServiceError, match='chain_outcome_signature_invalid') as error:
         app.record_chain_outcome(incoming)
+    assert error.value.status == 401
     with pytest.raises(ArenaStoreError, match='chain_outcome_conflict'):
         raw(app._store, incoming)
     assert rows(database) == canonical

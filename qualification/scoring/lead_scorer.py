@@ -5241,6 +5241,34 @@ def _structured_profile_identity_anchor(
                 **homepage_identity,
                 "linkedin_company_slug": web_observed_slug,
             }
+        if (
+            homepage_slug.isdigit()
+            and web_identity.get("decision") == COMPANY_FIT_MATCH
+            and web_identity.get("evidence_source")
+            == "company_web_reverification"
+            and homepage_domain == transport_domain
+            and web_identity.get("submitted_domain") == transport_domain
+            and web_identity.get("observed_domain") == transport_domain
+            and web_observed_slug
+            and not web_observed_slug.isdigit()
+            and web_submitted_slug in {"", web_observed_slug}
+            and homepage_name
+            and homepage_name == _company_name(web_identity.get("submitted_name"))
+            and homepage_name == _company_name(web_identity.get("observed_name"))
+        ):
+            # An optional submitted LinkedIn URL can already match the web
+            # observation while the fetched homepage has a numeric profile.
+            # Preserve that observation as lookup context, not alias proof.
+            # The structured parser must still bind ID, name, domain and URL.
+            return {
+                **homepage_identity,
+                "requested_profile_url": (
+                    f"https://www.linkedin.com/company/{homepage_slug}"
+                ),
+                "observed_profile_url": (
+                    f"https://www.linkedin.com/company/{web_observed_slug}"
+                ),
+            }
         if not numeric_alias_recovery_needed:
             return homepage_identity
     if (
@@ -8739,6 +8767,21 @@ async def _llm_reverify_company(
                 else None
             )
         ):
+            if not _has_explicitly_unproven_fit_dimensions(
+                verdict,
+                _incomplete_company_reverify_dimensions(
+                    result, icp_attribute=icp_attribute, icp_stage=icp_stage,
+                ),
+                icp=icp,
+                linkedin_refresh_outcome=str(
+                    current_profile_cache.get("refresh_outcome") or ""
+                ),
+                identity_receipt=result.details.get("identity_receipt"),
+                investigation_receipt=result.details.get("investigation_receipt"),
+            ):
+                # An unresolved semantic judgment cannot terminalize a
+                # separate unfinished source or provider obligation.
+                return result
             return company_fit_unavailable(
                 result.reason,
                 details={
@@ -9263,6 +9306,20 @@ async def _llm_reverify_company(
                     else None
                 )
             ):
+                if not _has_explicitly_unproven_fit_dimensions(
+                    repaired_verdict,
+                    _incomplete_company_reverify_dimensions(
+                        repaired_result,
+                        icp_attribute=icp_attribute, icp_stage=icp_stage,
+                    ),
+                    icp=icp,
+                    linkedin_refresh_outcome=str(
+                        current_profile_cache.get("refresh_outcome") or ""
+                    ),
+                    identity_receipt=repaired_result.details.get("identity_receipt"),
+                    investigation_receipt=repaired_result.details.get("investigation_receipt"),
+                ):
+                    return repaired_result
                 return company_fit_unavailable(
                     repaired_result.reason,
                     details={

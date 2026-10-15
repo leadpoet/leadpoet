@@ -3085,6 +3085,9 @@ exec env \
   bash "$GATEWAY_POST_ACTIVATE_REEXEC_SCRIPT" "$@"
 fi
 
+# Re-exec retains the caller's cwd, which Python searches before PYTHONPATH.
+# Resolve post-activation modules from the exact activated checkout.
+cd "$LEADPOET_REPO_ROOT"
 bind_activated_gateway_guard_candidate || exit 1
 if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
   if [ "$ARENA_CANDIDATE_TREE" != "$(arena_runtime_tree "$ARENA_CANDIDATE_SLOT" "$GATEWAY_DEPLOY_SHA")" ]; then

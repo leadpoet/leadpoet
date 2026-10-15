@@ -297,7 +297,7 @@ def _run_post_activate_guard_reexec(
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     start = script.index('GATEWAY_DEPLOY_STAGE="restart_reexec"')
-    end = script.index('\nfi\n\nbind_activated_gateway_guard_candidate', start)
+    end = script.index("\nfi\n\n# Re-exec retains the caller's cwd,", start)
     reexec = script[start:end]
     validate = _shell_function_source(
         script, "validate_post_activate_arena_guard_authority"
@@ -475,7 +475,7 @@ def test_gateway_prepare_discards_caller_arena_guard_authority() -> None:
     ]
     reexec = script[
         script.index('GATEWAY_DEPLOY_STAGE="restart_reexec"'):
-        script.index('\nfi\n\nbind_activated_gateway_guard_candidate')
+        script.index("\nfi\n\n# Re-exec retains the caller's cwd,")
     ]
     assert 'PREPARED_GATEWAY_SHA="$PREPARED_GATEWAY_SHA"' in reexec
     assert (
@@ -1659,6 +1659,91 @@ def test_gateway_restart_runs_prepared_modules_from_candidate_checkout(
         "run_prepared_gateway_module validator_tee.host.docker_operation_guard_v2"
         in script
     )
+
+
+@pytest.mark.parametrize("arena_enabled", ["0", "1"])
+def test_post_activation_install_ignores_stale_cwd_gateway_shim(tmp_path: Path, arena_enabled: str):
+    script = (ROOT / "gw_restart.sh").read_text()
+    start = script.index("# Re-exec retains the caller's cwd,")
+    end = script.index('"$GATEWAY_PYTHON_BIN" \\\n  "$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"', start)
+    block = script[start:end]
+    stale = tmp_path / "legacy-gateway"
+    (stale / "gateway").mkdir(parents=True)
+    (stale / "gateway/__init__.py").write_text(
+        "from pathlib import Path\n__path__ = [str(Path(__file__).resolve().parent.parent)]\n")
+    (stale / "tee").mkdir()
+    (stale / "tee/__init__.py").write_text("")
+    candidate = tmp_path / "candidate"
+    for package in ("gateway", "gateway/tee", "gateway/utils", "scripts"):
+        directory = candidate / package
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "__init__.py").write_text("")
+    module = candidate / "gateway/tee/install_gateway_release_state_v2.py"
+    module.write_text(
+        "import json, sys\nfrom pathlib import Path\n"
+        "active=Path(sys.argv[sys.argv.index('--active-manifest')+1])\n"
+        "active.write_text(json.dumps({'origin':__file__,'cwd':str(Path.cwd()),'args':sys.argv[1:]}))\n")
+    for relative in ("gateway/utils/tee_v2_bootstrap.py", "gateway/tee/verify_v2_runtime_ready.py"):
+        (candidate / relative).write_text("print(__file__)\n")
+    (candidate / "scripts/gateway_git_deploy.py").write_text(
+        "def verify_materialized_tree(*,repo_root,materialized_root,target_sha,strict_extras):\n"
+        " assert materialized_root.is_dir() and target_sha == 'a'*40 and strict_extras is True\n"
+        " (repo_root/'tree-verified').write_text('verified')\n")
+    active = tmp_path / "active.json"
+    prepared = tmp_path / "prepared.json"
+    retained = tmp_path / "retained-arena"
+    retained.mkdir()
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONSAFEPATH"}
+    env["PYTHONPATH"] = str(candidate)
+    unsafe = subprocess.run(
+        [sys.executable, "-m", "gateway.tee.install_gateway_release_state_v2",
+         "--active-manifest", str(active)],
+        cwd=stale, env=env, capture_output=True, text=True, timeout=5,
+    )
+    assert unsafe.returncode != 0
+    assert "No module named gateway.tee.install_gateway_release_state_v2" in unsafe.stderr
+    assert not active.exists()
+    values = {
+        "LEADPOET_REPO_ROOT": str(candidate), "GATEWAY_PYTHON_BIN": sys.executable,
+        "GATEWAY_ROOT": str(stale),
+        "ARENA_CONTINUITY_ENABLED": arena_enabled, "ARENA_CANDIDATE_SLOT": "1",
+        "ARENA_CANDIDATE_TREE": str(retained), "GATEWAY_DEPLOY_SHA": "a" * 40,
+        "GATEWAY_PREPARED_V2_RELEASE_MANIFEST": str(prepared),
+        "GATEWAY_V2_RELEASE_MANIFEST": str(active),
+    }
+    harness = "set -euo pipefail\n"
+    harness += "\n".join(f"{key}={shlex.quote(value)}" for key, value in values.items()) + "\n"
+    harness += (
+        'bind_activated_gateway_guard_candidate() { return "${BIND_STATUS:-0}"; }\n'
+        'arena_runtime_tree() { printf "%s\\n" "$ARENA_CANDIDATE_TREE"; }\n'
+        'arena_ingress_tool() { printf "dual 1 %s closed\\n" "$GATEWAY_DEPLOY_SHA"; }\n'
+        'record_gateway_restart_timing() { :; }\n'
+    ) + block
+    result = subprocess.run(["bash", "-c", harness], cwd=stale, env=env,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    installed = json.loads(active.read_text())
+    assert Path(installed["origin"]) == module
+    assert Path(installed["cwd"]) == candidate
+    assert installed["args"] == ["--prepared-manifest", str(prepared),
+                                 "--active-manifest", str(active), "--expected-commit", "a" * 40]
+    assert (candidate / "tree-verified").exists() is (arena_enabled == "1")
+    active.unlink()
+    rejected = subprocess.run(["bash", "-c", harness], cwd=stale,
+                              env=env | {"BIND_STATUS": "1"}, capture_output=True, text=True, timeout=5)
+    assert rejected.returncode != 0
+    assert not active.exists()
+    # Later module calls run from the explicit tee directory. The stale shim
+    # in its parent cannot shadow the canonical checkout from this cwd.
+    for name, relative in (("gateway.utils.tee_v2_bootstrap", "gateway/utils/tee_v2_bootstrap.py"),
+                           ("gateway.tee.verify_v2_runtime_ready", "gateway/tee/verify_v2_runtime_ready.py")):
+        marker = f'PYTHONPATH="$LEADPOET_REPO_ROOT" "$GATEWAY_PYTHON_BIN" -m {name}'
+        command = script[script.index(marker):].split("\n", 1)[0].removesuffix(" \\")
+        assignments = "\n".join(f"{key}={shlex.quote(value)}" for key, value in values.items()) + "\n"
+        later = subprocess.run(["bash", "-c", assignments + command], cwd=stale / "tee", env=env,
+                               capture_output=True, text=True, timeout=5)
+        assert later.returncode == 0, later.stderr
+        assert Path(later.stdout.strip()) == candidate / relative
 
 
 def test_gateway_restart_has_fail_closed_lock_and_official_epoch_gate() -> None:

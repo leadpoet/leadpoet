@@ -5,11 +5,15 @@ from __future__ import annotations
 import fcntl
 import io
 import json
+import os
 from pathlib import Path
+import shlex
 import shutil
+import stat
 import subprocess
 import tarfile
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 
@@ -112,19 +116,36 @@ def host(tmp_path, monkeypatch):
     candidate = _git(repo, "rev-parse", "HEAD")
     _git(repo, "push", "-u", "origin", "main")
     root = tmp_path / "controller"
-    root.mkdir(mode=0o700)
-    (root / "releases").mkdir(mode=0o700)
-    release = root / "releases" / previous
-    release.mkdir(mode=0o700)
-    for name, mode in bootstrap.FILES.items():
-        path = release / name
+    source = tmp_path / "installed-source"
+    for name, content in old.items():
+        path = source / name
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path.write_bytes(old[name])
-        path.chmod(mode)
-    (root / "current").symlink_to(f"releases/{previous}")
+        path.write_bytes(content)
     installed = tmp_path / "gw_restart.sh"
-    installed.write_bytes(old["gw_restart.sh"])
-    installed.chmod(0o700)
+    canonical = (ROOT / "gw_restart.sh").read_text()
+    installer = canonical[canonical.index("install_successful_restart_script() {"):]
+    installer = installer.split("\n}\n", 1)[0] + "\n}\n"
+    # Run the actual canonical installer under production's umask. Its private
+    # release contains 0775 descendants; the four files retain exact modes.
+    shell = "umask 002\n" + installer + "\n"
+    # BSD mv lacks -T. This fresh-install fixture has no prior current link.
+    shell += 'mv() { if [ "$1" = -Tf ]; then shift; command mv -f "$@"; else command mv "$@"; fi; }\n'
+    for key, value in {
+        "GATEWAY_RESTART_AUTHORITY_ROOT": source,
+        "GATEWAY_RESTART_AUTHORITY_COMMIT": previous,
+        "GATEWAY_DEPLOY_SHA": previous,
+        "LEADPOET_REPO_ROOT": repo,
+        "GATEWAY_RESTART_CONTROLLER_ROOT": root,
+        "GATEWAY_RESTART_CONTROLLER_CURRENT": root / "current",
+        "GATEWAY_HOST_RESTART_SCRIPT": installed,
+    }.items():
+        shell += f"{key}={shlex.quote(str(value))}\n"
+    subprocess.run(["bash", "-c", shell + "install_successful_restart_script\n"],
+                   check=True, capture_output=True, timeout=10)
+    release = root / "releases" / previous
+    assert stat.S_IMODE(release.stat().st_mode) == 0o700
+    for relative in ("gateway", "gateway/tee", "scripts"):
+        assert stat.S_IMODE((release / relative).stat().st_mode) == 0o775
     (repo / "canonical-control").write_text("success")
     (repo / "live-runtime-and-guard").write_text("accepted live work")
     arguments = dict(repo=repo, source_commit=candidate, expected_controller_commit=previous,
@@ -230,6 +251,63 @@ def test_non_main_source_and_unknown_origin_refuse(host, monkeypatch):
     monkeypatch.setattr(bootstrap, "ORIGINS", set())
     with pytest.raises(RuntimeError, match="unknown repository origin"):
         bootstrap.bootstrap(**host)
+
+
+def test_private_install_boundary_does_not_relax_other_parent_checks(host):
+    release = host["controller_root"] / "releases" / host["expected_controller_commit"]
+    path = release / "scripts/manage_owned_process_group.py"
+    bootstrap._parents(path, private_boundary=release)
+    with pytest.raises(RuntimeError, match="unsafe parent"):
+        bootstrap._parents(path)
+    with pytest.raises(RuntimeError, match="not a parent"):
+        bootstrap._parents(path, private_boundary=host["repo"])
+
+
+@pytest.mark.parametrize("change", ["world-writable", "sticky-world-writable", "symlink",
+                                    "boundary-group-writable", "exposed-parent"])
+def test_unsafe_release_directories_still_refuse_before_canonical_entry(host, change):
+    release = host["controller_root"] / "releases" / host["expected_controller_commit"]
+    nested = release / "scripts"
+    if change == "world-writable":
+        nested.chmod(0o777)
+    elif change == "sticky-world-writable":
+        nested.chmod(0o1777)
+    elif change == "symlink":
+        nested.rename(release / "retained-scripts")
+        nested.symlink_to(release / "retained-scripts", target_is_directory=True)
+    elif change == "boundary-group-writable":
+        release.chmod(0o775)
+    else:
+        # The controller root's parent is outside the release's private boundary.
+        host["controller_root"].parent.chmod(0o775)
+    with pytest.raises(RuntimeError):
+        bootstrap.bootstrap(**host)
+    assert not (host["repo"] / "canonical-events").exists()
+
+
+@pytest.mark.parametrize("owner", ["foreign-user", "foreign-group", "root-user"])
+def test_private_boundary_does_not_accept_writable_directories_from_other_owners(
+    host, monkeypatch, owner,
+):
+    if owner == "root-user" and os.getuid() == 0:
+        pytest.skip("root is the current test owner")
+    release = host["controller_root"] / "releases" / host["expected_controller_commit"]
+    nested = release / "scripts"
+    lstat = Path.lstat
+
+    def changed(path, *args, **kwargs):
+        metadata = lstat(path, *args, **kwargs)
+        if path == nested:
+            return SimpleNamespace(st_mode=metadata.st_mode,
+                                   st_uid=(0 if owner == "root-user" else
+                                           metadata.st_uid + 10000 if owner == "foreign-user" else metadata.st_uid),
+                                   st_gid=metadata.st_gid + (1 if owner == "foreign-group" else 0))
+        return metadata
+
+    monkeypatch.setattr(Path, "lstat", changed)
+    with pytest.raises(RuntimeError, match="unsafe parent"):
+        bootstrap.bootstrap(**host)
+    assert not (host["repo"] / "canonical-events").exists()
 
 
 @pytest.mark.parametrize("kind", ["traversal", "symlink"])

@@ -53,16 +53,32 @@ def _git(repo: Path, *args: str) -> bytes:
     return result.stdout
 
 
-def _parents(path: Path) -> None:
+def _parents(path: Path, *, private_boundary: Path | None = None) -> None:
+    if private_boundary is not None and private_boundary not in path.parents:
+        raise BootstrapError("controller release boundary is not a parent")
+    shielded = False
     for parent in reversed(path.parents):
         metadata = parent.lstat()
+        if parent == private_boundary:
+            if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid()
+                    or metadata.st_gid != os.getgid() or stat.S_IMODE(metadata.st_mode) != 0o700):
+                raise BootstrapError("controller release boundary is not owned and private")
+            shielded = True
+        # The canonical installer's umask can leave owned 0775 subdirectories
+        # inside its 0700 release. Only that verified private boundary permits
+        # group-write; exposed parents and world-writable descendants still fail.
+        protected_group_write = (shielded and metadata.st_uid == os.getuid()
+                                 and metadata.st_gid == os.getgid()
+                                 and not metadata.st_mode & 0o002)
         if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid not in (0, os.getuid())
-                or (metadata.st_mode & 0o022 and not metadata.st_mode & stat.S_ISVTX)):
+                or (metadata.st_mode & 0o022 and not protected_group_write
+                    and (shielded or not metadata.st_mode & stat.S_ISVTX))):
             raise BootstrapError("unsafe parent directory")
 
 
-def _owned(path: Path, mode: int, *, directory: bool = False) -> tuple[int, ...]:
-    _parents(path)
+def _owned(path: Path, mode: int, *, directory: bool = False,
+           private_boundary: Path | None = None) -> tuple[int, ...]:
+    _parents(path, private_boundary=private_boundary)
     metadata = path.lstat()
     kind_ok = stat.S_ISDIR(metadata.st_mode) if directory else stat.S_ISREG(metadata.st_mode)
     if (not kind_ok or metadata.st_uid != os.getuid() or metadata.st_gid != os.getgid()
@@ -90,7 +106,7 @@ def _installed(controller_root: Path, host_script: Path, commit: str,
     result.append(_owned(release, 0o700, directory=True))
     for name, mode in FILES.items():
         path = release / name
-        result.append(_owned(path, mode))
+        result.append(_owned(path, mode, private_boundary=release))
         if path.read_bytes() != blobs[name]:
             raise BootstrapError("installed controller differs from its committed bytes")
     result.append(_owned(host_script, 0o700))

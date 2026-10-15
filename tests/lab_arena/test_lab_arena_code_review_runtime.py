@@ -297,6 +297,38 @@ def test_review_telemetry_reports_no_provider_route_when_credential_absent():
         telemetry.install_recorder(None)
 
 
+def test_review_telemetry_reports_legacy_and_transient_attempt_caps():
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+    transport = ReviewTransport(lambda _parameters: pytest.fail("no provider dispatch"))
+    reviewer, row, store, _objects = _reviewer(_archive(_source()), transport)
+    store.finish_submission_review = lambda *_args: {
+        "status": "error", "code_review_status": "error", "attempt": 2,
+    }
+    try:
+        reviewer._finish_review(
+            row, "claim", "error",
+            {"error_code": "code_review_provider_unavailable"}, 0,
+            attempt=2,
+        )
+        (legacy,) = exporter.get_finished_spans()
+        assert legacy.attributes["arena.retryable"] is True
+        exp_count = len(exporter.get_finished_spans())
+        assert exp_count == 1
+
+        store.finish_submission_review = lambda *_args: {
+            "status": "error", "code_review_status": "error", "attempt": 6,
+        }
+        reviewer._finish_review(
+            row, "claim", "error",
+            {"error_code": "code_review_provider_rate_limited", "retryable": True}, 0,
+            attempt=6,
+        )
+        assert exporter.get_finished_spans()[-1].attributes["arena.retryable"] is False
+    finally:
+        telemetry.install_recorder(None)
+
+
 def test_runtime_sends_every_file_and_only_the_submitting_miners_key():
     members = _source()
     seen_rows = []

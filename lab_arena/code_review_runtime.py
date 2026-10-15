@@ -45,8 +45,15 @@ class SubmissionCodeReviewer:
             committed = result.get("code_review_status")
             if committed not in ("passed", "rejected", "error"):
                 return result
+            committed_attempt = int(result.get("attempt") or attempt)
             error_code = document.get("error_code", telemetry.NO_ERROR)
-            retryable = document.get("retryable") is True
+            retryable = False
+            if committed == "error":
+                policy_retryable = document.get("retryable")
+                if policy_retryable is True:
+                    retryable = committed_attempt < code_review_policy.MAX_TRANSIENT_ATTEMPTS
+                elif policy_retryable is not False:
+                    retryable = committed_attempt < code_review_policy.LEGACY_MAX_ATTEMPTS
             if result["status"] in ("deadline", "round_closed", "submission_ineligible"):
                 error_code = {
                     "deadline": "code_review_deadline_exceeded",
@@ -63,7 +70,7 @@ class SubmissionCodeReviewer:
                 round_id=str(row["round_id"]),
                 submission_id=str(row["submission_id"]),
                 miner_hotkey=str(row["miner_hotkey"]),
-                attempt=int(result.get("attempt") or attempt),
+                attempt=committed_attempt,
             )
         except BaseException:
             # Observability cannot turn a persisted review into a worker error.

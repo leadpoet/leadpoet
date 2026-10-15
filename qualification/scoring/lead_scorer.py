@@ -130,6 +130,7 @@ from qualification.scoring.linkedin_company_size import (
     linkedin_company_page_slug,
     STRUCTURED_PROFILE_COMPANY_TYPE_SOURCE_FIELD,
     STRUCTURED_PROFILE_DESCRIPTION_SOURCE_FIELD,
+    STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD,
     STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
     STRUCTURED_PROFILE_PRIVATE_COMPANY_TYPE,
     STRUCTURED_PROFILE_PROVIDER,
@@ -3097,8 +3098,10 @@ def _investigator_prefetched_pages(
         Mapping[str, Mapping[str, Any]]
     ] = None,
     structured_profile_description_evidence: Optional[Mapping[str, Any]] = None,
+    structured_profile_headquarters_evidence: Optional[Mapping[str, Any]] = None,
     verified_identity: Optional[Mapping[str, Any]] = None,
     include_structured_description: bool = False,
+    include_structured_headquarters: bool = False,
 ) -> dict[str, dict[str, str]]:
     """Return bounded private pages from already validated server sources."""
 
@@ -3126,60 +3129,97 @@ def _investigator_prefetched_pages(
         source_cache,
         submitted_source_urls,
     )
+    # A disputed HQ already fetched from the exact profile takes precedence
+    # over unrelated attribute-cache pages, without changing the page cap.
     for url, page in attribute_pages.items():
+        if (
+            include_structured_headquarters
+            and _strict_linkedin_company_profile_url(url)
+            != (structured_profile_headquarters_evidence or {}).get("url")
+        ):
+            continue
         if len(candidates) >= MAX_PREFETCHED_PAGES:
             break
         candidates.setdefault(url, page)
-    evidence = structured_profile_description_evidence or {}
     identity = verified_identity or {}
     expected_keys = {
         "name", "text", "provider", "source_field", "url", "website",
     }
     normalized_expected_name = _company_name(identity.get("normalized_name"))
-    normalized_evidence_name = _company_name(evidence.get("name"))
-    evidence_url = str(evidence.get("url") or "")
-    evidence_slug = linkedin_company_page_slug(evidence_url)
-    identity_slug = str(identity.get("linkedin_company_slug") or "").casefold()
-    identity_domain = str(identity.get("registrable_dns_domain") or "")
-    text = evidence.get("text")
-    submitted_profile_url = next(
-        (
-            url
-            for url in submitted_source_urls
-            if _strict_linkedin_company_profile_url(url) == evidence_url
-        ),
-        "",
-    )
-    if (
-        include_structured_description
-        and len(candidates) < MAX_PREFETCHED_PAGES
-        and set(evidence) == expected_keys
-        and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
-        and evidence.get("source_field")
-        == STRUCTURED_PROFILE_DESCRIPTION_SOURCE_FIELD
-        and normalized_expected_name
-        and normalized_evidence_name == normalized_expected_name
-        and identity_domain
-        and _registrable_domain(evidence.get("website")) == identity_domain
-        and identity_slug
-        and evidence_slug == identity_slug
-        and _strict_linkedin_company_profile_url(evidence_url) == evidence_url
-        and submitted_profile_url
-        and submitted_profile_url not in candidates
-        and isinstance(text, str)
-        and text
-        and text == text.strip()
-        and len(text) <= PROFILE_MAX_CHARACTERS
-        and not any(
-            unicodedata.category(character).startswith("C")
-            and character not in "\t\n\r"
-            for character in text
-        )
+    for raw_evidence, include, source_field in (
+        (structured_profile_description_evidence, include_structured_description,
+         STRUCTURED_PROFILE_DESCRIPTION_SOURCE_FIELD),
+        (structured_profile_headquarters_evidence, include_structured_headquarters,
+         STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD),
     ):
-        candidates[submitted_profile_url] = {
-            "final_url": evidence_url,
-            "text": text,
-        }
+        evidence = raw_evidence or {}
+        normalized_evidence_name = _company_name(evidence.get("name"))
+        evidence_url = str(evidence.get("url") or "")
+        evidence_slug = linkedin_company_page_slug(evidence_url)
+        identity_slug = str(identity.get("linkedin_company_slug") or "").casefold()
+        identity_domain = str(identity.get("registrable_dns_domain") or "")
+        text = evidence.get("text")
+        submitted_profile_url = next(
+            (
+                url
+                for url in dict.fromkeys((*candidates, *submitted_source_urls))
+                if url in submitted_source_urls
+                and _strict_linkedin_company_profile_url(url) == evidence_url
+            ),
+            "",
+        )
+        if (
+            include
+            and (
+                len(candidates) < MAX_PREFETCHED_PAGES
+                or submitted_profile_url in candidates
+            )
+            and set(evidence) == (
+                expected_keys | {"country", "state"}
+                if source_field == STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD
+                else expected_keys
+            )
+            and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+            and evidence.get("source_field") == source_field
+            and normalized_expected_name
+            and normalized_evidence_name == normalized_expected_name
+            and identity_domain
+            and _registrable_domain(evidence.get("website")) == identity_domain
+            and identity_slug
+            and evidence_slug == identity_slug
+            and _strict_linkedin_company_profile_url(evidence_url) == evidence_url
+            and submitted_profile_url
+            and isinstance(text, str)
+            and text
+            and text == text.strip()
+            and len(text) <= PROFILE_MAX_CHARACTERS
+            and not any(
+                unicodedata.category(character).startswith("C")
+                and character not in "\t\n\r"
+                for character in text
+            )
+        ):
+            existing = candidates.get(submitted_profile_url)
+            if existing is not None:
+                if (
+                    source_field != STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD
+                    or _strict_linkedin_company_profile_url(
+                        existing["final_url"]
+                    ) != evidence_url
+                    or text in existing["text"]
+                ):
+                    continue
+                text = existing["text"] + "\n\n" + text
+                if len(text) > MAX_PAGE_CHARACTERS:
+                    continue
+            candidates[submitted_profile_url] = {
+                "final_url": evidence_url,
+                "text": text,
+            }
+    for url, page in (attribute_pages.items() if include_structured_headquarters else ()):
+        if len(candidates) >= MAX_PREFETCHED_PAGES:
+            break
+        candidates.setdefault(url, page)
     pages, final_urls = _validated_prefetched_pages(
         candidates,
         submitted_source_urls=submitted_source_urls,
@@ -4815,10 +4855,12 @@ async def _fetch_structured_linkedin_profile_once(
     public_company_evidence: dict[str, str] = {}
     company_identity_evidence: dict[str, str] = {}
     company_description_evidence: dict[str, str] = {}
+    company_headquarters_evidence: dict[str, str] = {}
     fetch_kwargs: dict[str, Any] = {
         "diagnostic": structured_diagnostic,
         "public_company_evidence": public_company_evidence,
         "company_description_evidence": company_description_evidence,
+        "company_headquarters_evidence": company_headquarters_evidence,
         "expected_company_name": anchor_name,
     }
     if collect_identity:
@@ -4851,6 +4893,10 @@ async def _fetch_structured_linkedin_profile_once(
     if company_description_evidence:
         invocation_cache["structured_profile_description_evidence"] = (
             company_description_evidence
+        )
+    if company_headquarters_evidence:
+        invocation_cache["structured_profile_headquarters_evidence"] = (
+            company_headquarters_evidence
         )
     failure_reason = structured_diagnostic.get(VERIFIER_FAILURE_REASON_KEY)
     if failure_reason:
@@ -7345,6 +7391,7 @@ async def _run_targeted_company_evidence_investigation(
     structured_profile_identity_evidence: Optional[Mapping[str, Any]] = None,
     structured_profile_invocation_cache: Optional[dict[str, Any]] = None,
     structured_profile_description_evidence: Optional[Mapping[str, Any]] = None,
+    structured_profile_headquarters_evidence: Optional[Mapping[str, Any]] = None,
     prior_result: Optional[CompanyFitDecisionResult] = None,
     required_attribute_source_cache: Optional[
         dict[str, dict[str, Any]]
@@ -7561,6 +7608,12 @@ async def _run_targeted_company_evidence_investigation(
     )
     source_candidates = [
         *(
+            [structured_profile_headquarters_evidence.get("url")]
+            if "geography" in investigation_targets
+            and isinstance(structured_profile_headquarters_evidence, Mapping)
+            else []
+        ),
+        *(
             [headcount_conflict_context["structured_profile_evidence"]["url"],
              _dimension_web_evidence(verdict, "employee_size")["url"]]
             if headcount_conflict_context else []
@@ -7716,6 +7769,7 @@ async def _run_targeted_company_evidence_investigation(
             ),
         },
         verified_homepage_identity=investigation_verified_identity,
+        structured_headquarters_evidence=structured_profile_headquarters_evidence,
         verified_structured_alias_slug=structured_alias_slug,
         verified_navigation_identity=(
             {
@@ -7753,8 +7807,12 @@ async def _run_targeted_company_evidence_investigation(
             structured_profile_description_evidence=(
                 structured_profile_description_evidence
             ),
+            structured_profile_headquarters_evidence=(
+                structured_profile_headquarters_evidence
+            ),
             verified_identity=investigation_verified_identity,
             include_structured_description="stage" in investigation_targets,
+            include_structured_headquarters="geography" in investigation_targets,
         ),
         diagnostic=investigation_diagnostic,
     )
@@ -8725,6 +8783,9 @@ async def _llm_reverify_company(
                     "structured_profile_description_evidence"
                 )
             ),
+            structured_profile_headquarters_evidence=(
+                current_profile_cache.get("structured_profile_headquarters_evidence")
+            ),
             employee_size_conflict=employee_size_conflict,
             company_quality=company_quality,
             prior_result=result,
@@ -9269,6 +9330,9 @@ async def _llm_reverify_company(
                     current_profile_cache.get(
                         "structured_profile_description_evidence"
                     )
+                ),
+                structured_profile_headquarters_evidence=(
+                    current_profile_cache.get("structured_profile_headquarters_evidence")
                 ),
                 employee_size_conflict=employee_size_conflict,
                 company_quality=company_quality,

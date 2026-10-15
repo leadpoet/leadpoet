@@ -1,0 +1,128 @@
+[
+  {
+    "run_id": "arena-2026-10-15:sub-f86819cba08b000f0f103feaa77b8909:2:2:score:1",
+    "call_identity": "sha256:f4a29f26e0f96518674932bc96ab8610ce24bab600c0e9c1ca67c7e65be9b335",
+    "original_body_sha256": "f43b3be2b849ef4479e77baf4a6f4e109c786a2ad5f8311d0f5a36369bffefac",
+    "fixture": {
+      "status": 200,
+      "element": {
+        "id": "74065804",
+        "name": "Quaise Energy",
+        "website": "https://www.quaise.com/",
+        "pageType": "COMPANY",
+        "showcase": false,
+        "locations": [
+          {
+            "city": "Boston",
+            "line1": null,
+            "line2": null,
+            "parsed": {
+              "city": "Boston",
+              "text": "Boston, MA, United States",
+              "state": "Massachusetts",
+              "country": "United States",
+              "regionCode": null,
+              "countryCode": "US",
+              "countryFull": "United States of America"
+            },
+            "country": "US",
+            "postalCode": null,
+            "description": null,
+            "headquarter": false,
+            "geographicArea": "MA"
+          },
+          {
+            "city": "Houston",
+            "line1": null,
+            "line2": null,
+            "parsed": {
+              "city": "Houston",
+              "text": "Houston, TX, United States",
+              "state": "Texas",
+              "country": "United States",
+              "regionCode": null,
+              "countryCode": "US",
+              "countryFull": "United States of America"
+            },
+            "country": "US",
+            "postalCode": null,
+            "description": "Houston, TX",
+            "headquarter": true,
+            "geographicArea": "Texas"
+          }
+        ],
+        "companyType": "Privately Held",
+        "description": "Quaise develops superhot geothermal power plants for a terawatt-scale world. Our unique millimeter wave drilling system can build geothermal wells at unprecedented temperatures and depths, unlocking energy security and independence for every nation.\n\nBy targeting temperatures of 300-500 degrees Celsius at depths of 3-20 kilometers, we can build power generation and heat distribution plants within a short distance of every major population and industrial center on the planet.\n\nWe can even achieve the terawatt-level annual deployments required to meet accelerating global energy demand by scaling through the fossil fuel industry's established supply chain and workforce. There is no other energy solution capable of the same scale and speed.",
+        "linkedinUrl": "https://www.linkedin.com/company/quaise-energy/",
+        "universalName": "quaise-energy",
+        "employeeCountRange": {
+          "end": 200,
+          "start": 51
+        }
+      }
+    }
+  },
+  {
+    "run_id": "arena-2026-10-15:sub-478bc8060c427523137ad40a59b018b2:2:2:score:1",
+    "call_identity": "sha256:fff5c56a2fcd1c8ed28b84bd0fb7e953f96ed75c3c1254f44e3e7895edc9485c",
+    "original_body_sha256": "4cde41b4b0925d8011a37adbf445f5f8823e04de6edcefae869b0e9ffc99caca",
+    "fixture": {
+      "status": 200,
+      "element": {
+        "id": "74065804",
+        "name": "Quaise Energy",
+        "website": "https://www.quaise.com/",
+        "pageType": "COMPANY",
+        "showcase": false,
+        "locations": [
+          {
+            "city": "Houston",
+            "line1": null,
+            "line2": null,
+            "parsed": {
+              "city": "Houston",
+              "text": "Houston, TX, United States",
+              "state": "Texas",
+              "country": "United States",
+              "regionCode": null,
+              "countryCode": "US",
+              "countryFull": "United States of America"
+            },
+            "country": "US",
+            "postalCode": null,
+            "description": "Houston, TX",
+            "headquarter": true,
+            "geographicArea": "Texas"
+          },
+          {
+            "city": "Boston",
+            "line1": null,
+            "line2": null,
+            "parsed": {
+              "city": "Boston",
+              "text": "Boston, MA, United States",
+              "state": "Massachusetts",
+              "country": "United States",
+              "regionCode": null,
+              "countryCode": "US",
+              "countryFull": "United States of America"
+            },
+            "country": "US",
+            "postalCode": null,
+            "description": null,
+            "headquarter": false,
+            "geographicArea": "MA"
+          }
+        ],
+        "companyType": "Privately Held",
+        "description": "Quaise develops superhot geothermal power plants for a terawatt-scale world. Our unique millimeter wave drilling system can build geothermal wells at unprecedented temperatures and depths, unlocking energy security and independence for every nation.\n\nBy targeting temperatures of 300-500 degrees Celsius at depths of 3-20 kilometers, we can build power generation and heat distribution plants within a short distance of every major population and industrial center on the planet.\n\nWe can even achieve the terawatt-level annual deployments required to meet accelerating global energy demand by scaling through the fossil fuel industry's established supply chain and workforce. There is no other energy solution capable of the same scale and speed.",
+        "linkedinUrl": "https://www.linkedin.com/company/quaise-energy/",
+        "universalName": "quaise-energy",
+        "employeeCountRange": {
+          "end": 200,
+          "start": 51
+        }
+      }
+    }
+  }
+]

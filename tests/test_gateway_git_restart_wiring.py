@@ -2002,3 +2002,64 @@ def test_current_restart_native_gateway_memory_recovery_checks_process_identity(
     else:
         assert result.returncode != 0
         assert "working directory differs" in result.stderr
+
+
+def test_pre_shutdown_cleanup_uses_candidate_helper_before_old_checkout_activation(tmp_path: Path):
+    import json
+    import shlex
+    import sys
+
+    predecessor, candidate = tmp_path / "old-checkout", tmp_path / "verified-candidate"
+    relative = Path("validator_tee/host/restart_artifact_cleanup_v2.py")
+    for root in (predecessor, candidate):
+        (root / relative).parent.mkdir(parents=True)
+        (root / "validator_tee/__init__.py").write_text("")
+        (root / "validator_tee/host/__init__.py").write_text("")
+    (predecessor / relative).write_text('raise SystemExit("N-1 cleanup was selected")\n')
+    # Imported code must also come from the candidate, despite the old cwd.
+    (predecessor / "cleanup_source_marker.py").write_text('SOURCE="N-1"\n')
+    (candidate / "cleanup_source_marker.py").write_text('SOURCE="candidate"\n')
+    (candidate / relative).write_text(
+        'import json,sys\nfrom cleanup_source_marker import SOURCE\n'
+        'print(json.dumps({"source":SOURCE,"entry":__file__,"args":sys.argv[1:]}))\n'
+    )
+    source = (ROOT / "gw_restart.sh").read_text()
+    harness = tmp_path / "candidate-cleanup.sh"
+    values = {
+        "LEADPOET_REPO_ROOT": str(predecessor), "GATEWAY_PREFLIGHT_TREE": str(candidate),
+        "GATEWAY_PYTHON_BIN": sys.executable, "PREPARED_GATEWAY_SHA": "f" * 40,
+        "GATEWAY_V2_BUILD_WORK_ROOT": str(tmp_path / "builds"),
+        "VALIDATOR_V2_BUILD_WORK_ROOT": str(tmp_path / "validator-builds"),
+        "GATEWAY_TEE_EIF_ROOT": str(tmp_path / "tee"),
+        "GATEWAY_V2_RELEASE_ARCHIVE_ROOT": str(tmp_path / "archives"),
+        "GATEWAY_LAST_GOOD_MANIFEST": str(tmp_path / "last-good.json"),
+        "LEADPOET_DOCKER_OPERATION_LOCK_FILE": str(tmp_path / "docker.lock"),
+        "LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID": "123",
+        "GATEWAY_RESTART_TEMP_CLEANUP_MIN_AGE_SECONDS": "86400",
+        "GATEWAY_RESTART_EMERGENCY_BACKUP_MIN_AGE_SECONDS": "604800",
+        "GATEWAY_RESTART_CLEANUP_MAX_CANDIDATES": "64",
+    }
+    harness.write_text(
+        "#!/bin/bash\nset -euo pipefail\nsudo() { \"$@\"; }\n"
+        + "\n".join(name + "=" + shlex.quote(value) for name, value in values.items())
+        + "\n" + _shell_function_source(source, "run_bounded_restart_artifact_cleanup")
+        + "\nrun_bounded_restart_artifact_cleanup\n"
+    )
+    result = subprocess.run(["bash", str(harness)], cwd=predecessor,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0 and not result.stderr, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt["source"] == "candidate"
+    assert Path(receipt["entry"]) == candidate / relative
+    args = receipt["args"]
+    assert "--apply" in args
+    for option, expected in (
+        ("--gateway-build-commit", "f" * 40),
+        ("--gateway-build-root", str(tmp_path / "builds")),
+        ("--gateway-last-good-manifest", str(tmp_path / "last-good.json")),
+        ("--docker-lock-file", str(tmp_path / "docker.lock")),
+        ("--docker-lock-owner-pid", "123"),
+        ("--temp-min-age-seconds", "86400"),
+        ("--max-candidates", "64"),
+    ):
+        assert args[args.index(option) + 1] == expected

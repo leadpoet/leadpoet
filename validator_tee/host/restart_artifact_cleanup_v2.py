@@ -26,6 +26,8 @@ REPORT_SCHEMA_VERSION = "leadpoet.restart_artifact_cleanup.v2"
 DEFAULT_TEMP_MIN_AGE_SECONDS = 24 * 60 * 60
 DEFAULT_EMERGENCY_MIN_AGE_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_MAX_CANDIDATES = 64
+_LOCAL_BUILD_RE = re.compile(r"^[0-9a-f]{40}-local$")
+_LOCAL_BUILD_ROLES = {"gateway_coordinator", "gateway_scoring", "gateway_autoresearch"}
 _EMERGENCY_BACKUP_RE = re.compile(r"^emergency-v2-[0-9]{8}T[0-9]{6}Z$")
 
 
@@ -198,6 +200,45 @@ def _contains_nested_mount(candidate: Path, mount_points: Iterable[Path]) -> boo
     )
 
 
+def _verify_local_build_layout(path: Path) -> None:
+    """Recognize only extracted builder sources, never retained EIF outputs.
+
+    build_local_release_v2.sh uses <commit>-local/<role>/source. The builder
+    deletes its measured EIF; final identities and immutable rollback copies
+    are written outside this workspace. A failed EIF or unknown file stays.
+    Historical roles are included only to retire their old source copies.
+    """
+    try:
+        roles = list(path.iterdir())
+        if not roles:
+            raise ValueError
+        for role in roles:
+            if (role.name not in _LOCAL_BUILD_ROLES or role.is_symlink()
+                    or not role.is_dir()):
+                raise ValueError
+            children = list(role.iterdir())
+            if len(children) != 1 or children[0].name != "source":
+                raise ValueError
+            source = children[0]
+            if (source.is_symlink() or not source.is_dir()
+                    or (source / ".git").exists() or (source / ".git").is_symlink()):
+                raise ValueError
+            for relative in ("gateway/tee/Dockerfile.enclave",
+                             "gateway/tee/stage_attested_runtime.sh",
+                             "validator_tee/host/gateway_pcr0_builder.py"):
+                current = source
+                for part in Path(relative).parts:
+                    current = current / part
+                    if current.is_symlink():
+                        raise ValueError
+                if not current.is_file():
+                    raise ValueError
+    except (OSError, ValueError) as exc:
+        raise RestartArtifactCleanupV2Error(
+            "local build workspace has unrecognized or retained artifacts"
+        ) from exc
+
+
 def _measure_candidate(
     path: Path,
     *,
@@ -218,6 +259,9 @@ def _measure_candidate(
         raise RestartArtifactCleanupV2Error("candidate is not a regular file")
     if root_stat.st_uid not in allowed_owner_uids:
         raise RestartArtifactCleanupV2Error("candidate owner is not allowed")
+
+    if kind == "gateway_local_build":
+        _verify_local_build_layout(path)
 
     newest_mtime = root_stat.st_mtime
     size_bytes = root_stat.st_size
@@ -391,6 +435,8 @@ def _specifications(
         ),
     ]
     if gateway_build_root is not None:
+        specs.append(_Spec(gateway_build_root, "gateway_local_build",
+                           temp_min_age_seconds, pattern=_LOCAL_BUILD_RE))
         normalizer_root = gateway_build_root / ".docker-image-normalizer-v2"
         specs.extend(
             [
@@ -487,6 +533,7 @@ def cleanup_restart_artifacts(
     *,
     temporary_root: Path,
     gateway_build_root: Optional[Path] = None,
+    gateway_build_commit: Optional[str] = None,
     validator_build_root: Optional[Path] = None,
     gateway_eif_root: Optional[Path] = None,
     emergency_backup_root: Optional[Path] = None,
@@ -504,6 +551,9 @@ def cleanup_restart_artifacts(
     mountinfo_path: Path = Path("/proc/self/mountinfo"),
     mount_provider: Optional[Callable[[], Iterable[Path]]] = None,
 ) -> dict[str, object]:
+    if (gateway_build_commit is not None
+            and not re.fullmatch(r"[0-9a-f]{40}", gateway_build_commit)):
+        raise RestartArtifactCleanupV2Error("current gateway build commit is invalid")
     if temp_min_age_seconds < 1 or emergency_min_age_seconds < 1:
         raise RestartArtifactCleanupV2Error("cleanup ages must be positive")
     if max_candidates < 1:
@@ -550,6 +600,23 @@ def cleanup_restart_artifacts(
         report["safety_error"] = str(exc)
         return report
 
+    protected_commits = {gateway_build_commit} if gateway_build_commit else set()
+    local_authority_error = None
+    if gateway_build_root is not None:
+        if gateway_build_commit is None:
+            local_authority_error = "current gateway build commit is required"
+        if gateway_last_good_manifest is not None:
+            marker = Path(gateway_last_good_manifest)
+            if marker.exists() or marker.is_symlink():
+                try:
+                    from gateway.tee.release_archive_v2 import load_last_good_release
+                    protected_commits.add(load_last_good_release(marker)["commit_sha"])
+                except Exception:
+                    local_authority_error = "gateway last-good build authority is invalid"
+    authority_paths = {item for value in (
+        gateway_eif_root, gateway_archive_root, gateway_last_good_manifest,
+    ) if value is not None for item in (_normalized_path(value), Path(value).resolve())}
+
     for spec in specs:
         try:
             root = _validate_spec_root(spec.root)
@@ -578,6 +645,16 @@ def cleanup_restart_artifacts(
             if path in seen or path.parent != root:
                 continue
             seen.add(path)
+            if spec.kind == "gateway_local_build":
+                reason = local_authority_error
+                if path.name.removesuffix("-local") in protected_commits:
+                    reason = "current or last-good gateway build is protected"
+                if any(_path_is_within(authority, path) or _path_is_within(path, authority)
+                       for authority in authority_paths):
+                    reason = "local build overlaps retained gateway authority"
+                if reason:
+                    skipped.append({"path": str(path), "kind": spec.kind, "reason": reason})
+                    continue
             if _contains_nested_mount(path, observed_mounts):
                 skipped.append(
                     {
@@ -723,6 +800,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--temporary-root", type=Path, default=Path("/tmp"))
     parser.add_argument("--gateway-build-root", type=Path)
+    parser.add_argument("--gateway-build-commit")
     parser.add_argument("--validator-build-root", type=Path)
     parser.add_argument("--gateway-eif-root", type=Path)
     parser.add_argument("--emergency-backup-root", type=Path)
@@ -755,6 +833,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = cleanup_restart_artifacts(
         temporary_root=args.temporary_root,
         gateway_build_root=args.gateway_build_root,
+        gateway_build_commit=args.gateway_build_commit,
         validator_build_root=args.validator_build_root,
         gateway_eif_root=args.gateway_eif_root,
         emergency_backup_root=args.emergency_backup_root,

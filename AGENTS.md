@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: October 15 full-cycle monitoring
+
+The user authorized monitoring October 15 baseline and miner work through
+execution, scoring, publication, promotion, rewards and weights. This includes
+protected inspection and simple general fixes for confirmed faults, focused
+checks, safe push and merge, exact committed migrations, canonical deployment
+and live verification. Preserve October 13 and October 14 results, frozen
+models, scorers, policies, accepted work, provider costs and call caps, retry
+and deadline gates, host quarantine, operator controls and concurrent work.
+This authority ends when full-cycle monitoring and verification finish.
+
 ## Scoped production authorization: October 14 gateway outage recovery
 
 On 2026-10-14 the user authorized inspection and a general, durable fix for

@@ -1589,9 +1589,11 @@ def test_reward_activation_carries_latest_miner_winner_and_honors_nonpaying_barr
 
 
 def test_round_selection_and_direct_access_are_scoped_to_service_mode():
+    schedule = {"submission_open": "2026-09-02T00:00:00Z",
+                "submission_cutoff": "2026-09-04T00:00:00Z"}
     live = {
         "round_id": "live-round", "status": "open", "created_at": "2026-09-02T00:00:00Z",
-        "configuration_doc": {"mode": "live"},
+        "configuration_doc": {"mode": "live", "schedule": schedule},
     }
     shadow = {
         "round_id": "shadow-round", "status": "open", "created_at": "2026-09-03T00:00:00Z",
@@ -1608,6 +1610,7 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
             return {"live-round": live, "shadow-round": shadow}.get(round_id)
 
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 9, 3, tzinfo=timezone.utc)
     service._store = Store()
     service._config = SimpleNamespace(mode="live")
 
@@ -1615,7 +1618,8 @@ def test_round_selection_and_direct_access_are_scoped_to_service_mode():
     assert service.open_round()["round_id"] == "live-round"
     assert service.active_rounds() == [
         {
-            "round_id": "live-round", "status": "open", "schedule": {},
+            "round_id": "live-round", "status": "open", "schedule": schedule,
+            "submission_replacement_cutoff": "2026-09-03T23:00:00Z",
             "max_replacement_attempts": 1,
             "benchmark_icp_count": 20, "promotion_margin": 1.0,
             "output_schema_version": "leadpoet.lab_arena.output.v1",
@@ -1632,7 +1636,7 @@ def test_runtime_round_pin_rejects_alien_shadow_rounds_and_scopes_discovery():
         "created_at": "2026-09-07T00:00:00Z",
         "configuration_doc": {
             "mode": "shadow",
-            "schedule": {"submission_cutoff": "2026-09-08T00:00:00Z"},
+            "schedule": {"submission_open": "2026-09-07T00:00:00Z", "submission_cutoff": "2026-09-08T00:00:00Z"},
         },
     }
     alien = {
@@ -1678,6 +1682,7 @@ def test_runtime_round_pin_rejects_alien_shadow_rounds_and_scopes_discovery():
             }
 
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
     service._store = Store()
     service._config = SimpleNamespace(mode="shadow", pinned_round_id=pinned["round_id"])
 
@@ -1687,7 +1692,7 @@ def test_runtime_round_pin_rejects_alien_shadow_rounds_and_scopes_discovery():
         {
             "round_id": pinned["round_id"],
             "status": "open",
-            "schedule": {"submission_cutoff": "2026-09-08T00:00:00Z"},
+            "schedule": {"submission_open": "2026-09-07T00:00:00Z", "submission_cutoff": "2026-09-08T00:00:00Z"},
             "submission_replacement_cutoff": "2026-09-07T23:00:00Z",
             "max_replacement_attempts": 1,
             "benchmark_icp_count": 20, "promotion_margin": 1.0,
@@ -1737,7 +1742,8 @@ def test_round_discovery_filters_before_limits_and_pages_every_active_round():
             "created_at": created_at,
             "configuration_doc": {
                 "mode": mode,
-                "schedule": {"submission_cutoff": created_at},
+                "schedule": {"submission_open": "2026-09-01T00:00:00Z",
+                             "submission_cutoff": "2026-10-15T00:00:00Z" if status == "open" else created_at},
                 **extra.pop("configuration", {}),
             },
             **extra,
@@ -1836,6 +1842,7 @@ def test_round_discovery_filters_before_limits_and_pages_every_active_round():
             return next((item for item in rows if item["round_id"] == round_id), None)
 
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 10, 14, 12, tzinfo=timezone.utc)
     service._store = Store()
     service._config = SimpleNamespace(mode="live")
     service._round = Store.get_round
@@ -1923,7 +1930,7 @@ def test_public_current_discovers_latest_published_round_without_rewards():
         "created_at": "2026-09-03T09:00:00Z",
         "configuration_doc": {
             "mode": "live",
-            "schedule": {"submission_cutoff": "2026-09-04T00:00:00Z"},
+            "schedule": {"submission_open": "2026-09-03T00:00:00Z", "submission_cutoff": "2026-09-04T00:00:00Z"},
         },
     }
 
@@ -1946,6 +1953,7 @@ def test_public_current_discovers_latest_published_round_without_rewards():
             return []
 
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 9, 3, 12, tzinfo=timezone.utc)
     service._store = Store()
     service._config = SimpleNamespace(
         mode="live",
@@ -1977,6 +1985,7 @@ def test_public_current_has_no_published_round_before_publication():
             return []
 
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 9, 3, 12, tzinfo=timezone.utc)
     service._store = Store()
     service._config = SimpleNamespace(
         mode="shadow",
@@ -1991,7 +2000,8 @@ def test_public_current_has_no_published_round_before_publication():
 def test_public_views_never_serialize_source_or_private_runtime_fields():
     source_ref = "arena/private/source-secret.tar.gz"
     hotkey = "5" + "A" * 47
-    schedule = {"submission_cutoff": "2026-09-02T01:00:00Z"}
+    schedule = {"submission_open": "2026-09-02T00:00:00Z",
+                "submission_cutoff": "2026-09-02T01:00:00Z"}
     raw_configuration = {
         "mode": "shadow",
         "schedule": schedule,
@@ -2041,6 +2051,7 @@ def test_public_views_never_serialize_source_or_private_runtime_fields():
             }
 
     service = object.__new__(ArenaService)
+    service._clock = lambda: datetime(2026, 9, 2, 0, 30, tzinfo=timezone.utc)
     service._store = Store()
     service._config = SimpleNamespace(
         mode="shadow",

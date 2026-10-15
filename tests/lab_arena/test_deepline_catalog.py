@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+from threading import Event, Lock, Thread
 
 import pytest
 
@@ -135,6 +136,142 @@ def test_readonly_fetch_binds_detail_identity():
     incomplete.pop("inputSchema")
     with pytest.raises(catalog.CatalogError):
         catalog.fetch_catalog(read_json=lambda url, headers: {"tools": [incomplete]} if url == catalog.CATALOG_URL else row("different_tool"))
+
+
+def test_metadata_reads_overlap_with_fixed_bound_and_keep_frozen_hash():
+    details = [row("vendor_company_search_%d" % index) for index in range(8)]
+    listing = [{key: value for key, value in detail.items() if key != "inputSchema"} for detail in details]
+    by_id = {detail["toolId"]: detail for detail in details}
+    lock = Lock()
+    four_started = Event()
+    release = Event()
+    active = 0
+    maximum_active = 0
+
+    def read(url, headers):
+        nonlocal active, maximum_active
+        if url == catalog.CATALOG_URL:
+            assert headers == {}
+            return {"tools": listing}
+        assert headers == {"x-deepline-tool-meta-only": "1"}
+        tool_id = url.rsplit("/", 2)[-2]
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            if active == catalog.MAX_METADATA_READ_WORKERS:
+                four_started.set()
+        try:
+            assert release.wait(5), "metadata read did not release"
+            return by_id[tool_id]
+        finally:
+            with lock:
+                active -= 1
+
+    result = {}
+    def run():
+        try:
+            result["catalog"] = catalog.fetch_catalog(read_json=read)
+        except Exception as exc:
+            result["error"] = exc
+
+    worker = Thread(target=run)
+    worker.start()
+    try:
+        assert four_started.wait(5), "metadata reads did not overlap"
+        with lock:
+            assert active == catalog.MAX_METADATA_READ_WORKERS == 4
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert "error" not in result, result.get("error")
+    assert maximum_active == 4
+    assert result["catalog"] == catalog.freeze_catalog({"tools": details})
+
+
+def test_poll_metadata_follows_parent_and_reversed_detail_completion_keeps_hash():
+    parent = row(
+        "vendor_batch_scrape", categories=["automation"],
+        inputSchema={"type": "object", "properties": {"urls": {"type": "array", "items": {"type": "string"}}}, "required": ["urls"]},
+        asyncFlow={"startAction": "vendor_batch_scrape", "pollActions": ["vendor_get_status"], "finishAction": None},
+        asyncOperation={"job": {"idPaths": ["id"]}},
+    )
+    poll = row("vendor_get_status", categories=["admin"], inputSchema={"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]})
+    other = row("vendor_company_search_other")
+    other_listing = {key: value for key, value in other.items() if key != "inputSchema"}
+    excluded = row("vendor_people_search", categories=["people_search"])
+    excluded.pop("inputSchema")
+    other_finished = Event()
+    parent_finished = Event()
+    calls = []
+
+    def read(url, headers):
+        if url == catalog.CATALOG_URL:
+            assert not calls
+            return {"tools": [parent, other_listing, excluded]}
+        assert headers == {"x-deepline-tool-meta-only": "1"}
+        tool_id = url.rsplit("/", 2)[-2]
+        if tool_id == other["toolId"]:
+            calls.append(tool_id)
+            other_finished.set()
+            return other
+        if tool_id == parent["toolId"]:
+            assert other_finished.wait(5), "independent detail did not finish first"
+            calls.append(tool_id)
+            parent_finished.set()
+            return parent
+        assert tool_id == poll["toolId"]
+        assert parent_finished.is_set(), "poll fetched before parent detail"
+        calls.append(tool_id)
+        return poll
+
+    snapshot = catalog.fetch_catalog(read_json=read)
+    assert calls[:2] == [other["toolId"], parent["toolId"]]
+    assert calls.index(other["toolId"]) < calls.index(poll["toolId"])
+    assert calls.index(parent["toolId"]) < calls.index(poll["toolId"])
+    assert excluded["toolId"] not in calls
+    assert snapshot == catalog.freeze_catalog({"tools": [parent, other, poll]})
+
+
+def test_duplicate_listing_row_overwrites_a_delayed_detail():
+    first = row("vendor_company_search", description="First listing row.")
+    first.pop("inputSchema")
+    second = row("vendor_company_search", description="Last listing row wins.")
+    other = row("vendor_company_enrich")
+    other_listing = {key: value for key, value in other.items() if key != "inputSchema"}
+    first_response = row("vendor_company_search", description="Delayed detail loses.")
+    other_ready = Event()
+    calls = []
+
+    def read(url, headers):
+        if url == catalog.CATALOG_URL:
+            return {"tools": [first, other_listing, second]}
+        assert headers == {"x-deepline-tool-meta-only": "1"}
+        tool_id = url.rsplit("/", 2)[-2]
+        if tool_id == first["toolId"]:
+            assert other_ready.wait(5)
+            calls.append(tool_id)
+            return first_response
+        assert tool_id == other["toolId"]
+        calls.append(tool_id)
+        other_ready.set()
+        return other
+
+    assert catalog.fetch_catalog(read_json=read) == catalog.freeze_catalog({"tools": [second, other]})
+    assert calls == [other["toolId"], first["toolId"]]
+
+
+def test_invalid_poll_descriptor_fails_before_poll_requests():
+    parent = row("vendor_batch_scrape", categories=["automation"],
+                 inputSchema={"type": "object", "properties": {"urls": {"type": "array", "items": {"type": "string"}}}, "required": ["urls"]},
+                 asyncFlow={"startAction": "vendor_batch_scrape", "pollActions": ["../unsafe"], "finishAction": None})
+    calls = []
+    def read(url, headers):
+        calls.append((url, headers))
+        return {"tools": [parent]} if url == catalog.CATALOG_URL else parent
+    with pytest.raises(catalog.CatalogError, match="invalid_async_descriptor"):
+        catalog.fetch_catalog(read_json=read)
+    assert len(calls) == 2
 
 
 def test_local_metadata_operations_leave_legacy_table_unchanged():

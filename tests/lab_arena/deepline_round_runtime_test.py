@@ -74,6 +74,22 @@ def test_catalog_cannot_enable_people_for_company_round_or_change_hashed_price()
         contracts.validate_round_configuration(config)
 
 
+def test_metadata_identity_failure_never_creates_round():
+    incomplete = row("vendor_company_search")
+    incomplete.pop("inputSchema")
+    def source(**_kwargs):
+        return deepline_catalog.fetch_catalog(read_json=lambda url, _headers: (
+            {"tools": [incomplete]} if url == deepline_catalog.CATALOG_URL
+            else row("different_tool")
+        ))
+    service = _service(source)
+    calls = []
+    service._store.create_round = lambda *_args: calls.append("created")
+    with pytest.raises(deepline_catalog.CatalogError, match="catalog_identity_changed"):
+        service.create_round(datetime(2026, 10, 7, tzinfo=timezone.utc))
+    assert calls == []
+
+
 def test_unlimited_snapshot_is_explicit_only_for_deepline():
     document = {"schema_version": lab_arena_checkpoint.QUOTA_SNAPSHOT_SCHEMA_VERSION,
                 "providers": {p: {"limit": 200, "used": 1, "remaining": 199, "inflight": 0}

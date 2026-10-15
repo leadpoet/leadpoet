@@ -9,6 +9,7 @@ import hashlib
 import ipaddress
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, urlsplit
@@ -18,6 +19,7 @@ from jsonschema import Draft202012Validator
 SCHEMA_VERSION = "leadpoet.lab_arena.deepline_catalog.v1"
 POLICY_VERSION = "leadpoet.lab_arena.deepline_company_research.v1"
 CATALOG_URL = "https://code.deepline.com/api/v2/tools?compact=false"
+MAX_METADATA_READ_WORKERS = 4
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _CATEGORY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _COMPANY_CATEGORIES = frozenset({"company_search", "company_enrich", "research", "smb"})
@@ -577,38 +579,62 @@ def validate_payload(snapshot: Mapping[str, Any], tool_id: str, payload: Mapping
 
 
 def fetch_catalog(*, read_json: Callable[[str, Mapping[str, str]], Mapping[str, Any]], allow_people: bool = False) -> dict[str, Any]:
-    """Read only official catalog routes with a caller-owned trusted transport."""
+    """Read only official catalog routes with a concurrency-safe trusted transport."""
     document = _copy(read_json(CATALOG_URL, {}))
     if not isinstance(document, dict):
         raise CatalogError("invalid_catalog")
     rows = document.get("tools")
     if not isinstance(rows, list) or len(rows) > 4096:
         raise CatalogError("invalid_catalog")
-    detailed = {}
+    detail_requests = []
+    planned_rows = []
     for row in rows:
         if not isinstance(row, dict):
             raise CatalogError("invalid_catalog")
         schema = row.get("inputSchema", row.get("input_schema"))
         hint = (str(row.get("toolId", "")).replace("_", " ") + " " + str(schema.get("description", "") if isinstance(schema, dict) else ""))
         needs_detail = not isinstance(schema, dict) or row.get("asyncFlow") or re.search(r"\b(?:async|asynchronous|batch|crawl|agent|run)\b", hint, re.I)
-        if _eligible(row, allow_people) and needs_detail:
+        fetch_detail = bool(_eligible(row, allow_people) and needs_detail)
+        planned_rows.append((row, fetch_detail))
+        if fetch_detail:
             tool_id = row.get("toolId", row.get("id"))
-            detail = _copy(read_json("https://code.deepline.com/api/v2/integrations/%s/get" % tool_id, {"x-deepline-tool-meta-only": "1"}))
-            if not isinstance(detail, dict) or detail.get("toolId", detail.get("id")) != tool_id or detail.get("provider") != row.get("provider"):
-                raise CatalogError("catalog_identity_changed")
-            row = detail
-        detailed[row.get("toolId", row.get("id"))] = row
-    # Declared polls are metadata reads too. Their authority is granted only
-    # by the safe parent descriptor, never by their broad admin category.
-    for row in list(detailed.values()):
-        flow = row.get("asyncFlow")
-        if not isinstance(flow, dict) or not isinstance(flow.get("pollActions"), list):
-            continue
-        for tool_id in flow["pollActions"]:
-            if not isinstance(tool_id, str) or not _ID.fullmatch(tool_id):
-                raise CatalogError("invalid_async_descriptor")
-            detail = _copy(read_json("https://code.deepline.com/api/v2/integrations/%s/get" % tool_id, {"x-deepline-tool-meta-only": "1"}))
-            if not isinstance(detail, dict) or detail.get("toolId", detail.get("id")) != tool_id or detail.get("provider") != row.get("provider"):
+            detail_requests.append(("https://code.deepline.com/api/v2/integrations/%s/get" % tool_id, {"x-deepline-tool-meta-only": "1"}))
+
+    def read_detail(request: tuple[str, Mapping[str, str]]) -> Any:
+        return _copy(read_json(*request))
+
+    with ThreadPoolExecutor(max_workers=MAX_METADATA_READ_WORKERS) as executor:
+        # map yields in listing order even when independent GETs finish out of
+        # order. This preserves duplicate overwrite and frozen-hash behavior.
+        fetched = iter(executor.map(read_detail, detail_requests))
+        detailed = {}
+        for row, needs_detail in planned_rows:
+            if needs_detail:
+                detail = next(fetched)
+                if (not isinstance(detail, dict)
+                    or detail.get("toolId", detail.get("id")) != row.get("toolId", row.get("id"))
+                    or detail.get("provider") != row.get("provider")):
+                    raise CatalogError("catalog_identity_changed")
+                row = detail
+            detailed[row.get("toolId", row.get("id"))] = row
+
+        # Poll GETs depend on validated parent details. Their authority is
+        # granted only by the safe parent descriptor, never by their broad
+        # admin category. Fetch them only after the parent phase is complete.
+        poll_requests = []
+        for row in list(detailed.values()):
+            flow = row.get("asyncFlow")
+            if not isinstance(flow, dict) or not isinstance(flow.get("pollActions"), list):
+                continue
+            for tool_id in flow["pollActions"]:
+                if not isinstance(tool_id, str) or not _ID.fullmatch(tool_id):
+                    raise CatalogError("invalid_async_descriptor")
+                poll_requests.append((row, tool_id))
+        poll_urls = [("https://code.deepline.com/api/v2/integrations/%s/get" % tool_id, {"x-deepline-tool-meta-only": "1"}) for _, tool_id in poll_requests]
+        for (row, tool_id), detail in zip(poll_requests, executor.map(read_detail, poll_urls)):
+            if (not isinstance(detail, dict)
+                or detail.get("toolId", detail.get("id")) != tool_id
+                or detail.get("provider") != row.get("provider")):
                 raise CatalogError("catalog_identity_changed")
             detailed[tool_id] = detail
     return freeze_catalog({"tools": list(detailed.values())}, allow_people)

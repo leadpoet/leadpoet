@@ -32,6 +32,19 @@ with its local hotkey.
    a short direct-port handoff gap. Later canonical restarts keep Arena intake
    and reads on the serving slot while they prepare and check the next slot.
 
+   The fixed loopback port allocation is:
+
+   | Component | Slot 0 | Slot 1 |
+   | --- | --- | --- |
+   | Mainnet Arena API | `8792` | `8794` |
+   | Arena continuity edge | `8890` | `8891` |
+   | Hosted testnet Arena API | `8793` | — |
+
+   Ports `8890` and `8891` are reserved for the continuity edges. Ports
+   `8800` and `8801` are outside this allocation and can belong to other
+   services. The controller rejects an occupied candidate API or edge port;
+   it does not select another port or stop an unrelated listener.
+
    If a restart fails after Arena ingress moves, rerun the canonical command
    for the **same full commit SHA**. It verifies the retained release, serving
    process, and held restart guard before it resumes. An unfinished first

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import subprocess
@@ -14,26 +16,27 @@ BASELINE = b"gateway.subnet71.com {\n\treverse_proxy localhost:8000\n}\n"
 
 
 def test_domain_stage_keeps_legacy_gateway_but_moves_arena_to_edge():
-    config = render(arena_edge_port=8801, backend="legacy", direct=False)
-    assert config.count("reverse_proxy 127.0.0.1:8801") == 1
+    config = render(arena_edge_port=8891, backend="legacy", direct=False)
+    assert config.count("reverse_proxy 127.0.0.1:8891") == 1
     assert config.count("reverse_proxy 127.0.0.1:8000") == 1
     assert ":8000 {" not in config
     assert "@arena path /arena /arena/* /testnet/arena /testnet/arena/*" in config
 
 
 def test_dual_listener_holds_gateway_closed_until_verified():
-    closed = render(arena_edge_port=8801, backend="closed", direct=True)
-    assert closed.count("reverse_proxy 127.0.0.1:8801") == 2
+    closed = render(arena_edge_port=8891, backend="closed", direct=True)
+    assert closed.count("reverse_proxy 127.0.0.1:8891") == 2
     assert closed.count('respond "gateway temporarily unavailable" 503') == 2
     assert "reverse_proxy 127.0.0.1:8001" not in closed
-    ready = render(arena_edge_port=8800, backend="ready", direct=True)
-    assert ready.count("reverse_proxy 127.0.0.1:8800") == 2
+    ready = render(arena_edge_port=8890, backend="ready", direct=True)
+    assert ready.count("reverse_proxy 127.0.0.1:8890") == 2
     assert ready.count("reverse_proxy 127.0.0.1:8001") == 2
 
 
 @pytest.mark.parametrize(
     ("edge_port", "backend", "direct"),
-    [(8792, "ready", True), (8800, "legacy", True), (8800, "unknown", False)],
+    [(8792, "ready", True), (8890, "legacy", True), (8890, "unknown", False),
+     (8800, "ready", True), (8801, "ready", True)],
 )
 def test_invalid_ingress_target_fails_closed(edge_port, backend, direct):
     with pytest.raises(ValueError):
@@ -52,12 +55,12 @@ def test_exact_legacy_config_is_the_only_unmanaged_start(tmp_path):
 def test_committed_ingress_must_match_exact_config(tmp_path):
     state, caddy = tmp_path / "state.json", tmp_path / "Caddyfile"
     sha = "a" * 40
-    caddy.write_text(render(arena_edge_port=8801, backend="ready", direct=True))
+    caddy.write_text(render(arena_edge_port=8891, backend="ready", direct=True))
     commit_state(state, caddy, mode="dual", slot=1, sha=sha, backend="ready")
     assert inspect(state, caddy) == {
         "version": 1, "mode": "dual", "slot": 1, "sha": sha, "backend": "ready",
     }
-    caddy.write_text(render(arena_edge_port=8801, backend="closed", direct=True))
+    caddy.write_text(render(arena_edge_port=8891, backend="closed", direct=True))
     with pytest.raises(ValueError, match="differs"):
         inspect(state, caddy)
     with pytest.raises(ValueError, match="does not match"):
@@ -164,3 +167,19 @@ def test_reload_failure_never_overwrites_concurrent_caddy_edit(tmp_path, monkeyp
             mode="domain", slot=1, sha="a" * 40, backend="legacy",
         )
     assert caddy.read_text() == "unrelated site change\n"
+
+
+@pytest.mark.parametrize("slot,api_port,edge_port", [(0, 8792, 8890), (1, 8794, 8891)])
+def test_caddy_and_controller_share_the_same_fixed_slot_pair(slot, api_port, edge_port):
+    source = (Path(__file__).resolve().parents[1] / "gw_restart.sh").read_text()
+    function = source[source.index("arena_slot_ports() {"):].split("\n}\n", 1)[0] + "\n}\n"
+    result = subprocess.run(
+        ["bash", "-c", function + '\narena_slot_ports "$1"; printf "%s %s" "$ARENA_API_PORT" "$ARENA_EDGE_PORT"',
+         "slot-parity", str(slot)],
+        capture_output=True, text=True, check=True,
+    )
+    assert result.stdout == f"{api_port} {edge_port}"
+    assert ingress.slot_ports(slot) == (api_port, edge_port)
+    assert f"reverse_proxy 127.0.0.1:{edge_port}" in render(
+        arena_edge_port=edge_port, backend="ready", direct=True,
+    )

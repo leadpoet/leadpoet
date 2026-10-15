@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 import subprocess
 import textwrap
@@ -501,3 +502,65 @@ def test_previous_sha_uses_candidate_verified_stop_helper(tmp_path: Path):
     assert f"/slot0-{next_sha}/scripts/manage_owned_process_group.py" in old_driver_stop
     assert f"--cwd {tmp_path}/runtime/slot1-{SHA}" in old_driver_stop
     assert (tmp_path / "ingress").read_text().strip() == f"dual 0 {next_sha} ready"
+
+
+def _assert_listener_alive(listener: socket.socket) -> None:
+    # A real connection proves the unrelated listener survived the cutovers.
+    client = socket.create_connection(listener.getsockname(), timeout=1)
+    connection, _ = listener.accept()
+    try:
+        # Close the client first so TIME_WAIT belongs to its ephemeral port,
+        # not the fixed listener needed by the next controller test.
+        client.close()
+        assert connection.recv(1) == b""
+    finally:
+        client.close()
+        connection.close()
+
+
+def test_old_edge_listener_survives_first_and_second_dedicated_port_cutovers(tmp_path: Path):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as old_listener:
+        old_listener.bind(("127.0.0.1", 8801))
+        old_listener.listen()
+        old_listener.settimeout(1)
+        first = _run(tmp_path)
+        assert first.returncode == 0, first.stderr
+        first_events = _events(tmp_path)
+        assert "python:- 8794 8891" in first_events
+        assert "curl:http://127.0.0.1:8891/arena/v1/current" in first_events
+        assert (tmp_path / "ingress").read_text().strip() == f"dual 1 {SHA} ready"
+        _assert_listener_alive(old_listener)
+
+        second_sha = "b" * 40
+        second = _run(tmp_path, sha=second_sha)
+        assert second.returncode == 0, second.stderr
+        later = _events(tmp_path)[len(first_events):]
+        assert "python:- 8792 8890" in later
+        assert "curl:http://127.0.0.1:8890/arena/v1/current" in later
+        assert (tmp_path / "ingress").read_text().strip() == f"dual 0 {second_sha} ready"
+        _assert_listener_alive(old_listener)
+
+
+@pytest.mark.parametrize("candidate_slot,edge_port", [(1, 8891), (0, 8890)])
+def test_occupied_dedicated_edge_rejects_candidate_before_drain(
+    tmp_path: Path, candidate_slot: int, edge_port: int,
+):
+    if candidate_slot == 0:
+        assert _run(tmp_path).returncode == 0
+    prior_ingress = ((tmp_path / "ingress").read_text()
+                     if (tmp_path / "ingress").exists() else "legacy 0 - legacy\n")
+    prior_count = len(_events(tmp_path)) if (tmp_path / "events").exists() else 0
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as foreign_listener:
+        foreign_listener.bind(("127.0.0.1", edge_port))
+        foreign_listener.listen()
+        foreign_listener.settimeout(1)
+        result = _run(tmp_path, sha="b" * 40)
+        assert result.returncode != 0
+        assert "candidate Arena port is already occupied" in result.stderr
+        events = _events(tmp_path)[prior_count:]
+        assert "drain" not in events and "guard:authorize" not in events
+        assert not any(event.startswith("start:") for event in events)
+        assert not any(event.startswith("ingress:") for event in events)
+        assert (tmp_path / "ingress").read_text() == prior_ingress
+        assert not (tmp_path / "runtime" / f"slot{candidate_slot}-{'b' * 40}").exists()
+        _assert_listener_alive(foreign_listener)

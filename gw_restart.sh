@@ -215,8 +215,8 @@ arena_ingress_transition() {
 
 arena_slot_ports() {
   case "$1" in
-    0) ARENA_API_PORT=8792; ARENA_EDGE_PORT=8800 ;;
-    1) ARENA_API_PORT=8794; ARENA_EDGE_PORT=8801 ;;
+    0) ARENA_API_PORT=8792; ARENA_EDGE_PORT=8890 ;;
+    1) ARENA_API_PORT=8794; ARENA_EDGE_PORT=8891 ;;
     *) echo "ERROR: invalid Arena release slot" >&2; return 1 ;;
   esac
 }

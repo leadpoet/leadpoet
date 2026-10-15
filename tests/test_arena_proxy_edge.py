@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from gateway.api import arena_proxy
@@ -119,3 +120,52 @@ def test_edge_environment_reads_only_routing_and_ingest_values(tmp_path, monkeyp
     assert os.environ["MINER_MAX_CONCURRENT"] == "12"
     assert "LAB_ARENA_SERVICE_KEY" not in os.environ
     assert "LAB_ARENA_OPENROUTER_API_KEY" not in os.environ
+
+
+@pytest.mark.parametrize("edge_port,api_port", [(8890, 8792), (8891, 8794)])
+def test_edge_cli_binds_dedicated_slot_and_keeps_its_api_target(
+    tmp_path, monkeypatch, edge_port, api_port,
+):
+    import sys
+    from types import SimpleNamespace
+    import uvicorn
+    from scripts import run_arena_proxy_edge as edge
+
+    environment = tmp_path / "gateway.env"
+    environment.write_text("")
+    sha = "a" * 40
+    monkeypatch.setenv("LAB_ARENA_RELEASE_COMMIT", sha)
+    monkeypatch.setenv("GITHUB_SHA", sha)
+    monkeypatch.setenv("LAB_ARENA_RELEASE_ROOT", str(edge.ROOT))
+    monkeypatch.setenv("LAB_ARENA_PROXY_MAIN_PORT", "8792")
+    monkeypatch.setattr(sys, "argv", [
+        "arena-edge", "--port", str(edge_port), "--sidecar-port", str(api_port),
+        "--environment-file", str(environment),
+    ])
+    monkeypatch.setitem(sys.modules, "leadpoet_observability", SimpleNamespace(
+        init_sentry=lambda **_kwargs: None, configure_sentry_context=lambda **_kwargs: None,
+    ))
+    application = object()
+    observed = {}
+    monkeypatch.setattr(edge, "create_app", lambda: application)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: observed.update(app=app, **kwargs))
+
+    assert edge.main() == 0
+    assert observed["app"] is application
+    assert observed["host"] == "127.0.0.1" and observed["port"] == edge_port
+    assert edge.os.environ["LAB_ARENA_PROXY_MAIN_PORT"] == str(api_port)
+    assert observed["forwarded_allow_ips"] == "127.0.0.1"
+
+
+@pytest.mark.parametrize("old_port", [8800, 8801])
+def test_edge_cli_rejects_ports_outside_dedicated_allocation(monkeypatch, old_port):
+    import sys
+    from scripts import run_arena_proxy_edge as edge
+
+    monkeypatch.setattr(sys, "argv", [
+        "arena-edge", "--port", str(old_port), "--sidecar-port", "8794",
+        "--environment-file", "/unused/gateway.env",
+    ])
+    with pytest.raises(SystemExit) as error:
+        edge.main()
+    assert error.value.code == 2

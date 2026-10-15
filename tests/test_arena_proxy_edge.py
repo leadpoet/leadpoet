@@ -2,11 +2,50 @@
 
 from __future__ import annotations
 
+import sys
+
 import httpx
 from fastapi.testclient import TestClient
+import pytest
+import uvicorn
 
 from gateway.api import arena_proxy
+from scripts import run_arena_proxy_edge as edge
 from scripts.run_arena_proxy_edge import create_app, load_edge_environment
+
+
+@pytest.mark.parametrize("port,sidecar", [(18800, 8792), (18801, 8794)])
+def test_edge_cli_binds_only_the_selected_loopback_release_port(
+    tmp_path, monkeypatch, port, sidecar,
+):
+    environment = tmp_path / "gateway.env"
+    environment.write_text("LAB_ARENA_MODE=live\n")
+    monkeypatch.setattr(sys, "argv", ["edge", "--port", str(port),
+                                    "--sidecar-port", str(sidecar),
+                                    "--environment-file", str(environment)])
+    monkeypatch.setenv("LAB_ARENA_RELEASE_COMMIT", "a" * 40)
+    monkeypatch.setenv("GITHUB_SHA", "a" * 40)
+    monkeypatch.setenv("LAB_ARENA_RELEASE_ROOT", str(edge.ROOT))
+    app = object()
+    monkeypatch.setattr(edge, "create_app", lambda: app)
+    observed = {}
+    monkeypatch.setattr(uvicorn, "run", lambda selected, **kwargs:
+                        observed.update(app=selected, **kwargs))
+    assert edge.main() == 0
+    assert observed["app"] is app
+    assert observed["host"] == "127.0.0.1"
+    assert observed["port"] == port
+    assert observed["forwarded_allow_ips"] == "127.0.0.1"
+
+
+@pytest.mark.parametrize("port", [8800, 8801])
+def test_edge_cli_refuses_legacy_ports_before_startup(tmp_path, monkeypatch, port):
+    monkeypatch.setattr(sys, "argv", ["edge", "--port", str(port),
+                                    "--sidecar-port", "8794",
+                                    "--environment-file", str(tmp_path / "missing")])
+    with pytest.raises(SystemExit) as rejected:
+        edge.main()
+    assert rejected.value.code == 2
 
 
 def test_edge_forwards_arena_with_gateway_header_and_body_rules(monkeypatch):

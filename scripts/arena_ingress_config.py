@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 
 
-ARENA_EDGE_PORTS = (8800, 8801)
+ARENA_EDGE_PORTS = (18800, 18801)
 BACKENDS = {"legacy": 8000, "ready": 8001, "closed": None}
 BASELINE_CADDY_SHA256 = "feb10ab28f61a2bbcbfd0a75f6e16d53ecf7951bec5e94373f5958edc3d901dc"
 BASELINE_CADDY = b"gateway.subnet71.com {\n\treverse_proxy localhost:8000\n}\n"
@@ -56,7 +56,7 @@ def render(*, arena_edge_port: int, backend: str, direct: bool) -> str:
 def slot_ports(slot: int) -> tuple[int, int]:
     if type(slot) is not int or slot not in (0, 1):
         raise ValueError("Arena ingress slot is invalid")
-    return (8792, 8800) if slot == 0 else (8794, 8801)
+    return (8792, 18800) if slot == 0 else (8794, 18801)
 
 
 def _sha256(payload: bytes) -> str:

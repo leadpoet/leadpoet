@@ -45,6 +45,54 @@ GitHub workflow status is diagnostic. It does not authorize or block a
 canonical restart. Local release identity and cryptographic checks remain
 mandatory.
 
+## Repair an installed controller that cannot prepare its replacement
+
+Use this path only for a confirmed fault in the installed controller's
+preparation phase. It runs the candidate's **full canonical restart**, including
+the normal host locks, epoch gate, release verification, drain, cutover,
+attestation, and readiness checks. It does not install a controller in advance
+or skip a failed gate.
+
+Fetch `origin/main` in the canonical repository. Record its full source SHA and
+the inspected installed controller SHA from
+`~/.config/leadpoet/restart-controller/gateway/current`. Materialize only the
+repair helper from that exact commit into an owner-only temporary file:
+
+```bash
+cd /home/ec2-user/leadpoet_repo
+git fetch origin
+# Use the full reviewed source SHA and the full inspected installed SHA below.
+repair_helper="$(mktemp /tmp/gateway-controller-repair.XXXXXX.py)"
+chmod 600 "$repair_helper"
+git show <source-sha>:scripts/bootstrap_gateway_restart_controller.py > "$repair_helper"
+repair_status=0
+python3 "$repair_helper" \
+  --source-commit <source-sha> \
+  --expected-controller-commit <installed-controller-sha> || repair_status=$?
+rm -f "$repair_helper"
+(exit "$repair_status")
+```
+
+The helper verifies its own committed bytes, the official origin, current
+fetched main, the installed controller link and four owned controller files,
+and a private exact candidate archive. It refuses an occupied restart or
+recovery lock. It rechecks main and the installed controller before it releases
+its inspection locks and invokes the full candidate controller. The canonical
+controller must then acquire its own normal lock. Do not set authority, phase,
+or destructive-state environment variables by hand.
+
+The receipt reports the canonical exit code and the observed installed
+controller identity: `previous`, `candidate`, or `unknown`. An early failure
+leaves the old installed controller in place. A late failure can occur after
+the canonical controller installs its successor; preserve that state and use
+the normal exact-SHA recovery flow. The helper never rolls back canonical
+runtime, ingress, or guard changes. If the observer is interrupted while the
+controller still runs, it retains and reports the private authority path.
+
+A controller identity receipt does not verify runtime deployment. Complete the
+normal live checks below, including guard release and terminal restart success.
+Subsequent restarts use `/home/ec2-user/gw_restart.sh --commit <full-commit-sha>`.
+
 ## Verification
 
 Verify the gateway build identity, Arena API, validator installed identity,

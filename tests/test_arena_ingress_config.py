@@ -13,27 +13,35 @@ from scripts.arena_ingress_config import activate, commit_state, inspect, render
 BASELINE = b"gateway.subnet71.com {\n\treverse_proxy localhost:8000\n}\n"
 
 
+def test_release_slot_ports_leave_existing_services_unchanged():
+    assert ingress.slot_ports(0) == (8792, 18800)
+    assert ingress.slot_ports(1) == (8794, 18801)
+    for occupied_legacy_port in (8800, 8801):
+        with pytest.raises(ValueError, match="approved loopback port"):
+            render(arena_edge_port=occupied_legacy_port, backend="ready", direct=True)
+
+
 def test_domain_stage_keeps_legacy_gateway_but_moves_arena_to_edge():
-    config = render(arena_edge_port=8801, backend="legacy", direct=False)
-    assert config.count("reverse_proxy 127.0.0.1:8801") == 1
+    config = render(arena_edge_port=18801, backend="legacy", direct=False)
+    assert config.count("reverse_proxy 127.0.0.1:18801") == 1
     assert config.count("reverse_proxy 127.0.0.1:8000") == 1
     assert ":8000 {" not in config
     assert "@arena path /arena /arena/* /testnet/arena /testnet/arena/*" in config
 
 
 def test_dual_listener_holds_gateway_closed_until_verified():
-    closed = render(arena_edge_port=8801, backend="closed", direct=True)
-    assert closed.count("reverse_proxy 127.0.0.1:8801") == 2
+    closed = render(arena_edge_port=18801, backend="closed", direct=True)
+    assert closed.count("reverse_proxy 127.0.0.1:18801") == 2
     assert closed.count('respond "gateway temporarily unavailable" 503') == 2
     assert "reverse_proxy 127.0.0.1:8001" not in closed
-    ready = render(arena_edge_port=8800, backend="ready", direct=True)
-    assert ready.count("reverse_proxy 127.0.0.1:8800") == 2
+    ready = render(arena_edge_port=18800, backend="ready", direct=True)
+    assert ready.count("reverse_proxy 127.0.0.1:18800") == 2
     assert ready.count("reverse_proxy 127.0.0.1:8001") == 2
 
 
 @pytest.mark.parametrize(
     ("edge_port", "backend", "direct"),
-    [(8792, "ready", True), (8800, "legacy", True), (8800, "unknown", False)],
+    [(8792, "ready", True), (18800, "legacy", True), (18800, "unknown", False)],
 )
 def test_invalid_ingress_target_fails_closed(edge_port, backend, direct):
     with pytest.raises(ValueError):
@@ -52,12 +60,12 @@ def test_exact_legacy_config_is_the_only_unmanaged_start(tmp_path):
 def test_committed_ingress_must_match_exact_config(tmp_path):
     state, caddy = tmp_path / "state.json", tmp_path / "Caddyfile"
     sha = "a" * 40
-    caddy.write_text(render(arena_edge_port=8801, backend="ready", direct=True))
+    caddy.write_text(render(arena_edge_port=18801, backend="ready", direct=True))
     commit_state(state, caddy, mode="dual", slot=1, sha=sha, backend="ready")
     assert inspect(state, caddy) == {
         "version": 1, "mode": "dual", "slot": 1, "sha": sha, "backend": "ready",
     }
-    caddy.write_text(render(arena_edge_port=8801, backend="closed", direct=True))
+    caddy.write_text(render(arena_edge_port=18801, backend="closed", direct=True))
     with pytest.raises(ValueError, match="differs"):
         inspect(state, caddy)
     with pytest.raises(ValueError, match="does not match"):

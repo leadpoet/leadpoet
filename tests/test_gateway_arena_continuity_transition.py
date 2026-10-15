@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+import shlex
+import socket
 import subprocess
+import sys
 import textwrap
 
 import pytest
@@ -47,12 +51,64 @@ PUBLISH = 'GATEWAY_DEPLOY_STAGE="host_restart_script_install"' + _between(
 )
 
 
-def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA) -> subprocess.CompletedProcess[str]:
+def _runtime_clone(tmp_path: Path, origin: str) -> str:
+    """Run the controller's real environment projections with stale state."""
+    stale = {
+        "GATEWAY_DESTRUCTIVE_PHASE_STARTED": "1",
+        "GATEWAY_CONTROLLER_PROCESS_STATE_FILE": "/stale/other-worker.json",
+        "GATEWAY_PREFLIGHT_TREE": "",
+        "GATEWAY_RESTART_AUTHORITY_ROOT": "/stale/authority",
+        "GATEWAY_RESTART_AUTHORITY_COMMIT": "b" * 40,
+        "SAFE_RUNTIME_VALUE": "runtime value with spaces",
+        "SUPABASE_SERVICE_ROLE_KEY": "fixture-only-service-key",
+        "LAB_ARENA_OPENROUTER_API_KEY": "fixture-only-provider-key",
+    }
+
+    def project(marker: str, *args: Path, inherited: Path | None = None) -> None:
+        block = _between(marker + " <<'PY'\n", "\nPY\n")
+        if inherited is not None:
+            block = block.replace('f"/proc/{pid}/environ"', repr(str(inherited)))
+        subprocess.run([sys.executable, "-", *(str(arg) for arg in args)],
+                       input=block, text=True, check=True, capture_output=True, timeout=5)
+
+    clone = tmp_path / "projected-clone.sh"
+    if origin == "live":
+        inherited = tmp_path / "inherited-environ"
+        inherited.write_bytes(b"\0".join(f"{key}={value}".encode()
+                                          for key, value in stale.items()) + b"\0")
+        project('python3 - "$PID" "$ENV_CLONE"', inherited, clone, inherited=inherited)
+    else:
+        secret = tmp_path / "secret-document"
+        raw = (json.dumps(stale) if origin == "secret-json" else
+               "\n".join(f"export {key}={shlex.quote(value)}" for key, value in stale.items()))
+        secret.write_text(raw)
+        cache = tmp_path / "gateway.env"
+        if origin == "secret-cache":
+            cache.write_text(raw)
+        else:
+            project('python3 - "$SECRET_TMP" "$GATEWAY_ENV_FILE"', secret, cache)
+            # The canonical cache also feeds scoped service environment loaders.
+            assert "GATEWAY_DESTRUCTIVE_PHASE_STARTED" not in cache.read_text()
+            assert "GATEWAY_CONTROLLER_PROCESS_STATE_FILE" not in cache.read_text()
+            assert "GATEWAY_PREFLIGHT_TREE" not in cache.read_text()
+        project('python3 - "$GATEWAY_ENV_FILE" "$ENV_SECRET"', cache, clone)
+    result = clone.read_text()
+    for key in stale:
+        if key.startswith("GATEWAY_"):
+            assert key not in result
+    assert "SAFE_RUNTIME_VALUE='runtime value with spaces'" in result
+    assert "SUPABASE_SERVICE_ROLE_KEY=fixture-only-service-key" in result
+    assert "LAB_ARENA_OPENROUTER_API_KEY=fixture-only-provider-key" in result
+    return result
+
+
+def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
+         runtime_clone: str = "") -> subprocess.CompletedProcess[str]:
     preflight = tmp_path / "preflight"
     preflight.mkdir(exist_ok=True)
     (preflight / "marker").write_text("candidate\n", encoding="utf-8")
     clone = tmp_path / "env-clone"
-    clone.write_text("", encoding="utf-8")
+    clone.write_text(runtime_clone, encoding="utf-8")
     ingress = tmp_path / "ingress"
     if not ingress.exists():
         ingress.write_text("legacy 0 - legacy\n", encoding="utf-8")
@@ -233,7 +289,8 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA) -> subprocess.Comple
         GATEWAY_DEPLOY_STAGE=preflight
         ARENA_RECOVERING=0
         ARENA_REUSE_PREVIOUS=0
-        trap 'status=$?; if [ "$status" -ne 0 ]; then
+        trap 'status=$?; record "controller:$GATEWAY_DESTRUCTIVE_PHASE_STARTED:$GATEWAY_CONTROLLER_PROCESS_STATE_FILE:$GATEWAY_PREFLIGHT_TREE"
+        if [ "$status" -ne 0 ]; then
           if [ "$ARENA_RECOVERING" = 1 ] && [ "$GATEWAY_DESTRUCTIVE_PHASE_STARTED" != 1 ]; then
             if rollback_arena_candidate_before_destructive; then
               restore_arena_recovery_guard_before_destructive || true
@@ -259,6 +316,74 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA) -> subprocess.Comple
 
 def _events(tmp_path: Path) -> list[str]:
     return (tmp_path / "events").read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize("origin", ["live", "secret-json", "secret-dotenv", "secret-cache"])
+@pytest.mark.parametrize("failure", ["occupied", "drain"])
+def test_stale_runtime_state_cannot_suppress_owned_candidate_cleanup_and_retry(
+    tmp_path: Path, origin: str, failure: str,
+):
+    clone = _runtime_clone(tmp_path, origin)
+    live_worker = tmp_path / "old-worker.json"
+    live_worker.write_text("live legacy worker\n")
+    unrelated = tmp_path / "runtime" / f"slot0-{'c' * 40}"
+    unrelated.mkdir(parents=True)
+    (unrelated / "marker").write_text("unrelated retained archive\n")
+    first = _run(tmp_path, fail=failure, runtime_clone=clone)
+    assert first.returncode != 0
+    events = _events(tmp_path)
+    assert f"controller:0:{live_worker}:{tmp_path}/preflight" in events
+    assert "guard:authorize" not in events
+    assert "timing:shutdown_started" not in events
+    assert not any(event.startswith("python:") and
+                   ("old-worker.json" in event or "gateway-process.json" in event)
+                   for event in events)
+    assert live_worker.read_text() == "live legacy worker\n"
+    assert (unrelated / "marker").read_text() == "unrelated retained archive\n"
+    assert (tmp_path / "ingress").read_text().strip() == "legacy 0 - legacy"
+    assert not (tmp_path / "guard").exists()
+    assert not (tmp_path / "runtime" / f"slot1-{SHA}").exists()
+    assert not (tmp_path / "runtime" / "api-slot1-process.json").exists()
+    assert not (tmp_path / "runtime" / "edge-slot1-process.json").exists()
+    assert "stop:edge:1" in events and "stop:api:1" in events
+
+    retry = _run(tmp_path, runtime_clone=clone)
+    assert retry.returncode == 0, retry.stderr
+    assert (tmp_path / "ingress").read_text().strip() == f"dual 1 {SHA} ready"
+
+
+def test_occupied_edge_port_refuses_before_process_launch_and_cleans_archive(tmp_path: Path):
+    # Hold the real selected edge port while the production bind-check runs.
+    # This must not affect the existing ingress, worker, or another archive.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        occupied.bind(("127.0.0.1", 18801))
+        occupied.listen()
+        result = _run(tmp_path, runtime_clone=_runtime_clone(tmp_path, "live"))
+        assert result.returncode != 0
+        assert "candidate Arena port is already occupied" in result.stderr
+        assert not any(event.startswith("start:") for event in _events(tmp_path))
+        assert (tmp_path / "ingress").read_text().strip() == "legacy 0 - legacy"
+        assert not (tmp_path / "runtime" / f"slot1-{SHA}").exists()
+        assert not (tmp_path / "guard").exists()
+    assert _run(tmp_path).returncode == 0
+
+
+def test_stale_environment_failure_preserves_previous_serving_guard(tmp_path: Path):
+    assert _run(tmp_path, fail="backend").returncode != 0
+    previous = tmp_path / "runtime" / f"slot1-{SHA}"
+    prior_count = len(_events(tmp_path))
+    result = _run(tmp_path, fail="drain", runtime_clone=_runtime_clone(tmp_path, "live"))
+    assert result.returncode != 0
+    events = _events(tmp_path)[prior_count:]
+    assert "guard:abort" not in events
+    assert (tmp_path / "guard").exists()
+    assert (tmp_path / "ingress").read_text().strip() == f"dual 1 {SHA} closed"
+    assert previous.is_dir()
+    assert (tmp_path / "runtime" / "api-slot1-process.json").exists()
+    assert (tmp_path / "runtime" / "edge-slot1-process.json").exists()
+    assert not (tmp_path / "runtime" / f"slot0-{SHA}").exists()
+    assert "stop:api:1" not in events and "stop:edge:1" not in events
+    assert _run(tmp_path).returncode == 0
 
 
 def test_first_migration_and_same_sha_warm_restart(tmp_path: Path):

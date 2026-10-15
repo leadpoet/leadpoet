@@ -26,6 +26,12 @@ error event after retry exhaustion. Unknown failures keep their original error
 class; a diagnostic label must not hide the cause. Application exceptions and
 fail-closed cryptographic checks remain unchanged.
 
+A failed restart requires timeout evidence for the
+`restart.stage_deadline_exceeded` label. A long gap between ledger records can
+include work from several stages. It preserves duration evidence but does not
+prove a timeout; an otherwise unknown failure remains `restart.terminal_failure`.
+A completed restart with a slow interval keeps its nonterminal latency diagnostic.
+
 Do not export secrets, source, prompts, private ICPs, contacts, full vectors,
 attestation documents, request bodies, signatures, stack locals, or raw process
 environments. Failed scrubbing drops the telemetry event. A telemetry failure

@@ -84,6 +84,11 @@ SPEC478_FIXTURE = (
     / "fixtures"
     / "subtensor_events_spec478_block9277245.json"
 )
+SPEC479_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec479_block9286245.json"
+)
 
 
 def _compact(value: int) -> bytes:
@@ -412,6 +417,7 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (SPEC475_FIXTURE, 475),
         (SPEC477_FIXTURE, 477),
         (SPEC478_FIXTURE, 478),
+        (SPEC479_FIXTURE, 479),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(
@@ -455,7 +461,7 @@ def test_exact_parent_runtime_and_transition_events_prove_reveal(
     ) in fixture.calls
 
 
-@pytest.mark.parametrize(("fixture_path", "spec_version"), [(SPEC475_FIXTURE, 475), (SPEC477_FIXTURE, 477), (SPEC478_FIXTURE, 478)])
+@pytest.mark.parametrize(("fixture_path", "spec_version"), [(SPEC475_FIXTURE, 475), (SPEC477_FIXTURE, 477), (SPEC478_FIXTURE, 478), (SPEC479_FIXTURE, 479)])
 @pytest.mark.parametrize("control", ["exact", "wrong_vector", "wrong_owner"])
 def test_measured_chain_source_binds_published_vector_and_recipient(fixture_path, spec_version, control):
     fixture = MeasuredArchiveFixture(fixture_path, spec_version)
@@ -516,6 +522,7 @@ def test_measured_chain_source_binds_published_vector_and_recipient(fixture_path
         475: ([(0, 65535), (122, 28086)], 9234048, 9234041, 72),
         477: ([(0, 65535), (15, 6939), (210, 4626)], 9267887, 9267881, 54),
         478: ([(0, 65535), (15, 3295), (210, 4393)], 9277245, 9276881, 27),
+        479: ([(0, 65535), (15, 3295), (229, 4393)], 9286245, 9286242, 25),
     }[spec_version]
     assert result["weights"] == expected[0]
     assert result["reveal_block"] == expected[1]
@@ -524,7 +531,7 @@ def test_measured_chain_source_binds_published_vector_and_recipient(fixture_path
     assert result["event_witness"]["reveal_record_index"] == expected[3]
 
 
-@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470, 472, 475, 477, 478])
+@pytest.mark.parametrize("spec_version", [456, 457, 458, 459, 464, 466, 467, 468, 469, 470, 472, 475, 477, 478, 479])
 def test_historical_reveal_selects_observed_runtime_profile(
     monkeypatch, spec_version
 ):

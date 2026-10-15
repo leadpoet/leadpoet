@@ -48,11 +48,17 @@ def _setup(base: Path, *, mode: str = "live", backend: str = "closed", leak: str
         "    print('gateway-wrong-owner' if state == 'foreign-owner' else 'gateway-fixture-owner')\n")
     guard = {"schema_version": "leadpoet.lab_arena.restart_guard_state.v1", "guard_present": True,
              "candidate_commit": sha, "restart_scope": "gateway", "restart_phase": "gateway_destructive",
-             "guard_generation": 490}
+             "guard_generation": 490, "guard_active": True,
+             "drain": {"preserved": True, "current_leased_count": 0,
+                       "still_leased_count": 0, "lost_or_mutated_count": 0}}
     (base / "guard.json").write_text(json.dumps(guard))
+    (preflight / "arena_first_cutover_idle.py").write_text(
+        "from pathlib import Path\n"
+        "if (Path(__file__).parents[2]/'paid-review-active').exists(): raise SystemExit('paid review active')\n")
     (preflight / "lab_arena_restart_claim_guard.py").write_text(
         "import sys\nfrom pathlib import Path\n"
         "assert sys.argv[sys.argv.index('--invocation')+1] == 'gateway-fixture-owner'\n"
+        "if sys.argv[1] == 'authorize' and (Path(__file__).parents[2]/'authorize-reject').exists(): raise SystemExit('atomic authority changed')\n"
         "print((Path(__file__).parents[2]/'guard.json').read_text())\n")
     runtime = base / "runtime"
     runtime.mkdir()
@@ -76,7 +82,8 @@ def _setup(base: Path, *, mode: str = "live", backend: str = "closed", leak: str
 def _run(base: Path, sha: str, *, failure: str = "") -> subprocess.CompletedProcess[str]:
     functions = "\n".join(_function(name) for name in (
         "arena_runtime_tree", "prepare_arena_runtime_tree", "recover_arena_restart_owner",
-        "rollback_arena_candidate_before_destructive", "recover_arena_inherited_docker_locks"))
+        "rollback_arena_candidate_before_destructive", "run_lab_arena_restart_guard",
+        "require_arena_lock_recovery_idle", "recover_arena_inherited_docker_locks"))
     script = f'''set -euo pipefail
 cd {shlex.quote(str(base))}
 FIXTURE_BASE="$PWD"
@@ -112,6 +119,9 @@ arena_ingress_transition() {{
   [ "$FAIL" != cas ] || return 1
   printf '%s %s %s %s\n' "$6" "$7" "$8" "$9" > "$FIXTURE_BASE/ingress"
   echo "cas:$3:$7" >> "$FIXTURE_BASE/events"
+  if [ "$FAIL" = guard-before-retirement ]; then
+    "$GATEWAY_PYTHON_BIN" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p)); v["guard_active"]=False; open(p,"w").write(json.dumps(v))' "$FIXTURE_BASE/guard.json"
+  fi
 }}
 start_arena_component() {{
   [ "$4" = {sha} ] && [ "$(cat "$3/app.txt")" = 'exact serving source' ]
@@ -124,9 +134,17 @@ stop_arena_component() {{
   echo "stop:$1:$2" >> "$FIXTURE_BASE/events"
   [ "$FAIL" != "stop-$1" ] || return 1
   rm -f "$ARENA_RUNTIME_ROOT/$1-slot$2-process.json"
+  if [ "$FAIL" = guard-before-api ] && [ "$1" = edge ] && [ "$2" = 1 ]; then
+    "$GATEWAY_PYTHON_BIN" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p)); v["guard_active"]=False; open(p,"w").write(json.dumps(v))' "$FIXTURE_BASE/guard.json"
+  fi
 }}
 timeout() {{ shift; "$@"; }}
-curl() {{ [ "$FAIL" != health ]; }}
+curl() {{
+  [ "$FAIL" != health ] || return 1
+  if [ "$FAIL" = guard-before-cas ]; then
+    "$GATEWAY_PYTHON_BIN" -c 'import json,sys; p=sys.argv[1]; v=json.load(open(p)); v["guard_active"]=False; open(p,"w").write(json.dumps(v))' "$FIXTURE_BASE/guard.json"
+  fi
+}}
 sleep() {{ :; }}
 mv() {{ if [ "$1" = -T ]; then shift; fi; [ "$1" != -- ] || shift; "$GATEWAY_PYTHON_BIN" -c 'import os,sys; os.chmod(sys.argv[1],0o700); os.rename(sys.argv[1],sys.argv[2]); os.chmod(sys.argv[2],0o500)' "$1" "$2"; }}
 recover_arena_inherited_docker_locks
@@ -332,3 +350,77 @@ def test_driver_presence_refuses_handoff_before_cas(tmp_path: Path, driver: str)
     assert "driver" in result.stderr
     assert not _events(tmp_path)
     assert (tmp_path / "ingress").read_text().strip() == f"dual 1 {sha} closed"
+
+
+@pytest.mark.parametrize('mutation', ['inactive', 'not-preserved', 'current-lease',
+    'captured-lease', 'lost-work', 'malformed-drain', 'boolean-generation', 'paid-review'])
+def test_recovery_requires_active_guard_and_idle_work_before_any_handoff(tmp_path, mutation):
+    sha = _setup(tmp_path)
+    path = tmp_path / 'guard.json'
+    guard = json.loads(path.read_text())
+    if mutation == 'inactive':
+        guard['guard_active'] = False
+    elif mutation == 'not-preserved':
+        guard['drain']['preserved'] = False
+    elif mutation == 'current-lease':
+        guard['drain']['current_leased_count'] = 1
+    elif mutation == 'captured-lease':
+        guard['drain']['still_leased_count'] = 1
+    elif mutation == 'lost-work':
+        guard['drain']['lost_or_mutated_count'] = 1
+    elif mutation == 'malformed-drain':
+        guard['drain'] = {}
+    elif mutation == 'boolean-generation':
+        guard['guard_generation'] = True
+    else:
+        (tmp_path / 'paid-review-active').touch()
+    path.write_text(json.dumps(guard))
+    result = _run(tmp_path, sha)
+    assert result.returncode != 0
+    assert not _events(tmp_path)
+    assert (tmp_path / 'ingress').read_text().strip() == f'dual 1 {sha} closed'
+    assert (tmp_path / 'runtime/api-slot1-process.json').read_text() == 'leak'
+    assert (tmp_path / 'runtime/edge-slot1-process.json').read_text() == 'leak'
+
+
+def test_guard_expiry_during_readiness_prevents_ingress_handoff(tmp_path):
+    sha = _setup(tmp_path)
+    result = _run(tmp_path, sha, failure='guard-before-cas')
+    assert result.returncode != 0
+    assert (tmp_path / 'ingress').read_text().strip() == f'dual 1 {sha} closed'
+    assert not any(event.startswith('cas:') or event in ('stop:edge:1', 'stop:api:1') for event in _events(tmp_path))
+    assert (tmp_path / 'runtime/api-slot1-process.json').read_text() == 'leak'
+    assert (tmp_path / 'runtime/edge-slot1-process.json').read_text() == 'leak'
+
+
+def test_guard_expiry_after_handoff_prevents_retiring_either_old_component(tmp_path):
+    sha = _setup(tmp_path)
+    result = _run(tmp_path, sha, failure='guard-before-retirement')
+    assert result.returncode != 0
+    assert (tmp_path / 'ingress').read_text().strip() == f'dual 0 {sha} closed'
+    assert _events(tmp_path) == ['start:api:0', 'start:edge:0', 'cas:1:0']
+    for component in ('api', 'edge'):
+        assert (tmp_path / f'runtime/{component}-slot1-process.json').read_text() == 'leak'
+        assert (tmp_path / f'runtime/{component}-slot0-process.json').read_text().strip() == 'clean'
+
+
+def test_atomic_authorization_failure_refuses_handoff(tmp_path):
+    sha = _setup(tmp_path)
+    (tmp_path / 'authorize-reject').touch()
+    result = _run(tmp_path, sha)
+    assert result.returncode != 0
+    assert 'atomic authority changed' in result.stderr
+    assert not _events(tmp_path)
+    assert (tmp_path / 'ingress').read_text().strip() == f'dual 1 {sha} closed'
+
+
+def test_guard_expiry_between_retirements_preserves_remaining_old_api(tmp_path):
+    sha = _setup(tmp_path)
+    result = _run(tmp_path, sha, failure='guard-before-api')
+    assert result.returncode != 0
+    assert (tmp_path / 'ingress').read_text().strip() == f'dual 0 {sha} closed'
+    assert _events(tmp_path) == ['start:api:0', 'start:edge:0', 'cas:1:0', 'stop:edge:1']
+    assert (tmp_path / 'runtime/api-slot1-process.json').read_text() == 'leak'
+    assert not (tmp_path / 'runtime/edge-slot1-process.json').exists()
+    assert (tmp_path / 'runtime/api-slot0-process.json').read_text().strip() == 'clean'
+    assert (tmp_path / 'runtime/edge-slot0-process.json').read_text().strip() == 'clean'

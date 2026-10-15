@@ -481,6 +481,37 @@ PY
   return "$status"
 }
 
+require_arena_lock_recovery_idle() {
+  local state generation
+  # API code review is separate from the driver and durable execute/score leases.
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B \
+    "$GATEWAY_PREFLIGHT_TREE/scripts/arena_first_cutover_idle.py" \
+    --environment-file "$GATEWAY_ENV_FILE" >/dev/null || return 1
+  state="$(run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" owned)" || return 1
+  generation="$("$GATEWAY_PYTHON_BIN" -B - "$PREPARED_GATEWAY_SHA" "$state" <<'PY'
+import json
+import sys
+state = json.loads(sys.argv[2])
+drain = state.get("drain", {})
+if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
+        or state.get("guard_present") is not True or state.get("guard_active") is not True
+        or state.get("candidate_commit") != sys.argv[1]
+        or state.get("restart_scope") != "gateway"
+        or state.get("restart_phase") != "gateway_destructive"
+        or type(state.get("guard_generation")) is not int or state["guard_generation"] <= 0
+        or drain.get("preserved") is not True
+        or any(type(drain.get(key)) is not int or drain[key] != 0 for key in
+               ("current_leased_count", "still_leased_count", "lost_or_mutated_count"))):
+    raise SystemExit("Arena lock recovery requires an active owned idle gateway guard")
+print(state["guard_generation"])
+PY
+  )" || return 1
+  # The normal canonical RPC checks the same owner, generation, active lease and
+  # current drain atomically. Repeating its current destructive phase is legal.
+  run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
+    --generation "$generation" --phase gateway_destructive >/dev/null
+}
+
 recover_arena_inherited_docker_locks() {
   (
     # Subshell variables stay available to EXIT cleanup even when errexit
@@ -562,6 +593,7 @@ PY
         --release-sha "$PREPARED_GATEWAY_SHA" -- "${ARENA_COMPONENT_COMMAND[@]}")" = \
         "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" ] || exit 1
     done
+    require_arena_lock_recovery_idle || exit 1
     if [ "$crossed" = 0 ]; then
       ARENA_CANDIDATE_SLOT="$old_slot"
       prepare_arena_runtime_tree "$current_tree"
@@ -587,6 +619,7 @@ PY
         sleep 2
       done
       [ "$ready" = 1 ] || { echo "ERROR: Arena lock handoff candidate was not ready" >&2; exit 1; }
+      require_arena_lock_recovery_idle || exit 1
       arena_ingress_transition "$GATEWAY_PREFLIGHT_TREE" dual "$ARENA_PREVIOUS_SLOT" "$PREPARED_GATEWAY_SHA" closed \
         dual "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" closed
       crossed=1
@@ -616,6 +649,7 @@ PY
           --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$old_tree" --uid "$(id -u)" \
           --release-sha "$PREPARED_GATEWAY_SHA" -- "${ARENA_COMPONENT_COMMAND[@]}")" = \
           "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" ] || exit 1
+        require_arena_lock_recovery_idle || exit 1
         stop_arena_component "$component" "$old_slot" "$old_tree"
       fi
     done

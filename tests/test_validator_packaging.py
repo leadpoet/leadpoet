@@ -68,6 +68,8 @@ def distributions(tmp_path_factory):
 @pytest.mark.parametrize("origin", ["source", "sdist"])
 def test_wheel_dependencies_match_requirements(distributions, origin):
     with zipfile.ZipFile(distributions[origin]) as archive:
+        for name in ("__init__.py", "admission.py", "transport.py"):
+            assert "arena_reviewer_runtime/" + name in archive.namelist()
         metadata_path = next(n for n in archive.namelist() if n.endswith("/METADATA"))
         metadata = Parser().parsestr(archive.read(metadata_path).decode())
         entry_points_path = next(

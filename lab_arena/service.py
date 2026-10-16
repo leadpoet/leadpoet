@@ -18,7 +18,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import telemetry, runtime_version
+from lab_arena import telemetry, runtime_version, reviewer_runtime
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
@@ -4992,6 +4992,18 @@ class ArenaService:
         if response.get("kind") == "score":
             # A scoring assignment: the validator runs the pinned judge image on
             # the scored output with the signed scorer policy.
+            current_score_run = self._store.get_run(str(response["run_id"]))
+            if current_score_run is None:
+                raise ServiceError("run_missing", 404)
+            if current_score_run.get("lease_generation") != response.get("lease_generation"):
+                raise ServiceError("reviewer_runtime_lease_changed", 409)
+            try:
+                binding = reviewer_runtime.lease_binding(current_score_run, configuration)
+                lease.update(reviewer_runtime.selected_image(current_score_run, configuration))
+            except reviewer_runtime.ReviewerRuntimeError as exc:
+                raise ServiceError("reviewer_runtime_invalid", 503) from exc
+            if binding is not None:
+                lease["reviewer_runtime_doc"] = binding
             if quality_policy.enabled(configuration):
                 submission = self._store.get_submission(
                     str(response["submission_id"])
@@ -5041,8 +5053,7 @@ class ArenaService:
                 )
             if not quality_policy.enabled(configuration) and integrity.enabled(configuration):
                 try:
-                    current = self._store.get_run(str(response["run_id"])) or response
-                    prior = self._prior_legacy_terminal_breakdowns(current, round_row)
+                    prior = self._prior_legacy_terminal_breakdowns(current_score_run, round_row)
                     if prior:
                         lease["prior_terminal_breakdowns"] = prior
                 except (scoring.ScoringError, ServiceError, ValueError, OutputInvalid) as exc:
@@ -5165,6 +5176,19 @@ class ArenaService:
         if run is None:
             raise ServiceError("run_missing", 404)
         self._require_round_ownership(str(run.get("round_id") or ""))
+        if run.get("reviewer_runtime_doc") is not None:
+            row = self._round(str(run["round_id"]))
+            try:
+                binding = reviewer_runtime.lease_binding(run, row.get("configuration_doc") or {})
+            except reviewer_runtime.ReviewerRuntimeError as exc:
+                raise ServiceError("reviewer_runtime_invalid", 503) from exc
+            for event in events:
+                if event["kind"] == "runtime.started":
+                    # Host-owned selection audit also covers older validators.
+                    # This records the lease, not proof of image execution.
+                    event["content"]["reviewer_runtime_selection"] = {
+                        key: binding[key] for key in reviewer_runtime.AUDIT_FIELDS
+                    }
         try:
             result = self._store.append_trajectory_events(
                 run_id, hash_lease_token(lease_token), events
@@ -5313,8 +5337,12 @@ class ArenaService:
         if provider is None:
             raise ServiceError("scorer_image_access_unsupported", 409)
         configuration = round_row.get("configuration_doc") or {}
-        image_reference = str(configuration.get("scorer_image_reference") or "")
-        image_digest = str(configuration.get("scorer_image_digest") or "")
+        try:
+            selected = reviewer_runtime.selected_image(run, configuration)
+        except reviewer_runtime.ReviewerRuntimeError as exc:
+            raise ServiceError("reviewer_runtime_invalid", 503) from exc
+        image_reference = selected["image_reference"]
+        image_digest = selected["image_digest"]
         access = None
         failed = False
         try:
@@ -5708,6 +5736,12 @@ class ArenaService:
             raise ServiceError("run_round_mismatch", 400)
         if run.get("runner_hotkey") != validated["hotkey"]:
             raise ServiceError("run_runner_mismatch", 403)
+        try:
+            reviewer_runtime.validate_completion_audit(
+                run, round_row.get("configuration_doc") or {}, run_result,
+            )
+        except reviewer_runtime.ReviewerRuntimeError as exc:
+            raise ServiceError("reviewer_runtime_audit_invalid", 400) from exc
         kind = str(run.get("kind") or "execute")
         terminal_status = run_result["terminal_status"]
         if (

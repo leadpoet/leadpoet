@@ -13,8 +13,8 @@ from lab_arena.store import hash_lease_token
 from tests.lab_arena import untransitioned_host_fault_guard399_postgres_test as prior399
 from tests.lab_arena.execute_host_cooldown396_postgres_test import _hash, _security
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
+    migrations_before,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete
 from tests.lab_arena.test_lab_arena_service_round import Harness, daily_icps
@@ -22,13 +22,16 @@ from tests.lab_arena.test_lab_arena_service_round import Harness, daily_icps
 
 SQL401 = Path(__file__).parents[2] / "scripts/401-lab-arena-proxy-model-capacity.sql"
 migrated399 = prior399.migrated
+# Descendants replay SQL420's exact historical completion preimage. SQL465
+# changes that function, so it belongs after those historical upgrade chains.
+HISTORICAL_SERVICE_MIGRATIONS = migrations_before("465-lab-arena-partial-company-judgments.sql")
 
 
 @pytest.fixture(scope="module")
 def database():
     # Reproduce the live claim function's 6300- and 4500-second lease guards.
     # Without migrations 329 and 354, the current fixture has another hash.
-    migrations = CURRENT_SERVICE_MIGRATIONS + (
+    migrations = HISTORICAL_SERVICE_MIGRATIONS + (
         "264-lab-arena-codex-cost-reconciliation.sql",
         "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
         "312-lab-arena-temporary-hold-admission.sql",

@@ -392,3 +392,52 @@ def test_corrupt_first_pending_file_does_not_starve_later_valid_file(tmp_path, m
         assert len(api.attempts) == 1 and bad.exists() and not good.exists()
     finally:
         worker.close()
+
+
+@pytest.mark.parametrize('mode', ['delivery', 'replay'])
+@pytest.mark.parametrize('status', ['accepted', 'failed', 'accounting_open', 'stale', 'rejected', 'other'])
+def test_only_persisted_completion_status_recovers_matching_run(tmp_path, mode, status):
+    from tests.lab_arena.validator_logging_test import logger, queued
+
+    log = logger(monotonic=lambda: 100.0)
+    api = Api([{'status': status}])
+    cfg = config(tmp_path, api)
+    cfg.operational_logger = log
+    document = envelope(cfg)
+    run_id = document['body']['run_id']
+    log.error('completion', RuntimeError('private'), run_id=run_id, round_id=ROUND)
+    log.error('completion', RuntimeError('private'), run_id='unrelated-run', round_id=ROUND)
+    worker = rn.Runner(cfg)
+    try:
+        if mode == 'replay':
+            path = publish(worker, document)
+            worker._replay_pending_completions()
+        else:
+            if status == 'accounting_open':
+                with pytest.raises(rn.RunnerError, match='accounting_open'):
+                    worker._complete_with_retries(document)
+            else:
+                assert worker._complete_with_retries(document) == {'status': status}
+            path = cfg.work_dir/'pending-completions'/(document['request_id']+'.json')
+        recoveries = [event for event in queued(log) if event['kind'] == 'validator.recovered']
+        if status in {'accepted', 'failed'}:
+            assert [(event['run_id'], event['round_id']) for event in recoveries] == [(run_id, ROUND)]
+            assert not path.exists()
+        elif status in {'stale', 'rejected'}:
+            assert recoveries == [] and not path.exists()
+            assert json.loads(path.with_suffix('.'+status+'.json').read_text()) == document
+        else:
+            assert recoveries == [] and json.loads(path.read_text()) == document
+        # A different run's failure stays open and remains throttled even
+        # after this receipt is persisted or privately archived.
+        before = len(queued(log))
+        log.error('completion', RuntimeError('private'), run_id='unrelated-run', round_id=ROUND)
+        assert len(queued(log)) == before
+        assert api.attempts == [document]  # One exact RPC, no resign or body change.
+        assert api.claims == [] and api.provider_frames == []
+        if status == 'rejected' and mode == 'delivery':
+            assert any(event['kind'] == 'validator.error'
+                       and event['content'].get('reason') == 'completion_denied'
+                       for event in queued(log))
+    finally:
+        worker.close()

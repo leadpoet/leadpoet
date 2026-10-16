@@ -146,7 +146,7 @@ class ValidatorOperationalLogger:
                 encoded = exc.launch_stderr.encode("utf-8")
                 fields["launch_stderr"] = encoded[:2048].decode("utf-8", errors="ignore")
                 fields["launch_stderr_truncated"] = exc.launch_stderr_truncated or len(encoded) > 2048
-        key = (phase, fields.get("reason"), fields["error_class"],
+        key = (phase, round_id, run_id, fields.get("reason"), fields["error_class"],
                fields.get("operation"), fields.get("http_status"))
         with self._lock:
             previous = self._errors.get(key)
@@ -160,7 +160,9 @@ class ValidatorOperationalLogger:
 
     def recovered(self, phase, *, run_id=None, round_id=None):
         with self._lock:
-            keys = [key for key in self._errors if key[0] == phase]
+            # A different concurrent run cannot clear this run's failure.
+            # Global/startup events retain the explicit (None, None) scope.
+            keys = [key for key in self._errors if key[:3] == (phase, round_id, run_id)]
             for key in keys:
                 del self._errors[key]
         if keys:

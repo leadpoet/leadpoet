@@ -429,3 +429,149 @@ def test_shutdown_flushes_error_queued_during_inflight_startup_request():
     assert not closer.is_alive()
     assert not log._thread.is_alive()
     assert [e['kind'] for e in delivered] == ['validator.startup', 'validator.error', 'validator.stopping']
+
+
+def test_concurrent_run_errors_have_independent_deduplication():
+    from concurrent.futures import ThreadPoolExecutor
+
+    log = logger(monotonic=lambda: 100.0)
+    ready = threading.Barrier(2)
+    def report(run_id):
+        ready.wait(timeout=2)
+        log.error('completion', RuntimeError('private'), run_id=run_id,
+                  round_id='arena-2026-10-16')
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(report, ('run-a', 'run-b')))
+    assert {event['run_id'] for event in queued(log)} == {'run-a', 'run-b'}
+    assert all(event['kind'] == 'validator.error' for event in queued(log))
+
+
+def test_one_run_recovery_does_not_clear_another_run_failure():
+    log = logger(monotonic=lambda: 100.0)
+    scope = {'round_id': 'arena-2026-10-16'}
+    log.error('completion', RuntimeError('private'), run_id='run-a', **scope)
+    log.error('completion', RuntimeError('private'), run_id='run-b', **scope)
+    log.recovered('completion', run_id='run-b', **scope)
+    log.error('completion', RuntimeError('private'), run_id='run-a', **scope)
+    assert [(event['kind'], event['run_id']) for event in queued(log)] == [
+        ('validator.error', 'run-a'), ('validator.error', 'run-b'),
+        ('validator.recovered', 'run-b'),
+    ]
+    log.recovered('completion', run_id='run-a', **scope)
+    log.recovered('completion', run_id='run-a', **scope)
+    assert [(event['kind'], event['run_id']) for event in queued(log)][-1] == (
+        'validator.recovered', 'run-a')
+    assert len(queued(log)) == 4
+    log.error('completion', RuntimeError('private'), run_id='run-a', **scope)
+    assert len(queued(log)) == 5
+
+
+def test_unrelated_success_cannot_claim_recovery_without_its_own_error():
+    log = logger(monotonic=lambda: 100.0)
+    log.error('completion', RuntimeError('private'), run_id='run-a', round_id='round-a')
+    log.recovered('completion', run_id='run-b', round_id='round-a')
+    log.error('completion', RuntimeError('private'), run_id='run-a', round_id='round-a')
+    assert [event['kind'] for event in queued(log)] == ['validator.error']
+
+
+def test_same_run_error_stays_throttled_until_interval_or_matching_recovery():
+    clock = [100.0]
+    log = logger(monotonic=lambda: clock[0])
+    scope = {'run_id': 'run-a', 'round_id': 'round-a'}
+    log.error('completion', RuntimeError('private'), **scope)
+    clock[0] += log.ERROR_INTERVAL_SECONDS - 1
+    log.error('completion', RuntimeError('private'), **scope)
+    assert len(queued(log)) == 1
+    clock[0] += 1
+    log.error('completion', RuntimeError('private'), **scope)
+    assert len(queued(log)) == 2
+    log.recovered('completion', **scope)
+    log.error('completion', RuntimeError('private'), **scope)
+    assert [event['kind'] for event in queued(log)] == [
+        'validator.error', 'validator.error', 'validator.recovered', 'validator.error',
+    ]
+
+
+def test_round_identity_is_part_of_error_and_recovery_scope():
+    log = logger(monotonic=lambda: 100.0)
+    for round_id in ('round-a', 'round-b'):
+        log.error('claim', RuntimeError('private'), round_id=round_id)
+    log.recovered('claim', round_id='round-b')
+    log.error('claim', RuntimeError('private'), round_id='round-a')
+    assert [(event['kind'], event['round_id']) for event in queued(log)] == [
+        ('validator.error', 'round-a'), ('validator.error', 'round-b'),
+        ('validator.recovered', 'round-b'),
+    ]
+
+
+def test_global_startup_recovery_only_clears_global_errors():
+    log = logger(monotonic=lambda: 100.0)
+    log.error('startup', RuntimeError('private'))
+    log.error('startup', RuntimeError('private'))
+    log.error('startup', RuntimeError('private'), run_id='run-a', round_id='round-a')
+    log.recovered('startup')
+    log.recovered('startup')
+    log.error('startup', RuntimeError('private'), run_id='run-a', round_id='round-a')
+    events = queued(log)
+    assert [event['kind'] for event in events] == [
+        'validator.error', 'validator.error', 'validator.recovered',
+    ]
+    assert 'run_id' not in events[0] and 'run_id' not in events[-1]
+    assert events[1]['run_id'] == 'run-a'
+    log.recovered('startup', run_id='run-a', round_id='round-a')
+    assert queued(log)[-1]['run_id'] == 'run-a'
+
+
+def test_many_run_scopes_keep_error_and_event_queues_bounded():
+    log = logger(monotonic=lambda: 100.0)
+    for index in range(200):
+        log.error('completion', RuntimeError('private'), run_id='run-%d' % index,
+                  round_id='round-a')
+    assert len(log._errors) == log.QUEUE_LIMIT == 64
+    assert len(queued(log)) == log.QUEUE_LIMIT
+    assert {event['run_id'] for event in queued(log)} == {
+        'run-%d' % index for index in range(136, 200)}
+    log.recovered('completion', run_id='run-199', round_id='round-a')
+    assert len(log._errors) == 63 and len(queued(log)) == 64
+
+
+def test_failed_claim_then_successful_lease_recovers_the_round_scope(tmp_path, monkeypatch):
+    from lab_arena import runner
+    from tests.lab_arena.test_lab_arena_runner import FakeApi, lease, make_config
+
+    log = logger()
+    calls = []
+    recovered = log.recovered
+    def observe(phase, **scope):
+        calls.append((phase, scope))
+        recovered(phase, **scope)
+    monkeypatch.setattr(log, 'recovered', observe)
+    class Api(FakeApi):
+        failures = 1
+        def claim(self, envelope):
+            if self.failures:
+                self.failures -= 1
+                raise runner.RunnerError('private error', http_status=503)
+            return super().claim(envelope)
+    api = Api([lease('picked-up-run')])
+    config = replace(make_config(tmp_path, api, None), operational_logger=log,
+                     claim_retry_seconds=())
+    worker = runner.Runner(config)
+    worker._executor.execute = lambda assigned, token, icp: contracts.build_signed_request(
+        scope=contracts.SCOPE_COMPLETE, round_id=config.round_id,
+        hotkey=config.identity.hotkey, body={'run_id': assigned['run_id']},
+        timestamp=int(config.clock().timestamp()), sign_message=config.identity.sign)
+    try:
+        assert worker.run_once(max_claims=1) == 0
+        assert worker.run_once(max_claims=1) == 1
+    finally:
+        worker.close()
+    claim_events = [event for event in queued(log) if event['content'].get('phase') == 'claim']
+    assert [event['kind'] for event in claim_events] == ['validator.error', 'validator.recovered']
+    assert all(event['round_id'] == config.round_id and 'run_id' not in event for event in claim_events)
+    # Both the inner availability path and the outer successful pickup must
+    # match the request's round scope, before a particular run was assigned.
+    claim_calls = [scope for phase, scope in calls if phase == 'claim']
+    assert len(claim_calls) == 2
+    assert all(scope == {'round_id': config.round_id} for scope in claim_calls)
+    assert worker.abandoned == 0

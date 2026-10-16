@@ -572,6 +572,43 @@ def test_the_service_projection_only_produces_admissible_provider_spans():
     assert "sha256:" not in haystack and "claude-sonnet-4" not in haystack
 
 
+@pytest.mark.parametrize("http_status, expected", [
+    (200, "ok"), (201, "ok"), (400, "refused"), (401, "refused"),
+    (402, "refused"), (403, "refused"), (404, "refused"), (422, "refused"),
+    (429, "failed"), (500, "failed"), (502, "failed"), (503, "failed"),
+    (504, "failed"),
+])
+def test_settled_provider_span_preserves_worker_http_failure(http_status, expected):
+    from lab_arena.service import _provider_telemetry_fields
+
+    summary = {
+        "operation_id": "scrapingdog.scrape", "outcome": "settled",
+        "actual_microusd": 200, "provider_status": 200,
+    }
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    fields = _provider_telemetry_fields(summary, http_status, 1)
+    recorder.record_provider(duration_ms=5.0, **fields)
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.outcome"] == expected
+    assert span.attributes["arena.http_status"] == http_status
+    assert span.attributes["arena.provider_status"] == 200
+    assert span.attributes["arena.cost_microusd"] == 200
+    assert span.status.is_ok == (expected != "failed")
+    assert summary["outcome"] == "settled"
+
+
+@pytest.mark.parametrize("summary, expected", [
+    ({"outcome": "uncertain"}, "uncertain"),
+    ({"error_code": "provider_unavailable"}, "failed"),
+    ({"error_code": "miner_credentials_unavailable"}, "refused"),
+])
+def test_provider_http_fallback_preserves_specific_failure(summary, expected):
+    from lab_arena.service import _provider_telemetry_fields
+
+    assert _provider_telemetry_fields(summary, 502, 1)["outcome"] == expected
+
+
 def test_the_service_tool_projection_resolves_and_degrades():
     """``_telemetry_tool`` must only ever produce an admissible tool name."""
     from lab_arena.service import _telemetry_tool

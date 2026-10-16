@@ -123,7 +123,17 @@ def _provider_telemetry_fields(
         else ""
     )
     if not reported_error:
-        outcome = "uncertain" if call.get("outcome") == "uncertain" else "ok"
+        if call.get("outcome") == "uncertain":
+            outcome = "uncertain"
+        elif type(http_status) is int and (http_status == 429 or 500 <= http_status <= 599):
+            # A settled charge does not make the response delivered to the
+            # worker successful. Some adapters return an HTTP failure without
+            # an error_code in the accounting summary.
+            outcome = "failed"
+        elif type(http_status) is int and 400 <= http_status <= 499:
+            outcome = "refused"
+        else:
+            outcome = "ok"
     elif error_code in _TELEMETRY_UNCERTAIN_CODES or call.get("outcome") == "uncertain":
         outcome = "uncertain"
     elif error_code in _TELEMETRY_FAILED_CODES:

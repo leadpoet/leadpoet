@@ -58,6 +58,7 @@ COPY gateway/ ./gateway/
 COPY leadpoet_canonical/ ./leadpoet_canonical/
 COPY leadpoet_verifier/ ./leadpoet_verifier/
 COPY qualification/ ./qualification/
+COPY arena_reviewer_runtime/ ./arena_reviewer_runtime/
 COPY Leadpoet/ ./Leadpoet/
 
 # Do not bake local .env files into images. Configure the container with

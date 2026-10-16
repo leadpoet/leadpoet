@@ -8,6 +8,7 @@ extraction can be added. The extraction does not import today's grading code.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -60,15 +61,19 @@ def verify_overlay(data: bytes, expected_files: dict[str, bytes]) -> None:
     found: set[str] = set()
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
         for member in archive:
+            if set(member.pax_headers) - {"mtime", "atime", "ctime"} or member.sparse:
+                raise CompositionError("runtime layer contains filesystem metadata overrides")
             name = member.name.rstrip("/")
             while name.startswith("./"):
                 name = name[2:]
             path = PurePosixPath(name)
             if path.is_absolute() or ".." in path.parts or ".wh." in path.name:
                 raise CompositionError("unsafe runtime layer path")
-            if member.isdir() and name in directories:
+            if member.type == tarfile.DIRTYPE and name in directories:
+                if member.mode & 0o7000 or member.mode & 0o002:
+                    raise CompositionError("unsafe runtime layer directory mode")
                 continue
-            if not member.isfile() or name not in expected or name in found:
+            if member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE) or name not in expected or name in found:
                 raise CompositionError("runtime layer changes an unapproved file")
             if member.mode & 0o7000 or member.mode & 0o002:
                 raise CompositionError("unsafe runtime layer file mode")
@@ -96,6 +101,14 @@ def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]
                 if stream is None:
                     continue
                 data = stream.read()
+                # Docker's OCI store exports gzip blobs; its classic store
+                # exports uncompressed layer tar files. RootFS pins the hash
+                # of the uncompressed bytes in either case.
+                if data.startswith(b"\x1f\x8b"):
+                    with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
+                        data = compressed.read(MAX_OVERLAY_BYTES + 1)
+                    if len(data) > MAX_OVERLAY_BYTES:
+                        continue
                 if "sha256:" + hashlib.sha256(data).hexdigest() == digest:
                     verify_overlay(data, expected)
                     matches += 1

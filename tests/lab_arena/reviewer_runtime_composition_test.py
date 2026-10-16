@@ -61,6 +61,22 @@ def test_missing_duplicate_and_extra_files_fail():
             verify_overlay(layer(files), expected)
 
 
+def test_opaque_directory_metadata_cannot_hide_frozen_grading_files():
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        directory = tarfile.TarInfo("model/qualification")
+        directory.type = tarfile.DIRTYPE
+        directory.mode = 0o755
+        directory.pax_headers = {"SCHILY.xattr.trusted.overlay.opaque": "y"}
+        archive.addfile(directory)
+        item = tarfile.TarInfo("model/qualification/core.py")
+        item.size = 6
+        item.mode = 0o644
+        archive.addfile(item, io.BytesIO(b"frozen"))
+    with pytest.raises(CompositionError, match="metadata"):
+        verify_overlay(stream.getvalue(), {"qualification/core.py": b"frozen"})
+
+
 def test_base_and_configuration_are_immutable():
     base = {"Architecture": "amd64", "Os": "linux", "Config": {
         "Entrypoint": ["python3", "/model/scorer_entrypoint.py"], "User": "65534:65534",

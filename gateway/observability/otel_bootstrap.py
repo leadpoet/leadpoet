@@ -1234,12 +1234,40 @@ def _build_otlp_exporter(log: Dict[str, str]) -> Optional[Any]:
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
         OTLPSpanExporter,
     )
+    import math
+    import random
+    import requests
+
+    class _ConnectionRetrySession(requests.Session):
+        def post(self, *args, **kwargs):
+            started = time.monotonic()
+            try:
+                return super().post(*args, **kwargs)
+            except requests.ConnectionError as exc:
+                timeout = kwargs.get("timeout")
+                if (isinstance(exc, requests.Timeout)
+                    or type(timeout) not in (int, float)
+                    or not math.isfinite(timeout) or timeout <= 0
+                    or not isinstance(kwargs.get("data"), bytes)):
+                    raise
+                # The pinned exporter does not retry response-less disconnects.
+                # Retry the identical immutable batch once within its original
+                # timeout. HTTP status retries remain owned by the exporter.
+                deadline = started + timeout
+                delay = random.uniform(0.1, 0.2)
+                if deadline - time.monotonic() <= delay:
+                    raise
+                time.sleep(delay)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                return super().post(*args, **dict(kwargs, timeout=remaining))
 
     endpoint = os.getenv("GATEWAY_OTEL_ENDPOINT", "").strip()
     headers = {"Authorization": "Bearer " + token}
     # Explicit arguments only: the destination exists solely inside
     # this exporter object, never in ambient environment variables.
-    return OTLPSpanExporter(endpoint=endpoint, headers=headers)
+    return OTLPSpanExporter(endpoint=endpoint, headers=headers, session=_ConnectionRetrySession())
 
 
 def _build_span_processor(validating_exporter: Any, *, simple: bool) -> Any:

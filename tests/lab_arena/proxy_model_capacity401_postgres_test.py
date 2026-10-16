@@ -24,14 +24,14 @@ SQL401 = Path(__file__).parents[2] / "scripts/401-lab-arena-proxy-model-capacity
 migrated399 = prior399.migrated
 # Descendants replay SQL420's exact historical completion preimage. SQL465
 # changes that function, so it belongs after those historical upgrade chains.
-CURRENT_SERVICE_MIGRATIONS = migrations_before("465-lab-arena-partial-company-judgments.sql")
+HISTORICAL_SERVICE_MIGRATIONS = migrations_before("465-lab-arena-partial-company-judgments.sql")
 
 
 @pytest.fixture(scope="module")
 def database():
     # Reproduce the live claim function's 6300- and 4500-second lease guards.
     # Without migrations 329 and 354, the current fixture has another hash.
-    migrations = CURRENT_SERVICE_MIGRATIONS + (
+    migrations = HISTORICAL_SERVICE_MIGRATIONS + (
         "264-lab-arena-codex-cost-reconciliation.sql",
         "311-lab-arena-per-icp-closed-billing-reconciliation.sql",
         "312-lab-arena-temporary-hold-admission.sql",

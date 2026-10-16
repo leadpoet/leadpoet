@@ -6,13 +6,11 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import threading
-from unittest.mock import patch
 import uuid
 
 import pytest
 
 from tests.lab_arena import owner_overdue_lease_expiry463_postgres_test as deployed
-from tests.lab_arena import proxy_model_capacity401_postgres_test as historical
 from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
 
 ROOT = Path(__file__).parents[2]
@@ -25,10 +23,8 @@ CASES = json.loads((ROOT / 'tests/fixtures/arena_recovery46_setup_errors.json').
 def database():
     # Install465 after the historical421/450/463 upgrade chain, as production
     # did. Installing it before420 changes that exact historical preimage.
-    migrations = tuple(x for x in historical.CURRENT_SERVICE_MIGRATIONS if not x.startswith('465-'))
-    with patch.object(historical, 'CURRENT_SERVICE_MIGRATIONS', migrations):
-        generator = deployed.database.__wrapped__()
-        value = next(generator)
+    generator = deployed.database.__wrapped__()
+    value = next(generator)
     try:
         deployed.migrated.__wrapped__(value)
         with value[0].connect(**value[1]) as conn, conn.cursor() as cur:

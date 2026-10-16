@@ -1711,3 +1711,16 @@ proved credit exhaustion from proved submitted-key authentication failures.
 Preserve other provider causes, retry and terminal classification, frozen
 rounds, scoring, costs, credentials, completed work and concurrent changes.
 This authority ends after deployment and verification.
+
+## Scoped production authorization: reservation-only completion closeout
+
+On 2026-10-16 the user authorized the smallest general fix for an undispatched
+provider reservation that blocks a completed judge after a store failure.
+Use the existing completion RPC under its current lease/run lock to recover
+only reservation heads with no committed dispatch. This includes exact
+committed migration, focused PostgreSQL and signed completion controls, safe
+push and PR. The coordinating agent owns review, migration application and
+production verification. Preserve dispatched and uncertain accounting, all
+provider fees and source bindings, accepted work, retry limits, frozen scorer,
+ICPs, scoring rules, credentials, operator controls and concurrent work.
+This authority ends after deployment and verification.

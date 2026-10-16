@@ -34,6 +34,7 @@ from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH,
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
     MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS,
+    _ArenaProviderFetchError,
     _commercial_terms_navigation_locator,
     _fetch_bounded_html,
     current_exchange_profile_names_issuer,
@@ -3492,6 +3493,12 @@ async def investigate_company_evidence(
                 except asyncio.TimeoutError as exc:
                     primary_timeout = exc
                     result = {"ok": False, "error": "timeout"}
+                except _ArenaProviderFetchError as exc:
+                    if exc.broker_status not in (502, 503):
+                        raise
+                    # Preserve the failed fetch so the existing bounded,
+                    # exact-URL fallback can recover it without trusting its body.
+                    result = {"ok": False, "error": f"http_{exc.broker_status}"}
                 fetch_outcomes.append(_fetch_outcome(url, result))
                 if (
                     result.get("error") in {

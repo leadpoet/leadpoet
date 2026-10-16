@@ -4705,10 +4705,9 @@ async def verify_three_stage(
     )
     # Exact ATS retrieval establishes which posting was fetched, not who owns
     # its tenant. A hiring verdict must independently bind the employer.
-    require_ats_employer_identity = is_hiring_claim and any(
-        _is_recognized_ats_posting(url)
-        for url in row["claimed_source_urls"]
-    )
+    ats_posting_urls = [url for url in row["claimed_source_urls"]
+                        if _is_recognized_ats_posting(url)]
+    require_ats_employer_identity = is_hiring_claim and bool(ats_posting_urls)
 
     # Structural same-entity override: when the source URL is on the
     # lead's own ``company_website`` host (or subdomain), or on the
@@ -5090,10 +5089,12 @@ async def verify_three_stage(
         else STAGE3_MODEL
     )
     ats_ownership = None
-    if require_ats_employer_identity:
+    # Publisher credit applies to every Arena evidence type. Keep the stricter
+    # hiring approval guard separate from this existing bounded ownership lookup.
+    if require_ats_employer_identity or (integrity_policy and ats_posting_urls):
         ats_ownership = await _resolve_ats_employer_ownership(
             contents,
-            [url for url in row["claimed_source_urls"] if _is_recognized_ats_posting(url)],
+            ats_posting_urls,
             verified_identity_context,
             row["claimed_source_urls"],
         )

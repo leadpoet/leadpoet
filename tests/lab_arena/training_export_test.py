@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 import io
+import random
 import stat
 import tarfile
 
@@ -458,3 +459,70 @@ def test_whole_example_sanitizer_keeps_request_reasoning_control():
     entry.update(request_hash=request_hash, request_capture=pointer)
     result = assemble_example(**values)
     assert result["provider_calls"][0]["request"]["effective_parameters"]["reasoning"] == {"effort": "high"}
+
+
+def test_shuffled_ledger_preserves_action_order_lifecycle_and_reconciled_cost_provenance():
+    values = fixture()
+    add_call(values)
+    base_rows = values["ledger_rows"]
+    rows = []
+    identities = ["sha256:" + digit * 64 for digit in ("f", "e", "0", "1")]
+    for index, (identity, sequence, attempt, row_run) in enumerate(zip(identities, (0, 0, 2, 0), (1, 2, 1, 1),
+                                                                    ("execute:1", "execute:1", "execute:1", "judge:1"))):
+        offset = index * 4
+        for original in base_rows:
+            row = copy.deepcopy(original)
+            row.update(entry_id=offset + original["entry_id"], run_id=row_run, call_identity=identity,
+                       funding_source="host", created_at="2026-10-16T00:%02d:00Z" % (20 - offset - original["entry_id"]))
+            row["entry_doc"].update(action_sequence=sequence, provider_attempt=attempt,
+                                     base_call_identity=identities[0] if index == 1 else identity)
+            if row["entry_kind"] == "settlement":
+                row["terminal_response"].update(call_succeeded=True, headers={"content-type": "application/json"},
+                    provider_cost={"basis": "openrouter_generation_cost", "units": "0.000042", "unit_name": "usd",
+                                   "operation": "openrouter.chat", "request_id": "generation-%d" % index})
+            rows.append(row)
+        if index == 0:
+            # Retain the successful response while later billing establishes
+            # its exact charge. The equal payload must appear only once.
+            settlement = copy.deepcopy(rows[-1])
+            rows[-1].update(entry_kind="uncertain", amount_microusd=100)
+            settlement.update(entry_id=4, created_at="2026-10-16T00:30:00Z")
+            settlement["entry_doc"].update(openrouter_delayed_reconciliation=True,
+                                            reconciled_uncertainty_entry_id=3, late_reconciliation=True)
+            rows.append(settlement)
+    values["runs"][0]["result_doc"]["resource_summary"]["provider_call_count"] = 2
+    values["runs"][1]["result_doc"]["resource_summary"]["provider_call_count"] = 1
+    random.Random(42).shuffle(rows)
+    values["ledger_rows"] = rows
+    result = assemble_example(**values)
+    assert result["completeness"]["complete"]
+    assert [call["call_identity"] for call in result["provider_calls"]] == identities
+    first = result["provider_calls"][0]
+    assert first["funding_source"] == "host"
+    assert [event["entry_id"] for event in first["lifecycle"]] == [1, 2, 3, 4]
+    assert [event["created_at"] for event in first["lifecycle"]] == [
+        "2026-10-16T00:19:00Z", "2026-10-16T00:18:00Z", "2026-10-16T00:17:00Z", "2026-10-16T00:30:00Z"]
+    assert first["lifecycle"][-1]["accounting"]["reconciled_uncertainty_entry_id"] == 3
+    assert first["terminal_entry_id"] == 4
+    assert first["provider_cost"]["request_id"] == "generation-0"
+    assert first["response_provenance"]["delivery_to_worker"] == "not_proved"
+    assert result["costs"]["confirmed_actual_microusd"] == 168
+    assert all("response" not in receipt for receipt in first["response_receipts"])
+    assert all(receipt["response_ref"] == {"field": "response", "entry_id": 4} for receipt in first["response_receipts"])
+    values["ledger_rows"] = list(reversed(rows))
+    assert assemble_example(**values) == result
+
+
+def test_distinct_earlier_response_is_kept_without_claiming_worker_delivery():
+    values = fixture()
+    add_call(values)
+    earlier = copy.deepcopy(values["ledger_rows"][-1])
+    earlier.update(entry_kind="uncertain")
+    values["ledger_rows"][-1].update(entry_id=4)
+    earlier["terminal_response"]["body_b64"] = base64.b64encode(json.dumps({"result": "earlier distinct response"}).encode()).decode()
+    values["ledger_rows"].append(earlier)
+    result = assemble_example(**values)
+    receipts = result["provider_calls"][0]["response_receipts"]
+    assert receipts[0]["response"] == {"result": "earlier distinct response"}
+    assert receipts[1]["response_ref"]["field"] == "response"
+    assert receipts[0]["response_sha256"] != receipts[1]["response_sha256"]

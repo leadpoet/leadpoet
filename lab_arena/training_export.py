@@ -171,7 +171,31 @@ def _source_evidence(objects, run, round_row, submission, participant):
             "archive_commit_comment": source_bundle.source_archive_commit(source) or None}
 
 
-def _calls(rows, run_ids, objects):
+def _response_value(terminal, provider):
+    raw = base64.b64decode(terminal["body_b64"], validate=True)
+    if len(raw) > MAX_RECEIPT_BYTES:
+        raise ExportError("receipt_too_large")
+    try:
+        response = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        if provider == "openrouter":
+            raise ExportError("opaque_model_response")
+        response = {"text": raw.decode("utf-8")}
+    from lab_arena.training_capture import sanitize_training_value
+    response, redactions = sanitize_training_value(response)
+    response, removed = without_hidden_reasoning(response)
+    return response, sorted(set(redactions) | ({"hidden_reasoning"} if removed else set()))
+
+
+def _call_order(call, run_order):
+    def numeric(value):
+        return value if type(value) is int and value >= 0 else 2 ** 63
+    return (run_order.get(call["run_id"], 2 ** 63),
+            numeric(call.get("action_sequence")), numeric(call.get("provider_attempt", 1)),
+            call["reservation_entry_id"], call["call_identity"])
+
+
+def _calls(rows, run_ids, objects, run_order):
     grouped, calls, reasons = {}, [], set()
     if len({row.get("entry_id") for row in rows}) != len(rows):
         raise ExportError("duplicate_ledger_entry")
@@ -200,7 +224,57 @@ def _calls(rows, run_ids, objects):
         entry = reserve.get("entry_doc") or {}
         call = {"call_identity": identity, "run_id": reserve["run_id"],
                 "provider": reserve.get("provider"), "operation_id": reserve.get("operation_id"),
+                "funding_source": reserve.get("funding_source"), "reservation_entry_id": reserve["entry_id"],
                 **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
+        accounting_fields = {"reserved_microusd", "released_microusd", "variance_microusd", "late_reconciliation",
+                             "openrouter_delayed_reconciliation", "deepline_delayed_reconciliation",
+                             "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
+                             "openrouter_generation_id", "deepline_request_id", "deepline_operation",
+                             "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost"}
+        call["lifecycle"] = []
+        for row in sorted(entries, key=lambda row: int(row["entry_id"])):
+            metadata = {key: copy.deepcopy(row[key]) for key in
+                        ("entry_id", "entry_kind", "created_at", "funding_source", "amount_microusd") if key in row}
+            metadata["accounting"] = {key: copy.deepcopy(value) for key, value in (row.get("entry_doc") or {}).items()
+                                      if key in accounting_fields}
+            recorded_call = (row.get("entry_doc") or {}).get("call")
+            if isinstance(recorded_call, Mapping):
+                call_accounting = {key: copy.deepcopy(value) for key, value in recorded_call.items() if key in accounting_fields}
+                if call_accounting:
+                    metadata["accounting"]["call"] = call_accounting
+            call["lifecycle"].append(metadata)
+        call["response_receipts"] = []
+        latest_id = max((int(row["entry_id"]) for row in terminals), default=None)
+        latest_terminal = next((row.get("terminal_response") or {} for row in terminals if row["entry_id"] == latest_id), {})
+        latest_response, latest_redactions, latest_digest = None, [], None
+        try:
+            latest_response, latest_redactions = _response_value(latest_terminal, reserve.get("provider"))
+            latest_digest = contracts.document_hash(latest_response)
+        except Exception:
+            pass  # Missing receipt is recorded below; no failed proof is hidden.
+        saved_bodies = {}
+        for row in sorted(terminals, key=lambda row: int(row["entry_id"])):
+            terminal = row.get("terminal_response") or {}
+            receipt = {"entry_id": row["entry_id"], "entry_kind": row["entry_kind"],
+                       "created_at": row.get("created_at"),
+                       "metadata": {key: copy.deepcopy(value) for key, value in terminal.items() if key != "body_b64"}}
+            try:
+                response, redactions = _response_value(terminal, reserve.get("provider"))
+                digest = contracts.document_hash(response)
+                receipt["response_sha256"], receipt["privacy_redactions"] = digest, redactions
+                if digest == latest_digest:
+                    receipt["response_ref"] = {"field": "response", "entry_id": latest_id}
+                elif digest in saved_bodies:
+                    receipt["response_ref"] = {"entry_id": saved_bodies[digest]}
+                else:
+                    receipt["response"] = response
+                    saved_bodies[digest] = row["entry_id"]
+                if "credential" in redactions:
+                    reasons.add("response_privacy_nonexact")
+            except Exception:
+                receipt["response_unavailable"] = True
+            call["response_receipts"].append(receipt)
+        call["response_provenance"] = {"source": "stored_provider_ledger_receipt", "delivery_to_worker": "not_proved"}
         pointer = entry.get("request_capture") or {}
         try:
             from lab_arena.training_capture import read_request
@@ -227,39 +301,28 @@ def _calls(rows, run_ids, objects):
             if len({row["entry_id"] for row in terminals}) != len(terminals):
                 raise ExportError("duplicate_ledger_entry")
             call["accounting_state"] = latest["entry_kind"]
+            call["terminal_entry_id"] = latest["entry_id"]
             if type(latest.get("amount_microusd")) is not int or latest["amount_microusd"] < 0:
                 raise ExportError("call_cost_invalid")
             call["actual_microusd"] = latest["amount_microusd"] if latest["entry_kind"] != "uncertain" else None
             if latest["entry_kind"] == "uncertain":
                 reasons.add("provider_cost_unresolved")
             terminal = latest.get("terminal_response") or {}
-            try:
-                raw = base64.b64decode(terminal["body_b64"], validate=True)
-                if len(raw) > MAX_RECEIPT_BYTES:
-                    raise ExportError("receipt_too_large")
-                # Never export opaque response bytes: hidden reasoning can only
-                # be removed reliably from a parsed JSON response.
-                try:
-                    response = json.loads(raw)
-                except (ValueError, UnicodeDecodeError):
-                    if reserve.get("provider") == "openrouter":
-                        raise ExportError("opaque_model_response")
-                    response = {"text": raw.decode("utf-8")}
-                from lab_arena.training_capture import sanitize_training_value
-                response, redactions = sanitize_training_value(response)
-                call["response"], removed = without_hidden_reasoning(response)
-                call["response_hidden_reasoning_removed"] = removed or "hidden_reasoning" in redactions
-                call["response_privacy_redactions"] = redactions
-                if "credential" in redactions:
-                    reasons.add("response_privacy_nonexact")
+            if "provider_cost" in terminal:
+                call["provider_cost"] = copy.deepcopy(terminal["provider_cost"])
+            if latest_digest is not None:
+                call["response"] = latest_response
+                call["response_sha256"] = latest_digest
+                call["response_hidden_reasoning_removed"] = "hidden_reasoning" in latest_redactions
+                call["response_privacy_redactions"] = latest_redactions
                 call["response_status"] = terminal.get("status")
-            except Exception:
+            else:
                 reasons.add("full_response_unavailable")
             for key in ("judgment_cache_source_call_identity", "judgment_cache_source_run_id"):
                 if key in terminal:
                     call[key] = terminal[key]
         calls.append(call)
-    return calls, reasons
+    return sorted(calls, key=lambda call: _call_order(call, run_order)), reasons
 
 
 def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
@@ -362,15 +425,20 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             reasons["input_output_label"].add("judge_evidence_unverified")
     related = [row for row in runs if row.get("assignment_id") == run["assignment_id"]
                or row.get("kind") == "score" and row.get("scored_run_id") == run_id]
+    # This is a deterministic grouping, not a claim that parallel runs or calls
+    # occurred serially. Preserve original ledger timestamps in each lifecycle.
+    related.sort(key=lambda row: (row.get("kind") != "execute", int(row.get("stage_generation") or 0),
+                                  int(row.get("attempt") or 0), row["run_id"]))
     run_ids = {row["run_id"] for row in related}
     example["attempts"] = [{"run_id": row["run_id"], "kind": row["kind"], "attempt": row.get("attempt"),
                              "lease_generation": row.get("lease_generation"), "status": row.get("status"),
                              "terminal_cause": row.get("terminal_cause"), "runtime": _runtime(row)}
-                            for row in sorted(related, key=lambda row: row["run_id"])]
+                            for row in related]
     for row in ledger_rows:
         if row.get("run_id") in run_ids and any(row.get(key) != run.get(key) for key in ("round_id", "submission_id", "miner_hotkey")):
             raise ExportError("ledger_context_mismatch")
-    calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects)
+    calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
+                         {row["run_id"]: index for index, row in enumerate(related)})
     example["provider_calls"] = calls
     reasons["research_process"].update(gaps)
     reasons["costs"].update(gaps & {"provider_call_inflight", "provider_cost_unresolved", "ambiguous_call_lifecycle", "ledger_call_identity_missing"})
@@ -470,12 +538,14 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     hidden_removed = removed or "hidden_reasoning" in privacy_redactions or any(
-        call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", []) for call in calls)
+        call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", [])
+        or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("response_receipts", [])) for call in calls)
     clean["privacy"] = {"hidden_reasoning_removed": hidden_removed, "hidden_reasoning_excluded": True,
                         "context_redactions": sorted(privacy_redactions)}
     privacy_filtered = bool(privacy_redactions) or hidden_removed or any(
         (snapshot.get("privacy") or {}).get("redacted") for snapshot in snapshots.values()) or any(
-        (call.get("request_capture") or {}).get("redacted") or call.get("response_privacy_redactions") for call in calls)
+        (call.get("request_capture") or {}).get("redacted") or call.get("response_privacy_redactions")
+        or any(receipt.get("privacy_redactions") for receipt in call.get("response_receipts", [])) for call in calls)
     if "credential" in privacy_redactions:
         reasons["research_process"].add("context_privacy_nonexact")
     clean["privacy"]["privacy_filtered"] = privacy_filtered

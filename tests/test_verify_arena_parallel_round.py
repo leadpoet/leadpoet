@@ -390,10 +390,18 @@ def test_historical_replay_is_explicit_and_rejects_malformed_or_future_source(mo
         )
 
 
-def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monkeypatch):
+@pytest.mark.parametrize("active_frozen", [False, True])
+def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monkeypatch, active_frozen):
     from lab_arena import api, service, wiring
 
     built, _runs, _documents = _replay_source_fixture(monkeypatch)
+    if active_frozen:
+        source = built.store.get_round(REPLAY_SOURCE_ROUND_ID)
+        source["status"] = "stage2_scoring"
+        source["configuration_doc"]["mode"] = "live"
+        for run in _runs:
+            if run["status"] == "accepted":
+                run["output_hash"] = contracts.document_hash(json.loads(_documents[run["output_ref"]]))
     production_service = service.ArenaService
 
     @dataclass
@@ -438,8 +446,11 @@ def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monk
 
     replay_service, app = verification._build_pinned_service(
         "arena-2026-09-27-replay",
-        replay_published_round=REPLAY_SOURCE_ROUND_ID,
-        replay_historical=True,
+        **({"replay_active_frozen_round": REPLAY_SOURCE_ROUND_ID,
+            "replay_assignments": ["source-a:0", "source-b:1"],
+            "replay_miner_score_route": True}
+           if active_frozen else {"replay_published_round": REPLAY_SOURCE_ROUND_ID,
+                                 "replay_historical": True}),
     )
     cutoff = datetime(2026, 9, 27, 1, tzinfo=timezone.utc)
     schedule = replay_service.build_schedule(cutoff)

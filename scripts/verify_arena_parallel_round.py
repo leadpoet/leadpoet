@@ -79,6 +79,10 @@ def build_parser() -> argparse.ArgumentParser:
             help="replay accepted nonempty outputs from a published round dated today; no fresh sourcing",
         )
         command.add_argument(
+            "--replay-active-frozen-round",
+            help="copy explicitly selected accepted executions from an active committed round into a new shadow identity",
+        )
+        command.add_argument(
             "--replay-assignment", action="append",
             help="limit replay to this submission_id:ICP_position; repeat for each saved case",
         )
@@ -130,6 +134,7 @@ def _saved_output_replay(
     built: Any, source_round_id: str, round_id: str,
     *, assignments: list[str] | None = None, historical: bool = False,
     miner_score_route: bool = False,
+    active_frozen: bool = False,
 ) -> dict[str, Any]:
     """Read immutable accepted inputs for a new, explicitly labelled shadow run."""
 
@@ -155,8 +160,26 @@ def _saved_output_replay(
         and resumed_target.get("round_id") == round_id
         and (resumed_target.get("configuration_doc") or {}).get("mode") == "shadow"
     )
+    if active_frozen and (not assignments or not miner_score_route):
+        raise VerificationError("active frozen replay requires selected assignments and the miner score route")
+    if active_frozen and (
+        not source
+        or source.get("status") not in (
+            set(contracts.ROUND_STATUSES) - {"open", "cancelled"}
+            - (set() if resume_is_bound_shadow else {"published"})
+        )
+        or not source.get("benchmark_ref")
+        or source_config.get("mode") != "live"
+    ):
+        raise VerificationError("active replay source must be a committed active live round")
+    source_identity = contracts.document_hash({
+        name: source.get(name) for name in (
+            "round_id", "configuration_doc", "participants", "benchmark_ref",
+            "evaluation_date", "icp_set_date",
+        )
+    }) if active_frozen else None
     source_schedule = None
-    if historical and source:
+    if (historical or active_frozen) and source:
         schedule = source_config.get("schedule")
         try:
             evaluation_date = datetime.strptime(
@@ -186,11 +209,12 @@ def _saved_output_replay(
             "submission_cutoff": schedule["submission_cutoff"],
         }
     if (
-        not source or source.get("status") != "published"
+        not source or (not active_frozen and source.get("status") != "published")
         or source_round_id == round_id
         or (
             str(source.get("evaluation_date")) != _utc_now().date().isoformat()
             and not historical
+            and not active_frozen
             and not resume_is_bound_shadow
         )
         or source_config.get("network_name") != built.config.network_name
@@ -263,7 +287,7 @@ def _saved_output_replay(
         for position in range(source_count)
     }
     omitted_failed_origins = expected_origins - seen
-    if not omitted_failed_origins.issubset(failed_origins):
+    if not active_frozen and not omitted_failed_origins.issubset(failed_origins):
         raise VerificationError("replay source assignments are not terminal")
     selected = None
     if assignments is not None:
@@ -282,6 +306,9 @@ def _saved_output_replay(
     empty_output_count = 0
     unselected_output_count = 0
     for submission_id, source_position, run in accepted:
+        if active_frozen and (submission_id, source_position) not in selected:
+            unselected_output_count += 1
+            continue
         document = json.loads(built._objects.get_bounded(run["output_ref"], MAX_OUTPUT_BYTES))
         validated = validate_output_document(
             document,
@@ -292,6 +319,7 @@ def _saved_output_replay(
         output_hash = contracts.document_hash(document)
         if (
             validated != document
+            or (active_frozen and not stored_output_hash)
             or (
                 stored_output_hash not in (None, "")
                 and (
@@ -334,6 +362,17 @@ def _saved_output_replay(
         raise VerificationError("replay selection must contain accepted nonempty outputs")
     if not 2 <= len(icps) <= contracts.MAX_BENCHMARK_ICP_COUNT:
         raise VerificationError("replay nonempty assignment count is unsupported")
+    if active_frozen:
+        current = built.store.get_round(source_round_id) or {}
+        current_identity = contracts.document_hash({
+            name: current.get(name) for name in (
+                "round_id", "configuration_doc", "participants", "benchmark_ref",
+                "evaluation_date", "icp_set_date",
+            )
+        })
+        if (current.get("status") not in set(contracts.ROUND_STATUSES) - {"open", "cancelled"}
+                or current_identity != source_identity):
+            raise VerificationError("active replay source frozen inputs changed")
     input_hash = contracts.document_hash({"icps": icps, "outputs": outputs})
     with tempfile.TemporaryDirectory(prefix="arena-saved-output-replay-") as temporary:
         directory = Path(temporary) / "source"
@@ -375,7 +414,9 @@ def _saved_output_replay(
             "source_benchmark_icp_count": source_count,
             "source_participant_count": len(participant_ids),
             "source_accepted_output_count": len(accepted),
-            "omitted_failed_assignment_count": len(omitted_failed_origins),
+            **({"source_unaccepted_assignment_count": len(omitted_failed_origins)}
+               if active_frozen else
+               {"omitted_failed_assignment_count": len(omitted_failed_origins)}),
             "source_failed_attempt_count": failed_attempt_count,
             "omitted_empty_output_count": empty_output_count,
             "source_contributor_count": len({
@@ -384,6 +425,8 @@ def _saved_output_replay(
             "replayed_group_count": len(origins),
             "replayed_company_count": sum(item["company_count"] for item in origins),
             "selection_scope": (
+                "selected_active_frozen_participant_accepted_nonempty_execute_outputs"
+                if active_frozen else
                 "selected_published_participant_accepted_nonempty_execute_outputs"
                 if selected is not None else
                 "all_published_participant_accepted_nonempty_execute_outputs"
@@ -391,10 +434,15 @@ def _saved_output_replay(
             **({"omitted_unselected_output_count": unselected_output_count}
                if selected is not None else {}),
             **({
-                "historical_source": True,
+                "historical_source": historical,
                 "source_schedule": source_schedule,
                 "icp_set_date": icp_set_date.isoformat(),
             } if source_schedule else {}),
+            **({"active_frozen_source": True,
+                "target_benchmark_hash": contracts.document_hash({
+                    "schema_version": "leadpoet.lab_arena.benchmark.v1",
+                    "round_id": round_id, "icps": icps})}
+               if active_frozen else {}),
             "origins": origins,
         },
     }
@@ -444,14 +492,20 @@ def _build_pinned_service(
     replay_assignments: list[str] | None = None,
     replay_historical: bool = False,
     replay_miner_score_route: bool = False,
+    replay_active_frozen_round: str | None = None,
 ):
     """Use production dependencies with a process-local shadow ownership gate."""
 
-    if replay_assignments is not None and not replay_published_round:
+    if replay_active_frozen_round and replay_published_round:
+        raise VerificationError("choose one replay source mode")
+    source_round = replay_active_frozen_round or replay_published_round
+    if replay_active_frozen_round and (not replay_assignments or not replay_miner_score_route):
+        raise VerificationError("active frozen replay requires selected assignments and the miner score route")
+    if replay_assignments is not None and not source_round:
         raise VerificationError("replay assignments require a published source round")
-    if replay_historical and not replay_published_round:
+    if replay_historical and not source_round:
         raise VerificationError("historical replay requires a published source round")
-    if replay_miner_score_route and not replay_published_round:
+    if replay_miner_score_route and not source_round:
         raise VerificationError("miner score route requires a published source round")
     source_mode = os.environ.get("LAB_ARENA_MODE", "").strip().lower()
     if source_mode != "live":
@@ -463,11 +517,12 @@ def _build_pinned_service(
     built, _unused_app = build_service_from_environment("shadow")
     replay = (
         _saved_output_replay(
-            built, replay_published_round, round_id,
+            built, source_round, round_id,
             assignments=replay_assignments, historical=replay_historical,
             miner_score_route=replay_miner_score_route,
+            active_frozen=bool(replay_active_frozen_round),
         )
-        if replay_published_round else None
+        if source_round else None
     )
     defaults = replace(
         built.config.defaults,
@@ -499,7 +554,7 @@ def _build_pinned_service(
             },
         )
     Service = ArenaService
-    if replay_historical:
+    if replay_historical or replay_active_frozen_round:
         source_schedule = replay["source_schedule"]
 
         class HistoricalReplayArenaService(ArenaService):
@@ -630,6 +685,12 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
             str(row.get("round_id") or ""),
             required=row.get("status") != "open" or bool(participants),
         )
+        if replay.get("active_frozen_source") and row.get("status") != "open":
+            if not row.get("benchmark_ref"):
+                raise VerificationError("existing round replay benchmark is missing")
+            benchmark = json.loads(service._objects.get(row["benchmark_ref"]))
+            if contracts.document_hash(benchmark) != replay["target_benchmark_hash"]:
+                raise VerificationError("existing round replay benchmark inputs differ")
     if mismatches:
         raise VerificationError(
             "existing round is incompatible: " + ",".join(sorted(set(mismatches)))
@@ -1646,6 +1707,7 @@ def main(argv: list[str] | None = None) -> int:
             replay_assignments=args.replay_assignment,
             replay_historical=args.replay_historical,
             replay_miner_score_route=args.replay_miner_score_route,
+            replay_active_frozen_round=args.replay_active_frozen_round,
         )
         checks = service.startup_checks()
         print(

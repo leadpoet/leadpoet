@@ -484,12 +484,18 @@ def test_reserve_does_not_activate_ninth_turn(
 
 
 @pytest.mark.parametrize("late_tool", ["search_web", "fetch_page"])
-def test_inner_deadline_exit_retains_usage(monkeypatch, late_tool):
+def test_inner_deadline_final_submit_retains_usage(monkeypatch, late_tool):
     clock = _Clock()
     provider_calls = []
+    requests = []
 
     async def fake_post(_session, _url, *, headers, payload):
-        del headers, payload
+        del headers
+        requests.append(payload)
+        if len(requests) == 2:
+            return 200, _response(
+                "submit_findings", {"findings": [_finding(status="UNPROVEN")]}, call=2,
+            )
         clock.now = investigator.ADMISSION_DEADLINE_SECONDS
         arguments = (
             {"query": "Acme enrollment software"}
@@ -508,27 +514,23 @@ def test_inner_deadline_exit_retains_usage(monkeypatch, late_tool):
 
     assert provider_calls == []
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result["claims"]["industry"]["reason"] == (
-        "investigation admission budget exhausted"
-    )
+    assert len(requests) == 2
     assert result["usage"] == {
-        "reasoning_turns": 1,
+        "reasoning_turns": 2,
         "search_calls": 0,
         "fetch_calls": 0,
         "prefetched_pages": 1,
         "total_loaded_pages": 1,
         "fetch_outcomes": [],
     }
-    assert result["_completed_submit"] is False
-    assert result["failure_reason"] == (
-        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-    )
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL] == {
         "final_url": URL, "text": QUOTE,
     }
 
 
-def test_outer_deadline_retains_fresh_page_and_marks_interruption(monkeypatch):
+def test_outer_deadline_retains_fresh_page_for_final_judgment(monkeypatch):
     clock = _Clock()
     fresh_url = "https://acme.example/unrelated"
     calls = []
@@ -536,6 +538,10 @@ def test_outer_deadline_retains_fresh_page_and_marks_interruption(monkeypatch):
     async def fake_post(_session, _url, *, headers, payload):
         del headers, payload
         calls.append("model")
+        if len(calls) == 3:
+            return 200, _response(
+                "submit_findings", {"findings": [_finding(status="UNPROVEN")]}, call=2,
+            )
         return 200, _response("fetch_page", {"url": fresh_url})
 
     async def fake_fetch(_session, url, *, stealth_mode=False):
@@ -549,12 +555,10 @@ def test_outer_deadline_retains_fresh_page_and_marks_interruption(monkeypatch):
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
     result = _run_industry(monkeypatch, fake_post, clock)
 
-    assert calls == ["model", "fetch"]
+    assert calls == ["model", "fetch", "model"]
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result["_completed_submit"] is False
-    assert result["failure_reason"] == (
-        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-    )
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][fresh_url] == {
         "final_url": fresh_url,
         "text": "This page has no relevant proof.",

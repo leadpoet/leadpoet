@@ -95,7 +95,8 @@ def test_admitted_contents_may_settle_without_a_new_cancellation_deadline(monkey
     result, calls = _review(monkeypatch, error="http_502", late_settlement=True)
     assert calls == [("primary", URL), ("contents", URL)]
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] == QUOTE
-    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["_completed_submit"] is True
 
 
 @pytest.mark.parametrize("cap,expired", [(1, False), (4, True)])

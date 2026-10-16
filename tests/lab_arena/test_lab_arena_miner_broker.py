@@ -1,6 +1,7 @@
 """Credential-isolation regression checks; these are not live-run evidence."""
 
 from dataclasses import replace
+import asyncio
 import base64
 import json
 from urllib.parse import quote
@@ -11,7 +12,7 @@ from lab_arena import broker as br
 from lab_arena import operations
 from test_lab_arena_broker import (
     CHAT, CONTEXT, FakeLedgerStore, FakeTransport, deepline_history,
-    deepline_history_entry, make_broker,
+    deepline_history_entry, make_broker, deepline_generic_http_401_denial,
 )
 
 
@@ -49,7 +50,7 @@ def _firecrawl_failed_zero_history(request_id):
     return deepline_history(entry)
 
 
-def test_miner_score_managed_firecrawl_enrichment_denial_is_request_refusal():
+def test_miner_score_managed_firecrawl_enrichment_denial_is_infrastructure():
     request_id = "iad1::firecrawl-enrichment-denied"
     denial = firecrawl_enrichment_denial(request_id)
     marked = []
@@ -75,11 +76,11 @@ def test_miner_score_managed_firecrawl_enrichment_denial_is_request_refusal():
     result = broker.execute(context, **arguments)
     replay = broker.execute(context, **arguments)
 
-    assert result.status == 403
+    assert result.status == 502
     assert json.loads(result.body) == {
-        "error": {"code": "provider_request_refused"}
+        "error": {"code": "provider_unavailable"}
     }
-    assert result.call["error_code"] == "provider_request_refused"
+    assert result.call["error_code"] == "provider_unavailable"
     assert result.call["provider_status"] == 403
     assert result.call["actual_microusd"] == 0
     assert result.call["cost_basis"] == "deepline_exact_request_credits_x_0.10_usd"
@@ -87,7 +88,7 @@ def test_miner_score_managed_firecrawl_enrichment_denial_is_request_refusal():
     assert result.call["effective_operation_id"] == "deepline.execute"
     assert marked == []
     assert replay.call["idempotent"] is True
-    assert replay.call["error_code"] == "provider_request_refused"
+    assert replay.status == 502
     assert replay.body == result.body
     assert [sent["method"] for sent in transport.sent] == ["POST", "GET"]
     terminal = ledger.calls[result.call["call_identity"]]["terminal"]
@@ -110,11 +111,125 @@ def test_miner_score_firecrawl_denial_without_verified_cost_stays_uncertain():
         action_sequence=0,
         timeout_ms=60_000,
     )
-    assert result.status == 403
-    assert result.call["error_code"] == "provider_request_refused"
+    assert result.status == 502
+    assert result.call["error_code"] == "provider_unavailable"
     assert result.call["outcome"] == "uncertain"
     assert "actual_microusd" not in result.call
     assert ledger.log == ["reserve", "dispatch", "uncertain"]
+
+
+@pytest.mark.parametrize("status", [401, 402, 403, 429])
+@pytest.mark.parametrize("tool,provider", [
+    ("firecrawl_scrape", "firecrawl"),
+    ("generic_http_request", "generic_http"),
+])
+def test_managed_account_provenance_precedes_request_refusal(status, tool, provider):
+    denial = firecrawl_enrichment_denial()
+    denial.update(provider=provider, operation=tool, upstream_status=status)
+    denial["tool_error"].update(provider=provider, operation=tool, statusCode=status)
+    response = br.ProviderResponse(status, {}, json.dumps(denial).encode())
+    assert br._deepline_managed_provider_failure(response)
+    assert not br._provider_request_refused("deepline", {"tool": tool}, response)
+    assert not br._miner_credential_failure(
+        "deepline", response, champion_credential_retry=False,
+    )
+
+
+@pytest.mark.parametrize("owner,target_refusal,expected_status,expected_fallback", [
+    ("deepline_managed", False, 502, 1),
+    ("workspace", False, 402, 0),
+    ("none", True, 403, 0),
+])
+def test_broker_denial_reaches_frozen_compatible_investigator(
+    monkeypatch, owner, target_refusal, expected_status, expected_fallback,
+):
+    from qualification.scoring import company_evidence_investigator as investigator
+
+    # Exact October16 managed-provider provenance, with synthetic identity and
+    # source. Keep this at the full broker -> frozen investigator boundary.
+    request_id = "hermetic-managed-auth"
+    denial = firecrawl_enrichment_denial(request_id)
+    denial["credential_owner"] = owner
+    tool, provider = "firecrawl_scrape", "firecrawl"
+    operation_id = "scrapingdog.scrape"
+    source_url = "https://example.com/evidence"
+    parameters = {"url": source_url}
+    if target_refusal:
+        denial = deepline_generic_http_401_denial(request_id)
+        denial["upstream_status"] = 403
+        denial["tool_error"]["statusCode"] = 403
+        tool, provider = "generic_http_request", "generic_http"
+        operation_id = "deepline.execute"
+        parameters = {"tool": tool, "payload": {"url": source_url}}
+    entry = deepline_history_entry(
+        request_id, tool, 0, charge_state="failed", provider=provider,
+    )
+    entry.update(status="error", delta=0)
+    broker, ledger, transport = make_broker(
+        transport=FakeTransport([(403, denial), (200, deepline_history(entry))]),
+        credential_for=lambda *_: "synthetic-miner-key",
+        funding_source_for=lambda *_: "miner_key",
+    )
+    result = broker.execute(
+        replace(CONTEXT, kind="score", round_id="arena-2026-10-16"),
+        operation_id=operation_id, parameters=parameters,
+        action_sequence=0, timeout_ms=60_000,
+    )
+    assert result.status == expected_status
+    assert result.call["provider_status"] == 403
+    assert result.call["actual_microusd"] == 0
+    assert result.call["outcome"] == "settled"
+    assert [call["method"] for call in transport.sent] == ["POST", "GET"]
+    assert denial.get("error", "private upstream denial") not in repr(ledger.calls)
+
+    calls = {"model": 0, "exa": 0}
+    async def bounded(_session, url, **_kwargs):
+        return result.status, url, result.body.decode()
+    async def exa(_session, url):
+        calls["exa"] += 1
+        return {"ok": True, "url": url, "final_url": url,
+                "text": "Acme offers software products."}
+    async def search(*_args, **_kwargs):
+        return {"results": []}
+    async def model(_session, _url, *, headers, payload):
+        calls["model"] += 1
+        if calls["model"] == 1:
+            name, arguments = "fetch_page", {"url": source_url}
+        else:
+            name, arguments = "submit_findings", {"findings": [{
+                "target": "stage", "status": "UNPROVEN", "observed_value": None,
+                "observed_country": "", "observed_state": "",
+                "observed_industry": "", "observed_subindustry": "",
+                "activity_role": "unresolved", "evidence_url": "",
+                "evidence_quote": "", "supporting_evidence": [],
+                "old_name": "", "new_name": "", "old_domain": "",
+                "new_domain": "", "shared_linkedin_slug": "",
+                "reason": "No company-bound stage proof.",
+            }]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": f"hermetic-{calls['model']}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+    monkeypatch.setenv("OPENROUTER_API_KEY", "synthetic-key")
+    monkeypatch.setenv("EXA_API_KEY", "synthetic-key")
+    monkeypatch.setenv("SCRAPINGDOG_API_KEY", "synthetic-key")
+    monkeypatch.setattr("socket.socket.connect", lambda *_: pytest.fail("network forbidden"))
+    monkeypatch.setattr(investigator, "_fetch_bounded_html", bounded)
+    monkeypatch.setattr(investigator, "_fetch_exa_exact_page", exa)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    monkeypatch.setattr(investigator, "_post_json", model)
+    outcome = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://example.com"},
+        targets=("stage",), requested_stage="Private Equity",
+    ))
+    assert calls["exa"] == expected_fallback
+    assert outcome["failure_reason"] == ("provider_error" if owner == "workspace" else "")
+    fetches = outcome["usage"]["fetch_outcomes"]
+    if expected_fallback:
+        assert [fetch["ok"] for fetch in fetches] == [False, True]
+        assert fetches[0]["error_class"] == "http_error"
+    elif target_refusal:
+        assert fetches[0]["error_class"] == "provider_request_refused"
 
 
 def test_miner_score_firecrawl_public_page_still_succeeds():
@@ -205,7 +320,7 @@ def test_miner_score_firecrawl_account_denials_preserve_account_ownership(
     {"tool_error": {"provider": "generic_http"}},
     {"tool_error": {"operation": "other"}},
 ])
-def test_firecrawl_enrichment_refusal_rejects_inconsistent_metadata(change):
+def test_firecrawl_denial_is_not_a_request_refusal_with_inconsistent_metadata(change):
     denial = firecrawl_enrichment_denial()
     if "tool_error" in change:
         denial["tool_error"].update(change["tool_error"])
@@ -225,7 +340,7 @@ def test_firecrawl_enrichment_refusal_rejects_inconsistent_metadata(change):
     (b"[]", "firecrawl_scrape"),
     (b"{}", "generic_http_request"),
 ])
-def test_firecrawl_enrichment_refusal_rejects_malformed_or_other_tool(body, tool):
+def test_firecrawl_denial_is_not_a_request_refusal_with_malformed_or_other_tool(body, tool):
     response = br.ProviderResponse(403, {"content-type": "application/json"}, body)
     assert not br._provider_request_refused("deepline", {"tool": tool}, response)
 

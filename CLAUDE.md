@@ -1722,3 +1722,15 @@ redaction, best-effort delivery, execution, scoring, costs and weights.
 Authority includes focused checks, safe push and PR. The coordinating agent
 owns review, merge, canonical deployment and production verification.
 This authority ends after deployment and verification.
+
+## Scoped production authorization: Arena store error diagnostics
+
+On 2026-10-16 the user authorized the smallest general observability fix for
+missing Arena store-error diagnostics. Retain only bounded operation and known
+RPC/table names, HTTP status, SQLSTATE/PostgREST code, or transport class in
+existing private provider diagnostics. Do not export raw exceptions, SQL,
+arguments, URLs, credentials, prompts, or bodies. Preserve status mapping,
+retry, dispatch, settlement, scoring, frozen images, dependencies, data schema,
+and concurrent changes. Authority includes focused checks and a local commit;
+the coordinating agent owns review, push, merge, deployment and verification.
+This authority ends after deployment and verification.

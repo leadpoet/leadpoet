@@ -669,6 +669,11 @@ PROVIDER_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "duration_ms": (int, float),
 }
 
+STORE_ERROR_SPAN_FIELDS = frozenset({
+    "arena.store_operation", "arena.store_resource", "arena.store_http_status",
+    "arena.store_code", "arena.store_transport_error",
+})
+
 PROVIDER_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(PROVIDER_SPAN_ATTRIBUTE_TYPES)
 
 # The ONLY attributes a run-outcome span may carry. There is deliberately no
@@ -971,7 +976,15 @@ def _validating_exporter(
         return _http_violation(span, trimmed)
 
     def _provider_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
-        run_identity_error = _attributed_run_violation(attributes, PROVIDER_SPAN_ATTRIBUTE_TYPES)
+        from lab_arena.store import safe_store_error_metadata
+
+        store_fields = {key: value for key, value in attributes.items() if key in STORE_ERROR_SPAN_FIELDS}
+        if store_fields:
+            metadata = {key.removeprefix("arena.store_"): value for key, value in store_fields.items()}
+            if safe_store_error_metadata(metadata) != metadata or attributes.get("arena.outcome") != "failed":
+                return "store_error"
+        provider_fields = {key: value for key, value in attributes.items() if key not in store_fields}
+        run_identity_error = _attributed_run_violation(provider_fields, PROVIDER_SPAN_ATTRIBUTE_TYPES)
         if run_identity_error is not None:
             return run_identity_error
         provider = attributes["arena.provider"]
@@ -1510,6 +1523,7 @@ class ArenaTelemetry:
         duration_ms: float = 0.0,
         start_ns: Optional[int] = None,
         run_identity: Optional[Mapping[str, Any]] = None,
+        store_error: Optional[Mapping[str, Any]] = None,
     ) -> None:
         try:
             self._record_provider(
@@ -1526,6 +1540,7 @@ class ArenaTelemetry:
                 duration_ms=duration_ms,
                 start_ns=start_ns,
                 run_identity=run_identity,
+                store_error=store_error,
             )
         except BaseException as exc:
             self._log_emit_failure(exc)
@@ -1546,6 +1561,7 @@ class ArenaTelemetry:
         duration_ms: float,
         start_ns: Optional[int],
         run_identity: Optional[Mapping[str, Any]],
+        store_error: Optional[Mapping[str, Any]],
     ) -> None:
         if self._provider_tracer is None:
             return
@@ -1567,6 +1583,10 @@ class ArenaTelemetry:
         span.set_attribute("arena.attempts", int(attempts))
         span.set_attribute("arena.cost_microusd", int(cost_microusd))
         span.set_attribute("duration_ms", float(duration_ms))
+        if store_error:
+            from lab_arena.store import safe_store_error_metadata
+            for key, value in safe_store_error_metadata(store_error).items():
+                span.set_attribute("arena.store_" + key, value)
         if run_identity is not None:
             for key, value in run_identity.items():
                 span.set_attribute(key, value)

@@ -372,15 +372,54 @@ PUBLICATION_RPC_READ_TIMEOUT_SECONDS = 605.0
 CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS = 20.0
 
 
+STORE_TRANSPORT_ERRORS = frozenset({
+    "TransportError", "HTTPError", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+    "PoolTimeout", "ConnectError", "ReadError", "WriteError", "CloseError",
+    "LocalProtocolError", "RemoteProtocolError", "ProxyError", "UnsupportedProtocol",
+    "DecodingError", "TooManyRedirects", "HTTPStatusError", "OperationalError",
+    "InterfaceError",
+})
+
+
+def safe_store_error_metadata(value: Any) -> Dict[str, Any]:
+    """Project only a known store operation and bounded machine diagnostics."""
+    if not isinstance(value, Mapping):
+        return {}
+    operation, resource = value.get("operation"), value.get("resource")
+    allowed = FUNCTION_SIGNATURES if operation == "rpc" else TABLES if operation == "select" else ()
+    if not isinstance(resource, str) or resource not in allowed:
+        return {}
+    result = {"operation": operation, "resource": resource}
+    status, code, transport_error = (value.get(key) for key in ("http_status", "code", "transport_error"))
+    if type(status) is int and 100 <= status <= 599:
+        result["http_status"] = status
+    if isinstance(code, str) and re.fullmatch(r"(?:[0-9A-Z]{5}|PGRST[0-9]{3})", code):
+        result["code"] = code
+    if isinstance(transport_error, str) and transport_error in STORE_TRANSPORT_ERRORS:
+        result["transport_error"] = transport_error
+    return result
+
+
 class ArenaStoreError(RuntimeError):
     """A durable-state operation failed. Messages never carry credentials."""
+
+    def __init__(self, message: str, *, operation=None, resource=None,
+                 http_status=None, code=None, transport_error=None) -> None:
+        super().__init__(message)
+        metadata = safe_store_error_metadata({
+            "operation": operation, "resource": resource, "http_status": http_status,
+            "code": code, "transport_error": transport_error,
+        })
+        if metadata:
+            self.store_error = metadata
 
 
 class ArenaStoreUnavailable(ArenaStoreError):
     """Temporary database failure; distinguish a proved rollback from lost response."""
 
-    def __init__(self, message: str, *, transaction_rolled_back: bool = False) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, *, transaction_rolled_back: bool = False,
+                 **diagnostics: Any) -> None:
+        super().__init__(message, **diagnostics)
         self.transaction_rolled_back = transaction_rolled_back
 
 
@@ -490,7 +529,8 @@ class PostgrestTransport(StoreTransport):
     def __repr__(self) -> str:  # never expose the token
         return "PostgrestTransport(%r)" % self._base_url
 
-    def _raise_for_status(self, response: httpx.Response, context: str) -> None:
+    def _raise_for_status(self, response: httpx.Response, context: str,
+                          *, operation: str, resource: str) -> None:
         if 200 <= response.status_code < 300:
             return
         detail = ""
@@ -506,8 +546,12 @@ class PostgrestTransport(StoreTransport):
             raise ArenaStoreUnavailable(
                 "%s failed: HTTP %d%s" % (context, response.status_code, detail),
                 transaction_rolled_back=True,
+                operation=operation, resource=resource,
+                http_status=response.status_code, code=code,
             )
-        raise ArenaStoreError("%s failed: HTTP %d%s" % (context, response.status_code, detail))
+        raise ArenaStoreError("%s failed: HTTP %d%s" % (context, response.status_code, detail),
+                              operation=operation, resource=resource,
+                              http_status=response.status_code, code=code)
 
     def rpc(self, function: str, params: Mapping[str, Any]) -> Any:
         if function not in FUNCTION_SIGNATURES:
@@ -545,9 +589,9 @@ class PostgrestTransport(StoreTransport):
             except httpx.TransportError as exc:
                 # A mutating RPC may have committed before its response failed.
                 # Surface availability to the API, but never replay the POST.
-                raise ArenaStoreUnavailable("rpc %s transport failure: %s" % (function, type(exc).__name__)) from exc
+                raise ArenaStoreUnavailable("rpc %s transport failure: %s" % (function, type(exc).__name__), operation="rpc", resource=function, transport_error=type(exc).__name__) from exc
             except httpx.HTTPError as exc:
-                raise ArenaStoreError("rpc %s transport failure: %s" % (function, type(exc).__name__)) from exc
+                raise ArenaStoreError("rpc %s transport failure: %s" % (function, type(exc).__name__), operation="rpc", resource=function, transport_error=type(exc).__name__) from exc
             if response.status_code >= 400 and attempt < DEADLOCK_RETRIES:
                 try:
                     code = response.json().get("code")
@@ -574,9 +618,10 @@ class PostgrestTransport(StoreTransport):
                 # Other mutating RPCs retain the no-replay policy.
                 raise ArenaStoreUnavailable(
                     "rpc %s temporarily unavailable: HTTP %d"
-                    % (function, response.status_code)
+                    % (function, response.status_code), operation="rpc", resource=function,
+                    http_status=response.status_code,
                 )
-            self._raise_for_status(response, "rpc %s" % function)
+            self._raise_for_status(response, "rpc %s" % function, operation="rpc", resource=function)
             try:
                 return response.json()
             except ValueError as exc:
@@ -584,10 +629,11 @@ class PostgrestTransport(StoreTransport):
                     # A successful non-JSON response can follow a committed
                     # insert. Replaying the same event UUID is idempotent.
                     raise ArenaStoreUnavailable(
-                        "rpc %s returned non-JSON" % function
+                        "rpc %s returned non-JSON" % function, operation="rpc",
+                        resource=function, http_status=response.status_code,
                     ) from exc
-                raise ArenaStoreError("rpc %s returned non-JSON" % function) from exc
-        raise ArenaStoreError("rpc %s failed after deadlock retries" % function)
+                raise ArenaStoreError("rpc %s returned non-JSON" % function, operation="rpc", resource=function, http_status=response.status_code) from exc
+        raise ArenaStoreError("rpc %s failed after deadlock retries" % function, operation="rpc", resource=function)
 
     def select(
         self,
@@ -705,14 +751,15 @@ class PostgrestTransport(StoreTransport):
             except (httpx.ReadError, httpx.ReadTimeout) as exc:
                 if attempt:
                     raise ArenaStoreUnavailable(
-                        "select %s transport failure: %s" % (table, type(exc).__name__)
+                        "select %s transport failure: %s" % (table, type(exc).__name__),
+                        operation="select", resource=table, transport_error=type(exc).__name__,
                     ) from exc
             except httpx.HTTPError as exc:
-                raise ArenaStoreError("select %s transport failure: %s" % (table, type(exc).__name__)) from exc
-        self._raise_for_status(response, "select %s" % table)
+                raise ArenaStoreError("select %s transport failure: %s" % (table, type(exc).__name__), operation="select", resource=table, transport_error=type(exc).__name__) from exc
+        self._raise_for_status(response, "select %s" % table, operation="select", resource=table)
         rows = response.json()
         if not isinstance(rows, list):
-            raise ArenaStoreError("select %s returned a non-list" % table)
+            raise ArenaStoreError("select %s returned a non-list" % table, operation="select", resource=table, http_status=response.status_code)
         return rows
 
     def close(self) -> None:
@@ -819,10 +866,10 @@ class PsycopgTransport(StoreTransport):
                     diag = getattr(exc, "diag", None)
                     detail = (getattr(diag, "message_detail", None) or "")[:2000]
                     context = (getattr(diag, "context", None) or "")[:600]
-                    raise ArenaStoreError("rpc %s failed: %s%s%s" % (function, str(exc).splitlines()[0][:200], (" [" + detail + "]") if detail else "", (" {" + context + "}") if context else "")) from exc
+                    raise ArenaStoreError("rpc %s failed: %s%s%s" % (function, str(exc).splitlines()[0][:200], (" [" + detail + "]") if detail else "", (" {" + context + "}") if context else ""), operation="rpc", resource=function, code=getattr(exc, "pgcode", None), transport_error=type(exc).__name__) from exc
             finally:
                 self._release(connection)
-        raise ArenaStoreError("rpc %s failed after deadlock retries" % function)
+        raise ArenaStoreError("rpc %s failed after deadlock retries" % function, operation="rpc", resource=function)
 
     def select(
         self,
@@ -943,7 +990,7 @@ class PsycopgTransport(StoreTransport):
                     cursor.execute(sql, values)
                     return [row[0] for row in cursor.fetchall()]
             except Exception as exc:
-                raise ArenaStoreError("select %s failed: %s" % (table, str(exc).splitlines()[0][:200])) from exc
+                raise ArenaStoreError("select %s failed: %s" % (table, str(exc).splitlines()[0][:200]), operation="select", resource=table, code=getattr(exc, "pgcode", None), transport_error=type(exc).__name__) from exc
         finally:
             self._release(connection)
 

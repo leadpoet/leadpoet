@@ -1711,3 +1711,14 @@ proved credit exhaustion from proved submitted-key authentication failures.
 Preserve other provider causes, retry and terminal classification, frozen
 rounds, scoring, costs, credentials, completed work and concurrent changes.
 This authority ends after deployment and verification.
+
+## Scoped production authorization: validator recovery event identity
+
+On 2026-10-16 the user authorized the smallest general observability fix for
+validator errors and recovery events from concurrent runs. Include round and
+run identity in the existing bounded in-memory error suppression and matching
+recovery. Preserve global startup behavior, event schema, queue limits,
+redaction, best-effort delivery, execution, scoring, costs and weights.
+Authority includes focused checks, safe push and PR. The coordinating agent
+owns review, merge, canonical deployment and production verification.
+This authority ends after deployment and verification.

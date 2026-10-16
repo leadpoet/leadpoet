@@ -30,9 +30,9 @@ def database():
 def normal_database():
     # Each normal flow owns its baseline funding history. A winner from a
     # previous parameter must not replace this fixture's host-funded baseline.
-    # The current service also calls the bounded recovery RPC during stage 2.
-    # Use the complete deployed schema for this normal transition proof.
-    from tests.lab_arena.bounded_baseline_recovery470_postgres_test import database as current_database
+    # The current store also needs SQL474's execution-attempt projection.
+    # Use the ordered current-runner schema; keep migration469 tests historical.
+    from tests.lab_arena.bounded_baseline_recovery470_postgres_test import current_runner_database as current_database
     yield from current_database.__wrapped__()
 
 

@@ -25,6 +25,8 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
+from arena_reviewer_runtime.admission import ReviewerAdmission
+from arena_reviewer_runtime.transport import post_json
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
@@ -2104,13 +2106,7 @@ async def _post_json(
     headers: Mapping[str, str],
     payload: Mapping[str, Any],
 ) -> tuple[int, Any]:
-    async with session.post(url, headers=dict(headers), json=dict(payload)) as response:
-        status = response.status
-        try:
-            body = await response.json()
-        except (aiohttp.ContentTypeError, ValueError):
-            body = None
-    return status, body
+    return await post_json(session, url, headers=headers, payload=payload)
 
 
 async def _post_openrouter_json(
@@ -3818,8 +3814,11 @@ async def investigate_company_evidence(
             forced_stage_search_pending = False
             incomplete_submit_retries = 0
             incomplete_submit_retry_pending = False
-            late_final_submit_pending = bool(
-                fetched_pages and (search_calls or fetch_calls)
+            admission = ReviewerAdmission(
+                admission_seconds=ADMISSION_DEADLINE_SECONDS,
+                judgment_reserve_seconds=JUDGMENT_ADMISSION_RESERVE_SECONDS,
+                serialization_grace_seconds=SERIALIZATION_REPAIR_GRACE_SECONDS,
+                loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
             industry_followup_pending = False
             industry_followup_search_completed = False
@@ -3889,41 +3888,24 @@ async def investigate_company_evidence(
                     if scoped_correction_active
                     else requested_targets
                 )
-                # Let admitted work settle under the broker's bound. Loaded
-                # evidence may then receive one submit-only judgment; this does
-                # not reopen research or add a reasoning turn or repair retry.
                 elapsed = time.monotonic() - started
-                late_final_submit = bool(
-                    late_final_submit_pending
-                    and elapsed >= ADMISSION_DEADLINE_SECONDS
-                )
-                late_final_submit_pending = False
                 late_serialization_retry_pending = bool(
                     positive_semantic_review
                     and incomplete_submit_retry_pending
                     and forced_next_tool == "submit_findings"
                 )
-                if (
-                    elapsed >= ADMISSION_DEADLINE_SECONDS
-                    and not late_serialization_retry_pending
-                    and not late_final_submit
-                ):
+                turn_admission = admission.next_turn(
+                    elapsed=elapsed,
+                    serialization_retry_pending=late_serialization_retry_pending,
+                )
+                if turn_admission.mode == "stop":
                     return interrupted_result(_turn)
-                if (
-                    late_serialization_retry_pending
-                    and elapsed >= (
-                        ADMISSION_DEADLINE_SECONDS
-                        + SERIALIZATION_REPAIR_GRACE_SECONDS
-                    )
-                ):
+                if turn_admission.serialization_expired:
                     raise ValueError("reasoning_tool_arguments_malformed")
                 required_tool = forced_next_tool
                 if scoped_correction_active:
                     required_tool = "submit_findings"
-                judgment_reserve_active = bool(
-                    elapsed >= ADMISSION_DEADLINE_SECONDS
-                    - JUDGMENT_ADMISSION_RESERVE_SECONDS
-                )
+                judgment_reserve_active = turn_admission.mode == "submit_only"
                 stage_search_reserve = bool(
                     "stage" in requested_targets
                     and normalized_requested_stage
@@ -4034,7 +4016,7 @@ async def investigate_company_evidence(
                             if (
                                 not correction_turn
                                 and not scoped_correction_active
-                                and not late_final_submit
+                                and not turn_admission.restrict_tools
                             ) or tool["name"] == "submit_findings"
                         ],
                         "tool_choice": (
@@ -5003,9 +4985,8 @@ async def investigate_company_evidence(
                             }
                 else:
                     raise ValueError("reasoning_tool_unknown")
-                late_final_submit_pending = bool(
-                    name in {"search_web", "fetch_page"}
-                    and fetched_pages
+                admission.tool_settled(
+                    name=name, has_loaded_evidence=bool(fetched_pages),
                 )
                 assistant_message: dict[str, Any] = {
                     "role": "assistant",

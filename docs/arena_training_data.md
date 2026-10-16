@@ -145,8 +145,9 @@ This fixture replayed saved research output, so it is only a judging example.
 An independent read of OpenRouter generation
 `gen-1792187452-JF8ykLOYDbcOS5iqZgFJ` returned Perplexity Sonar and a $0.0079 charge,
 which exactly matched ledger entry 4970393. It returned no prompt/response text.
-Deepline's exact-request billing endpoint also returned the matching request for
-ledger entry 4970376. These are bounded samples, not a claim that all historical
+Deepline's exact-request billing endpoint returned a final, posted 0.02-credit
+charge for ledger entry 4970376, exactly matching its 2,000 micro-USD charge.
+These are bounded samples, not a claim that all historical
 charges were independently re-audited.
 
 The retained September 13 Supabase archive manifest covers 20,270,597 rows in
@@ -180,9 +181,46 @@ can increase memorization and contaminate evaluation: [Lee et al., ACL 2022](htt
 
 ## Verification record
 
-Implementation and release evidence are recorded with the task's final review.
-Local capture, input, exporter, proxy and existing runner checks must pass after
-integration. Live acceptance requires a fresh reward-disabled execution and its
-real judgment, then independent readback of the exact private input/request
-objects, ledger receipts, output and score. A replay fixture or HTTP health result
-alone does not meet this acceptance criterion.
+The integrated candidate includes remote main through `60e4483a0`. The final local
+gate passed **457 tests in 48.99 seconds**, with no failures or skips and one
+existing multipart deprecation warning. It covered capture, input, export,
+lease/billing failures, runner, API, gateway proxy/edge and fresh-round verification.
+Python compilation, whitespace checks and AGENTS/CLAUDE parity passed. Independent
+review verified the privacy, lease-recovery and prior-attempt fixes. Two broader
+pre-existing fixture failures were isolated outside the final focused gate:
+an exception fixture cannot set its new transaction attribute, and an auth-evidence
+fixture expects the old evidence shape. They are not reported as passing.
+
+The exporter from candidate `cc44ff1c094998247f0fdc185a8611dfbf029479` was executed
+in an isolated temporary directory on the gateway against **read-only production
+records and objects**. It did not replace a serving runtime or construct an Arena
+service. The private files remained on the host.
+
+| Verified historical example | Company labels | Response bodies | Full requests | Result |
+|---|---:|---:|---:|---|
+| Oct 16 citation replay, ICP 0 | 3 | 53 / 53 | 0 | Labels, context, source and costs valid; process incomplete |
+| Oct 15 published miner `sub-f86819cba08b000f0f103feaa77b8909`, stage 2, ICP 3 | 5 | 294 / 296 | 0 | Labels, context and source valid; 2 unresolved calls and direct-web evidence gaps |
+
+The second example recomputed its 49.666667 ICP score. These eight company labels
+prove reconstruction works on real records. They are not a validated corpus count
+or a manual judgment of label quality. Both exports correctly returned exit 2.
+
+Fresh OnePatch telemetry showed 26 trajectory uploads with no span errors in the
+last 30-minute window, plus real provider and billing-reconciliation traffic.
+The production service's environment tag was blank; host/release checks supplied
+the environment identity. Sentry's production 24-hour query returned restart,
+weight-chain and OTLP issues, with no collection-specific issue. The absence of
+a collection alert did not detect the missing prompts. No unrelated incident was
+changed or marked resolved.
+
+**Release status: implemented and locally verified, not yet deployed.** The session
+does not expose the GitHub connector required by repository instructions for PRs
+and merges. Canonical deployment and the fresh reward-disabled proof remain
+pending that connection. No database migration is required.
+
+The committed verifier supports a fresh, baseline-only two-ICP proof (the minimum
+valid round size) with one worker slot, frozen public ICP selection and rewards
+disabled. It never reuses saved outputs. Live acceptance still requires that fresh
+execution and its real judgment, then independent readback of the exact private
+input/request objects, ledger receipts, output and score. A replay fixture or HTTP
+health result alone does not meet this acceptance criterion.

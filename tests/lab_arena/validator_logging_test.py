@@ -533,3 +533,45 @@ def test_many_run_scopes_keep_error_and_event_queues_bounded():
         'run-%d' % index for index in range(136, 200)}
     log.recovered('completion', run_id='run-199', round_id='round-a')
     assert len(log._errors) == 63 and len(queued(log)) == 64
+
+
+def test_failed_claim_then_successful_lease_recovers_the_round_scope(tmp_path, monkeypatch):
+    from lab_arena import runner
+    from tests.lab_arena.test_lab_arena_runner import FakeApi, lease, make_config
+
+    log = logger()
+    calls = []
+    recovered = log.recovered
+    def observe(phase, **scope):
+        calls.append((phase, scope))
+        recovered(phase, **scope)
+    monkeypatch.setattr(log, 'recovered', observe)
+    class Api(FakeApi):
+        failures = 1
+        def claim(self, envelope):
+            if self.failures:
+                self.failures -= 1
+                raise runner.RunnerError('private error', http_status=503)
+            return super().claim(envelope)
+    api = Api([lease('picked-up-run')])
+    config = replace(make_config(tmp_path, api, None), operational_logger=log,
+                     claim_retry_seconds=())
+    worker = runner.Runner(config)
+    worker._executor.execute = lambda assigned, token, icp: contracts.build_signed_request(
+        scope=contracts.SCOPE_COMPLETE, round_id=config.round_id,
+        hotkey=config.identity.hotkey, body={'run_id': assigned['run_id']},
+        timestamp=int(config.clock().timestamp()), sign_message=config.identity.sign)
+    try:
+        assert worker.run_once(max_claims=1) == 0
+        assert worker.run_once(max_claims=1) == 1
+    finally:
+        worker.close()
+    claim_events = [event for event in queued(log) if event['content'].get('phase') == 'claim']
+    assert [event['kind'] for event in claim_events] == ['validator.error', 'validator.recovered']
+    assert all(event['round_id'] == config.round_id and 'run_id' not in event for event in claim_events)
+    # Both the inner availability path and the outer successful pickup must
+    # match the request's round scope, before a particular run was assigned.
+    claim_calls = [scope for phase, scope in calls if phase == 'claim']
+    assert len(claim_calls) == 2
+    assert all(scope == {'round_id': config.round_id} for scope in claim_calls)
+    assert worker.abandoned == 0

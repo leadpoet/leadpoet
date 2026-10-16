@@ -4794,7 +4794,7 @@ class Runner:
                     break
                 taken += 1
                 if log is not None:
-                    log.recovered("claim", run_id=response.get("run_id"), round_id=round_id)
+                    log.recovered("claim", round_id=round_id)
                     log.activity(1)
                 try:
                     future = self._pool.submit(self._run_lease, response)

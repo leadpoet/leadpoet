@@ -1570,6 +1570,26 @@ def _deepline_exact_readback(
             continue
         if _response_contains_credential(response, secret):
             return native_id, None
+        if (response.status == 404 and execution_key is not None
+            and native_id is not None
+            and _DEEPLINE_BILLING_REQUEST_ID_RE.fullmatch(native_id) is not None):
+            # Legacy edge IDs can be valid bill receipts. Only a missing bill
+            # permits the original execution key to recover another identity.
+            native_id = None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None, None
+            try:
+                response = transport.send(
+                    method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
+                    headers=headers, body=b"", timeout_seconds=remaining,
+                    **({"max_response_bytes": lookup_max_response_bytes}
+                       if lookup_max_response_bytes is not None else {}),
+                )
+            except ProviderTransportError:
+                continue
+            if _response_contains_credential(response, secret):
+                return None, None
         if native_id is None:
             supported = [value for name, value in response.headers.items()
                          if name.lower() == "x-deepline-idempotency-supported"]

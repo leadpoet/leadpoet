@@ -342,9 +342,9 @@ def _firecrawl_response(
     if 200 <= status < 300 and (
         not raw_html.strip()
         or re.sub(r"\s+", " ", raw_html).strip().casefold()
-        == "provider account capacity details redacted."
+        in ("provider account capacity details redacted.", "[redacted]")
     ):
-        # A completed provider job can still return a transport diagnostic
+        # A completed provider job can still return a diagnostic or placeholder
         # instead of the requested page. Never turn that text into evidence.
         raise CompatibilityResponseError("firecrawl_source_content_unavailable")
     return (

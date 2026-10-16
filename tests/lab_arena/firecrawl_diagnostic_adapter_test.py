@@ -19,6 +19,7 @@ from tests.lab_arena.test_lab_arena_broker import (
 
 URL = "https://example.com/about"
 DIAGNOSTIC = "Provider account capacity details redacted."
+REDACTED = "[REDACTED]"
 
 
 def _route():
@@ -41,7 +42,10 @@ def _envelope(raw_html, *, source_url=URL, status=200):
     }
 
 
-@pytest.mark.parametrize("raw_html", ["", " \n ", DIAGNOSTIC, "  Provider  account\ncapacity details redacted.  "])
+@pytest.mark.parametrize("raw_html", [
+    "", " \n ", DIAGNOSTIC, "  Provider  account\ncapacity details redacted.  ",
+    REDACTED, " \n[REDACTED]\t ", "[redacted]",
+])
 def test_successful_firecrawl_requires_source_content(raw_html):
     with pytest.raises(compat.CompatibilityResponseError, match="firecrawl_source_content_unavailable"):
         compat.adapt_response_with_trusted_url(
@@ -53,6 +57,9 @@ def test_successful_firecrawl_requires_source_content(raw_html):
 @pytest.mark.parametrize("raw_html", [
     "Short but valid page text.",
     "<article>Provider account capacity details redacted. This article explains the issue.</article>",
+    "[REDACTED] appears in this valid page text.",
+    "<article>[REDACTED]</article>",
+    "[ REDACTED ]",
 ])
 def test_valid_short_or_mentioning_page_survives(raw_html):
     status, _headers, body, response_url = compat.adapt_response_with_trusted_url(
@@ -62,13 +69,24 @@ def test_valid_short_or_mentioning_page_survives(raw_html):
     assert (status, body, response_url) == (200, raw_html.encode(), URL)
 
 
-def test_wrong_url_and_missing_status_still_fail_before_content_check():
+def test_live_shaped_redacted_envelope_with_valid_redirect_metadata_is_unavailable():
+    payload = _envelope(REDACTED)
+    payload["result"]["data"]["metadata"]["url"] = "https://example.com/en/global"
+    assert len(payload["result"]["data"]["rawHtml"].encode()) == 10
+    with pytest.raises(compat.CompatibilityResponseError, match="firecrawl_source_content_unavailable"):
+        compat.adapt_response_with_trusted_url(
+            _route(), status=200, headers={}, body=json.dumps(payload).encode(),
+        )
+
+
+@pytest.mark.parametrize("raw_html", [DIAGNOSTIC, REDACTED])
+def test_wrong_url_and_missing_status_still_fail_before_content_check(raw_html):
     with pytest.raises(compat.CompatibilityResponseError, match="firecrawl_source_url_mismatch"):
         compat.adapt_response_with_trusted_url(
             _route(), status=200, headers={},
-            body=json.dumps(_envelope(DIAGNOSTIC, source_url="https://other.example/")).encode(),
+            body=json.dumps(_envelope(raw_html, source_url="https://other.example/")).encode(),
         )
-    missing_status = _envelope(DIAGNOSTIC)
+    missing_status = _envelope(raw_html)
     del missing_status["result"]["data"]["metadata"]["statusCode"]
     with pytest.raises(compat.CompatibilityResponseError, match="missing_firecrawl_target_status"):
         compat.adapt_response_with_trusted_url(
@@ -80,10 +98,11 @@ def _score_context():
     return br.RunContext(**{**CONTEXT.__dict__, "kind": "score", "round_id": "arena-2026-10-13"})
 
 
-def test_paid_diagnostic_settles_exact_cost_once_and_triggers_fetch_failure(monkeypatch):
+@pytest.mark.parametrize("raw_html", [DIAGNOSTIC, REDACTED])
+def test_paid_diagnostic_settles_exact_cost_once_and_triggers_fetch_failure(monkeypatch, raw_html):
     store = FakeLedgerStore(openrouter_capacity=49_945_650)
     broker, _store, transport = make_broker(
-        store=store, transport=FakeTransport([(200, _envelope(DIAGNOSTIC))]),
+        store=store, transport=FakeTransport([(200, _envelope(raw_html))]),
         credential_for=lambda _context, _provider: DL_KEY,
         funding_source_for=lambda _context: "miner_key",
     )
@@ -119,8 +138,9 @@ def test_paid_diagnostic_settles_exact_cost_once_and_triggers_fetch_failure(monk
     assert page == {"ok": False, "error": "http_502"}
 
 
-def test_diagnostic_with_delayed_billing_keeps_full_reservation():
-    payload = _envelope(DIAGNOSTIC)
+@pytest.mark.parametrize("raw_html", [DIAGNOSTIC, REDACTED])
+def test_diagnostic_with_delayed_billing_keeps_full_reservation(raw_html):
+    payload = _envelope(raw_html)
     payload["billing"] = {"pricing_status": "pending"}
     transport = FakeTransport([(200, payload), (200, {"entries": "invalid"})])
     store = FakeLedgerStore(openrouter_capacity=49_945_650)
@@ -225,6 +245,7 @@ def test_diagnostic_with_delayed_billing_keeps_full_reservation():
 @pytest.mark.parametrize("raw_html,target_status", [
     ("Short but valid page text.", 200),
     (DIAGNOSTIC, 404),
+    (REDACTED, 404),
 ])
 def test_zero_cost_or_failed_target_status_is_not_reclassified(raw_html, target_status):
     payload = _envelope(raw_html, status=target_status)

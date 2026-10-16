@@ -130,6 +130,24 @@ def _validate_round_id(round_id: str) -> str:
     return str(round_id)
 
 
+def _accepted_execution_identity(run: Mapping[str, Any], round_id: str) -> dict[str, Any]:
+    """Bind gateway-validated, write-once execute bytes; no signed hash is assumed."""
+
+    if (
+        run.get("round_id") != round_id or run.get("kind") != "execute"
+        or run.get("status") != "accepted" or run.get("terminal_cause") != "accepted"
+        or (run.get("result_doc") or {}).get("terminal_status") != "accepted"
+        or run.get("output_ref") != f"arena/{round_id}/outputs/{run.get('run_id')}.json"
+    ):
+        raise VerificationError("active replay source execution authority is invalid")
+    return {name: run.get(name) for name in (
+        "run_id", "assignment_id", "round_id", "submission_id", "miner_hotkey",
+        "kind", "stage", "icp_position", "attempt", "runner_hotkey", "status",
+        "terminal_cause", "result_doc", "output_ref", "output_hash",
+        "claim_request_id", "claim_request_hash", "lease_generation", "stage_generation",
+    )}
+
+
 def _saved_output_replay(
     built: Any, source_round_id: str, round_id: str,
     *, assignments: list[str] | None = None, historical: bool = False,
@@ -305,10 +323,15 @@ def _saved_output_replay(
     accepted.sort(key=lambda item: (item[0], item[1]))
     empty_output_count = 0
     unselected_output_count = 0
+    selected_sources = {}
     for submission_id, source_position, run in accepted:
         if active_frozen and (submission_id, source_position) not in selected:
             unselected_output_count += 1
             continue
+        if active_frozen:
+            selected_sources[run["run_id"]] = contracts.document_hash(
+                _accepted_execution_identity(run, source_round_id)
+            )
         document = json.loads(built._objects.get_bounded(run["output_ref"], MAX_OUTPUT_BYTES))
         validated = validate_output_document(
             document,
@@ -319,7 +342,10 @@ def _saved_output_replay(
         output_hash = contracts.document_hash(document)
         if (
             validated != document
-            or (active_frozen and not stored_output_hash)
+            or (active_frozen and stored_output_hash is not None and (
+                not isinstance(stored_output_hash, str)
+                or contracts.SHA256_RE.fullmatch(stored_output_hash) is None
+            ))
             or (
                 stored_output_hash not in (None, "")
                 and (
@@ -363,6 +389,21 @@ def _saved_output_replay(
     if not 2 <= len(icps) <= contracts.MAX_BENCHMARK_ICP_COUNT:
         raise VerificationError("replay nonempty assignment count is unsupported")
     if active_frozen:
+        # Execute completion authenticates the runner/lease, validates the body,
+        # and writes canonical bytes through IfNoneMatch. Legacy execute rows
+        # legitimately have no persisted content hash. Pin their canonical
+        # snapshot twice; do not manufacture a signed content receipt.
+        current_runs = [run for run in built.store.list_runs(source_round_id)
+                        if run.get("run_id") in selected_sources]
+        if len(current_runs) != len(selected_sources):
+            raise VerificationError("active replay source execution identity changed")
+        for run in current_runs:
+            if contracts.document_hash(_accepted_execution_identity(run, source_round_id)) != selected_sources[run["run_id"]]:
+                raise VerificationError("active replay source execution identity changed")
+            repeated = json.loads(built._objects.get_bounded(run["output_ref"], MAX_OUTPUT_BYTES))
+            origin = next(item for item in origins if item["source_run_id"] == run["run_id"])
+            if contracts.document_hash(repeated) != origin["source_output_hash"]:
+                raise VerificationError("active replay source output bytes changed")
         current = built.store.get_round(source_round_id) or {}
         current_identity = contracts.document_hash({
             name: current.get(name) for name in (

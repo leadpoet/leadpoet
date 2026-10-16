@@ -401,6 +401,11 @@ def test_historical_replay_service_keeps_source_dates_and_current_deadlines(monk
         source["configuration_doc"]["mode"] = "live"
         for run in _runs:
             if run["status"] == "accepted":
+                old_ref = run["output_ref"]
+                run.update(round_id=REPLAY_SOURCE_ROUND_ID, terminal_cause="accepted",
+                           result_doc={"terminal_status": "accepted"},
+                           output_ref=f"arena/{REPLAY_SOURCE_ROUND_ID}/outputs/{run['run_id']}.json")
+                _documents[run["output_ref"]] = _documents[old_ref]
                 run["output_hash"] = contracts.document_hash(json.loads(_documents[run["output_ref"]]))
     production_service = service.ArenaService
 

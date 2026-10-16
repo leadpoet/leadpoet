@@ -775,14 +775,17 @@ def test_integrity_verified_ats_publisher_applies_to_techstack(monkeypatch) -> N
         return {"answer": answer, "model": "test-model", "usage": {}}
 
     async def fetch(*args, **kwargs):
+        assert args[0] == [source_url]
+        body = (
+            "Acme job description. Responsibilities include Python. "
+            "Apply for this job. [Careers](https://acme.com/careers)"
+        )
         return {
             "results": [{
                 "url": source_url,
-                "text": (
-                    "Acme job description. Responsibilities include Python. "
-                    "Apply for this job."
-                ),
-                "meta": {"kind": "greenhouse_job"},
+                "text": body,
+                "meta": {"kind": "greenhouse_job", "observed_ownership_links":
+                         verifier._observed_ownership_links(body, source_url)},
             }],
             "statuses": [],
         }
@@ -801,9 +804,16 @@ def test_integrity_verified_ats_publisher_applies_to_techstack(monkeypatch) -> N
         declared_source="job_board",
         stage1_soft_reject=True,
         integrity_policy=True,
+        verified_company_identity={
+            "decision": "match", "observed_name": "acme",
+            "observed_domain": "acme.com", "observed_linkedin_slug": "acme",
+            "evidence_source": "company_web_reverification",
+        },
         buyer_max_age_days=180,
     ))
     assert result["job_publisher_relationship"] == "verified"
+    assert result["ats_employer_ownership"]["source_count"] == 1
+    assert result["verified_job_source_urls"] == [source_url]
 
 
 def test_integrity_retries_unavailable_bonus_after_verified_primary() -> None:

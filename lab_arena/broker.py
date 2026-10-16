@@ -114,6 +114,12 @@ _SAFE_EXCEPTION_CLASSES = frozenset(
         "ValueError",
     }
 )
+_FIRECRAWL_COMPATIBILITY_FAILURE_CODES = frozenset({
+    "invalid_deepline_envelope", "incomplete_deepline_envelope",
+    "missing_deepline_result", "missing_firecrawl_raw_html",
+    "firecrawl_source_url_mismatch", "invalid_firecrawl_final_url",
+    "missing_firecrawl_target_status", "firecrawl_source_content_unavailable",
+})
 _DEEPLINE_JOB_STATUSES = frozenset(
     {"cancelled", "completed", "failed", "in_progress", "pending", "queued", "running"}
 )
@@ -5930,6 +5936,14 @@ class Broker:
                                 "error_class": _safe_exception_class(exc),
                             }
                         )
+                        if (
+                            failure_stage == "response_adaptation"
+                            and route is not None
+                            and route.adapter == "firecrawl_raw_html"
+                            and type(exc) is scoring_provider_compat.CompatibilityResponseError
+                            and str(exc) in _FIRECRAWL_COMPATIBILITY_FAILURE_CODES
+                        ):
+                            summary["compatibility_failure_code"] = str(exc)
                         if (
                             type(observed_provider_http_status) is int
                             and 100 <= observed_provider_http_status <= 599

@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped implementation authorization: October 16 weight-read diagnostics
+
+The user authorized the smallest Arena-side diagnostic change for intermittent
+normal-validator weight reads during October 16 monitoring. Keep diagnostics
+bounded to allowlisted source operations and trusted failure codes in the
+existing validator-event reason and operation fields. Do not expose raw
+exceptions, RPC responses, endpoints or credentials. Preserve trust validation,
+retries, signing and chain writes, scoring, frozen images, accepted work and
+concurrent tasks. No new telemetry architecture or schema is authorized. The
+owning root agent controls review, merge and canonical deployment; implementation
+agents must hand off the local diff and tests before any push or deployment.
+This scope ends after the diagnostic change and its verification are complete.
+
 ## Scoped production authorization: general baseline infrastructure continuation
 
 On 2026-10-15 the user authorized recovery of unfinished infrastructure-failed

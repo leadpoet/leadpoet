@@ -18,6 +18,7 @@ from urllib.parse import urlsplit
 from lab_arena import contracts
 from lab_arena.runtime_host import RuntimeHostError
 from lab_arena.scoring_startup import ScoringStartupError
+from lab_arena.weight_read_diagnostics import chain_error_fields
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -146,6 +147,12 @@ class ValidatorOperationalLogger:
                 encoded = exc.launch_stderr.encode("utf-8")
                 fields["launch_stderr"] = encoded[:2048].decode("utf-8", errors="ignore")
                 fields["launch_stderr_truncated"] = exc.launch_stderr_truncated or len(encoded) > 2048
+        if phase in {"weights", "weight_recovery"}:
+            diagnostic = chain_error_fields(exc)
+            if diagnostic.get("operation"):
+                fields["operation"] = diagnostic["operation"]
+            if not reason and diagnostic.get("reason"):
+                fields["reason"] = diagnostic["reason"]
         key = (phase, round_id, run_id, fields.get("reason"), fields["error_class"],
                fields.get("operation"), fields.get("http_status"))
         with self._lock:

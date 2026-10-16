@@ -41,6 +41,7 @@ from leadpoet_canonical.subtensor_events_v2 import (
     prove_timelocked_weights_reveal_v2,
     validate_subtensor_events_profile_v2,
 )
+from lab_arena.weight_read_diagnostics import chain_read, note_rpc_failure
 
 
 FINALIZATION_RPC_PACING_SECONDS = 1.05
@@ -70,6 +71,7 @@ def _chain_timestamp(timestamp_ms: int) -> str:
 
 
 class ValidatorChainSourceV2:
+    @chain_read("finalized_head")
     def read_finalized_head(self) -> Dict[str, Any]:
         finalized = self._call(method='chain_getFinalizedHead', params=[], request_id=1)
         block_hash = normalize_raw_hash(finalized, "finalized head")
@@ -100,6 +102,7 @@ class ValidatorChainSourceV2:
             )
         self._epoch_authority_supplier = epoch_authority_supplier
 
+    @chain_read("signing_runtime")
     def read_chain_signing_runtime(
         self,
         *,
@@ -173,6 +176,7 @@ class ValidatorChainSourceV2:
             "genesis_hash": genesis_hash,
         }
 
+    @chain_read("account_nonce")
     def read_finalized_account_nonce(
         self, *, account_public_key_hex: str, finalized_block_hash: str
     ) -> int:
@@ -189,11 +193,13 @@ class ValidatorChainSourceV2:
         except ChainSourceV2Error as exc:
             raise ValidatorChainSourceV2Error("finalized account nonce is invalid") from exc
 
+    @chain_read("canonical_block_hash")
     def read_canonical_block_hash(self, *, block: int) -> str:
         result = self._call(method='chain_getBlockHash', params=[int(block)], request_id=1)
         return normalize_raw_hash(result, "canonical block hash")
 
 
+    @chain_read("confirm_reveal")
     def prove_timelocked_reveal_transition(
         self, *, netuid: int, validator_hotkey: str,
         hotkey_public_key_hex: str, subnet_epoch_index: int,
@@ -788,6 +794,7 @@ class ValidatorChainSourceV2:
         }
 
 
+    @chain_read("snapshot")
     def read_finalized_snapshot(self, *, netuid: int, epoch_id: int) -> Dict[str, Any]:
         finalized = self._call(method='chain_getFinalizedHead', params=[], request_id=1)
         finalized_hash = normalize_raw_hash(finalized, "finalized head")
@@ -908,6 +915,7 @@ class ValidatorChainSourceV2:
             "epoch_boundary": epoch_boundary,
         }
 
+    @chain_read("confirm_inclusion")
     def find_finalized_extrinsic_inclusion(
         self,
         *,
@@ -1077,11 +1085,25 @@ class ValidatorChainSourceV2:
         )
 
     def _call(self, **kwargs: Any) -> Any:
-        return self._rpc_call(**kwargs)
+        try:
+            return self._rpc_call(**kwargs)
+        except Exception as exc:
+            try:
+                note_rpc_failure(exc, "live", kwargs.get("method"))
+            except Exception:
+                pass  # A diagnostic failure must not replace the chain error.
+            raise
 
     def _archive_call(self, **kwargs: Any) -> Any:
         if self._archive_rpc_call is None:
             raise ValidatorChainSourceV2Error(
                 "archive RPC adapter is required for historical epoch state"
             )
-        return self._archive_rpc_call(**kwargs)
+        try:
+            return self._archive_rpc_call(**kwargs)
+        except Exception as exc:
+            try:
+                note_rpc_failure(exc, "archive", kwargs.get("method"))
+            except Exception:
+                pass
+            raise

@@ -6425,13 +6425,21 @@ def _has_explicitly_unproven_fit_dimensions(
                             identity_receipt["submitted_linkedin_slug"].strip()
                         )
                     )
+                    # An explicit empty observed slug can also exhaust a
+                    # negative identity investigation. It proves no match.
+                    and isinstance(
+                        identity_receipt.get("observed_linkedin_slug"), str
+                    )
+                    and (
+                        identity_receipt["observed_linkedin_slug"] == ""
+                        or bool(identity_receipt["observed_linkedin_slug"].strip())
+                    )
                     and all(
                         isinstance(identity_receipt.get(field), str)
                         and bool(identity_receipt[field].strip())
                         for field in (
                             "submitted_name", "submitted_domain",
                             "observed_name", "observed_domain",
-                            "observed_linkedin_slug",
                         )
                     )
                     and identity_receipt["submitted_domain"]

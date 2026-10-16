@@ -135,13 +135,14 @@ def test_managed_account_provenance_precedes_request_refusal(status, tool, provi
     )
 
 
-@pytest.mark.parametrize("owner,target_refusal,expected_status,expected_fallback", [
-    ("deepline_managed", False, 502, 1),
-    ("workspace", False, 402, 0),
-    ("none", True, 403, 0),
+@pytest.mark.parametrize("owner,target_refusal,exa_recovers,expected_status,expected_fallback", [
+    ("deepline_managed", False, True, 502, 1),
+    ("deepline_managed", False, False, 502, 1),
+    ("workspace", False, False, 402, 0),
+    ("none", True, False, 403, 0),
 ])
 def test_broker_denial_reaches_frozen_compatible_investigator(
-    monkeypatch, owner, target_refusal, expected_status, expected_fallback,
+    monkeypatch, owner, target_refusal, exa_recovers, expected_status, expected_fallback,
 ):
     from qualification.scoring import company_evidence_investigator as investigator
 
@@ -187,6 +188,8 @@ def test_broker_denial_reaches_frozen_compatible_investigator(
         return result.status, url, result.body.decode()
     async def exa(_session, url):
         calls["exa"] += 1
+        if not exa_recovers:
+            return {"ok": False, "error": "contents_provider_unavailable"}
         return {"ok": True, "url": url, "final_url": url,
                 "text": "Acme offers software products."}
     async def search(*_args, **_kwargs):
@@ -223,10 +226,13 @@ def test_broker_denial_reaches_frozen_compatible_investigator(
         targets=("stage",), requested_stage="Private Equity",
     ))
     assert calls["exa"] == expected_fallback
-    assert outcome["failure_reason"] == ("provider_error" if owner == "workspace" else "")
+    infrastructure_failure = owner == "workspace" or (expected_fallback and not exa_recovers)
+    assert outcome["failure_reason"] == ("provider_error" if infrastructure_failure else "")
+    if infrastructure_failure:
+        assert not outcome.get("_completed_submit")
     fetches = outcome["usage"]["fetch_outcomes"]
     if expected_fallback:
-        assert [fetch["ok"] for fetch in fetches] == [False, True]
+        assert [fetch["ok"] for fetch in fetches] == [False, exa_recovers]
         assert fetches[0]["error_class"] == "http_error"
     elif target_refusal:
         assert fetches[0]["error_class"] == "provider_request_refused"

@@ -249,13 +249,37 @@ def test_presign_does_not_retry_after_opening_budget(monkeypatch):
             self.calls += 1
             return Response()
 
-    observed = iter((0.0, 91.0))
+    observed = iter((0.0, 181.0))
     monkeypatch.setattr(miner_submit.time, "monotonic", lambda: next(observed))
     session = Session()
     response = miner_submit._post_presign_with_opening_retry(
         session, "https://example.test", {})
     assert response.status_code == 503
     assert session.calls == 1
+
+
+@pytest.mark.parametrize("round_id,expected_status,expected_code", [
+    ("arena-2026-10-17", 404, "round_unknown"),
+    ("not-a-round", 404, "round_unknown"),
+    ("", 400, "request_invalid:request round_id required"),
+])
+def test_opening_presign_unknown_and_malformed_signed_requests_stay_terminal(
+    round_id, expected_status, expected_code,
+):
+    service = bare_service(moment(15) - timedelta(seconds=30))
+    service.validate_request = ArenaService.validate_request.__get__(service)
+    service._config.verify_signature = lambda _hotkey, _signature, _message: True
+    service._store = SimpleNamespace(get_round=lambda _round_id: None)
+    request = contracts.build_signed_request(
+        scope=contracts.SCOPE_SUBMISSION_PRESIGN,
+        round_id=round_id, hotkey="5" * 48, body={},
+        timestamp=int(service.now().timestamp()), sign_message=lambda _message: "a" * 128,
+    )
+    with TestClient(create_app(service)) as client:
+        response = client.post("/arena/v1/submissions/presign", json=request)
+    assert response.status_code == expected_status
+    assert response.json()["code"] == expected_code
+    assert "Retry-After" not in response.headers
 
 
 def test_client_waits_for_current_round_only_near_cutoff(monkeypatch):
@@ -292,3 +316,122 @@ def test_client_waits_for_current_round_only_near_cutoff(monkeypatch):
         miner_submit.find_open_round("https://example.test", session=old)
     assert closed.value.code == "submission_window_closed"
     assert old.calls == 1
+
+
+@pytest.mark.parametrize("seconds_before,created_after", [(60, 44), (90, 89)])
+def test_presign_retry_crosses_opening_and_waits_for_creation(
+    monkeypatch, seconds_before, created_after,
+):
+    opening = moment(15)
+    elapsed = [0.0]
+    service = bare_service(opening - timedelta(seconds=seconds_before))
+    service.now = lambda: opening + timedelta(seconds=elapsed[0] - seconds_before)
+    service.validate_request = ArenaService.validate_request.__get__(service)
+    service._config.verify_signature = lambda _hotkey, _signature, _message: True
+    service._require_round_mode = lambda row: row
+    row = round_row("arena-2026-10-16", opening, moment(16))
+    # No store mutation or nonce API exists: refused requests must not use one.
+    service._store = SimpleNamespace(get_round=lambda _round_id: (
+        row if service.now() >= opening + timedelta(seconds=created_after) else None
+    ))
+
+    def presign(envelope):
+        validated, resolved = service._request_round(
+            envelope, scope=contracts.SCOPE_SUBMISSION_PRESIGN,
+        )
+        service._require_submission_window(resolved)
+        return {"status": "accepted", "request_id": validated["request_id"]}
+
+    service.handle_submission_presign = presign
+    request = contracts.build_signed_request(
+        scope=contracts.SCOPE_SUBMISSION_PRESIGN,
+        round_id=row["round_id"], hotkey="5" * 48, body={},
+        timestamp=int(service.now().timestamp()), sign_message=lambda _message: "a" * 128,
+    )
+    requests = []
+    replies = []
+
+    def sleep(delay):
+        elapsed[0] += delay
+
+    monkeypatch.setattr(miner_submit, "time", SimpleNamespace(
+        monotonic=lambda: elapsed[0], sleep=sleep,
+    ))
+    with TestClient(create_app(service)) as client:
+        class Session:
+            def post(self, _url, *, json, **_kwargs):
+                requests.append(json)
+                response = client.post("/arena/v1/submissions/presign", json=json)
+                replies.append(response)
+                return response
+
+        response = miner_submit._post_presign_with_opening_retry(
+            Session(), "https://example.test", request,
+        )
+    assert response.status_code == 200
+    assert elapsed[0] >= seconds_before + created_after
+    assert all(reply.status_code == 503 for reply in replies[:-1])
+    assert all(reply.json()["code"] == "round_opening" for reply in replies[:-1])
+    assert all(reply.headers["Retry-After"] == "2" for reply in replies[:-1])
+    assert all(envelope is request for envelope in requests)
+    assert (service.now().timestamp() - request["timestamp"]
+            <= contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS)
+    assert service.validate_request(
+        request, scope=contracts.SCOPE_SUBMISSION_PRESIGN, round_id=None,
+    )["request_id"] == request["request_id"]
+
+
+@pytest.mark.parametrize("offset,expected", [
+    (-90.001, False), (-90, True), (-0.001, True),
+    (0, True), (89.999, True), (90, False),
+])
+def test_opening_retry_window_exact_edges(offset, expected):
+    service = bare_service(moment(15) + timedelta(seconds=offset))
+    assert service._due_daily_round_opening("arena-2026-10-16") is expected
+
+
+def test_current_round_keeps_exact_cutoff_and_future_round_cannot_open_early():
+    cutoff = moment(15)
+    service = bare_service(cutoff - timedelta(microseconds=1))
+    current = round_row("arena-2026-10-15", moment(14), cutoff)
+    future = round_row("arena-2026-10-16", cutoff, moment(16))
+    service._require_submission_window(current)
+    assert ArenaService._round_accepts_submissions(current, service.now())
+    with pytest.raises(ServiceError) as early:
+        service._require_submission_window(future)
+    assert (early.value.code, early.value.status) == ("submission_window_closed", 409)
+    service.now = lambda: cutoff
+    with pytest.raises(ServiceError) as closed:
+        service._require_submission_window(current)
+    assert (closed.value.code, closed.value.status) == ("submission_window_closed", 409)
+    assert not ArenaService._round_accepts_submissions(current, service.now())
+    service._require_submission_window(future)
+
+
+@pytest.mark.parametrize("status,code", [
+    (404, "round_unknown"), (409, "submission_window_closed"),
+    (503, "provider_unavailable"), (200, None),
+])
+def test_opening_client_keeps_terminal_responses_terminal(monkeypatch, status, code):
+    class Response:
+        status_code = status
+
+        def json(self):
+            return {"code": code}
+
+    class Session:
+        calls = 0
+
+        def post(self, *_args, **_kwargs):
+            self.calls += 1
+            return Response()
+
+    monkeypatch.setattr(miner_submit, "time", SimpleNamespace(
+        monotonic=lambda: 0.0,
+        sleep=lambda _delay: pytest.fail("terminal response must not retry"),
+    ))
+    session = Session()
+    assert miner_submit._post_presign_with_opening_retry(
+        session, "https://example.test", {},
+    ).status_code == status
+    assert session.calls == 1

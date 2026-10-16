@@ -726,6 +726,14 @@ def code_review_summary(
     http_status = document.get("provider_http_status")
     if type(http_status) is int and 100 <= http_status <= 599:
         result["provider_http_status"] = http_status
+    if (
+        result["status"] == "error"
+        and document.get("error_code") == "code_review_provider_credit"
+        and document.get("provider_limit_source") == "openrouter_credits"
+        and type(document.get("provider_effective_http_status")) is int
+        and document["provider_effective_http_status"] == 402
+    ):
+        result["failure_reason"] = "provider_credit_exhausted"
     return result
 
 

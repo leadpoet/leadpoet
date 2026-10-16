@@ -1059,6 +1059,62 @@ def test_public_review_diagnostics_project_only_typed_status_and_retry_flag():
     assert "retryable" not in invalid and "provider_http_status" not in invalid
 
 
+@pytest.mark.parametrize("raw_status", [200, 402])
+def test_public_review_projects_confirmed_credit_exhaustion_only(raw_status):
+    from lab_arena import code_review_policy
+    observation = code_review_policy.provider_response_observation(
+        {"error": {"code": 402, "metadata": {
+            "limit_source": "openrouter_credits", "private_detail": "private-secret",
+        }}}, raw_http_status=raw_status, effective_http_status=402,
+    )
+    view = public_dashboard.code_review_summary({
+        "status": "accepted", "code_review_status": "error",
+        "code_review_doc": {"error_code": "code_review_provider_credit",
+                            "provider_http_status": raw_status, **observation},
+    })
+    assert view["failure_reason"] == "provider_credit_exhausted"
+    assert view["provider_http_status"] == raw_status
+    assert not any(key in view for key in observation)
+    assert "private" not in json.dumps(view)
+
+
+@pytest.mark.parametrize("change", [
+    {"provider_limit_source": "unknown"}, {"provider_limit_source": None},
+    {"provider_limit_source": "openrouter_key_limit"},
+    {"provider_limit_source": "openrouter_in_flight_budget"},
+    {"provider_limit_source": ["openrouter_credits", "unknown"]},
+    {"provider_limit_source": "private provider prose"},
+    {"provider_effective_http_status": None}, {"provider_effective_http_status": "402"},
+    {"provider_effective_http_status": 402.0}, {"provider_effective_http_status": True},
+    {"provider_effective_http_status": 429},
+    {"error_code": "code_review_provider_authentication", "provider_http_status": 401},
+    {"error_code": "code_review_provider_authentication", "provider_http_status": 403},
+    {"error_code": "unknown_failure"},
+])
+def test_public_review_does_not_infer_exhaustion_from_generic_or_invalid_evidence(change):
+    view = public_dashboard.code_review_summary({
+        "code_review_status": "error", "code_review_doc": {
+            "error_code": "code_review_provider_credit", "provider_http_status": 402,
+            "provider_limit_source": "openrouter_credits",
+            "provider_effective_http_status": 402, **change,
+        },
+    })
+    assert "failure_reason" not in view
+    assert "provider_limit_source" not in view
+
+
+@pytest.mark.parametrize("status", ["pending", "reviewing", "passed", "rejected"])
+def test_public_review_ignores_stale_credit_evidence_after_status_change(status):
+    view = public_dashboard.code_review_summary({
+        "code_review_status": status, "code_review_doc": {
+            "error_code": "code_review_provider_credit", "provider_http_status": 402,
+            "provider_limit_source": "openrouter_credits", "provider_effective_http_status": 402,
+        },
+    })
+    assert view["status"] == status
+    assert "failure_reason" not in view
+
+
 @pytest.mark.parametrize('attempts,round_status,offset,expected', [
     (3, 'open', -1, True), (6, 'open', -1, False),
     (3, 'open', 0, False), (3, 'open', 1, False),

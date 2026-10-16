@@ -29,6 +29,9 @@ _HIDDEN_KEYS = frozenset({
 _CONFIG_KEYS = frozenset({
     "effort", "summary", "context", "max_tokens", "exclude", "enabled",
 })
+_PARAMETER_KEYS = frozenset({
+    "admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters",
+})
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _URL_SECRET_KEYS = frozenset({
     "key", "token", "sig", "signature", "auth", "credential", "credentials",
@@ -106,6 +109,17 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = ()) -> tuple[An
         text = _URL_RE.sub(clean_url, text)
         return trajectory.redact_text(text, tuple(variants))
 
+    def request_config_path(path: tuple[str, ...]) -> bool:
+        # The same request is sanitized first as a standalone blob and later
+        # inside its exported example. Match the complete trusted container
+        # path, so provider response objects cannot impersonate request config.
+        if len(path) == 1 and path[0] in _PARAMETER_KEYS or path == ("outbound", "body"):
+            return True
+        if len(path) not in (4, 5) or path[0] != "provider_calls" or not path[1].isdigit() or path[2] != "request":
+            return False
+        return (len(path) == 4 and path[3] in _PARAMETER_KEYS
+                or path[3:] == ("outbound", "body"))
+
     def clean(item: Any, path: tuple[str, ...] = ()) -> Any:
         nonlocal count
         count += 1
@@ -131,9 +145,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = ()) -> tuple[An
                 normalized = key.lower().replace("-", "_")
                 safe_config = (
                     normalized == "reasoning"
-                    and path in {("admitted_parameters",), ("normalized_parameters",),
-                                 ("effective_parameters",), ("hashed_parameters",),
-                                 ("outbound", "body")}
+                    and request_config_path(path)
                     and isinstance(child, Mapping)
                     and set(child) <= _CONFIG_KEYS
                     and all(isinstance(v, (str, bool, int)) or v is None for v in child.values())

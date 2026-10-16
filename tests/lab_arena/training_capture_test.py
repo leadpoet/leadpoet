@@ -106,6 +106,24 @@ def test_hidden_reasoning_items_are_redacted_but_model_visible_summary_remains()
     assert reasons == ["hidden_reasoning"]
 
 
+def test_full_export_preserves_only_explicit_request_reasoning_config_paths():
+    config = {"effort": "high", "summary": "concise"}
+    request = {name: {"reasoning": config} for name in (
+        "admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters",
+    )}
+    request["outbound"] = {"body": {"reasoning": config}}
+    cleaned, reasons = capture.sanitize_training_value({"provider_calls": [{"request": request}]})
+    assert cleaned["provider_calls"][0]["request"] == request
+    assert reasons == []
+    # A response can contain any field names. None establish a request root.
+    response = {"provider_calls": [{"request": request}], "hashed_parameters": {"reasoning": config},
+                "outbound": {"body": {"reasoning": config}}, "reasoning": config}
+    cleaned, reasons = capture.sanitize_training_value({"provider_calls": [{"response": response}]})
+    rendered = json.dumps(cleaned)
+    assert '"effort": "high"' not in rendered
+    assert reasons == ["hidden_reasoning"]
+
+
 @pytest.mark.parametrize("mutation", [
     {"sha256": "sha256:" + "0" * 64}, {"size_bytes": 1},
     {"compressed_bytes": 1}, {"redacted": True}, {"encoding": "identity"},

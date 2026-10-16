@@ -323,7 +323,17 @@ def _firecrawl_response(
     requested_url = str(route.requested_parameters.get("url") or "")
     if str(metadata.get("sourceURL") or "") != requested_url:
         raise CompatibilityResponseError("firecrawl_source_url_mismatch")
-    final_url = _safe_https_url(metadata.get("url"))
+    final_url_value = metadata.get("url")
+    if isinstance(final_url_value, str) and "#" in final_url_value:
+        # A fragment does not identify a different fetched resource. Preserve
+        # the original metadata's length/character checks before removing it.
+        if (
+            len(final_url_value) <= 2000
+            and "\\" not in final_url_value
+            and all(0x21 <= ord(char) < 0x7F for char in final_url_value)
+        ):
+            final_url_value = final_url_value.split("#", 1)[0]
+    final_url = _safe_https_url(final_url_value)
     if not final_url:
         raise CompatibilityResponseError("invalid_firecrawl_final_url")
     status = metadata.get("statusCode")

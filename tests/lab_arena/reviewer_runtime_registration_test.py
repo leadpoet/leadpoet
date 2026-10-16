@@ -1,8 +1,11 @@
 """Runtime activation uses the existing scoped store, never rewrites a round."""
+import json
 import sys
 
+import httpx
 import pytest
 
+from lab_arena import store
 from scripts import register_arena_reviewer_runtime as command
 
 
@@ -67,3 +70,47 @@ def test_apply_exact_registration_readback_and_transport_cleanup(monkeypatch, mi
     else:
         assert command.main() == 0
     assert calls == ["lab_arena_register_reviewer_runtime_v1", "close"]
+
+
+@pytest.mark.parametrize("http_status", [200, 503])
+def test_apply_uses_real_postgrest_rpc_and_closes_transport(
+    monkeypatch, capsys, http_status,
+):
+    setup_args(monkeypatch, apply=True)
+    monkeypatch.setenv("LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY", "1")
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://store.example")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_test")
+    monkeypatch.setattr(command, "load_scoped_environment", lambda _: None)
+    arguments = command.registration_arguments(GRADING, RUNTIME)
+    registered = {key.removeprefix("p_"): value for key, value in arguments.items()}
+    registered["updated_at"] = "2026-10-16T23:00:00Z"
+    requests = []
+
+    def reply(request):
+        requests.append(request)
+        assert request.method == "POST"
+        assert str(request.url) == (
+            "https://store.example/rest/v1/rpc/lab_arena_register_reviewer_runtime_v1"
+        )
+        assert json.loads(request.content) == arguments
+        assert request.headers["apikey"] == "sb_secret_test"
+        return httpx.Response(
+            http_status,
+            json=registered if http_status == 200 else {"message": "synthetic unavailable"},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(reply))
+    monkeypatch.setattr(store, "create_http1_client", lambda _: client)
+    assert command.PostgrestTransport is store.PostgrestTransport
+    try:
+        if http_status == 200:
+            assert command.main() == 0
+            assert json.loads(capsys.readouterr().out) == registered
+        else:
+            with pytest.raises(store.ArenaStoreError, match="HTTP 503"):
+                command.main()
+            assert capsys.readouterr().out == ""
+        assert len(requests) == 1
+        assert client.is_closed
+    finally:
+        client.close()

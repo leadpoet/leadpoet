@@ -100,6 +100,10 @@ TARGETS = frozenset({
     "required_attribute",
 })
 STATUSES = frozenset({"VERIFIED", "CONTRADICTED", "UNPROVEN"})
+MISSING_CITATION_REASON = (
+    "submitted finding requires a valid fetched URL and a nonempty exact quote; "
+    "citation fields are missing or invalid, so no quote was checked"
+)
 PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON = (
     "supporting private-equity classification quote was not present in fetched source"
 )
@@ -2542,9 +2546,14 @@ def _validated_findings(
         else:
             evidence_url = _safe_https_url(finding["evidence_url"])
             fetched_text = fetched_pages.get(evidence_url, "")
-            if not evidence_url or not _quote_occurs(
-                finding["evidence_quote"], fetched_text
-            ):
+            if not evidence_url or not finding["evidence_quote"].strip():
+                finding.update(
+                    status="UNPROVEN",
+                    evidence_url="",
+                    evidence_quote="",
+                    reason=MISSING_CITATION_REASON,
+                )
+            elif not _quote_occurs(finding["evidence_quote"], fetched_text):
                 finding.update(
                     status="UNPROVEN",
                     evidence_url="",
@@ -4671,6 +4680,17 @@ async def investigate_company_evidence(
                                             else ""
                                         )
                                     )
+                                )
+                                + (
+                                    "For findings with missing or invalid citation fields, "
+                                    "supply the fetched URL and exact quote from loaded "
+                                    "evidence. No passage was rejected for those findings; "
+                                    "missing fields do not establish that the fact is absent. "
+                                    if any(
+                                        item.get("reason") == MISSING_CITATION_REASON
+                                        for item in rejected
+                                    )
+                                    else ""
                                 )
                                 + (
                                     "The supporting classification URL/quote was not present "

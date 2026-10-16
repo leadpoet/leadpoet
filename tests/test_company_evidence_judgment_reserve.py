@@ -307,6 +307,8 @@ def test_mandatory_current_stage_discovery_precedes_reserved_submit(monkeypatch)
         "function": {"name": "submit_findings"},
     }
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
     assert result["usage"]["search_calls"] == 1
 
 
@@ -368,6 +370,8 @@ def test_reserve_overrides_pending_stage_recovery_without_marking_search_success
         "function": {"name": "submit_findings"},
     }
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == "provider_error"
     assert result["usage"]["search_calls"] == 1
 
 
@@ -566,19 +570,18 @@ def test_outer_deadline_retains_fresh_page_for_final_judgment(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("reserve_time", "finding_status", "reasoning_turn_cap", "research_exhausted", "expected_interrupted"),
+    ("reserve_time", "finding_status", "reasoning_turn_cap", "research_exhausted"),
     [
-        (True, "UNPROVEN", False, False, True),
-        (False, "UNPROVEN", False, False, False),
-        (True, "VERIFIED", False, False, False),
-        (True, "UNPROVEN", True, False, False),
-        (True, "UNPROVEN", False, True, False),
+        (True, "UNPROVEN", False, False),
+        (False, "UNPROVEN", False, False),
+        (True, "VERIFIED", False, False),
+        (True, "UNPROVEN", True, False),
+        (True, "UNPROVEN", False, True),
     ],
 )
-def test_reserve_forced_submit_only_interrupts_unresolved_available_research(
+def test_reserved_submit_completes_validated_bounded_judgment(
     monkeypatch, reserve_time, finding_status, reasoning_turn_cap,
     research_exhausted,
-    expected_interrupted,
 ):
     clock = _Clock()
     requests = []
@@ -615,15 +618,15 @@ def test_reserve_forced_submit_only_interrupts_unresolved_available_research(
 
     assert len(requests) == 2
     assert result["claims"]["industry"]["status"] == finding_status
-    assert result["_completed_submit"] is (not expected_interrupted)
-    assert result["failure_reason"] == (
-        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
-        if expected_interrupted else ""
-    )
+    # A complete validated UNPROVEN submission is an honest bounded judgment;
+    # unused research capacity does not turn it into an infrastructure failure.
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
     assert result["usage"]["search_calls"] == 1
+    assert result["usage"]["fetch_calls"] == 0
 
 
-def test_stage_turn_reserve_does_not_mark_time_interruption(monkeypatch):
+def test_exhausted_mandatory_stage_discovery_stays_incomplete_in_reserve(monkeypatch):
     calls = 0
 
     def monotonic():
@@ -662,6 +665,10 @@ def test_stage_turn_reserve_does_not_mark_time_interruption(monkeypatch):
     ))
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    assert result["_completed_submit"] is True
-    assert result["failure_reason"] == ""
+    # No current-status discovery was admitted. A negative submit cannot
+    # replace that required proof merely because the judgment reserve began.
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == (
+        investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+    )
     assert result["usage"]["search_calls"] == 0

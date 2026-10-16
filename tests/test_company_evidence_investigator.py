@@ -8715,17 +8715,26 @@ def _completed_cross_domain_rebrand_receipts():
 
 @pytest.mark.parametrize("typed_refusal", [False, True])
 @pytest.mark.parametrize("submitted_linkedin_slug", ["abacus-group", ""])
+@pytest.mark.parametrize("observed_linkedin_slug", ["abacus-technology", ""])
 def test_completed_cross_domain_unproven_rebrand_is_company_local(
-    typed_refusal, submitted_linkedin_slug,
+    typed_refusal, submitted_linkedin_slug, observed_linkedin_slug,
 ):
     identity, investigation = _completed_cross_domain_rebrand_receipts()
     identity["submitted_linkedin_slug"] = submitted_linkedin_slug
+    identity["observed_linkedin_slug"] = observed_linkedin_slug
     investigation["usage"] = {"fetch_outcomes": [
         {"ok": False, "error_class": "provider_request_refused"}
         if typed_refusal else {"ok": True, "error_class": ""},
     ]}
 
     assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {}, ("identity",), identity_receipt=identity,
+        investigation_receipt=investigation,
+    )
+    # An explicit empty observed slug does not prove a match. It can finish
+    # only a completed, failure-free negative investigation.
+    investigation["completed_submitted_findings"] = False
+    assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
         {}, ("identity",), identity_receipt=identity,
         investigation_receipt=investigation,
     )
@@ -8780,7 +8789,7 @@ def test_empty_submitted_linkedin_needs_completed_stage_and_rebrand_findings():
         ({}, {"failure_reason": "malformed_response"}),
         ({}, {"targets": ["headcount", "stage"]}),
         ({}, {"claims": {"rebrand": {"status": "VERIFIED"}}}),
-        ({"observed_linkedin_slug": ""}, {}),
+        ({"observed_linkedin_slug": None}, {}),
         ({"evidence_source": "company_homepage"}, {}),
         ({"reason_code": "identity_provider_error"}, {}),
         ({}, {"usage": {"fetch_outcomes": [

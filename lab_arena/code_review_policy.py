@@ -9,6 +9,9 @@ from typing import Any, Dict, Mapping, Optional
 LEGACY_MAX_ATTEMPTS = 3
 MAX_TRANSIENT_ATTEMPTS = 6
 TRANSIENT_BACKOFF_SECONDS = (60, 120, 240, 480, 900)
+OPENROUTER_LIMIT_SOURCES = frozenset({
+    "openrouter_credits", "openrouter_key_limit", "openrouter_in_flight_budget",
+})
 
 SOURCE_ERROR_CODES = frozenset({
     "code_review_source_size_mismatch",
@@ -104,6 +107,30 @@ def source_diagnostic(error_code: str) -> Dict[str, Any]:
     if error_code not in SOURCE_ERROR_CODES:
         error_code = "code_review_preparation_unavailable"
     return diagnostic(error_code, retryable=False)
+
+
+def provider_response_observation(
+    document: Any, *, raw_http_status: int, effective_http_status: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Retain fixed provider observations without granting retry or cost authority."""
+
+    result: Dict[str, Any] = {"provider_limit_source": "unknown"}
+    for name, value in (
+        ("provider_raw_http_status", raw_http_status),
+        ("provider_effective_http_status", effective_http_status),
+    ):
+        if type(value) is int and 100 <= value <= 599:
+            result[name] = value
+    error = document.get("error") if isinstance(document, Mapping) else None
+    if not isinstance(error, Mapping) or type(error.get("code")) is not int:
+        return result
+    metadata = error.get("metadata")
+    source = metadata.get("limit_source") if isinstance(metadata, Mapping) else None
+    if (error["code"] in (402, 429)
+        and error["code"] in (raw_http_status, effective_http_status)
+        and isinstance(source, str) and source in OPENROUTER_LIMIT_SOURCES):
+        result["provider_limit_source"] = source
+    return result
 
 
 def provider_http_diagnostic(status: int) -> Dict[str, Any]:

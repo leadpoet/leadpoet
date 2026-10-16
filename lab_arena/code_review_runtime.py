@@ -221,6 +221,7 @@ class SubmissionCodeReviewer:
         actual = 0
         status = "error"
         provider_http_status = 0
+        provider_observation: dict[str, Any] = {}
         funding_route = "none"
         document: dict[str, Any] = code_review_policy.diagnostic(
             "code_review_provider_unavailable"
@@ -275,6 +276,10 @@ class SubmissionCodeReviewer:
                         parsed = json.loads(response.body.decode("utf-8"))
                     except (UnicodeDecodeError, ValueError):
                         parsed = None
+                    if response.internal_provenance is None:
+                        provider_observation = code_review_policy.provider_response_observation(
+                            parsed, raw_http_status=provider_http_status,
+                        )
                     if isinstance(parsed, Mapping):
                         actual = broker.actual_openrouter_cost_microusd(
                             self._prices, prepared.parameters["model"], parsed,
@@ -304,6 +309,11 @@ class SubmissionCodeReviewer:
                         raise code_review.CodeReviewError(
                             "review_response_invalid", response_reason="envelope"
                         ) from exc
+                    if response.internal_provenance is None:
+                        provider_observation = code_review_policy.provider_response_observation(
+                            parsed, raw_http_status=provider_http_status,
+                            effective_http_status=response.status,
+                        )
                     if response.status == 200:
                         if not isinstance(parsed, Mapping):
                             raise code_review.CodeReviewError(
@@ -358,6 +368,11 @@ class SubmissionCodeReviewer:
             document = code_review_policy.diagnostic(
                 "code_review_cost_unavailable"
             )
+        if status == "error" and any(
+            provider_observation.get(name, 0) >= 400
+            for name in ("provider_raw_http_status", "provider_effective_http_status")
+        ):
+            document.update(provider_observation)
         document.update({
             "model": code_review.DEFAULT_REVIEW_MODEL,
             "file_count": len(prepared.reviewed_files),

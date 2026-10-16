@@ -1128,6 +1128,14 @@ def _identity_result(
 class _ArenaProviderFetchError(aiohttp.ClientError):
     """An Arena error response has no validated target response URL."""
 
+    def __init__(self, message: str, *, broker_status: Optional[int] = None):
+        super().__init__(message)
+        self.broker_status = (
+            broker_status
+            if type(broker_status) is int and 100 <= broker_status <= 599
+            else None
+        )
+
 
 async def _fetch_bounded_html(
     session: aiohttp.ClientSession,
@@ -1144,7 +1152,8 @@ async def _fetch_bounded_html(
             and getattr(resp, "_lab_arena_response_url_validated", None) is False
         ):
             raise _ArenaProviderFetchError(
-                "website fetch error: Arena provider response unavailable"
+                "website fetch error: Arena provider response unavailable",
+                broker_status=resp.status,
             )
         raw = bytearray()
         while len(raw) < _MAX_BYTES:

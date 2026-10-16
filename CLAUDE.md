@@ -1678,6 +1678,7 @@ The user explicitly authorized `$overnight-rebenchmark-validation` on 2026-09-09
 17. Run safe, independent calls together and return concise results. Handle dependent calls, writes, approvals, and failure-sensitive calls separately.
 
 18. Routine handoff: run `git diff --check`; run `python3 -m py_compile` for touched Python files; for Pydantic changes, round-trip JSON; for scoring changes, scan for silent exception sentinels. Ask before adding production dependencies.
+19. When OnePatch is authorized, use fresh, sufficiently broad continuous queries with overlap and keep unresolved production blockers and deadlines active across checks until direct production evidence clears them.
 
 ## Scoped execution deadline authorization, 2026-09-21
 

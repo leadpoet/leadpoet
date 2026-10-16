@@ -52,6 +52,7 @@ RUN python3 /tmp/install_arena_codex.py \
 # import closure of lab_arena, qualification, gateway, and leadpoet_verifier,
 # which reaches the support packages below as well.
 COPY lab_arena/ /model/lab_arena/
+COPY arena_reviewer_runtime/ /model/arena_reviewer_runtime/
 COPY qualification/ /model/qualification/
 COPY gateway/ /model/gateway/
 COPY leadpoet_verifier/ /model/leadpoet_verifier/

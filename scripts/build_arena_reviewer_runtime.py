@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Compose a runtime repair on an immutable Arena grader, without rebuilding it.
+
+The original image layers, dependencies and process configuration stay intact.
+Only the dedicated runtime package and the reviewed admission-interface
+extraction can be added. The extraction does not import today's grading code.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import io
+import json
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+GRADER_FILE = "qualification/scoring/company_evidence_investigator.py"
+RUNTIME_DIRECTORY = "arena_reviewer_runtime"
+MAX_OVERLAY_BYTES = 4 * 1024 * 1024
+
+
+class CompositionError(ValueError):
+    pass
+
+
+def checked_output(args: list[str], **kwargs: Any) -> str:
+    return subprocess.check_output(args, text=True, **kwargs).strip()
+
+
+def image_inspect(reference: str) -> dict[str, Any]:
+    return json.loads(checked_output(["docker", "image", "inspect", reference]))[0]
+
+
+def verify_image_configuration(base: dict, candidate: dict) -> list[str]:
+    """A runtime release cannot change the base, interpreter or import path."""
+    for name in ("Architecture", "Os", "Config"):
+        if candidate.get(name) != base.get(name):
+            raise CompositionError("composed image changed " + name)
+    original = base["RootFS"]["Layers"]
+    composed = candidate["RootFS"]["Layers"]
+    if composed[:len(original)] != original or len(composed) != len(original) + 1:
+        raise CompositionError("composed image must append exactly one runtime layer")
+    return composed[len(original):]
+
+
+def verify_overlay(data: bytes, expected_files: dict[str, bytes]) -> None:
+    """Verify actual added bytes, not a label claiming grading equivalence."""
+    if len(data) > MAX_OVERLAY_BYTES:
+        raise CompositionError("runtime layer exceeds its bounded size")
+    expected = {"model/" + path: value for path, value in expected_files.items()}
+    directories = {str(parent) for path in expected for parent in PurePosixPath(path).parents}
+    found: set[str] = set()
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as archive:
+        for member in archive:
+            name = member.name.rstrip("/")
+            while name.startswith("./"):
+                name = name[2:]
+            path = PurePosixPath(name)
+            if path.is_absolute() or ".." in path.parts or ".wh." in path.name:
+                raise CompositionError("unsafe runtime layer path")
+            if member.isdir() and name in directories:
+                continue
+            if not member.isfile() or name not in expected or name in found:
+                raise CompositionError("runtime layer changes an unapproved file")
+            if member.mode & 0o7000 or member.mode & 0o002:
+                raise CompositionError("unsafe runtime layer file mode")
+            if member.size != len(expected[name]):
+                raise CompositionError("runtime file size mismatch")
+            stream = archive.extractfile(member)
+            if stream is None or stream.read() != expected[name]:
+                raise CompositionError("runtime file differs from reviewed source")
+            found.add(name)
+    if found != set(expected):
+        raise CompositionError("runtime layer is missing expected files")
+
+
+def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]) -> None:
+    """Stream Docker's archive; do not unpack the base or trust archive names."""
+    process = subprocess.Popen(["docker", "image", "save", reference], stdout=subprocess.PIPE)
+    matches = 0
+    try:
+        assert process.stdout is not None
+        with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+            for member in archive:
+                if not member.isfile() or member.size > MAX_OVERLAY_BYTES:
+                    continue
+                stream = archive.extractfile(member)
+                if stream is None:
+                    continue
+                data = stream.read()
+                if "sha256:" + hashlib.sha256(data).hexdigest() == digest:
+                    verify_overlay(data, expected)
+                    matches += 1
+        if process.wait() != 0 or matches != 1:
+            raise CompositionError("could not verify the exact added runtime layer")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait()
+
+
+def extract_grader(reference: str, destination: Path) -> bytes:
+    container = checked_output(["docker", "create", reference])
+    try:
+        subprocess.run(["docker", "cp", container + ":/model/" + GRADER_FILE,
+                        str(destination)], check=True, stdout=subprocess.DEVNULL)
+        return destination.read_bytes()
+    finally:
+        subprocess.run(["docker", "rm", container], check=True, stdout=subprocess.DEVNULL)
+
+
+def expected_overlay(original: bytes) -> dict[str, bytes]:
+    from scripts.arena_reviewer_admission_seam import convert_admission_seam
+
+    converted = convert_admission_seam(original)
+    files = {GRADER_FILE: converted}
+    for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
+        if path.is_symlink():
+            raise CompositionError("runtime source must not be a symlink")
+        files[RUNTIME_DIRECTORY + "/" + path.name] = path.read_bytes()
+    if len(files) < 3:
+        raise CompositionError("runtime source is incomplete")
+    return files
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--grading-image", required=True)
+    parser.add_argument("--verify-image", help="verify an existing composition instead of building")
+    parser.add_argument("--push", action="store_true")
+    args = parser.parse_args()
+    match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
+    if not match:
+        raise CompositionError("grading image must be pinned by digest")
+    if args.push and args.verify_image:
+        raise CompositionError("verify does not publish")
+    revision = checked_output(["git", "rev-parse", "HEAD"], cwd=ROOT)
+    if args.push and checked_output(["git", "status", "--porcelain"], cwd=ROOT):
+        raise CompositionError("publishing requires a clean committed checkout")
+    base = image_inspect(args.grading_image)
+    if base.get("Architecture") != "amd64" or base.get("Os") != "linux":
+        raise CompositionError("grading image must be linux/amd64")
+    with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
+        root = Path(directory)
+        original = extract_grader(args.grading_image, root / "original.py")
+        files = expected_overlay(original)
+        tag = args.verify_image or (match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12])
+        if not args.verify_image:
+            for name, data in files.items():
+                path = root / "overlay" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                path.chmod(0o644)
+            (root / "Dockerfile").write_text(
+                "FROM " + args.grading_image + "\nCOPY --chown=65534:65534 overlay/ /model/\n"
+            )
+            subprocess.run(["docker", "build", "--platform", "linux/amd64",
+                            "--provenance=false", "--sbom=false", "-t", tag, str(root)], check=True)
+        candidate = image_inspect(tag)
+        added = verify_image_configuration(base, candidate)
+        verify_saved_overlay(tag, added[0], files)
+        reference = tag
+        if args.push:
+            subprocess.run(["docker", "push", tag], check=True)
+            digests = image_inspect(tag).get("RepoDigests") or []
+            matching = [value for value in digests if value.startswith(match[1] + "@sha256:")]
+            if len(matching) != 1:
+                raise CompositionError("published runtime digest is ambiguous")
+            reference = matching[0]
+        print(json.dumps({
+            "grading_image": args.grading_image,
+            "runtime_image": reference,
+            "runtime_source_commit": revision,
+            "base_layers_unchanged": True,
+            "process_configuration_unchanged": True,
+            "original_investigator_sha256": hashlib.sha256(original).hexdigest(),
+            "overlay_files": {name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
+        }, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (CompositionError, ValueError) as exc:
+        raise SystemExit(str(exc)) from None

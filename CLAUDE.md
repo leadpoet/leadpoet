@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: frozen grading and repairable reviewer runtime
+
+On 2026-10-16 the user authorized separating immutable grading behavior from
+repairable reviewer runtime, including protected inspection, narrow committed
+migrations, runtime image composition, safe push/merge, canonical deployment and
+live unfinished-review recovery. Preserve original grading semantics, frozen
+round configuration, accepted results, caches, checkpoints, cost controls and
+competition rules. Only unfinished judgments may use the repaired runtime;
+do not rescore published October 13 outcomes. Verify exact grading bytes,
+lease-pinned runtime identity, provider settlement and accepted-work immutability.
+This authority ends after the October 16 cycle and production validation finish.
+
+
 ## Scoped implementation authorization: October 16 weight-read diagnostics
 
 The user authorized the smallest Arena-side diagnostic change for intermittent

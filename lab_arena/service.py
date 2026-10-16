@@ -7,10 +7,12 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
 import secrets
 import threading
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -18,7 +20,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import telemetry, runtime_version
+from lab_arena import telemetry, runtime_version, training_input
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
@@ -338,10 +340,19 @@ class LocalObjectStore:
 
     def put(self, ref: str, data: bytes) -> None:
         path = self._path(ref)
-        if path.exists() and path.read_bytes() != bytes(data):
-            raise ArenaContractError("object ref %s already holds different bytes" % ref)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(bytes(data))
+        # Publish complete bytes atomically and never replace an existing ref.
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".arena-")
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(bytes(data))
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                if path.read_bytes() != bytes(data):
+                    raise ArenaContractError("object ref %s already holds different bytes" % ref)
+        finally:
+            os.unlink(temporary)
 
     def get(self, ref: str) -> bytes:
         path = self._path(ref)
@@ -592,6 +603,8 @@ class ServiceConfig:
     scorer_image_access: Optional[
         Callable[[str, str], Mapping[str, Any]]
     ] = None
+    # Observational uploads use a separate bounded client in production.
+    training_object_store: Optional[ObjectStore] = None
 
     def __post_init__(self) -> None:
         if (
@@ -5207,6 +5220,51 @@ class ArenaService:
                     run_identity=_telemetry_run_identity(run),
                 )
         return result
+
+    def handle_training_input(
+        self, run_id: str, lease_token: str, document: Any,
+    ) -> Dict[str, Any]:
+        """Store the final runner input only for this live, owned run lease."""
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
+        expected_hash = str(run.get("lease_token_hash") or "")
+        if not expected_hash or not hmac.compare_digest(expected_hash, hash_lease_token(lease_token)):
+            raise ServiceError("lease_invalid", 401)
+        if run.get("status") != "leased":
+            raise ServiceError("lease_inactive", 409)
+        try:
+            raw_expiry = run.get("lease_expires_at")
+            expiry = raw_expiry if isinstance(raw_expiry, datetime) else datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            raise ServiceError("lease_invalid", 401) from None
+        if expiry.astimezone(timezone.utc) <= self.now():
+            raise ServiceError("lease_expired", 409)
+        try:
+            snapshot, compressed = training_input.build_snapshot(
+                run_id, str(run.get("kind") or "execute"), document,
+                secrets=(lease_token,),
+            )
+        except (ValueError, TypeError, RecursionError):
+            raise ServiceError("training_input_invalid", 400) from None
+        objects = self._config.training_object_store
+        if objects is None:
+            raise ServiceError("training_input_unavailable", 503)
+        try:
+            objects.put(training_input.object_ref(run_id), compressed)
+        except ArenaContractError:
+            raise ServiceError("training_input_conflict", 409) from None
+        except Exception:
+            raise ServiceError("training_input_unavailable", 503) from None
+        return {
+            "status": "stored", "schema_version": training_input.SCHEMA_VERSION,
+            "ref": training_input.object_ref(run_id),
+            "input_sha256": snapshot["input_sha256"],
+            "privacy": snapshot["privacy"],
+        }
 
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
         """Return source bytes only to the runner that holds the active lease."""

@@ -43,7 +43,7 @@ import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
 from lab_arena import trajectory, validator_events
-from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, runtime_version, scoring, shim, source_bundle
+from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, runtime_version, scoring, shim, source_bundle, training_input
 from lab_arena.contracts import ArenaContractError
 from lab_arena.broker import (
     provider_authentication_failure_reason, provider_credit_failure_reason,
@@ -724,6 +724,8 @@ class ArenaApiClient(Protocol):
 
     def trajectory(self, run_id: str, lease_token: str, events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]: ...
 
+    def training_input(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
+
     def source(self, run_id: str, lease_token: str) -> bytes: ...
 
     def image_access(self, run_id: str, lease_token: str) -> Dict[str, Any]: ...
@@ -833,6 +835,17 @@ class HttpArenaApiClient:
             {"events": list(events)},
             headers={"x-lab-arena-lease": lease_token},
             timeout_seconds=5.0,
+        )
+
+    def training_input(
+        self, run_id: str, lease_token: str, document: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        training_input.object_ref(run_id)  # Same bounded path vocabulary as storage.
+        if len(contracts.canonical_json(document).encode("utf-8")) > training_input.MAX_INPUT_BYTES:
+            raise RunnerError("training input exceeds capture limit")
+        return self._post(
+            "/arena/v1/runs/%s/training-input" % run_id, document,
+            headers={"x-lab-arena-lease": lease_token}, timeout_seconds=2.0,
         )
 
     def provider(
@@ -3182,6 +3195,32 @@ def _record_trajectory(
         print("Arena trajectory upload failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
 
 
+def _record_training_input(
+    config: RunnerConfig, lease: Mapping[str, Any], lease_token: str,
+    document: Mapping[str, Any],
+) -> None:
+    """Best-effort input evidence; capture cannot change run/scoring results."""
+    send = getattr(config.api, "training_input", None)
+    if not callable(send):
+        return
+    try:
+        for attempt in range(2):
+            try:
+                response = send(str(lease["run_id"]), lease_token, document)
+            except Exception:
+                if attempt == 0:
+                    continue
+                raise
+            if not isinstance(response, Mapping) or response.get("status") != "stored":
+                raise RunnerError("training input capture rejected")
+            break
+    except Exception as exc:
+        try:
+            print("Arena training input capture failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+
 def _runtime_log_events(
     result: Optional[runtime.SandboxResult], lease_token: str, observed_at: str,
 ) -> List[Dict[str, Any]]:
@@ -3537,6 +3576,7 @@ class AssignmentExecutor:
                         set(operations.OPERATIONS) | set(operations.CATALOG_OPERATIONS)
                     )
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
+            _record_training_input(config, lease, lease_token, input_document)
             staged_agent_entrypoint = (
                 None
                 if scoring_run

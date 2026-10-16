@@ -14,7 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from lab_arena import contracts, source_bundle, telemetry, trajectory, validator_events
+from lab_arena import contracts, source_bundle, telemetry, trajectory, training_input, validator_events
 from lab_arena.contracts import ArenaContractError
 from lab_arena.service import ArenaService, ServiceError
 from lab_arena.store import ArenaStoreUnavailable
@@ -292,6 +292,21 @@ def create_app(service: ArenaService) -> FastAPI:
         )
         return await run_in_threadpool(
             service.handle_trajectory, run_id, lease_token, document
+        )
+
+    @app.post("/arena/v1/runs/{run_id}/training-input")
+    async def capture_training_input(
+        run_id: str, request: Request,
+        x_lab_arena_lease: Optional[str] = Header(default=None),
+    ) -> JSONResponse:
+        lease_token = _lease_header(x_lab_arena_lease)
+        document = await _read_json(request, limits=contracts.StrictLimits(
+            max_depth=64, max_list_items=250_000, max_object_keys=250_000,
+            max_string_bytes=training_input.MAX_INPUT_BYTES,
+            max_total_bytes=training_input.MAX_INPUT_BYTES,
+        ))
+        return await no_store_public_call(
+            service.handle_training_input, run_id, lease_token, document,
         )
 
     @app.get("/arena/v1/runs/{run_id}/quota")

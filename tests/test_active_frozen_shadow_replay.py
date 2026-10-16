@@ -25,6 +25,11 @@ def _active_source(monkeypatch):
     source["configuration_doc"]["mode"] = "live"
     for run in runs:
         if run["status"] == "accepted":
+            old_ref = run["output_ref"]
+            run.update(round_id=REPLAY_SOURCE_ROUND_ID, terminal_cause="accepted",
+                       result_doc={"terminal_status": "accepted"},
+                       output_ref=f"arena/{REPLAY_SOURCE_ROUND_ID}/outputs/{run['run_id']}.json")
+            documents[run["output_ref"]] = documents[old_ref]
             run["output_hash"] = contracts.document_hash(json.loads(documents[run["output_ref"]]))
     return built, source, runs, documents
 
@@ -67,6 +72,60 @@ def test_active_replay_has_new_inputs_without_old_judgment_authority(monkeypatch
     assert b"old_scorer_authority" not in replay["archive"]
 
 
+def test_active_replay_uses_real_null_hash_contract_and_compares_canonical_bytes(monkeypatch):
+    built, source, runs, documents = _active_source(monkeypatch)
+    for run in runs:
+        if run["status"] == "accepted":
+            run["output_hash"] = None
+    reads = []
+    original_get = built._objects.get_bounded
+    def read(ref, maximum):
+        reads.append(ref)
+        return original_get(ref, maximum)
+    built._objects.get_bounded = read
+    replay = _replay(built)
+    assert all(not row["source_stored_output_hash_present"] for row in replay["evidence"]["origins"])
+    assert len(reads) == 4 and len(set(reads)) == 2
+    assert replay["evidence"]["replayed_company_count"] == 2
+
+
+@pytest.mark.parametrize("change", ["bytes", "identity", "terminal_cause", "terminal_result", "result_body", "ref"])
+def test_active_replay_rejects_mutated_bytes_or_selected_authority(monkeypatch, change):
+    built, source, runs, documents = _active_source(monkeypatch)
+    original_runs = built.store.list_runs
+    calls = []
+    def changed(round_id):
+        calls.append(round_id)
+        if len(calls) == 2:
+            run = runs[0]
+            if change == "bytes":
+                document = json.loads(documents[run["output_ref"]])
+                document["companies"][0]["company_name"] = "Changed after first read"
+                documents[run["output_ref"]] = json.dumps(document).encode()
+            elif change == "identity": run["runner_hotkey"] = "different-runner"
+            elif change == "terminal_cause": run["terminal_cause"] = "provider_error"
+            elif change == "terminal_result": run["result_doc"]["terminal_status"] = "failed"
+            elif change == "result_body": run["result_doc"]["resource_summary"] = {"changed": True}
+            elif change == "ref": run["output_ref"] = "arena/other/output.json"
+        return original_runs(round_id)
+    built.store.list_runs = changed
+    with pytest.raises(verification.VerificationError, match="(changed|authority is invalid)"):
+        _replay(built)
+
+
+def test_active_replay_ignores_normal_score_and_timestamp_updates(monkeypatch):
+    built, source, runs, documents = _active_source(monkeypatch)
+    original_runs = built.store.list_runs
+    calls = []
+    def progressing(round_id):
+        calls.append(round_id)
+        if len(calls) == 2:
+            runs[0].update(per_icp_score=14.0, updated_at="later")
+        return original_runs(round_id)
+    built.store.list_runs = progressing
+    assert _replay(built)["evidence"]["replayed_group_count"] == 2
+
+
 @pytest.mark.parametrize("status", ["open", "published", "cancelled", "unknown"])
 def test_active_replay_rejects_unfrozen_or_wrong_source_mode(monkeypatch, status):
     built, source, _runs, _documents = _active_source(monkeypatch)
@@ -86,7 +145,8 @@ def test_active_replay_requires_selection_and_host_compat_route(monkeypatch, cha
 
 @pytest.mark.parametrize("mutation", [
     "missing_bank", "missing_date", "wrong_network", "wrong_netuid", "shadow",
-    "missing_hash", "wrong_hash", "pending_selected", "failed_selected",
+    "missing_hash", "wrong_hash", "malformed_hash", "pending_selected", "failed_selected",
+    "terminal_cause", "terminal_result", "output_ref",
 ])
 def test_active_replay_rejects_invalid_or_incomplete_selected_inputs(monkeypatch, mutation):
     built, source, runs, _documents = _active_source(monkeypatch)
@@ -97,8 +157,12 @@ def test_active_replay_rejects_invalid_or_incomplete_selected_inputs(monkeypatch
     elif mutation == "shadow": source["configuration_doc"]["mode"] = "shadow"
     elif mutation == "missing_hash": runs[0]["output_hash"] = ""
     elif mutation == "wrong_hash": runs[0]["output_hash"] = "sha256:" + "0" * 64
+    elif mutation == "malformed_hash": runs[0]["output_hash"] = "malformed"
     elif mutation == "pending_selected": runs[0]["status"] = "pending"
     elif mutation == "failed_selected": runs[0]["status"] = "failed"
+    elif mutation == "terminal_cause": runs[0]["terminal_cause"] = "provider_error"
+    elif mutation == "terminal_result": runs[0]["result_doc"]["terminal_status"] = "failed"
+    elif mutation == "output_ref": runs[0]["output_ref"] = "arena/other/output.json"
     with pytest.raises(verification.VerificationError):
         _replay(built)
 

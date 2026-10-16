@@ -353,6 +353,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example = {"schema_version": SCHEMA_VERSION,
                "example_id": contracts.document_hash({"schema_version": SCHEMA_VERSION, "run_id": run_id}),
                **{key: run[key] for key in ("run_id", "round_id", "submission_id", "stage", "icp_position", "assignment_id", "attempt")},
+               "round_status": round_row.get("status"), "rewards_enabled": round_row.get("rewards_enabled"),
+               "arena_network_name": round_row.get("arena_network_name"),
                "configuration": copy.deepcopy(config), "evaluation_date": round_row.get("evaluation_date"),
                "role": "baseline" if submission_row.get("is_king") is True else "miner",
                "runtime": _runtime(run), "companies": []}
@@ -381,13 +383,31 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     if not config.get("scorer_image_digest") or not config.get("scorer_image_reference"):
         reasons["source_identity"].add("scorer_image_identity_missing")
     try:
-        output = validate_output_document(_json_object(objects, run["output_ref"], MAX_OUTPUT_BYTES),
+        expected_output_ref = "arena/%s/outputs/%s.json" % (run["round_id"], run_id)
+        if run.get("output_ref") != expected_output_ref:
+            raise ExportError("execution_output_reference_mismatch")
+        stored_output = _json_object(objects, expected_output_ref, MAX_OUTPUT_BYTES)
+        # Production replay authority hashes the parsed stored document, not
+        # literal JSON whitespace or a newly normalized validation projection.
+        output_hash = contracts.document_hash(stored_output)
+        recorded_hash = run.get("output_hash")
+        if recorded_hash not in (None, "") and (
+                not isinstance(recorded_hash, str) or contracts.SHA256_RE.fullmatch(recorded_hash) is None
+                or recorded_hash != output_hash):
+            raise ExportError("execution_output_hash_mismatch")
+        output = validate_output_document(stored_output,
                                           expected_schema_version=contact_policy.output_schema(config),
                                           require_intent_dates=False)
         if run.get("status") != "accepted" or run.get("terminal_cause") != "accepted":
             raise ExportError("execution_not_accepted")
         example["output"] = output
+        example["output_identity"] = {"ref": expected_output_ref, "document_hash": output_hash,
+                                      "recorded_hash_present": recorded_hash not in (None, "")}
+    except ExportError as exc:
+        output = None
+        reasons["input_output_label"].add(str(exc))
     except Exception:
+        output = None
         reasons["input_output_label"].add("accepted_output_unavailable")
     judge = _select_judge(run, runs)
     if judge is None or judge.get("status") != "accepted" or judge.get("terminal_cause") != "accepted":

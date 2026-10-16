@@ -16,6 +16,7 @@ from lab_arena.output import validate_output_document
 from scripts.export_arena_training import _ledger, write_private
 
 CLAIM_HASH = "sha256:" + "c" * 64
+OUTPUT_REF = "arena/arena-2026-10-16/outputs/execute:1.json"
 
 
 def save_input(objects, run_id, kind, document, *, generation=1, claim_hash=CLAIM_HASH):
@@ -52,6 +53,7 @@ def fixture():
     config = {"scorer_policy": policy, "scorer_image_digest": "sha256:" + "a" * 64,
               "scorer_image_reference": "registry/scorer@sha256:" + "a" * 64}
     round_row = {"round_id": "arena-2026-10-16", "configuration_doc": config,
+                 "status": "published", "rewards_enabled": True, "arena_network_name": "finney",
                  "benchmark_ref": "benchmark", "evaluation_date": "2026-10-16",
                  "participants": [{"submission_id": "sub"}]}
     archive = io.BytesIO()
@@ -73,14 +75,14 @@ def fixture():
                "miner_hotkey": "miner", "stage": 1, "icp_position": 0, "assignment_id": "execute",
                "attempt": 1, "kind": "execute", "status": "accepted", "terminal_cause": "accepted",
                "lease_generation": 1, "claim_request_hash": CLAIM_HASH,
-               "output_ref": "output", "result_doc": {"resource_summary": copy.deepcopy(resource)}}
+               "output_ref": OUTPUT_REF, "result_doc": {"resource_summary": copy.deepcopy(resource)}}
     judge = dict(execute, run_id="judge:1", kind="score", assignment_id="judge", scored_run_id="execute:1",
                  output_ref="judge-output", result_doc={"resource_summary": copy.deepcopy(resource)})
     output = validate_output_document({"schema_version": contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION, "companies": [company]}, require_intent_dates=False)
     company = output["companies"][0]
     breakdowns = [{"final_score": 60.0}]
     execute["per_icp_score"] = verify.scored_row("sub", 0, execute["run_id"], icp, [company], breakdowns, policy)["per_icp_score"]
-    objects.put("output", contracts.canonical_json(output).encode())
+    objects.put(OUTPUT_REF, contracts.canonical_json(output).encode())
     objects.put("judge-output", contracts.canonical_json(scoring.build_scoring_output(execute["run_id"], breakdowns)).encode())
     for row, document in ((execute, {"schema_version": "leadpoet.lab_arena.icp_input.v1", "icp": icp, "evaluation_date": "2026-10-16"}),
                           (judge, scoring.build_scoring_input(scored_run_id=execute["run_id"], icp=icp,
@@ -95,6 +97,7 @@ def test_complete_no_external_call_example_is_deterministic_and_has_labels():
     first = assemble_example(**values)
     assert first["completeness"]["complete"] is True
     assert first["companies"][0]["label_status"] == "scored"
+    assert (first["round_status"], first["rewards_enabled"], first["arena_network_name"]) == ("published", True, "finney")
     assert first["judgment"]["per_icp_score"] == 60
     assert assemble_example(**dict(values, runs=list(reversed(values["runs"])))) == first
     unhashed = dict(first)
@@ -397,9 +400,9 @@ def test_provider_retry_receipts_count_one_logical_call_but_keep_every_cost():
 
 def test_judge_snapshot_contains_full_output_before_company_goal_slicing():
     values = fixture()
-    output = json.loads(values["objects"].values["output"])
+    output = json.loads(values["objects"].values[OUTPUT_REF])
     output["companies"].append(copy.deepcopy(output["companies"][0]))
-    values["objects"].put("output", contracts.canonical_json(output).encode())
+    values["objects"].put(OUTPUT_REF, contracts.canonical_json(output).encode())
     icp = json.loads(values["objects"].values["benchmark"])["icps"][0]
     policy = values["round_row"]["configuration_doc"]["scorer_policy"]
     save_input(values["objects"], "judge:1", "score", scoring.build_scoring_input(
@@ -526,3 +529,57 @@ def test_distinct_earlier_response_is_kept_without_claiming_worker_delivery():
     assert receipts[0]["response"] == {"result": "earlier distinct response"}
     assert receipts[1]["response_ref"]["field"] == "response"
     assert receipts[0]["response_sha256"] != receipts[1]["response_sha256"]
+
+
+def test_foreign_execution_output_pointer_cannot_supply_another_runs_bytes():
+    values = fixture()
+    foreign_ref = "arena/arena-2026-10-16/outputs/foreign-execution:1.json"
+    values["objects"].put(foreign_ref, values["objects"].values[OUTPUT_REF])
+    values["runs"][0]["output_ref"] = foreign_ref
+    result = assemble_example(**values)
+    assert "execution_output_reference_mismatch" in result["completeness"]["incomplete_reasons"]
+    assert result["completeness"]["dimensions"]["input_output_label"] is False
+    assert "output" not in result and result["companies"] == []
+
+
+def test_optional_recorded_execution_hash_detects_changed_valid_json():
+    values = fixture()
+    original = json.loads(values["objects"].values[OUTPUT_REF])
+    values["runs"][0]["output_hash"] = contracts.document_hash(original)
+    original["companies"][0]["fit_summary"] = "Different submitted company evidence"
+    values["objects"].put(OUTPUT_REF, contracts.canonical_json(original).encode())
+    result = assemble_example(**values)
+    assert "execution_output_hash_mismatch" in result["completeness"]["incomplete_reasons"]
+    assert result["completeness"]["dimensions"]["input_output_label"] is False
+    assert "output" not in result
+
+
+def test_execution_hash_uses_canonical_parsed_document_not_transport_whitespace():
+    values = fixture()
+    document = json.loads(values["objects"].values[OUTPUT_REF])
+    digest = contracts.document_hash(document)
+    values["runs"][0]["output_hash"] = digest
+    values["objects"].put(OUTPUT_REF, json.dumps(document, indent=4).encode())
+    result = assemble_example(**values)
+    assert result["completeness"]["complete"]
+    assert result["output_identity"] == {"ref": OUTPUT_REF, "document_hash": digest, "recorded_hash_present": True}
+
+
+@pytest.mark.parametrize("absent_hash", [None, ""])
+def test_canonical_legacy_output_does_not_invent_a_recorded_hash(absent_hash):
+    values = fixture()
+    values["runs"][0]["output_hash"] = absent_hash
+    result = assemble_example(**values)
+    assert result["completeness"]["complete"]
+    assert result["output_identity"]["recorded_hash_present"] is False
+
+
+def test_round_filters_report_stored_state_without_inferring_reward_authority():
+    values = fixture()
+    published = assemble_example(**values)
+    values["round_row"].update(status="cancelled", rewards_enabled=False, arena_network_name="finney-shadow")
+    cancelled = assemble_example(**values)
+    assert (cancelled["round_status"], cancelled["rewards_enabled"], cancelled["arena_network_name"]) == (
+        "cancelled", False, "finney-shadow")
+    assert cancelled["example_id"] == published["example_id"]
+    assert cancelled["example_hash"] != published["example_hash"]

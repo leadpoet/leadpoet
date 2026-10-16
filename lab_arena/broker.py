@@ -5385,8 +5385,10 @@ class Broker:
                     "cost_unit_name": raw_cost.unit_name,
                 }
             )
+        # Legacy aliases (for example exa.search) still bill the bound native
+        # tool (exa_search), which the response-recovery SQL also requires.
         cost_operation = (
-            str(effective_normalized.get("tool") or effective_operation_id)
+            str(deepline_operation or effective_normalized.get("tool") or effective_operation_id)
             if effective_operation.provider == "deepline"
             else effective_operation_id
         )

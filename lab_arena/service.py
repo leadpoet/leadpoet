@@ -1660,9 +1660,18 @@ class ArenaService:
         if now < opening:
             opening -= timedelta(days=1)
         # This only describes the bounded scheduler cutover, not a permanent
-        # alternative admission path if daily creation fails.
-        return (opening <= now < opening + timedelta(seconds=90)
-                and round_id == round_id_for_cutoff(opening + timedelta(days=1)))
+        # alternative admission path if daily creation fails. The window spans
+        # the opening in both directions: miners racing the cutoff name the
+        # next canonical round moments before it is created, and a terminal
+        # 404 there loses a submission that a short retry would have placed.
+        next_opening = opening + timedelta(days=1)
+        grace = timedelta(seconds=90)
+        return (
+            (opening <= now < opening + grace
+             and round_id == round_id_for_cutoff(opening + timedelta(days=1)))
+            or (next_opening - grace <= now < next_opening
+                and round_id == round_id_for_cutoff(next_opening + timedelta(days=1)))
+        )
 
     def _hot_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         """One round's row for runner-facing handlers, cached for a few seconds.

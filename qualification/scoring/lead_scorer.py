@@ -5019,6 +5019,38 @@ async def _refresh_linkedin_employee_size_observation(
     unavailable = _without_employee_size_observation(verdict)
     if not evidence_slug:
         evidence_slug = _linkedin_company_evidence_slug(evidence_url)
+    anchor_slug = str(
+        verified_homepage_identity.get("linkedin_company_slug") or ""
+    ).strip().casefold()
+    if (
+        evidence_slug != anchor_slug
+        and all(
+            isinstance(verified_homepage_identity.get(field), str)
+            and str(verified_homepage_identity[field]).strip()
+            for field in (
+                "normalized_name",
+                "registrable_dns_domain",
+                "linkedin_company_slug",
+            )
+        )
+        and linkedin_company_page_slug(
+            f"https://www.linkedin.com/company/{anchor_slug}"
+        ) == anchor_slug
+        and evaluate_company_identity(
+            submitted_name=company.company_name,
+            submitted_website=company.company_website,
+            submitted_linkedin=company.company_linkedin,
+            observed_name=verified_homepage_identity["normalized_name"],
+            observed_website=(
+                "https://" + verified_homepage_identity["registrable_dns_domain"]
+            ),
+            observed_linkedin=f"https://www.linkedin.com/company/{anchor_slug}",
+            evidence_source="company_homepage",
+        ).get("decision") == COMPANY_FIT_MATCH
+    ):
+        # Discard the unbound citation and fetch the independently verified
+        # homepage profile. Only that fetch can supply the size URL and quote.
+        evidence_slug = anchor_slug
     if not evidence_slug:
         if invocation_cache.get("refresh_outcome") != "retryable_failure":
             invocation_cache["refresh_outcome"] = (
@@ -5026,9 +5058,6 @@ async def _refresh_linkedin_employee_size_observation(
             )
         return unavailable
 
-    anchor_slug = str(
-        verified_homepage_identity.get("linkedin_company_slug") or ""
-    ).strip().casefold()
     if anchor_slug:
         identity_matches = anchor_slug == evidence_slug
     else:

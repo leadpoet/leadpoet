@@ -2186,6 +2186,35 @@ def provider_credit_failure_reason(call: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def provider_authentication_failure_reason(call: Mapping[str, Any]) -> Optional[str]:
+    """Describe a bound submitted-account rejection, never infer key expiry."""
+    try:
+        evidence = _validated_account_failure_evidence(
+            call.get("account_failure_evidence")
+        )
+    except BrokerError:
+        return None
+    if (
+        evidence is not None
+        and evidence.get("provider_status") == 401
+        and call.get("provider_status") == 401
+        and call.get("provider") in ("openrouter", "deepline", "scrapingdog")
+        and call.get("funding_source") == "miner_key"
+        and call.get("error_code") == "miner_credentials_unavailable"
+        and call.get("outcome") in ("uncertain", "settled")
+        and type(call.get("provider_attempt")) is int
+        and type(call.get("action_sequence")) is int
+        and _account_failure_matches_call(
+            evidence,
+            base_call_identity=call.get("base_call_identity"),
+            provider_attempt=call.get("provider_attempt"),
+            action_sequence=call.get("action_sequence"),
+        )
+    ):
+        return "provider_authentication_failed"
+    return None
+
+
 def _judgment_cache_material(
     context: RunContext,
     *,
@@ -4677,7 +4706,10 @@ class Broker:
             evidence = _validated_account_failure_evidence(
                 terminal_document.get("account_failure_evidence")
             )
-            if evidence is not None and evidence.get("reason") == "out_of_credit":
+            if evidence is not None and (
+                evidence.get("reason") == "out_of_credit"
+                or evidence.get("provider_status") == 401
+            ):
                 if not _account_failure_matches_call(
                     evidence, base_call_identity=base_call_identity,
                     provider_attempt=provider_attempt, action_sequence=action_sequence,
@@ -4743,7 +4775,10 @@ class Broker:
                 )
             except BrokerError:
                 return _error_result("broker_unavailable", summary)
-            if evidence is not None and evidence.get("reason") == "out_of_credit":
+            if evidence is not None and (
+                evidence.get("reason") == "out_of_credit"
+                or evidence.get("provider_status") == 401
+            ):
                 if not _account_failure_matches_call(
                     evidence, base_call_identity=base_call_identity,
                     provider_attempt=provider_attempt, action_sequence=action_sequence,
@@ -5457,6 +5492,7 @@ class Broker:
             # unknown. Keep its call binding separate from cost evidence.
             retain_account_failure_evidence = miner_credential_failure and (
                 champion_credential_retry
+                or response.status == 401
                 or (
                     effective_operation.provider == "deepline"
                     and response.status in (401, 402, 403)
@@ -5474,6 +5510,8 @@ class Broker:
                 if (effective_operation.provider == "deepline"
                     and _deepline_insufficient_credit_response(response, raw_document)):
                     account_failure_evidence["reason"] = "out_of_credit"
+                if (account_failure_evidence.get("reason") == "out_of_credit"
+                    or account_failure_evidence.get("provider_status") == 401):
                     summary["account_failure_evidence"] = dict(account_failure_evidence)
             missing_deepline_cost = (
                 effective_operation.provider == "deepline" and raw_actual is None

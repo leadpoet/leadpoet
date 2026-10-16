@@ -1402,7 +1402,7 @@ def test_company_subpage_refreshes_canonical_company_size_field(
         "https://www.linkedin.com/in/acme/life",
     ],
 )
-def test_company_subpage_cannot_bypass_company_identity_binding(
+def test_unbound_company_subpage_uses_only_verified_homepage_profile(
     monkeypatch,
     employee_url,
 ):
@@ -1432,8 +1432,12 @@ def test_company_subpage_cannot_bypass_company_identity_binding(
         )
     )
 
-    assert result.decision == COMPANY_FIT_UNAVAILABLE
-    assert fetches == []
+    assert result.decision == COMPANY_FIT_MATCH
+    assert fetches == ["https://www.linkedin.com/company/acme"]
+    assert result.details["dimension_evidence"]["employee_size"] == {
+        "url": "https://www.linkedin.com/company/acme",
+        "quote": "Company size 11-50 employees",
+    }
 
 
 @pytest.mark.parametrize(
@@ -5445,28 +5449,53 @@ def test_wrong_homepage_linkedin_anchor_cannot_authorize_profile_fetch(monkeypat
     assert fetches == []
 
 
-def test_wrong_model_linkedin_profile_blocks_both_size_providers(monkeypatch):
-    fetches = []
-    verdict = _verdict(employee_url="https://www.linkedin.com/company/other")
+@pytest.mark.parametrize("employee_url", [
+    "https://www.linkedin.com/company/acme",
+    "https://www.linkedin.com/company/other",
+    "https://www.linkedin.com/in/acme-person",
+])
+@pytest.mark.parametrize("missing_geography", [False, True])
+@pytest.mark.parametrize("wrong_observed_profile", [False, True])
+def test_verified_homepage_profile_replaces_unbound_size_citation_once(
+    monkeypatch, employee_url, missing_geography, wrong_observed_profile,
+):
+    profile_url = "https://linkedin.com/company/acme"
+    quote = "Company size\n11-50 employees"
+    calls, pending = _install_exa_bodies(monkeypatch, {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [{"url": profile_url, "text": f"## About\n{quote}"}],
+    })
+    verdict = _verdict(employee_url=employee_url)
+    if wrong_observed_profile:
+        verdict["observed_company_linkedin"] = "https://linkedin.com/company/other"
+
+        async def no_profile_redirect(_session, url, **_kwargs):
+            return 200, url, ""
+
+        monkeypatch.setattr(lead_scorer, "_fetch_bounded_html", no_profile_redirect)
+    provider_calls = []
 
     async def provider(**_kwargs):
-        return verdict, ""
+        provider_calls.append(1)
+        observation = dict(verdict)
+        # Force a schema repair to prove the invocation reuses the paid fetch.
+        observation["industry_matches"] = None if len(provider_calls) == 1 else True
+        if missing_geography:
+            observation.update(
+                observed_hq_country="", geography_matches=None,
+                geography_evidence_url="", geography_evidence_quote="",
+            )
+        return observation, ""
 
-    async def fetch(*args, **_kwargs):
-        fetches.append(args)
-        return {
-            "employee_count": "11-50",
-            "url": args[-1],
-            "quote": "Company size 11-50 employees",
-        }
+    async def unexpected_structured(*_args, **_kwargs):
+        raise AssertionError("complete current-profile size needs no fallback")
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
-    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", fetch)
     monkeypatch.setattr(
         lead_scorer,
         "fetch_structured_linkedin_company_size",
-        fetch,
+        unexpected_structured,
     )
 
     result = asyncio.run(
@@ -5478,8 +5507,127 @@ def test_wrong_model_linkedin_profile_blocks_both_size_providers(monkeypatch):
         )
     )
 
+    assert result.decision == (
+        COMPANY_FIT_UNAVAILABLE
+        if missing_geography or wrong_observed_profile else COMPANY_FIT_MATCH
+    )
+    assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_evidence"]["employee_size"] == {
+        "url": profile_url, "quote": quote,
+    }
+    if missing_geography:
+        assert result.details["dimension_decisions"]["geography"] == COMPANY_FIT_UNAVAILABLE
+    if wrong_observed_profile:
+        assert result.details["identity_decision"] == COMPANY_FIT_UNAVAILABLE
+    assert len(provider_calls) == 2
+    assert [call[1]["json"]["ids"] for call in calls] == [
+        ["https://www.linkedin.com/company/acme"]
+    ]
+    assert pending == []
+    assert verdict["employee_size_evidence_url"] == employee_url
+    assert verdict["observed_employee_count"] == "1"
+
+
+def test_verified_profile_selection_needs_no_submitted_or_model_profile_match(monkeypatch):
+    calls, pending = _install_exa_bodies(monkeypatch, {
+        "statuses": [{"status": "success", "source": "crawled"}],
+        "results": [{
+            "url": "https://linkedin.com/company/acme",
+            "text": "## About\nCompany size\n11-50 employees",
+        }],
+    })
+    verdict = _verdict(employee_url="https://linkedin.com/company/other")
+    verdict["observed_company_linkedin"] = "https://linkedin.com/company/other"
+    cache = {}
+    for _ in range(2):
+        refreshed = asyncio.run(lead_scorer._refresh_linkedin_employee_size_observation(
+            verdict, _company(linkedin=""), _icp(),
+            verified_homepage_identity=lead_scorer._verified_homepage_identity_anchor(
+                _homepage_anchor()
+            ),
+            invocation_cache=cache,
+        ))
+        assert refreshed["observed_employee_count"] == "11-50"
+        assert refreshed["employee_size_evidence_url"] == "https://linkedin.com/company/acme"
+        assert refreshed["employee_size_evidence_quote"] == "Company size\n11-50 employees"
+    assert len(calls) == 1
+    assert calls[0][1]["json"]["ids"] == ["https://www.linkedin.com/company/acme"]
+    assert pending == []
+
+
+@pytest.mark.parametrize("anchor_update", [
+    {"observed_name": ""},
+    {"observed_domain": ""},
+    {"observed_linkedin_slug": ""},
+    {"observed_linkedin_slug": "acme/invalid"},
+    {"decision": COMPANY_FIT_UNAVAILABLE},
+    {"evidence_source": "model"},
+])
+def test_unbound_size_citation_requires_complete_verified_homepage(
+    monkeypatch, anchor_update,
+):
+    anchor = _homepage_anchor()
+    anchor.details["identity"].update(anchor_update)
+
+    async def provider(**_kwargs):
+        return _verdict(employee_url="https://www.linkedin.com/company/other"), ""
+
+    async def unexpected_fetch(*_args, **_kwargs):
+        raise AssertionError("an incomplete or unverified anchor cannot authorize a fetch")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    monkeypatch.setattr(lead_scorer, "fetch_current_linkedin_company_size", unexpected_fetch)
+    monkeypatch.setattr(lead_scorer, "fetch_structured_linkedin_company_size", unexpected_fetch)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(), _icp(), require_company_fit_dimensions=True,
+        verified_homepage_identity=anchor,
+    ))
     assert result.decision == COMPANY_FIT_UNAVAILABLE
-    assert fetches == []
+    assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize("failure_kind", ["wrong_profile", "provider_error"])
+def test_verified_profile_fallback_preserves_fetch_failure_recovery(
+    monkeypatch, failure_kind,
+):
+    body = (
+        {
+            "statuses": [{"status": "success", "source": "crawled"}],
+            "results": [{
+                "url": "https://linkedin.com/company/other",
+                "text": "## About\nCompany size\n11-50 employees",
+            }],
+        }
+        if failure_kind == "wrong_profile"
+        else {"statuses": [{"status": "error"}], "results": []}
+    )
+    calls, pending = _install_exa_bodies(monkeypatch, body)
+
+    async def provider(**_kwargs):
+        return _verdict(employee_url="https://www.linkedin.com/company/other"), ""
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(), _icp(), require_company_fit_dimensions=True,
+        verified_homepage_identity=_homepage_anchor(),
+    ))
+
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_decisions"]["employee_size"] == COMPANY_FIT_UNAVAILABLE
+    assert result.details["dimension_evidence"]["employee_size"] == {"url": "", "quote": ""}
+    assert result.details["failure_class"] == "employee_size_verification_failed"
+    assert result.details["failure_reason_code"] == (
+        "malformed_response" if failure_kind == "wrong_profile" else "provider_error"
+    )
+    assert scorer_breakdown_has_retryable_infrastructure_failure({
+        "verifier_gate_receipts": [result.receipt("company_fit")],
+    })
+    assert [call[1]["json"]["ids"] for call in calls] == [
+        ["https://www.linkedin.com/company/acme"]
+    ]
+    assert pending == []
 
 
 def test_current_size_does_not_override_wrong_observed_company_identity(monkeypatch):

@@ -136,9 +136,14 @@ def test_expired_verdict_does_not_admit_rereview_or_erase_sibling(monkeypatch):
     assert result["claims"]["industry"]["status"] == "VERIFIED"
 
 
-def test_already_expired_deadline_admits_no_judgment(monkeypatch):
-    result, requests = _run(monkeypatch, [_stage()], search_finish=110.0)
-    assert len(requests) == 0
+def test_late_admitted_discovery_gets_one_final_judgment_without_rereview(monkeypatch):
+    result, requests = _run(
+        monkeypatch, [_stage()], search_finish=110.0, first_finish=110.0,
+    )
+    assert len(requests) == 1
+    assert [tool["function"]["name"] for tool in requests[0]["tools"]] == [
+        "submit_findings",
+    ]
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
 
 

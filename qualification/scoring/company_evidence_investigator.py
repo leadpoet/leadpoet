@@ -81,7 +81,9 @@ ALTERNATIVE_PUBLIC_STAGE_CONTEXT_CHARACTERS = 1_500
 MAX_ALTERNATIVE_PUBLIC_STAGE_CONTEXTS = 2
 ADMISSION_DEADLINE_SECONDS = 110.0
 # One bounded submit-only repair may follow an admitted positive judgment.
-# Research and ordinary judgment keep the 110-second admission deadline.
+# Research and ordinary reasoning keep the 110-second admission deadline.
+# An admitted call that settles late may still use one remaining ordinary
+# turn to submit findings over already loaded evidence, without more research.
 SERIALIZATION_REPAIR_GRACE_SECONDS = 30.0
 # Reserve the final 30 seconds of the unchanged admission window for judgment
 # over loaded evidence. Provider calls already admitted may settle under the
@@ -3807,6 +3809,9 @@ async def investigate_company_evidence(
             forced_stage_search_pending = False
             incomplete_submit_retries = 0
             incomplete_submit_retry_pending = False
+            late_final_submit_pending = bool(
+                fetched_pages and (search_calls or fetch_calls)
+            )
             industry_followup_pending = False
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
@@ -3875,11 +3880,15 @@ async def investigate_company_evidence(
                     if scoped_correction_active
                     else requested_targets
                 )
-                # Do not cancel a paid request after admission. Stop admitting
-                # the next request when the shared per-company deadline passed,
-                # except one pending serialization repair; an admitted request
-                # settles under the broker's own bound.
+                # Let admitted work settle under the broker's bound. Loaded
+                # evidence may then receive one submit-only judgment; this does
+                # not reopen research or add a reasoning turn or repair retry.
                 elapsed = time.monotonic() - started
+                late_final_submit = bool(
+                    late_final_submit_pending
+                    and elapsed >= ADMISSION_DEADLINE_SECONDS
+                )
+                late_final_submit_pending = False
                 late_serialization_retry_pending = bool(
                     positive_semantic_review
                     and incomplete_submit_retry_pending
@@ -3888,6 +3897,7 @@ async def investigate_company_evidence(
                 if (
                     elapsed >= ADMISSION_DEADLINE_SECONDS
                     and not late_serialization_retry_pending
+                    and not late_final_submit
                 ):
                     return interrupted_result(_turn)
                 if (
@@ -4015,6 +4025,7 @@ async def investigate_company_evidence(
                             if (
                                 not correction_turn
                                 and not scoped_correction_active
+                                and not late_final_submit
                             ) or tool["name"] == "submit_findings"
                         ],
                         "tool_choice": (
@@ -4878,8 +4889,6 @@ async def investigate_company_evidence(
                         }
                 elif name == "search_web":
                     elapsed = time.monotonic() - started
-                    if elapsed >= ADMISSION_DEADLINE_SECONDS:
-                        return interrupted_result(_turn + 1)
                     if (
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
@@ -4923,8 +4932,6 @@ async def investigate_company_evidence(
                                     forced_next_tool = "fetch_page"
                 elif name == "fetch_page":
                     elapsed = time.monotonic() - started
-                    if elapsed >= ADMISSION_DEADLINE_SECONDS:
-                        return interrupted_result(_turn + 1)
                     safe_url = _safe_https_url(
                         arguments.get("url")
                         if isinstance(arguments, Mapping)
@@ -4976,6 +4983,10 @@ async def investigate_company_evidence(
                             }
                 else:
                     raise ValueError("reasoning_tool_unknown")
+                late_final_submit_pending = bool(
+                    name in {"search_web", "fetch_page"}
+                    and fetched_pages
+                )
                 assistant_message: dict[str, Any] = {
                     "role": "assistant",
                     # Provider replies can include response-only metadata such

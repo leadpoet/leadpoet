@@ -304,9 +304,11 @@ def _signed_request(
 
 def _post_presign_with_opening_retry(session: Any, base: str,
                                      presign: Mapping[str, Any]) -> Any:
-    """Retry only a confirmed round-opening refusal for at most 90 seconds."""
+    """Retry only a confirmed round-opening refusal for at most 180 seconds."""
 
-    opening_deadline = time.monotonic() + 90
+    # The server's bounded opening window allows 90 seconds before opening
+    # and 90 seconds after it. An early request must cover both halves.
+    opening_deadline = time.monotonic() + 180
     while True:
         try:
             response = session.post(

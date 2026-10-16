@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: Arena training-data completeness audit
+
+On 2026-10-16 the user authorized a deep end-to-end audit of Arena trajectory
+collection and historical reconstruction, plus the smallest general production-safe
+fixes for definite completeness gaps. This includes protected read-only inspection
+of OnePatch, Sentry, production logs/state, Supabase, provider billing records and
+private Arena objects; narrow source changes and exact committed migrations when
+needed; safe push and merge; canonical deployment; and bounded reward-disabled
+live execution/judging verification. Preserve scoring, qualification, provider
+accounting and budgets, credentials, frozen inputs and accepted outputs, rewards,
+weights, historical records and concurrent work. Capture only intentionally
+available training state; do not expose secrets or hidden provider reasoning.
+Do not add a new telemetry platform or Research Lab lineage machinery. This
+scope expires when collection fixes and exact live reconstruction are verified.
+
 ## Scoped implementation authorization: October 16 weight-read diagnostics
 
 The user authorized the smallest Arena-side diagnostic change for intermittent

@@ -2199,7 +2199,10 @@ def test_http_transport_per_call_limit_accepts_exact_boundary_only():
 
 
 @pytest.mark.parametrize("credential_echo", [False, True])
-def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(credential_echo):
+@pytest.mark.parametrize("fragment", ["", "#apply"])
+def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(
+    credential_echo, fragment,
+):
     requested_url = "https://wonderskin.com/"
     tail_marker = DL_KEY if credential_echo else "raw-envelope-tail-must-not-be-persisted"
     raw_html_bytes = 5_030_336
@@ -2217,7 +2220,7 @@ def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(creden
             "rawHtml": raw_html,
             "metadata": {
                 "sourceURL": requested_url,
-                "url": requested_url,
+                "url": requested_url + fragment,
                 "statusCode": 200,
             },
         }},
@@ -2269,6 +2272,7 @@ def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(creden
         return
 
     assert result.status == 200 and result.call["outcome"] == "settled"
+    assert result.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == requested_url
     assert result.call["actual_microusd"] == 2_000
     assert result.call["reserved_microusd"] == 10_000_000
     assert len(result.body) == operations.OPERATIONS[
@@ -2277,6 +2281,7 @@ def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(creden
     assert tail_marker.encode() not in result.body
     assert store.openrouter_capacity == 9_998_000
     terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert terminal["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] == requested_url
     persisted_body = base64.b64decode(terminal["body_b64"])
     assert persisted_body == result.body
     assert tail_marker.encode() not in persisted_body

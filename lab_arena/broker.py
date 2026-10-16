@@ -2186,6 +2186,37 @@ def provider_credit_failure_reason(call: Mapping[str, Any]) -> Optional[str]:
     return None
 
 
+def provider_authentication_failure_reason(call: Mapping[str, Any]) -> Optional[str]:
+    """Describe a bound submitted-account rejection, never infer key expiry."""
+    try:
+        evidence = _validated_account_failure_evidence(
+            call.get("account_failure_evidence")
+        )
+    except BrokerError:
+        return None
+    if (
+        evidence is not None
+        and evidence.get("provider_status") == 401
+        and evidence.get("submitted_account_authentication") is True
+        and type(call.get("provider_status")) is int
+        and call.get("provider_status") == 401
+        and call.get("provider") in ("openrouter", "deepline", "scrapingdog")
+        and call.get("funding_source") == "miner_key"
+        and call.get("error_code") == "miner_credentials_unavailable"
+        and call.get("outcome") in ("uncertain", "settled")
+        and type(call.get("provider_attempt")) is int
+        and type(call.get("action_sequence")) is int
+        and _account_failure_matches_call(
+            evidence,
+            base_call_identity=call.get("base_call_identity"),
+            provider_attempt=call.get("provider_attempt"),
+            action_sequence=call.get("action_sequence"),
+        )
+    ):
+        return "provider_authentication_failed"
+    return None
+
+
 def _judgment_cache_material(
     context: RunContext,
     *,
@@ -2645,7 +2676,15 @@ def _validated_account_failure_evidence(
         }, {
             "error_class", "provider_status", "base_call_identity",
             "provider_attempt", "action_sequence", "reason",
+        }, {
+            "error_class", "provider_status", "base_call_identity",
+            "provider_attempt", "action_sequence", "submitted_account_authentication",
         })
+        or ("submitted_account_authentication" in account_failure and (
+            account_failure["submitted_account_authentication"] is not True
+            or type(account_failure.get("provider_status")) is not int
+            or account_failure.get("provider_status") != 401
+        ))
         or ("reason" in account_failure and (
             account_failure["reason"] != "out_of_credit"
             or account_failure.get("provider_status") != 402
@@ -3185,6 +3224,36 @@ def _miner_credential_failure(
         ):
             return False
     return True
+
+
+def _submitted_account_authentication(
+    provider: str, response: ProviderResponse, *,
+    original_http_status: int, raw_document: Any,
+) -> bool:
+    """Qualify diagnostics without changing credential or cost policy.
+
+    OpenRouter's provider_name/provider_code fields identify upstream errors.
+    Its typed authentication category can describe an upstream key, and an
+    HTTP200 generation error is not direct submitted-key authentication.
+    """
+    if response.status != 401 or response.internal_provenance is not None:
+        return False
+    if provider != "openrouter":
+        return True
+    if original_http_status != 401 or not isinstance(raw_document, Mapping):
+        return False
+    error = raw_document.get("error")
+    if not isinstance(error, Mapping):
+        return False
+    metadata = error.get("metadata")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        return False
+    return not (
+        "provider" in raw_document
+        or "choices" in raw_document
+        or isinstance(metadata, Mapping)
+        and any(key in metadata for key in ("provider_name", "provider_code", "raw"))
+    )
 
 
 class Broker:
@@ -4677,7 +4746,10 @@ class Broker:
             evidence = _validated_account_failure_evidence(
                 terminal_document.get("account_failure_evidence")
             )
-            if evidence is not None and evidence.get("reason") == "out_of_credit":
+            if evidence is not None and (
+                evidence.get("reason") == "out_of_credit"
+                or evidence.get("provider_status") == 401
+            ):
                 if not _account_failure_matches_call(
                     evidence, base_call_identity=base_call_identity,
                     provider_attempt=provider_attempt, action_sequence=action_sequence,
@@ -4743,7 +4815,10 @@ class Broker:
                 )
             except BrokerError:
                 return _error_result("broker_unavailable", summary)
-            if evidence is not None and evidence.get("reason") == "out_of_credit":
+            if evidence is not None and (
+                evidence.get("reason") == "out_of_credit"
+                or evidence.get("provider_status") == 401
+            ):
                 if not _account_failure_matches_call(
                     evidence, base_call_identity=base_call_identity,
                     provider_attempt=provider_attempt, action_sequence=action_sequence,
@@ -5457,6 +5532,7 @@ class Broker:
             # unknown. Keep its call binding separate from cost evidence.
             retain_account_failure_evidence = miner_credential_failure and (
                 champion_credential_retry
+                or response.status == 401
                 or (
                     effective_operation.provider == "deepline"
                     and response.status in (401, 402, 403)
@@ -5474,6 +5550,14 @@ class Broker:
                 if (effective_operation.provider == "deepline"
                     and _deepline_insufficient_credit_response(response, raw_document)):
                     account_failure_evidence["reason"] = "out_of_credit"
+                if _submitted_account_authentication(
+                    effective_operation.provider, response,
+                    original_http_status=observed_provider_http_status,
+                    raw_document=raw_document,
+                ):
+                    account_failure_evidence["submitted_account_authentication"] = True
+                if (account_failure_evidence.get("reason") == "out_of_credit"
+                    or account_failure_evidence.get("provider_status") == 401):
                     summary["account_failure_evidence"] = dict(account_failure_evidence)
             missing_deepline_cost = (
                 effective_operation.provider == "deepline" and raw_actual is None

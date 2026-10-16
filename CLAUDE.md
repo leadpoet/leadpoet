@@ -1700,3 +1700,14 @@ deployment through the overnight procedures. Preserve published results, frozen
 inputs, accepted work, qualification standards, cost rules, rewards, weights and
 concurrent work. Do not rescore historical rounds or fabricate reward-bearing
 results. Authority ends when confirmed fixes are live and verified end to end.
+
+## Scoped production authorization: provider failure labels
+
+On 2026-10-16 the user authorized a narrow general correction to provider
+failure labels, including protected read-only inspection, focused controls,
+safe push and merge, canonical gateway and normal-validator deployment, and
+production verification during the October 16 full-cycle watch. Distinguish
+proved credit exhaustion from proved submitted-key authentication failures.
+Preserve other provider causes, retry and terminal classification, frozen
+rounds, scoring, costs, credentials, completed work and concurrent changes.
+This authority ends after deployment and verification.

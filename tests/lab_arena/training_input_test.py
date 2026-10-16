@@ -21,12 +21,14 @@ from tests.lab_arena.test_lab_arena_runner import (
 
 NOW = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
 TOKEN = "a" * 64
+CLAIM_HASH = "sha256:" + "c" * 64
 
 
 def service_for(tmp_path, **changes):
     run = {
         "run_id": "r1", "round_id": "arena-test", "kind": "execute",
         "status": "leased", "lease_token_hash": hash_lease_token(TOKEN),
+        "lease_generation": 1, "claim_request_hash": CLAIM_HASH,
         "lease_expires_at": (NOW + timedelta(minutes=2)).isoformat(),
         **changes,
     }
@@ -45,14 +47,14 @@ def test_long_input_roundtrip_and_immutable_duplicate(tmp_path):
     receipt = service.handle_training_input("r1", TOKEN, document)
     assert receipt["status"] == "stored"
     assert service.handle_training_input("r1", TOKEN, document) == receipt
-    saved = training_input.read_input(objects, "r1", "execute")
+    saved = training_input.read_input(objects, "r1", "execute", 1, CLAIM_HASH)
     assert saved["input"] == document
     assert saved["input_sha256"] == contracts.document_hash(document)
     assert saved["privacy"] == {"redacted": False, "redactions": []}
     with pytest.raises(ServiceError) as rejected:
         service.handle_training_input("r1", TOKEN, {"different": True})
     assert rejected.value.status == 409
-    assert training_input.read_input(objects, "r1", "execute") == saved
+    assert training_input.read_input(objects, "r1", "execute", 1, CLAIM_HASH) == saved
 
 
 @pytest.mark.parametrize("changes, token, code", [
@@ -84,31 +86,35 @@ def test_input_redacts_credentials_and_hidden_reasoning(tmp_path):
     service, objects = service_for(tmp_path)
     document = {"prompt": "hello " + TOKEN, "api_key": "credential", "reasoning_content": "private reasoning", "icp": {"prompt": "complete"}}
     service.handle_training_input("r1", TOKEN, document)
-    saved = training_input.read_input(objects, "r1", "execute")
+    saved = training_input.read_input(objects, "r1", "execute", 1, CLAIM_HASH)
     assert TOKEN not in json.dumps(saved)
     assert "private reasoning" not in json.dumps(saved)
     assert saved["privacy"] == {"redacted": True, "redactions": ["credential", "hidden_reasoning"]}
     assert saved["input"]["icp"] == document["icp"]
 
 
-@pytest.mark.parametrize("mutation", ["hash", "run", "kind", "schema", "privacy", "inflate"])
+@pytest.mark.parametrize("mutation", ["hash", "run", "kind", "schema", "privacy", "inflate", "generation", "claim"])
 def test_reader_refuses_corrupt_or_unbounded_input(tmp_path, mutation):
     objects = LocalObjectStore(tmp_path)
-    snapshot, data = training_input.build_snapshot("r1", "execute", {"icp": "input"})
+    snapshot, data = training_input.build_snapshot("r1", "execute", {"icp": "input"}, lease_generation=1, claim_request_hash=CLAIM_HASH)
     if mutation == "hash":
         snapshot["input"]["icp"] = "changed"
     elif mutation == "run":
         snapshot["run_id"] = "other"
     elif mutation == "kind":
         snapshot["kind"] = "score"
+    elif mutation == "generation":
+        snapshot["lease_generation"] = 2
+    elif mutation == "claim":
+        snapshot["claim_request_hash"] = "sha256:" + "d" * 64
     elif mutation == "schema":
         snapshot["schema_version"] = "unknown"
     elif mutation == "privacy":
         snapshot["privacy"]["redacted"] = True
     data = gzip.compress(b"x" * (training_input.MAX_OBJECT_BYTES + 1) if mutation == "inflate" else contracts.canonical_json(snapshot).encode(), mtime=0)
-    objects.put(training_input.object_ref("r1"), data)
+    objects.put(training_input.object_ref("r1", 1), data)
     with pytest.raises(training_input.InputCaptureError):
-        training_input.read_input(objects, "r1", "execute")
+        training_input.read_input(objects, "r1", "execute", 1, CLAIM_HASH)
 
 
 def test_api_requires_lease_bounds_body_and_marks_response_private(tmp_path):
@@ -217,5 +223,43 @@ def test_local_capture_is_immutable_under_concurrent_uploads(tmp_path):
     with ThreadPoolExecutor(max_workers=8) as pool:
         accepted = [value for value in pool.map(upload, range(8)) if value is not None]
     assert len(accepted) == 1
-    assert training_input.read_input(objects, "r1", "execute")["input"] == {"input": str(accepted[0]) * 10_000}
+    assert training_input.read_input(objects, "r1", "execute", 1, CLAIM_HASH)["input"] == {"input": str(accepted[0]) * 10_000}
     assert not list(tmp_path.rglob(".arena-*"))
+
+
+def test_reclaimed_run_keeps_both_inputs_and_reads_only_final_lease_authority(tmp_path):
+    service, objects = service_for(tmp_path)
+    old_document = {"icp": {"prompt": "first"}, "company_judgment_cache": {"hits": []}}
+    first = service.handle_training_input("r1", TOKEN, old_document)
+    run = service._store.get_run("r1")
+    next_token = "b" * 64
+    next_claim = "sha256:" + "d" * 64
+    run.update(lease_generation=2, claim_request_hash=next_claim,
+               lease_token_hash=hash_lease_token(next_token))
+    final_document = {"icp": {"prompt": "first"}, "company_judgment_cache": {"hits": [{"verified": True}]}}
+    # A client cannot set the authority fields. They remain ordinary input data.
+    final_document["lease_generation"] = 99
+    final_document["claim_request_hash"] = "client supplied"
+    with pytest.raises(ServiceError) as stale:
+        service.handle_training_input("r1", TOKEN, final_document)
+    assert stale.value.code == "lease_invalid"
+    final = service.handle_training_input("r1", next_token, final_document)
+    assert first["ref"] != final["ref"]
+    assert final["lease_generation"] == 2 and final["claim_request_hash"] == next_claim
+    assert training_input.read_input(objects, "r1", "execute", 1, CLAIM_HASH)["input"] == old_document
+    saved = training_input.read_input(objects, "r1", "execute", 2, next_claim)
+    assert saved["input"] == final_document
+    with pytest.raises(training_input.InputCaptureError):
+        training_input.read_input(objects, "r1", "execute", 2, CLAIM_HASH)
+
+
+@pytest.mark.parametrize("authority", [
+    {"lease_generation": None}, {"lease_generation": 0}, {"lease_generation": True},
+    {"claim_request_hash": None}, {"claim_request_hash": "invalid"},
+])
+def test_missing_claim_authority_cannot_create_input_evidence(tmp_path, authority):
+    service, _objects = service_for(tmp_path, **authority)
+    with pytest.raises(ServiceError) as error:
+        service.handle_training_input("r1", TOKEN, {})
+    assert error.value.code == "training_input_invalid"
+    assert not list((tmp_path / "objects").rglob("*.gz"))

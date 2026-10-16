@@ -840,7 +840,8 @@ class HttpArenaApiClient:
     def training_input(
         self, run_id: str, lease_token: str, document: Mapping[str, Any],
     ) -> Dict[str, Any]:
-        training_input.object_ref(run_id)  # Same bounded path vocabulary as storage.
+        # Generation and claim identity are taken only from the gateway row.
+        training_input.object_ref(run_id, 1)  # Validate the path vocabulary.
         if len(contracts.canonical_json(document).encode("utf-8")) > training_input.MAX_INPUT_BYTES:
             raise RunnerError("training input exceeds capture limit")
         return self._post(

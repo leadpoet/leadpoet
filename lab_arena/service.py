@@ -5246,6 +5246,8 @@ class ArenaService:
         try:
             snapshot, compressed = training_input.build_snapshot(
                 run_id, str(run.get("kind") or "execute"), document,
+                lease_generation=run.get("lease_generation"),
+                claim_request_hash=run.get("claim_request_hash"),
                 secrets=(lease_token,),
             )
         except (ValueError, TypeError, RecursionError):
@@ -5254,14 +5256,16 @@ class ArenaService:
         if objects is None:
             raise ServiceError("training_input_unavailable", 503)
         try:
-            objects.put(training_input.object_ref(run_id), compressed)
+            objects.put(training_input.object_ref(run_id, snapshot["lease_generation"]), compressed)
         except ArenaContractError:
             raise ServiceError("training_input_conflict", 409) from None
         except Exception:
             raise ServiceError("training_input_unavailable", 503) from None
         return {
             "status": "stored", "schema_version": training_input.SCHEMA_VERSION,
-            "ref": training_input.object_ref(run_id),
+            "ref": training_input.object_ref(run_id, snapshot["lease_generation"]),
+            "lease_generation": snapshot["lease_generation"],
+            "claim_request_hash": snapshot["claim_request_hash"],
             "input_sha256": snapshot["input_sha256"],
             "privacy": snapshot["privacy"],
         }

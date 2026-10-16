@@ -2,8 +2,8 @@
 """Compose a runtime repair on an immutable Arena grader, without rebuilding it.
 
 The original image layers, dependencies and process configuration stay intact.
-Only the dedicated runtime package and the reviewed admission-interface
-extraction can be added. The extraction does not import today's grading code.
+Only the dedicated runtime package and reviewed operational-interface
+extractions can be added. They do not import today's grading code.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 GRADER_FILE = "qualification/scoring/company_evidence_investigator.py"
+ENTRYPOINT_FILES = ("lab_arena/scorer_entrypoint.py", "scorer_entrypoint.py")
 RUNTIME_DIRECTORY = "arena_reviewer_runtime"
 MAX_OVERLAY_BYTES = 4 * 1024 * 1024
 
@@ -120,21 +121,29 @@ def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]
             process.wait()
 
 
-def extract_grader(reference: str, destination: Path) -> bytes:
+def extract_frozen_sources(reference: str, destination: Path) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
-        subprocess.run(["docker", "cp", container + ":/model/" + GRADER_FILE,
-                        str(destination)], check=True, stdout=subprocess.DEVNULL)
-        return destination.read_bytes()
+        files = {}
+        for name in (GRADER_FILE, *ENTRYPOINT_FILES):
+            path = destination / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["docker", "cp", container + ":/model/" + name,
+                            str(path)], check=True, stdout=subprocess.DEVNULL)
+            files[name] = path.read_bytes()
+        return files
     finally:
         subprocess.run(["docker", "rm", container], check=True, stdout=subprocess.DEVNULL)
 
 
-def expected_overlay(original: bytes) -> dict[str, bytes]:
+def expected_overlay(original: dict[str, bytes]) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
+    from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
 
-    converted = convert_admission_seam(original)
-    files = {GRADER_FILE: converted}
+    if set(original) != {GRADER_FILE, *ENTRYPOINT_FILES}:
+        raise CompositionError("frozen operational sources are incomplete")
+    files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
+    files.update({name: convert_checkpoint_seam(original[name]) for name in ENTRYPOINT_FILES})
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -163,7 +172,7 @@ def main() -> int:
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        original = extract_grader(args.grading_image, root / "original.py")
+        original = extract_frozen_sources(args.grading_image, root / "original")
         files = expected_overlay(original)
         tag = args.verify_image or (match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12])
         if not args.verify_image:
@@ -194,7 +203,7 @@ def main() -> int:
             "runtime_source_commit": revision,
             "base_layers_unchanged": True,
             "process_configuration_unchanged": True,
-            "original_investigator_sha256": hashlib.sha256(original).hexdigest(),
+            "original_files": {name: hashlib.sha256(value).hexdigest() for name, value in original.items()},
             "overlay_files": {name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
         }, sort_keys=True))
     return 0

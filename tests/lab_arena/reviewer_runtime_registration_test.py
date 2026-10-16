@@ -1,0 +1,69 @@
+"""Runtime activation uses the existing scoped store, never rewrites a round."""
+import sys
+
+import pytest
+
+from scripts import register_arena_reviewer_runtime as command
+
+
+GRADING = "registry.example/lab/scorer@sha256:" + "a" * 64
+RUNTIME = "registry.example/lab/scorer@sha256:" + "b" * 64
+
+
+@pytest.mark.parametrize("runtime", ["registry.example/lab/scorer:latest",
+                                      "registry.example/other@sha256:" + "b" * 64])
+def test_unpinned_or_different_repository_rejected(runtime):
+    with pytest.raises(ValueError):
+        command.registration_arguments(GRADING, runtime)
+
+
+def setup_args(monkeypatch, *, apply=False):
+    monkeypatch.setattr(sys, "argv", ["register", "--grading-image", GRADING,
+        "--runtime-image", RUNTIME, "--environment-file", "/protected/env"] +
+        (["--apply"] if apply else []))
+
+
+def test_plan_never_reads_credentials_or_calls_store(monkeypatch, capsys):
+    setup_args(monkeypatch)
+    monkeypatch.setattr(command, "load_scoped_environment", lambda _: pytest.fail("credential read"))
+    monkeypatch.setattr(command, "PostgrestTransport", lambda *a, **k: pytest.fail("store called"))
+    assert command.main() == 0
+    assert '"writes": false' in capsys.readouterr().out
+
+
+def test_apply_requires_operator_intent_before_credential_read(monkeypatch):
+    setup_args(monkeypatch, apply=True)
+    monkeypatch.delenv("LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY", raising=False)
+    monkeypatch.setattr(command, "load_scoped_environment", lambda _: pytest.fail("credential read"))
+    with pytest.raises(ValueError, match="operator"):
+        command.main()
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_apply_exact_registration_readback_and_transport_cleanup(monkeypatch, mismatch):
+    setup_args(monkeypatch, apply=True)
+    monkeypatch.setenv("LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY", "1")
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://store.example")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_test")
+    monkeypatch.setattr(command, "load_scoped_environment", lambda _: None)
+    calls = []
+    class Transport:
+        def __init__(self, url, *, service_key):
+            assert url == "https://store.example" and service_key == "sb_secret_test"
+        def rpc(self, name, arguments):
+            calls.append(name)
+            assert arguments == command.registration_arguments(GRADING, RUNTIME)
+            result = {key.removeprefix("p_"): value for key, value in arguments.items()}
+            result["updated_at"] = "2026-10-16T23:00:00Z"
+            if mismatch:
+                result["runtime_image_reference"] = GRADING
+            return result
+        def close(self):
+            calls.append("close")
+    monkeypatch.setattr(command, "PostgrestTransport", Transport)
+    if mismatch:
+        with pytest.raises(ValueError, match="readback"):
+            command.main()
+    else:
+        assert command.main() == 0
+    assert calls == ["lab_arena_register_reviewer_runtime_v1", "close"]

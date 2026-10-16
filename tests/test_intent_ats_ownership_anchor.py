@@ -151,19 +151,44 @@ def test_retained_customerio_text_fragment_is_not_part_of_resource_identity():
     ("https://unrelated.example/", False),
     ("https://usefluency.com/%0Aunsafe", False),
 ])
-def test_wayback_ownership_links_require_exact_official_snapshot_provenance(snapshot_source, expected, relative):
+def test_wayback_ownership_links_require_exact_official_snapshot_provenance(monkeypatch, snapshot_source, expected, relative):
+    import json
+    from urllib.parse import parse_qs, urlsplit
+
     import httpx
+    from lab_arena import shim
+
     snapshot = "https://web.archive.org/web/20260721211653/" + snapshot_source
     href = ("" if relative else "http://web.archive.org") + "/web/20260721211653id_/https://jobs.ashbyhq.com/fluency"
     body = '<html><body><p>' + ('Company information. ' * 40) + f'</p><a href="{href}">Careers</a></body></html>'
-    def reply(request):
-        if request.url.host == "archive.org":
-            return httpx.Response(200, json={"archived_snapshots": {"closest": {"url": snapshot}}})
-        return httpx.Response(200, text=body)
-    original = httpx.AsyncClient
-    with mock.patch.object(intent.httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(reply), **kwargs)):
-        fetched = asyncio.run(intent._try_wayback("https://usefluency.com/"))
+    requests = []
+
+    def dispatch(operation_id, parameters, timeout_ms):
+        assert operation_id == shim.PAGE_FETCH_OPERATION
+        assert timeout_ms == shim._trusted_page_fetch_timeout_ms()
+        target = parameters["url"]
+        assert parameters == {"url": target, "dynamic": False}
+        requests.append(target)
+        if len(requests) == 1:
+            parsed = urlsplit(target)
+            assert (parsed.scheme, parsed.netloc, parsed.path, parsed.fragment) == (
+                "https", "archive.org", "/wayback/available", "",
+            )
+            assert parse_qs(parsed.query) == {"url": ["https://usefluency.com/"]}
+            payload = {"archived_snapshots": {"closest": {"url": snapshot}}}
+            return 200, {"content-type": "application/json"}, json.dumps(payload).encode(), ""
+        assert len(requests) == 2
+        assert target == snapshot
+        return 200, {"content-type": "text/html"}, body.encode(), ""
+
+    # Exercise the production client adapter locally and in the shimmed image;
+    # only the broker transport is synthetic. No request reaches a real socket.
+    monkeypatch.setattr(httpx.AsyncClient, "send", shim._httpx_send(httpx)[1])
+    monkeypatch.setenv(shim.TRUSTED_SCORER_ENV, "1")
+    monkeypatch.setattr(shim, "_dispatch_with_response_url", dispatch)
+    fetched = asyncio.run(intent._try_wayback("https://usefluency.com/"))
     assert fetched["ok"] is True
+    assert len(requests) == 2
     result = {"url": "https://usefluency.com/", "text": fetched["content"], "meta": fetched["meta"]}
     anchors = intent._ats_ownership_anchors([result], [ASHBY], IDENTITY)
     assert bool(anchors) is expected

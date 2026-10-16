@@ -127,6 +127,7 @@ def record_provider(
     duration_ms: float = 0.0,
     start_ns: Optional[int] = None,
     run_identity: Optional[Mapping[str, Any]] = None,
+    store_error: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Record one provider call. Never raises."""
     recorder = _recorder
@@ -147,6 +148,7 @@ def record_provider(
             duration_ms=duration_ms,
             start_ns=start_ns,
             run_identity=run_identity,
+            **({"store_error": store_error} if store_error else {}),
         )
     except BaseException:
         pass

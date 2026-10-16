@@ -37,6 +37,7 @@ from lab_arena.store import (
     PUBLIC_CONFIGURATION_COLUMN,
     PUBLIC_RESULTS_CONFIGURATION_FIELDS,
     hash_lease_token,
+    safe_store_error_metadata,
 )
 from gateway.utils.hotkey_roles import (
     ValidatorIneligible, permitted_validator_uid, validator_uid,
@@ -5599,6 +5600,12 @@ class ArenaService:
                 cancel_requested=cancel_requested,
             )
         except Exception as exc:
+            store_error = {}
+            try:
+                if isinstance(exc, ArenaStoreError):
+                    store_error = safe_store_error_metadata(getattr(exc, "store_error", None))
+            except Exception:
+                pass  # A diagnostic must not replace the original exception.
             try:
                 error_content = {
                     "operation_id": operation_id,
@@ -5607,6 +5614,8 @@ class ArenaService:
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error_class": type(exc).__name__,
                 }
+                if store_error:
+                    error_content["store_error"] = store_error
                 attempts = getattr(exc, "_arena_trajectory_attempts", ())
                 if isinstance(attempts, (list, tuple)):
                     error_content["provider_attempts"] = [
@@ -5625,6 +5634,7 @@ class ArenaService:
                 raised_operation,
                 "failed",
                 error_type=type(exc).__name__,
+                store_error=store_error or None,
                 tool=_telemetry_tool(operation_id, frame["parameters"]),
                 duration_ms=(time.monotonic() - started) * 1000.0,
                 run_identity=run_identity,

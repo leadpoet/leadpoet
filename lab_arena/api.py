@@ -137,7 +137,7 @@ def create_app(service: ArenaService) -> FastAPI:
 
     @app.exception_handler(ArenaStoreUnavailable)
     async def _store_unavailable(request: Request, exc: ArenaStoreUnavailable) -> JSONResponse:
-        telemetry.note_denial("arena_store_unavailable")
+        telemetry.note_denial("arena_store_unavailable", error=exc)
         return JSONResponse(
             status_code=503,
             content={"status": "unavailable", "code": "arena_store_unavailable"},

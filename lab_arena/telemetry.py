@@ -71,6 +71,7 @@ def record(
     duration_ms: float = 0.0,
     start_ns: Optional[int] = None,
     source_sha: Optional[str] = None,
+    store_error: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Record one stage outcome. Never raises."""
     recorder = _recorder
@@ -85,6 +86,7 @@ def record(
             duration_ms=duration_ms,
             start_ns=start_ns,
             source_sha=source_sha,
+            **({"store_error": store_error} if store_error else {}),
         )
     except BaseException:
         pass
@@ -101,13 +103,26 @@ def flush(timeout_millis: int = 1000) -> None:
         pass
 
 
-def note_denial(code: str) -> None:
+def _store_error_metadata(error: Optional[BaseException]) -> Mapping[str, Any]:
+    """Read only existing diagnostics from the exact temporary-store error."""
+    try:
+        from lab_arena.store import ArenaStoreUnavailable, safe_store_error_metadata
+
+        if type(error) is ArenaStoreUnavailable:
+            return safe_store_error_metadata(error.__dict__.get("store_error"))
+    except BaseException:
+        pass
+    return {}
+
+
+def note_denial(code: str, *, error: Optional[BaseException] = None) -> None:
     """Name the refusal the sidecar is returning for the current request."""
     recorder = _recorder
     if recorder is None:
         return
     try:
-        recorder.note_denial(code)
+        metadata = _store_error_metadata(error)
+        recorder.note_denial(code, **({"store_error": metadata} if metadata else {}))
     except BaseException:
         pass
 
@@ -265,7 +280,8 @@ def stage(name: str) -> Iterator[StageResult]:
     """Time one pipeline stage and record its outcome, success or failure.
 
     The wrapped exception is re-raised unchanged — this observes, it never
-    swallows. Only the exception's class name is recorded.
+    swallows. Temporary store failures also retain their existing allowlisted
+    machine diagnostics; no exception text or request data is recorded.
     """
     result = StageResult()
     start_ns = time.time_ns()
@@ -279,6 +295,7 @@ def stage(name: str) -> Iterator[StageResult]:
             error_type=type(exc).__name__,
             duration_ms=(time.monotonic() - start_mono) * 1000.0,
             start_ns=start_ns,
+            store_error=_store_error_metadata(exc),
         )
         raise
     record(

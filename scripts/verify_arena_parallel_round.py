@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--round-id", required=True)
         command.add_argument("--environment-file", type=Path, required=True)
         command.add_argument(
+            "--published-icp-round",
+            help="fresh sourcing on exactly two public ICPs from this published round; no saved outputs",
+        )
+        command.add_argument("--icp-position", type=int, action="append")
+        command.add_argument(
             "--replay-published-round",
             help="replay accepted nonempty outputs from a published round dated today; no fresh sourcing",
         )
@@ -528,17 +533,74 @@ def _validate_replay_source_archive(
         raise VerificationError("replay source archive differs")
 
 
+def _fresh_source_icps(built: Any, source_id: str, target_id: str, positions: list[int]) -> dict[str, Any]:
+    """Select public immutable ICPs only; never read or reuse source outputs."""
+    from lab_arena import contracts
+
+    if (
+        contracts.ROUND_ID_RE.fullmatch(source_id) is None or source_id == target_id
+        or len(positions) != 2 or len(set(positions)) != 2
+        or any(type(position) is not int or position < 0 for position in positions)
+    ):
+        raise VerificationError("fresh sourcing requires two distinct public ICP positions")
+    row = built.store.get_round(source_id)
+    config = (row or {}).get("configuration_doc") or {}
+    if (
+        not row or row.get("round_id") != source_id
+        or row.get("status") != "published" or not row.get("benchmark_ref")
+        or config.get("network_name") != built.config.network_name
+        or config.get("netuid") != built.config.netuid
+    ):
+        raise VerificationError("fresh ICP source is not a published round on this network")
+    public = built.public_benchmark(source_id)
+    public_positions = {item.get("icp_position") for item in public.get("icps") or []}
+    if public.get("round_id") != source_id or not set(positions).issubset(public_positions):
+        raise VerificationError("fresh ICP source positions are not public")
+    raw = built._objects.get_bounded(row["benchmark_ref"], 4 * 1024 * 1024)
+    benchmark = json.loads(raw)
+    icps = benchmark.get("icps")
+    if (
+        benchmark.get("schema_version") != "leadpoet.lab_arena.benchmark.v1"
+        or benchmark.get("round_id") != source_id or not isinstance(icps, list)
+        or len(icps) != contracts.benchmark_icp_count(config)
+        or max(positions) >= len(icps)
+        or any(not isinstance(icps[position], dict) for position in positions)
+    ):
+        raise VerificationError("fresh ICP source benchmark is invalid")
+    selected = [dict(icps[position], icp_id="%s:fresh:%d" % (target_id, index))
+                for index, position in enumerate(positions)]
+    return {
+        "icps": selected,
+        "evidence": {
+            "mode": "fresh_sourcing", "saved_outputs_reused": False,
+            "source_round_id": source_id, "source_benchmark_ref": row["benchmark_ref"],
+            "source_benchmark_sha256": contracts.hash_bytes(raw),
+            "source_configuration_sha256": contracts.document_hash(config),
+            "source_icp_positions": list(positions),
+            "selected_icp_hashes": [contracts.document_hash(item) for item in selected],
+        },
+    }
+
+
 def _build_pinned_service(
     round_id: str, *, replay_published_round: str | None = None,
     replay_assignments: list[str] | None = None,
     replay_historical: bool = False,
     replay_miner_score_route: bool = False,
     replay_active_frozen_round: str | None = None,
+    published_icp_round: str | None = None,
+    icp_positions: list[int] | None = None,
 ):
     """Use production dependencies with a process-local shadow ownership gate."""
 
     if replay_active_frozen_round and replay_published_round:
         raise VerificationError("choose one replay source mode")
+    if published_icp_round and any((replay_published_round, replay_active_frozen_round,
+                                    replay_assignments is not None, replay_historical,
+                                    replay_miner_score_route)):
+        raise VerificationError("fresh sourcing cannot be combined with replay flags")
+    if bool(published_icp_round) != bool(icp_positions):
+        raise VerificationError("fresh sourcing requires a published source and two ICP positions")
     source_round = replay_active_frozen_round or replay_published_round
     if replay_active_frozen_round and (not replay_assignments or not replay_miner_score_route):
         raise VerificationError("active frozen replay requires selected assignments and the miner score route")
@@ -555,7 +617,9 @@ def _build_pinned_service(
     from lab_arena.service import ArenaService, DEFAULT_BASELINE_SOURCE_URL
     from lab_arena.wiring import build_service_from_environment
 
-    built, _unused_app = build_service_from_environment("shadow")
+    # Public source disclosure still enforces its original live-mode boundary.
+    built, _unused_app = build_service_from_environment("live" if published_icp_round else "shadow")
+    fresh = _fresh_source_icps(built, published_icp_round, round_id, icp_positions) if published_icp_round else None
     replay = (
         _saved_output_replay(
             built, source_round, round_id,
@@ -571,6 +635,7 @@ def _build_pinned_service(
         daily_cutoff_hour_utc=None,
         baseline_source_url=replay["source_url"] if replay else DEFAULT_BASELINE_SOURCE_URL,
         **({"benchmark_icp_count": len(replay["icps"])} if replay else {}),
+        **({"benchmark_icp_count": 2, "runner_slot_ceiling": 1} if fresh else {}),
     )
     config = replace(
         built.config,
@@ -594,6 +659,11 @@ def _build_pinned_service(
                 "status": "ready", "set_id": set_id, "icps": replay["icps"],
             },
         )
+    if fresh:
+        config = replace(config, daily_icp_source=lambda *, set_id, active_at: {
+            "status": "ready", "set_id": set_id,
+            "icps": json.loads(json.dumps(fresh["icps"])),
+        })
     Service = ArenaService
     if replay_historical or replay_active_frozen_round:
         source_schedule = replay["source_schedule"]
@@ -606,6 +676,8 @@ def _build_pinned_service(
 
         Service = HistoricalReplayArenaService
     service = Service(config)
+    if fresh:
+        service._fresh_sourcing = fresh
     if replay:
         service._saved_output_replay = replay["evidence"]
         _validate_replay_source_archive(service, round_id, required=False)
@@ -732,6 +804,22 @@ def _validate_frozen_round(service: Any, row: Mapping[str, Any]) -> None:
             benchmark = json.loads(service._objects.get(row["benchmark_ref"]))
             if contracts.document_hash(benchmark) != replay["target_benchmark_hash"]:
                 raise VerificationError("existing round replay benchmark inputs differ")
+    fresh = getattr(service, "_fresh_sourcing", None)
+    if fresh:
+        if replay is not None or benchmark_icp_count != 2 or defaults.runner_slot_ceiling != 1:
+            mismatches.append("fresh_sourcing_scope")
+        if row.get("reward_activated_at") is not None or row.get("reward_epoch") is not None:
+            mismatches.append("fresh_sourcing_reward_authority")
+        if row.get("benchmark_ref"):
+            benchmark = json.loads(service._objects.get_bounded(row["benchmark_ref"], 4 * 1024 * 1024))
+            if (
+                benchmark.get("schema_version") != "leadpoet.lab_arena.benchmark.v1"
+                or benchmark.get("round_id") != row.get("round_id")
+                or benchmark.get("icps") != fresh["icps"]
+            ):
+                mismatches.append("fresh_sourcing_benchmark")
+        elif row.get("status") != "open":
+            mismatches.append("fresh_sourcing_benchmark_missing")
     if mismatches:
         raise VerificationError(
             "existing round is incompatible: " + ",".join(sorted(set(mismatches)))
@@ -1513,6 +1601,8 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
     return {
         "schema_version": ARTIFACT_SCHEMA_VERSION,
         **({"saved_output_replay": replay} if replay else {}),
+        **({"fresh_sourcing": service._fresh_sourcing["evidence"]}
+           if getattr(service, "_fresh_sourcing", None) else {}),
         "observed_at": _utc_now().isoformat().replace("+00:00", "Z"),
         "round": {
             "round_id": round_id,
@@ -1749,6 +1839,8 @@ def main(argv: list[str] | None = None) -> int:
             replay_historical=args.replay_historical,
             replay_miner_score_route=args.replay_miner_score_route,
             replay_active_frozen_round=args.replay_active_frozen_round,
+            published_icp_round=args.published_icp_round,
+            icp_positions=args.icp_position,
         )
         checks = service.startup_checks()
         print(

@@ -110,6 +110,32 @@ def test_only_due_canonical_presign_gets_retryable_refusal():
     assert late.value.code == "round_unknown"
 
 
+def test_presign_just_before_the_opening_is_retryable():
+    """A miner racing the cutoff names the next round seconds early."""
+
+    service = bare_service(moment(15) - timedelta(seconds=30))
+    service._store = SimpleNamespace(get_round=lambda _round_id: None)
+
+    with pytest.raises(ServiceError) as due:
+        service._request_round({"round_id": "arena-2026-10-16"},
+                               scope=contracts.SCOPE_SUBMISSION_PRESIGN)
+    assert (due.value.code, due.value.status) == ("round_opening", 503)
+
+    # Outside the bounded window, and for any other round, the refusal stays
+    # terminal so a wrong round id is never retried indefinitely.
+    service.now = lambda: moment(15) - timedelta(seconds=91)
+    with pytest.raises(ServiceError) as early:
+        service._request_round({"round_id": "arena-2026-10-16"},
+                               scope=contracts.SCOPE_SUBMISSION_PRESIGN)
+    assert early.value.code == "round_unknown"
+
+    service.now = lambda: moment(15) - timedelta(seconds=30)
+    with pytest.raises(ServiceError) as other:
+        service._request_round({"round_id": "arena-2026-10-17"},
+                               scope=contracts.SCOPE_SUBMISSION_PRESIGN)
+    assert other.value.code == "round_unknown"
+
+
 def test_same_signed_presign_can_retry_without_nonce_write():
     service = bare_service(moment(14, 0, 1))
     reads = []

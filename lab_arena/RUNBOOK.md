@@ -386,9 +386,11 @@ cancellation labels. It preserves historical results and source objects.
 Migrations 422 and 423 supersede whole-round execution cancellation: after
 bounded lease drain, unfinished assignments remain explicitly incomplete.
 Completed ICP results are judged and persisted normally. An incomplete model
-has a null final score and cannot win promotion. An incomplete baseline permits
-publication of the available results but no new champion; the existing reward
-continuity path remains in use. No missing ICP is silently assigned a score.
+has a null final score and cannot win promotion. The current publication path
+requires complete accepted baseline execution and judgment at every configured
+position. An incomplete baseline cannot authorize publication, a new champion,
+or new rewards; existing weight continuity follows the governing signed reward
+basis. No missing ICP is silently assigned a score.
 Deploy its matching service after applying the migration. Source admission
 still uses the existing upload MD5 and server-assigned submission ID.
 
@@ -396,6 +398,35 @@ Migration 194 refreshes only the trusted scorer digest and pinned reference
 when an existing open round atomically commits its benchmark. This lets a
 deployed scorer fix apply before any work is created. The committed scorer
 pin and every other round setting remain immutable.
+
+### Verify a scorer release separately from a host release
+
+A gateway or validator restart does not rebuild the scorer image. The CI image
+smoke build does not push an image or update production configuration. A merged
+scorer fix is therefore not evidence that any round runs it.
+
+For a change intended to affect scoring:
+
+1. Build and publish the image with `scripts/build_lab_arena_judge_image.sh`
+   from the clean, reviewed source. Test the affected path and controls inside
+   that exact digest, including the normal runner, broker, cost settlement,
+   completion and publication path where relevant.
+2. Update only `LAB_ARENA_SCORER_IMAGE` through the protected configuration
+   procedure. Use the digest-pinned reference. Run the canonical gateway
+   release so both API and the sole round driver load it. Restart validators
+   only when their host code also requires deployment.
+3. Read back the selected image from both actual API and driver processes.
+   Retain the image digest, build source and test results. A host source SHA or
+   successful health response does not establish scorer deployment.
+4. At normal benchmark commitment, verify the round's persisted image digest
+   and reference, then the actual execution/scoring leases. Only then report
+   the scorer as active for that round. An open round can still display its
+   earlier image until commitment; an already committed round keeps its pin.
+
+These are release acceptance checks, not a new runtime identity gate. Do not
+require gateway and scorer Git SHAs to match, add validator attestation, or
+change a frozen round to make the checks pass. Report an incomplete scorer
+release as incomplete even when the host deployment succeeded.
 
 Start the service:
 

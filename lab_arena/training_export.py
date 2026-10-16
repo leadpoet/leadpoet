@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import re
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -125,6 +126,49 @@ def _runtime(row):
     return {key: copy.deepcopy(result[key]) for key in
             ("started_at", "finished_at", "terminal_status", "resource_summary", "failure_diagnostic")
             if key in result}
+
+
+def _verified_runtime_source(resource):
+    commit = resource.get("validator_source_commit")
+    if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        return False
+    origin, dirty = resource.get("validator_source_origin"), resource.get("validator_source_dirty")
+    return origin == "git_checkout" and dirty == "clean" or origin in {"release_marker", "verified_archive_environment"} and dirty == "unknown"
+
+
+def _source_evidence(objects, run, round_row, submission, participant):
+    source_ref = participant["source_ref"]
+    expected_ref = "arena/%s/sources/%s.tar.gz" % (run["round_id"], run["submission_id"])
+    if source_ref != submission.get("source_ref") or source_ref != expected_ref:
+        raise ExportError("source_ref_mismatch")
+    source = objects.get_bounded(source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
+    facts = source_bundle.validate_source_archive(source)
+    if (type(participant.get("source_size_bytes")) is not int
+            or type(submission.get("source_size_bytes")) is not int
+            or participant["source_size_bytes"] != facts["source_size_bytes"]
+            or submission["source_size_bytes"] != facts["source_size_bytes"]):
+        raise ExportError("source_size_mismatch")
+    digest = contracts.hash_bytes(source)
+    recorded = submission.get("source_archive_sha256")
+    if recorded:
+        if recorded != digest:
+            raise ExportError("source_hash_mismatch")
+        origin = "recorded_archive_hash"
+    else:
+        # Daily baselines predate recorded archive digests. The source endpoint
+        # and runner both use the frozen source object and exact frozen size.
+        # Derive a new hash only after validating that same immutable boundary.
+        expected_baseline = "baseline-" + run["round_id"].removeprefix("arena-")
+        if (submission.get("is_king") is not True or participant.get("is_king") is not True
+                or submission.get("status") != "frozen"
+                or run["submission_id"] != expected_baseline
+                or (round_row.get("configuration_doc") or {}).get("baseline_hotkey") != run.get("miner_hotkey")):
+            raise ExportError("source_recorded_hash_missing")
+        origin = "computed_from_frozen_object"
+    return {"ref": source_ref, "sha256": digest, "size_bytes": len(source),
+            "hash_origin": origin, "recorded_hash_present": bool(recorded),
+            "normalized_sha256": submission.get("source_normalized_sha256"),
+            "archive_commit_comment": source_bundle.source_archive_commit(source) or None}
 
 
 def _calls(rows, run_ids, objects):
@@ -265,19 +309,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         raise ExportError("ambiguous_frozen_participant")
     participant = participants[0]
     try:
-        source_ref = participant["source_ref"]
-        if source_ref != submission_row.get("source_ref"):
-            raise ExportError("source_ref_mismatch")
-        source = objects.get_bounded(source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
-        digest = contracts.hash_bytes(source)
-        if digest != submission_row.get("source_archive_sha256"):
-            raise ExportError("source_hash_missing_or_mismatch")
-        example["source"] = {"ref": source_ref, "sha256": digest,
-                             "normalized_sha256": submission_row.get("source_normalized_sha256")}
+        example["source"] = _source_evidence(objects, run, round_row, submission_row, participant)
     except Exception:
         reasons["source_identity"].add("source_unverified")
     resource = (run.get("result_doc") or {}).get("resource_summary") or {}
-    if resource.get("validator_source_commit") in (None, "unknown") or resource.get("validator_source_dirty") == "dirty":
+    if not _verified_runtime_source(resource):
         reasons["source_identity"].add("runtime_source_unverified")
     if not config.get("scorer_image_digest") or not config.get("scorer_image_reference"):
         reasons["source_identity"].add("scorer_image_identity_missing")
@@ -342,16 +378,31 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                          "competition_cost": "not_recomputed", "all_related_attempts_included": True}
     snapshots = dict(input_snapshots or {})
     selected_ids = {run_id} | ({judge["run_id"]} if judge else set())
-    for selected_id in sorted(selected_ids):
+    launched_ids = set()
+    for row in related:
+        result = row.get("result_doc") or {}
+        resource = result.get("resource_summary") or {}
+        if (result.get("started_at") or row.get("output_ref") or resource.get("provider_call_count", 0)
+                or resource.get("wall_seconds", 0)):
+            launched_ids.add(row["run_id"])
+    snapshot_ids = selected_ids | launched_ids
+    for selected_id in sorted(snapshot_ids):
         selected_resource = (by_id[selected_id].get("result_doc") or {}).get("resource_summary") or {}
-        if selected_resource.get("validator_source_commit") in (None, "unknown") or selected_resource.get("validator_source_dirty") == "dirty":
+        if selected_id in selected_ids and not _verified_runtime_source(selected_resource):
             reasons["source_identity"].add("runtime_source_unverified")
+        elif selected_id not in selected_ids and not _verified_runtime_source(selected_resource):
+            reasons["research_process"].add("prior_attempt_source_unverified")
         if selected_id not in snapshots:
             try:
                 from lab_arena.training_input import read_input
-                snapshots[selected_id] = read_input(objects, selected_id, by_id[selected_id]["kind"])
+                selected = by_id[selected_id]
+                snapshots[selected_id] = read_input(objects, selected_id, selected["kind"],
+                                                     selected.get("lease_generation"), selected.get("claim_request_hash"))
             except Exception:
-                reasons["exact_inputs"].add("runtime_input_snapshot_missing")
+                if selected_id in selected_ids:
+                    reasons["exact_inputs"].add("runtime_input_snapshot_missing")
+                else:
+                    reasons["research_process"].add("prior_attempt_input_missing")
         if selected_id in snapshots:
             snapshot = snapshots[selected_id]
             document = snapshot.get("input")
@@ -364,10 +415,12 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 reasons["exact_inputs"].add("runtime_input_privacy_nonexact")
             if (snapshot.get("schema_version") != "leadpoet.lab_arena.training_input.v1"
                     or snapshot.get("run_id") != selected_id or snapshot.get("kind") != by_id[selected_id]["kind"]
+                    or snapshot.get("lease_generation") != by_id[selected_id].get("lease_generation")
+                    or snapshot.get("claim_request_hash") != by_id[selected_id].get("claim_request_hash")
                     or not isinstance(document, dict) or snapshot.get("input_sha256") != contracts.document_hash(document)):
                 reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
                 del snapshots[selected_id]
-            elif selected_id != run_id and (
+            elif by_id[selected_id]["kind"] == "score" and (
                     document.get("scored_run_id") != run_id or output is None
                     or document.get("companies") != output["companies"]
                     or document.get("scorer_policy") != config.get("scorer_policy")
@@ -382,14 +435,27 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     actual_icp.pop(key, None)
                 if actual_icp != expected_icp or document.get("evaluation_date") != round_row.get("evaluation_date"):
                     reasons["exact_inputs"].add("runtime_input_context_mismatch")
-    example["input_snapshots"] = {key: snapshots[key] for key in sorted(selected_ids) if key in snapshots}
+    example["input_snapshots"] = {key: snapshots[key] for key in sorted(snapshot_ids) if key in snapshots}
     if not selected_ids.issubset(snapshots):
         reasons["exact_inputs"].add("runtime_input_snapshot_missing")
     for row in related:
         summary = (row.get("result_doc") or {}).get("resource_summary") or {}
         if (summary.get("web_egress") or {}).get("connection_count", 0):
             reasons["research_process"].add("direct_web_content_not_captured")
-        captured = sum(call["run_id"] == row["run_id"] for call in calls)
+        logical_calls = set()
+        for call in calls:
+            if call["run_id"] != row["run_id"]:
+                continue
+            sequence = call.get("action_sequence")
+            base = call.get("base_call_identity")
+            if type(sequence) is int and sequence >= 0:
+                logical_calls.add(("action", sequence))
+            elif isinstance(base, str) and base:
+                logical_calls.add(("base", base))
+            else:
+                reasons["research_process"].add("logical_call_identity_unverified")
+                logical_calls.add(("unproved", call["call_identity"]))
+        captured = len(logical_calls)
         if summary.get("provider_call_count") != captured:
             reasons["research_process"].add("provider_capture_count_unverified")
             reasons["costs"].add("provider_capture_count_unverified")
@@ -400,11 +466,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     # Diagnostic logs and model-reported decisions are deliberately excluded.
     example["excluded"] = ["diagnostic_trajectory_excerpts", "model_reported_decision_excerpts", "hidden_reasoning"]
     from lab_arena.training_capture import sanitize_training_value
-    privacy_redactions = set()
-    for key in ("icp", "output", "judgment", "companies", "configuration", "attempts"):
-        if key in example:
-            example[key], redactions = sanitize_training_value(example[key])
-            privacy_redactions.update(redactions)
+    example, redactions = sanitize_training_value(example)
+    privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     hidden_removed = removed or "hidden_reasoning" in privacy_redactions or any(
         call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", []) for call in calls)

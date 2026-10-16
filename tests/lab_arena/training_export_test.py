@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import io
 import stat
+import tarfile
 
 import pytest
 
@@ -11,6 +13,14 @@ from lab_arena import contracts, scoring, training_capture, training_input, veri
 from lab_arena.training_export import ExportError, assemble_example, without_hidden_reasoning
 from lab_arena.output import validate_output_document
 from scripts.export_arena_training import _ledger, write_private
+
+CLAIM_HASH = "sha256:" + "c" * 64
+
+
+def save_input(objects, run_id, kind, document, *, generation=1, claim_hash=CLAIM_HASH):
+    _, compressed = training_input.build_snapshot(run_id, kind, document,
+                                                 lease_generation=generation, claim_request_hash=claim_hash)
+    objects.put(training_input.object_ref(run_id, generation), compressed)
 
 
 class Objects:
@@ -42,16 +52,26 @@ def fixture():
               "scorer_image_reference": "registry/scorer@sha256:" + "a" * 64}
     round_row = {"round_id": "arena-2026-10-16", "configuration_doc": config,
                  "benchmark_ref": "benchmark", "evaluation_date": "2026-10-16",
-                 "participants": [{"submission_id": "sub", "source_ref": "source"}]}
+                 "participants": [{"submission_id": "sub"}]}
+    archive = io.BytesIO()
+    harness = b"def run_icp(icp):\n    return []\n"
+    with tarfile.open(fileobj=archive, mode="w:gz") as source_tar:
+        member = tarfile.TarInfo("harness.py")
+        member.size = len(harness)
+        source_tar.addfile(member, io.BytesIO(harness))
+    source = archive.getvalue()
+    source_ref = "arena/%s/sources/sub.tar.gz" % round_row["round_id"]
+    round_row["participants"][0].update(source_ref=source_ref, source_size_bytes=len(source))
     submission = {"submission_id": "sub", "round_id": round_row["round_id"], "miner_hotkey": "miner",
-                  "source_ref": "source", "source_archive_sha256": contracts.hash_bytes(b"source")}
-    objects.put("source", b"source")
+                  "source_ref": source_ref, "source_size_bytes": len(source), "source_archive_sha256": contracts.hash_bytes(source)}
+    objects.put(source_ref, source)
     objects.put("benchmark", contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1",
                 "round_id": round_row["round_id"], "icps": [icp] * contracts.benchmark_icp_count(config)}).encode())
-    resource = {"validator_source_commit": "a" * 40, "validator_source_dirty": "clean", "provider_call_count": 0}
+    resource = {"validator_source_commit": "a" * 40, "validator_source_origin": "git_checkout", "validator_source_dirty": "clean", "provider_call_count": 0}
     execute = {"run_id": "execute:1", "round_id": round_row["round_id"], "submission_id": "sub",
                "miner_hotkey": "miner", "stage": 1, "icp_position": 0, "assignment_id": "execute",
                "attempt": 1, "kind": "execute", "status": "accepted", "terminal_cause": "accepted",
+               "lease_generation": 1, "claim_request_hash": CLAIM_HASH,
                "output_ref": "output", "result_doc": {"resource_summary": copy.deepcopy(resource)}}
     judge = dict(execute, run_id="judge:1", kind="score", assignment_id="judge", scored_run_id="execute:1",
                  output_ref="judge-output", result_doc={"resource_summary": copy.deepcopy(resource)})
@@ -64,8 +84,7 @@ def fixture():
     for row, document in ((execute, {"schema_version": "leadpoet.lab_arena.icp_input.v1", "icp": icp, "evaluation_date": "2026-10-16"}),
                           (judge, scoring.build_scoring_input(scored_run_id=execute["run_id"], icp=icp,
                                                              companies=[company], policy=policy, evaluation_date="2026-10-16"))):
-        _, compressed = training_input.build_snapshot(row["run_id"], row["kind"], document)
-        objects.put(training_input.object_ref(row["run_id"]), compressed)
+        save_input(objects, row["run_id"], row["kind"], document)
     return dict(run_id=execute["run_id"], round_row=round_row, submission_row=submission,
                 runs=[execute, judge], ledger_rows=[], objects=objects)
 
@@ -84,7 +103,7 @@ def test_complete_no_external_call_example_is_deterministic_and_has_labels():
 
 def test_missing_snapshot_preserves_verified_labels_but_cannot_claim_full_process():
     values = fixture()
-    del values["objects"].values[training_input.object_ref("execute:1")]
+    del values["objects"].values[training_input.object_ref("execute:1", 1)]
     result = assemble_example(**values)
     assert result["completeness"]["dimensions"]["input_output_label"] is True
     assert result["completeness"]["dimensions"]["exact_inputs"] is False
@@ -118,19 +137,20 @@ def test_direct_web_and_count_gap_are_explicit():
     assert set(result["completeness"]["incomplete_reasons"]) == {"direct_web_content_not_captured", "provider_capture_count_unverified"}
 
 
-def add_call(values, *, status="settlement", pointer=True):
+def add_call(values, *, status="settlement", pointer=True, provider="openrouter", operation="openrouter.chat"):
     run = values["runs"][0]
     run["result_doc"]["resource_summary"]["provider_call_count"] = 1
     identity, hashed_parameters = "sha256:" + "1" * 64, {"model": "test"}
     request_hash = contracts.document_hash(hashed_parameters)
     captured = training_capture.RequestCapture(values["objects"])(
-        {"hashed_parameters": hashed_parameters, "request_hash": request_hash, "operation_id": "openrouter.chat",
+        {"hashed_parameters": hashed_parameters, "request_hash": request_hash, "operation_id": operation,
          "admitted_parameters": {"messages": [{"role": "user", "content": "x" * 12000}]},
          "effective_parameters": {"model": "test"}, "outbound": {"body": {"model": "test"}}})
     context = {key: run[key] for key in ("run_id", "round_id", "submission_id", "miner_hotkey")}
     reserve = dict(context, entry_id=1, entry_kind="reservation", call_identity=identity,
-                   provider="openrouter", operation_id="openrouter.chat", amount_microusd=0,
-                   entry_doc={"request_hash": request_hash, **({"request_capture": captured} if pointer else {})})
+                   provider=provider, operation_id=operation, amount_microusd=0,
+                   entry_doc={"request_hash": request_hash, "action_sequence": 0, "base_call_identity": identity,
+                              **({"request_capture": captured} if pointer else {})})
     body = {"choices": [{"message": {"content": "result", "reasoning_content": "PRIVATE THOUGHT"}}]}
     terminal = dict(reserve, entry_id=3, entry_kind=status, amount_microusd=42,
                     terminal_response={"body_b64": base64.b64encode(json.dumps(body).encode()).decode(), "status": 200})
@@ -210,9 +230,8 @@ def test_request_privacy_redaction_is_explicit_nonexact_gap():
 
 def test_exact_snapshot_hash_does_not_override_wrong_frozen_context():
     values = fixture()
-    _, compressed = training_input.build_snapshot("execute:1", "execute",
-                                                 {"icp": {"icp_id": "different"}, "evaluation_date": "2026-10-16"})
-    values["objects"].put(training_input.object_ref("execute:1"), compressed)
+    save_input(values["objects"], "execute:1", "execute",
+               {"icp": {"icp_id": "different"}, "evaluation_date": "2026-10-16"})
     result = assemble_example(**values)
     assert result["completeness"]["dimensions"]["input_output_label"] is True
     assert "runtime_input_context_mismatch" in result["completeness"]["incomplete_reasons"]
@@ -253,10 +272,9 @@ def test_duplicate_ledger_entries_are_not_counted_twice():
 
 def test_filtered_input_is_not_exact_but_valid_labels_remain():
     values = fixture()
-    _, compressed = training_input.build_snapshot("execute:1", "execute", {
+    save_input(values["objects"], "execute:1", "execute", {
         "icp": json.loads(values["objects"].values["benchmark"])["icps"][0],
         "evaluation_date": "2026-10-16", "authorization": "secret credential"})
-    values["objects"].put(training_input.object_ref("execute:1"), compressed)
     result = assemble_example(**values)
     assert result["privacy"]["privacy_filtered"] is True
     assert result["privacy"]["exact_replay"] is False
@@ -297,3 +315,146 @@ def test_read_only_cli_does_not_construct_a_service(monkeypatch, tmp_path, capsy
     assert Store.closed
     assert json.loads(path.read_text())["completeness"]["complete"]
     assert "test-only" not in capsys.readouterr().out
+
+
+def baseline_fixture():
+    values = fixture()
+    submission = values["submission_row"]
+    baseline_id = "baseline-2026-10-16"
+    old_ref = submission["source_ref"]
+    new_ref = "arena/arena-2026-10-16/sources/%s.tar.gz" % baseline_id
+    values["objects"].values[new_ref] = values["objects"].values.pop(old_ref)
+    submission.update(submission_id=baseline_id, source_ref=new_ref, is_king=True, status="frozen")
+    submission.pop("source_archive_sha256")
+    participant = values["round_row"]["participants"][0]
+    participant.update(submission_id=baseline_id, source_ref=new_ref, is_king=True)
+    values["round_row"]["configuration_doc"]["baseline_hotkey"] = "miner"
+    for row in values["runs"]:
+        row["submission_id"] = baseline_id
+    return values
+
+
+def test_baseline_without_recorded_digest_uses_valid_frozen_object_authority():
+    result = assemble_example(**baseline_fixture())
+    assert result["completeness"]["complete"]
+    assert result["source"]["hash_origin"] == "computed_from_frozen_object"
+    assert result["source"]["recorded_hash_present"] is False
+    assert result["source"]["sha256"].startswith("sha256:")
+
+
+@pytest.mark.parametrize("failure", ["size", "pin", "archive", "unfrozen", "identity"])
+def test_baseline_fallback_does_not_accept_wrong_or_unfrozen_source(failure):
+    values = baseline_fixture()
+    submission = values["submission_row"]
+    if failure == "size":
+        values["round_row"]["participants"][0]["source_size_bytes"] += 1
+    elif failure == "pin":
+        values["round_row"]["participants"][0]["source_ref"] = "other"
+    elif failure == "archive":
+        values["objects"].values[submission["source_ref"]] = b"not an archive"
+    elif failure == "unfrozen":
+        submission["status"] = "accepted"
+    else:
+        values["round_row"]["configuration_doc"]["baseline_hotkey"] = "other"
+    result = assemble_example(**values)
+    assert "source_unverified" in result["completeness"]["incomplete_reasons"]
+    assert "source" not in result
+
+
+def test_runtime_metadata_is_sanitized_at_every_export_location():
+    values = fixture()
+    secret = "sk-or-v1-" + "a" * 40
+    values["runs"][0]["result_doc"]["resource_summary"]["validator_source_commit"] = secret
+    result = assemble_example(**values)
+    assert secret not in json.dumps(result)
+    assert "runtime_source_unverified" in result["completeness"]["incomplete_reasons"]
+    assert result["privacy"]["privacy_filtered"]
+
+
+@pytest.mark.parametrize("origin,dirty,valid", [("git_checkout", "unknown", False),
+    ("git_checkout", "dirty", False), (None, "clean", False),
+    ("release_marker", "unknown", True), ("verified_archive_environment", "unknown", True)])
+def test_runtime_provenance_requires_verified_origin(origin, dirty, valid):
+    values = fixture()
+    values["runs"][0]["result_doc"]["resource_summary"].update(validator_source_origin=origin, validator_source_dirty=dirty)
+    assert assemble_example(**values)["completeness"]["dimensions"]["source_identity"] is valid
+
+
+def test_provider_retry_receipts_count_one_logical_call_but_keep_every_cost():
+    values = fixture()
+    add_call(values)
+    first = values["ledger_rows"]
+    retry_id = "sha256:" + "7" * 64
+    retries = [dict(row, entry_id=row["entry_id"] + 3, call_identity=retry_id,
+                    entry_doc=dict(row["entry_doc"], provider_attempt=2)) for row in first]
+    first.extend(retries)
+    result = assemble_example(**values)
+    assert result["completeness"]["complete"]
+    assert len(result["provider_calls"]) == 2
+    assert result["costs"]["confirmed_actual_microusd"] == 84
+
+
+def test_judge_snapshot_contains_full_output_before_company_goal_slicing():
+    values = fixture()
+    output = json.loads(values["objects"].values["output"])
+    output["companies"].append(copy.deepcopy(output["companies"][0]))
+    values["objects"].put("output", contracts.canonical_json(output).encode())
+    icp = json.loads(values["objects"].values["benchmark"])["icps"][0]
+    policy = values["round_row"]["configuration_doc"]["scorer_policy"]
+    save_input(values["objects"], "judge:1", "score", scoring.build_scoring_input(
+        scored_run_id="execute:1", icp=icp, companies=output["companies"], policy=policy, evaluation_date="2026-10-16"))
+    result = assemble_example(**values)
+    assert result["completeness"]["complete"]
+    assert [row["label_status"] for row in result["companies"]] == ["scored", "outside_evaluated_slice"]
+
+
+def test_tool_html_response_is_complete_and_not_a_diagnostic_excerpt():
+    values = fixture()
+    add_call(values, provider="scrapingdog", operation="scrapingdog.scrape")
+    text = "<html>" + "source content " * 1000 + "</html>"
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(text.encode()).decode()
+    result = assemble_example(**values)
+    assert result["completeness"]["complete"]
+    assert result["provider_calls"][0]["response"]["text"] == text
+
+
+def test_input_from_previous_lease_does_not_claim_exact_reconstruction():
+    values = fixture()
+    values["runs"][0]["lease_generation"] = 2
+    result = assemble_example(**values)
+    assert result["completeness"]["dimensions"]["input_output_label"]
+    assert "runtime_input_snapshot_missing" in result["completeness"]["incomplete_reasons"]
+
+
+def test_launched_prior_judge_input_is_required_for_complete_retry_process():
+    values = fixture()
+    prior = copy.deepcopy(values["runs"][1])
+    prior.update(run_id="judge-prior:1", status="failed", terminal_cause="judge_timeout", output_ref=None)
+    prior["result_doc"]["started_at"] = "2026-10-16T00:00:00Z"
+    values["runs"][1]["attempt"] = 2
+    values["runs"].append(prior)
+    first = assemble_example(**values)
+    assert first["completeness"]["dimensions"]["input_output_label"]
+    assert first["completeness"]["dimensions"]["exact_inputs"]
+    assert "prior_attempt_input_missing" in first["completeness"]["incomplete_reasons"]
+    current_input = training_input.read_input(values["objects"], "judge:1", "score", 1, CLAIM_HASH)["input"]
+    save_input(values["objects"], prior["run_id"], "score", current_input)
+    second = assemble_example(**values)
+    assert second["completeness"]["complete"]
+    assert prior["run_id"] in second["input_snapshots"]
+    assert {row["lease_generation"] for row in second["attempts"]} == {1}
+
+
+def test_whole_example_sanitizer_keeps_request_reasoning_control():
+    values = fixture()
+    add_call(values)
+    entry = values["ledger_rows"][0]["entry_doc"]
+    parameters = {"model": "test", "reasoning": {"effort": "high"}}
+    request_hash = contracts.document_hash(parameters)
+    pointer = training_capture.RequestCapture(values["objects"])(
+        {"operation_id": "openrouter.chat", "request_hash": request_hash,
+         "hashed_parameters": parameters, "admitted_parameters": parameters,
+         "effective_parameters": parameters, "outbound": {"body": parameters}})
+    entry.update(request_hash=request_hash, request_capture=pointer)
+    result = assemble_example(**values)
+    assert result["provider_calls"][0]["request"]["effective_parameters"]["reasoning"] == {"effort": "high"}

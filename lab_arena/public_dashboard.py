@@ -758,9 +758,11 @@ def _evaluation_failure_reason(run: Mapping[str, Any]) -> str:
         return "scoring_window"
     if (
         cause == "credential_error"
-        and run.get("failure_reason") == "provider_credit_exhausted"
+        and run.get("failure_reason") in (
+            "provider_credit_exhausted", "provider_authentication_failed"
+        )
     ):
-        return "provider_credit_exhausted"
+        return run["failure_reason"]
     return _EVALUATION_FAILURE_REASONS.get(cause, "unknown")
 
 

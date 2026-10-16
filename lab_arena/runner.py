@@ -45,7 +45,9 @@ from lab_arena import integrity, contact_policy, intent_details_policy, quality_
 from lab_arena import trajectory, validator_events
 from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, runtime_version, scoring, shim, source_bundle
 from lab_arena.contracts import ArenaContractError
-from lab_arena.broker import provider_credit_failure_reason
+from lab_arena.broker import (
+    provider_authentication_failure_reason, provider_credit_failure_reason,
+)
 from lab_arena.output import (
     OutputInvalid,
     SUPPORTED_OUTPUT_SCHEMA_VERSIONS,
@@ -4061,6 +4063,17 @@ class AssignmentExecutor:
                 "stage": "provider_call",
                 "error_class": "provider_unavailable",
                 "reason": "provider_credit_exhausted",
+            }
+            run_result["failure_diagnostic"] = failure_diagnostic
+        elif terminal == "credential_error" and any(
+            call.get("call_identity") not in recovered_responses_retries
+            and provider_authentication_failure_reason(call) is not None
+            for call in latest_operation_calls
+        ):
+            failure_diagnostic = {
+                "stage": "provider_call",
+                "error_class": "provider_unavailable",
+                "reason": "provider_authentication_failed",
             }
             run_result["failure_diagnostic"] = failure_diagnostic
         elif scoring_run and terminal in ("judge_error", "judge_timeout"):

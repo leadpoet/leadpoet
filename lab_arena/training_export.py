@@ -1,0 +1,425 @@
+"""Read-only, fail-closed assembly of one Arena training example.
+
+Labeled results and a complete research process are separate claims. Diagnostic
+trajectory excerpts cannot establish the latter. No provider or chain call is
+made by this module, and no service lifecycle is started.
+"""
+
+from __future__ import annotations
+
+import base64
+import copy
+import json
+from decimal import Decimal
+from typing import Any, Mapping, Sequence
+
+from lab_arena import contracts, contact_policy, integrity, scoring, source_bundle, verify
+from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
+
+SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
+HIDDEN_KEYS = frozenset({"reasoning_content", "hidden_reasoning", "encrypted_content", "reasoning_details"})
+MAX_RECEIPT_BYTES = 16 * 1024 * 1024
+
+
+class ExportError(ValueError):
+    """The supplied identity or immutable join is ambiguous or invalid."""
+
+
+def _json_object(objects: Any, ref: str, limit: int) -> dict:
+    raw = objects.get_bounded(ref, limit)
+    value = json.loads(raw)
+    if not isinstance(value, dict):
+        raise ExportError("object_not_document")
+    return value
+
+
+def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
+    """Copy a JSON value, removing hidden-reasoning fields at every depth."""
+    removed = False
+
+    def walk(item):
+        nonlocal removed
+        if isinstance(item, dict):
+            result = {}
+            for key, child in item.items():
+                normalized = str(key).lower().replace("-", "_")
+                safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
+                if normalized in HIDDEN_KEYS or normalized == "reasoning" and not safe_config or item.get("type") == "reasoning" and normalized in {"content", "summary", "text"}:
+                    removed = True
+                else:
+                    result[key] = walk(child)
+            return result
+        if isinstance(item, list):
+            return [walk(child) for child in item]
+        return item
+
+    return walk(value), removed
+
+
+class _Rows:
+    """Minimal read-only store for the existing accepted-evidence validators."""
+
+    def __init__(self, runs, submission, caches, companies):
+        self.runs = runs
+        self.submission = submission
+        self.caches = {row["cache_key"]: row for row in caches}
+        self.companies = {(row["cache_key"], row["authority_slot"]): row for row in companies}
+        if len(self.caches) != len(caches) or len(self.companies) != len(companies):
+            raise ExportError("ambiguous_cache_rows")
+
+    def get_run(self, run_id):
+        return self.runs.get(run_id)
+
+    def get_submission(self, submission_id):
+        return self.submission if self.submission.get("submission_id") == submission_id else None
+
+    def get_judgment_cache(self, key):
+        return self.caches.get(key)
+
+    def get_company_judgment(self, key, slot):
+        return self.companies.get((key, slot))
+
+
+def _evidence_reader(store, objects):
+    # These methods only read the injected store/object interfaces. Deliberately
+    # do not construct ArenaService, which also owns production lifecycle writes.
+    from lab_arena.service import ArenaService
+
+    class EvidenceReader:
+        _verified_breakdowns = ArenaService._verified_breakdowns
+        _company_quality_breakdowns = ArenaService._company_quality_breakdowns
+        _validated_company_judgment_lease = ArenaService._validated_company_judgment_lease
+        _company_judgment_evidence = ArenaService._company_judgment_evidence
+
+    class BoundedObjects:
+        def get(self, ref):
+            return objects.get_bounded(ref, scoring.MAX_SCORING_OUTPUT_BYTES)
+
+        def get_bounded(self, ref, limit):
+            return objects.get_bounded(ref, limit)
+
+    reader = EvidenceReader()
+    reader._store, reader._objects = store, BoundedObjects()
+    return reader
+
+
+def _select_judge(run, runs):
+    candidates = [row for row in runs if row.get("kind") == "score"
+                  and row.get("scored_run_id") == run["run_id"]]
+    for row in candidates:
+        if any(row.get(key) != run.get(key) for key in
+               ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position")):
+            raise ExportError("judge_membership_mismatch")
+    if not candidates:
+        return None
+    rank = lambda row: (row.get("status") == "accepted", int(row.get("stage_generation") or 0), int(row.get("attempt") or 0))
+    best = max(map(rank, candidates))
+    selected = [row for row in candidates if rank(row) == best]
+    if len(selected) != 1:
+        raise ExportError("ambiguous_judge")
+    return selected[0]
+
+
+def _runtime(row):
+    result = row.get("result_doc") or {}
+    return {key: copy.deepcopy(result[key]) for key in
+            ("started_at", "finished_at", "terminal_status", "resource_summary", "failure_diagnostic")
+            if key in result}
+
+
+def _calls(rows, run_ids, objects):
+    grouped, calls, reasons = {}, [], set()
+    if len({row.get("entry_id") for row in rows}) != len(rows):
+        raise ExportError("duplicate_ledger_entry")
+    for row in rows:
+        if row.get("run_id") not in run_ids:
+            raise ExportError("ledger_run_mismatch")
+        identity = row.get("call_identity")
+        if not isinstance(identity, str) or not identity:
+            reasons.add("ledger_call_identity_missing")
+            continue
+        # call_identity has a global unique reservation index in Arena SQL.
+        # Multiple reservations or cross-run reuse fail closed below.
+        grouped.setdefault(identity, []).append(row)
+    for identity, entries in sorted(grouped.items()):
+        reserves = [row for row in entries if row.get("entry_kind") == "reservation"]
+        dispatches = [row for row in entries if row.get("entry_kind") == "dispatch"]
+        terminals = [row for row in entries if row.get("entry_kind") in
+                     {"settlement", "uncertain", "recovery", "refusal"}]
+        if len(reserves) != 1 or len(dispatches) > 1:
+            reasons.add("ambiguous_call_lifecycle")
+            continue
+        reserve = reserves[0]
+        if any(any(row.get(key) != reserve.get(key) for key in
+                   ("run_id", "round_id", "submission_id", "provider", "operation_id")) for row in entries):
+            raise ExportError("ledger_membership_mismatch")
+        entry = reserve.get("entry_doc") or {}
+        call = {"call_identity": identity, "run_id": reserve["run_id"],
+                "provider": reserve.get("provider"), "operation_id": reserve.get("operation_id"),
+                **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
+        pointer = entry.get("request_capture") or {}
+        try:
+            from lab_arena.training_capture import read_request
+            if pointer.get("status") not in {"stored", "referenced"}:
+                raise ExportError("request_not_stored")
+            call["request"] = read_request(objects, pointer)
+            call["request_capture"] = pointer
+            request = call["request"]
+            if request.get("request_hash") != entry.get("request_hash") or request.get("operation_id") != reserve.get("operation_id"):
+                raise ExportError("request_identity_mismatch")
+            if pointer.get("redacted") is True:
+                reasons.add("request_privacy_nonexact")
+            elif not isinstance(request.get("hashed_parameters"), dict) or contracts.document_hash(request["hashed_parameters"]) != entry.get("request_hash"):
+                raise ExportError("request_parameters_hash_mismatch")
+        except Exception:
+            call.pop("request", None)
+            reasons.add("full_request_unavailable")
+        if not terminals:
+            reasons.add("provider_call_inflight")
+        else:
+            # A later recovery can settle a previous uncertain entry. The
+            # append-only ledger's highest entry_id is the current authority.
+            latest = max(terminals, key=lambda row: int(row["entry_id"]))
+            if len({row["entry_id"] for row in terminals}) != len(terminals):
+                raise ExportError("duplicate_ledger_entry")
+            call["accounting_state"] = latest["entry_kind"]
+            if type(latest.get("amount_microusd")) is not int or latest["amount_microusd"] < 0:
+                raise ExportError("call_cost_invalid")
+            call["actual_microusd"] = latest["amount_microusd"] if latest["entry_kind"] != "uncertain" else None
+            if latest["entry_kind"] == "uncertain":
+                reasons.add("provider_cost_unresolved")
+            terminal = latest.get("terminal_response") or {}
+            try:
+                raw = base64.b64decode(terminal["body_b64"], validate=True)
+                if len(raw) > MAX_RECEIPT_BYTES:
+                    raise ExportError("receipt_too_large")
+                # Never export opaque response bytes: hidden reasoning can only
+                # be removed reliably from a parsed JSON response.
+                try:
+                    response = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    if reserve.get("provider") == "openrouter":
+                        raise ExportError("opaque_model_response")
+                    response = {"text": raw.decode("utf-8")}
+                from lab_arena.training_capture import sanitize_training_value
+                response, redactions = sanitize_training_value(response)
+                call["response"], removed = without_hidden_reasoning(response)
+                call["response_hidden_reasoning_removed"] = removed or "hidden_reasoning" in redactions
+                call["response_privacy_redactions"] = redactions
+                if "credential" in redactions:
+                    reasons.add("response_privacy_nonexact")
+                call["response_status"] = terminal.get("status")
+            except Exception:
+                reasons.add("full_response_unavailable")
+            for key in ("judgment_cache_source_call_identity", "judgment_cache_source_run_id"):
+                if key in terminal:
+                    call[key] = terminal[key]
+        calls.append(call)
+    return calls, reasons
+
+
+def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
+                     submission_row: Mapping[str, Any], runs: Sequence[Mapping[str, Any]],
+                     ledger_rows: Sequence[Mapping[str, Any]], objects: Any,
+                     cache_rows: Sequence[Mapping[str, Any]] = (),
+                     company_judgment_rows: Sequence[Mapping[str, Any]] = (),
+                     input_snapshots: Mapping[str, Mapping[str, Any]] | None = None) -> dict:
+    """Assemble one exact execution. Missing evidence produces explicit gaps.
+
+    Invalid identity/ambiguous joins raise ExportError. ``input_snapshots`` must
+    contain verified persisted payloads, never a newly reconstructed input.
+    All other inputs are plain immutable rows or a read-only object interface.
+    """
+    by_id = {row["run_id"]: row for row in runs}
+    if len(by_id) != len(runs) or run_id not in by_id:
+        raise ExportError("ambiguous_or_missing_run")
+    run = by_id[run_id]
+    if run.get("kind") != "execute":
+        raise ExportError("execution_run_required")
+    if (run.get("round_id") != round_row.get("round_id")
+            or run.get("submission_id") != submission_row.get("submission_id")
+            or run.get("miner_hotkey") != submission_row.get("miner_hotkey")
+            or submission_row.get("round_id") != round_row.get("round_id")):
+        raise ExportError("context_membership_mismatch")
+    config = round_row.get("configuration_doc") or {}
+    reasons = {name: set() for name in ("context", "source_identity", "input_output_label", "exact_inputs", "costs", "research_process")}
+    example = {"schema_version": SCHEMA_VERSION,
+               "example_id": contracts.document_hash({"schema_version": SCHEMA_VERSION, "run_id": run_id}),
+               **{key: run[key] for key in ("run_id", "round_id", "submission_id", "stage", "icp_position", "assignment_id", "attempt")},
+               "configuration": copy.deepcopy(config), "evaluation_date": round_row.get("evaluation_date"),
+               "role": "baseline" if submission_row.get("is_king") is True else "miner",
+               "runtime": _runtime(run), "companies": []}
+    icp = output = None
+    try:
+        benchmark = _json_object(objects, round_row["benchmark_ref"], 4 * 1024 * 1024)
+        if (benchmark.get("schema_version") != "leadpoet.lab_arena.benchmark.v1"
+                or benchmark.get("round_id") != run["round_id"]
+                or len(benchmark["icps"]) != contracts.benchmark_icp_count(config)):
+            raise ExportError("benchmark_invalid")
+        icp = benchmark["icps"][int(run["icp_position"])]
+        example["icp"] = icp
+    except Exception:
+        reasons["context"].add("frozen_icp_unavailable")
+    participants = [row for row in round_row.get("participants") or [] if row.get("submission_id") == run["submission_id"]]
+    if len(participants) != 1:
+        raise ExportError("ambiguous_frozen_participant")
+    participant = participants[0]
+    try:
+        source_ref = participant["source_ref"]
+        if source_ref != submission_row.get("source_ref"):
+            raise ExportError("source_ref_mismatch")
+        source = objects.get_bounded(source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES)
+        digest = contracts.hash_bytes(source)
+        if digest != submission_row.get("source_archive_sha256"):
+            raise ExportError("source_hash_missing_or_mismatch")
+        example["source"] = {"ref": source_ref, "sha256": digest,
+                             "normalized_sha256": submission_row.get("source_normalized_sha256")}
+    except Exception:
+        reasons["source_identity"].add("source_unverified")
+    resource = (run.get("result_doc") or {}).get("resource_summary") or {}
+    if resource.get("validator_source_commit") in (None, "unknown") or resource.get("validator_source_dirty") == "dirty":
+        reasons["source_identity"].add("runtime_source_unverified")
+    if not config.get("scorer_image_digest") or not config.get("scorer_image_reference"):
+        reasons["source_identity"].add("scorer_image_identity_missing")
+    try:
+        output = validate_output_document(_json_object(objects, run["output_ref"], MAX_OUTPUT_BYTES),
+                                          expected_schema_version=contact_policy.output_schema(config),
+                                          require_intent_dates=False)
+        if run.get("status") != "accepted" or run.get("terminal_cause") != "accepted":
+            raise ExportError("execution_not_accepted")
+        example["output"] = output
+    except Exception:
+        reasons["input_output_label"].add("accepted_output_unavailable")
+    judge = _select_judge(run, runs)
+    if judge is None or judge.get("status") != "accepted" or judge.get("terminal_cause") != "accepted":
+        reasons["input_output_label"].add("final_judge_unavailable")
+    elif output is not None and icp is not None:
+        try:
+            policy = config["scorer_policy"]
+            sliced = verify.slice_first_n(output["companies"], verify.icp_company_goal(icp))
+            reader = _evidence_reader(_Rows(by_id, submission_row, cache_rows, company_judgment_rows), objects)
+            breakdowns = reader._verified_breakdowns(judge, icp=icp, companies=sliced, policy=policy)
+            result = verify.scored_row(run["submission_id"], run["icp_position"], run_id, icp, output["companies"], breakdowns, policy)
+            if run.get("per_icp_score") is None or abs(Decimal(str(result["per_icp_score"])) - Decimal(str(run["per_icp_score"]))) > Decimal("0.000001"):
+                raise ExportError("score_mismatch")
+            example["score_run_id"] = judge["run_id"]
+            example["judgment"] = {"breakdowns": breakdowns, "per_icp_score": result["per_icp_score"],
+                                   "runtime": _runtime(judge),
+                                   "judgment_cache_source_run_id": judge.get("judgment_cache_source_run_id"),
+                                   "company_judgment_refs": judge.get("company_judgment_refs")}
+            if judge.get("company_judgment_refs") is not None:
+                needed = {(row["cache_key"], row["authority_slot"]) for row in
+                          ((judge.get("claim_response") or {}).get("company_judgment_cache") or {}).get("hits", [])}
+                needed.update((row["cache_key"], row["authority_slot"]) for row in
+                              ((judge.get("claim_response") or {}).get("company_judgment_cache") or {}).get("misses", []))
+                example["judgment"]["company_authority_evidence"] = [copy.deepcopy(row) for row in company_judgment_rows
+                                                                       if (row["cache_key"], row["authority_slot"]) in needed]
+            if judge.get("judgment_cache_key"):
+                example["judgment"]["cache_authority_evidence"] = [copy.deepcopy(row) for row in cache_rows
+                                                                   if row["cache_key"] == judge["judgment_cache_key"]]
+            indexed = dict(zip(result["scored_company_indexes"], breakdowns))
+            for index, company in enumerate(output["companies"]):
+                state = "scored" if index in indexed else "skipped" if index in result["skipped_company_indexes"] else "outside_evaluated_slice"
+                example["companies"].append({"company_index": index, "company": company, "label_status": state,
+                                              "judgment": indexed.get(index)})
+        except Exception:
+            reasons["input_output_label"].add("judge_evidence_unverified")
+    related = [row for row in runs if row.get("assignment_id") == run["assignment_id"]
+               or row.get("kind") == "score" and row.get("scored_run_id") == run_id]
+    run_ids = {row["run_id"] for row in related}
+    example["attempts"] = [{"run_id": row["run_id"], "kind": row["kind"], "attempt": row.get("attempt"),
+                             "lease_generation": row.get("lease_generation"), "status": row.get("status"),
+                             "terminal_cause": row.get("terminal_cause"), "runtime": _runtime(row)}
+                            for row in sorted(related, key=lambda row: row["run_id"])]
+    for row in ledger_rows:
+        if row.get("run_id") in run_ids and any(row.get(key) != run.get(key) for key in ("round_id", "submission_id", "miner_hotkey")):
+            raise ExportError("ledger_context_mismatch")
+    calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects)
+    example["provider_calls"] = calls
+    reasons["research_process"].update(gaps)
+    reasons["costs"].update(gaps & {"provider_call_inflight", "provider_cost_unresolved", "ambiguous_call_lifecycle", "ledger_call_identity_missing"})
+    example["costs"] = {"confirmed_actual_microusd": sum(call.get("actual_microusd") or 0 for call in calls),
+                         "competition_cost": "not_recomputed", "all_related_attempts_included": True}
+    snapshots = dict(input_snapshots or {})
+    selected_ids = {run_id} | ({judge["run_id"]} if judge else set())
+    for selected_id in sorted(selected_ids):
+        selected_resource = (by_id[selected_id].get("result_doc") or {}).get("resource_summary") or {}
+        if selected_resource.get("validator_source_commit") in (None, "unknown") or selected_resource.get("validator_source_dirty") == "dirty":
+            reasons["source_identity"].add("runtime_source_unverified")
+        if selected_id not in snapshots:
+            try:
+                from lab_arena.training_input import read_input
+                snapshots[selected_id] = read_input(objects, selected_id, by_id[selected_id]["kind"])
+            except Exception:
+                reasons["exact_inputs"].add("runtime_input_snapshot_missing")
+        if selected_id in snapshots:
+            snapshot = snapshots[selected_id]
+            document = snapshot.get("input")
+            privacy = snapshot.get("privacy")
+            if (not isinstance(privacy, dict) or type(privacy.get("redacted")) is not bool
+                    or not isinstance(privacy.get("redactions"), list)
+                    or privacy["redacted"] != bool(privacy["redactions"])):
+                reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
+            if (snapshot.get("privacy") or {}).get("redacted") is True:
+                reasons["exact_inputs"].add("runtime_input_privacy_nonexact")
+            if (snapshot.get("schema_version") != "leadpoet.lab_arena.training_input.v1"
+                    or snapshot.get("run_id") != selected_id or snapshot.get("kind") != by_id[selected_id]["kind"]
+                    or not isinstance(document, dict) or snapshot.get("input_sha256") != contracts.document_hash(document)):
+                reasons["exact_inputs"].add("runtime_input_snapshot_invalid")
+                del snapshots[selected_id]
+            elif selected_id != run_id and (
+                    document.get("scored_run_id") != run_id or output is None
+                    or document.get("companies") != output["companies"]
+                    or document.get("scorer_policy") != config.get("scorer_policy")
+                    or document.get("evaluation_date") != round_row.get("evaluation_date")):
+                reasons["exact_inputs"].add("judge_input_context_mismatch")
+            if isinstance(document, dict) and icp is not None:
+                actual_icp = dict(document.get("icp") or {})
+                expected_icp = integrity.agent_visible_icp(icp, contacts_required=contact_policy.enabled(config)) if integrity.enabled(config) else dict(icp)
+                if not contact_policy.enabled(config):
+                    expected_icp.pop("contact_policy", None)
+                for key in ("output_schema_version", "company_quality_policy", "company_requirements", "intent_details_policy", "_arena_provider_observations"):
+                    actual_icp.pop(key, None)
+                if actual_icp != expected_icp or document.get("evaluation_date") != round_row.get("evaluation_date"):
+                    reasons["exact_inputs"].add("runtime_input_context_mismatch")
+    example["input_snapshots"] = {key: snapshots[key] for key in sorted(selected_ids) if key in snapshots}
+    if not selected_ids.issubset(snapshots):
+        reasons["exact_inputs"].add("runtime_input_snapshot_missing")
+    for row in related:
+        summary = (row.get("result_doc") or {}).get("resource_summary") or {}
+        if (summary.get("web_egress") or {}).get("connection_count", 0):
+            reasons["research_process"].add("direct_web_content_not_captured")
+        captured = sum(call["run_id"] == row["run_id"] for call in calls)
+        if summary.get("provider_call_count") != captured:
+            reasons["research_process"].add("provider_capture_count_unverified")
+            reasons["costs"].add("provider_capture_count_unverified")
+    reasons["research_process"].update(reasons["exact_inputs"])
+    reasons["research_process"].update(reasons["input_output_label"])
+    if reasons["context"]:
+        reasons["input_output_label"].add("frozen_context_unverified")
+    # Diagnostic logs and model-reported decisions are deliberately excluded.
+    example["excluded"] = ["diagnostic_trajectory_excerpts", "model_reported_decision_excerpts", "hidden_reasoning"]
+    from lab_arena.training_capture import sanitize_training_value
+    privacy_redactions = set()
+    for key in ("icp", "output", "judgment", "companies", "configuration", "attempts"):
+        if key in example:
+            example[key], redactions = sanitize_training_value(example[key])
+            privacy_redactions.update(redactions)
+    clean, removed = without_hidden_reasoning(example)
+    hidden_removed = removed or "hidden_reasoning" in privacy_redactions or any(
+        call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", []) for call in calls)
+    clean["privacy"] = {"hidden_reasoning_removed": hidden_removed, "hidden_reasoning_excluded": True,
+                        "context_redactions": sorted(privacy_redactions)}
+    privacy_filtered = bool(privacy_redactions) or hidden_removed or any(
+        (snapshot.get("privacy") or {}).get("redacted") for snapshot in snapshots.values()) or any(
+        (call.get("request_capture") or {}).get("redacted") or call.get("response_privacy_redactions") for call in calls)
+    if "credential" in privacy_redactions:
+        reasons["research_process"].add("context_privacy_nonexact")
+    clean["privacy"]["privacy_filtered"] = privacy_filtered
+    clean["privacy"]["exact_replay"] = not privacy_filtered and not any(reasons.values())
+    clean["completeness"] = {"complete": not any(reasons.values()),
+                             "dimensions": {key: not value for key, value in reasons.items()},
+                             "incomplete_reasons": sorted({reason for values in reasons.values() for reason in values}),
+                             "reasons_by_dimension": {key: sorted(value) for key, value in reasons.items()}}
+    clean["example_hash"] = contracts.document_hash(clean)
+    return json.loads(contracts.canonical_json(clean))

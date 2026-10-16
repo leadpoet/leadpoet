@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import json
 
 from fastapi.testclient import TestClient
+import pytest
 
 from lab_arena import broker as br, public_dashboard, runner, scoring
 from lab_arena.api import create_app
@@ -14,13 +15,15 @@ from tests.lab_arena.test_lab_arena_runner import RefusedJudgeRuntime
 from tests.lab_arena.test_lab_arena_service_round import Harness, keypair
 
 
-def test_runner_http_completion_persists_auth_reason_and_public_progress(database, tmp_path):
+@pytest.mark.parametrize("upstream", [False, True])
+def test_runner_http_completion_persists_auth_reason_and_public_progress(database, tmp_path, upstream):
     connect = lambda: database[0].connect(**database[1])
-    h = Harness(connect, tmp_path, challengers=["AuthenticationRefusal"], runners=["alpha"])
-    miner_hotkey = keypair("svc-miner-AuthenticationRefusal").ss58_address
+    flavor = "AuthenticationRefusal" + ("Upstream" if upstream else "Direct")
+    h = Harness(connect, tmp_path, challengers=[flavor], runners=["alpha"])
+    miner_hotkey = keypair("svc-miner-" + flavor).ss58_address
     h.chain.runners.append(miner_hotkey)
     h.chain.permits[miner_hotkey] = False
-    _start_parallel_round(h, "arena-2099-09-51", slot_ceiling=2)
+    _start_parallel_round(h, "arena-2099-09-" + ("52" if upstream else "51"), slot_ceiling=2)
     # Keep the baseline positions out of this single miner execution.
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s AND miner_hotkey=%s", (h.round_id, h.baseline_hotkey))
@@ -28,7 +31,10 @@ def test_runner_http_completion_persists_auth_reason_and_public_progress(databas
         cursor.execute("SET LOCAL session_replication_role=replica")
         cursor.execute("UPDATE public.lab_arena_runs SET status='failed',terminal_cause='stage_closed' WHERE run_id=ANY(%s)", (baseline_ids,))
         cursor.execute("SET LOCAL session_replication_role=origin")
-    transport = FakeTransport([(401, {"error": {"code": 401, "message": "private auth detail"}})])
+    native = {"error": {"code": 401, "message": "private auth detail"}}
+    if upstream:
+        native["error"]["metadata"] = {"provider_name": "synthetic_vendor", "provider_code": "invalid_api_key"}
+    transport = FakeTransport([(401, native)])
     broker = br.Broker(store=h.service.store, key_for=lambda provider: HOST_KEYS[provider],
         credential_for=lambda _context, provider: HOST_KEYS[provider],
         funding_source_for=lambda _context: "miner_key", price_table=price_table(),
@@ -54,7 +60,11 @@ def test_runner_http_completion_persists_auth_reason_and_public_progress(databas
         held = api.held
     saved = h.service.store.get_run(held["run_id"])
     assert saved["status"] == "failed" and saved["terminal_cause"] == "credential_error"
-    assert saved["result_doc"]["failure_diagnostic"]["reason"] == "provider_authentication_failed"
+    expected = "provider_credentials" if upstream else "provider_authentication_failed"
+    if upstream:
+        assert "failure_diagnostic" not in saved["result_doc"]
+    else:
+        assert saved["result_doc"]["failure_diagnostic"]["reason"] == expected
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT entry_kind,amount_microusd,terminal_response FROM public.lab_arena_ledger "
                        "WHERE run_id=%s ORDER BY entry_id", (held["run_id"],))
@@ -63,12 +73,14 @@ def test_runner_http_completion_persists_auth_reason_and_public_progress(databas
         assert ledger[-1][1] == 0
         assert ledger[0][1] >= 0 and ledger[1][1] >= 0
         assert ledger[-1][2]["call_succeeded"] is False
-        assert ledger[-1][2]["account_failure_evidence"]["provider_status"] == 401
+        evidence = ledger[-1][2]["account_failure_evidence"]
+        assert evidence["provider_status"] == 401
+        assert evidence.get("submitted_account_authentication") is (None if upstream else True)
         cursor.execute("SELECT run_id,assignment_id,submission_id,kind,status,terminal_cause,"
                        "result_doc#>>'{failure_diagnostic,reason}' AS failure_reason "
                        "FROM public.lab_arena_runs WHERE run_id=%s", (held["run_id"],))
         projected_run = dict(zip([column.name for column in cursor.description], cursor.fetchone()))
     progress = public_dashboard.evaluation_progress([projected_run], h.clock.now)
-    assert progress["failure_reasons"] == ["provider_authentication_failed"]
+    assert progress["failure_reasons"] == [expected]
     assert "private" not in json.dumps(progress)
     assert len(transport.sent) == 1

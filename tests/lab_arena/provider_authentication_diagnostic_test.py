@@ -18,8 +18,11 @@ from tests.lab_arena.test_lab_arena_runner import (
 )
 
 
-def authentication_refusal():
-    transport = FakeTransport([(401, {"error": {"code": 401, "message": "private auth detail"}})])
+def authentication_refusal(*, native_status=401, metadata=None):
+    document = {"error": {"code": 401, "message": "private auth detail"}}
+    if metadata is not None:
+        document["error"]["metadata"] = metadata
+    transport = FakeTransport([(native_status, document)])
     instance, store, _ = make_broker(
         transport=transport, funding_source_for=lambda _: "miner_key",
         credential_for=lambda _, provider: HOST_KEYS[provider],
@@ -94,8 +97,9 @@ def test_native_non_account_failures_do_not_get_authentication_diagnostic(case):
 
 
 @pytest.mark.parametrize("scoring_run", [False, True])
-def test_broker_worker_runner_completion_and_public_projection_share_fixed_reason(tmp_path, scoring_run):
-    response, *_ = authentication_refusal()
+@pytest.mark.parametrize("upstream", [False, True])
+def test_broker_worker_runner_completion_and_public_projection_share_fixed_reason(tmp_path, scoring_run, upstream):
+    response, *_ = authentication_refusal(metadata={"provider_name": "synthetic_vendor", "provider_code": "invalid_api_key"} if upstream else None)
     class Api(RefusingApi):
         def provider(self, *args):
             super().provider(*args)
@@ -106,9 +110,12 @@ def test_broker_worker_runner_completion_and_public_projection_share_fixed_reaso
     assert runner.Runner(make_config(tmp_path, api, sandbox)).run_once() == 1
     result = contracts.validate_run_result(json.loads(json.dumps(api.completions[0]["body"]["result"])))
     assert result["terminal_status"] == "credential_error"
-    assert result["failure_diagnostic"] == {"stage": "provider_call", "error_class": "provider_unavailable", "reason": "provider_authentication_failed"}
-    projected = public_dashboard.evaluation_progress([run(status="failed", terminal_cause=result["terminal_status"], failure_reason=result["failure_diagnostic"]["reason"])], NOW)
-    assert projected["failure_reasons"] == ["provider_authentication_failed"]
+    if upstream:
+        assert "failure_diagnostic" not in result
+    else:
+        assert result["failure_diagnostic"] == {"stage": "provider_call", "error_class": "provider_unavailable", "reason": "provider_authentication_failed"}
+    projected = public_dashboard.evaluation_progress([run(status="failed", terminal_cause=result["terminal_status"], failure_reason=result.get("failure_diagnostic", {}).get("reason"))], NOW)
+    assert projected["failure_reasons"] == ["provider_credentials" if upstream else "provider_authentication_failed"]
     assert len(api.provider_frames) == 1
     assert "private" not in json.dumps(projected)
 
@@ -185,3 +192,65 @@ def test_credit_diagnostic_keeps_priority_over_another_authentication_failure(tm
     result = api.completions[0]["body"]["result"]
     assert result["terminal_status"] == "credential_error"
     assert result["failure_diagnostic"]["reason"] == "provider_credit_exhausted"
+
+
+@pytest.mark.parametrize("metadata,native_status", [
+    ({"provider_name": "synthetic_vendor"}, 401),
+    ({"provider_code": "invalid_api_key"}, 401),
+    ({"raw": "private upstream payload"}, 401),
+    ({"provider_name": ""}, 401), ({"provider_code": None}, 401),
+    ("malformed", 401), (True, 401),
+    (None, 200), ({"error_type": "authentication"}, 200),
+])
+def test_explicit_or_ambiguous_upstream_authentication_stays_generic_on_fresh_and_replay(metadata, native_status):
+    first, instance, store, transport, arguments = authentication_refusal(metadata=metadata, native_status=native_status)
+    before = deepcopy(store.calls)
+    replay = instance.execute(CONTEXT, **arguments)
+    for result in (first, replay):
+        assert result.status == 402
+        assert result.call["error_code"] == "miner_credentials_unavailable"
+        assert result.call["actual_microusd"] == 0
+        assert broker.provider_authentication_failure_reason(result.call) is None
+        assert "submitted_account_authentication" not in result.call["account_failure_evidence"]
+    assert store.calls == before and len(transport.sent) == 1
+
+
+def test_old_lossy_account401_proof_stays_generic_on_replay():
+    first, instance, store, transport, arguments = authentication_refusal()
+    saved = store.calls[first.call["call_identity"]]
+    saved["terminal"]["account_failure_evidence"].pop("submitted_account_authentication")
+    replay = instance.execute(CONTEXT, **arguments)
+    assert replay.status == 402 and replay.call["error_code"] == "miner_credentials_unavailable"
+    assert broker.provider_authentication_failure_reason(replay.call) is None
+    assert len(transport.sent) == 1
+
+
+@pytest.mark.parametrize("value", [False, "true", 1, None])
+def test_direct_account_marker_accepts_only_literal_true(value):
+    first, _, store, _, _ = authentication_refusal()
+    call = deepcopy(first.call)
+    call["account_failure_evidence"]["submitted_account_authentication"] = value
+    assert broker.provider_authentication_failure_reason(call) is None
+    terminal = deepcopy(store.calls[first.call["call_identity"]]["terminal"])
+    terminal["account_failure_evidence"] = call["account_failure_evidence"]
+    with pytest.raises(broker.BrokerError):
+        broker._decode_terminal(terminal)
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_unknown_fee_account_marker_survives_uncertain_replay_without_changing_reply(legacy, monkeypatch):
+    from tests.lab_arena.provider_credit_diagnostic_test import _unknown_fee_refusal
+    monkeypatch.setattr(broker, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
+    first, instance, store, transport, context, arguments = _unknown_fee_refusal(status=401, document={"error": {"code": "UNAUTHORIZED"}})
+    assert first.call["outcome"] == "uncertain"
+    assert broker.provider_authentication_failure_reason(first.call) == "provider_authentication_failed"
+    proof = store.calls[first.call["call_identity"]]["uncertain_doc"]["account_failure_evidence"]
+    if legacy:
+        proof.pop("submitted_account_authentication")
+    before = deepcopy(store.calls)
+    before_requests = len(transport.sent)
+    replay = instance.execute(context, **arguments)
+    assert replay.status == 409 and replay.call["error_code"] == "call_uncertain"
+    assert replay.call["account_failure_evidence"].get("submitted_account_authentication") is (None if legacy else True)
+    assert broker.provider_authentication_failure_reason(replay.call) is None
+    assert store.calls == before and len(transport.sent) == before_requests

@@ -2197,6 +2197,8 @@ def provider_authentication_failure_reason(call: Mapping[str, Any]) -> Optional[
     if (
         evidence is not None
         and evidence.get("provider_status") == 401
+        and evidence.get("submitted_account_authentication") is True
+        and type(call.get("provider_status")) is int
         and call.get("provider_status") == 401
         and call.get("provider") in ("openrouter", "deepline", "scrapingdog")
         and call.get("funding_source") == "miner_key"
@@ -2674,7 +2676,15 @@ def _validated_account_failure_evidence(
         }, {
             "error_class", "provider_status", "base_call_identity",
             "provider_attempt", "action_sequence", "reason",
+        }, {
+            "error_class", "provider_status", "base_call_identity",
+            "provider_attempt", "action_sequence", "submitted_account_authentication",
         })
+        or ("submitted_account_authentication" in account_failure and (
+            account_failure["submitted_account_authentication"] is not True
+            or type(account_failure.get("provider_status")) is not int
+            or account_failure.get("provider_status") != 401
+        ))
         or ("reason" in account_failure and (
             account_failure["reason"] != "out_of_credit"
             or account_failure.get("provider_status") != 402
@@ -3214,6 +3224,36 @@ def _miner_credential_failure(
         ):
             return False
     return True
+
+
+def _submitted_account_authentication(
+    provider: str, response: ProviderResponse, *,
+    original_http_status: int, raw_document: Any,
+) -> bool:
+    """Qualify diagnostics without changing credential or cost policy.
+
+    OpenRouter's provider_name/provider_code fields identify upstream errors.
+    Its typed authentication category can describe an upstream key, and an
+    HTTP200 generation error is not direct submitted-key authentication.
+    """
+    if response.status != 401 or response.internal_provenance is not None:
+        return False
+    if provider != "openrouter":
+        return True
+    if original_http_status != 401 or not isinstance(raw_document, Mapping):
+        return False
+    error = raw_document.get("error")
+    if not isinstance(error, Mapping):
+        return False
+    metadata = error.get("metadata")
+    if metadata is not None and not isinstance(metadata, Mapping):
+        return False
+    return not (
+        "provider" in raw_document
+        or "choices" in raw_document
+        or isinstance(metadata, Mapping)
+        and any(key in metadata for key in ("provider_name", "provider_code", "raw"))
+    )
 
 
 class Broker:
@@ -5510,6 +5550,12 @@ class Broker:
                 if (effective_operation.provider == "deepline"
                     and _deepline_insufficient_credit_response(response, raw_document)):
                     account_failure_evidence["reason"] = "out_of_credit"
+                if _submitted_account_authentication(
+                    effective_operation.provider, response,
+                    original_http_status=observed_provider_http_status,
+                    raw_document=raw_document,
+                ):
+                    account_failure_evidence["submitted_account_authentication"] = True
                 if (account_failure_evidence.get("reason") == "out_of_credit"
                     or account_failure_evidence.get("provider_status") == 401):
                     summary["account_failure_evidence"] = dict(account_failure_evidence)

@@ -4523,6 +4523,11 @@ class Runner:
                     result = self._config.api.complete(refreshed)
                     if self._acknowledge_completion(path, result):
                         self.completed.append({"run_id": envelope["body"]["run_id"], "result": result})
+                        if (result.get("status") in ("accepted", "failed")
+                            and self._config.operational_logger is not None):
+                            self._config.operational_logger.recovered(
+                                "completion", run_id=envelope["body"].get("run_id"),
+                                round_id=envelope.get("round_id"))
             except Exception as exc:
                 # A bad file, denial or outage cannot erase the authenticated
                 # receipt, resign unverified data, or stop later replay items.
@@ -4632,7 +4637,7 @@ class Runner:
                         if status == "rejected":
                             log.error("completion", RunnerError("completion denied"), reason="completion_denied",
                                 run_id=envelope["body"].get("run_id"), round_id=envelope.get("round_id"))
-                        else:
+                        elif status in ("accepted", "failed"):
                             log.recovered("completion", run_id=envelope["body"].get("run_id"), round_id=envelope.get("round_id"))
                     return result
                 try:

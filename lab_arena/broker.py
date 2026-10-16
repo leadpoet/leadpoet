@@ -36,7 +36,7 @@ from urllib.parse import quote, unquote_to_bytes, urlsplit
 import httpx
 
 from lab_arena import contracts, deepline_catalog, operations, provider_costs, scoring_provider_compat
-from lab_arena import telemetry
+from lab_arena import telemetry, training_capture
 from lab_arena.contracts import ArenaContractError
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
 
@@ -2012,6 +2012,10 @@ def _reservation_readback_matches(
     expected_call_doc = reservation_arguments.get("call_doc")
     if not isinstance(call_doc, Mapping) or not isinstance(expected_call_doc, Mapping):
         return False
+    # Optional evidence must not change economic identity or prevent replay of
+    # an older in-flight reservation after this observational feature deploys.
+    call_doc = {key: value for key, value in call_doc.items() if key != "request_capture"}
+    expected_call_doc = {key: value for key, value in expected_call_doc.items() if key != "request_capture"}
     if dict(call_doc) != dict(expected_call_doc):
         source_fields = {
             "judgment_cache_source_call_identity",
@@ -3312,6 +3316,7 @@ class Broker:
         openrouter_shared_gate: Optional[OpenRouterSharedGate] = None,
         host_shadow_score_compat_round_id: Optional[str] = None,
         host_shadow_score_compat_source_round_id: Optional[str] = None,
+        capture_request: Optional[Callable[..., Any]] = None,
     ) -> None:
         self._store = store
         # Host-only callers retain key_for. Production supplies the scoped
@@ -3337,6 +3342,7 @@ class Broker:
             if model not in self._price_table["models"]:
                 raise ArenaContractError("judge model %s is missing from the price table" % model)
         self._transport = transport
+        self._capture_request = capture_request
         self._clock = clock
         self._lease_ttl_seconds = int(lease_ttl_seconds)
 
@@ -4044,6 +4050,7 @@ class Broker:
             )
         except operations.OperationError:
             return _error_result("invalid_request", {"operation_id": operation_id})
+        requested_normalized = normalized
         if isinstance(action_sequence, bool) or not isinstance(action_sequence, int) or action_sequence < 0:
             return _error_result("invalid_request", {"operation_id": operation_id})
         if operation_id in {"deepline.tools.list", "deepline.tools.get", "deepline.tools.search"}:
@@ -4301,6 +4308,51 @@ class Broker:
                         and finder_payload[key].strip()
                     },
                 }
+        captured_outbound: Optional[operations.OutboundRequest] = None
+        prepared_capture: Optional[training_capture.PreparedRequest] = None
+        request_capture = {}
+        capture_request = getattr(self, "_capture_request", None)
+        if capture_request is not None:
+            try:
+                # Construct only a credential-free plan. Successful construction
+                # is reused below; failed observation leaves the original path
+                # and its failure behavior unchanged.
+                captured_outbound = operations.build_outbound_request(
+                    effective_operation_id, effective_normalized,
+                    deepline_catalog=context.deepline_catalog,
+                    openrouter_provider_policy=(
+                        openrouter_host_route.provider_policy
+                        if openrouter_host_route is not None else None
+                    ),
+                )
+                prepared = capture_request({
+                    "operation_id": operation_id,
+                    "request_hash": request_hash,
+                    "hashed_parameters": normalized,
+                    "admitted_parameters": parameters,
+                    "normalized_parameters": requested_normalized,
+                    "effective_operation_id": effective_operation_id,
+                    "effective_parameters": effective_normalized,
+                    "route": route.summary() if route is not None else {},
+                    "outbound": {
+                        "method": captured_outbound.target.method,
+                        "host": captured_outbound.target.host,
+                        "path": captured_outbound.target.path,
+                        "query": dict(captured_outbound.query),
+                        "body": json.loads(captured_outbound.body) if captured_outbound.body else None,
+                        "body_sha256": contracts.hash_bytes(captured_outbound.body),
+                        "content_type": captured_outbound.content_type,
+                    },
+                }, secrets=(secret,))
+                if isinstance(prepared, training_capture.PreparedRequest):
+                    prepared_capture = prepared
+                    request_capture = dict(prepared.pointer)
+                elif isinstance(prepared, Mapping) and prepared.get("status") == "unavailable":
+                    request_capture = dict(prepared)
+                else:
+                    request_capture = training_capture.unavailable()
+            except Exception:
+                request_capture = training_capture.unavailable()
         reservation_arguments = dict(
             run_id=context.run_id,
             lease_token_hash=context.lease_token_hash,
@@ -4309,7 +4361,7 @@ class Broker:
             provider=effective_operation.provider,
             funding_source=funding_source,
             amount_microusd=amount,
-            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
+            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"request_capture": request_capture} if request_capture else {}), **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
         judgment_cache_key = ""
@@ -4320,7 +4372,7 @@ class Broker:
             and provider_attempt == 1
         ):
             try:
-                cached_outbound = operations.build_outbound_request(
+                cached_outbound = captured_outbound or operations.build_outbound_request(
                     effective_operation_id,
                     effective_normalized,
                     deepline_catalog=context.deepline_catalog,
@@ -4528,6 +4580,25 @@ class Broker:
             return _error_result("broker_unavailable", summary)
         if status == "stale":
             return _error_result("lease_stale", summary)
+        if prepared_capture is not None and status == "reserved":
+            try:
+                capture_authorized = reserved.get("idempotent") is False
+                if not capture_authorized:
+                    # Replays can repair a missing blob only when the exact
+                    # existing receipt references the prepared content.
+                    rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+                    capture_authorized = any(
+                        row.get("entry_kind") == "reservation"
+                        and row.get("run_id") == context.run_id
+                        and row.get("call_identity") == call_identity
+                        and isinstance(row.get("entry_doc"), Mapping)
+                        and row["entry_doc"].get("request_capture") == request_capture
+                        for row in rows if isinstance(row, Mapping)
+                    )
+                if capture_authorized:
+                    prepared_capture.persist()
+            except Exception:
+                pass  # Missing object verification makes evidence incomplete.
         if status == "champion_restart_required":
             if (
                 not champion_credential_retry
@@ -4613,6 +4684,8 @@ class Broker:
                 call_succeeded=terminal_document.get("call_succeeded") is True,
             ):
                 return _error_result("broker_unavailable", summary)
+            if prepared_capture is not None:
+                prepared_capture.persist()
             summary.update({
                 "outcome": "settled", "cached": True,
                 "actual_microusd": 0, "status": cached_status,
@@ -4967,7 +5040,7 @@ class Broker:
             summary["outcome"] = "uncertain"
             return _error_result("call_uncertain", summary)
         # Build the outbound request from the constant table and inject the credential.
-        outbound = operations.build_outbound_request(
+        outbound = captured_outbound or operations.build_outbound_request(
             effective_operation_id,
             effective_normalized,
             deepline_catalog=context.deepline_catalog,

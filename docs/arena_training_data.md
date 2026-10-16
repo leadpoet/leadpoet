@@ -44,6 +44,12 @@ source reference without a recorded archive hash.
 These counts include several policy and runtime generations. Shadow/replay rounds,
 testnet, cancelled rounds and current unfinished rounds require separate filters.
 A saved-output replay provides new judging evidence but no new research trajectory.
+A later output-reference audit found 332 accepted rows pointing outside their own
+canonical run/round output path. All belonged to cancelled reward-disabled rounds;
+sampled records were archive aliases of older output objects. They are excluded
+from complete-example export and are not additional independent demonstrations.
+The published reward pool was unaffected. One more execution completed during
+the audit; the inventory above remains the original consistent snapshot.
 
 ## Actual data path
 
@@ -93,7 +99,8 @@ gzip, size limits and a separate S3 client with bounded timeouts and no SDK retr
 No new database table, queue, background monitor, dependency or lineage service is
 required. Input uploads require an active owned lease before storage. Request
 object writes occur only after accounting admission. Capture failure cannot change
-provider execution, scores or billing. It produces incomplete training evidence.
+the provider's accounting or score rules. It produces incomplete training evidence.
+The bounded storage call adds some latency; a fresh live proof is still required.
 
 The full payload limit is explicit. Oversized or unavailable evidence is rejected
 as a training source; it is never silently clipped and called complete. Credentials
@@ -116,6 +123,9 @@ are separate properties from label validity.
   bounded and potentially incomplete. They are not authoritative demonstrations.
 - A matching hash proves linkage and integrity, not factual truth or a good label.
   Training selection still needs company-level review and evaluation.
+- Ledger receipts preserve provider payloads and original lifecycle times. They
+  do not prove that the worker received or used a particular network response.
+  The export states this boundary and does not infer concurrency from array order.
 - An accepted result can contain an upstream error, a recovered billing result,
   zero qualified companies, or an incomplete judgment. Keep the explicit proof
   dimensions; do not collapse these cases into a success flag.
@@ -190,6 +200,11 @@ review verified the privacy, lease-recovery and prior-attempt fixes. Two broader
 pre-existing fixture failures were isolated outside the final focused gate:
 an exception fixture cannot set its new transaction attribute, and an auth-evidence
 fixture expects the old evidence shape. They are not reported as passing.
+The closing exporter changes preserve numeric action order, original receipt times,
+funding and reconciliation provenance without duplicating equal response bodies.
+They also enforce the execution's own output path and expose round filters. The
+final capture/input/export check passed **106 tests in 4.26 seconds**; compilation
+and whitespace checks passed again.
 
 The exporter from candidate `cc44ff1c094998247f0fdc185a8611dfbf029479` was executed
 in an isolated temporary directory on the gateway against **read-only production

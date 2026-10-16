@@ -116,8 +116,18 @@ def test_firecrawl_route_requires_raw_html_and_exact_source_identity():
         "http://example.com/about",
         "https://127.0.0.1/about",
         "https://user@example.com/about",
-        "https://example.com/about#fragment",
         "https://example.com/about\n",
+        "http://example.com/about#fragment",
+        "https://127.0.0.1/about#fragment",
+        "https://user@example.com/about#fragment",
+        "https://example.com:444/about#fragment",
+        "/about#fragment",
+        "https://example.com/about#fragment\n",
+        "https://example.com/about#fragment\\suffix",
+        "https://example.com/about#fr\u00e4gment",
+        "https://example.com/about#fragment\x00",
+        "https://example.com/about#fragment\x7f",
+        "https://example.com/about#" + "x" * 2000,
     ),
 )
 def test_firecrawl_final_url_must_be_a_public_https_url(response_url):
@@ -144,6 +154,57 @@ def test_firecrawl_final_url_must_be_a_public_https_url(response_url):
                     },
                 }
             ),
+        )
+
+
+@pytest.mark.parametrize("fragment", ["#apply", "#", "#apply#details"])
+def test_firecrawl_final_url_removes_only_fragment(fragment):
+    requested_url = "https://example.com/about"
+    final_url = "https://jobs.example.com/careers?locale=en"
+    html = "<!doctype html><html><body>Open roles</body></html>"
+    selected = route("scrapingdog.scrape", {"url": requested_url})
+
+    status, headers, body, response_url = compat.adapt_response_with_trusted_url(
+        selected,
+        status=200,
+        headers={},
+        body=envelope({
+            "rawHtml": html,
+            "metadata": {
+                "sourceURL": requested_url,
+                "url": final_url + fragment,
+                "statusCode": 200,
+            },
+        }),
+    )
+
+    assert status == 200
+    assert headers["content-type"].startswith("text/html")
+    assert body == html.encode("utf-8")
+    assert response_url == final_url
+
+
+def test_firecrawl_fragment_does_not_relax_request_or_source_url_validation():
+    requested_url = "https://example.com/about"
+    with pytest.raises(operations.OperationRequestError, match="invalid_url"):
+        operations.validate_operation_request(
+            "scrapingdog.scrape", {"url": requested_url + "#fragment"}
+        )
+
+    selected = route("scrapingdog.scrape", {"url": requested_url})
+    with pytest.raises(compat.CompatibilityResponseError, match="source_url_mismatch"):
+        compat.adapt_response_with_trusted_url(
+            selected,
+            status=200,
+            headers={},
+            body=envelope({
+                "rawHtml": "<html></html>",
+                "metadata": {
+                    "sourceURL": requested_url + "#fragment",
+                    "url": requested_url + "#fragment",
+                    "statusCode": 200,
+                },
+            }),
         )
 
 

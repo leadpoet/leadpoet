@@ -625,6 +625,8 @@ LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 # fifth attribute exists only on the sidecar, where a 4xx with no reason is
 # the difference between "a runner was denied a claim" and "a runner is
 # broken". Its vocabulary is the literal prefix of a ``ServiceError`` code.
+# Temporary store failures may also carry the existing bounded machine fields;
+# the final exporter admits those only for the matching 503 denial.
 ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "http.request.method": (str,),
     "http.route": (str,),
@@ -959,7 +961,23 @@ def _validating_exporter(
             return "route"
         return None
 
+    def _without_store_error_fields(attributes: Dict[str, Any], *, allowed: bool) -> Optional[Dict[str, Any]]:
+        fields = {key: value for key, value in attributes.items() if key in STORE_ERROR_SPAN_FIELDS}
+        if fields:
+            from lab_arena.store import safe_store_error_metadata
+
+            metadata = {key.removeprefix("arena.store_"): value for key, value in fields.items()}
+            if not allowed or safe_store_error_metadata(metadata) != metadata:
+                return None
+        return {key: value for key, value in attributes.items() if key not in fields}
+
     def _arena_http_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
+        attributes = _without_store_error_fields(attributes, allowed=(
+            attributes.get("http.response.status_code") == 503
+            and attributes.get("arena.denial") == "arena_store_unavailable"
+        ))
+        if attributes is None:
+            return "store_error"
         if not _attributes_conform(attributes, ARENA_HTTP_ATTRIBUTE_TYPES):
             return "attributes"
         denial = attributes["arena.denial"]
@@ -1106,6 +1124,12 @@ def _validating_exporter(
         return None
 
     def _task_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
+        attributes = _without_store_error_fields(attributes, allowed=(
+            attributes.get("arena.outcome") == "failed"
+            and attributes.get("arena.error_type") == "ArenaStoreUnavailable"
+        ))
+        if attributes is None:
+            return "store_error"
         stage = attributes.get("arena.stage")
         if stage in ARENA_LIFECYCLE_STAGES:
             if not _attributes_conform(attributes, LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES):
@@ -1472,20 +1496,23 @@ class ArenaTelemetry:
 
     # -- refusal code ----------------------------------------------------
 
-    def note_denial(self, code: str) -> None:
+    def note_denial(self, code: str, *, store_error: Optional[Mapping[str, Any]] = None) -> None:
         """Record the refusal code for the request currently being served."""
         try:
             state = self._denial.get()
             if state is None:
-                state = [ARENA_NO_DENIAL]
+                state = [ARENA_NO_DENIAL, {}]
                 self._denial.set(state)
+            from lab_arena.store import safe_store_error_metadata
+
             state[0] = str(code)
+            state[1] = safe_store_error_metadata(store_error)
         except BaseException:
             pass
 
     def reset_denial(self) -> None:
         try:
-            self._denial.set([ARENA_NO_DENIAL])
+            self._denial.set([ARENA_NO_DENIAL, {}])
         except BaseException:
             pass
 
@@ -1504,6 +1531,16 @@ class ArenaTelemetry:
         if _ARENA_DENIAL_RE.fullmatch(prefix) and prefix in ARENA_DENIAL_CODES:
             return prefix
         return ARENA_NO_DENIAL
+
+    def take_store_error(self) -> Mapping[str, Any]:
+        """Return only bounded store diagnostics from this request's context."""
+        try:
+            from lab_arena.store import safe_store_error_metadata
+
+            state = self._denial.get()
+            return safe_store_error_metadata(state[1]) if state is not None else {}
+        except BaseException:
+            return {}
 
     # -- provider calls --------------------------------------------------
 
@@ -1737,6 +1774,7 @@ class ArenaTelemetry:
         duration_ms: float = 0.0,
         start_ns: Optional[int] = None,
         source_sha: Optional[str] = None,
+        store_error: Optional[Mapping[str, Any]] = None,
     ) -> None:
         try:
             self._record(
@@ -1747,6 +1785,7 @@ class ArenaTelemetry:
                 duration_ms=duration_ms,
                 start_ns=start_ns,
                 source_sha=source_sha,
+                store_error=store_error,
             )
         except BaseException as exc:
             # Telemetry is observational only — the pipeline must not notice.
@@ -1762,6 +1801,7 @@ class ArenaTelemetry:
         duration_ms: float,
         start_ns: Optional[int],
         source_sha: Optional[str],
+        store_error: Optional[Mapping[str, Any]],
     ) -> None:
         from opentelemetry.trace import Status, StatusCode
 
@@ -1773,6 +1813,11 @@ class ArenaTelemetry:
         span.set_attribute("duration_ms", float(duration_ms))
         if source_sha is not None:
             span.set_attribute("arena.source_sha", str(source_sha))
+        if store_error:
+            from lab_arena.store import safe_store_error_metadata
+
+            for key, value in safe_store_error_metadata(store_error).items():
+                span.set_attribute("arena.store_" + key, value)
         if outcome == "failed":
             span.set_status(Status(StatusCode.ERROR))
         span.end()
@@ -1888,7 +1933,11 @@ def configure_arena_otel(
                 span.set_attribute("http.request.method", method)
                 span.set_attribute("http.route", route)
                 span.set_attribute("http.response.status_code", int(status_code))
-                span.set_attribute("arena.denial", telemetry.take_denial())
+                denial = telemetry.take_denial()
+                span.set_attribute("arena.denial", denial)
+                if int(status_code) == 503 and denial == "arena_store_unavailable":
+                    for key, value in telemetry.take_store_error().items():
+                        span.set_attribute("arena.store_" + key, value)
                 span.set_attribute(
                     "duration_ms", (time.monotonic() - start_mono) * 1000.0
                 )

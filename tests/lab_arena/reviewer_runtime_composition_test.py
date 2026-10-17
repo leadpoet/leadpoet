@@ -97,3 +97,40 @@ def test_base_and_configuration_are_immutable():
         bad["RootFS"]["Layers"] = layers
         with pytest.raises(CompositionError):
             verify_image_configuration(base, bad)
+
+
+@pytest.mark.parametrize("negative_finality", [False, True])
+def test_source_access_correction_is_explicit_and_composes(negative_finality):
+    from scripts import build_arena_reviewer_runtime as builder
+    from scripts.arena_reviewer_source_access_seam import (
+        INVESTIGATOR_DELTAS, FINALITY_DELTAS,
+        convert_source_access_seam, convert_source_access_finality_seam,
+    )
+
+    original = {
+        name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
+                              if name == "scorer_entrypoint.py" else name)).read_bytes()
+        for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
+    }
+    # Model a frozen pre-correction image without depending on Git history.
+    for name, deltas in ((builder.GRADER_FILE, INVESTIGATOR_DELTAS),
+                         (builder.FINALITY_FILE, FINALITY_DELTAS)):
+        for _, old, new in deltas:
+            assert original[name].count(new.encode()) == 1
+            original[name] = original[name].replace(new.encode(), old.encode(), 1)
+    prior_sources = dict(original)
+    if not negative_finality:
+        prior_sources.pop(builder.FINALITY_FILE)
+    prior = builder.expected_overlay(
+        prior_sources, complete_negative_finality=negative_finality,
+    )
+    repaired = builder.expected_overlay(
+        original, complete_negative_finality=negative_finality,
+        source_access_denied=True,
+    )
+    assert repaired[builder.GRADER_FILE] == convert_source_access_seam(prior[builder.GRADER_FILE])
+    assert repaired[builder.FINALITY_FILE] == convert_source_access_finality_seam(
+        prior.get(builder.FINALITY_FILE, original[builder.FINALITY_FILE]))
+    for name in set(prior) - {builder.GRADER_FILE, builder.FINALITY_FILE}:
+        assert repaired[name] == prior[name]
+    assert set(repaired) == set(prior) | {builder.FINALITY_FILE}

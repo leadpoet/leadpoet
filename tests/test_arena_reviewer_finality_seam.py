@@ -29,7 +29,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _current_source():
-    return (ROOT / FINALITY_FILE).read_bytes()
+    # This suite isolates PR483. Reverse the separate source-access correction
+    # so its original frozen847 hash remains a real immutable-source control.
+    from scripts.arena_reviewer_source_access_seam import FINALITY_DELTAS
+    source = (ROOT / FINALITY_FILE).read_bytes()
+    for _, old, new in FINALITY_DELTAS:
+        source = source.replace(new.encode(), old.encode(), 1)
+    return source
 
 
 def _original_source():
@@ -158,9 +164,10 @@ def test_build_and_verify_use_the_same_explicit_correction_option(
     candidate["RootFS"]["Layers"].append("sha256:overlay")
     monkeypatch.setattr(composer, "image_inspect", lambda image: base if image == grading else candidate)
 
-    def extract(image, destination, *, complete_negative_finality):
+    def extract(image, destination, *, complete_negative_finality, source_access_denied):
         assert image == grading
         assert complete_negative_finality is correction
+        assert source_access_denied is False
         original = _base_sources()
         if correction:
             original[FINALITY_FILE] = _original_source()

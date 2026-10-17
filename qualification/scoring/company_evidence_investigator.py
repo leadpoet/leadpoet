@@ -2353,6 +2353,20 @@ async def _fetch_exa_exact_page(
             not isinstance(item, Mapping) for item in statuses
         ):
             return {"ok": False, "error": "invalid_contents_status"}
+        # Exa authenticated the API request; this exact target denied access.
+        # Do not confuse a crawl status with API auth, credits or an outage.
+        if len(statuses) == 1 and body.get("results") == []:
+            source = statuses[0]
+            error = source.get("error")
+            if (
+                source.get("id") == canonical_url
+                and source.get("status") == "error"
+                and isinstance(error, Mapping)
+                and type(error.get("httpStatusCode")) is int
+                and error["httpStatusCode"] in {401, 403}
+                and error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
+            ):
+                return {"ok": False, "error": "source_access_denied"}
         if any(
             item.get("status") == "error" or item.get("error")
             for item in statuses
@@ -2392,6 +2406,7 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     elif raw_error in {
         "invalid_url", "unsupported_binary_content", "empty_page",
         "provider_request_refused", "provider_diagnostic_body",
+        "source_access_denied",
     }:
         error_class = raw_error
     else:
@@ -3523,7 +3538,10 @@ async def investigate_company_evidence(
                     fetch_calls += 1
                     result = await _fetch_exa_exact_page(session, url)
                     fetch_outcomes.append(_fetch_outcome(url, result))
-                if primary_timeout is not None and not result.get("ok"):
+                if (
+                    primary_timeout is not None and not result.get("ok")
+                    and result.get("error") != "source_access_denied"
+                ):
                     raise primary_timeout
                 retry_with_stealth = bool(result.pop("_retry_with_stealth", False))
                 if (
@@ -4842,7 +4860,7 @@ async def investigate_company_evidence(
                                 outcome["ok"] is False
                                 and outcome["error_class"] not in {
                                     "provider_request_refused", "source_not_found",
-                                    "source_gone",
+                                    "source_gone", "source_access_denied",
                                 }
                             )
                         unresolved_source = bool(

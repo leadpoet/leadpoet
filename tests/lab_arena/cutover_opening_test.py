@@ -228,10 +228,10 @@ def test_client_retries_only_round_opening_presign(monkeypatch):
 
     monkeypatch.setattr(miner_submit.time, "sleep", lambda _delay: None)
     due = Session([Response(503, "round_opening"), Response(200, None)])
-    assert miner_submit._post_presign_with_opening_retry(due, "https://example.test", {}).status_code == 200
+    assert miner_submit._post_submission_with_retry(due, "https://example.test", {}).status_code == 200
     assert due.calls == 2
     unrelated = Session([Response(503, "provider_unavailable")])
-    assert miner_submit._post_presign_with_opening_retry(unrelated, "https://example.test", {}).status_code == 503
+    assert miner_submit._post_submission_with_retry(unrelated, "https://example.test", {}).status_code == 503
     assert unrelated.calls == 1
 
 
@@ -252,7 +252,7 @@ def test_presign_does_not_retry_after_opening_budget(monkeypatch):
     observed = iter((0.0, 181.0))
     monkeypatch.setattr(miner_submit.time, "monotonic", lambda: next(observed))
     session = Session()
-    response = miner_submit._post_presign_with_opening_retry(
+    response = miner_submit._post_submission_with_retry(
         session, "https://example.test", {})
     assert response.status_code == 503
     assert session.calls == 1
@@ -365,7 +365,7 @@ def test_presign_retry_crosses_opening_and_waits_for_creation(
                 replies.append(response)
                 return response
 
-        response = miner_submit._post_presign_with_opening_retry(
+        response = miner_submit._post_submission_with_retry(
             Session(), "https://example.test", request,
         )
     assert response.status_code == 200
@@ -431,7 +431,7 @@ def test_opening_client_keeps_terminal_responses_terminal(monkeypatch, status, c
         sleep=lambda _delay: pytest.fail("terminal response must not retry"),
     ))
     session = Session()
-    assert miner_submit._post_presign_with_opening_retry(
+    assert miner_submit._post_submission_with_retry(
         session, "https://example.test", {},
     ).status_code == status
     assert session.calls == 1

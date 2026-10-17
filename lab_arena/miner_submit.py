@@ -12,6 +12,7 @@ import time
 import warnings
 import re
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -302,30 +303,58 @@ def _signed_request(
         raise MinerSubmissionError("wallet_signing_failed", type(exc).__name__) from exc
 
 
-def _post_presign_with_opening_retry(session: Any, base: str,
-                                     presign: Mapping[str, Any]) -> Any:
-    """Retry only a confirmed round-opening refusal for at most 180 seconds."""
+def _retry_after_delay(value: Any) -> float | None:
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    value = value.strip()
+    if re.fullmatch(r"[0-9]+", value):
+        seconds = float(int(value))
+    else:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                return None
+            seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    # Retry-After is a minimum wait. Avoid a busy loop for zero or past dates.
+    return max(1.0, seconds)
+
+
+def _post_submission_with_retry(
+    session: Any, base: str, envelope: Mapping[str, Any],
+    *, submission_id: str | None = None,
+) -> Any:
+    """Bound retries of these idempotent signed POSTs to the same round."""
 
     # The server's bounded opening window allows 90 seconds before opening
     # and 90 seconds after it. An early request must cover both halves.
-    opening_deadline = time.monotonic() + 180
+    deadline = time.monotonic() + 180
+    path = ("/arena/v1/submissions/presign" if submission_id is None
+            else "/arena/v1/submissions/%s/finalize" % submission_id)
     while True:
         try:
             response = session.post(
-                base + "/arena/v1/submissions/presign",
-                json=presign, timeout=60, allow_redirects=False,
+                base + path, json=envelope, timeout=60, allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
         if int(response.status_code) == 503:
-            try:
-                opening = response.json()
-            except (TypeError, ValueError):
-                opening = None
-            remaining = opening_deadline - time.monotonic()
-            if (isinstance(opening, Mapping) and opening.get("code") == "round_opening"
-                    and remaining > 0):
-                time.sleep(min(2.0, remaining))
+            remaining = deadline - time.monotonic()
+            headers = getattr(response, "headers", {})
+            retry_after = headers.get("Retry-After") if isinstance(headers, Mapping) else None
+            if retry_after is not None:
+                delay = _retry_after_delay(retry_after)
+            else:
+                try:
+                    opening = response.json()
+                except (TypeError, ValueError):
+                    opening = None
+                delay = (min(2.0, remaining) if submission_id is None
+                         and isinstance(opening, Mapping)
+                         and opening.get("code") == "round_opening" else None)
+            if delay is not None and 0 < delay <= remaining:
+                time.sleep(delay)
                 continue
         return response
 
@@ -465,7 +494,7 @@ def submit_agent_source(
             keypair=keypair,
             now=now,
         )
-        response = _post_presign_with_opening_retry(session, base, presign)
+        response = _post_submission_with_retry(session, base, presign)
         target = _json_response(response, "submission_presign")
         submission_id = str(target.get("submission_id") or "")
         source_ref = str(target.get("source_ref") or "")
@@ -490,15 +519,9 @@ def submit_agent_source(
             keypair=keypair,
             now=now,
         )
-        try:
-            response = session.post(
-                "%s/arena/v1/submissions/%s/finalize" % (base, submission_id),
-                json=finalize,
-                timeout=60,
-                allow_redirects=False,
-            )
-        except requests.RequestException as exc:
-            raise MinerSubmissionError("arena_unreachable", type(exc).__name__) from exc
+        response = _post_submission_with_retry(
+            session, base, finalize, submission_id=submission_id,
+        )
         result = _json_response(response, "submission_finalize")
         if result.get("status") != "accepted" or result.get("submission_id") != submission_id:
             raise MinerSubmissionError("arena_response_invalid", "submission_finalize")

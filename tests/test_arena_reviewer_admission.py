@@ -6,7 +6,8 @@ import pytest
 
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from scripts.arena_reviewer_admission_seam import (
-    AdmissionSeamError, _REPLACEMENTS, convert_admission_seam,
+    AdmissionSeamError, _CORRECTION_ELIGIBILITY_ARGUMENT, _REPLACEMENTS,
+    convert_admission_seam,
 )
 
 
@@ -60,6 +61,30 @@ def test_serialization_repair_keeps_its_existing_expiry():
     assert expired.serialization_expired
 
 
+@pytest.mark.parametrize("elapsed", [110.0, 180.0])
+def test_only_existing_final_correction_can_follow_a_late_judgment(elapsed):
+    admission = _admission()
+    admission.tool_settled(name="submit_findings", has_loaded_evidence=True)
+    final = admission.next_turn(
+        elapsed=elapsed, serialization_retry_pending=False,
+        final_correction_eligible=True,
+    )
+    assert (final.mode, final.restrict_tools) == ("submit_only", True)
+    # The caller owns the one existing correction turn. This allowance does
+    # not create a following ordinary turn or revive a research allowance.
+    assert admission.next_turn(
+        elapsed=elapsed, serialization_retry_pending=False,
+    ).mode == "stop"
+
+
+def test_final_correction_does_not_extend_serialization_retry_grace():
+    final = _admission().next_turn(
+        elapsed=140.0, serialization_retry_pending=True,
+        final_correction_eligible=True,
+    )
+    assert final.serialization_expired
+
+
 def _hooked_source():
     return (Path(__file__).resolve().parents[1] / "qualification/scoring"
             / "company_evidence_investigator.py").read_bytes()
@@ -84,6 +109,19 @@ def test_both_admission_shapes_convert_to_exact_same_source(repaired):
 
 def test_hooked_source_is_returned_byte_for_byte():
     assert convert_admission_seam(_hooked_source()) == _hooked_source()
+
+
+def test_complete_hook_receives_only_existing_correction_eligibility():
+    source = _hooked_source().replace(_CORRECTION_ELIGIBILITY_ARGUMENT.encode(), b"", 1)
+    assert convert_admission_seam(source) == _hooked_source()
+
+
+def test_correction_binding_does_not_permit_other_partial_hook_changes():
+    source = _hooked_source().decode().replace(_CORRECTION_ELIGIBILITY_ARGUMENT, "", 1)
+    alternatives, replacement = _REPLACEMENTS[1]
+    source = source.replace(replacement, alternatives[0], 1)
+    with pytest.raises(AdmissionSeamError):
+        convert_admission_seam(source.encode())
 
 
 def test_converter_preserves_grading_changes_in_its_input():

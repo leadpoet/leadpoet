@@ -3897,7 +3897,9 @@ async def investigate_company_evidence(
                 }
 
             for _turn in range(MAX_REASONING_TURNS + 1):
-                correction_turn = _turn == MAX_REASONING_TURNS
+                correction_turn = (
+                    _turn == MAX_REASONING_TURNS or final_correction_pending
+                )
                 if correction_turn and not final_correction_pending:
                     break
                 scoped_correction_active = bool(scoped_correction_targets)

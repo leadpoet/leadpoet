@@ -455,6 +455,15 @@ service errors and ambiguous or mismatched source responses remain failures.
 Verify the affected unfinished judgment through accepted completion and public
 publication, and compare its previously accepted outputs before and after.
 
+For the approved pending final-correction repair, also build and verify with
+`--pending-final-correction`. It changes only the frozen loop predicate so an
+already-pending correction uses the next existing turn, even if the preceding
+submission finished after the admission deadline. The correction offers only
+`submit_findings`; it adds no research or repeated correction, and preserves
+all turn limits, evidence validation and provider-failure handling. Composition
+evidence records `pending_submit_only_final_correction_v1`. Keep the prior
+approved correction flags when composing from the original frozen image.
+
 ### Verify a scorer release separately from a host release
 
 A gateway or validator restart does not rebuild the scorer image. The CI image

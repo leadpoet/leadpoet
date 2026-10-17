@@ -134,3 +134,38 @@ def test_source_access_correction_is_explicit_and_composes(negative_finality):
     for name in set(prior) - {builder.GRADER_FILE, builder.FINALITY_FILE}:
         assert repaired[name] == prior[name]
     assert set(repaired) == set(prior) | {builder.FINALITY_FILE}
+
+
+@pytest.mark.parametrize("negative_finality", [False, True])
+@pytest.mark.parametrize("source_access", [False, True])
+def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
+    negative_finality, source_access,
+):
+    from scripts import build_arena_reviewer_runtime as builder
+    from scripts.arena_reviewer_budget_seam import _OLD, _NEW, convert_budget_seam
+
+    names = [builder.GRADER_FILE, *builder.ENTRYPOINT_FILES]
+    if negative_finality or source_access:
+        names.append(builder.FINALITY_FILE)
+    original = {
+        name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
+                              if name == "scorer_entrypoint.py" else name)).read_bytes()
+        for name in names
+    }
+    # Reproduce the original frozen loop; do not import current grading behavior.
+    assert original[builder.GRADER_FILE].count(_NEW.encode()) == 1
+    original[builder.GRADER_FILE] = original[builder.GRADER_FILE].replace(
+        _NEW.encode(), _OLD.encode(), 1)
+    prior = builder.expected_overlay(
+        original, complete_negative_finality=negative_finality,
+        source_access_denied=source_access,
+    )
+    repaired = builder.expected_overlay(
+        original, complete_negative_finality=negative_finality,
+        source_access_denied=source_access, pending_final_correction=True,
+    )
+    assert prior[builder.GRADER_FILE].count(_OLD.encode()) == 1
+    assert repaired[builder.GRADER_FILE] == convert_budget_seam(prior[builder.GRADER_FILE])
+    assert set(repaired) == set(prior)
+    for name in set(prior) - {builder.GRADER_FILE}:
+        assert repaired[name] == prior[name]

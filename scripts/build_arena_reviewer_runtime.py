@@ -4,8 +4,8 @@
 The original image layers, dependencies and process configuration stay intact.
 Only the dedicated runtime package and reviewed operational-interface
 extractions can be added by default. An explicit option applies only the
-approved terminal-negative, exact-source-access and pending-final-correction
-repairs to frozen source.
+approved terminal-negative, exact-source-access, pending-final-correction and
+shared failed attribute-source review repairs to frozen source.
 Neither path imports today's grading code.
 """
 from __future__ import annotations
@@ -128,12 +128,13 @@ def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]
 def extract_frozen_sources(
     reference: str, destination: Path, *, complete_negative_finality: bool = False,
     source_access_denied: bool = False,
+    failed_attribute_source_recovery: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
         files = {}
         names = (GRADER_FILE, *ENTRYPOINT_FILES)
-        if complete_negative_finality or source_access_denied:
+        if complete_negative_finality or source_access_denied or failed_attribute_source_recovery:
             names += (FINALITY_FILE,)
         for name in names:
             path = destination / name
@@ -150,18 +151,19 @@ def expected_overlay(
     original: dict[str, bytes], *, complete_negative_finality: bool = False,
     source_access_denied: bool = False,
     pending_final_correction: bool = False,
+    failed_attribute_source_recovery: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
 
     expected = {GRADER_FILE, *ENTRYPOINT_FILES}
-    if complete_negative_finality or source_access_denied:
+    if complete_negative_finality or source_access_denied or failed_attribute_source_recovery:
         expected.add(FINALITY_FILE)
     if set(original) != expected:
         raise CompositionError("frozen operational sources are incomplete")
     files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
     files.update({name: convert_checkpoint_seam(original[name]) for name in ENTRYPOINT_FILES})
-    if complete_negative_finality or source_access_denied:
+    if complete_negative_finality or source_access_denied or failed_attribute_source_recovery:
         files[FINALITY_FILE] = original[FINALITY_FILE]
     if complete_negative_finality:
         from scripts.arena_reviewer_finality_seam import convert_finality_seam
@@ -175,6 +177,9 @@ def expected_overlay(
     if pending_final_correction:
         from scripts.arena_reviewer_budget_seam import convert_budget_seam
         files[GRADER_FILE] = convert_budget_seam(files[GRADER_FILE])
+    if failed_attribute_source_recovery:
+        from scripts.arena_reviewer_attribute_source_seam import convert_attribute_source_seam
+        files[FINALITY_FILE] = convert_attribute_source_seam(files[FINALITY_FILE])
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -201,6 +206,10 @@ def main() -> int:
         "--pending-final-correction", action="store_true",
         help="allow an already pending submit-only final correction; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--failed-attribute-source-recovery", action="store_true",
+        help="include a failed attribute source in an already planned review; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
@@ -219,17 +228,20 @@ def main() -> int:
             args.grading_image, root / "original",
             complete_negative_finality=args.complete_negative_finality,
             source_access_denied=args.source_access_denied,
+            failed_attribute_source_recovery=args.failed_attribute_source_recovery,
         )
         files = expected_overlay(
             original, complete_negative_finality=args.complete_negative_finality,
             source_access_denied=args.source_access_denied,
             pending_final_correction=args.pending_final_correction,
+            failed_attribute_source_recovery=args.failed_attribute_source_recovery,
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
             + ("-negative-finality" if args.complete_negative_finality else "")
             + ("-source-access" if args.source_access_denied else "")
             + ("-pending-final-correction" if args.pending_final_correction else "")
+            + ("-attribute-source-recovery" if args.failed_attribute_source_recovery else "")
         )
         if not args.verify_image:
             for name, data in files.items():
@@ -261,6 +273,9 @@ def main() -> int:
         if args.pending_final_correction:
             from scripts.arena_reviewer_budget_seam import CORRECTION_ID as BUDGET_CORRECTION_ID
             corrections.append(BUDGET_CORRECTION_ID)
+        if args.failed_attribute_source_recovery:
+            from scripts.arena_reviewer_attribute_source_seam import CORRECTION_ID as ATTRIBUTE_SOURCE_CORRECTION_ID
+            corrections.append(ATTRIBUTE_SOURCE_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,

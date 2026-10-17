@@ -6892,6 +6892,18 @@ def _targeted_company_investigation_dimensions(
             )
         ):
             targets.append("geography")
+    grounding = details.get("required_attribute_grounding")
+    if (
+        targets
+        and details.get("required_attribute_decision") == COMPANY_FIT_UNAVAILABLE
+        and isinstance(grounding, Mapping)
+        and grounding.get("status") == "source_unavailable"
+        and grounding.get(VERIFIER_FAILURE_DETAIL_KEY)
+        in {SOURCE_BLOCKED_FAILURE_REASON, PROVIDER_ERROR_FAILURE_REASON}
+    ):
+        # Share the already planned review and its unchanged research limits.
+        # A failed source is still a failure until independent review resolves it.
+        targets.append("required_attribute")
     return tuple(targets)
 
 
@@ -6928,6 +6940,7 @@ def _positive_semantic_review_needed(
             "rebrand": "identity",
             "industry": "industry",
             "geography": "geography",
+            "required_attribute": "required_attribute",
         }[target]
         for target in investigation_targets
     }

@@ -2477,6 +2477,7 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
         verdict(repaired_quote, cited_source_url),
     ]
     prompts = []
+    investigation_calls = []
 
     async def provider(**kwargs):
         prompts.append(kwargs["prompt"])
@@ -2486,7 +2487,9 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
         return candidate
 
     async def bounded_investigation(*, targets, **_kwargs):
-        assert targets == ("stage", "industry", "required_attribute")
+        investigation_calls.append(tuple(targets))
+        assert targets == ("stage", "required_attribute", "industry")
+        assert set(targets) == {"stage", "industry", "required_attribute"}
         return {
             "claims": {
                 "stage": stage_finding,
@@ -2557,11 +2560,12 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
         evidence_investigator=True,
     ))
 
+    assert len(investigation_calls) == 1
     assert result.decision == expected_decision
     assert source_fetch.await_count == 1
     assert len(prompts) == 1
     receipt = result.details["investigation_receipt"]
-    assert receipt["targets"] == ["stage", "industry", "required_attribute"]
+    assert receipt["targets"] == ["stage", "required_attribute", "industry"]
     assert investigator.PRIVATE_FETCHED_PAGES_KEY not in receipt
     assert source_text not in str(receipt)
     assert source_text not in str(result.details)
@@ -2669,6 +2673,7 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
 
     responses = [verdict(), verdict(repaired=True)]
     prompts = []
+    investigation_calls = []
 
     async def provider(**kwargs):
         prompts.append(kwargs["prompt"])
@@ -2678,7 +2683,9 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
         return candidate
 
     async def bounded_investigation(*, targets, positive_semantic_review, **_kwargs):
-        assert targets == ("stage", "industry", "required_attribute")
+        investigation_calls.append(tuple(targets))
+        assert targets == ("stage", "required_attribute", "industry")
+        assert set(targets) == {"stage", "industry", "required_attribute"}
         assert positive_semantic_review is True
         stage = _finding(
             "stage",
@@ -2761,6 +2768,7 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
         evidence_investigator=True,
     ))
 
+    assert len(investigation_calls) == 1
     assert result.decision == expected_decision
     assert source_fetch.await_count == 1
     # The industry source can guide a separate attribute judgment, but cannot
@@ -2809,6 +2817,7 @@ def test_rapid7_unproven_stage_and_industry_cannot_repair_attribute_source(
     lead_scorer._clear_required_attribute_evidence(repaired)
     responses = [unresolved, repaired]
     prompts = []
+    investigation_calls = []
 
     async def provider(**kwargs):
         prompts.append(kwargs["prompt"])
@@ -2818,7 +2827,9 @@ def test_rapid7_unproven_stage_and_industry_cannot_repair_attribute_source(
         return candidate
 
     async def unproven_investigation(*, targets, **_kwargs):
-        assert targets == ("stage", "industry", "required_attribute")
+        investigation_calls.append(tuple(targets))
+        assert targets == ("stage", "required_attribute", "industry")
+        assert set(targets) == {"stage", "industry", "required_attribute"}
         return {
             "claims": {
                 target: _finding(
@@ -2839,12 +2850,13 @@ def test_rapid7_unproven_stage_and_industry_cannot_repair_attribute_source(
             },
         }
 
+    source_fetch = AsyncMock(side_effect=lead_scorer.aiohttp.ClientError)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
     monkeypatch.setattr(
         lead_scorer,
         "_fetch_bounded_html",
-        AsyncMock(side_effect=lead_scorer.aiohttp.ClientError),
+        source_fetch,
     )
     monkeypatch.setattr(
         lead_scorer,
@@ -2865,6 +2877,9 @@ def test_rapid7_unproven_stage_and_industry_cannot_repair_attribute_source(
         evidence_investigator=True,
     ))
 
+    assert source_fetch.await_count == 1
+    assert len(prompts) == 1
+    assert len(investigation_calls) == 1
     assert result.decision == COMPANY_FIT_UNAVAILABLE
     assert result.details["required_attribute_decision"] == (
         COMPANY_FIT_UNAVAILABLE

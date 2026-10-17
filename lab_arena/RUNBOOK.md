@@ -464,6 +464,18 @@ all turn limits, evidence validation and provider-failure handling. Composition
 evidence records `pending_submit_only_final_correction_v1`. Keep the prior
 approved correction flags when composing from the original frozen image.
 
+For the approved failed attribute-source recovery, also build and verify with
+`--failed-attribute-source-recovery`. When another typed investigation is
+already planned, it includes the active attribute if its independently fetched
+source failed. This uses the same investigation and unchanged turn, search,
+fetch, time and cost limits. Existing validators must prove a replacement or
+complete a healthy UNPROVEN review; provider failures are never source absence
+or qualification. Grounded attributes and attribute-only recovery stay unchanged.
+Evidence records `failed_attribute_source_shared_review_v1`. Keep the three
+prior correction flags when composing the frozen October 16 grader. Register
+the verified runtime image through the existing reviewer mapping; this source
+correction does not require a gateway or validator host restart.
+
 ### Recover an unusable Firecrawl page response
 
 Miner-funded scoring keeps Firecrawl as its first page transport. A completed,

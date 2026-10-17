@@ -24,7 +24,7 @@ import math
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from email.utils import parsedate_to_datetime
@@ -116,7 +116,7 @@ _SAFE_EXCEPTION_CLASSES = frozenset(
 )
 _FIRECRAWL_COMPATIBILITY_FAILURE_CODES = frozenset({
     "invalid_deepline_envelope", "incomplete_deepline_envelope",
-    "missing_deepline_result", "missing_firecrawl_raw_html",
+    "missing_deepline_result", "missing_firecrawl_raw_html", "invalid_firecrawl_source_url",
     "firecrawl_source_url_mismatch", "invalid_firecrawl_final_url",
     "missing_firecrawl_target_status", "firecrawl_source_content_unavailable",
 })
@@ -2690,11 +2690,7 @@ def _decode_terminal(
         body = base64.b64decode(str(document["body_b64"]), validate=True)
     except (KeyError, TypeError, ValueError) as exc:
         raise BrokerError("broker_unavailable") from exc
-    if compatibility_failure_code is not None and (
-        body != operations.GENERIC_UNAVAILABLE_BODY
-        or any(isinstance(name, str) and name.lower() == operations.TRUSTED_RESPONSE_URL_HEADER
-               for name in headers)
-    ):
+    if compatibility_failure_code is not None and body != operations.GENERIC_UNAVAILABLE_BODY:
         raise BrokerError("broker_unavailable")
     if document.get("credit_failure_proof") is not None and call_succeeded is not False:
         raise BrokerError("broker_unavailable")
@@ -2707,11 +2703,21 @@ def _decode_terminal(
     if len(trusted_names) > 1:
         raise BrokerError("broker_unavailable")
     if trusted_names:
+        if compatibility_failure_code is not None and (
+            compatibility_failure_code != "firecrawl_source_content_unavailable"
+        ):
+            raise BrokerError("broker_unavailable")
         name = trusted_names[0]
         headers[operations.TRUSTED_RESPONSE_URL_HEADER] = _validated_response_url(
             headers.pop(name),
             secret=secret,
         )
+        if compatibility_failure_code is not None and not (
+            scoring_provider_compat._safe_public_source_https_url(
+                headers[operations.TRUSTED_RESPONSE_URL_HEADER]
+            )
+        ):
+            raise BrokerError("broker_unavailable")
     return status, headers, body
 
 
@@ -3885,6 +3891,7 @@ class Broker:
         account_provider_status: Optional[int] = None
         base_call_identity: Optional[str] = None
         source_content_fallback = False
+        source_content_response_url: Optional[str] = None
         for provider_attempt in range(1, CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS + 1):
             provider_attempt_started = time.monotonic()
             try:
@@ -3899,6 +3906,7 @@ class Broker:
                     api_started_at=api_started_at,
                     cancel_requested=cancel_requested,
                     source_content_fallback=source_content_fallback,
+                    source_content_response_url=source_content_response_url,
                 )
             except Exception as exc:
                 try:
@@ -3961,6 +3969,11 @@ class Broker:
                 )
             ):
                 source_content_fallback = True
+                source_content_response_url = result.headers.get(operations.TRUSTED_RESPONSE_URL_HEADER)
+                if source_content_response_url is not None and not (
+                    scoring_provider_compat._safe_public_source_https_url(source_content_response_url)
+                ):
+                    return final_result(_error_result("broker_unavailable", result.call))
                 continue
             if result.call.get("provider_fallback_required") is True:
                 return final_result(result)
@@ -4056,6 +4069,7 @@ class Broker:
         api_started_at: Optional[float] = None,
         cancel_requested: Optional[Callable[[], bool]] = None,
         source_content_fallback: bool = False,
+        source_content_response_url: Optional[str] = None,
     ) -> BrokerResult:
         if api_started_at is None:
             api_started_at = time.monotonic()
@@ -4072,6 +4086,7 @@ class Broker:
                 api_started_at=api_started_at,
                 cancel_requested=cancel_requested,
                 source_content_fallback=source_content_fallback,
+                source_content_response_url=source_content_response_url,
                 gate_holder=gate_holder,
             )
         finally:
@@ -4092,6 +4107,7 @@ class Broker:
         cancel_requested: Optional[Callable[[], bool]],
         gate_holder: list[OpenRouterGateLease],
         source_content_fallback: bool = False,
+        source_content_response_url: Optional[str] = None,
     ) -> BrokerResult:
         operation = (operations.OPERATIONS.get(operation_id)
                      or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))
@@ -4200,6 +4216,7 @@ class Broker:
                 timeout_ms=route_timeout_ms,
                 allow_host_shadow_score=host_shadow_score_compat,
                 source_content_fallback=source_content_fallback,
+                source_content_response_url=source_content_response_url,
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
@@ -4436,6 +4453,9 @@ class Broker:
             reservation_arguments["call_doc"]["source_content_fallback_timeout_ms"] = (
                 effective_normalized["payload"]["timeout_ms"]
             )
+            reservation_arguments["call_doc"]["source_content_fallback_url"] = (
+                effective_normalized["payload"]["url"]
+            )
         judgment_cache_key = ""
         cached_outbound: Optional[operations.OutboundRequest] = None
         if (
@@ -4648,6 +4668,20 @@ class Broker:
             )
             if type(saved_timeout) is not int or not 1 <= saved_timeout <= 60_000:
                 return _error_result("broker_unavailable", summary)
+            saved_doc = reservations[0]["entry_doc"]
+            if "source_content_fallback_url" in saved_doc:
+                saved_url = saved_doc["source_content_fallback_url"]
+                if (
+                    not isinstance(saved_url, str)
+                    or not scoring_provider_compat._safe_public_source_https_url(saved_url)
+                    or saved_url != effective_normalized["payload"]["url"]
+                ):
+                    return _error_result("broker_unavailable", summary)
+            else:
+                # Older attempts were admitted against the original URL.
+                # A newly observed redirect cannot change their keyed body.
+                saved_url = requested_normalized["url"]
+                reservation_arguments["call_doc"].pop("source_content_fallback_url")
             # A keyed resume must reproduce its originally admitted payload.
             # Only the transport's current absolute deadline can shrink.
             reservation_arguments["call_doc"]["source_content_fallback_timeout_ms"] = saved_timeout
@@ -4658,8 +4692,10 @@ class Broker:
                 return _error_result("broker_unavailable", summary)
             effective_normalized = {
                 **effective_normalized,
-                "payload": {**effective_normalized["payload"], "timeout_ms": saved_timeout},
+                "payload": {**effective_normalized["payload"], "timeout_ms": saved_timeout,
+                            "url": saved_url},
             }
+            route = replace(route, effective_parameters=effective_normalized)
             captured_outbound = None
         # Terminal admission replies such as stale and refused do not create a
         # reservation. Preserve their normal classification. A response-loss
@@ -6136,8 +6172,24 @@ class Broker:
                         and str(exc) in _FIRECRAWL_COMPATIBILITY_FAILURE_CODES
                     ) else None
                 )
+                compatibility_response_headers = dict(refused.headers)
+                if compatibility_failure_code == "firecrawl_source_content_unavailable":
+                    response_url = getattr(exc, "trusted_response_url", None)
+                    if response_url is not None:
+                        try:
+                            # The complete provider response was credential-
+                            # checked before adaptation and the key was cleared.
+                            response_url = _validated_response_url(response_url)
+                        except BrokerError:
+                            response_url = ""
+                        if scoring_provider_compat._safe_public_source_https_url(response_url):
+                            compatibility_response_headers[operations.TRUSTED_RESPONSE_URL_HEADER] = response_url
+                        else:
+                            # Invalid redirect metadata cannot authorize a
+                            # broker rescue or become a durable trust marker.
+                            compatibility_failure_code = None
                 terminal = _terminal_response_document(
-                    refused.status, refused.headers, refused.body,
+                    refused.status, compatibility_response_headers, refused.body,
                     call_succeeded=False,
                     provider_cost=cost_record,
                     compatibility_failure_code=compatibility_failure_code,
@@ -6172,7 +6224,7 @@ class Broker:
                                 observed_provider_http_status
                             )
                         return BrokerResult(
-                            refused.status, refused.headers, refused.body, summary
+                            refused.status, compatibility_response_headers, refused.body, summary
                         )
                 except Exception:
                     pass

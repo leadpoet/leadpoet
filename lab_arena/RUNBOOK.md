@@ -468,7 +468,10 @@ approved correction flags when composing from the original frozen image.
 
 Miner-funded scoring keeps Firecrawl as its first page transport. A completed,
 settled response with the exact `firecrawl_source_content_unavailable` code
-can use one alternate `generic_http_request` for the same URL. The alternate
+can use one alternate `generic_http_request` for the source. If that response
+binds the exact original source URL to a validated public HTTPS final URL, the
+alternate uses that observed destination. Otherwise it keeps the original URL;
+it never guesses a hostname or adds a second alternate attempt. The alternate
 uses the existing second provider-attempt identity, the same miner credential,
 the frozen tool catalog and all existing cost and call limits. It has only the
 time left in the original request. The existing settlement rule still applies
@@ -484,7 +487,13 @@ Provider cookies and other headers are not forwarded. A failed source remains
 a failure; existing source absence, retry and Exa fallback rules still apply.
 Both attempt receipts and charges remain in the ledger. The exact first-failure
 code is retained so a repeated action reuses its settled alternate without
-making another provider request. No accepted score or frozen grader is changed.
+making another provider request. The primary's trusted response-URL header pins
+the observed destination. Each new alternate reservation pins its actual URL
+and upstream timeout. Recovery reproduces that exact body under its existing
+execution key, while the transport deadline stays bounded. Older reservations
+without a pinned URL keep the original requested URL and their saved timeout,
+even when a redirect is now known. Malformed, private or conflicting saved URL
+metadata fails closed. No accepted score or frozen grader is changed.
 
 ### Verify a scorer release separately from a host release
 

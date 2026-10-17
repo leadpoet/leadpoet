@@ -312,3 +312,170 @@ def test_malformed_saved_fallback_timeout_cannot_dispatch(saved_timeout):
     fallback["call_doc"]["source_content_fallback_timeout_ms"] = saved_timeout
     assert _execute(broker).call["error_code"] == "broker_unavailable"
     assert len(transport.sent) == 2
+
+
+# These source/redirect/status/placeholder fields reproduce the saved M&G
+# Firecrawl receipt. The successful HTML is synthetic; no score is asserted.
+MANDG_URL = "https://mandg.com/"
+MANDG_FINAL = "https://www.mandg.com/"
+
+
+def _mandg_primary():
+    primary = _envelope(REDACTED, source_url=MANDG_URL)
+    primary["result"]["data"]["metadata"]["url"] = MANDG_FINAL
+    return primary
+
+
+def _mandg_generic(*, requested_url=MANDG_FINAL):
+    payload = _generic(final_url=MANDG_FINAL)
+    payload["toolResponse"]["rawV2"]["requested_url"] = requested_url
+    return payload
+
+
+def _mandg_execute(broker):
+    return broker.execute(_score_context(), operation_id="scrapingdog.scrape",
+                          parameters={"url": MANDG_URL}, action_sequence=0,
+                          timeout_ms=30_000)
+
+
+def _mandg_once(broker, *, attempt=1, response_url=None):
+    return broker._execute_once(
+        _score_context(), operation_id="scrapingdog.scrape", parameters={"url": MANDG_URL},
+        action_sequence=0, timeout_ms=30_000, provider_attempt=attempt,
+        champion_credential_retry=False, source_content_fallback=attempt == 2,
+        source_content_response_url=response_url,
+    )
+
+
+def test_saved_mandg_redirect_drives_one_rescue_with_original_action_identity():
+    broker, ledger, transport = _broker([(200, _mandg_primary()), (200, _mandg_generic())])
+    assert _mandg_execute(broker).body == HTML.encode()
+    primary, fallback = list(ledger.calls.values())
+    assert primary["terminal"]["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] == MANDG_FINAL
+    assert fallback["call_doc"]["source_content_fallback_url"] == MANDG_FINAL
+    assert primary["call_doc"]["request_hash"] == fallback["call_doc"]["request_hash"]
+    assert primary["call_doc"]["base_call_identity"] == fallback["call_doc"]["base_call_identity"]
+    assert [json.loads(request["body"])["payload"]["url"] for request in transport.sent] == [MANDG_URL, MANDG_FINAL]
+    assert [call["actual"] for call in ledger.calls.values()] == [2_000, 0]
+    restarted, _, resumed_transport = _broker([], store=ledger)
+    result = _mandg_execute(restarted)
+    assert result.status == 200 and result.body == HTML.encode()
+    assert result.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == MANDG_FINAL
+    assert resumed_transport.sent == []
+
+
+def test_restart_after_primary_settlement_uses_its_pinned_redirect():
+    broker, ledger, original_transport = _broker([(200, _mandg_primary())])
+    primary = _mandg_once(broker)
+    assert primary.status == 502
+    assert primary.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == MANDG_FINAL
+    restarted, _, transport = _broker([(200, _mandg_generic())], store=ledger)
+    assert _mandg_execute(restarted).status == 200
+    assert len(original_transport.sent) == len(transport.sent) == 1
+    assert json.loads(transport.sent[0]["body"])["payload"]["url"] == MANDG_FINAL
+
+
+def test_old_primary_terminal_without_redirect_keeps_original_url():
+    broker, ledger, _ = _broker([(200, _mandg_primary())])
+    primary = _mandg_once(broker)
+    ledger.calls[primary.call["call_identity"]]["terminal"]["headers"].pop(operations.TRUSTED_RESPONSE_URL_HEADER)
+    restarted, _, transport = _broker([(200, _mandg_generic(requested_url=MANDG_URL))], store=ledger)
+    assert _mandg_execute(restarted).status == 200
+    assert json.loads(transport.sent[0]["body"])["payload"]["url"] == MANDG_URL
+
+
+@pytest.mark.parametrize("state", ["settlement", "reservation", "dispatch"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_fallback_reservation_replays_exact_keyed_url_before_and_after_url_pinning(state, legacy):
+    class RecoveryStore(FakeLedgerStore):
+        def recover_deepline_response(self, **kwargs):
+            return self.settle_call(**{key: kwargs[key] for key in (
+                "run_id", "lease_token_hash", "call_identity", "actual_microusd",
+                "terminal_response", "lease_ttl_seconds",
+            )})
+
+    actual_url = MANDG_URL if legacy else MANDG_FINAL
+    broker, ledger, transport = _broker([
+        (200, _mandg_primary()), (200, _mandg_generic(requested_url=actual_url)),
+    ], store=RecoveryStore())
+    _mandg_once(broker)
+    # The old release always used the original source, even when its primary
+    # knew a redirect. Construct that exact historical request and receipt.
+    assert _mandg_once(broker, attempt=2, response_url=None if legacy else MANDG_FINAL).status == 200
+    fallback = next(call for call in ledger.calls.values()
+                    if call["call_doc"].get("provider_attempt") == 2)
+    if legacy:
+        fallback["call_doc"].pop("source_content_fallback_url")
+    original_body = transport.sent[1]["body"]
+    original_timeout = fallback["call_doc"]["source_content_fallback_timeout_ms"]
+    if state != "settlement":
+        fallback["kind"] = state
+        fallback.pop("terminal")
+
+    class ResumeTransport(FakeTransport):
+        def send(self, **request):
+            if request["method"] == "GET":
+                self.sent.append(request)
+                return br.ProviderResponse(200, {"x-deepline-idempotency-supported": "true"}, json.dumps({
+                    "requestId": _generic()["job_id"], "toolId": "generic_http_request",
+                    "executionRecovery": {"idempotencyKey": fallback["call_doc"]["deepline_execution_key"], "state": "running"},
+                }).encode())
+            assert request["body"] == original_body
+            return super().send(**request)
+
+    resumed_transport = ResumeTransport([(200, _mandg_generic(requested_url=actual_url))])
+    restarted, _, _ = _broker([], store=ledger, transport=resumed_transport)
+    result = _mandg_execute(restarted)
+    assert result.status == 200 and result.body == HTML.encode()
+    assert len(resumed_transport.sent) == {"settlement": 0, "reservation": 1, "dispatch": 2}[state]
+    assert ("source_content_fallback_url" not in fallback["call_doc"]) is legacy
+    assert fallback["call_doc"]["source_content_fallback_timeout_ms"] == original_timeout
+
+
+@pytest.mark.parametrize("bad_url", [None, "https://metadata.google.internal/", "https://private.local/",
+                                      "http://example.com/", "https://other-public.example/"])
+def test_tampered_saved_redirect_destination_cannot_dispatch(bad_url):
+    broker, ledger, transport = _broker([(200, _mandg_primary()), (200, _mandg_generic())])
+    assert _mandg_execute(broker).status == 200
+    fallback = next(call for call in ledger.calls.values() if call["call_doc"].get("provider_attempt") == 2)
+    fallback["call_doc"]["source_content_fallback_url"] = bad_url
+    assert _mandg_execute(broker).call["error_code"] == "broker_unavailable"
+    assert len(transport.sent) == 2
+
+
+@pytest.mark.parametrize("header_url", ["https://metadata.google.internal/", "https://private.local/",
+                                        "https://other-public.example/"])
+def test_tampered_primary_redirect_or_reservation_mismatch_fails_closed(header_url):
+    broker, ledger, transport = _broker([(200, _mandg_primary()), (200, _mandg_generic())])
+    assert _mandg_execute(broker).status == 200
+    primary = next(call for call in ledger.calls.values() if call["call_doc"].get("provider_attempt") == 1)
+    primary["terminal"]["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] = header_url
+    assert _mandg_execute(broker).call["error_code"] == "broker_unavailable"
+    assert len(transport.sent) == 2
+
+
+def test_wrong_generic_requested_url_cannot_substitute_for_observed_redirect():
+    broker, ledger, transport = _broker([
+        (200, _mandg_primary()), (200, _mandg_generic(requested_url=MANDG_URL)),
+    ])
+    result = _mandg_execute(broker)
+    assert result.status == 502 and result.body == operations.GENERIC_UNAVAILABLE_BODY
+    assert len(transport.sent) == len(ledger.calls) == 2
+
+
+def test_untrusted_upstream_header_cannot_override_validated_redirect():
+    broker, ledger, transport = _broker([
+        (200, _mandg_primary(), {operations.TRUSTED_RESPONSE_URL_HEADER: "https://other-public.example/"}),
+        (200, _mandg_generic()),
+    ])
+    assert _mandg_execute(broker).status == 200
+    assert json.loads(transport.sent[1]["body"])["payload"]["url"] == MANDG_FINAL
+
+
+def test_other_compatibility_failure_cannot_carry_redirect_authority():
+    broker, ledger, transport = _broker([(200, _mandg_primary())])
+    primary = _mandg_once(broker)
+    terminal = ledger.calls[primary.call["call_identity"]]["terminal"]
+    terminal["compatibility_failure_code"] = "missing_firecrawl_raw_html"
+    assert _mandg_execute(broker).call["error_code"] == "broker_unavailable"
+    assert len(transport.sent) == 1

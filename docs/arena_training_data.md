@@ -79,6 +79,16 @@ These filters identify candidates for further review, not complete trajectories:
 historical prompts, responses, label authority, source trust and deduplication
 still require verification.
 
+A fresh count at **2026-10-17 03:24 UTC** found 38,377 run rows, 20,439 execution
+attempts, 14,335 accepted executions (10,516 miner and 3,819 baseline), and 14,957
+accepted judge runs. Published reward rounds contained 8,354 accepted executions,
+8,095 with scores and 779 with positive scores. Diagnostic events existed for
+8,037 accepted executions; the published-reward event subset remained 6,560 runs,
+6,338 scored and 673 positive across 107 positive round/stage/ICP slots. There
+were 3,800 accepted executions reporting direct web access. The earlier table and
+storage figures remain the original snapshot; these live counts do not establish
+a training-ready example count.
+
 ## Actual data path
 
 1. A round freezes participants, source object references, the benchmark and ICP
@@ -136,8 +146,9 @@ The worker uploads its exceptional observations before completion, while its lea
 is active. The artifact binds the run, lease generation and claim request hash.
 The exporter checks its hash, count and action links. Worker evidence never becomes
 a provider receipt or a settled charge. Overflow, lost upload and unfinished socket
-handlers remain explicit gaps. The bounded storage calls add some latency; a fresh
-live proof is still required.
+handlers remain explicit gaps. The bounded storage calls add some latency. The
+final release's fresh live proof below verifies the stored path without changing
+execution or score rules.
 
 The full payload limit is explicit. Oversized or unavailable evidence is rejected
 as a training source; it is never silently clipped and called complete. Credentials
@@ -181,6 +192,17 @@ call it the original evidence, expand a truncated diagnostic excerpt, or guess a
 judge join by timestamp. Such material can support analysis, not exact replay.
 Provider billing APIs can confirm model, timing, token usage and charge but do not
 restore the missing prompt text.
+
+Some short historical tool requests are recoverable. A read-only check on October
+17 reversed only complete diagnostic list wrappers, then required the exact
+operation, action sequence and canonical normalized-parameter hash to match the
+original ledger reservation. It recovered 31 of 53 requests in the citation judge
+sample and 168 of 199 execution-only requests in the published October 15 sample
+below. The latter count excludes that execution's separate judge calls.
+All matches were Deepline tool requests; no OpenRouter model request matched.
+These are verified normalized parameters, not recovered outbound headers, runtime
+input files or full model prompts. No historical rows or objects were changed.
+Unmatched projections remain incomplete, even when they look plausible.
 
 A concrete pre-change judge run,
 `arena-2026-10-16-citationprobe:baseline-2026-10-16-citationprobe:1:0:score:1`,
@@ -272,8 +294,9 @@ weight-chain and OTLP issues, with no collection-specific issue. The absence of
 a collection alert did not detect the missing prompts. No unrelated incident was
 changed or marked resolved.
 
-**Verification status: production deployment is verified; the complete fresh
-execution-to-judgment proof is still in progress.** The authenticated GitHub App
+**Verification status: production deployment and a fresh accepted execution-to-
+judgment export are verified. Full-process completeness remains false for the
+explicit direct-web and privacy boundaries below.** The authenticated GitHub App
 API confirms repository push access. The earlier connector-availability concern
 was incorrect.
 No database migration is required for collection. The integrated exporter also
@@ -364,3 +387,93 @@ At 02:36:35 UTC, the old proof runner had exited and its task-owned API server
 was stopped after verifying zero leased runs and zero inflight provider calls.
 The original process records and logs were retained. The frozen round and its
 unstarted second ICP remain available for the final release proof.
+
+### Final collection release
+
+PR [#514](https://github.com/leadpoet/leadpoet/pull/514) merged at
+`6ec7e578a16cd7562cd01014459e9b4e24a28feb` on October 17. Both canonical deployment
+controllers completed successfully on that exact commit. The gateway's restart
+guard preserved all 20 active leases with durable accepted receipts, with no lost
+or expired leases. Runtime attestation and exact build identity passed. The
+operator pause remained false and normal claims resumed. The normal validator
+passed protected readiness; read-only finalized-chain state matched its signed
+weight journal. This verifies weight continuity, not a new broadcast from the new
+process.
+
+Independent production readback at 03:10 UTC verified two judge-failure artifacts
+on this release. Their 21 and 12 worker calls matched 21 and 12 ledger calls,
+full requests and full responses. Each artifact retained six nonstandard worker
+responses with exact action links, matching hashes and no observation gaps.
+These are successful collection checks, not successful judgments or negative
+company labels.
+
+At 03:20 UTC, two normal accepted executions on the final release also verified
+92/92 and 110/110 full request/response pairs, all settled, plus five and four
+exceptional worker responses. Their exact inputs had no redactions. Both used
+direct web access (10 and 35 connections), and both had privacy-filtered provider
+payloads. One runner reported a dirty Git checkout; its runtime source cannot be
+certified merely because its recorded commit matches the release. These runs
+prove production capture works and remain excluded from complete-process proof.
+
+The fresh ICP 1 execution started on the same release. Its exact input was
+1,781,748 bytes, with no privacy redactions and hash
+`sha256:46b413e5d9c88966e7143bb0170b01628799f7430b4ee4bfe56677c383b5754c`.
+Independent billing readback matched OpenRouter ledger entry 5000142 to Gemini
+2.5 Flash through Google: $0.0004004, rounded up to 401 micro-USD in the ledger.
+Deepline entry 5000261 matched the exact Exa request at 0.1 credits ($0.01), final
+and posted. Neither billing API returned request/response bodies.
+
+One real accepted judge on the preceding release also verified the new full-input
+and request path: `arena-2026-10-17:baseline-2026-10-17:1:7:score:5` retained its
+1,871,821-byte input, all 58 requests and responses, and a 94,083-byte score object
+with five company breakdowns. All 28 OpenRouter responses disclosed model and
+upstream provider: 25 Luna/Azure and three Sonar/Perplexity. Privacy-filtered
+payloads remain explicitly non-exact. This is real judging evidence, not a fresh
+complete research example by itself.
+
+### Fresh execution, judgment and export readback
+
+The final-release execution
+`arena-2026-10-17-trainingproof:baseline-2026-10-17-trainingproof:1:1:1`
+was accepted at 03:24:53 UTC. Its actual judge,
+`arena-2026-10-17-trainingproof:baseline-2026-10-17-trainingproof:1:1:score:1`,
+was accepted at 03:27:45 UTC. Independent readback and the committed read-only
+exporter verified the following at 03:29 UTC:
+
+| Evidence | Result |
+|---|---|
+| Exact execution input | 1,781,748 bytes; matching hash; no redactions |
+| Exact judge input | 1,783,582 bytes; matching hash; no redactions |
+| Execution provider calls | 143 worker calls, ledger calls, full requests and full responses; all settled |
+| Judge provider calls | 13 worker calls, ledger calls, full requests and full responses; all settled |
+| Exceptional worker outcomes | Seven retained, complete, hash-verified and linked; no local refusals or unfinished handlers |
+| Final output and judgment | One submitted company; one authoritative scored breakdown; per-ICP score recomputed as zero |
+| Source and grading | Frozen source archive verified; both runtime commits match `6ec7e578`; judge image matches frozen grading |
+| Actual cost | 641,741 micro-USD ($0.641741), including execution and judging |
+| Runtime | Execution sandbox 1,166.78 seconds; judge 127.75 seconds; signed start/finish times retained separately |
+| Request storage | 151 unique objects for 156 calls; 2,685,666 raw bytes compressed to 540,609 bytes |
+| Private export | 12,935,723 bytes; file mode 0600 |
+
+The example hash is
+`sha256:b9ff035d1f6b24b11abb02e2b4f5d285668574e17cfc437b52d8a61397d88cd1`.
+The export file hash is
+`sha256:f4d27a6029f8b39722a58599de523a2cb4c67da04bc6c2afc846b92e17ad42d1`.
+The private payload remains on the gateway; only this evidence summary is in Git.
+
+The export passed `context`, `source_identity`, `exact_inputs`,
+`input_output_label` and `costs`. It correctly returned exit 2 with
+`research_process=false` for exactly three reasons:
+`direct_web_content_not_captured`, `request_privacy_nonexact`, and
+`response_privacy_nonexact`. The execution made 117 direct HTTPS connections;
+their page bodies are not retained. Credential filtering and hidden-reasoning
+exclusion also prevent exact replay. There were no missing broker request or
+response payloads, unexplained call-count differences, or unsettled costs for
+this execution and judge.
+
+This proves the new collection path works from actual fresh research through a
+real judge and independent export. It does not certify a complete full-agent
+demonstration or a good positive example. A zero score is retained as a scored
+outcome, not silently promoted to a successful company label. The whole two-ICP
+probe also retains the first ICP's earlier failures; it is not reported as an
+all-successful round. Use broker-only research and review the safe retained
+content before selecting future full-process training examples.

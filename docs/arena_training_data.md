@@ -51,6 +51,16 @@ from complete-example export and are not additional independent demonstrations.
 The published reward pool was unaffected. One more execution completed during
 the audit; the inventory above remains the original consistent snapshot.
 
+A later cache inventory found 7,049 run-judgment cache records covering 5,774
+distinct scoring input hashes and 12,860 company breakdowns. The published reward
+subset contained 7,579 breakdowns, including 910 marked `company_qualified=true`,
+across 1,867 company identity keys and 33 scorer images. These are candidate labels,
+not a reviewed training set or a count of unique legal companies. The separate
+company cache contained only 67 rows from 61 source judges. It is not the main
+historical label store. Select a compatible policy cohort before counting useful
+examples; exclude infrastructure failures and skipped cases, and deduplicate
+repeated evidence and cached judgments before splitting the data.
+
 ## Actual data path
 
 1. A round freezes participants, source object references, the benchmark and ICP
@@ -169,6 +179,12 @@ opaque without the original protected decryption path. No full restore or key
 export was performed, and this archive is not counted as recoverable training
 examples. Retain it unchanged.
 
+The validator also retained 14 old `input/icp.json` files from September 5 and 8.
+They were about 2 KB each and did not identify a run, round, assignment or lease
+generation. The normal runner deletes its temporary run directory on completion.
+These local files cannot establish complete historical trajectories or replace
+the new immutable input snapshot. They were left unchanged.
+
 ## Export and first experiment
 
 Use `scripts/export_arena_training.py --run-id ... --environment-file ... --output ...`.
@@ -228,9 +244,10 @@ weight-chain and OTLP issues, with no collection-specific issue. The absence of
 a collection alert did not detect the missing prompts. No unrelated incident was
 changed or marked resolved.
 
-**Release status: implementation and integration verification complete; deployment
-and fresh live proof are in progress.** The authenticated GitHub App API confirms
-repository push access. The earlier connector-availability concern was incorrect.
+**Verification status: production deployment is verified; the complete fresh
+execution-to-judgment proof is still in progress.** The authenticated GitHub App
+API confirms repository push access. The earlier connector-availability concern
+was incorrect.
 No database migration is required for collection. The integrated exporter also
 validates each selected and prior launched judge runtime against its persisted
 lease binding, separately from the frozen grading image.
@@ -241,3 +258,57 @@ disabled. It never reuses saved outputs. Live acceptance still requires that fre
 execution and its real judgment, then independent readback of the exact private
 input/request objects, ledger receipts, output and score. A replay fixture or HTTP
 health result alone does not meet this acceptance criterion.
+
+The first canonical deployment of PR #510 was commit
+`d8a97d5dc1d6296f8f7f49fc327cf406263b37b3` on both gateway and normal validator.
+Its fresh reward-disabled proof exposed a capture bug: the frozen Deepline catalog
+contains 64-bit JSON Schema integer bounds, but the input endpoint reused the
+operational API's `2**53` limit. The endpoint rejected the input while research
+continued. PR #512 removes only the integer magnitude limit for training inputs;
+all other routes retain their default bound, and body size, depth, strings and
+finite-number checks remain active. The exact 1,781,849-byte live JSON input then
+round-tripped through the candidate HTTP endpoint and object store with equal
+values, matching hash and no redactions. The merged candidate
+`6ab0dc94feddfd9220d4c7b611ab9b94284c1909` passed 361 tests in 48.19 seconds,
+plus compilation, whitespace, protected-manifest and AGENTS/CLAUDE checks.
+
+At 01:58:37 UTC on October 17, an independent read of the first proof's 119 request
+objects verified every hash, length and ledger identity. The objects contained
+754,840 uncompressed bytes in 104,356 compressed bytes. All 119 terminal response
+receipts were present. This was an in-progress snapshot, not final trajectory
+certification. The first execution's missing input remains an explicit historical
+gap; it is not backfilled from the local diagnostic copy.
+
+Both canonical controllers completed for `6ab0dc94f`. The gateway passed runtime
+attestation and exact `/build-info` checks; the normal validator passed protected
+readiness on the same commit. The operator pause remained false. Finalized-chain
+readback matched the existing signed weight journal; that finalization predated
+the new process and is not evidence of a new broadcast.
+
+The original proof attempt ended with `provider_error`, and Arena created its
+normal retry. The same frozen reward-disabled round resumed on the fixed release.
+At 02:07:42 UTC, retry `arena-2026-10-17-trainingproof:baseline-2026-10-17-trainingproof:1:0:2`
+had a verified lease-generation-2 input object: 1,781,849 bytes, no redactions,
+hash `sha256:009c8eb79d6a52b2355788f23c23c69b91983c9ea8a29760de6a973a14435fe9`.
+
+Independent provider records for that retry matched OpenRouter ledger entry
+4988957 at $0.020958 and Deepline entry 4989012 at 0.01 credits ($0.001).
+OpenRouter identified `anthropic/claude-4.5-sonnet-20250929` on Amazon Bedrock;
+Deepline identified `contextdev_post_news_search` with a final posted charge.
+This verifies two real billing joins. It does not establish label quality or
+prove that every call has settled.
+
+Privacy review found six retained response receipts containing nonempty HTTPS
+`auth` parameters. Their values were not emitted or tested, and the export keeps
+redacting them. Separate synthetic checks found false credential flags for empty
+credential-named values and diagnostic NUL escaping. The follow-up fix preserves
+only null and empty JSON strings/objects/arrays, and leaves NUL escaping to JSON
+serialization. Nonempty credentials, false/zero sensitive values, signed access
+URLs and exact-secret matching retain their existing protection. Diagnostic logs
+keep their original escaping behavior. The focused gate passed 176 tests.
+
+Neither observed fresh proof attempt used free catalog discovery. The first
+failed attempt reported 158 worker provider calls but had 157 ledger actions;
+one gateway request failed before admission. The exporter reports the mismatch
+instead of treating it as a complete process. Free local catalog discovery is a
+separate known boundary, not the cause of that mismatch.

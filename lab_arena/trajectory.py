@@ -66,10 +66,12 @@ class TrajectoryError(ValueError):
     """One trajectory event violated the bounded private contract."""
 
 
-def redact_text(value: str, secrets: Sequence[str] = ()) -> str:
+def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = True) -> str:
     """Redact exact known secrets and common credential forms from one stream."""
 
-    text = str(value).replace("\x00", "\\u0000")
+    text = str(value)
+    if escape_nul:
+        text = text.replace("\x00", "\\u0000")
     for secret in sorted(
         {item for item in secrets if isinstance(item, str) and len(item) >= 4},
         key=len,

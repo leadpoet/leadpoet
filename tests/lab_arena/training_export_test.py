@@ -245,6 +245,31 @@ def test_full_request_not_excerpt_and_hidden_response_reasoning_removed():
     assert result["costs"]["confirmed_actual_microusd"] == 42
 
 
+def test_empty_credential_fields_and_nul_do_not_create_false_export_gaps():
+    values = fixture()
+    add_call(values)
+    body = {"content": "before\x00after", "api_key": None, "authorization": "",
+            "credentials": {}, "private_key": []}
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
+    result = assemble_example(**values)
+    assert result["provider_calls"][0]["response"] == body
+    assert result["provider_calls"][0]["response_privacy_redactions"] == []
+    assert result["completeness"]["complete"] is True
+    assert result["privacy"]["exact_replay"] is True
+
+
+def test_nonempty_auth_url_still_prevents_exact_export():
+    values = fixture()
+    add_call(values)
+    auth = "a" * 64
+    body = {"url": "https://example.test/file?auth=" + auth}
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
+    result = assemble_example(**values)
+    assert "response_privacy_nonexact" in result["completeness"]["incomplete_reasons"]
+    assert result["privacy"]["exact_replay"] is False
+    assert auth not in json.dumps(result["provider_calls"][0]["response"])
+
+
 @pytest.mark.parametrize("change,reason", [("pointer", "full_request_unavailable"), ("uncertain", "provider_cost_unresolved"), ("response", "full_response_unavailable")])
 def test_call_gaps_are_not_complete(change, reason):
     values = fixture()

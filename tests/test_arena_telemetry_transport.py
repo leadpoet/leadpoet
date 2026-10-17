@@ -81,6 +81,7 @@ def test_real_http_export_keeps_only_approved_operational_metadata(monkeypatch, 
         assert {span.name for span in spans} == {
             "arena.provider.openrouter", "arena.driver_tick",
             "arena.reconcile_active_deepline_costs",
+            "arena.reconcile_deepline_billing_lookup",
         }
         billing = next(span for span in spans if span.name == "arena.reconcile_active_deepline_costs")
         attributes = {item.key: item.value for item in billing.attributes}

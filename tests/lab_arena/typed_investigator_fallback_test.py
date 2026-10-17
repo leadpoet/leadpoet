@@ -22,9 +22,12 @@ def _adapted_result(raw_html):
         credential_for=lambda *_: DL_KEY,
         funding_source_for=lambda *_: "miner_key",
     )
-    result = broker.execute(
+    # Keep this fixture focused on the primary response consumed by the
+    # investigator's separate exact-source Exa fallback.
+    result = broker._execute_once(
         _score_context(), operation_id="scrapingdog.scrape",
         parameters={"url": URL}, action_sequence=0, timeout_ms=30_000,
+        provider_attempt=1, champion_credential_retry=False,
     )
     return result, ledger
 

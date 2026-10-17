@@ -106,9 +106,12 @@ def test_paid_diagnostic_settles_exact_cost_once_and_triggers_fetch_failure(monk
         credential_for=lambda _context, _provider: DL_KEY,
         funding_source_for=lambda _context: "miner_key",
     )
-    result = broker.execute(
+    # Inspect the primary settlement separately from the bounded alternate
+    # transport now selected by execute() after this exact settled failure.
+    result = broker._execute_once(
         _score_context(), operation_id="scrapingdog.scrape",
         parameters={"url": URL}, action_sequence=0, timeout_ms=30_000,
+        provider_attempt=1, champion_credential_retry=False,
     )
     assert result.status == 502 and result.call["outcome"] == "settled"
     assert result.call["actual_microusd"] == 2_000
@@ -120,9 +123,10 @@ def test_paid_diagnostic_settles_exact_cost_once_and_triggers_fetch_failure(monk
     assert store.log == ["reserve", "dispatch", "settle"]
     assert len(transport.sent) == 1
 
-    replay = broker.execute(
+    replay = broker._execute_once(
         _score_context(), operation_id="scrapingdog.scrape",
         parameters={"url": URL}, action_sequence=0, timeout_ms=30_000,
+        provider_attempt=1, champion_credential_retry=False,
     )
     assert replay.status == 502 and replay.body == result.body
     assert replay.call["call_identity"] == result.call["call_identity"]

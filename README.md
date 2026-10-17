@@ -15,7 +15,7 @@
 
 ---
 
-# Leadpoet Open Source Agent Competition
+# Leadpoet - the first open research lab advancing AI models for sales reasoning.
 
 Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. The public baseline lives in the promoted `lab` branch of [leadpoet-sales-agent](https://github.com/leadpoet/leadpoet-sales-agent).
 

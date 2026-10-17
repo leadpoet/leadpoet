@@ -113,7 +113,7 @@ def test_paid_adapter_diagnostic_uses_real_reader_and_exact_url_fallback(monkeyp
     response, ledger = _adapted_result(DIAGNOSTIC)
     assert response.status == 502
     assert response.call["actual_microusd"] == 2_000
-    assert operations.TRUSTED_RESPONSE_URL_HEADER not in response.headers
+    assert response.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == URL
     result, calls = _investigate(monkeypatch, response)
     assert calls == {"fetch": 1, "exa": 1, "model": 2}
     assert result["_completed_submit"] is True

@@ -68,6 +68,8 @@ _LEVER_API_PATH_RE = re.compile(
 class CompatibilityResponseError(ValueError):
     """The provider response cannot satisfy the legacy judge contract."""
 
+    trusted_response_url: Optional[str] = None
+
 
 @dataclass(frozen=True)
 class MinerScoreRoute:
@@ -159,6 +161,7 @@ def route_for(
     timeout_ms: Optional[int] = None,
     allow_host_shadow_score: bool = False,
     source_content_fallback: bool = False,
+    source_content_response_url: Optional[str] = None,
 ) -> Optional[MinerScoreRoute]:
     """Return one exact Deepline route for an eligible scoring request."""
 
@@ -194,17 +197,25 @@ def route_for(
             )
         if source_content_fallback is True:
             # Only the broker may select this transport after retaining a
-            # settled Firecrawl source-content failure. Keep the exact source
-            # URL and the original requested rendering intent on the route.
+            # settled Firecrawl source-content failure. Keep the original
+            # source and rendering intent; only its explicit validated final
+            # URL may select a different transport destination.
             if not _safe_public_source_https_url(requested["url"]):
                 raise operations.OperationRequestError("invalid_url", "url")
+            response_url = (
+                requested["url"]
+                if source_content_response_url is None
+                else _safe_public_source_https_url(source_content_response_url)
+            )
+            if not response_url:
+                raise operations.OperationRequestError("invalid_url", "response_url")
             return MinerScoreRoute(
                 requested_operation_id=operation_id,
                 effective_operation_id=EFFECTIVE_OPERATION_ID,
                 effective_parameters={
                     "tool": GENERIC_HTTP_TOOL,
                     "payload": {
-                        "url": requested["url"],
+                        "url": response_url,
                         "method": "GET",
                         "follow_redirects": True,
                         "timeout_ms": upstream_timeout_ms,
@@ -382,7 +393,14 @@ def _firecrawl_response(
     ):
         # A completed provider job can still return a diagnostic or placeholder
         # instead of the requested page. Never turn that text into evidence.
-        raise CompatibilityResponseError("firecrawl_source_content_unavailable")
+        if not _safe_public_source_https_url(requested_url):
+            raise CompatibilityResponseError("invalid_firecrawl_source_url")
+        public_final_url = _safe_public_source_https_url(final_url)
+        if not public_final_url:
+            raise CompatibilityResponseError("invalid_firecrawl_final_url")
+        failure = CompatibilityResponseError("firecrawl_source_content_unavailable")
+        failure.trusted_response_url = public_final_url
+        raise failure
     return (
         status,
         {"content-type": "text/html; charset=utf-8"},
@@ -417,8 +435,15 @@ def _generic_http_raw_html_response(
         or data.get("method") != "GET"
     ):
         raise CompatibilityResponseError("invalid_generic_html_envelope")
+    effective_payload = route.effective_parameters.get("payload")
+    effective_url = (
+        effective_payload.get("url")
+        if isinstance(effective_payload, Mapping) else None
+    )
     if (
-        data.get("requested_url") != route.requested_parameters.get("url")
+        not _safe_public_source_https_url(route.requested_parameters.get("url"))
+        or not _safe_public_source_https_url(effective_url)
+        or data.get("requested_url") != effective_url
         or not _safe_public_source_https_url(data.get("requested_url"))
     ):
         raise CompatibilityResponseError("generic_html_source_url_mismatch")

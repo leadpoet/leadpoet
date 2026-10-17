@@ -374,6 +374,9 @@ PUBLICATION_RPC_READ_TIMEOUT_SECONDS = 605.0
 # Closed-round billing scans historical ledger entries; one slow read must not
 # use the short timeout shared with ordinary RPCs.
 CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS = 20.0
+# Submission totals validate stored response receipts across every retry.
+# A large, valid history can exceed the ordinary eight-second read deadline.
+SUBMISSION_COSTS_READ_TIMEOUT_SECONDS = 20.0
 
 
 STORE_TRANSPORT_ERRORS = frozenset({
@@ -579,6 +582,8 @@ class PostgrestTransport(StoreTransport):
             read_timeout = PUBLICATION_RPC_READ_TIMEOUT_SECONDS
         elif function == "lab_arena_next_closed_provider_reconciliation_v1":
             read_timeout = CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS
+        elif function == "lab_arena_submission_costs":
+            read_timeout = SUBMISSION_COSTS_READ_TIMEOUT_SECONDS
         if read_timeout is not None:
             timeout = self._client.timeout
             request_options["timeout"] = httpx.Timeout(

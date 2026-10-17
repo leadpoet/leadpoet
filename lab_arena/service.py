@@ -20,7 +20,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input
+from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
@@ -5245,10 +5245,8 @@ class ArenaService:
                 )
         return result
 
-    def handle_training_input(
-        self, run_id: str, lease_token: str, document: Any,
-    ) -> Dict[str, Any]:
-        """Store the final runner input only for this live, owned run lease."""
+    def _training_capture_run(self, run_id: str, lease_token: str) -> Dict[str, Any]:
+        """Authorize private capture with the current owned, active lease."""
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
@@ -5267,6 +5265,13 @@ class ArenaService:
             raise ServiceError("lease_invalid", 401) from None
         if expiry.astimezone(timezone.utc) <= self.now():
             raise ServiceError("lease_expired", 409)
+        return run
+
+    def handle_training_input(
+        self, run_id: str, lease_token: str, document: Any,
+    ) -> Dict[str, Any]:
+        """Store the final runner input only for this live, owned run lease."""
+        run = self._training_capture_run(run_id, lease_token)
         try:
             snapshot, compressed = training_input.build_snapshot(
                 run_id, str(run.get("kind") or "execute"), document,
@@ -5293,6 +5298,31 @@ class ArenaService:
             "input_sha256": snapshot["input_sha256"],
             "privacy": snapshot["privacy"],
         }
+
+    def handle_training_observations(self, run_id: str, lease_token: str, document: Any) -> Dict[str, Any]:
+        run = self._training_capture_run(run_id, lease_token)
+        try:
+            snapshot, compressed = training_observations.build_snapshot(
+                run_id, str(run.get("kind") or "execute"), document,
+                lease_generation=run.get("lease_generation"),
+                claim_request_hash=run.get("claim_request_hash"), secrets=(lease_token,),
+            )
+        except (ValueError, TypeError, RecursionError):
+            raise ServiceError("training_observations_invalid", 400) from None
+        objects = self._config.training_object_store
+        if objects is None:
+            raise ServiceError("training_observations_unavailable", 503)
+        ref = training_observations.object_ref(run_id, snapshot["lease_generation"], snapshot["claim_request_hash"])
+        try:
+            objects.put(ref, compressed)
+        except ArenaContractError:
+            raise ServiceError("training_observations_conflict", 409) from None
+        except Exception:
+            raise ServiceError("training_observations_unavailable", 503) from None
+        return {"status": "stored", "schema_version": training_observations.SCHEMA_VERSION,
+                "ref": ref, "lease_generation": snapshot["lease_generation"],
+                "claim_request_hash": snapshot["claim_request_hash"],
+                "payload_sha256": snapshot["payload_sha256"]}
 
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
         """Return source bytes only to the runner that holds the active lease."""

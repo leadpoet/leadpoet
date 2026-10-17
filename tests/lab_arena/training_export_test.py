@@ -70,7 +70,7 @@ def fixture():
     objects.put(source_ref, source)
     objects.put("benchmark", contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1",
                 "round_id": round_row["round_id"], "icps": [icp] * contracts.benchmark_icp_count(config)}).encode())
-    resource = {"validator_source_commit": "a" * 40, "validator_source_origin": "git_checkout", "validator_source_dirty": "clean", "provider_call_count": 0}
+    resource = {"validator_source_commit": "a" * 40, "validator_source_origin": "git_checkout", "validator_source_dirty": "clean", "provider_call_count": 0, "provider_local_refusal_count": 0, "web_egress": {"connection_count": 0}}
     execute = {"run_id": "execute:1", "round_id": round_row["round_id"], "submission_id": "sub",
                "miner_hotkey": "miner", "stage": 1, "icp_position": 0, "assignment_id": "execute",
                "attempt": 1, "kind": "execute", "status": "accepted", "terminal_cause": "accepted",
@@ -210,7 +210,7 @@ def test_direct_web_and_count_gap_are_explicit():
     values["runs"][0]["result_doc"]["resource_summary"].update(web_egress={"connection_count": 1}, provider_call_count=1)
     result = assemble_example(**values)
     assert result["completeness"]["dimensions"]["input_output_label"] is True
-    assert set(result["completeness"]["incomplete_reasons"]) == {"direct_web_content_not_captured", "provider_capture_count_unverified"}
+    assert set(result["completeness"]["incomplete_reasons"]) == {"direct_web_content_not_captured", "provider_capture_count_unverified", "worker_observations_unavailable"}
 
 
 def add_call(values, *, status="settlement", pointer=True, provider="openrouter", operation="openrouter.chat"):

@@ -43,7 +43,7 @@ import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
 from lab_arena import trajectory, validator_events
-from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, reviewer_runtime, runtime, runtime_version, scoring, shim, source_bundle, training_input
+from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, reviewer_runtime, runtime, runtime_version, scoring, shim, source_bundle, training_input, training_observations
 from lab_arena.contracts import ArenaContractError
 from lab_arena.broker import (
     provider_authentication_failure_reason, provider_credit_failure_reason,
@@ -726,6 +726,8 @@ class ArenaApiClient(Protocol):
 
     def training_input(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
 
+    def training_observations(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
+
     def source(self, run_id: str, lease_token: str) -> bytes: ...
 
     def image_access(self, run_id: str, lease_token: str) -> Dict[str, Any]: ...
@@ -846,6 +848,17 @@ class HttpArenaApiClient:
             raise RunnerError("training input exceeds capture limit")
         return self._post(
             "/arena/v1/runs/%s/training-input" % run_id, document,
+            headers={"x-lab-arena-lease": lease_token}, timeout_seconds=2.0,
+        )
+
+    def training_observations(
+        self, run_id: str, lease_token: str, document: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        training_input.object_ref(run_id, 1)
+        if len(contracts.canonical_json(document).encode("utf-8")) > training_observations.MAX_OBJECT_BYTES:
+            raise RunnerError("training observations exceed capture limit")
+        return self._post(
+            "/arena/v1/runs/%s/training-observations" % run_id, document,
             headers={"x-lab-arena-lease": lease_token}, timeout_seconds=2.0,
         )
 
@@ -1792,6 +1805,11 @@ class RunState:
     recovered_responses_retry_call_identities: set[str] = field(
         default_factory=set
     )
+    worker_observations: training_observations.Buffer = field(default_factory=training_observations.Buffer)
+    worker_observation_ordinal: int = 0
+    worker_observations_pending: set[int] = field(default_factory=set)
+    worker_observations_frozen: bool = False
+    worker_handlers_inflight: int = 0
     action_sequence: int = 0
     refusals: int = 0  # refused calls answered by the Arena for this run
     local_refusals: int = 0  # refused locally during an operation cooldown
@@ -2391,6 +2409,7 @@ class WorkerSocketServer:
         timeout_ms: int,
         *,
         cancel_requested: Optional[Callable[[], bool]] = None,
+        observation: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         state = self._state
         operation = operations.get_operation(operation_id)
@@ -2412,6 +2431,9 @@ class WorkerSocketServer:
         with state.lock:
             sequence = state.action_sequence
             state.action_sequence += 1
+            if observation is not None:
+                observation["action_sequence"] = sequence
+                observation["contributes_to_provider_call_count"] = False
             refusal_count, refusal_error = state.operation_refusals.get(
                 refusal_key, (0, "call_refused")
             )
@@ -2426,6 +2448,9 @@ class WorkerSocketServer:
                     # Refuse only this operation. Keep its original error and
                     # never start an automatic paid retry.
                     state.local_refusals += 1
+                    if observation is not None:
+                        observation["kind"] = "local_refusal"
+                        observation["contributes_to_provider_call_count"] = False
                     return refusal_error, None
                 # Reserve one model-requested probe until its actual result.
                 state.operation_probe_inflight.add(refusal_key)
@@ -2435,7 +2460,7 @@ class WorkerSocketServer:
         try:
             return self._dispatch_admitted(
                 operation_id, parameters, timeout_ms, state, sequence,
-                refusal_key, probe, deadline, cancel_requested,
+                refusal_key, probe, deadline, cancel_requested, observation,
             )
         finally:
             if probe:
@@ -2461,6 +2486,7 @@ class WorkerSocketServer:
         probe: bool,
         deadline: float,
         cancel_requested: Optional[Callable[[], bool]],
+        observation: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         frame = {"operation_id": operation_id, "parameters": dict(parameters), "timeout_ms": int(timeout_ms), "action_sequence": sequence}
         while True:
@@ -2471,6 +2497,8 @@ class WorkerSocketServer:
                     state.lease["run_id"], state.lease_token, frame
                 )
             except RunnerError as exc:
+                if observation is not None:
+                    observation.update(kind="transport_failure", exception_class=type(exc).__name__)
                 # A gateway failure can occur before dispatch, after dispatch,
                 # or after settlement. Never replay an unknown outcome.
                 provider_event = None
@@ -2489,6 +2517,8 @@ class WorkerSocketServer:
                         "error_code": "broker_unavailable",
                     }
                     state.calls.append(failed_call)
+                    if observation is not None:
+                        observation["contributes_to_provider_call_count"] = True
                     _record_latest_operation_call_locked(
                         state, refusal_key, failed_call, sequence
                     )
@@ -2524,6 +2554,8 @@ class WorkerSocketServer:
                 with state.lock:
                     held_call = dict(document["call"])
                     state.calls.append(held_call)
+                    if observation is not None:
+                        observation["contributes_to_provider_call_count"] = True
                     _record_latest_operation_call_locked(
                         state, refusal_key, held_call, sequence
                     )
@@ -2532,6 +2564,8 @@ class WorkerSocketServer:
             document, frame, deadline, cancel_requested
         )
         def invalid_broker_response() -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+            if observation is not None:
+                observation["kind"] = "invalid_response"
             with state.lock:
                 failed_call = {
                     "operation_id": operation_id,
@@ -2540,6 +2574,8 @@ class WorkerSocketServer:
                     "error_code": "broker_unavailable",
                 }
                 state.calls.append(failed_call)
+                if observation is not None:
+                    observation["contributes_to_provider_call_count"] = True
                 _record_latest_operation_call_locked(
                     state, refusal_key, failed_call, sequence
                 )
@@ -2583,6 +2619,8 @@ class WorkerSocketServer:
         call = dict(document["call"])
         with state.lock:
             state.calls.append(call)
+            if observation is not None:
+                observation["contributes_to_provider_call_count"] = True
             latest = _record_latest_operation_call_locked(
                 state, refusal_key, call, sequence
             )
@@ -2728,6 +2766,7 @@ class WorkerSocketServer:
         timeout_ms: int,
         *,
         cancel_requested: Optional[Callable[[], bool]] = None,
+        observation: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         """Bridge one operation, retrying only proved free Responses throttles."""
 
@@ -2740,6 +2779,7 @@ class WorkerSocketServer:
                 parameters,
                 timeout_ms,
                 cancel_requested=cancel_requested,
+                observation=observation,
             )
         deadline = time.monotonic() + max(1, int(timeout_ms)) / 1000.0 + (
             MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
@@ -2754,6 +2794,7 @@ class WorkerSocketServer:
                 parameters,
                 attempt_timeout_ms,
                 cancel_requested=cancel_requested,
+                observation=observation,
             )
             if error or document is None:
                 return error, document
@@ -2851,6 +2892,127 @@ class WorkerSocketServer:
         headers[SETTLED_MICROUSD_HEADER] = str(call["actual_microusd"])
         return headers
 
+    def _mark_observations_incomplete(self) -> None:
+        try:
+            with self._state.lock:
+                self._state.worker_observations.failures.add("capture_incomplete")
+        except Exception:
+            pass
+
+    def _begin_observation(self, *args: Any) -> Optional[Dict[str, Any]]:
+        try:
+            return self._begin_observation_unchecked(*args)
+        except Exception:
+            try:
+                with self._state.lock:
+                    self._state.worker_observations.failures.add("capture_incomplete")
+            except Exception:
+                pass
+            return None
+
+    def _begin_observation_unchecked(self, operation_id: str, parameters: Mapping[str, Any], timeout_ms: int, protocol: str) -> Dict[str, Any]:
+        state = self._state
+        with state.lock:
+            ordinal = state.worker_observation_ordinal
+            state.worker_observation_ordinal += 1
+            state.worker_observations_pending.add(ordinal)
+        return {"ordinal": ordinal, "action_sequence": None,
+                "operation_id": operation_id, "request": {"admitted_parameters": dict(parameters), "timeout_ms": int(timeout_ms)},
+                "protocol": protocol, "contributes_to_provider_call_count": False}
+
+    def _dispatch_observed(self, *args: Any, observation: Optional[Dict[str, Any]], **kwargs: Any) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        try:
+            return self._dispatch(*args, observation=observation, **kwargs)
+        except Exception as exc:
+            if observation is not None:
+                observation.update(kind="transport_failure", exception_class=type(exc).__name__)
+            self._finish_observation(observation, None)
+            raise
+
+    def _finish_observation(self, observation: Optional[Dict[str, Any]], *args: Any, **kwargs: Any) -> None:
+        if observation is None:
+            return
+        try:
+            self._finish_observation_unchecked(observation, *args, **kwargs)
+        except Exception:
+            try:
+                with self._state.lock:
+                    self._state.worker_observations.failures.add("capture_incomplete")
+                    self._state.worker_observations_pending.discard(observation["ordinal"])
+            except Exception:
+                pass
+
+    def _finish_observation_unchecked(self, observation: Dict[str, Any], response: Optional[Dict[str, Any]], *, error: Optional[str] = None, document: Optional[Mapping[str, Any]] = None) -> None:
+        # Evidence failures cannot change the response, retry, quota or accounting.
+        state = self._state
+        try:
+            call = (document or {}).get("call") or {}
+            valid_response = False
+            if response is not None and "status" in response:
+                try:
+                    shim.parse_worker_response(response)
+                    valid_response = True
+                except shim.ShimError as exc:
+                    observation.update(kind="invalid_response", exception_class=type(exc).__name__)
+            normal_paid_success = (
+                not error and response is not None and valid_response
+                and type(response.get("status")) is int and 200 <= response["status"] < 300
+                and call.get("outcome") == "settled" and not call.get("error_code")
+                and call.get("operation_id") == observation["operation_id"]
+                and type(call.get("action_sequence")) is int
+                and call["action_sequence"] == observation["action_sequence"]
+                and isinstance(call.get("call_identity"), str)
+                and contracts.SHA256_RE.fullmatch(call["call_identity"])
+                and observation["operation_id"] not in operations.CATALOG_OPERATIONS
+            )
+            with state.lock:
+                if state.worker_observations_frozen:
+                    return
+                if not normal_paid_success:
+                    outcome = {"protocol": observation["protocol"]}
+                    if response is not None:
+                        outcome["response"] = response
+                    for key, value in (("exception_class", observation.get("exception_class")), ("error_code", error)):
+                        if value is not None:
+                            outcome[key] = value
+                    kind = observation.get("kind") or ("local_catalog" if observation["operation_id"] in operations.CATALOG_OPERATIONS else "nonstandard_response")
+                    state.worker_observations.append({
+                        **{key: observation[key] for key in ("ordinal", "action_sequence", "operation_id", "request", "contributes_to_provider_call_count")},
+                        "kind": kind, "outcome": outcome,
+                        "call_identity": call.get("call_identity"),
+                        "privacy": {"redacted": False, "redactions": []},
+                    }, secrets=(state.lease_token,))
+                state.worker_observations_pending.discard(observation["ordinal"])
+        except Exception:
+            with state.lock:
+                state.worker_observations.failures.add("capture_incomplete")
+                state.worker_observations_pending.discard(observation["ordinal"])
+
+    def _observation_text(self, raw: bytes) -> Any:
+        try:
+            text = raw.decode("utf-8")
+            try:
+                return json.loads(text)
+            except ValueError:
+                return text
+        except Exception:
+            try:
+                with self._state.lock:
+                    self._state.worker_observations.failures.add("capture_incomplete")
+            except Exception:
+                pass
+            return "[UNAVAILABLE_REQUEST_ENCODING]"
+
+    def _record_parse_observation(self, request: Mapping[str, Any], response: Dict[str, Any], protocol: str, code: str) -> None:
+        try:
+            observation = self._begin_observation("unknown", request, 0, protocol)
+            if observation is not None:
+                observation.update(kind="local_parse_error", contributes_to_provider_call_count=False)
+            self._finish_observation(observation, response, error=code)
+        except Exception:
+            with self._state.lock:
+                self._state.worker_observations.failures.add("capture_incomplete")
+
     def handle_frame(
         self,
         raw: bytes,
@@ -2869,23 +3031,32 @@ class WorkerSocketServer:
         try:
             operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw, deepline_catalog=self._state.lease.get("deepline_catalog"))
         except shim.OperationFrameError as exc:
-            return shim.encode_worker_error(str(exc) if str(exc) in shim.FRAME_ERROR_CODES else "invalid_frame")
+            code = str(exc) if str(exc) in shim.FRAME_ERROR_CODES else "invalid_frame"
+            self._record_parse_observation({"raw_frame": self._observation_text(raw)}, {"error": code}, "frame", code)
+            return shim.encode_worker_error(code)
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
-            return shim.encode_worker_error(code if code in shim.FRAME_ERROR_CODES else "invalid_request")
-        error, document = self._dispatch(
+            code = code if code in shim.FRAME_ERROR_CODES else "invalid_request"
+            self._record_parse_observation({"raw_frame": self._observation_text(raw)}, {"error": code}, "frame", code)
+            return shim.encode_worker_error(code)
+        observation = self._begin_observation(operation_id, parameters, timeout_ms, "frame")
+        error, document = self._dispatch_observed(
             operation_id,
             parameters,
             timeout_ms,
             cancel_requested=cancel_requested,
+            observation=observation,
         )
         if error:
+            self._finish_observation(observation, {"error": error}, error=error)
             return shim.encode_worker_error(error)
-        return contracts.canonical_json({
+        response = {
             "status": document["status"],
             "headers": document["headers"],
             "body_b64": document["body_b64"],
-        }).encode("utf-8")
+        }
+        self._finish_observation(observation, response, document=document)
+        return contracts.canonical_json(response).encode("utf-8")
 
     def handle_http(
         self,
@@ -2902,16 +3073,22 @@ class WorkerSocketServer:
             operation_id, parameters = operations.match_request(method, url, body, headers, deepline_catalog=self._state.lease.get("deepline_catalog"))
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
-            return HTTP_ERROR_STATUS.get(code, 400), {}, _http_error_body(code)
+            status, payload = HTTP_ERROR_STATUS.get(code, 400), _http_error_body(code)
+            self._record_parse_observation({"method": method, "url": url, "headers": dict(headers), "body_text": self._observation_text(body)}, {"status": status, "headers": {}, "body_b64": base64.b64encode(payload).decode("ascii")}, "http", code)
+            return status, {}, payload
         operation_timeout_ms = operations.get_operation(operation_id).timeout_seconds * 1000
-        error, document = self._dispatch(
+        observation = self._begin_observation(operation_id, parameters, operation_timeout_ms, "http")
+        error, document = self._dispatch_observed(
             operation_id,
             parameters,
             operation_timeout_ms,
             cancel_requested=cancel_requested,
+            observation=observation,
         )
         if error:
-            return HTTP_ERROR_STATUS.get(error, 400), {}, _http_error_body(error)
+            status, payload = HTTP_ERROR_STATUS.get(error, 400), _http_error_body(error)
+            self._finish_observation(observation, {"status": status, "headers": {}, "body_b64": base64.b64encode(payload).decode("ascii")}, error=error)
+            return status, {}, payload
         response_headers = {
             str(name): str(value)
             for name, value in dict(document.get("headers") or {}).items()
@@ -2923,7 +3100,12 @@ class WorkerSocketServer:
         try:
             payload = base64.b64decode(str(document["body_b64"]), validate=True)
         except (ValueError, TypeError):
-            return 503, {}, _http_error_body("worker_unavailable")
+            payload = _http_error_body("worker_unavailable")
+            if observation is not None:
+                observation["kind"] = "invalid_response"
+            self._finish_observation(observation, {"status": 503, "headers": {}, "body_b64": base64.b64encode(payload).decode("ascii")}, error="worker_unavailable", document=document)
+            return 503, {}, payload
+        self._finish_observation(observation, {"status": int(document["status"]), "headers": response_headers, "body_b64": base64.b64encode(payload).decode("ascii")}, document=document)
         return int(document["status"]), response_headers, payload
 
     def start(self) -> None:
@@ -2949,9 +3131,13 @@ class WorkerSocketServer:
                 return slots.acquire(blocking=False)
 
             def process_request(self, request: Any, client_address: Any) -> None:
+                with server_self._state.lock:
+                    server_self._state.worker_handlers_inflight += 1
                 try:
                     super().process_request(request, client_address)
                 except Exception:
+                    with server_self._state.lock:
+                        server_self._state.worker_handlers_inflight -= 1
                     slots.release()
                     raise
 
@@ -2959,6 +3145,8 @@ class WorkerSocketServer:
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
+                    with server_self._state.lock:
+                        server_self._state.worker_handlers_inflight -= 1
                     slots.release()
 
         class HttpBridge(http.server.BaseHTTPRequestHandler):
@@ -2972,20 +3160,20 @@ class WorkerSocketServer:
             def _bridge(self) -> None:
                 self.close_connection = True
                 if self.headers.get("Transfer-Encoding"):
-                    self._answer(400, {}, _http_error_body("invalid_request"))
+                    self._reject(400, "invalid_request")
                     return
                 try:
                     length = int(self.headers.get("Content-Length") or "0")
                 except ValueError:
-                    self._answer(400, {}, _http_error_body("invalid_request"))
+                    self._reject(400, "invalid_request")
                     return
                 if length < 0 or length > shim.MAX_FRAME_BYTES:
-                    self._answer(413, {}, _http_error_body("request_too_large"))
+                    self._reject(413, "request_too_large")
                     return
                 body = self.rfile.read(length) if length else b""
                 host = (self.headers.get("Host") or "").strip()
                 if not host or "/" in host or any(ch.isspace() for ch in host):
-                    self._answer(400, {}, _http_error_body("invalid_request"))
+                    self._reject(400, "invalid_request")
                     return
                 headers = {name: value for name, value in self.headers.items()}
                 status, response_headers, payload = server_self.handle_http(
@@ -2996,6 +3184,21 @@ class WorkerSocketServer:
                     cancel_requested=lambda: connection_closed(self.connection),
                 )
                 self._answer(status, response_headers, payload)
+
+            def _reject(self, status: int, code: str) -> None:
+                payload = _http_error_body(code)
+                server_self._mark_observations_incomplete()
+                server_self._record_parse_observation(
+                    {"method": self.command, "path": self.path, "headers": dict(self.headers)},
+                    {"status": status, "headers": {}, "body_b64": base64.b64encode(payload).decode("ascii")},
+                    "http", code,
+                )
+                self._answer(status, {}, payload)
+
+            def send_error(self, code: int, message: Any = None, explain: Any = None) -> None:
+                # BaseHTTPRequestHandler can refuse a request before _bridge.
+                server_self._mark_observations_incomplete()
+                super().send_error(code, message, explain)
 
             def _answer(self, status: int, headers: Mapping[str, str], payload: bytes) -> None:
                 self.send_response(status)
@@ -3029,6 +3232,8 @@ class WorkerSocketServer:
                     header = _recv_exact(connection, 4)
                     size = int.from_bytes(header, "big")
                     if size < 2 or size > shim.MAX_FRAME_BYTES:
+                        server_self._mark_observations_incomplete()
+                        server_self._record_parse_observation({"declared_frame_size": size}, {"error": "frame_too_large"}, "frame", "frame_too_large")
                         payload = shim.encode_worker_error("frame_too_large")
                     else:
                         payload = server_self.handle_frame(
@@ -3220,6 +3425,38 @@ def _record_training_input(
             print("Arena training input capture failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
         except Exception:
             pass
+
+
+def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any], lease_token: str, state: RunState) -> Dict[str, Any]:
+    summary = {"status": "unavailable", "observation_count": 0,
+               "local_refusal_count": 0, "complete": False}
+    try:
+        with state.lock:
+            state.worker_observations_frozen = True
+            if state.worker_observations_pending or state.worker_handlers_inflight:
+                state.worker_observations.failures.add("capture_incomplete")
+            document = state.worker_observations.document()
+        summary.update(observation_count=document["observation_count"],
+                       local_refusal_count=document["local_refusal_count"], complete=document["complete"])
+        send = getattr(config.api, "training_observations", None)
+        if not callable(send):
+            return summary
+        for attempt in range(2):
+            try:
+                result = send(str(lease["run_id"]), lease_token, document)
+                if (not isinstance(result, Mapping) or result.get("status") != "stored"
+                        or not isinstance(result.get("payload_sha256"), str) or not contracts.SHA256_RE.fullmatch(result["payload_sha256"])):
+                    raise RunnerError("training observations rejected")
+                return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
+            except Exception:
+                if attempt:
+                    raise
+    except Exception as exc:
+        try:
+            print("Arena training observations capture failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+    return summary
 
 
 def _runtime_log_events(
@@ -3878,6 +4115,7 @@ class AssignmentExecutor:
                 server.stop()
             except Exception as exc:
                 stop_exception = exc
+            observation_capture = _record_training_observations(config, lease, lease_token, state)
             shutil.rmtree(run_dir, ignore_errors=True)
             shutil.rmtree(socket_dir, ignore_errors=True)
             if stop_exception is not None:
@@ -4072,6 +4310,7 @@ class AssignmentExecutor:
                 "provider_call_count": len(state.calls),
                 "provider_refusal_count": refusal_count,
                 "provider_local_refusal_count": local_refusal_count,
+                "worker_observations": observation_capture,
                 "provider_unresolved_failure_count": (
                     unresolved_credentials + unresolved_providers
                 ),

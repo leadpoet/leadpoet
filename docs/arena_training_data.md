@@ -61,6 +61,24 @@ historical label store. Select a compatible policy cohort before counting useful
 examples; exclude infrastructure failures and skipped cases, and deduplicate
 repeated evidence and cached judgments before splitting the data.
 
+The largest published-reward scorer-image cohort illustrates the duplication:
+531 distinct scoring inputs with nonempty breakdowns contained 1,440 company
+labels, including 214 qualified labels, but only 236 company identity keys and
+35 qualified company keys. The cohort's scorer digest is
+`sha256:be2c560cf8fc8b21d5854f5f0509e175a03846c81758901a35e726ccff25a848`.
+Its 1,226 nonempty failure reasons require classification before using them as
+negative examples. One scorer image is a useful first filter, not proof that
+every frozen policy is identical. These counts support a small curation and
+evaluation pilot, not a claim of broad generalization or a ready training split.
+
+The October 17 follow-up count had 779 positive accepted executions in published
+reward rounds. Of these, 346 explicitly reported zero direct web connections.
+Only 92 also had a recorded 40-character source commit and an explicit zero local
+refusal count. Another 27 lacked the refusal field; absence is not proof of zero.
+These filters identify candidates for further review, not complete trajectories:
+historical prompts, responses, label authority, source trust and deduplication
+still require verification.
+
 ## Actual data path
 
 1. A round freezes participants, source object references, the benchmark and ICP
@@ -92,6 +110,7 @@ are corroborating views; neither proves collection completeness.
 | Full model/tool request | Hash and short projection; prompt text discarded | Private content-addressed gzip object; immutable reservation holds its pointer |
 | Requested vs effective model/parameters | Spread over summaries and routing code | Retain admitted, normalized, hashed and effective parameters plus credential-free outbound body, target and route |
 | Full returned response | Usually already in `terminal_response.body_b64`; diagnostic view truncated | Reuse and verify the existing receipt; do not write a duplicate response object |
+| Worker-visible failures and local calls | Transport failures, local catalog replies and local refusals can lack a paid receipt | One bounded private artifact per run lease retains exceptional requests and returned outcomes; normal paid successes reuse the ledger |
 | Provider identity | Broker provider, response model, route and billing records differ | Preserve each with its role; never infer physical model identity from a requested alias alone |
 | ICP/company/final output | Present in separate frozen objects | Exact round/position/submission/output joins; retain company order |
 | Labels | Full score objects and cache authorities; run score alone insufficient | Verify existing production evidence rules and recompute per-ICP score; reject ambiguity |
@@ -106,11 +125,19 @@ The exporter must read and hash-check its object before it accepts it.
 
 Capture uses the existing private object store, immutable objects, deterministic
 gzip, size limits and a separate S3 client with bounded timeouts and no SDK retries.
+The October 17 production readback confirmed all four bucket public-access blocks,
+enabled versioning and default AES256 encryption. The host role could not read the
+bucket policy-status API; no policy was changed.
 No new database table, queue, background monitor, dependency or lineage service is
 required. Input uploads require an active owned lease before storage. Request
 object writes occur only after accounting admission. Capture failure cannot change
 the provider's accounting or score rules. It produces incomplete training evidence.
-The bounded storage call adds some latency; a fresh live proof is still required.
+The worker uploads its exceptional observations before completion, while its lease
+is active. The artifact binds the run, lease generation and claim request hash.
+The exporter checks its hash, count and action links. Worker evidence never becomes
+a provider receipt or a settled charge. Overflow, lost upload and unfinished socket
+handlers remain explicit gaps. The bounded storage calls add some latency; a fresh
+live proof is still required.
 
 The full payload limit is explicit. Oversized or unavailable evidence is rejected
 as a training source; it is never silently clipped and called complete. Credentials
@@ -123,9 +150,10 @@ are separate properties from label validity.
   TLS traffic cannot be reconstructed. Runs using it are excluded from complete
   process training unless their relevant observations are independently retained.
   This change does not introduce a TLS interception proxy.
-- Local frozen-catalog discovery has no paid ledger reservation. Its diagnostic
-  events can be abbreviated. A count mismatch cannot certify these calls as full.
-  Use a broker-only subset for a first complete call-trajectory experiment.
+- Historical local frozen-catalog discovery has no paid ledger reservation. Its
+  diagnostic events can be abbreviated. New worker observations retain the full
+  returned catalog, while the exporter continues to reject an unexplained count
+  mismatch. Use a broker-only subset for a first complete call-trajectory experiment.
 - Hidden provider chain of thought is not a collection target. Unlogged internal
   variables or private provider search steps are not recoverable. Explicit model
   messages and returned tool outputs are the available training state.
@@ -312,3 +340,27 @@ failed attempt reported 158 worker provider calls but had 157 ledger actions;
 one gateway request failed before admission. The exporter reports the mismatch
 instead of treating it as a complete process. Free local catalog discovery is a
 separate known boundary, not the cause of that mismatch.
+
+The second attempt also ended with `provider_error`: 144 worker calls versus 143
+ledger actions, zero local refusals and 72 direct web connections. One failed
+call had a captured request but no terminal response receipt because its provider
+cost was unavailable. These failures exposed the need to retain exceptional
+worker-visible outcomes separately from provider receipts. Neither attempt is
+counted as a successful training example. Across both attempts, the observation
+at 02:22:53 UTC had 300 ledger calls, no inflight calls, three uncertain costs,
+and $0.943890 of confirmed charges. The second ICP remained unstarted.
+
+The worker-observation follow-up passed an integrated gate of **505 tests in
+54.44 seconds** (55.15 seconds including the release checks), with no failures
+or skips and one existing multipart deprecation warning. It covered capture,
+inputs, export, worker observations, runner/API behavior, Responses retries,
+refusal contracts and gateway routes. A final operation-registry validation
+change passed **113 focused tests in 2.26 seconds**. Compilation, whitespace,
+protected-workflow and AGENTS/CLAUDE checks passed. Independent review checked
+unchanged worker outcomes/counters, billing authority, privacy, hidden retries,
+immutable lease binding and incomplete shutdown snapshots.
+
+At 02:36:35 UTC, the old proof runner had exited and its task-owned API server
+was stopped after verifying zero leased runs and zero inflight provider calls.
+The original process records and logs were retained. The frozen round and its
+unstarted second ICP remain available for the final release proof.

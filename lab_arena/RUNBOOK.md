@@ -439,6 +439,22 @@ After activation, check both grading and runtime identities on actual leases,
 accepted-work hashes, cost settlement, publication and downstream weights.
 Successful image construction or a host restart alone does not prove recovery.
 
+For the approved exact-source access-denial correction, build and verify with
+`--source-access-denied`. The composer applies only the reviewed Exa response
+classification and matching investigation/finality checks to the frozen source.
+It records `exact_exa_source_access_denied_v1` in the composition evidence.
+Use `--complete-negative-finality` as well when retaining the prior approved
+negative-finality correction. Neither option copies the current grader.
+
+An Exa API 200 containing one exact requested URL with `CRAWL_HTTP_401` or
+`CRAWL_HTTP_403`, the matching integer status and no result is unavailable source
+evidence. It can supersede an earlier failed fetch of that same URL. It does
+not prove a company fails qualification: the existing bounded discovery and
+validated findings must still complete. API authentication, credit, rate-limit,
+service errors and ambiguous or mismatched source responses remain failures.
+Verify the affected unfinished judgment through accepted completion and public
+publication, and compare its previously accepted outputs before and after.
+
 ### Verify a scorer release separately from a host release
 
 A gateway or validator restart does not rebuild the scorer image. The CI image

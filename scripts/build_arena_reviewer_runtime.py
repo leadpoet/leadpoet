@@ -4,7 +4,7 @@
 The original image layers, dependencies and process configuration stay intact.
 Only the dedicated runtime package and reviewed operational-interface
 extractions can be added by default. An explicit option applies only the
-approved PR483 terminal-negative correction to extracted frozen source.
+approved terminal-negative and exact-source-access corrections to frozen source.
 Neither path imports today's grading code.
 """
 from __future__ import annotations
@@ -126,12 +126,13 @@ def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]
 
 def extract_frozen_sources(
     reference: str, destination: Path, *, complete_negative_finality: bool = False,
+    source_access_denied: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
         files = {}
         names = (GRADER_FILE, *ENTRYPOINT_FILES)
-        if complete_negative_finality:
+        if complete_negative_finality or source_access_denied:
             names += (FINALITY_FILE,)
         for name in names:
             path = destination / name
@@ -146,20 +147,29 @@ def extract_frozen_sources(
 
 def expected_overlay(
     original: dict[str, bytes], *, complete_negative_finality: bool = False,
+    source_access_denied: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
 
     expected = {GRADER_FILE, *ENTRYPOINT_FILES}
-    if complete_negative_finality:
+    if complete_negative_finality or source_access_denied:
         expected.add(FINALITY_FILE)
     if set(original) != expected:
         raise CompositionError("frozen operational sources are incomplete")
     files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
     files.update({name: convert_checkpoint_seam(original[name]) for name in ENTRYPOINT_FILES})
+    if complete_negative_finality or source_access_denied:
+        files[FINALITY_FILE] = original[FINALITY_FILE]
     if complete_negative_finality:
         from scripts.arena_reviewer_finality_seam import convert_finality_seam
-        files[FINALITY_FILE] = convert_finality_seam(original[FINALITY_FILE])
+        files[FINALITY_FILE] = convert_finality_seam(files[FINALITY_FILE])
+    if source_access_denied:
+        from scripts.arena_reviewer_source_access_seam import (
+            convert_source_access_seam, convert_source_access_finality_seam,
+        )
+        files[GRADER_FILE] = convert_source_access_seam(files[GRADER_FILE])
+        files[FINALITY_FILE] = convert_source_access_finality_seam(files[FINALITY_FILE])
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -178,6 +188,10 @@ def main() -> int:
         "--complete-negative-finality", action="store_true",
         help="apply only the approved PR483 terminal-negative correction; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--source-access-denied", action="store_true",
+        help="apply the exact-source access-denial correction; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
@@ -195,13 +209,16 @@ def main() -> int:
         original = extract_frozen_sources(
             args.grading_image, root / "original",
             complete_negative_finality=args.complete_negative_finality,
+            source_access_denied=args.source_access_denied,
         )
         files = expected_overlay(
             original, complete_negative_finality=args.complete_negative_finality,
+            source_access_denied=args.source_access_denied,
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
             + ("-negative-finality" if args.complete_negative_finality else "")
+            + ("-source-access" if args.source_access_denied else "")
         )
         if not args.verify_image:
             for name, data in files.items():
@@ -226,13 +243,17 @@ def main() -> int:
                 raise CompositionError("published runtime digest is ambiguous")
             reference = matching[0]
         from scripts.arena_reviewer_finality_seam import CORRECTION_ID
+        corrections = [CORRECTION_ID] if args.complete_negative_finality else []
+        if args.source_access_denied:
+            from scripts.arena_reviewer_source_access_seam import CORRECTION_ID as SOURCE_ACCESS_CORRECTION_ID
+            corrections.append(SOURCE_ACCESS_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,
             "runtime_source_commit": revision,
             "base_layers_unchanged": True,
             "process_configuration_unchanged": True,
-            "grading_corrections": ([CORRECTION_ID] if args.complete_negative_finality else []),
+            "grading_corrections": corrections,
             "original_files": {name: hashlib.sha256(value).hexdigest() for name, value in original.items()},
             "overlay_files": {name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
         }, sort_keys=True))

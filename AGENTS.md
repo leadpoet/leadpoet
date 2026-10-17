@@ -1,5 +1,24 @@
 # Agent Instructions
 
+## Scoped production authorization: exact-source access-denial recovery
+
+On 2026-10-16 the user authorized a simple durable fix for the repeated
+Flightpath source-page access failure affecting submission
+`sub-a2e839b9670e7b41266d2365d96eb4be`, with exact-edge-case tests, push and
+production deployment. This permits protected inspection, narrow code changes,
+safe push and merge, verified scorer/runtime image publication and registration,
+and canonical gateway/normal-validator deployment with live recovery checks.
+For unfinished judgments, preserve a validated exact-source Exa crawl 401/403
+as inaccessible evidence, like the existing typed per-request refusal, in both
+investigation and finality checks. A denied page is not an automatic zero;
+existing bounded discovery, factual validation and qualification rules still
+apply. Apply only this explicit correction to frozen graders through the
+verified composer. Preserve all other frozen bytes, accepted judgments, inputs,
+caches, costs, credentials, rewards, weights and concurrent work. Provider API
+authentication, credit and transient errors must remain retryable. Do not rescore
+accepted work or replace an old round with the current grader. This authority
+expires when the fix and the affected production result are verified.
+
 ## Scoped production authorization: Arena training-data completeness audit
 
 On 2026-10-16 the user authorized a deep end-to-end audit of Arena trajectory

@@ -1,5 +1,23 @@
 # Agent Instructions
 
+## Scoped production authorization: October 16 publication recovery
+
+On 2026-10-16 the user directed continued investigation until a permanent fix
+for the delayed October 16 round flagged by Dylan is complete. This includes
+protected read-only production and provider evidence inspection, narrow
+code changes, exact committed migrations if required, focused reproductions
+and regression checks, safe push and merge, verified runtime-image publication
+and registration, and canonical gateway/normal-validator deployment with
+live publication and reward-activation verification. Use original receipts to
+identify the remaining judgment failures; do not treat generic provider errors
+as proved missing evidence. Preserve frozen grading and qualification rules,
+accepted judgments and scores, inputs, caches, billing records and cost limits,
+credentials, reward policy, history and concurrent work. Do not force a winner,
+write scores or reward state manually, replay accepted work, bypass release
+checks, or introduce a new scheduler. Use the existing verified reviewer-runtime
+repair path where applicable. This authority ends after the durable repair and
+live October 16 publication and reward activation are verified.
+
 ## Scoped production authorization: exact-source access-denial recovery
 
 On 2026-10-16 the user authorized a simple durable fix for the repeated

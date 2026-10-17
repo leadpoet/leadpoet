@@ -22,6 +22,7 @@ SCHEMA_VERSION = "leadpoet.lab_arena.training_request.v1"
 OBJECT_PREFIX = "private/arena-training/requests/"
 MAX_OBJECT_BYTES = 8 * 1024 * 1024
 MAX_COMPRESSED_BYTES = MAX_OBJECT_BYTES + 64 * 1024
+MAX_VALUE_NODES = 250_000
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HIDDEN_KEYS = frozenset({
     "reasoning_content", "hidden_reasoning", "encrypted_content", "reasoning_details",
@@ -72,7 +73,8 @@ def _canonical(value: Any) -> bytes:
                       ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
-def sanitize_training_value(value: Any, secrets: Sequence[str] = ()) -> tuple[Any, list[str]]:
+def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
+                            max_nodes: int = MAX_VALUE_NODES) -> tuple[Any, list[str]]:
     """Redact private material without truncation; report every redaction class."""
     reasons: set[str] = set()
     count = 0
@@ -125,7 +127,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = ()) -> tuple[An
     def clean(item: Any, path: tuple[str, ...] = ()) -> Any:
         nonlocal count
         count += 1
-        if count > 250_000 or len(path) > 64:
+        if count > max_nodes or len(path) > 64:
             raise CaptureError("request_structure_limit")
         if isinstance(item, str):
             text = clean_text(item)

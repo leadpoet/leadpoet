@@ -5584,7 +5584,10 @@ class ArenaService:
             unique: Dict[str, Dict[str, Any]] = {}
             logger = logging.getLogger(__name__)
             try:
-                abandoned = sorted(self._store.list_abandoned_billing_runs(round_id))
+                with telemetry.stage("reconcile_deepline_billing_lookup") as observed:
+                    abandoned = sorted(self._store.list_abandoned_billing_runs(round_id))
+                    observed.count = len(abandoned)
+                    observed.idle = not abandoned
             except Exception as exc:
                 logger.warning("Arena abandoned billing lookup failed: %s", type(exc).__name__)
                 abandoned = []
@@ -5600,10 +5603,13 @@ class ArenaService:
                         return
                     page_limit = min(_DEEPLINE_BILLING_PAGE_LIMIT, missing)
                     try:
-                        items = self._deepline_cost_candidates(
-                            round_id, limit=page_limit,
-                            **options,
-                        )
+                        with telemetry.stage("reconcile_deepline_billing_lookup") as observed:
+                            items = self._deepline_cost_candidates(
+                                round_id, limit=page_limit,
+                                **options,
+                            )
+                            observed.count = len(items)
+                            observed.idle = not items
                     except Exception as exc:
                         logger.warning("Arena billing candidate lookup failed: %s", type(exc).__name__)
                         return

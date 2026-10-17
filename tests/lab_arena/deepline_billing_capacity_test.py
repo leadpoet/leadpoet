@@ -5,9 +5,12 @@ import threading
 import time
 
 import pytest
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from gateway.observability.otel_bootstrap import configure_arena_otel, STORE_ERROR_SPAN_FIELDS
+from lab_arena import telemetry
 from lab_arena import broker as br
-from lab_arena.store import ArenaStore
+from lab_arena.store import ArenaStore, ArenaStoreUnavailable
 from tests.lab_arena.deepline_delayed_cost_reconciliation_unit_test import (
     ROUND_ID, _bare_service, _candidate,
 )
@@ -424,9 +427,83 @@ def test_settlement_telemetry_counts_all_completed_bills(monkeypatch):
     service, _ = service_for(store, broker)
     monkeypatch.setattr(telemetry, 'stage', stage)
     assert service._reconcile_active_deepline_cost(ROUND_ID)['settled'] == 8
-    assert observations[0][0] == 'reconcile_active_deepline_costs'
-    assert observations[0][1].count == 8
-    assert observations[0][1].idle is False
+    settlement = next(observed for name, observed in observations if name == 'reconcile_active_deepline_costs')
+    assert settlement.count == 8
+    assert settlement.idle is False
+    assert any(name == 'reconcile_deepline_billing_lookup' for name, _ in observations)
+
+
+@pytest.mark.parametrize("fault", ["ReadTimeout", "55P03"])
+def test_candidate_lookup_failure_reports_safe_resource_without_stopping_other_lanes(monkeypatch, caplog, fault):
+    canary = "secret-prompt-SQL-https://private.invalid/token"
+    resource = "lab_arena_list_deepline_cost_reconciliations_v2"
+
+    class FailedPriorityStore(QueueStore):
+        def __init__(self):
+            super().__init__()
+            self.urgent = []
+            self.items = [candidate(7)]
+            self.priority_reads = 0
+
+        def list_deepline_cost_reconciliations(self, round_id, **options):
+            if options.get("successful_execute_only"):
+                self.priority_reads += 1
+                diagnostics = ({"transport_error": fault} if fault == "ReadTimeout"
+                               else {"code": fault, "http_status": 500})
+                raise ArenaStoreUnavailable(canary, operation="rpc", resource=resource,
+                                            **diagnostics)
+            return super().list_deepline_cost_reconciliations(round_id, **options)
+
+    store = FailedPriorityStore()
+    service, broker = service_for(store)
+    exporter = InMemorySpanExporter()
+    monkeypatch.setattr(telemetry, "_recorder", configure_arena_otel(None, span_exporter=exporter))
+    result = service._reconcile_active_deepline_cost(ROUND_ID)
+
+    assert result == {"status": "pending", "checked": 1, "settled": 0}
+    assert broker.seen == [7] and store.priority_reads == 1
+    assert service._deepline_reconciliation_after[(ROUND_ID, "")] == 7
+    assert (ROUND_ID, "") not in service._deepline_priority_reconciliation_after
+    failed = [span for span in exporter.get_finished_spans()
+              if span.attributes.get("arena.outcome") == "failed"]
+    assert len(failed) == 1 and failed[0].name == "arena.reconcile_deepline_billing_lookup"
+    metadata = {key.removeprefix("arena.store_"): value for key, value in failed[0].attributes.items()
+                if key in STORE_ERROR_SPAN_FIELDS}
+    expected = {"operation": "rpc", "resource": resource}
+    expected.update({"transport_error": fault} if fault == "ReadTimeout"
+                    else {"code": fault, "http_status": 500})
+    assert metadata == expected
+    assert canary not in str(failed[0]) + caplog.text
+
+
+def test_abandoned_lookup_failure_reports_safe_select_and_preserves_candidate_checks(monkeypatch, caplog):
+    canary = "secret-prompt-SQL-https://private.invalid/token"
+
+    class FailedAbandonedStore(QueueStore):
+        def __init__(self):
+            super().__init__()
+            self.items = [candidate(7)]
+
+        def list_abandoned_billing_runs(self, round_id):
+            raise ArenaStoreUnavailable(canary, operation="select",
+                                        resource="lab_arena_runs", transport_error="ReadTimeout")
+
+    store = FailedAbandonedStore()
+    service, broker = service_for(store)
+    exporter = InMemorySpanExporter()
+    monkeypatch.setattr(telemetry, "_recorder", configure_arena_otel(None, span_exporter=exporter))
+    result = service._reconcile_active_deepline_cost(ROUND_ID)
+
+    assert result == {"status": "pending", "checked": 1, "settled": 0}
+    assert broker.seen == [7]
+    failed = [span for span in exporter.get_finished_spans()
+              if span.attributes.get("arena.outcome") == "failed"]
+    assert len(failed) == 1 and failed[0].name == "arena.reconcile_deepline_billing_lookup"
+    metadata = {key.removeprefix("arena.store_"): value for key, value in failed[0].attributes.items()
+                if key in STORE_ERROR_SPAN_FIELDS}
+    assert metadata == {"operation": "select", "resource": "lab_arena_runs",
+                        "transport_error": "ReadTimeout"}
+    assert canary not in str(failed[0]) + caplog.text
 
 
 def test_wrapped_rpc_page_reserves_last_cursor_item_not_largest_entry_id():

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import itertools
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -139,6 +140,43 @@ def _schema(raw: Any) -> dict[str, Any]:
     except Exception as exc:
         raise CatalogError("invalid_schema") from exc
     return schema
+
+
+_CONTEXTDEV_NEWS_EXCLUSIVE_FILTERS = (
+    "sourceDomain", "sourceCountry", "articleLanguage", "articleType",
+)
+
+
+def _complete_contextdev_news_filter_contract(schema: dict[str, Any]) -> None:
+    """Complete the known news-search filter rule in future frozen metadata.
+
+    The advertised fields are individually valid, but the provider rejects
+    requests containing more than one of these four filters. Keep all other
+    upstream constraints, including the independent date filter.
+    """
+    filter_schema = schema["properties"].get("filterBy")
+    if (
+        not isinstance(filter_schema, dict)
+        or filter_schema.get("type") != "object"
+        or not isinstance(filter_schema.get("properties"), dict)
+        or not set(_CONTEXTDEV_NEWS_EXCLUSIVE_FILTERS) <= set(filter_schema["properties"])
+    ):
+        raise CatalogError("contextdev_news_filter_schema_changed")
+    pairs = [
+        {"required": [first, second]}
+        for first, second in itertools.combinations(_CONTEXTDEV_NEWS_EXCLUSIVE_FILTERS, 2)
+    ]
+    constraint = {"not": {"anyOf": pairs}}
+    clauses = filter_schema.setdefault("allOf", [])
+    if constraint not in clauses:
+        clauses.append(constraint)
+    explanation = (
+        "Supply at most one of sourceDomain, sourceCountry, articleLanguage, "
+        "or articleType; date may be combined with one of them."
+    )
+    description = str(filter_schema.get("description", "")).strip()
+    if explanation not in description:
+        filter_schema["description"] = (description + " " + explanation).strip()
 
 
 def _rate(value: Any) -> Any:
@@ -637,4 +675,17 @@ def fetch_catalog(*, read_json: Callable[[str, Mapping[str, str]], Mapping[str, 
                 or detail.get("provider") != row.get("provider")):
                 raise CatalogError("catalog_identity_changed")
             detailed[tool_id] = detail
+    news = detailed.get("contextdev_post_news_search")
+    if (isinstance(news, dict) and news.get("provider") == "contextdev"
+        and _eligible(news, allow_people)):
+        # Complete the advertised contract only when obtaining metadata for a
+        # new round. A changed tool schema loses only this tool's approval;
+        # revalidating an already frozen round must not change it.
+        try:
+            schema = _schema(news.get("inputSchema", news.get("input_schema")))
+            _complete_contextdev_news_filter_contract(schema)
+        except CatalogError:
+            detailed.pop("contextdev_post_news_search")
+        else:
+            news["inputSchema"] = schema
     return freeze_catalog({"tools": list(detailed.values())}, allow_people)

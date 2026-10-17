@@ -20,7 +20,7 @@ from typing import Mapping
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from lab_arena import operations
+from lab_arena import operations, training_input
 
 
 router = APIRouter(prefix="/arena", tags=["agent-competition"])
@@ -319,6 +319,11 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         and len(parts) == 4
         and parts[:2] == ["v1", "runs"]
         and parts[3] == "trajectory"
+        else training_input.MAX_INPUT_BYTES
+        if request.method == "POST"
+        and len(parts) == 4
+        and parts[:2] == ["v1", "runs"]
+        and parts[3] == "training-input"
         else _MAX_VALIDATOR_EVENTS_REQUEST_BYTES
         if request.method == "POST" and arena_path == "v1/validators/events"
         else _MAX_REQUEST_BYTES

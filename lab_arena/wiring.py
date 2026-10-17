@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, scorer_image_access, scoring_provider_compat, signing
+from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
 from lab_arena.service import (
@@ -452,6 +452,33 @@ def build_service_from_environment(mode: str):
         "scrapingdog": _required("LAB_ARENA_SCRAPINGDOG_API_KEY"),
         "deepline": _required("LAB_ARENA_DEEPLINE_API_KEY"),
     }
+    # Use the same private bucket/prefix with a separate, short I/O budget.
+    # Evidence failure must not hold a provider request for the SDK's default
+    # network retries. Embedded object stores retain their existing contract.
+    capture_objects = objects
+    if getattr(objects, "_client", None) is not None:
+        try:
+            import boto3
+            from botocore.config import Config
+
+            capture_objects = S3ObjectStore(
+                _required("LAB_ARENA_BUCKET"),
+                prefix=os.environ.get("LAB_ARENA_OBJECT_PREFIX", ""),
+                client=boto3.client(
+                    "s3", region_name=os.environ.get("AWS_REGION"),
+                    config=Config(
+                        signature_version="s3v4", connect_timeout=0.5,
+                        read_timeout=0.5,
+                        retries={"total_max_attempts": 1, "mode": "standard"},
+                    ),
+                ),
+            )
+        except Exception:
+            capture_objects = None
+    request_capture = training_capture.RequestCapture(capture_objects)
+
+    def capture_provider_request(document, *, secrets=()):
+        return request_capture.prepare(document, secrets=(*provider_keys.values(), *secrets))
     credential_key_id = os.environ.get("LAB_ARENA_CREDENTIAL_KMS_KEY_ID", "").strip()
     # A missing miner vault must not interrupt baseline rebenchmarking. New
     # miner admission fails closed until the vault is configured.
@@ -555,6 +582,7 @@ def build_service_from_environment(mode: str):
         return broker_module.Broker(
             store=store, key_for=key_for, judge_models=judge_models,
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),
+            capture_request=capture_provider_request,
             lease_ttl_seconds=int(round_row["configuration_doc"]["lease_ttl_seconds"]),
             credential_for=submission_keys.credential_for,
             funding_source_for=submission_keys.funding_source_for,
@@ -605,7 +633,7 @@ def build_service_from_environment(mode: str):
         return store.current_daily_icp_set(set_id)
 
     config = ServiceConfig(
-        mode=mode, store=store, object_store=objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
+        mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
         deepline_catalog_source=deepline_catalog_source,
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,

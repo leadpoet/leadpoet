@@ -149,6 +149,22 @@ def test_proxy_uses_the_shared_larger_limit_only_for_completions(monkeypatch):
     ).status_code == 413
 
 
+def test_proxy_allows_full_training_input_only_on_exact_route(monkeypatch):
+    observed = {}
+    async def forward(method, path, *, query, body, headers):
+        observed.update(path=path, body=body, headers=dict(headers))
+        return httpx.Response(200, json={"status": "stored"})
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = _app()
+    body = b"x" * (arena_proxy._MAX_REQUEST_BYTES + 1)
+    response = client.post("/arena/v1/runs/r1/training-input", content=body, headers={"x-lab-arena-lease": "a" * 64})
+    assert response.status_code == 200
+    assert observed == {"path": "v1/runs/r1/training-input", "body": body, "headers": {"x-lab-arena-lease": "a" * 64}}
+    assert client.post("/arena/v1/runs/r1/training-input/extra", content=body).status_code == 413
+    assert client.post("/arena/v1/runs/r1/training-input", content=b"{}", headers={"content-length": str(arena_proxy.training_input.MAX_INPUT_BYTES + 1)}).status_code == 413
+
+
 def test_proxy_applies_compact_trajectory_limit(monkeypatch):
     observed = {}
 

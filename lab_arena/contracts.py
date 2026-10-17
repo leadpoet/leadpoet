@@ -1441,6 +1441,10 @@ RUN_RESULT_FIELDS = (
             F("validator_source_origin", "str", maximum=32, required=False),
             F("validator_source_dirty", "str", maximum=16, required=False),
             F("gateway_claim_source_commit", "str", maximum=64, required=False),
+            F("grading_image_digest", "sha256", required=False),
+            F("grading_image_reference", "str", minimum=1, maximum=512, required=False),
+            F("runtime_image_digest", "sha256", required=False),
+            F("runtime_image_reference", "str", minimum=1, maximum=512, required=False),
             F("web_egress", "object", required=False, fields=(
                 F("policy_version", "str", choices=(PROXY_EXECUTION_VERSION,)),
                 F("worker_slot", "int", minimum=0, maximum=250),

@@ -10,7 +10,7 @@ import tarfile
 
 import pytest
 
-from lab_arena import contracts, scoring, training_capture, training_input, verify
+from lab_arena import contracts, reviewer_runtime, scoring, training_capture, training_input, verify
 from lab_arena.training_export import ExportError, assemble_example, without_hidden_reasoning
 from lab_arena.output import validate_output_document
 from scripts.export_arena_training import _ledger, write_private
@@ -51,7 +51,7 @@ def fixture():
                                    "snippet": "A new product", "why_now": "Recent launch"}]}
     policy = scoring.build_scorer_policy()
     config = {"scorer_policy": policy, "scorer_image_digest": "sha256:" + "a" * 64,
-              "scorer_image_reference": "registry/scorer@sha256:" + "a" * 64}
+              "scorer_image_reference": "registry.example/scorer@sha256:" + "a" * 64}
     round_row = {"round_id": "arena-2026-10-16", "configuration_doc": config,
                  "status": "published", "rewards_enabled": True, "arena_network_name": "finney",
                  "benchmark_ref": "benchmark", "evaluation_date": "2026-10-16",
@@ -99,10 +99,82 @@ def test_complete_no_external_call_example_is_deterministic_and_has_labels():
     assert first["companies"][0]["label_status"] == "scored"
     assert (first["round_status"], first["rewards_enabled"], first["arena_network_name"]) == ("published", True, "finney")
     assert first["judgment"]["per_icp_score"] == 60
+    identity = first["judgment"]["runtime_identity"]
+    assert identity["selection_basis"] == "frozen_round"
+    assert identity["runtime_image_digest"] == identity["grading_image_digest"] == values["round_row"]["configuration_doc"]["scorer_image_digest"]
     assert assemble_example(**dict(values, runs=list(reversed(values["runs"])))) == first
     unhashed = dict(first)
     del unhashed["example_hash"]
     assert first["example_hash"] == contracts.document_hash(unhashed)
+
+
+def runtime_binding(values, judge):
+    config = values["round_row"]["configuration_doc"]
+    judge["reviewer_runtime_doc"] = {
+        "schema_version": reviewer_runtime.SCHEMA_VERSION,
+        "run_id": judge["run_id"], "lease_generation": judge["lease_generation"],
+        "grading_image_digest": config["scorer_image_digest"],
+        "grading_image_reference": config["scorer_image_reference"],
+        "runtime_image_digest": "sha256:" + "d" * 64,
+        "runtime_image_reference": "registry.example/runtime@sha256:" + "d" * 64,
+    }
+    return judge["reviewer_runtime_doc"]
+
+
+def test_repaired_reviewer_runtime_is_retained_separately_from_frozen_grading():
+    values = fixture()
+    binding = runtime_binding(values, values["runs"][1])
+    result = assemble_example(**values)
+    assert result["completeness"]["complete"]
+    identity = result["judgment"]["runtime_identity"]
+    assert identity == {"selection_basis": "persisted_lease_binding", **binding}
+    assert identity["runtime_image_digest"] != identity["grading_image_digest"]
+    assert next(row for row in result["attempts"] if row["kind"] == "score")["runtime_identity"] == identity
+
+
+@pytest.mark.parametrize("field,value", [
+    ("run_id", "wrong-run"), ("lease_generation", 2),
+    ("grading_image_digest", "sha256:" + "e" * 64),
+    ("runtime_image_reference", "registry.example/runtime@sha256:" + "e" * 64),
+])
+def test_invalid_reviewer_binding_prevents_complete_export(field, value):
+    values = fixture()
+    runtime_binding(values, values["runs"][1])[field] = value
+    result = assemble_example(**values)
+    assert result["completeness"]["dimensions"]["input_output_label"]
+    assert not result["privacy"]["exact_replay"]
+    assert result["completeness"]["reasons_by_dimension"]["source_identity"] == ["reviewer_runtime_identity_unverified"]
+    assert "runtime_identity" not in result["judgment"]
+
+
+def test_reviewer_completion_audit_must_match_persisted_runtime_binding():
+    values = fixture()
+    judge = values["runs"][1]
+    binding = runtime_binding(values, judge)
+    judge["result_doc"]["resource_summary"].update({key: binding[key] for key in reviewer_runtime.AUDIT_FIELDS})
+    assert assemble_example(**values)["completeness"]["complete"]
+    judge["result_doc"]["resource_summary"]["runtime_image_digest"] = "sha256:" + "e" * 64
+    result = assemble_example(**values)
+    assert "reviewer_runtime_identity_unverified" in result["completeness"]["incomplete_reasons"]
+
+
+def test_prior_launched_judge_keeps_its_own_reviewer_runtime_identity():
+    values = fixture()
+    prior = copy.deepcopy(values["runs"][1])
+    prior.update(run_id="prior-judge", status="failed", terminal_cause="judge_timeout", output_ref=None)
+    prior["result_doc"]["started_at"] = "2026-10-16T00:00:00Z"
+    values["runs"][1]["attempt"] = 2
+    binding = runtime_binding(values, prior)
+    values["runs"].append(prior)
+    document = training_input.read_input(values["objects"], "judge:1", "score", 1, CLAIM_HASH)["input"]
+    save_input(values["objects"], prior["run_id"], "score", document)
+    result = assemble_example(**values)
+    assert result["completeness"]["complete"]
+    assert next(row for row in result["attempts"] if row["run_id"] == prior["run_id"])["runtime_identity"] == {"selection_basis": "persisted_lease_binding", **binding}
+    binding["lease_generation"] = 2
+    result = assemble_example(**values)
+    assert result["completeness"]["dimensions"]["source_identity"]
+    assert "reviewer_runtime_identity_unverified" in result["completeness"]["reasons_by_dimension"]["research_process"]
 
 
 def test_missing_snapshot_preserves_verified_labels_but_cannot_claim_full_process():

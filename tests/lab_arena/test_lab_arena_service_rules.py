@@ -2457,19 +2457,31 @@ def test_each_new_day_uses_the_public_baseline_even_after_a_miner_won_yesterday(
     ]
 
 
-def test_score_lease_uses_the_round_pinned_scorer_after_restart():
+@pytest.mark.parametrize("with_runtime", [False, True])
+def test_score_lease_uses_the_round_pinned_scorer_after_restart(with_runtime):
     runner = "5" * 48
     pinned_digest = "sha256:" + "a" * 64
     pinned_reference = "registry.example/lab/scorer@" + pinned_digest
+    runtime_digest = "sha256:" + "c" * 64
+    runtime_reference = "registry.example/lab/runtime@" + runtime_digest
+    runtime_doc = {
+        "schema_version": "leadpoet.lab_arena.reviewer_runtime.v1",
+        "run_id": "score-1", "lease_generation": 1,
+        "grading_image_digest": pinned_digest, "grading_image_reference": pinned_reference,
+        "runtime_image_digest": runtime_digest, "runtime_image_reference": runtime_reference,
+    } if with_runtime else None
 
     class Store:
         def claim_assignment(self, **_kwargs):
-            return {"status": "leased", "kind": "score", "submission_id": "sub-1", "scored_run_id": "execute-1", "icp_position": 0}
+            return {"status": "leased", "run_id": "score-1", "lease_generation": 1, "kind": "score", "submission_id": "sub-1", "scored_run_id": "execute-1", "icp_position": 0}
 
         def get_submission(self, _submission_id):
             return {"code_review_status": "passed"}
 
         def get_run(self, _run_id):
+            if _run_id == "score-1":
+                return {"run_id": "score-1", "kind": "score", "lease_generation": 1,
+                        "reviewer_runtime_doc": runtime_doc}
             return {"output_ref": "out.json"}
 
     class Objects:
@@ -2503,7 +2515,12 @@ def test_score_lease_uses_the_round_pinned_scorer_after_restart():
     service.benchmark_icps = lambda _round_id: [{}]
 
     lease = service.handle_claim({})
-    assert (lease["image_digest"], lease["image_reference"]) == (pinned_digest, pinned_reference)
+    assert (lease["image_digest"], lease["image_reference"]) == (
+        (runtime_digest, runtime_reference) if with_runtime else (pinned_digest, pinned_reference)
+    )
+    assert configuration["scorer_image_digest"] == pinned_digest
+    if with_runtime:
+        assert lease["reviewer_runtime_doc"] == runtime_doc
 
 
 def _runner_claim_service(*, registered, role, configured=False):

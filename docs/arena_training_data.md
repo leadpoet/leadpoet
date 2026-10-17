@@ -191,8 +191,8 @@ can increase memorization and contaminate evaluation: [Lee et al., ACL 2022](htt
 
 ## Verification record
 
-The integrated candidate includes remote main through `60e4483a0`. The final local
-gate passed **457 tests in 48.99 seconds**, with no failures or skips and one
+The integrated candidate includes remote main through `e724c9240`. The combined
+local gate passed **500 tests in 49.09 seconds**, with no failures or skips and one
 existing multipart deprecation warning. It covered capture, input, export,
 lease/billing failures, runner, API, gateway proxy/edge and fresh-round verification.
 Python compilation, whitespace checks and AGENTS/CLAUDE parity passed. Independent
@@ -228,10 +228,12 @@ weight-chain and OTLP issues, with no collection-specific issue. The absence of
 a collection alert did not detect the missing prompts. No unrelated incident was
 changed or marked resolved.
 
-**Release status: implemented and locally verified, not yet deployed.** The session
-does not expose the GitHub connector required by repository instructions for PRs
-and merges. Canonical deployment and the fresh reward-disabled proof remain
-pending that connection. No database migration is required.
+**Release status: implementation and integration verification complete; deployment
+and fresh live proof are in progress.** The authenticated GitHub App API confirms
+repository push access. The earlier connector-availability concern was incorrect.
+No database migration is required for collection. The integrated exporter also
+validates each selected and prior launched judge runtime against its persisted
+lease binding, separately from the frozen grading image.
 
 The committed verifier supports a fresh, baseline-only two-ICP proof (the minimum
 valid round size) with one worker slot, frozen public ICP selection and rewards

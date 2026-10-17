@@ -43,7 +43,7 @@ import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
 from lab_arena import trajectory, validator_events
-from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, runtime, runtime_version, scoring, shim, source_bundle, training_input
+from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, reviewer_runtime, runtime, runtime_version, scoring, shim, source_bundle, training_input
 from lab_arena.contracts import ArenaContractError
 from lab_arena.broker import (
     provider_authentication_failure_reason, provider_credit_failure_reason,
@@ -3365,6 +3365,7 @@ def _runtime_source_metadata(lease: Mapping[str, Any]) -> Dict[str, str]:
         "gateway_claim_source_commit": runtime_version.commit_or_unknown(
             lease.get("gateway_source_commit")
         ),
+        **reviewer_runtime.audit_metadata(lease),
     }
 
 

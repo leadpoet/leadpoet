@@ -14,7 +14,7 @@ import re
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
-from lab_arena import contracts, contact_policy, integrity, scoring, source_bundle, verify
+from lab_arena import contracts, contact_policy, integrity, reviewer_runtime, scoring, source_bundle, verify
 from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
@@ -126,6 +126,24 @@ def _runtime(row):
     return {key: copy.deepcopy(result[key]) for key in
             ("started_at", "finished_at", "terminal_status", "resource_summary", "failure_diagnostic")
             if key in result}
+
+
+def _reviewer_runtime_identity(row, configuration):
+    """Retain lease selection separately from frozen grading, not attestation."""
+    binding = reviewer_runtime.lease_binding(row, configuration)
+    reviewer_runtime.validate_completion_audit(
+        row, configuration, row.get("result_doc") or {},
+    )
+    if binding is not None:
+        return {"selection_basis": "persisted_lease_binding", **binding}
+    # Historical score leases predate runtime repairs and used the frozen image.
+    return {
+        "selection_basis": "frozen_round",
+        "grading_image_digest": configuration["scorer_image_digest"],
+        "grading_image_reference": configuration["scorer_image_reference"],
+        "runtime_image_digest": configuration["scorer_image_digest"],
+        "runtime_image_reference": configuration["scorer_image_reference"],
+    }
 
 
 def _verified_runtime_source(resource):
@@ -474,7 +492,17 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 or resource.get("wall_seconds", 0)):
             launched_ids.add(row["run_id"])
     snapshot_ids = selected_ids | launched_ids
+    attempt_by_id = {row["run_id"]: row for row in example["attempts"]}
     for selected_id in sorted(snapshot_ids):
+        if by_id[selected_id]["kind"] == "score":
+            try:
+                identity = _reviewer_runtime_identity(by_id[selected_id], config)
+                attempt_by_id[selected_id]["runtime_identity"] = identity
+                if selected_id == example.get("score_run_id"):
+                    example["judgment"]["runtime_identity"] = copy.deepcopy(identity)
+            except (reviewer_runtime.ReviewerRuntimeError, KeyError, TypeError, ValueError):
+                dimension = "source_identity" if selected_id in selected_ids else "research_process"
+                reasons[dimension].add("reviewer_runtime_identity_unverified")
         selected_resource = (by_id[selected_id].get("result_doc") or {}).get("resource_summary") or {}
         if selected_id in selected_ids and not _verified_runtime_source(selected_resource):
             reasons["source_identity"].add("runtime_source_unverified")

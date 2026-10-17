@@ -11,7 +11,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_arena import contracts, runner, scoring, training_input
+from lab_arena import contracts, reviewer_runtime, runner, scoring, training_input
 from lab_arena.api import create_app
 from lab_arena.service import ArenaService, LocalObjectStore, ServiceError
 from lab_arena.store import hash_lease_token
@@ -182,6 +182,14 @@ def test_judge_capture_retains_validated_recovery_context(tmp_path, context):
         scored_output={"companies": document["companies"]},
     )
     active[context] = extra
+    active["reviewer_runtime_doc"] = {
+        "schema_version": reviewer_runtime.SCHEMA_VERSION,
+        "run_id": active["run_id"], "lease_generation": active["lease_generation"],
+        "grading_image_digest": "sha256:" + "a" * 64,
+        "grading_image_reference": "registry.example/scorer@sha256:" + "a" * 64,
+        "runtime_image_digest": active["image_digest"],
+        "runtime_image_reference": active["image_reference"],
+    }
     snapshots = []
     class CapturingApi(FakeApi):
         def training_input(self, run_id, token, value):
@@ -193,6 +201,10 @@ def test_judge_capture_retains_validated_recovery_context(tmp_path, context):
     assert runner.Runner(make_config(tmp_path, api, sandbox)).run_once() == 1
     assert snapshots[0] == sandbox.input_documents[0]
     assert snapshots[0][context] == extra
+    summary = api.completions[0]["body"]["result"]["resource_summary"]
+    assert {key: summary[key] for key in reviewer_runtime.AUDIT_FIELDS} == {
+        key: active["reviewer_runtime_doc"][key] for key in reviewer_runtime.AUDIT_FIELDS
+    }
 
 
 def test_unconfigured_capture_does_not_use_main_object_client(tmp_path):

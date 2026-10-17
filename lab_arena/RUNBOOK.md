@@ -399,6 +399,46 @@ when an existing open round atomically commits its benchmark. This lets a
 deployed scorer fix apply before any work is created. The committed scorer
 pin and every other round setting remain immutable.
 
+### Frozen grading and repairable reviewer runtime
+
+The round's `scorer_image_digest/reference` remains its immutable grading and
+cache identity. Never change it to repair unfinished reviews. Grading prompts,
+models, evidence rules, scoring code and dependencies remain in that image.
+
+`scripts/build_arena_reviewer_runtime.py --grading-image <digest-reference>`
+composes one runtime image on that exact base. It does not rebuild dependencies
+or copy current grading modules. The only added code is the dedicated
+`arena_reviewer_runtime` package and a checked extraction of the investigator's
+admission/transport interface and scorer checkpoint/output IO. Unknown source
+shapes fail the build. The tool
+checks the actual added image layer and unchanged process configuration.
+For already separated graders, the grading file remains byte-identical.
+
+Deploy a verified composition through the trusted reviewer-runtime mapping.
+The mapping is separate from frozen round configuration. A score lease pins
+the selected runtime when its generation starts. A later deployment cannot
+change that lease's image; a later unfinished retry can use the repair.
+Execution images, accepted judgments, frozen cache keys, partial checkpoints,
+provider request identity and score calculation do not change. The normal
+judge queue and completion path remain the only scoring path.
+
+Apply migration `495-lab-arena-reviewer-runtime-selection.sql` through the
+canonical migration helper. Build with `--push`, then independently verify the
+published digest with `--verify-image`. On the reviewed gateway release, run
+`scripts/register_arena_reviewer_runtime.py` with `--grading-image`,
+`--runtime-image`, and the protected `--environment-file`. Its default is a
+read-only plan; activation requires `--apply` and
+`LEADPOET_ARENA_REVIEWER_RUNTIME_APPLY=1`. Do not update a frozen round or
+replace the default grader with an older round's runtime image. Rollback uses
+the same registration command to select the original grading image for future
+leases; existing leases and accepted work stay intact.
+
+Before activation, replay the affected failure and completed positive/negative
+controls. Compare original and extracted request payloads and grading outputs.
+After activation, check both grading and runtime identities on actual leases,
+accepted-work hashes, cost settlement, publication and downstream weights.
+Successful image construction or a host restart alone does not prove recovery.
+
 ### Verify a scorer release separately from a host release
 
 A gateway or validator restart does not rebuild the scorer image. The CI image

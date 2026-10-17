@@ -571,3 +571,76 @@ def test_credential_insert_wait_rolls_back_admission_after_deadline(
     finally:
         blocker.close()
         observer.close()
+
+
+def test_service_presign_replay_returns_one_persisted_upload_reservation(store, database, monkeypatch):
+    """A new server candidate ID must not turn a retry into a second reservation."""
+    from types import SimpleNamespace
+
+    from lab_arena import service as service_module
+    from tests.lab_arena.cutover_opening_test import bare_service
+
+    round_id = "arena-2098-05-18-replay"
+    miner = _hotkey("service-presign-replay")
+    config = _config(round_id, cutoff_after=timedelta(hours=3))
+    config.update(stage_1_icp_count=1, stage_2_icp_count=1)
+    store.create_round(round_id, config)
+    row = store.get_round(round_id)
+    envelope = {"round_id": round_id, "request_id": "same-signed-request", "body": {
+        "source_size_bytes": 123,
+        "source_content_md5": base64.b64encode(hashlib.md5(b"source").digest()).decode(),
+        "consent": {"public_rerun": True},
+    }}
+    service = bare_service(datetime.now(timezone.utc))
+    service._store = store
+    service._config.chain = SimpleNamespace(uid_for_hotkey=lambda hotkey: 0 if hotkey == miner else None)
+    validated_requests = []
+
+    def validated_request(request, **kwargs):
+        assert request is envelope
+        validated_requests.append(request)
+        return {"hotkey": miner, "body": request["body"]}, row
+
+    # The signed-envelope boundary has independent signature tests. Exercise the
+    # actual service, store and SQL reservation authority after that boundary.
+    service._request_round = validated_request
+    candidates = iter(["a" * 32, "b" * 32])
+    monkeypatch.setattr(service_module.secrets, "token_hex", lambda length: next(candidates))
+    registrations = []
+    register = store.register_submission
+
+    def record_registration(*args, **kwargs):
+        result = register(*args, **kwargs)
+        registrations.append((args[1], result))
+        return result
+
+    monkeypatch.setattr(store, "register_submission", record_registration)
+    upload_refs = []
+
+    def presign_put(source_ref, **kwargs):
+        upload_refs.append(source_ref)
+        assert kwargs["source_content_md5"] == envelope["body"]["source_content_md5"]
+        return {"upload_url": "https://uploads.example/same-object", "upload_headers": {},
+                "expires_in_seconds": 600}
+
+    service._objects = SimpleNamespace(presign_put=presign_put)
+    first = service.handle_submission_presign(envelope)
+    replay = service.handle_submission_presign(envelope)
+    assert first == replay
+    assert [candidate for candidate, _ in registrations] == ["sub-" + "a" * 32, "sub-" + "b" * 32]
+    assert [result["status"] for _, result in registrations] == ["registered", "existing"]
+    assert first["submission_id"] == "sub-" + "a" * 32
+    assert upload_refs == [first["source_ref"], first["source_ref"]]
+    assert len(validated_requests) == 2
+    rows = store.list_submissions(round_id)
+    assert len(rows) == 1 and rows[0]["submission_id"] == first["submission_id"]
+    assert rows[0]["status"] == "uploading"
+    assert rows[0]["source_ref"] == first["source_ref"]
+    assert store.get_submission("sub-" + "b" * 32) is None
+    psycopg2, dsn = database
+    with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT count(*) FROM public.lab_arena_submission_credentials "
+            "WHERE submission_id=%s", (first["submission_id"],),
+        )
+        assert cursor.fetchone()[0] == 0

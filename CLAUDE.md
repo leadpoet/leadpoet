@@ -25,6 +25,16 @@ round configuration, accepted results, caches, checkpoints, cost controls and
 competition rules. Only unfinished judgments may use the repaired runtime;
 do not rescore published October 13 outcomes. Verify exact grading bytes,
 lease-pinned runtime identity, provider settlement and accepted-work immutability.
+The user additionally approved the exact PR483 completion correction for
+unfinished judgments only: an explicit empty optional observed LinkedIn slug
+must not prevent a complete, healthy UNPROVEN investigation from reaching
+terminal finality. Apply only that predicate delta to the frozen grading source
+through the existing verified image composer, with an explicit correction in
+its evidence. Preserve factual findings, evidence validation, qualification and
+numeric scores; UNPROVEN remains zero. Preserve accepted judgments, round
+configuration, caches, checkpoints, provider failures and all other grading
+bytes. This does not authorize a current-grader transplant or replay of
+accepted work.
 This authority ends after the October 16 cycle and production validation finish.
 
 

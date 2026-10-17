@@ -33,6 +33,7 @@ class ReviewerAdmission:
 
     def next_turn(
         self, *, elapsed: float, serialization_retry_pending: bool,
+        final_correction_eligible: bool = False,
     ) -> Admission:
         late_submit = bool(
             self._late_submit_pending and elapsed >= self._admission_seconds
@@ -42,13 +43,19 @@ class ReviewerAdmission:
             elapsed >= self._admission_seconds
             and not serialization_retry_pending
             and not late_submit
+            and not final_correction_eligible
         ):
             return Admission("stop")
         return Admission(
             "submit_only"
             if elapsed >= self._admission_seconds - self._judgment_reserve_seconds
             else "ordinary",
-            restrict_tools=late_submit,
+            # The grading loop alone admits its existing conditional final
+            # correction turn. Let that submit-only turn settle after an
+            # admitted judgment crosses the deadline; add no ordinary turn.
+            restrict_tools=late_submit or bool(
+                final_correction_eligible and elapsed >= self._admission_seconds
+            ),
             serialization_expired=bool(
                 serialization_retry_pending
                 and elapsed >= (

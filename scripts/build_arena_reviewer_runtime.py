@@ -3,7 +3,9 @@
 
 The original image layers, dependencies and process configuration stay intact.
 Only the dedicated runtime package and reviewed operational-interface
-extractions can be added. They do not import today's grading code.
+extractions can be added by default. An explicit option applies only the
+approved PR483 terminal-negative correction to extracted frozen source.
+Neither path imports today's grading code.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 GRADER_FILE = "qualification/scoring/company_evidence_investigator.py"
+FINALITY_FILE = "qualification/scoring/lead_scorer.py"
 ENTRYPOINT_FILES = ("lab_arena/scorer_entrypoint.py", "scorer_entrypoint.py")
 RUNTIME_DIRECTORY = "arena_reviewer_runtime"
 MAX_OVERLAY_BYTES = 4 * 1024 * 1024
@@ -121,11 +124,16 @@ def verify_saved_overlay(reference: str, digest: str, expected: dict[str, bytes]
             process.wait()
 
 
-def extract_frozen_sources(reference: str, destination: Path) -> dict[str, bytes]:
+def extract_frozen_sources(
+    reference: str, destination: Path, *, complete_negative_finality: bool = False,
+) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
         files = {}
-        for name in (GRADER_FILE, *ENTRYPOINT_FILES):
+        names = (GRADER_FILE, *ENTRYPOINT_FILES)
+        if complete_negative_finality:
+            names += (FINALITY_FILE,)
+        for name in names:
             path = destination / name
             path.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["docker", "cp", container + ":/model/" + name,
@@ -136,14 +144,22 @@ def extract_frozen_sources(reference: str, destination: Path) -> dict[str, bytes
         subprocess.run(["docker", "rm", container], check=True, stdout=subprocess.DEVNULL)
 
 
-def expected_overlay(original: dict[str, bytes]) -> dict[str, bytes]:
+def expected_overlay(
+    original: dict[str, bytes], *, complete_negative_finality: bool = False,
+) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
 
-    if set(original) != {GRADER_FILE, *ENTRYPOINT_FILES}:
+    expected = {GRADER_FILE, *ENTRYPOINT_FILES}
+    if complete_negative_finality:
+        expected.add(FINALITY_FILE)
+    if set(original) != expected:
         raise CompositionError("frozen operational sources are incomplete")
     files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
     files.update({name: convert_checkpoint_seam(original[name]) for name in ENTRYPOINT_FILES})
+    if complete_negative_finality:
+        from scripts.arena_reviewer_finality_seam import convert_finality_seam
+        files[FINALITY_FILE] = convert_finality_seam(original[FINALITY_FILE])
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -158,6 +174,10 @@ def main() -> int:
     parser.add_argument("--grading-image", required=True)
     parser.add_argument("--verify-image", help="verify an existing composition instead of building")
     parser.add_argument("--push", action="store_true")
+    parser.add_argument(
+        "--complete-negative-finality", action="store_true",
+        help="apply only the approved PR483 terminal-negative correction; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
@@ -172,9 +192,17 @@ def main() -> int:
         raise CompositionError("grading image must be linux/amd64")
     with tempfile.TemporaryDirectory(prefix="arena-reviewer-") as directory:
         root = Path(directory)
-        original = extract_frozen_sources(args.grading_image, root / "original")
-        files = expected_overlay(original)
-        tag = args.verify_image or (match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12])
+        original = extract_frozen_sources(
+            args.grading_image, root / "original",
+            complete_negative_finality=args.complete_negative_finality,
+        )
+        files = expected_overlay(
+            original, complete_negative_finality=args.complete_negative_finality,
+        )
+        tag = args.verify_image or (
+            match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
+            + ("-negative-finality" if args.complete_negative_finality else "")
+        )
         if not args.verify_image:
             for name, data in files.items():
                 path = root / "overlay" / name
@@ -197,12 +225,14 @@ def main() -> int:
             if len(matching) != 1:
                 raise CompositionError("published runtime digest is ambiguous")
             reference = matching[0]
+        from scripts.arena_reviewer_finality_seam import CORRECTION_ID
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,
             "runtime_source_commit": revision,
             "base_layers_unchanged": True,
             "process_configuration_unchanged": True,
+            "grading_corrections": ([CORRECTION_ID] if args.complete_negative_finality else []),
             "original_files": {name: hashlib.sha256(value).hexdigest() for name, value in original.items()},
             "overlay_files": {name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
         }, sort_keys=True))

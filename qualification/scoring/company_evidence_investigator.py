@@ -3897,6 +3897,9 @@ async def investigate_company_evidence(
                 turn_admission = admission.next_turn(
                     elapsed=elapsed,
                     serialization_retry_pending=late_serialization_retry_pending,
+                    final_correction_eligible=(
+                        correction_turn and final_correction_pending
+                    ),
                 )
                 if turn_admission.mode == "stop":
                     return interrupted_result(_turn)

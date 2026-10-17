@@ -2,8 +2,9 @@
 
 Only the reviewed admission blocks below can change. All prompts, model
 configuration, evidence rules, counters, and other source bytes are retained.
-Unknown or partial conversion shapes fail closed. Already converted source is
-returned byte-for-byte; there is no source-version or image-digest dispatch.
+Unknown or partial conversion shapes fail closed. A complete runtime hook may
+receive only the existing final-correction eligibility binding; otherwise it
+is returned byte-for-byte. There is no source-version or image-digest dispatch.
 """
 
 from __future__ import annotations
@@ -11,6 +12,12 @@ from __future__ import annotations
 
 class AdmissionSeamError(ValueError):
     """The frozen source does not have a reviewed admission shape."""
+
+
+_CORRECTION_ELIGIBILITY_ARGUMENT = """                    final_correction_eligible=(
+                        correction_turn and final_correction_pending
+                    ),
+"""
 
 
 # Alternatives cover admission before and after the late-settlement repair.
@@ -166,6 +173,9 @@ from arena_reviewer_runtime.transport import post_json
                 turn_admission = admission.next_turn(
                     elapsed=elapsed,
                     serialization_retry_pending=late_serialization_retry_pending,
+                    final_correction_eligible=(
+                        correction_turn and final_correction_pending
+                    ),
                 )
                 if turn_admission.mode == "stop":
                     return interrupted_result(_turn)
@@ -293,14 +303,17 @@ def convert_admission_seam(source: bytes) -> bytes:
     for alternatives, replacement in _REPLACEMENTS:
         # Longest first: the unconverted prefix may also occur in the
         # converted block. Exactly one full matching block is required.
-        matches = [old for old in alternatives if old in text]
+        matches = [old for old in (*alternatives, replacement) if old in text]
         if not matches:
             raise AdmissionSeamError("unrecognized reviewer admission block")
         old = max(matches, key=len)
         if text.count(old) != 1:
             raise AdmissionSeamError("ambiguous reviewer admission block")
         text = text.replace(old, replacement, 1)
-    if already_converted and text != original:
+    if (
+        already_converted and text != original
+        and text.replace(_CORRECTION_ELIGIBILITY_ARGUMENT, "", 1) != original
+    ):
         raise AdmissionSeamError("reviewer admission interface is incomplete")
     compile(text, "company_evidence_investigator.py", "exec")
     return text.encode("utf-8")

@@ -133,6 +133,27 @@ def test_exact_numeric_response_remains_usable_with_bound_id_and_name(monkeypatc
     assert evidence["employee_count"] == "51-200"
 
 
+@pytest.mark.parametrize("expected_name", ["Acme", "Unrelated Company"])
+@pytest.mark.parametrize("projector", [
+    linkedin.project_structured_linkedin_company_description,
+    linkedin.project_structured_linkedin_company_headquarters,
+])
+def test_exact_numeric_description_and_hq_keep_existing_name_binding(projector, expected_name):
+    body = _body(
+        linkedinUrl=NUMERIC,
+        description="Acme develops payment software.",
+        locations=[{"headquarter": True, "country": "United States",
+                    "geographicArea": "California", "city": "San Francisco"}],
+    )
+    evidence = projector(DOMAIN, NUMERIC, expected_name, body)
+    if expected_name == "Acme":
+        assert evidence["name"] == "Acme, Inc."
+        assert evidence["url"] == NUMERIC
+        assert evidence["text"]
+    else:
+        assert evidence is None
+
+
 def test_nested_organization_and_multiple_roots_cannot_supply_identity():
     body = _body(name="Unrelated Company")
     body["result"]["data"]["element"]["similarOrganizations"] = [

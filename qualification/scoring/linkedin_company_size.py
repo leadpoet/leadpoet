@@ -656,6 +656,7 @@ def project_structured_linkedin_company_description(
         requested_domain,
         requested_profile_url,
         payload,
+        expected_company_name=expected_company_name,
     )
     elements = _structured_company_elements(payload)
     normalized_expected_name = _company_name(expected_company_name)
@@ -700,6 +701,7 @@ def project_structured_linkedin_company_headquarters(
 
     identity = project_structured_linkedin_company_identity(
         requested_domain, requested_profile_url, payload,
+        expected_company_name=expected_company_name,
     )
     elements = _structured_company_elements(payload)
     if (

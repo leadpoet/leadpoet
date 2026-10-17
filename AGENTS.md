@@ -1729,7 +1729,7 @@ The user explicitly authorized `$overnight-rebenchmark-validation` on 2026-09-09
 
 8. Resolve minor ambiguity by inspecting the existing context and conventions, choosing a reversible and in-scope assumption, proceeding, and disclosing it. Ask only when my input would materially change the outcome or authorize a destructive, external, or high-impact action.
 
-9. GitHub is authenticated through the GitHub App and git credential helper. Do not gate GitHub work on gh auth status; use git for pushes and the GitHub connector for PRs, checks, and merges.
+9. GitHub is authenticated through the GitHub App and git credential helper. Do not gate GitHub work on gh auth status; use git for pushes.
 
 10. For repository work, fetch the authoritative remote at the start or resumption of every task. For new task branches or worktrees, use the latest remote default branch unless the requested work requires another base; continue existing PR or release work from its relevant branch. Before readiness, handoff, push, PR, or merge, fetch again and verify that every repository checkout includes its latest intended base and any stacked parent. Preserve dirty work; resolve restack failures in a clean worktree. Keep development and tests tied to the edited checkout, sync through commits or PRs, and never copy into a mixed dirty tree.
 

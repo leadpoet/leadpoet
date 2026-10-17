@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 import pytest
 
-from lab_arena import broker as br, contracts, operations, training_capture as capture
+from lab_arena import broker as br, contracts, operations, trajectory, training_capture as capture
 from lab_arena.service import LocalObjectStore
 from tests.lab_arena.test_lab_arena_broker import (
     CONTEXT, FakeLedgerStore, FakeTransport, HOST_KEYS, make_broker,
@@ -93,6 +93,54 @@ def test_secret_redaction_is_explicit_without_changing_safe_reasoning_config(tmp
     assert pointer["redacted"] is True
     assert pointer["redactions"] == ["credential", "hidden_reasoning"]
     assert restored["admitted_parameters"]["reasoning"] == {"effort": "high", "exclude": True}
+
+
+@pytest.mark.parametrize("value", [None, "", {}, []])
+def test_empty_credential_fields_roundtrip_without_false_redactions(tmp_path, value):
+    document = _document()
+    document["optional"] = {key: value for key in (
+        "authorization", "api_key", "credentials", "private_key", "session_token",
+    )}
+    objects = LocalObjectStore(tmp_path)
+    pointer = capture.RequestCapture(objects)(document)
+    restored = capture.read_request(objects, pointer)
+    assert restored["optional"] == document["optional"]
+    assert pointer["redacted"] is False and pointer["redactions"] == []
+    assert restored["privacy"] == {"redacted": False, "redactions": []}
+
+
+@pytest.mark.parametrize("value", [False, 0, (), {"value": None}, [""], "nonempty-secret"])
+def test_nonempty_or_non_json_empty_credential_values_still_redact(value):
+    cleaned, reasons = capture.sanitize_training_value({"api_key": value, "credentials": value})
+    assert cleaned == {"api_key": "[REDACTED]", "credentials": "[REDACTED]"}
+    assert reasons == ["credential"]
+
+
+def test_private_json_nul_roundtrip_keeps_diagnostic_escaping_default(tmp_path):
+    text = "before\x00after"
+    assert trajectory.redact_text(text) == "before\\u0000after"
+    assert trajectory.redact_text(text, escape_nul=False) == text
+    document = {"content": text, "key\x00part": "value"}
+    objects = LocalObjectStore(tmp_path)
+    pointer = capture.RequestCapture(objects)(document)
+    restored = capture.read_request(objects, pointer)
+    assert all(restored[key] == value for key, value in document.items())
+    assert pointer["redacted"] is False and pointer["redactions"] == []
+    encoded = gzip.decompress(objects.get(pointer["ref"]))
+    assert b"\x00" not in encoded and b"\\u0000" in encoded
+
+
+def test_private_nul_preservation_does_not_weaken_real_credential_redaction():
+    secret = "known-private-secret"
+    auth = "a" * 64
+    text = ("start\x00 " + secret + " Bearer abcdefghijklmnop "
+            "api_key=another-private-key sk-abcdefghijklmnopq "
+            "https://example.test/file?auth=" + auth)
+    cleaned, reasons = capture.sanitize_training_value({"content": text}, secrets=(secret,))
+    assert "\x00" in cleaned["content"]
+    assert reasons == ["credential"]
+    for private in (secret, "abcdefghijklmnop", "another-private-key", "sk-abcdefghijklmnopq", auth):
+        assert private not in cleaned["content"]
 
 
 def test_hidden_reasoning_items_are_redacted_but_model_visible_summary_remains():

@@ -323,7 +323,7 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         if request.method == "POST"
         and len(parts) == 4
         and parts[:2] == ["v1", "runs"]
-        and parts[3] == "training-input"
+        and parts[3] in {"training-input", "training-observations"}
         else _MAX_VALIDATOR_EVENTS_REQUEST_BYTES
         if request.method == "POST" and arena_path == "v1/validators/events"
         else _MAX_REQUEST_BYTES

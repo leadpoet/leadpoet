@@ -107,7 +107,9 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = ()) -> tuple[An
             return url
 
         text = _URL_RE.sub(clean_url, text)
-        return trajectory.redact_text(text, tuple(variants))
+        # JSON escapes NUL losslessly. Diagnostic stream escaping would change
+        # private evidence and falsely report a credential redaction.
+        return trajectory.redact_text(text, tuple(variants), escape_nul=False)
 
     def request_config_path(path: tuple[str, ...]) -> bool:
         # The same request is sanitized first as a standalone blob and later
@@ -150,7 +152,14 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = ()) -> tuple[An
                     and set(child) <= _CONFIG_KEYS
                     and all(isinstance(v, (str, bool, int)) or v is None for v in child.values())
                 )
-                if trajectory._SENSITIVE_KEY_RE.fullmatch(normalized) or normalized in _EXTRA_SECRET_KEYS:
+                # False and zero retain the existing sensitive-value handling.
+                empty_credential = child is None or (
+                    isinstance(child, (str, dict, list)) and len(child) == 0
+                )
+                if (
+                    trajectory._SENSITIVE_KEY_RE.fullmatch(normalized)
+                    or normalized in _EXTRA_SECRET_KEYS
+                ) and not empty_credential:
                     result[key] = "[REDACTED]"
                     reasons.add("credential")
                 elif normalized in _HIDDEN_KEYS or (normalized == "reasoning" and not safe_config) or (

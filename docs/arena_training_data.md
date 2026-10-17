@@ -51,6 +51,34 @@ from complete-example export and are not additional independent demonstrations.
 The published reward pool was unaffected. One more execution completed during
 the audit; the inventory above remains the original consistent snapshot.
 
+A later cache inventory found 7,049 run-judgment cache records covering 5,774
+distinct scoring input hashes and 12,860 company breakdowns. The published reward
+subset contained 7,579 breakdowns, including 910 marked `company_qualified=true`,
+across 1,867 company identity keys and 33 scorer images. These are candidate labels,
+not a reviewed training set or a count of unique legal companies. The separate
+company cache contained only 67 rows from 61 source judges. It is not the main
+historical label store. Select a compatible policy cohort before counting useful
+examples; exclude infrastructure failures and skipped cases, and deduplicate
+repeated evidence and cached judgments before splitting the data.
+
+The largest published-reward scorer-image cohort illustrates the duplication:
+531 distinct scoring inputs with nonempty breakdowns contained 1,440 company
+labels, including 214 qualified labels, but only 236 company identity keys and
+35 qualified company keys. The cohort's scorer digest is
+`sha256:be2c560cf8fc8b21d5854f5f0509e175a03846c81758901a35e726ccff25a848`.
+Its 1,226 nonempty failure reasons require classification before using them as
+negative examples. One scorer image is a useful first filter, not proof that
+every frozen policy is identical. These counts support a small curation and
+evaluation pilot, not a claim of broad generalization or a ready training split.
+
+The October 17 follow-up count had 779 positive accepted executions in published
+reward rounds. Of these, 346 explicitly reported zero direct web connections.
+Only 92 also had a recorded 40-character source commit and an explicit zero local
+refusal count. Another 27 lacked the refusal field; absence is not proof of zero.
+These filters identify candidates for further review, not complete trajectories:
+historical prompts, responses, label authority, source trust and deduplication
+still require verification.
+
 ## Actual data path
 
 1. A round freezes participants, source object references, the benchmark and ICP
@@ -82,6 +110,7 @@ are corroborating views; neither proves collection completeness.
 | Full model/tool request | Hash and short projection; prompt text discarded | Private content-addressed gzip object; immutable reservation holds its pointer |
 | Requested vs effective model/parameters | Spread over summaries and routing code | Retain admitted, normalized, hashed and effective parameters plus credential-free outbound body, target and route |
 | Full returned response | Usually already in `terminal_response.body_b64`; diagnostic view truncated | Reuse and verify the existing receipt; do not write a duplicate response object |
+| Worker-visible failures and local calls | Transport failures, local catalog replies and local refusals can lack a paid receipt | One bounded private artifact per run lease retains exceptional requests and returned outcomes; normal paid successes reuse the ledger |
 | Provider identity | Broker provider, response model, route and billing records differ | Preserve each with its role; never infer physical model identity from a requested alias alone |
 | ICP/company/final output | Present in separate frozen objects | Exact round/position/submission/output joins; retain company order |
 | Labels | Full score objects and cache authorities; run score alone insufficient | Verify existing production evidence rules and recompute per-ICP score; reject ambiguity |
@@ -96,11 +125,19 @@ The exporter must read and hash-check its object before it accepts it.
 
 Capture uses the existing private object store, immutable objects, deterministic
 gzip, size limits and a separate S3 client with bounded timeouts and no SDK retries.
+The October 17 production readback confirmed all four bucket public-access blocks,
+enabled versioning and default AES256 encryption. The host role could not read the
+bucket policy-status API; no policy was changed.
 No new database table, queue, background monitor, dependency or lineage service is
 required. Input uploads require an active owned lease before storage. Request
 object writes occur only after accounting admission. Capture failure cannot change
 the provider's accounting or score rules. It produces incomplete training evidence.
-The bounded storage call adds some latency; a fresh live proof is still required.
+The worker uploads its exceptional observations before completion, while its lease
+is active. The artifact binds the run, lease generation and claim request hash.
+The exporter checks its hash, count and action links. Worker evidence never becomes
+a provider receipt or a settled charge. Overflow, lost upload and unfinished socket
+handlers remain explicit gaps. The bounded storage calls add some latency; a fresh
+live proof is still required.
 
 The full payload limit is explicit. Oversized or unavailable evidence is rejected
 as a training source; it is never silently clipped and called complete. Credentials
@@ -113,9 +150,10 @@ are separate properties from label validity.
   TLS traffic cannot be reconstructed. Runs using it are excluded from complete
   process training unless their relevant observations are independently retained.
   This change does not introduce a TLS interception proxy.
-- Local frozen-catalog discovery has no paid ledger reservation. Its diagnostic
-  events can be abbreviated. A count mismatch cannot certify these calls as full.
-  Use a broker-only subset for a first complete call-trajectory experiment.
+- Historical local frozen-catalog discovery has no paid ledger reservation. Its
+  diagnostic events can be abbreviated. New worker observations retain the full
+  returned catalog, while the exporter continues to reject an unexplained count
+  mismatch. Use a broker-only subset for a first complete call-trajectory experiment.
 - Hidden provider chain of thought is not a collection target. Unlogged internal
   variables or private provider search steps are not recoverable. Explicit model
   messages and returned tool outputs are the available training state.
@@ -168,6 +206,12 @@ constraints exclude request/response bodies. Encrypted artifact envelopes remain
 opaque without the original protected decryption path. No full restore or key
 export was performed, and this archive is not counted as recoverable training
 examples. Retain it unchanged.
+
+The validator also retained 14 old `input/icp.json` files from September 5 and 8.
+They were about 2 KB each and did not identify a run, round, assignment or lease
+generation. The normal runner deletes its temporary run directory on completion.
+These local files cannot establish complete historical trajectories or replace
+the new immutable input snapshot. They were left unchanged.
 
 ## Export and first experiment
 
@@ -228,9 +272,10 @@ weight-chain and OTLP issues, with no collection-specific issue. The absence of
 a collection alert did not detect the missing prompts. No unrelated incident was
 changed or marked resolved.
 
-**Release status: implementation and integration verification complete; deployment
-and fresh live proof are in progress.** The authenticated GitHub App API confirms
-repository push access. The earlier connector-availability concern was incorrect.
+**Verification status: production deployment is verified; the complete fresh
+execution-to-judgment proof is still in progress.** The authenticated GitHub App
+API confirms repository push access. The earlier connector-availability concern
+was incorrect.
 No database migration is required for collection. The integrated exporter also
 validates each selected and prior launched judge runtime against its persisted
 lease binding, separately from the frozen grading image.
@@ -241,3 +286,81 @@ disabled. It never reuses saved outputs. Live acceptance still requires that fre
 execution and its real judgment, then independent readback of the exact private
 input/request objects, ledger receipts, output and score. A replay fixture or HTTP
 health result alone does not meet this acceptance criterion.
+
+The first canonical deployment of PR #510 was commit
+`d8a97d5dc1d6296f8f7f49fc327cf406263b37b3` on both gateway and normal validator.
+Its fresh reward-disabled proof exposed a capture bug: the frozen Deepline catalog
+contains 64-bit JSON Schema integer bounds, but the input endpoint reused the
+operational API's `2**53` limit. The endpoint rejected the input while research
+continued. PR #512 removes only the integer magnitude limit for training inputs;
+all other routes retain their default bound, and body size, depth, strings and
+finite-number checks remain active. The exact 1,781,849-byte live JSON input then
+round-tripped through the candidate HTTP endpoint and object store with equal
+values, matching hash and no redactions. The merged candidate
+`6ab0dc94feddfd9220d4c7b611ab9b94284c1909` passed 361 tests in 48.19 seconds,
+plus compilation, whitespace, protected-manifest and AGENTS/CLAUDE checks.
+
+At 01:58:37 UTC on October 17, an independent read of the first proof's 119 request
+objects verified every hash, length and ledger identity. The objects contained
+754,840 uncompressed bytes in 104,356 compressed bytes. All 119 terminal response
+receipts were present. This was an in-progress snapshot, not final trajectory
+certification. The first execution's missing input remains an explicit historical
+gap; it is not backfilled from the local diagnostic copy.
+
+Both canonical controllers completed for `6ab0dc94f`. The gateway passed runtime
+attestation and exact `/build-info` checks; the normal validator passed protected
+readiness on the same commit. The operator pause remained false. Finalized-chain
+readback matched the existing signed weight journal; that finalization predated
+the new process and is not evidence of a new broadcast.
+
+The original proof attempt ended with `provider_error`, and Arena created its
+normal retry. The same frozen reward-disabled round resumed on the fixed release.
+At 02:07:42 UTC, retry `arena-2026-10-17-trainingproof:baseline-2026-10-17-trainingproof:1:0:2`
+had a verified lease-generation-2 input object: 1,781,849 bytes, no redactions,
+hash `sha256:009c8eb79d6a52b2355788f23c23c69b91983c9ea8a29760de6a973a14435fe9`.
+
+Independent provider records for that retry matched OpenRouter ledger entry
+4988957 at $0.020958 and Deepline entry 4989012 at 0.01 credits ($0.001).
+OpenRouter identified `anthropic/claude-4.5-sonnet-20250929` on Amazon Bedrock;
+Deepline identified `contextdev_post_news_search` with a final posted charge.
+This verifies two real billing joins. It does not establish label quality or
+prove that every call has settled.
+
+Privacy review found six retained response receipts containing nonempty HTTPS
+`auth` parameters. Their values were not emitted or tested, and the export keeps
+redacting them. Separate synthetic checks found false credential flags for empty
+credential-named values and diagnostic NUL escaping. The follow-up fix preserves
+only null and empty JSON strings/objects/arrays, and leaves NUL escaping to JSON
+serialization. Nonempty credentials, false/zero sensitive values, signed access
+URLs and exact-secret matching retain their existing protection. Diagnostic logs
+keep their original escaping behavior. The focused gate passed 176 tests.
+
+Neither observed fresh proof attempt used free catalog discovery. The first
+failed attempt reported 158 worker provider calls but had 157 ledger actions;
+one gateway request failed before admission. The exporter reports the mismatch
+instead of treating it as a complete process. Free local catalog discovery is a
+separate known boundary, not the cause of that mismatch.
+
+The second attempt also ended with `provider_error`: 144 worker calls versus 143
+ledger actions, zero local refusals and 72 direct web connections. One failed
+call had a captured request but no terminal response receipt because its provider
+cost was unavailable. These failures exposed the need to retain exceptional
+worker-visible outcomes separately from provider receipts. Neither attempt is
+counted as a successful training example. Across both attempts, the observation
+at 02:22:53 UTC had 300 ledger calls, no inflight calls, three uncertain costs,
+and $0.943890 of confirmed charges. The second ICP remained unstarted.
+
+The worker-observation follow-up passed an integrated gate of **505 tests in
+54.44 seconds** (55.15 seconds including the release checks), with no failures
+or skips and one existing multipart deprecation warning. It covered capture,
+inputs, export, worker observations, runner/API behavior, Responses retries,
+refusal contracts and gateway routes. A final operation-registry validation
+change passed **113 focused tests in 2.26 seconds**. Compilation, whitespace,
+protected-workflow and AGENTS/CLAUDE checks passed. Independent review checked
+unchanged worker outcomes/counters, billing authority, privacy, hidden retries,
+immutable lease binding and incomplete shutdown snapshots.
+
+At 02:36:35 UTC, the old proof runner had exited and its task-owned API server
+was stopped after verifying zero leased runs and zero inflight provider calls.
+The original process records and logs were retained. The frozen round and its
+unstarted second ICP remain available for the final release proof.

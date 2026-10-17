@@ -1436,6 +1436,13 @@ RUN_RESULT_FIELDS = (
             F("provider_refusal_count", "int", minimum=0, required=False),
             F("provider_local_refusal_count", "int", minimum=0, required=False),
             F("provider_unresolved_failure_count", "int", minimum=0, required=False),
+            F("worker_observations", "object", required=False, fields=(
+                F("status", "str", choices=("stored", "unavailable")),
+                F("observation_count", "int", minimum=0),
+                F("local_refusal_count", "int", minimum=0),
+                F("complete", "bool"),
+                F("payload_sha256", "sha256", required=False),
+            )),
             # Optional audit metadata, never an identity/admission requirement.
             F("validator_source_commit", "str", maximum=64, required=False),
             F("validator_source_origin", "str", maximum=32, required=False),

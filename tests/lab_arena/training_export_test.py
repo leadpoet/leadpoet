@@ -70,7 +70,7 @@ def fixture():
     objects.put(source_ref, source)
     objects.put("benchmark", contracts.canonical_json({"schema_version": "leadpoet.lab_arena.benchmark.v1",
                 "round_id": round_row["round_id"], "icps": [icp] * contracts.benchmark_icp_count(config)}).encode())
-    resource = {"validator_source_commit": "a" * 40, "validator_source_origin": "git_checkout", "validator_source_dirty": "clean", "provider_call_count": 0}
+    resource = {"validator_source_commit": "a" * 40, "validator_source_origin": "git_checkout", "validator_source_dirty": "clean", "provider_call_count": 0, "provider_local_refusal_count": 0, "web_egress": {"connection_count": 0}}
     execute = {"run_id": "execute:1", "round_id": round_row["round_id"], "submission_id": "sub",
                "miner_hotkey": "miner", "stage": 1, "icp_position": 0, "assignment_id": "execute",
                "attempt": 1, "kind": "execute", "status": "accepted", "terminal_cause": "accepted",
@@ -210,7 +210,7 @@ def test_direct_web_and_count_gap_are_explicit():
     values["runs"][0]["result_doc"]["resource_summary"].update(web_egress={"connection_count": 1}, provider_call_count=1)
     result = assemble_example(**values)
     assert result["completeness"]["dimensions"]["input_output_label"] is True
-    assert set(result["completeness"]["incomplete_reasons"]) == {"direct_web_content_not_captured", "provider_capture_count_unverified"}
+    assert set(result["completeness"]["incomplete_reasons"]) == {"direct_web_content_not_captured", "provider_capture_count_unverified", "worker_observations_unavailable"}
 
 
 def add_call(values, *, status="settlement", pointer=True, provider="openrouter", operation="openrouter.chat"):
@@ -243,6 +243,31 @@ def test_full_request_not_excerpt_and_hidden_response_reasoning_removed():
     assert "hidden_reasoning" in result["provider_calls"][0]["response_privacy_redactions"]
     assert result["privacy"]["hidden_reasoning_removed"] is True
     assert result["costs"]["confirmed_actual_microusd"] == 42
+
+
+def test_empty_credential_fields_and_nul_do_not_create_false_export_gaps():
+    values = fixture()
+    add_call(values)
+    body = {"content": "before\x00after", "api_key": None, "authorization": "",
+            "credentials": {}, "private_key": []}
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
+    result = assemble_example(**values)
+    assert result["provider_calls"][0]["response"] == body
+    assert result["provider_calls"][0]["response_privacy_redactions"] == []
+    assert result["completeness"]["complete"] is True
+    assert result["privacy"]["exact_replay"] is True
+
+
+def test_nonempty_auth_url_still_prevents_exact_export():
+    values = fixture()
+    add_call(values)
+    auth = "a" * 64
+    body = {"url": "https://example.test/file?auth=" + auth}
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
+    result = assemble_example(**values)
+    assert "response_privacy_nonexact" in result["completeness"]["incomplete_reasons"]
+    assert result["privacy"]["exact_replay"] is False
+    assert auth not in json.dumps(result["provider_calls"][0]["response"])
 
 
 @pytest.mark.parametrize("change,reason", [("pointer", "full_request_unavailable"), ("uncertain", "provider_cost_unresolved"), ("response", "full_response_unavailable")])

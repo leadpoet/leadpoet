@@ -244,6 +244,7 @@ def _calls(rows, run_ids, objects, run_order):
                 "provider": reserve.get("provider"), "operation_id": reserve.get("operation_id"),
                 "funding_source": reserve.get("funding_source"), "reservation_entry_id": reserve["entry_id"],
                 **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
+        call_reasons = set()
         accounting_fields = {"reserved_microusd", "released_microusd", "variance_microusd", "late_reconciliation",
                              "openrouter_delayed_reconciliation", "deepline_delayed_reconciliation",
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
@@ -288,7 +289,7 @@ def _calls(rows, run_ids, objects, run_order):
                     receipt["response"] = response
                     saved_bodies[digest] = row["entry_id"]
                 if "credential" in redactions:
-                    reasons.add("response_privacy_nonexact")
+                    call_reasons.add("response_privacy_nonexact")
             except Exception:
                 receipt["response_unavailable"] = True
             call["response_receipts"].append(receipt)
@@ -304,14 +305,14 @@ def _calls(rows, run_ids, objects, run_order):
             if request.get("request_hash") != entry.get("request_hash") or request.get("operation_id") != reserve.get("operation_id"):
                 raise ExportError("request_identity_mismatch")
             if pointer.get("redacted") is True:
-                reasons.add("request_privacy_nonexact")
+                call_reasons.add("request_privacy_nonexact")
             elif not isinstance(request.get("hashed_parameters"), dict) or contracts.document_hash(request["hashed_parameters"]) != entry.get("request_hash"):
                 raise ExportError("request_parameters_hash_mismatch")
         except Exception:
             call.pop("request", None)
-            reasons.add("full_request_unavailable")
+            call_reasons.add("full_request_unavailable")
         if not terminals:
-            reasons.add("provider_call_inflight")
+            call_reasons.add("provider_call_inflight")
         else:
             # A later recovery can settle a previous uncertain entry. The
             # append-only ledger's highest entry_id is the current authority.
@@ -324,7 +325,7 @@ def _calls(rows, run_ids, objects, run_order):
                 raise ExportError("call_cost_invalid")
             call["actual_microusd"] = latest["amount_microusd"] if latest["entry_kind"] != "uncertain" else None
             if latest["entry_kind"] == "uncertain":
-                reasons.add("provider_cost_unresolved")
+                call_reasons.add("provider_cost_unresolved")
             terminal = latest.get("terminal_response") or {}
             if "provider_cost" in terminal:
                 call["provider_cost"] = copy.deepcopy(terminal["provider_cost"])
@@ -335,12 +336,82 @@ def _calls(rows, run_ids, objects, run_order):
                 call["response_privacy_redactions"] = latest_redactions
                 call["response_status"] = terminal.get("status")
             else:
-                reasons.add("full_response_unavailable")
+                call_reasons.add("full_response_unavailable")
             for key in ("judgment_cache_source_call_identity", "judgment_cache_source_run_id"):
                 if key in terminal:
                     call[key] = terminal[key]
+        call["evidence_gaps"] = sorted(call_reasons)
+        reasons.update(call_reasons)
         calls.append(call)
     return sorted(calls, key=lambda call: _call_order(call, run_order)), reasons
+
+
+def _worker_evidence(related, calls, objects):
+    from lab_arena import training_observations
+    artifacts, errors, counts = {}, set(), {}
+    for run in related:
+        run_id = run["run_id"]
+        summary = (run.get("result_doc") or {}).get("resource_summary") or {}
+        capture = summary.get("worker_observations")
+        paid = [call for call in calls if call["run_id"] == run_id]
+        sequences = {call["action_sequence"] for call in paid if type(call.get("action_sequence")) is int}
+        counts[run_id] = set(sequences)
+        local_refusals = summary.get("provider_local_refusal_count")
+        if type(local_refusals) is not int or local_refusals < 0:
+            errors.add("worker_local_refusals_unverified")
+        needed = (type(summary.get("provider_call_count")) is not int or summary.get("provider_call_count") != len(sequences)
+                  or type(local_refusals) is int and local_refusals > 0
+                  or any("full_response_unavailable" in call["evidence_gaps"] for call in paid))
+        try:
+            snapshot = training_observations.read_snapshot(objects, run_id, run["kind"], run.get("lease_generation"), run.get("claim_request_hash"))
+        except Exception:
+            if needed or capture is not None:
+                errors.add("worker_observations_unavailable")
+            continue
+        payload = snapshot["payload"]
+        if capture is not None and (not isinstance(capture, dict)
+                or capture.get("status") != "stored" or capture.get("payload_sha256") != snapshot["payload_sha256"]
+                or capture.get("observation_count") != payload["observation_count"]
+                or capture.get("local_refusal_count") != payload["local_refusal_count"]
+                or capture.get("complete") != payload["complete"]):
+            errors.add("worker_observation_summary_invalid")
+            continue
+        if not payload["complete"]:
+            errors.add("worker_observations_incomplete")
+        if payload["local_refusal_count"] != local_refusals:
+            errors.add("worker_local_refusals_unverified")
+        artifacts[run_id] = snapshot
+        for observation in payload["observations"]:
+            if observation["privacy"]["redacted"]:
+                errors.add("worker_observation_privacy_nonexact")
+            sequence, identity = observation["action_sequence"], observation["call_identity"]
+            matches = [call for call in paid if call.get("action_sequence") == sequence]
+            if identity is not None:
+                sequence_matches = matches
+                matches = [call for call in matches if call["call_identity"] == identity]
+                if not matches and (sequence_matches or any(call["call_identity"] == identity for call in paid)):
+                    errors.add("worker_observation_link_invalid")
+                    continue
+            if matches:
+                if len(matches) != 1 or matches[0]["operation_id"] != observation["operation_id"] or not observation["contributes_to_provider_call_count"]:
+                    errors.add("worker_observation_link_invalid")
+                    continue
+                call = matches[0]
+                if isinstance(call.get("request"), dict) and call["request"].get("admitted_parameters") != observation["request"]["admitted_parameters"]:
+                    errors.add("worker_observation_request_mismatch")
+                    continue
+                call["worker_observation_ref"] = {"run_id": run_id, "ordinal": observation["ordinal"], "payload_sha256": snapshot["payload_sha256"]}
+                # The exact returned bridge outcome can fill worker-process
+                # evidence; it never becomes an upstream receipt or known cost.
+                call["evidence_gaps"] = [gap for gap in call["evidence_gaps"] if gap != "full_response_unavailable"]
+            elif observation["contributes_to_provider_call_count"]:
+                if type(sequence) is not int:
+                    errors.add("worker_observation_link_invalid")
+                    continue
+                counts[run_id].add(sequence)
+                if observation["kind"] != "local_catalog":
+                    errors.add("worker_call_accounting_unverified")
+    return artifacts, errors, counts
 
 
 def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
@@ -477,8 +548,14 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             raise ExportError("ledger_context_mismatch")
     calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
                          {row["run_id"]: index for index, row in enumerate(related)})
+    observations, observation_gaps, observed_actions = _worker_evidence(related, calls, objects)
+    # Recompute payload gaps after exact worker-side fallback joins. Structural
+    # ledger failures and every accounting gap retain their original authority.
+    gaps -= {"full_request_unavailable", "full_response_unavailable", "request_privacy_nonexact", "response_privacy_nonexact", "provider_call_inflight", "provider_cost_unresolved"}
+    gaps.update(gap for call in calls for gap in call["evidence_gaps"])
     example["provider_calls"] = calls
-    reasons["research_process"].update(gaps)
+    reasons["research_process"].update(gaps | observation_gaps)
+    reasons["costs"].update(observation_gaps & {"worker_call_accounting_unverified"})
     reasons["costs"].update(gaps & {"provider_call_inflight", "provider_cost_unresolved", "ambiguous_call_lifecycle", "ledger_call_identity_missing"})
     example["costs"] = {"confirmed_actual_microusd": sum(call.get("actual_microusd") or 0 for call in calls),
                          "competition_cost": "not_recomputed", "all_related_attempts_included": True}
@@ -556,7 +633,13 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         reasons["exact_inputs"].add("runtime_input_snapshot_missing")
     for row in related:
         summary = (row.get("result_doc") or {}).get("resource_summary") or {}
-        if (summary.get("web_egress") or {}).get("connection_count", 0):
+        web = summary.get("web_egress")
+        if "web_egress" not in summary and row.get("kind") == "score" and _verified_runtime_source(summary):
+            # The trusted scorer starts with no web bridge and network=none.
+            pass
+        elif not isinstance(web, dict) or type(web.get("connection_count")) is not int or web["connection_count"] < 0:
+            reasons["research_process"].add("direct_web_usage_unverified")
+        elif web["connection_count"]:
             reasons["research_process"].add("direct_web_content_not_captured")
         logical_calls = set()
         for call in calls:
@@ -571,8 +654,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             else:
                 reasons["research_process"].add("logical_call_identity_unverified")
                 logical_calls.add(("unproved", call["call_identity"]))
+        logical_calls.update(("action", sequence) for sequence in observed_actions.get(row["run_id"], set()))
         captured = len(logical_calls)
-        if summary.get("provider_call_count") != captured:
+        if type(summary.get("provider_call_count")) is not int or summary.get("provider_call_count") != captured:
             reasons["research_process"].add("provider_capture_count_unverified")
             reasons["costs"].add("provider_capture_count_unverified")
     reasons["research_process"].update(reasons["exact_inputs"])
@@ -585,12 +669,14 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     example, redactions = sanitize_training_value(example)
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
-    hidden_removed = removed or "hidden_reasoning" in privacy_redactions or any(
+    clean["worker_observation_artifacts"] = observations
+    observation_redactions = {reason for artifact in observations.values() for item in artifact["payload"]["observations"] for reason in item["privacy"]["redactions"]}
+    hidden_removed = removed or "hidden_reasoning" in observation_redactions or "hidden_reasoning" in privacy_redactions or any(
         call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", [])
         or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("response_receipts", [])) for call in calls)
     clean["privacy"] = {"hidden_reasoning_removed": hidden_removed, "hidden_reasoning_excluded": True,
                         "context_redactions": sorted(privacy_redactions)}
-    privacy_filtered = bool(privacy_redactions) or hidden_removed or any(
+    privacy_filtered = bool(privacy_redactions | observation_redactions) or hidden_removed or any(
         (snapshot.get("privacy") or {}).get("redacted") for snapshot in snapshots.values()) or any(
         (call.get("request_capture") or {}).get("redacted") or call.get("response_privacy_redactions")
         or any(receipt.get("privacy_redactions") for receipt in call.get("response_receipts", [])) for call in calls)

@@ -19,7 +19,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit
 
-from lab_arena import operations
+from lab_arena import deepline_catalog, operations
 
 
 COMPATIBILITY_VERSION = "miner-score-deepline-compat:v1"
@@ -30,6 +30,7 @@ SHADOW_REPLAY_ROUTE_PREFIX = (
 
 FIRECRAWL_TOOL = "firecrawl_scrape"
 GENERIC_HTTP_TOOL = "generic_http_request"
+SOURCE_HTML_ADAPTERS = frozenset({"firecrawl_raw_html", "generic_http_raw_html"})
 HARVEST_JOB_TOOL = "harvestapi_get_job"
 HARVEST_POST_TOOL = "harvestapi_get_post"
 TWITTER_POST_TOOL = "twitterapi_tweets_by_ids"
@@ -157,6 +158,7 @@ def route_for(
     parameters: Mapping[str, Any],
     timeout_ms: Optional[int] = None,
     allow_host_shadow_score: bool = False,
+    source_content_fallback: bool = False,
 ) -> Optional[MinerScoreRoute]:
     """Return one exact Deepline route for an eligible scoring request."""
 
@@ -188,6 +190,27 @@ def route_for(
                     },
                 },
                 adapter="generic_ats_json:" + ats_kind,
+                requested_parameters=requested,
+            )
+        if source_content_fallback is True:
+            # Only the broker may select this transport after retaining a
+            # settled Firecrawl source-content failure. Keep the exact source
+            # URL and the original requested rendering intent on the route.
+            if not _safe_public_source_https_url(requested["url"]):
+                raise operations.OperationRequestError("invalid_url", "url")
+            return MinerScoreRoute(
+                requested_operation_id=operation_id,
+                effective_operation_id=EFFECTIVE_OPERATION_ID,
+                effective_parameters={
+                    "tool": GENERIC_HTTP_TOOL,
+                    "payload": {
+                        "url": requested["url"],
+                        "method": "GET",
+                        "follow_redirects": True,
+                        "timeout_ms": upstream_timeout_ms,
+                    },
+                },
+                adapter="generic_http_raw_html",
                 requested_parameters=requested,
             )
         payload = {
@@ -287,6 +310,19 @@ def _safe_https_url(value: Any) -> str:
         return ""
 
 
+def _safe_public_source_https_url(value: Any) -> str:
+    safe_url = _safe_https_url(value)
+    if not safe_url:
+        return ""
+    try:
+        # Reuse the frozen catalog's lexical public-target policy. This makes
+        # no DNS requests and does not change Firecrawl's existing contract.
+        deepline_catalog._public_url(safe_url)
+    except deepline_catalog.CatalogError:
+        return ""
+    return safe_url
+
+
 def _json_bytes(value: Any) -> bytes:
     try:
         return json.dumps(
@@ -352,6 +388,82 @@ def _firecrawl_response(
         {"content-type": "text/html; charset=utf-8"},
         raw_html.encode("utf-8"),
         final_url,
+    )
+
+
+def _generic_http_raw_html_response(
+    route: MinerScoreRoute, body: bytes,
+) -> tuple[int, dict[str, str], bytes, str]:
+    """Require the exact public GET receipt before exposing its source HTML."""
+
+    try:
+        document = json.loads(bytes(body).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise CompatibilityResponseError("invalid_generic_html_envelope") from exc
+    tool_response = (
+        document.get("toolResponse") if isinstance(document, Mapping) else None
+    )
+    data = tool_response.get("rawV2") if isinstance(tool_response, Mapping) else None
+    if (
+        not isinstance(document, Mapping)
+        or document.get("status") != "completed"
+        or document.get("error") is not None
+        or document.get("tool_error") is not None
+        or not isinstance(tool_response, Mapping)
+        or tool_response.get("view") != "rawV2"
+        or not isinstance(data, Mapping)
+        or data.get("provider") != "generic_http"
+        or data.get("operation") != GENERIC_HTTP_TOOL
+        or data.get("method") != "GET"
+    ):
+        raise CompatibilityResponseError("invalid_generic_html_envelope")
+    if (
+        data.get("requested_url") != route.requested_parameters.get("url")
+        or not _safe_public_source_https_url(data.get("requested_url"))
+    ):
+        raise CompatibilityResponseError("generic_html_source_url_mismatch")
+    final_url = _safe_public_source_https_url(data.get("final_url"))
+    if not final_url:
+        raise CompatibilityResponseError("invalid_generic_html_final_url")
+    status = data.get("status_code")
+    if (
+        type(status) is not int or not 100 <= status <= 599
+        or type(data.get("ok")) is not bool
+        or data["ok"] != (200 <= status < 300)
+    ):
+        raise CompatibilityResponseError("invalid_generic_html_target_status")
+    headers = data.get("headers")
+    if not isinstance(headers, Mapping) or any(
+        not isinstance(name, str) or not isinstance(value, str)
+        for name, value in headers.items()
+    ):
+        raise CompatibilityResponseError("invalid_generic_html_headers")
+    if not 200 <= status < 300:
+        # Only proved source absence is terminal. Every other failed target
+        # fetch must retain the caller's existing bounded Exa recovery path.
+        # No error-body content becomes evidence.
+        outward_status = status if status in {404, 410} else 502
+        return outward_status, {"content-type": "text/html; charset=utf-8"}, b"", final_url
+    content_types = [
+        value for name, value in headers.items() if name.lower() == "content-type"
+    ]
+    if len(content_types) != 1:
+        raise CompatibilityResponseError("invalid_generic_html_content_type")
+    content_type = content_types[0].split(";", 1)[0].strip().casefold()
+    if content_type not in {"text/html", "application/xhtml+xml"}:
+        raise CompatibilityResponseError("invalid_generic_html_content_type")
+    html = data.get("data")
+    if not isinstance(html, str):
+        raise CompatibilityResponseError("missing_generic_html_body")
+    if (
+        not html.strip()
+        or re.sub(r"\s+", " ", html).strip().casefold()
+        in ("provider account capacity details redacted.", "[redacted]")
+    ):
+        raise CompatibilityResponseError("generic_html_source_content_unavailable")
+    return (
+        status, {"content-type": content_type + "; charset=utf-8"},
+        html.encode("utf-8"), final_url,
     )
 
 
@@ -590,6 +702,8 @@ def adapt_response_with_trusted_url(
     del headers
     if status < 200 or status >= 300:
         raise CompatibilityResponseError("deepline_http_error")
+    if route.adapter == "generic_http_raw_html":
+        return _generic_http_raw_html_response(route, body)
     data = _envelope_data(body)
     if route.adapter.startswith("generic_ats_json:"):
         response_status, response_headers, response_body = _generic_ats_response(
@@ -644,6 +758,7 @@ __all__ = [
     "EFFECTIVE_OPERATION_ID",
     "FIRECRAWL_TOOL",
     "GENERIC_HTTP_TOOL",
+    "SOURCE_HTML_ADAPTERS",
     "HARVEST_JOB_TOOL",
     "HARVEST_POST_TOOL",
     "TWITTER_POST_TOOL",

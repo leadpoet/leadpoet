@@ -26,9 +26,10 @@ def _execute(payload):
         transport=FakeTransport([(200, payload)]),
         credential_for=lambda *_: DL_KEY, funding_source_for=lambda *_: "miner_key",
     )
-    result = broker.execute(
+    result = broker._execute_once(
         _score_context(), operation_id="scrapingdog.scrape",
         parameters={"url": URL}, action_sequence=0, timeout_ms=30_000,
+        provider_attempt=1, champion_credential_retry=False,
     )
     return result, ledger, transport
 
@@ -56,7 +57,7 @@ def test_fixed_adapter_reason_survives_real_broker_and_trajectory(monkeypatch, c
     assert content["call"]["actual_microusd"] == 2_000
     saved = ledger.calls[result.call["call_identity"]]
     assert saved["terminal"]["call_succeeded"] is False
-    assert "compatibility_failure_code" not in saved["terminal"]
+    assert saved["terminal"]["compatibility_failure_code"] == code
     assert "compatibility_failure_code" not in saved["terminal"]["headers"]
     assert ledger.log == ["reserve", "dispatch", "settle"]
     assert len(transport.sent) == 1

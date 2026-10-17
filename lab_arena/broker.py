@@ -1412,12 +1412,17 @@ def _deepline_execution_response_readback(
     operation: str, operation_aliases: Sequence[str], max_response_bytes: int,
     observed_status: Optional[int] = None,
     resume_request: Optional[Mapping[str, Any]] = None,
+    deadline: Optional[float] = None,
 ) -> Optional[ProviderResponse]:
     """Read a saved reply, or resume a proved running request with its same key."""
     if execution_key is None or _DEEPLINE_EXECUTION_KEY_RE.fullmatch(execution_key) is None:
         return None
     recovery_deadline = (time.monotonic() + float(resume_request["timeout_seconds"])
                          if resume_request is not None else None)
+    if deadline is not None:
+        recovery_deadline = deadline if recovery_deadline is None else min(deadline, recovery_deadline)
+        if time.monotonic() >= recovery_deadline:
+            return None
     try:
         lookup = transport.send(
             method="GET", url=DEEPLINE_EXECUTION_BY_KEY_URL + quote(execution_key, safe=""),
@@ -2083,6 +2088,7 @@ def _terminal_response_document(
     account_failure_evidence: Optional[Mapping[str, Any]] = None,
     credit_failure_proof: Optional[Mapping[str, Any]] = None,
     judgment_cache_eligible: bool = False,
+    compatibility_failure_code: Optional[str] = None,
 ) -> Dict[str, Any]:
     document = {
         "status": int(status),
@@ -2098,6 +2104,8 @@ def _terminal_response_document(
         document["credit_failure_proof"] = dict(credit_failure_proof)
     if judgment_cache_eligible:
         document["judgment_cache_eligible"] = True
+    if compatibility_failure_code is not None:
+        document["compatibility_failure_code"] = compatibility_failure_code
     return document
 
 
@@ -2612,8 +2620,19 @@ def _decode_terminal(
         "deepline_async_job_ids",
         "deepline_response_missing",
         "deepline_response_missing_reason",
+        "compatibility_failure_code",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
+        raise BrokerError("broker_unavailable")
+    compatibility_failure_code = document.get("compatibility_failure_code")
+    if "compatibility_failure_code" in document and (
+        not isinstance(compatibility_failure_code, str)
+        or compatibility_failure_code not in _FIRECRAWL_COMPATIBILITY_FAILURE_CODES
+        or document.get("call_succeeded") is not False
+        or type(document.get("status")) is not int
+        or document["status"] != 502
+        or not isinstance(document.get("provider_cost"), Mapping)
+    ):
         raise BrokerError("broker_unavailable")
     if "deepline_response_missing" in document and document["deepline_response_missing"] is not True:
         raise BrokerError("broker_unavailable")
@@ -2671,6 +2690,12 @@ def _decode_terminal(
         body = base64.b64decode(str(document["body_b64"]), validate=True)
     except (KeyError, TypeError, ValueError) as exc:
         raise BrokerError("broker_unavailable") from exc
+    if compatibility_failure_code is not None and (
+        body != operations.GENERIC_UNAVAILABLE_BODY
+        or any(isinstance(name, str) and name.lower() == operations.TRUSTED_RESPONSE_URL_HEADER
+               for name in headers)
+    ):
+        raise BrokerError("broker_unavailable")
     if document.get("credit_failure_proof") is not None and call_succeeded is not False:
         raise BrokerError("broker_unavailable")
     trusted_names = [
@@ -3859,6 +3884,7 @@ class Broker:
 
         account_provider_status: Optional[int] = None
         base_call_identity: Optional[str] = None
+        source_content_fallback = False
         for provider_attempt in range(1, CHAMPION_CREDENTIAL_PROVIDER_ATTEMPTS + 1):
             provider_attempt_started = time.monotonic()
             try:
@@ -3872,6 +3898,7 @@ class Broker:
                     champion_credential_retry=retry_miner_credential,
                     api_started_at=api_started_at,
                     cancel_requested=cancel_requested,
+                    source_content_fallback=source_content_fallback,
                 )
             except Exception as exc:
                 try:
@@ -3912,6 +3939,29 @@ class Broker:
             except Exception:
                 # Observation must not affect provider retry or result behavior.
                 pass
+            if source_content_fallback:
+                # One alternate transport only. Its own failure never opens
+                # another source attempt or an account-credential waterfall.
+                return final_result(result)
+            if (
+                provider_attempt == 1
+                and getattr(context, "kind", "execute") == "score"
+                and operation_id == "scrapingdog.scrape"
+                and result.status == 502
+                and result.call.get("provider") == "deepline"
+                and result.call.get("adapter") == "firecrawl_raw_html"
+                and result.call.get("outcome") == "settled"
+                and type(result.call.get("actual_microusd")) is int
+                and result.call["actual_microusd"] >= 0
+                and result.call.get("compatibility_failure_code")
+                == "firecrawl_source_content_unavailable"
+                and time.monotonic() < api_started_at + min(
+                    max(1, int(timeout_ms)) / 1000.0,
+                    float(operations.OPERATIONS[operation_id].timeout_seconds),
+                )
+            ):
+                source_content_fallback = True
+                continue
             if result.call.get("provider_fallback_required") is True:
                 return final_result(result)
             if result.call.get("provider") == "deepline" and result.call.get("outcome") == "uncertain":
@@ -4005,6 +4055,7 @@ class Broker:
         champion_credential_retry: bool,
         api_started_at: Optional[float] = None,
         cancel_requested: Optional[Callable[[], bool]] = None,
+        source_content_fallback: bool = False,
     ) -> BrokerResult:
         if api_started_at is None:
             api_started_at = time.monotonic()
@@ -4020,6 +4071,7 @@ class Broker:
                 champion_credential_retry=champion_credential_retry,
                 api_started_at=api_started_at,
                 cancel_requested=cancel_requested,
+                source_content_fallback=source_content_fallback,
                 gate_holder=gate_holder,
             )
         finally:
@@ -4039,11 +4091,17 @@ class Broker:
         api_started_at: float,
         cancel_requested: Optional[Callable[[], bool]],
         gate_holder: list[OpenRouterGateLease],
+        source_content_fallback: bool = False,
     ) -> BrokerResult:
         operation = (operations.OPERATIONS.get(operation_id)
                      or getattr(operations, "CATALOG_OPERATIONS", {}).get(operation_id))
         if operation is None:
             return _error_result("invalid_request", {"operation_id": str(operation_id)})
+        source_content_deadline = (
+            api_started_at + min(max(1, int(timeout_ms)) / 1000.0,
+                                 float(operation.timeout_seconds))
+            if source_content_fallback else None
+        )
         try:
             normalized = operations.validate_operation_request(
                 operation_id, parameters, deepline_catalog=context.deepline_catalog,
@@ -4122,16 +4180,26 @@ class Broker:
                 route_round_id = (
                     self._host_shadow_score_compat_source_round_id or route_round_id
                 )
+            route_timeout_ms = min(
+                max(1, int(timeout_ms)), operation.timeout_seconds * 1000
+            )
+            if source_content_fallback:
+                remaining_ms = int((source_content_deadline - time.monotonic()) * 1000)
+                if remaining_ms <= 0:
+                    return _error_result("provider_unavailable", {
+                        "operation_id": operation_id, "outcome": "not_dispatched",
+                        "reason": "provider_admission_deadline",
+                    })
+                route_timeout_ms = min(route_timeout_ms, remaining_ms)
             route = scoring_provider_compat.route_for(
                 kind=getattr(context, "kind", "execute"),
                 funding_source=funding_source,
                 round_id=route_round_id,
                 operation_id=operation_id,
                 parameters=normalized,
-                timeout_ms=min(
-                    max(1, int(timeout_ms)), operation.timeout_seconds * 1000
-                ),
+                timeout_ms=route_timeout_ms,
                 allow_host_shadow_score=host_shadow_score_compat,
+                source_content_fallback=source_content_fallback,
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
@@ -4364,6 +4432,10 @@ class Broker:
             call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"request_capture": request_capture} if request_capture else {}), **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
+        if source_content_fallback:
+            reservation_arguments["call_doc"]["source_content_fallback_timeout_ms"] = (
+                effective_normalized["payload"]["timeout_ms"]
+            )
         judgment_cache_key = ""
         cached_outbound: Optional[operations.OutboundRequest] = None
         if (
@@ -4479,6 +4551,8 @@ class Broker:
         # Another call can hold money without having spent it. Wait briefly for
         # settlement, using the same identity; do not dispatch or charge twice.
         reserve_deadline = time.monotonic() + operations.BUDGET_ADMISSION_MAX_SECONDS
+        if source_content_deadline is not None:
+            reserve_deadline = min(reserve_deadline, source_content_deadline)
         judgment_cache_deadline = api_started_at + operation_timeout_seconds - 2.0
         if gate_lease is not None:
             reserve_deadline = min(
@@ -4559,6 +4633,34 @@ class Broker:
                 return _error_result("provider_unavailable", summary)
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")
+        if source_content_fallback and reserved.get("idempotent") is True and status in {
+            "reserved", "dispatched", "settled", "uncertain", "recovered",
+        }:
+            rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+            if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+                return _error_result("broker_unavailable", summary)
+            reservations = [row for row in rows if isinstance(row, Mapping)
+                            and row.get("entry_kind") == "reservation"]
+            saved_timeout = (
+                reservations[0].get("entry_doc", {}).get("source_content_fallback_timeout_ms")
+                if len(reservations) == 1
+                and isinstance(reservations[0].get("entry_doc"), Mapping) else None
+            )
+            if type(saved_timeout) is not int or not 1 <= saved_timeout <= 60_000:
+                return _error_result("broker_unavailable", summary)
+            # A keyed resume must reproduce its originally admitted payload.
+            # Only the transport's current absolute deadline can shrink.
+            reservation_arguments["call_doc"]["source_content_fallback_timeout_ms"] = saved_timeout
+            if not _reservation_readback_matches(
+                self._store, reservation_arguments, reserved,
+                confirmed_cost_admission=True, ledger_entries=rows,
+            ):
+                return _error_result("broker_unavailable", summary)
+            effective_normalized = {
+                **effective_normalized,
+                "payload": {**effective_normalized["payload"], "timeout_ms": saved_timeout},
+            }
+            captured_outbound = None
         # Terminal admission replies such as stale and refused do not create a
         # reservation. Preserve their normal classification. A response-loss
         # state, and an idempotent reservation that could still dispatch, must
@@ -4792,18 +4894,24 @@ class Broker:
                     recovery_url, recovery_headers = inject_credential(recovery_outbound, secret)
                     recovery_headers["idempotency-key"] = request_accounting["deepline_execution_key"]
                     recovery_headers["x-deepline-request-id"] = request_accounting["deepline_request_id"]
+                    if route is not None and route.adapter == "generic_http_raw_html":
+                        recovery_headers["x-deepline-execute-response-contract"] = "raw-v2"
                     deepline_recovery_response = _deepline_execution_response_readback(
                         transport=self._transport, secret=secret,
                         execution_key=request_accounting["deepline_execution_key"],
                         operation=request_accounting["tool"],
                         operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
                         max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
-                            if route is not None and route.adapter == "firecrawl_raw_html"
+                            if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
                             else effective_operation.max_response_bytes),
+                        deadline=source_content_deadline,
                         resume_request=(dict(method=recovery_outbound.target.method, url=recovery_url,
                             headers=recovery_headers, body=recovery_outbound.body,
-                            timeout_seconds=operation_timeout_seconds,
-                            max_response_bytes=effective_operation.max_response_bytes)
+                            timeout_seconds=(max(0.0, source_content_deadline - time.monotonic())
+                                             if source_content_deadline is not None else operation_timeout_seconds),
+                            max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                                if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
+                                else effective_operation.max_response_bytes))
                             if deepline_catalog_entry is not None or route is not None else None),
                     )
                     if deepline_recovery_response is not None:
@@ -4820,9 +4928,15 @@ class Broker:
             except BrokerError:
                 return _error_result("broker_unavailable", summary)
             if operations.TRUSTED_RESPONSE_URL_HEADER in terminal_headers and (
-                route is None or route.adapter != "firecrawl_raw_html"
+                route is None or route.adapter not in scoring_provider_compat.SOURCE_HTML_ADAPTERS
             ):
                 return _error_result("broker_unavailable", summary)
+            if "compatibility_failure_code" in terminal_document:
+                if route is None or route.adapter != "firecrawl_raw_html":
+                    return _error_result("broker_unavailable", summary)
+                summary["compatibility_failure_code"] = terminal_document["compatibility_failure_code"]
+                summary["error_code"] = "provider_unavailable"
+                summary["failure_stage"] = "response_adaptation"
             if isinstance(terminal_document, Mapping) and "judgment_cache_source_call_identity" in terminal_document:
                 if (
                     not judgment_cache_key
@@ -5015,6 +5129,8 @@ class Broker:
         # sequence because no call-level pre-dispatch release transition exists.
         billing_deadline: Optional[float] = None
         request_deadline = time.monotonic() + operation_timeout_seconds
+        if source_content_deadline is not None:
+            request_deadline = min(request_deadline, source_content_deadline)
         if gate_lease is not None:
             billing_deadline = (
                 api_deadline - operations.PROVIDER_API_TIMEOUT_GRACE_SECONDS
@@ -5081,6 +5197,11 @@ class Broker:
                 headers["x-deepline-request-id"] = deepline_request_id
             if deepline_execution_key is not None:
                 headers["idempotency-key"] = deepline_execution_key
+            if route is not None and route.adapter == "generic_http_raw_html":
+                headers["x-deepline-execute-response-contract"] = "raw-v2"
+            # A reservation admitted before expiry can settle late. Preserve
+            # that existing contract with the minimum transport bound; never
+            # grant a fresh fallback window after slow local persistence.
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
                 try:
@@ -5097,7 +5218,7 @@ class Broker:
                                 )
                             }
                             if route is not None
-                            and route.adapter == "firecrawl_raw_html"
+                            and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
                             else {}
                         ),
                     )
@@ -5110,9 +5231,10 @@ class Broker:
                             operation_aliases=(deepline_catalog_entry["operation_aliases"]
                                                if deepline_catalog_entry else ()),
                             max_response_bytes=(_DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
-                                if route is not None and route.adapter == "firecrawl_raw_html"
+                                if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
                                 else effective_operation.max_response_bytes),
                             observed_status=transport_error.observed_status,
+                            deadline=source_content_deadline,
                         )
                         if effective_operation.provider == "deepline" else None
                     )
@@ -5399,7 +5521,7 @@ class Broker:
                                 operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
                                 lookup_max_response_bytes=(
                                     _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
-                                    if route is not None and route.adapter == "firecrawl_raw_html"
+                                    if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
                                     else None
                                 ),
                         )
@@ -5483,7 +5605,7 @@ class Broker:
                             operation_aliases=(deepline_catalog_entry["operation_aliases"] if deepline_catalog_entry else ()),
                             lookup_max_response_bytes=(
                                 _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
-                                if route is not None and route.adapter == "firecrawl_raw_html"
+                                if route is not None and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
                                 else None
                             ),
                             reconciliation_deadline=(time.monotonic()
@@ -6004,10 +6126,21 @@ class Broker:
             # or sanitization rejected the provider payload.
             if raw_actual is not None and failure_stage != "settlement":
                 refused = _error_result("provider_unavailable", summary)
+                compatibility_failure_code = (
+                    str(exc)
+                    if (
+                        failure_stage == "response_adaptation"
+                        and route is not None
+                        and route.adapter == "firecrawl_raw_html"
+                        and type(exc) is scoring_provider_compat.CompatibilityResponseError
+                        and str(exc) in _FIRECRAWL_COMPATIBILITY_FAILURE_CODES
+                    ) else None
+                )
                 terminal = _terminal_response_document(
                     refused.status, refused.headers, refused.body,
                     call_succeeded=False,
                     provider_cost=cost_record,
+                    compatibility_failure_code=compatibility_failure_code,
                 )
                 try:
                     settled = self._persist_provider_accounting(self._store.settle_call,
@@ -6029,14 +6162,8 @@ class Broker:
                                 "error_class": _safe_exception_class(exc),
                             }
                         )
-                        if (
-                            failure_stage == "response_adaptation"
-                            and route is not None
-                            and route.adapter == "firecrawl_raw_html"
-                            and type(exc) is scoring_provider_compat.CompatibilityResponseError
-                            and str(exc) in _FIRECRAWL_COMPATIBILITY_FAILURE_CODES
-                        ):
-                            summary["compatibility_failure_code"] = str(exc)
+                        if compatibility_failure_code is not None:
+                            summary["compatibility_failure_code"] = compatibility_failure_code
                         if (
                             type(observed_provider_http_status) is int
                             and 100 <= observed_provider_http_status <= 599

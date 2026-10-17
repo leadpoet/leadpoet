@@ -464,6 +464,28 @@ all turn limits, evidence validation and provider-failure handling. Composition
 evidence records `pending_submit_only_final_correction_v1`. Keep the prior
 approved correction flags when composing from the original frozen image.
 
+### Recover an unusable Firecrawl page response
+
+Miner-funded scoring keeps Firecrawl as its first page transport. A completed,
+settled response with the exact `firecrawl_source_content_unavailable` code
+can use one alternate `generic_http_request` for the same URL. The alternate
+uses the existing second provider-attempt identity, the same miner credential,
+the frozen tool catalog and all existing cost and call limits. It has only the
+time left in the original request. The existing settlement rule still applies
+to an attempt admitted before that deadline: a slow successful ledger reservation
+can finish with the transport's minimum 1 ms timeout; it receives no new request
+budget. Unknown billing, authentication failures, source mismatches and other
+malformed responses do not authorize this fallback.
+
+The alternate requests Deepline's `raw-v2` response contract and validates the
+provider, method, requested URL, final public HTTPS URL, target status and HTML.
+Only the page body, content type and validated source URL reach the scorer.
+Provider cookies and other headers are not forwarded. A failed source remains
+a failure; existing source absence, retry and Exa fallback rules still apply.
+Both attempt receipts and charges remain in the ledger. The exact first-failure
+code is retained so a repeated action reuses its settled alternate without
+making another provider request. No accepted score or frozen grader is changed.
+
 ### Verify a scorer release separately from a host release
 
 A gateway or validator restart does not rebuild the scorer image. The CI image

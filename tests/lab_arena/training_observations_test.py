@@ -239,6 +239,26 @@ def test_export_uses_worker_error_without_forging_provider_receipt_or_cost():
     assert "provider_cost_unresolved" in result["completeness"]["incomplete_reasons"]
 
 
+@pytest.mark.parametrize("has_worker_response", [False, True])
+def test_only_returned_worker_response_fills_missing_ledger_response(has_worker_response):
+    values = fixture()
+    add_call(values)
+    values["ledger_rows"][-1]["terminal_response"] = None
+    row = observation(identity=None)
+    row["request"]["admitted_parameters"] = {"messages": [{"role": "user", "content": "x" * 12000}]}
+    if not has_worker_response:
+        row["outcome"] = {"protocol": "frame", "exception_class": "RunnerError"}
+    save(values, payload(row))
+
+    result = assemble_example(**values)
+    call = result["provider_calls"][0]
+    assert "worker_observation_ref" in call and "response" not in call
+    assert call["actual_microusd"] == 42
+    assert ("full_response_unavailable" in call["evidence_gaps"]) is not has_worker_response
+    assert result["completeness"]["complete"] is has_worker_response
+    assert result["privacy"]["exact_replay"] is has_worker_response
+
+
 def test_export_transport_before_admission_retains_unknown_accounting():
     values = fixture()
     values["runs"][0]["result_doc"]["resource_summary"]["provider_call_count"] = 1

@@ -404,9 +404,11 @@ def _worker_evidence(related, calls, objects):
                     errors.add("worker_observation_request_mismatch")
                     continue
                 call["worker_observation_ref"] = {"run_id": run_id, "ordinal": observation["ordinal"], "payload_sha256": snapshot["payload_sha256"]}
-                # The exact returned bridge outcome can fill worker-process
-                # evidence; it never becomes an upstream receipt or known cost.
-                call["evidence_gaps"] = [gap for gap in call["evidence_gaps"] if gap != "full_response_unavailable"]
+                # Only a returned bridge response can fill the missing-response
+                # gap. An exception-only observation does not prove a body.
+                # Neither outcome becomes an upstream receipt or known cost.
+                if isinstance(observation["outcome"].get("response"), dict):
+                    call["evidence_gaps"] = [gap for gap in call["evidence_gaps"] if gap != "full_response_unavailable"]
             elif observation["contributes_to_provider_call_count"]:
                 if type(sequence) is not int:
                     errors.add("worker_observation_link_invalid")

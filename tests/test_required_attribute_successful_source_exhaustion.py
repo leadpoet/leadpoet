@@ -83,7 +83,11 @@ def _install(monkeypatch, *, source_fault=None, hydrate=True, independent_failur
 
     async def investigate(**kwargs):
         calls["investigator"] += 1
-        assert set(kwargs["targets"]) == {"stage", "headcount", "industry"}
+        failed_attribute_review = source_fault in {"failed", "empty"}
+        assert set(kwargs["targets"]) == {
+            "stage", "headcount", "industry",
+            *({"required_attribute"} if failed_attribute_review else set()),
+        }
         # A validated industry claim can be retained with the disputed facts.
         claim = {
             "target": "industry", "status": "VERIFIED",
@@ -102,11 +106,20 @@ def _install(monkeypatch, *, source_fault=None, hydrate=True, independent_failur
                 **{target: {"target": target, "status": "UNPROVEN", "observed_value": "",
                             "evidence_url": "", "evidence_quote": ""}
                    for target in ("stage", "headcount")},
+                **({"required_attribute": {
+                    "target": "required_attribute", "status": "UNPROVEN",
+                    "observed_value": "", "evidence_url": "", "evidence_quote": "",
+                    "reason": "The exact source still failed during the shared review.",
+                }} if failed_attribute_review else {}),
             },
             "usage": {"fetch_outcomes": [{
                 "url_sha256": hashlib.sha256(ARTICLE.encode()).hexdigest(),
                 "ok": True, "loaded_text_length": 41,
-            }]},
+            }, *([{
+                "url_sha256": hashlib.sha256(ROOT.encode()).hexdigest(),
+                "ok": False, "loaded_text_length": 0,
+                "error_class": "http_error" if source_fault == "failed" else "empty_page",
+            }] if failed_attribute_review else [])]},
             investigator.PRIVATE_FETCHED_PAGES_KEY: ({ARTICLE: {
                 "final_url": ARTICLE, "text": claim["evidence_quote"],
             }} if hydrate else {}),
@@ -175,7 +188,9 @@ def test_successful_source_exhaustion_is_unqualified_not_infrastructure_failure(
 def test_source_failure_or_missing_evidence_is_not_exhausted_success(monkeypatch, source_fault):
     _install(monkeypatch, source_fault=source_fault)
     result = _run()
-    assert result.details["required_attribute_grounding"]["status"] == "url_limit"
+    assert result.details["required_attribute_grounding"]["status"] == (
+        "unproven" if source_fault in {"failed", "empty"} else "url_limit"
+    )
     assert result.details.get("failure_class") != "insufficient_fit_evidence"
     assert _retryable(result)
 

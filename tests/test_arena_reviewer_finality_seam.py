@@ -164,10 +164,12 @@ def test_build_and_verify_use_the_same_explicit_correction_option(
     candidate["RootFS"]["Layers"].append("sha256:overlay")
     monkeypatch.setattr(composer, "image_inspect", lambda image: base if image == grading else candidate)
 
-    def extract(image, destination, *, complete_negative_finality, source_access_denied):
+    def extract(image, destination, *, complete_negative_finality, source_access_denied,
+                failed_attribute_source_recovery):
         assert image == grading
         assert complete_negative_finality is correction
         assert source_access_denied is False
+        assert failed_attribute_source_recovery is False
         original = _base_sources()
         if correction:
             original[FINALITY_FILE] = _original_source()

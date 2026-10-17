@@ -20,6 +20,9 @@ from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
 HIDDEN_KEYS = frozenset({"reasoning_content", "hidden_reasoning", "encrypted_content", "reasoning_details"})
 MAX_RECEIPT_BYTES = 16 * 1024 * 1024
+# An example joins independently bounded inputs, requests and receipts. Its
+# final privacy pass needs a separate finite budget from a single request.
+MAX_EXAMPLE_NODES = 2_000_000
 
 
 class ExportError(ValueError):
@@ -666,7 +669,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     # Diagnostic logs and model-reported decisions are deliberately excluded.
     example["excluded"] = ["diagnostic_trajectory_excerpts", "model_reported_decision_excerpts", "hidden_reasoning"]
     from lab_arena.training_capture import sanitize_training_value
-    example, redactions = sanitize_training_value(example)
+    example, redactions = sanitize_training_value(example, max_nodes=MAX_EXAMPLE_NODES)
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     clean["worker_observation_artifacts"] = observations

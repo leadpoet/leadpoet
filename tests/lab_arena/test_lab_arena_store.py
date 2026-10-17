@@ -213,7 +213,35 @@ def test_closed_provider_selector_extends_only_its_read_deadline():
     assert requests[1].extensions["timeout"] == timeout.as_dict()
 
 
+def test_submission_costs_extends_only_its_read_deadline():
+    requests = []
+    timeout = httpx.Timeout(connect=2, read=8, write=3, pool=4)
+    costs = {
+        "schema_version": "leadpoet.lab_arena.submission_costs.v1",
+        "submission_id": "sub-large-retry-history",
+        "providers": [],
+    }
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json=costs)
+
+    with httpx.Client(transport=httpx.MockTransport(handler), timeout=timeout) as client:
+        transport = PostgrestTransport(
+            "https://project.example", service_key="sb_secret_test", http_client=client
+        )
+        assert ArenaStore(transport).submission_costs(costs["submission_id"]) == costs
+        transport.rpc("lab_arena_whoami", {})
+        assert client.timeout == timeout
+
+    assert requests[0].extensions["timeout"] == {
+        "connect": 2, "read": 20.0, "write": 3, "pool": 4
+    }
+    assert requests[1].extensions["timeout"] == timeout.as_dict()
+
+
 @pytest.mark.parametrize(("function", "timeout_setting"), [
+    ("lab_arena_submission_costs", "SUBMISSION_COSTS_READ_TIMEOUT_SECONDS"),
     ("lab_arena_next_closed_provider_reconciliation_v1", "CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS"),
     ("lab_arena_open_scoring", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
     ("lab_arena_open_scoring_v2", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),

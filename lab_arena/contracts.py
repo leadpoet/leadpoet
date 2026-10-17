@@ -389,7 +389,7 @@ class StrictLimits:
     max_object_keys: int = 256
     max_string_bytes: int = 16_384
     max_total_bytes: int = 1_048_576
-    max_abs_int: int = 2 ** 53
+    max_abs_int: Optional[int] = 2 ** 53
 
 
 REQUEST_LIMITS = StrictLimits(
@@ -460,7 +460,7 @@ def _check_value(value: Any, limits: StrictLimits, depth: int, path: str) -> Non
     if value is None or isinstance(value, bool):
         return
     if isinstance(value, int):
-        if abs(value) > limits.max_abs_int:
+        if limits.max_abs_int is not None and abs(value) > limits.max_abs_int:
             raise ArenaContractError("integer out of range at %s" % path)
         return
     if isinstance(value, float):

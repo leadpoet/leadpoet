@@ -129,6 +129,77 @@ def test_api_requires_lease_bounds_body_and_marks_response_private(tmp_path):
     assert http.post(path, content=b"{}", headers={"x-lab-arena-lease": TOKEN, "content-length": str(training_input.MAX_INPUT_BYTES + 1)}).status_code == 413
 
 
+def test_training_input_api_preserves_large_schema_integers_exactly(tmp_path):
+    service, objects = service_for(tmp_path)
+    document = {"deepline_catalog": {"tools": [{"output_schema": {
+        "signed": {"type": "integer", "minimum": -(2 ** 63), "maximum": 2 ** 63 - 1},
+        "unsigned": {"type": "integer", "minimum": 0, "maximum": 2 ** 64 - 1},
+    }}]}}
+    raw = contracts.canonical_json(document).encode("utf-8")
+    response = TestClient(create_app(service)).post(
+        "/arena/v1/runs/r1/training-input", content=raw,
+        headers={"x-lab-arena-lease": TOKEN, "content-type": "application/json"},
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    saved = training_input.read_input(objects, "r1", "execute", 1, CLAIM_HASH)
+    assert saved["input"] == json.loads(raw) == document
+    assert contracts.canonical_json(saved["input"]).encode("utf-8") == raw
+    assert saved["privacy"] == {"redacted": False, "redactions": []}
+    assert response.json()["input_sha256"] == contracts.document_hash(document)
+    with pytest.raises(contracts.ArenaContractError, match="integer out of range"):
+        contracts.check_strict_document(document)
+    bounded_response = TestClient(create_app(service)).post(
+        "/arena/v1/runs/r1/trajectory", json=document,
+        headers={"x-lab-arena-lease": TOKEN},
+    )
+    assert bounded_response.status_code == 400
+    assert "integer out of range" in bounded_response.json()["detail"]
+
+
+@pytest.mark.parametrize("value", [2 ** 53 + 1, -(2 ** 53 + 1)])
+def test_default_strict_integer_bound_stays_enabled(value):
+    assert contracts.StrictLimits().max_abs_int == 2 ** 53
+    with pytest.raises(contracts.ArenaContractError, match="integer out of range"):
+        contracts.check_strict_document({"value": value})
+    contracts.check_strict_document({"value": value}, contracts.StrictLimits(max_abs_int=None))
+
+
+@pytest.mark.parametrize("number", ["NaN", "Infinity", "-Infinity"])
+def test_training_input_api_still_rejects_nonfinite_numbers(tmp_path, number):
+    service, objects = service_for(tmp_path)
+    response = TestClient(create_app(service)).post(
+        "/arena/v1/runs/r1/training-input", content='{"value":%s}' % number,
+        headers={"x-lab-arena-lease": TOKEN},
+    )
+    assert response.status_code == 400
+    assert "non-finite number" in response.json()["detail"]
+    with pytest.raises(training_input.InputCaptureError):
+        training_input.read_input(objects, "r1", "execute", 1, CLAIM_HASH)
+
+
+@pytest.mark.parametrize("failure", ["size", "depth", "control", "surrogate"])
+def test_training_input_api_keeps_structure_and_string_guards(tmp_path, failure):
+    service, _objects = service_for(tmp_path)
+    expected = 400
+    if failure == "size":
+        document = {"value": "x" * training_input.MAX_INPUT_BYTES}
+        expected = 413
+    elif failure == "depth":
+        document = 0
+        for _ in range(66):
+            document = {"value": document}
+    elif failure == "control":
+        document = {"value": "\u0000"}
+    else:
+        document = {"value": "\ud800"}
+    response = TestClient(create_app(service)).post(
+        "/arena/v1/runs/r1/training-input", content=json.dumps(document),
+        headers={"x-lab-arena-lease": TOKEN},
+    )
+    assert response.status_code == expected
+
+
 @pytest.mark.parametrize("kind", ["execute", "score"])
 @pytest.mark.parametrize("capture_fails", [False, True])
 def test_capture_matches_final_runtime_boundary_without_affecting_execution(tmp_path, kind, capture_fails):

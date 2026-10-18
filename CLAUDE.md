@@ -1,5 +1,18 @@
 # Agent Instructions
 
+## Scoped production authorization: October 17 audit and October 18 full cycle
+
+On 2026-10-17 the user authorized a full October 17 audit and continuous
+October 18 baseline and miner monitoring through publication, promotion,
+incentives and final weights. This includes protected production, provider,
+OnePatch, Sentry and private trajectory inspection; narrow general fixes for
+confirmed faults; focused checks; safe push and merge; exact committed migrations
+only when required; and canonical gateway/normal-validator deployment.
+Preserve frozen ICPs, models and grading, accepted work and published history,
+provider accounting and budgets, credentials, operator controls and concurrent
+work. Do not fabricate scores, replay accepted work or force a champion.
+This scope ends after the October 18 cycle and live verification complete.
+
 ## Scoped production authorization: October 16 publication recovery
 
 On 2026-10-16 the user directed continued investigation until a permanent fix

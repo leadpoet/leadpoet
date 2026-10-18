@@ -319,6 +319,7 @@ def test_command_construction(tmp_path):
     ) == [
         "/usr/local/bin/runsc",
         "--root=%s" % root,
+        "--log=/dev/stderr",
         "--rootless=false",
         "--network=none",
         "--host-uds=open",

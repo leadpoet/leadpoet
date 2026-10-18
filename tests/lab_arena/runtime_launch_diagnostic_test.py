@@ -37,6 +37,7 @@ def test_real_launcher_failure_retains_redacted_diagnostic_and_cleanup(tmp_path)
     runner = RealLauncher(
         "import sys\n"
         "print('mount cgroup failed: permission denied', file=sys.stderr)\n"
+        "print('{\"msg\":\"boot child fatal: mount namespace denied\",\"api_key\":\"private-child-value\"}', file=sys.stderr)\n"
         "print('OPENROUTER_API_KEY=sk-or-v1-0123456789abcdef', file=sys.stderr)\n"
         "print('Bearer bearer-value-0123456789', file=sys.stderr)\n"
         "print('https://user:pass@host.invalid/path?secret=value', file=sys.stderr)\n"
@@ -50,8 +51,9 @@ def test_real_launcher_failure_retains_redacted_diagnostic_and_cleanup(tmp_path)
     assert error.launch_exit_code == 128
     assert not error.launch_timed_out
     assert "permission denied" in error.launch_stderr
+    assert "boot child fatal: mount namespace denied" in error.launch_stderr
     private = host.runtime_host_private_diagnostic(error)
-    for sensitive in (secret, "sk-or-v1-0123456789abcdef", "bearer-value-0123456789", "user:pass", "secret=value"):
+    for sensitive in (secret, "private-child-value", "sk-or-v1-0123456789abcdef", "bearer-value-0123456789", "user:pass", "secret=value"):
         assert sensitive not in private
     assert "permission denied" not in host.runtime_host_diagnostic(error)
     assert runner.process.poll() == 128

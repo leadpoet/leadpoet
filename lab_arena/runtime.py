@@ -523,6 +523,10 @@ def runsc_run_command(
     return [
         str(config.runsc_path),
         "--root=%s" % runsc_root,
+        # runsc donates its normal error-log FD to boot/gofer children. Send
+        # their fatal startup errors to the existing bounded stderr capture;
+        # debug logging and syscall tracing remain disabled.
+        "--log=/dev/stderr",
         # Rootful: the OCI document maps the explicit 65534 identity; gVisor
         # rootless mode would remap the caller to container root instead.
         "--rootless=false",

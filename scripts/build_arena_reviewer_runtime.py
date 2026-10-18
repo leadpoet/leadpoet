@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 GRADER_FILE = "qualification/scoring/company_evidence_investigator.py"
+VERIFICATION_FILE = "qualification/scoring/company_verification.py"
 FINALITY_FILE = "qualification/scoring/lead_scorer.py"
 ENTRYPOINT_FILES = ("lab_arena/scorer_entrypoint.py", "scorer_entrypoint.py")
 RUNTIME_DIRECTORY = "arena_reviewer_runtime"
@@ -129,6 +130,7 @@ def extract_frozen_sources(
     reference: str, destination: Path, *, complete_negative_finality: bool = False,
     source_access_denied: bool = False,
     failed_attribute_source_recovery: bool = False,
+    authenticated_page_refusal: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -136,6 +138,8 @@ def extract_frozen_sources(
         names = (GRADER_FILE, *ENTRYPOINT_FILES)
         if complete_negative_finality or source_access_denied or failed_attribute_source_recovery:
             names += (FINALITY_FILE,)
+        if authenticated_page_refusal:
+            names += (VERIFICATION_FILE,)
         for name in names:
             path = destination / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,6 +156,7 @@ def expected_overlay(
     source_access_denied: bool = False,
     pending_final_correction: bool = False,
     failed_attribute_source_recovery: bool = False,
+    authenticated_page_refusal: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
@@ -159,6 +164,8 @@ def expected_overlay(
     expected = {GRADER_FILE, *ENTRYPOINT_FILES}
     if complete_negative_finality or source_access_denied or failed_attribute_source_recovery:
         expected.add(FINALITY_FILE)
+    if authenticated_page_refusal:
+        expected.add(VERIFICATION_FILE)
     if set(original) != expected:
         raise CompositionError("frozen operational sources are incomplete")
     files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
@@ -180,6 +187,12 @@ def expected_overlay(
     if failed_attribute_source_recovery:
         from scripts.arena_reviewer_attribute_source_seam import convert_attribute_source_seam
         files[FINALITY_FILE] = convert_attribute_source_seam(files[FINALITY_FILE])
+    if authenticated_page_refusal:
+        from scripts.arena_reviewer_typed_refusal_seam import (
+            convert_investigator_seam, convert_verification_seam,
+        )
+        files[GRADER_FILE] = convert_investigator_seam(files[GRADER_FILE])
+        files[VERIFICATION_FILE] = convert_verification_seam(original[VERIFICATION_FILE])
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -210,6 +223,10 @@ def main() -> int:
         "--failed-attribute-source-recovery", action="store_true",
         help="include a failed attribute source in an already planned review; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--authenticated-page-refusal", action="store_true",
+        help="classify only a host-bound exact page refusal; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
@@ -229,12 +246,15 @@ def main() -> int:
             complete_negative_finality=args.complete_negative_finality,
             source_access_denied=args.source_access_denied,
             failed_attribute_source_recovery=args.failed_attribute_source_recovery,
+            **({"authenticated_page_refusal": True}
+               if args.authenticated_page_refusal else {}),
         )
         files = expected_overlay(
             original, complete_negative_finality=args.complete_negative_finality,
             source_access_denied=args.source_access_denied,
             pending_final_correction=args.pending_final_correction,
             failed_attribute_source_recovery=args.failed_attribute_source_recovery,
+            authenticated_page_refusal=args.authenticated_page_refusal,
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
@@ -242,6 +262,7 @@ def main() -> int:
             + ("-source-access" if args.source_access_denied else "")
             + ("-pending-final-correction" if args.pending_final_correction else "")
             + ("-attribute-source-recovery" if args.failed_attribute_source_recovery else "")
+            + ("-refusal" if args.authenticated_page_refusal else "")
         )
         if not args.verify_image:
             for name, data in files.items():
@@ -276,6 +297,9 @@ def main() -> int:
         if args.failed_attribute_source_recovery:
             from scripts.arena_reviewer_attribute_source_seam import CORRECTION_ID as ATTRIBUTE_SOURCE_CORRECTION_ID
             corrections.append(ATTRIBUTE_SOURCE_CORRECTION_ID)
+        if args.authenticated_page_refusal:
+            from scripts.arena_reviewer_typed_refusal_seam import CORRECTION_ID as PAGE_REFUSAL_CORRECTION_ID
+            corrections.append(PAGE_REFUSAL_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,

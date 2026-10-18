@@ -2854,10 +2854,30 @@ class WorkerSocketServer:
             if not (
                 isinstance(name, str)
                 and name.lower() in (
-                    SETTLED_MICROUSD_HEADER, CALL_IDENTITY_HEADER
+                    SETTLED_MICROUSD_HEADER, CALL_IDENTITY_HEADER,
                 )
             )
         }
+        call = document.get("call")
+        if (
+            operation_id == shim.PAGE_FETCH_OPERATION
+            and type(document.get("status")) is int
+            and document["status"] == 403
+            and isinstance(call, Mapping)
+            and call.get("operation_id") == operation_id
+            and call.get("provider") == "deepline"
+            and type(call.get("action_sequence")) is int
+            and call.get("action_sequence") == action_sequence
+            and call.get("error_code") == "provider_request_refused"
+            and isinstance(call.get("call_identity"), str)
+            and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
+        ):
+            try:
+                body = base64.b64decode(str(document["body_b64"]), validate=True)
+            except (TypeError, ValueError):
+                body = b""
+            if body == b'{"error":{"code":"provider_request_refused"}}':
+                headers[CALL_IDENTITY_HEADER] = call["call_identity"]
         if operation_id != "deepline.execute":
             return headers
         call = document.get("call")

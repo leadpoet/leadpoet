@@ -97,6 +97,122 @@ def test_request_spans_name_the_operation_without_leaking_the_run_id():
     assert "secret" not in haystack
 
 
+def test_public_round_spans_identify_only_canonical_matched_rounds():
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+
+    @app.get("/arena/v1/rounds/{round_id}")
+    def _round(round_id: str):
+        if round_id == "arena-2026-10-17":
+            return {"status": "ok"}
+        telemetry.note_denial("round_missing")
+        return JSONResponse(status_code=404, content={"status": "missing"})
+
+    @app.get("/arena/v1/rounds/{round_id}/submissions")
+    def _submissions(round_id: str):
+        telemetry.note_denial("round_missing")
+        return JSONResponse(status_code=404, content={"status": "missing"})
+
+    @app.get("/arena/v1/runs/{run_id}/complete")
+    def _complete(run_id: str):
+        return {"status": "ok"}
+
+    recorder = configure_arena_otel(app, span_exporter=exp)
+    telemetry.install_recorder(recorder)
+    try:
+        with TestClient(app) as client:
+            assert client.get("/arena/v1/rounds/arena-2026-10-17").status_code == 200
+            assert client.get("/arena/v1/rounds/arena-2026-10-19").status_code == 404
+            assert client.get("/arena/v1/rounds/arena-2026-10-19/submissions").status_code == 404
+            assert client.get("/arena/v1/rounds/arena-2020-02-29").status_code == 404
+            assert client.get("/arena/v1/runs/arena-2026-10-19/complete").status_code == 200
+            assert client.get("/arena/v1/rounds/arena-2026-02-30").status_code == 404
+            assert client.get("/arena/v1/rounds/arena-2026-10-19-private").status_code == 404
+            assert client.get("/arena/v1/rounds/arena-2026-10-19?token=secret").status_code == 404
+            assert client.get("/arena/v1/rounds/arena-2026-10-19/missing").status_code == 404
+    finally:
+        telemetry.install_recorder(None)
+
+    spans = exp.get_finished_spans()
+    assert len(spans) == 9, "invalid IDs and unmatched paths must keep the base span"
+    assert [span.attributes.get("arena.round_id") for span in spans] == [
+        "arena-2026-10-17", "arena-2026-10-19", "arena-2026-10-19",
+        "arena-2020-02-29", None, None, None, "arena-2026-10-19", None,
+    ]
+    assert [span.attributes["arena.denial"] for span in spans[:3]] == [
+        "-", "round_missing", "round_missing",
+    ]
+    assert spans[-1].attributes["http.route"] == "/_unmatched"
+    assert "secret" not in repr([dict(span.attributes) for span in spans])
+
+
+def test_public_round_http_exporter_rejects_forged_round_attributes():
+    from gateway.observability.otel_bootstrap import _validating_exporter
+    from opentelemetry.context import Context
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.trace import SpanKind
+
+    route = "/arena/v1/rounds/{round_id}"
+    allowed = {route, "/arena/v1/runs/{run_id}/complete"}
+    exp = InMemorySpanExporter()
+    resource = {"service.name": ARENA_SERVICE_NAME}
+    validator = _validating_exporter(
+        exp, allowed_routes=lambda: allowed, expected_resource=resource,
+        scopes={ARENA_HTTP_SCOPE: "arena_http"},
+    )
+    provider = TracerProvider(resource=Resource(resource))
+    provider.add_span_processor(SimpleSpanProcessor(validator))
+    tracer = provider.get_tracer(ARENA_HTTP_SCOPE)
+
+    def emit(route, round_id):
+        span = tracer.start_span("GET " + route, kind=SpanKind.SERVER, context=Context())
+        for key, value in {
+            "http.request.method": "GET", "http.route": route,
+            "http.response.status_code": 404, "arena.denial": "round_missing",
+            "duration_ms": 1.0,
+        }.items():
+            span.set_attribute(key, value)
+        if round_id is not None:
+            span.set_attribute("arena.round_id", round_id)
+        span.end()
+
+    emit(route, "arena-2026-10-19")
+    for invalid in ("arena-2026-02-30", "arena-2026-10-19-private", "secret"):
+        emit(route, invalid)
+    emit("/arena/v1/runs/{run_id}/complete", "arena-2026-10-19")
+    emit(route, None)
+    spans = exp.get_finished_spans()
+    assert len(spans) == 2
+    assert spans[0].attributes["arena.round_id"] == "arena-2026-10-19"
+    assert "arena.round_id" not in spans[1].attributes
+
+
+def test_public_round_store_503_retains_bounded_diagnostics():
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+    recorder = configure_arena_otel(app, span_exporter=exp)
+
+    @app.get("/arena/v1/rounds/{round_id}")
+    def _round(round_id: str):
+        recorder.note_denial("arena_store_unavailable", store_error={
+            "operation": "select", "resource": "lab_arena_rounds",
+            "transport_error": "ReadTimeout",
+        })
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+
+    with TestClient(app) as client:
+        assert client.get("/arena/v1/rounds/arena-2026-10-19").status_code == 503
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.round_id"] == "arena-2026-10-19"
+    assert span.attributes["arena.denial"] == "arena_store_unavailable"
+    assert span.attributes["arena.store_operation"] == "select"
+    assert span.attributes["arena.store_resource"] == "lab_arena_rounds"
+    assert span.attributes["arena.store_transport_error"] == "ReadTimeout"
+
+
 def test_arena_identity_is_never_the_gateway_identity():
     """INC-238's shape: a second emitter must not inherit the first's name."""
     exp = InMemorySpanExporter()

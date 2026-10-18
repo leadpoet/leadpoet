@@ -51,10 +51,11 @@ which runs the Arena competition pipeline in its own process. It reuses the
 identical fail-closed machinery under separate Arena scopes:
 
 - ``arena.http`` — one SERVER span per sidecar request, carrying the SAME four
-  attributes. At the gateway every Arena call collapses into the catch-all
-  ``/arena/{arena_path:path}`` template, so the operation that was invoked is
-  not recoverable from gateway telemetry at all; the sidecar's own route
-  templates restore it without exporting a single client-controlled string.
+  attributes plus a bounded refusal code. A matched public round route may
+  also carry a canonical calendar-date round id from its path parameter. At
+  the gateway every Arena call collapses into the catch-all
+  ``/arena/{arena_path:path}`` template, so the sidecar's own route templates
+  identify the operation without exporting the concrete URL.
 - ``arena.task`` — one INTERNAL span per driver / worker stage, so a stalled
   pipeline stops being indistinguishable from an idle one. Its attribute set
   is a separate, equally fixed allowlist: a stage name from a frozen
@@ -87,6 +88,7 @@ from __future__ import annotations
 import os
 import re
 import time
+from datetime import date
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -641,9 +643,10 @@ LIFECYCLE_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 
 # The Arena sidecar's HTTP envelope: the gateway's four, plus the refusal code
 # the sidecar itself produced. The gateway's own envelope is UNCHANGED — this
-# fifth attribute exists only on the sidecar, where a 4xx with no reason is
-# the difference between "a runner was denied a claim" and "a runner is
-# broken". Its vocabulary is the literal prefix of a ``ServiceError`` code.
+# fifth required attribute exists only on the sidecar, where a 4xx with no
+# reason is the difference between "a runner was denied a claim" and "a runner
+# is broken". Its vocabulary is the literal prefix of a ``ServiceError`` code.
+# A matched public round route may add an optional canonical round id.
 # Temporary store failures may also carry the existing bounded machine fields;
 # the final exporter admits those only for the matching 503 denial.
 ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
@@ -654,7 +657,43 @@ ARENA_HTTP_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "duration_ms": (int, float),
 }
 
-ARENA_HTTP_ATTRIBUTE_ALLOWLIST = frozenset(ARENA_HTTP_ATTRIBUTE_TYPES)
+ARENA_HTTP_ATTRIBUTE_ALLOWLIST = (
+    frozenset(ARENA_HTTP_ATTRIBUTE_TYPES) | frozenset({"arena.round_id"})
+)
+
+# A registered public round route can name the requested round. The concrete
+# path, query, headers, and other path parameters remain private.
+_ARENA_PUBLIC_ROUND_ROUTE_PREFIX = "/arena/v1/rounds/{round_id}"
+_ARENA_HTTP_ROUND_ID_RE = re.compile(r"^arena-([0-9]{4}-[0-9]{2}-[0-9]{2})$")
+
+
+def _is_public_round_route(route: str) -> bool:
+    return route == _ARENA_PUBLIC_ROUND_ROUTE_PREFIX or route.startswith(
+        _ARENA_PUBLIC_ROUND_ROUTE_PREFIX + "/"
+    )
+
+
+def _canonical_http_round_id(value: Any) -> bool:
+    if type(value) is not str:
+        return False
+    match = _ARENA_HTTP_ROUND_ID_RE.fullmatch(value)
+    if match is None:
+        return False
+    try:
+        date.fromisoformat(match.group(1))
+    except ValueError:
+        return False
+    return True
+
+
+def _matched_http_round_id(scope: Mapping[str, Any], route: str) -> Optional[str]:
+    if not _is_public_round_route(route):
+        return None
+    params = scope.get("path_params")
+    if not isinstance(params, Mapping):
+        return None
+    value = params.get("round_id")
+    return value if _canonical_http_round_id(value) else None
 
 # The only per-run fields admitted on provider, terminal, and runtime spans. The Arena
 # service takes these from the authenticated database run row, not a request.
@@ -938,7 +977,8 @@ def _validating_exporter(
     vocabularies:
 
     ``http``        SERVER span, four HTTP fields plus optional capacity pair
-    ``arena_http``  SERVER span, those four plus the Arena refusal code
+    ``arena_http``  SERVER span, those four plus the Arena refusal code and
+                    optional canonical public round id
     ``task``        INTERNAL span, the five approved pipeline-stage attributes
     ``provider``    INTERNAL span, the ten approved provider-call attributes
     ``run``         INTERNAL span, the four approved run-outcome attributes
@@ -997,8 +1037,17 @@ def _validating_exporter(
         ))
         if attributes is None:
             return "store_error"
-        if not _attributes_conform(attributes, ARENA_HTTP_ATTRIBUTE_TYPES):
+        has_round_id = "arena.round_id" in attributes
+        expected_types = ARENA_HTTP_ATTRIBUTE_TYPES
+        if has_round_id:
+            expected_types = {**expected_types, "arena.round_id": (str,)}
+        if not _attributes_conform(attributes, expected_types):
             return "attributes"
+        if has_round_id and (
+            not _is_public_round_route(attributes["http.route"])
+            or not _canonical_http_round_id(attributes["arena.round_id"])
+        ):
+            return "round_id"
         denial = attributes["arena.denial"]
         if denial != ARENA_NO_DENIAL and (
             not _ARENA_DENIAL_RE.fullmatch(denial)
@@ -1008,7 +1057,7 @@ def _validating_exporter(
         trimmed = {
             key: value
             for key, value in attributes.items()
-            if key != "arena.denial"
+            if key not in ("arena.denial", "arena.round_id")
         }
         return _http_violation(span, trimmed)
 
@@ -1977,6 +2026,9 @@ def configure_arena_otel(
                 span.set_attribute("http.request.method", method)
                 span.set_attribute("http.route", route)
                 span.set_attribute("http.response.status_code", int(status_code))
+                round_id = _matched_http_round_id(scope, route)
+                if round_id is not None:
+                    span.set_attribute("arena.round_id", round_id)
                 denial = telemetry.take_denial()
                 span.set_attribute("arena.denial", denial)
                 if int(status_code) == 503 and denial == "arena_store_unavailable":

@@ -2191,6 +2191,7 @@ async def _fetch_page(
     safe_url = _safe_https_url(url)
     if not safe_url:
         return {"ok": False, "error": "invalid_url"}
+    api_key = ""
     try:
         canonical_url = public_http_url(safe_url)
         linkedin_profile = _strict_linkedin_company_profile_url(canonical_url)
@@ -2268,6 +2269,14 @@ async def _fetch_page(
         if not safe_final_url:
             raise ValueError("invalid final URL")
         safe_final_url = public_http_url(safe_final_url)
+    except _ArenaProviderFetchError as exc:
+        if (
+            api_key
+            and exc.broker_status == 403
+            and exc.broker_error_code == "provider_request_refused"
+        ):
+            return {"ok": False, "error": "provider_request_refused"}
+        raise
     except (TypeError, ValueError):
         return {"ok": False, "error": "invalid_url"}
     if status != 200:

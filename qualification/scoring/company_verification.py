@@ -1128,13 +1128,27 @@ def _identity_result(
 class _ArenaProviderFetchError(aiohttp.ClientError):
     """An Arena error response has no validated target response URL."""
 
-    def __init__(self, message: str, *, broker_status: Optional[int] = None):
+    def __init__(
+        self, message: str, *, broker_status: Optional[int] = None,
+        broker_error_code: str = "",
+    ):
         super().__init__(message)
         self.broker_status = (
             broker_status
             if type(broker_status) is int and 100 <= broker_status <= 599
             else None
         )
+        self.broker_error_code = (
+            "provider_request_refused"
+            if self.broker_status == 403
+            and broker_error_code == "provider_request_refused"
+            else ""
+        )
+
+
+_ARENA_PROVIDER_REQUEST_REFUSED_BODY = (
+    b'{"error":{"code":"provider_request_refused"}}'
+)
 
 
 async def _fetch_bounded_html(
@@ -1151,9 +1165,31 @@ async def _fetch_bounded_html(
             resp.status >= 400
             and getattr(resp, "_lab_arena_response_url_validated", None) is False
         ):
+            broker_error_code = ""
+            if (
+                resp.status == 403
+                and bool(getattr(resp, "headers", {}).get(
+                    "x-leadpoet-call-identity"
+                ))
+            ):
+                # The broker's fixed refusal has no target URL. Read at most
+                # one byte beyond its exact envelope; never return this body
+                # or the shim's request-URL fallback as page evidence.
+                raw_error = bytearray()
+                while len(raw_error) <= len(_ARENA_PROVIDER_REQUEST_REFUSED_BODY):
+                    chunk = await resp.content.read(
+                        len(_ARENA_PROVIDER_REQUEST_REFUSED_BODY) + 1
+                        - len(raw_error)
+                    )
+                    if not chunk:
+                        break
+                    raw_error.extend(chunk)
+                if bytes(raw_error) == _ARENA_PROVIDER_REQUEST_REFUSED_BODY:
+                    broker_error_code = "provider_request_refused"
             raise _ArenaProviderFetchError(
                 "website fetch error: Arena provider response unavailable",
                 broker_status=resp.status,
+                broker_error_code=broker_error_code,
             )
         raw = bytearray()
         while len(raw) < _MAX_BYTES:

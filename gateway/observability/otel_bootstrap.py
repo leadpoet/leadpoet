@@ -622,6 +622,14 @@ TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
 }
 
 TASK_SPAN_ATTRIBUTE_ALLOWLIST = frozenset(TASK_SPAN_ATTRIBUTE_TYPES)
+BILLING_LOOKUP_LANES = frozenset({"execute", "score", "general"})
+BILLING_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    **TASK_SPAN_ATTRIBUTE_TYPES,
+    "arena.round_id": (str,),
+    "arena.billing_lane": (str,),
+    "arena.cursor_entry_id": (int,),
+    "arena.run_scoped": (bool,),
+}
 ARENA_LIFECYCLE_STAGES = frozenset(
     {"service_startup", "service_shutdown", "service_preflight"}
 )
@@ -1147,6 +1155,13 @@ def _validating_exporter(
             source_sha = attributes["arena.source_sha"]
             if source_sha != "unknown" and not re.fullmatch(r"[0-9a-f]{40}", source_sha):
                 return "source_sha"
+        elif stage == "reconcile_deepline_billing_lookup" and _attributes_conform(
+            attributes, BILLING_TASK_SPAN_ATTRIBUTE_TYPES
+        ):
+            if (not _ARENA_ROUND_ID_RE.fullmatch(attributes["arena.round_id"])
+                    or attributes["arena.billing_lane"] not in BILLING_LOOKUP_LANES
+                    or not 0 <= attributes["arena.cursor_entry_id"] <= 9223372036854775807):
+                return "billing_lookup"
         elif not _attributes_conform(attributes, TASK_SPAN_ATTRIBUTE_TYPES):
             return "attributes"
         if stage not in ARENA_TASK_STAGES:
@@ -1785,6 +1800,7 @@ class ArenaTelemetry:
         start_ns: Optional[int] = None,
         source_sha: Optional[str] = None,
         store_error: Optional[Mapping[str, Any]] = None,
+        billing_lookup: Optional[Mapping[str, Any]] = None,
     ) -> None:
         try:
             self._record(
@@ -1796,6 +1812,7 @@ class ArenaTelemetry:
                 start_ns=start_ns,
                 source_sha=source_sha,
                 store_error=store_error,
+                billing_lookup=billing_lookup,
             )
         except BaseException as exc:
             # Telemetry is observational only — the pipeline must not notice.
@@ -1812,6 +1829,7 @@ class ArenaTelemetry:
         start_ns: Optional[int],
         source_sha: Optional[str],
         store_error: Optional[Mapping[str, Any]],
+        billing_lookup: Optional[Mapping[str, Any]],
     ) -> None:
         from opentelemetry.trace import Status, StatusCode
 
@@ -1823,6 +1841,19 @@ class ArenaTelemetry:
         span.set_attribute("duration_ms", float(duration_ms))
         if source_sha is not None:
             span.set_attribute("arena.source_sha", str(source_sha))
+        if stage == "reconcile_deepline_billing_lookup" and isinstance(billing_lookup, Mapping):
+            round_id = billing_lookup.get("round_id")
+            lane = billing_lookup.get("lane")
+            cursor = billing_lookup.get("cursor_entry_id")
+            run_scoped = billing_lookup.get("run_scoped")
+            if (type(round_id) is str and _ARENA_ROUND_ID_RE.fullmatch(round_id)
+                    and type(lane) is str and lane in BILLING_LOOKUP_LANES
+                    and type(cursor) is int and 0 <= cursor <= 9223372036854775807
+                    and type(run_scoped) is bool):
+                span.set_attribute("arena.round_id", round_id)
+                span.set_attribute("arena.billing_lane", lane)
+                span.set_attribute("arena.cursor_entry_id", cursor)
+                span.set_attribute("arena.run_scoped", run_scoped)
         if store_error:
             from lab_arena.store import safe_store_error_metadata
 

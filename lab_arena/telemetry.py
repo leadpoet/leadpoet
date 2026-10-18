@@ -39,7 +39,9 @@ bounded identifiers copied from the gateway's authenticated run row. Review
 spans carry four bounded identifiers from the accepted submission and committed
 attempt. No ICP content, source bundle, prompt, completion, score, model
 output, URL, or credential is accepted.
-Stage and gate spans remain aggregate.
+Stage and gate spans remain aggregate, except Deepline billing lookups carry
+the bounded round, lane, cursor and run-scope context needed to locate a slow
+candidate query. They never carry a run ID or provider payload.
 """
 
 from __future__ import annotations
@@ -72,6 +74,7 @@ def record(
     start_ns: Optional[int] = None,
     source_sha: Optional[str] = None,
     store_error: Optional[Mapping[str, Any]] = None,
+    billing_lookup: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Record one stage outcome. Never raises."""
     recorder = _recorder
@@ -87,6 +90,7 @@ def record(
             start_ns=start_ns,
             source_sha=source_sha,
             **({"store_error": store_error} if store_error else {}),
+            **({"billing_lookup": billing_lookup} if billing_lookup else {}),
         )
     except BaseException:
         pass
@@ -276,7 +280,7 @@ class StageResult:
 
 
 @contextmanager
-def stage(name: str) -> Iterator[StageResult]:
+def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> Iterator[StageResult]:
     """Time one pipeline stage and record its outcome, success or failure.
 
     The wrapped exception is re-raised unchanged — this observes, it never
@@ -296,6 +300,7 @@ def stage(name: str) -> Iterator[StageResult]:
             duration_ms=(time.monotonic() - start_mono) * 1000.0,
             start_ns=start_ns,
             store_error=_store_error_metadata(exc),
+            billing_lookup=billing_lookup,
         )
         raise
     record(
@@ -304,6 +309,7 @@ def stage(name: str) -> Iterator[StageResult]:
         count=int(result.count or 0),
         duration_ms=(time.monotonic() - start_mono) * 1000.0,
         start_ns=start_ns,
+        billing_lookup=billing_lookup,
     )
 
 

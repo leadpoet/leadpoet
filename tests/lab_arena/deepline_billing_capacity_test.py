@@ -415,7 +415,7 @@ def test_settlement_telemetry_counts_all_completed_bills(monkeypatch):
     observations = []
 
     @contextmanager
-    def stage(name):
+    def stage(name, **_kwargs):
         observed = SimpleNamespace(count=0, idle=False)
         observations.append((name, observed))
         yield observed
@@ -473,6 +473,11 @@ def test_candidate_lookup_failure_reports_safe_resource_without_stopping_other_l
     expected.update({"transport_error": fault} if fault == "ReadTimeout"
                     else {"code": fault, "http_status": 500})
     assert metadata == expected
+    assert {key: failed[0].attributes[key] for key in (
+        'arena.round_id', 'arena.billing_lane', 'arena.cursor_entry_id',
+        'arena.run_scoped')} == {
+            'arena.round_id': ROUND_ID, 'arena.billing_lane': 'execute',
+            'arena.cursor_entry_id': 0, 'arena.run_scoped': False}
     assert canary not in str(failed[0]) + caplog.text
 
 
@@ -512,7 +517,10 @@ def test_wrapped_rpc_page_reserves_last_cursor_item_not_largest_entry_id():
     store.items = [candidate(n) for n in range(1, 11)]
     service, broker = service_for(store)
     service._deepline_reconciliation_after[(ROUND_ID, '')] = 9
-    first = service._deepline_cost_candidates(ROUND_ID, limit=3)
+    lookup_context = {}
+    first = service._deepline_cost_candidates(
+        ROUND_ID, limit=3, lookup_context=lookup_context)
+    assert lookup_context['cursor_entry_id'] == store.reads[-1][1] == 9
     assert {item['uncertain_entry_id'] for item in first} == {10, 1, 2}
     assert service._deepline_reconciliation_after[(ROUND_ID, '')] == 2
     second = service._deepline_cost_candidates(ROUND_ID, limit=3)

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,9 +59,17 @@ def export_run(store, objects, run_id):
             cached = store.get_company_judgment(*identity)
             if cached is not None:
                 company_rows[identity] = cached
+    def cost_eligibility_reader(**identity):
+        # The stable database RPC is the competition authority for per-ICP
+        # successful-sourcing cost. Keep its observation time with the result.
+        result = store.icp_cost_eligibility(**identity)
+        return {"observed_at": datetime.now(timezone.utc).isoformat(),
+                "eligibility": result}
+
     return assemble_example(run_id=run_id, round_row=round_row, submission_row=submission,
                             runs=runs, ledger_rows=ledger, objects=objects,
-                            cache_rows=list(caches.values()), company_judgment_rows=list(company_rows.values()))
+                            cache_rows=list(caches.values()), company_judgment_rows=list(company_rows.values()),
+                            cost_eligibility_reader=cost_eligibility_reader)
 
 
 def write_private(path: Path, document: dict) -> None:

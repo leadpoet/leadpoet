@@ -10,10 +10,10 @@ import tarfile
 
 import pytest
 
-from lab_arena import contracts, reviewer_runtime, scoring, training_capture, training_input, verify
-from lab_arena.training_export import ExportError, assemble_example, without_hidden_reasoning
+from lab_arena import contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, verify
+from lab_arena.training_export import ExportError, _competition_cost_snapshot, assemble_example, without_hidden_reasoning
 from lab_arena.output import validate_output_document
-from scripts.export_arena_training import _ledger, write_private
+from scripts.export_arena_training import _ledger, export_run, write_private
 
 CLAIM_HASH = "sha256:" + "c" * 64
 OUTPUT_REF = "arena/arena-2026-10-16/outputs/execute:1.json"
@@ -680,3 +680,273 @@ def test_round_filters_report_stored_state_without_inferring_reward_authority():
         "cancelled", False, "finney-shadow")
     assert cancelled["example_id"] == published["example_id"]
     assert cancelled["example_hash"] != published["example_hash"]
+
+
+def per_icp_cost_fixture():
+    """One qualified company earns 12.75 before the separate cost decision."""
+    values = baseline_fixture()
+    config = values["round_row"]["configuration_doc"]
+    config.update(integrity_policy="arena_integrity_v1",
+                  sourcing_cost_eligibility_policy=contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+                  execution_icp_cap_microusd=4_000_000,
+                  cost_per_company_microusd=800_000)
+    benchmark = json.loads(values["objects"].values["benchmark"])
+    icp = dict(benchmark["icps"][0], max_companies=4)
+    benchmark["icps"] = [icp] * len(benchmark["icps"])
+    values["objects"].put("benchmark", contracts.canonical_json(benchmark).encode())
+    execute, judge = values["runs"]
+    output = json.loads(values["objects"].values[OUTPUT_REF])
+    breakdown = {"company_index": 0, "company_identity_key": "company-acme",
+                 "company_identity_alias_keys": ["company-acme"],
+                 "company_qualified": True, "duplicate_company": False,
+                 "final_score": 51.0}
+    row = verify.scored_row(execute["submission_id"], 0, execute["run_id"], icp,
+                            output["companies"], [breakdown], config["scorer_policy"])
+    record = scoring.run_scores_for_store({"rows": [row], "integrity_policy": "arena_integrity_v1"},
+                                          [execute])[0]
+    execute.update(per_icp_score=record["per_icp_score"],
+                   qualification_doc=record["qualification_doc"])
+    values["objects"].put(judge["output_ref"], contracts.canonical_json(
+        scoring.build_scoring_output(execute["run_id"], [breakdown])).encode())
+    save_input(values["objects"], execute["run_id"], "execute",
+               {"schema_version": "leadpoet.lab_arena.icp_input.v1", "icp": icp,
+                "evaluation_date": "2026-10-16"})
+    save_input(values["objects"], judge["run_id"], "score",
+               scoring.build_scoring_input(scored_run_id=execute["run_id"], icp=icp,
+                                           companies=output["companies"], policy=config["scorer_policy"],
+                                           evaluation_date="2026-10-16"))
+    return values
+
+
+def per_icp_cost_reader(*, spend=1_145_340, reason="cost_per_company_exceeded",
+                        secret=None, round_id="arena-2026-10-16",
+                        submission_id="baseline-2026-10-16", icp_position=0):
+    unresolved = 42 if reason == "provider_cost_uncertain" else 0
+    unresolved_calls = 1 if reason in ("provider_cost_uncertain", "provider_calls_inflight") else 0
+    def read(**identity):
+        assert identity == {"round_id": round_id,
+                            "submission_id": submission_id,
+                            "icp_position": icp_position, "qualified_company_count": 1}
+        return {"observed_at": "2026-10-18T04:20:00+00:00",
+                "eligibility": {"icp_position": icp_position, "eligible": reason == "eligible",
+                                "eligibility_reason": reason,
+                                "competition_sourcing_microusd": spend,
+                                "execution_icp_cap_microusd": 4_000_000,
+                                "cost_per_company_cap_microusd": 800_000,
+                                "eligibility_cap_microusd": 800_000,
+                                "execution": {"successful_microusd": spend - unresolved,
+                                              "success_unresolved_microusd": unresolved,
+                                              "inflight_calls": int(reason == "provider_calls_inflight"),
+                                              "success_unresolved_calls": unresolved_calls},
+                                "private_marker": secret}}
+    return read
+
+
+def test_raw_quality_and_export_time_cost_ineligibility_are_separate():
+    values = per_icp_cost_fixture()
+    secret = "never-export-this-cost-authority-field"
+    result = assemble_example(**values, cost_eligibility_reader=per_icp_cost_reader(secret=secret))
+    assert result["judgment"]["per_icp_score"] == 12.75
+    assert result["companies"][0]["judgment"]["company_qualified"] is True
+    decision = result["competition_cost_eligibility"]
+    assert decision == {"status": "available", "scope": "export_time_per_icp_sourcing",
+                        "source_rpc": "lab_arena_icp_cost_eligibility",
+                        "observed_at": "2026-10-18T04:20:00+00:00",
+                        "policy": contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+                        "icp_position": 0, "qualified_company_count": 1,
+                        "competition_sourcing_microusd": 1_145_340,
+                        "execution_icp_cap_microusd": 4_000_000,
+                        "cost_per_company_cap_microusd": 800_000,
+                        "eligibility_cap_microusd": 800_000,
+                        "eligible": False, "eligibility_reason": "cost_per_company_exceeded"}
+    assert result["costs"]["confirmed_actual_microusd"] == 0
+    assert secret not in json.dumps(result)
+
+
+def test_oct18_baseline_icp7_observed_quality_and_cost_example():
+    """The observed 12.75 quality label survives the separate 1,145,340 cost refusal."""
+    values = per_icp_cost_fixture()
+    run = values["runs"][0]
+    run.update(run_id="arena-2026-10-18:baseline-2026-10-18:1:7:1",
+               round_id="arena-2026-10-18", submission_id="baseline-2026-10-18",
+               icp_position=7)
+    icp = json.loads(values["objects"].values["benchmark"])["icps"][0]
+    output = json.loads(values["objects"].values[OUTPUT_REF])
+    breakdowns = json.loads(values["objects"].values["judge-output"])["breakdowns"]
+    scored = verify.scored_row(run["submission_id"], 7, run["run_id"], icp,
+                               output["companies"], breakdowns,
+                               values["round_row"]["configuration_doc"]["scorer_policy"])
+    run["qualification_doc"] = scoring.run_scores_for_store(
+        {"rows": [scored], "integrity_policy": "arena_integrity_v1"}, [run]
+    )[0]["qualification_doc"]
+    decision = _competition_cost_snapshot(
+        run=run, configuration=values["round_row"]["configuration_doc"],
+        scored=scored, related=[run], reader=per_icp_cost_reader(
+            round_id="arena-2026-10-18", submission_id="baseline-2026-10-18",
+            icp_position=7))
+    assert scored["per_icp_score"] == 12.75
+    assert decision["eligible"] is False
+    assert decision["competition_sourcing_microusd"] == 1_145_340
+    assert decision["eligibility_reason"] == "cost_per_company_exceeded"
+
+
+def test_eligible_snapshot_is_distinct_from_actual_paid_cost():
+    result = assemble_example(**per_icp_cost_fixture(),
+                              cost_eligibility_reader=per_icp_cost_reader(spend=500_000, reason="eligible"))
+    assert result["competition_cost_eligibility"]["eligible"] is True
+    assert result["competition_cost_eligibility"]["competition_sourcing_microusd"] == 500_000
+    assert result["judgment"]["per_icp_score"] == 12.75
+
+
+def test_export_run_wires_one_read_only_cost_rpc_with_verified_qualified_count():
+    values = per_icp_cost_fixture()
+    calls = []
+    class Store:
+        def get_run(self, run_id):
+            assert run_id == values["run_id"]
+            return values["runs"][0]
+        def get_round(self, round_id):
+            assert round_id == values["round_row"]["round_id"]
+            return values["round_row"]
+        def get_submission(self, submission_id):
+            assert submission_id == values["submission_row"]["submission_id"]
+            return values["submission_row"]
+        def list_runs(self, round_id):
+            assert round_id == values["round_row"]["round_id"]
+            return values["runs"]
+        def list_ledger(self, **identity):
+            assert identity["run_id"] in {row["run_id"] for row in values["runs"]}
+            return []
+        def icp_cost_eligibility(self, **identity):
+            calls.append(identity)
+            return per_icp_cost_reader()(**identity)["eligibility"]
+    result = export_run(Store(), values["objects"], values["run_id"])
+    assert result["competition_cost_eligibility"]["status"] == "available"
+    assert result["competition_cost_eligibility"]["source_rpc"] == "lab_arena_icp_cost_eligibility"
+    assert calls == [{"round_id": "arena-2026-10-16",
+                      "submission_id": "baseline-2026-10-16",
+                      "icp_position": 0, "qualified_company_count": 1}]
+
+
+@pytest.mark.parametrize("spend,reason", [
+    (1_145_340, "eligible"), (500_000, "cost_per_company_exceeded")])
+def test_contradictory_cost_authority_reply_is_unavailable(spend, reason):
+    result = assemble_example(**per_icp_cost_fixture(),
+                              cost_eligibility_reader=per_icp_cost_reader(spend=spend, reason=reason))
+    decision = result["competition_cost_eligibility"]
+    assert decision["status"] == "unavailable"
+    assert "eligible" not in decision and "competition_sourcing_microusd" not in decision
+
+
+def test_missing_or_unfinished_cost_authority_never_invents_an_eligible_zero():
+    values = per_icp_cost_fixture()
+    missing = assemble_example(**values)["competition_cost_eligibility"]
+    assert missing["status"] == "unavailable" and missing["reason"] == "cost_authority_unavailable"
+    assert "eligible" not in missing and "competition_sourcing_microusd" not in missing
+    values["runs"][1]["status"] = "leased"
+    unfinished = assemble_example(**values, cost_eligibility_reader=per_icp_cost_reader())
+    assert unfinished["competition_cost_eligibility"]["status"] == "unavailable"
+    assert unfinished["competition_cost_eligibility"]["reason"] == "quality_or_attempt_not_final"
+    assert "judgment" not in unfinished
+
+
+def test_persisted_qualification_mismatch_blocks_cost_snapshot_without_changing_raw_label():
+    values = per_icp_cost_fixture()
+    values["runs"][0]["qualification_doc"]["companies"][0]["company_qualified"] = False
+    result = assemble_example(**values, cost_eligibility_reader=per_icp_cost_reader())
+    assert result["judgment"]["per_icp_score"] == 12.75
+    assert result["competition_cost_eligibility"] == {
+        "status": "unavailable", "reason": "persisted_qualification_mismatch",
+        "policy": contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY}
+
+
+def test_verified_cached_judgment_controls_cost_snapshot_and_bad_cache_blocks_it():
+    values = per_icp_cost_fixture()
+    execute, judge = values["runs"]
+    config = values["round_row"]["configuration_doc"]
+    output = json.loads(values["objects"].values[OUTPUT_REF])
+    icp = json.loads(values["objects"].values["benchmark"])["icps"][0]
+    scoring_input = scoring.build_scoring_input(
+        scored_run_id=execute["run_id"], icp=icp, companies=output["companies"],
+        policy=config["scorer_policy"], evaluation_date="2026-10-16")
+    scope = judgment_cache.build_cache_scope(
+        scoring_input=scoring_input, round_id=execute["round_id"], network_name="finney",
+        netuid=71, scorer_image_digest=config["scorer_image_digest"],
+        scorer_image_reference=config["scorer_image_reference"],
+        integrity_policy="arena_integrity_v1")
+    source_score_run_id = "judge:source"
+    source_scored_run_id = "execute:source"
+    source_output = scoring.build_scoring_output(
+        source_scored_run_id,
+        json.loads(values["objects"].values[judge["output_ref"]])["breakdowns"])
+    evidence = judgment_cache.build_evidence_snapshot(
+        output=source_output, cache_scope=scope,
+        source_score_run_id=source_score_run_id,
+        source_scored_run_id=source_scored_run_id,
+        source_output_ref="arena/arena-2026-10-16/scores/items/judge:source.json",
+        source_runner_hotkey="validator-source",
+        runner_authority_exclusions=["validator-source"])
+    cache_row = {"cache_key": scope["cache_key"],
+                 "scoring_input_hash": scope["scoring_input_hash"],
+                 "evidence_hash": contracts.document_hash(evidence),
+                 "evidence_doc": evidence,
+                 "source_score_run_id": source_score_run_id}
+    source = dict(judge, run_id=source_score_run_id,
+                  scored_run_id=source_scored_run_id,
+                  runner_hotkey="validator-source")
+    values["runs"].append(source)
+    values["cache_rows"] = [cache_row]
+    judge.update(judgment_cache_key=scope["cache_key"],
+                 judgment_cache_source_run_id=source_score_run_id)
+    result = assemble_example(**values, cost_eligibility_reader=per_icp_cost_reader())
+    assert result["judgment"]["judgment_cache_source_run_id"] == source_score_run_id
+    assert result["competition_cost_eligibility"]["status"] == "available"
+    cache_row["evidence_hash"] = "sha256:" + "0" * 64
+    def forbidden_reader(**_identity):
+        pytest.fail("invalid cached judgment must not call cost authority")
+    invalid = assemble_example(**values, cost_eligibility_reader=forbidden_reader)
+    assert "judgment" not in invalid
+    assert invalid["competition_cost_eligibility"]["status"] == "unavailable"
+
+
+@pytest.mark.parametrize("reason", ["provider_calls_inflight", "provider_cost_uncertain"])
+def test_unsettled_cost_authority_is_explicitly_unavailable(reason):
+    result = assemble_example(**per_icp_cost_fixture(),
+                              cost_eligibility_reader=per_icp_cost_reader(reason=reason))
+    decision = result["competition_cost_eligibility"]
+    assert decision["status"] == "unavailable" and decision["reason"] == reason
+    assert "eligible" not in decision and "competition_sourcing_microusd" not in decision
+
+
+def test_failed_call_unknown_fee_does_not_hide_final_successful_sourcing_decision():
+    values = per_icp_cost_fixture()
+    add_call(values, status="uncertain")
+    values["ledger_rows"][-1]["terminal_response"]["status"] = 502
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(
+        b'{"error":"provider_unavailable"}').decode()
+    values["ledger_rows"][-1]["entry_doc"].update(
+        reason="worker_reported",
+        call={"call_succeeded": False, "reason": "transport_failure", "provider_status": 502})
+    result = assemble_example(**values, cost_eligibility_reader=per_icp_cost_reader(
+        spend=500_000, reason="eligible"))
+    assert result["provider_calls"][0]["accounting_state"] == "uncertain"
+    assert result["provider_calls"][0]["actual_microusd"] is None
+    assert result["completeness"]["dimensions"]["costs"] is False
+    assert result["competition_cost_eligibility"]["status"] == "available"
+    assert result["competition_cost_eligibility"]["eligible"] is True
+
+
+def test_successful_call_unknown_fee_keeps_successful_sourcing_decision_unavailable():
+    values = per_icp_cost_fixture()
+    add_call(values, status="uncertain")
+    values["ledger_rows"][-1]["entry_doc"].update(
+        reason="worker_reported", call={"call_succeeded": True,
+                                        "reason": "missing_provider_cost", "provider_status": 200})
+    result = assemble_example(**values, cost_eligibility_reader=per_icp_cost_reader(
+        reason="provider_cost_uncertain"))
+    assert result["provider_calls"][0]["accounting_state"] == "uncertain"
+    assert result["completeness"]["dimensions"]["costs"] is False
+    decision = result["competition_cost_eligibility"]
+    assert decision["status"] == "unavailable"
+    assert decision["reason"] == "provider_cost_uncertain"
+    assert "eligible" not in decision

@@ -243,6 +243,13 @@ reports independent completeness dimensions. An incomplete example exits with
 code 2; identity ambiguity or access failure exits with code 1. Never treat the
 existence of an export file as proof it is eligible for training.
 
+For per-ICP rounds, `competition_cost_eligibility` is a read-only snapshot from
+`lab_arena_icp_cost_eligibility` at export time. Its timestamp and frozen policy
+caps distinguish it from the published historical reward decision. Actual paid
+cost remains separate; an unknown failed-call fee can leave that accounting
+incomplete while successful-sourcing eligibility is final. Missing or unsettled
+eligibility authority is marked unavailable, never assumed eligible at zero cost.
+
 Start with evidence-to-qualification, or another single scorer subtask with complete
 input and a checked label. Select one stable policy/model generation. Separate
 companies, near-duplicate evidence, source-code families and time windows across

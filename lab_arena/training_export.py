@@ -11,8 +11,9 @@ import base64
 import copy
 import json
 import re
+from datetime import datetime
 from decimal import Decimal
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from lab_arena import contracts, contact_policy, integrity, reviewer_runtime, scoring, source_bundle, verify
 from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
@@ -419,12 +420,116 @@ def _worker_evidence(related, calls, objects):
     return artifacts, errors, counts
 
 
+def _competition_cost_snapshot(*, run, configuration, scored, related,
+                               reader: Callable[..., Mapping[str, Any]] | None) -> dict:
+    """Keep the export-time cost decision separate from the quality label.
+
+    The existing SQL authority calculates successful-sourcing cost. Its result
+    is a snapshot, not a persisted publication decision or actual paid cost.
+    """
+
+    policy = configuration.get("sourcing_cost_eligibility_policy")
+    unavailable = lambda reason: {"status": "unavailable", "reason": reason,
+                                  "policy": policy if isinstance(policy, str) else None}
+    if policy != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
+        return unavailable("per_icp_policy_not_configured")
+    if (configuration.get("integrity_policy") != "arena_integrity_v1"
+            or scored is None or run.get("status") != "accepted"
+            or any(row.get("status") not in ("accepted", "failed") for row in related)):
+        return unavailable("quality_or_attempt_not_final")
+    try:
+        # This is the exact projection used when stage scores are persisted.
+        record = scoring.run_scores_for_store(
+            {"rows": [scored], "integrity_policy": "arena_integrity_v1"}, [run]
+        )[0]
+        qualification = record["qualification_doc"]
+        if qualification != run.get("qualification_doc"):
+            return unavailable("persisted_qualification_mismatch")
+        qualified = {
+            row["company_identity_key"] for row in qualification["companies"]
+            if row["company_qualified"] is True and row["duplicate_company"] is False
+        }
+        if any(type(row.get("company_qualified")) is not bool
+                or type(row.get("duplicate_company")) is not bool
+                or not isinstance(row.get("company_identity_key"), str)
+                or not row["company_identity_key"]
+                for row in qualification["companies"]):
+            return unavailable("persisted_qualification_invalid")
+    except (KeyError, IndexError, TypeError, ValueError, scoring.ScoringError):
+        return unavailable("persisted_qualification_unavailable")
+    if reader is None:
+        return unavailable("cost_authority_unavailable")
+    try:
+        observed = reader(
+            round_id=run["round_id"], submission_id=run["submission_id"],
+            icp_position=int(run["icp_position"]),
+            qualified_company_count=len(qualified),
+        )
+        timestamp = observed["observed_at"]
+        moment = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            raise ValueError("cost snapshot has no timezone")
+        snapshot = observed["eligibility"]
+        if not isinstance(snapshot, Mapping):
+            raise ValueError("cost snapshot is not a mapping")
+        execution = snapshot["execution"]
+        if not isinstance(execution, Mapping):
+            raise ValueError("execution cost state is not a mapping")
+        numbers = (
+            "competition_sourcing_microusd", "execution_icp_cap_microusd",
+            "cost_per_company_cap_microusd", "eligibility_cap_microusd",
+        )
+        if (type(snapshot.get("icp_position")) is not int
+                or snapshot["icp_position"] != run["icp_position"]
+                or any(type(snapshot.get(key)) is not int or snapshot[key] < 0
+                       for key in numbers)
+                or any(type(execution.get(key)) is not int or execution[key] < 0
+                       for key in ("successful_microusd", "success_unresolved_microusd",
+                                   "inflight_calls", "success_unresolved_calls"))
+                or snapshot["competition_sourcing_microusd"] != (
+                    execution["successful_microusd"]
+                    + execution["success_unresolved_microusd"])
+                or snapshot["execution_icp_cap_microusd"] != configuration.get("execution_icp_cap_microusd")
+                or snapshot["cost_per_company_cap_microusd"] != configuration.get("cost_per_company_microusd")
+                or snapshot["eligibility_cap_microusd"] != (
+                    snapshot["cost_per_company_cap_microusd"] * len(qualified))):
+            raise ValueError("cost snapshot does not match frozen policy")
+        reason = snapshot.get("eligibility_reason")
+        if reason in ("provider_calls_inflight", "provider_cost_uncertain"):
+            return {**unavailable(reason), "observed_at": timestamp,
+                    "source_rpc": "lab_arena_icp_cost_eligibility"}
+        if (reason not in ("eligible", "cost_per_company_exceeded")
+                or type(snapshot.get("eligible")) is not bool
+                or snapshot["eligible"] != (reason == "eligible")
+                or snapshot["eligible"] != (
+                    snapshot["competition_sourcing_microusd"]
+                    <= snapshot["eligibility_cap_microusd"])
+                or execution["inflight_calls"] or execution["success_unresolved_calls"]):
+            raise ValueError("cost snapshot decision is not final")
+        return {
+            "status": "available", "scope": "export_time_per_icp_sourcing",
+            "source_rpc": "lab_arena_icp_cost_eligibility",
+            "observed_at": timestamp, "policy": policy,
+            "icp_position": run["icp_position"],
+            "qualified_company_count": len(qualified),
+            "competition_sourcing_microusd": snapshot["competition_sourcing_microusd"],
+            "execution_icp_cap_microusd": snapshot["execution_icp_cap_microusd"],
+            "cost_per_company_cap_microusd": snapshot["cost_per_company_cap_microusd"],
+            "eligibility_cap_microusd": snapshot["eligibility_cap_microusd"],
+            "eligible": snapshot["eligible"], "eligibility_reason": reason,
+        }
+    except Exception:
+        # Never put an RPC exception, URL, or service credential in an export.
+        return unavailable("cost_authority_unavailable")
+
+
 def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                      submission_row: Mapping[str, Any], runs: Sequence[Mapping[str, Any]],
                      ledger_rows: Sequence[Mapping[str, Any]], objects: Any,
                      cache_rows: Sequence[Mapping[str, Any]] = (),
                      company_judgment_rows: Sequence[Mapping[str, Any]] = (),
-                     input_snapshots: Mapping[str, Mapping[str, Any]] | None = None) -> dict:
+                     input_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
+                     cost_eligibility_reader: Callable[..., Mapping[str, Any]] | None = None) -> dict:
     """Assemble one exact execution. Missing evidence produces explicit gaps.
 
     Invalid identity/ambiguous joins raise ExportError. ``input_snapshots`` must
@@ -503,6 +608,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     except Exception:
         output = None
         reasons["input_output_label"].add("accepted_output_unavailable")
+    scored = None
     judge = _select_judge(run, runs)
     if judge is None or judge.get("status") != "accepted" or judge.get("terminal_cause") != "accepted":
         reasons["input_output_label"].add("final_judge_unavailable")
@@ -535,6 +641,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 state = "scored" if index in indexed else "skipped" if index in result["skipped_company_indexes"] else "outside_evaluated_slice"
                 example["companies"].append({"company_index": index, "company": company, "label_status": state,
                                               "judgment": indexed.get(index)})
+            scored = result
         except Exception:
             reasons["input_output_label"].add("judge_evidence_unverified")
     related = [row for row in runs if row.get("assignment_id") == run["assignment_id"]
@@ -564,6 +671,14 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     reasons["costs"].update(gaps & {"provider_call_inflight", "provider_cost_unresolved", "ambiguous_call_lifecycle", "ledger_call_identity_missing"})
     example["costs"] = {"confirmed_actual_microusd": sum(call.get("actual_microusd") or 0 for call in calls),
                          "competition_cost": "not_recomputed", "all_related_attempts_included": True}
+    example["competition_cost_eligibility"] = _competition_cost_snapshot(
+        run=run, configuration=config, scored=scored, related=related,
+        reader=cost_eligibility_reader,
+    )
+    if (config.get("sourcing_cost_eligibility_policy")
+            == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            and example["competition_cost_eligibility"]["status"] != "available"):
+        reasons["costs"].add("competition_cost_eligibility_unavailable")
     snapshots = dict(input_snapshots or {})
     selected_ids = {run_id} | ({judge["run_id"]} if judge else set())
     launched_ids = set()

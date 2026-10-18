@@ -1023,7 +1023,7 @@ _OPERATION_LIST = (
         # Deepline 240-second window without changing the ICP hard deadline.
         timeout_seconds=240,
         max_request_bytes=65_536,
-        max_response_bytes=1_048_576,
+        max_response_bytes=2_097_152,
         cost_rule=CALL_QUOTA_COST_RULE,
         response_sanitizer="json",
         funding_source="host",

@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from lab_arena import broker as br
+from lab_arena import broker as br, operations
 from lab_arena.service import _provider_telemetry_fields
 from tests.lab_arena.deepline_worker_same_action_recovery_test import Api, worker
 from tests.lab_arena.deepline_delayed_cost_reconciliation_unit_test import _candidate
@@ -547,7 +547,8 @@ def test_unkeyed_batch_error_replays_without_execution_lookup(status):
 
 def test_oversized_error_is_not_retained_for_replay(monkeypatch):
     monkeypatch.setattr(br, "_DEEPLINE_BILLING_MAX_ATTEMPTS", 1)
-    body = json.dumps({"request_id": REQUEST_ID, "error": "x" * 1_048_576}).encode()
+    body = json.dumps({"request_id": REQUEST_ID,
+                       "error": "x" * operations.get_operation("deepline.execute").max_response_bytes}).encode()
     result, _, store, _, _ = execute(ErrorTransport(body=body))
     assert result.status == 502 and result.call["error_code"] == "provider_unavailable"
     saved = store.calls[result.call["call_identity"]]["uncertain_doc"]

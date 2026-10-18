@@ -86,6 +86,7 @@ _DIRECT_URLOPEN = urlrequest.build_opener(urlrequest.ProxyHandler({})).open
 
 GENERIC_ERRORS = {
     "invalid_request": 400,
+    "capability_unavailable": 400,
     "model_not_allowed": 400,
     "budget_refused": 402,
     "lease_stale": 409,
@@ -4221,9 +4222,30 @@ class Broker:
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
             effective_operation = operations.OPERATIONS[effective_operation_id]
-            effective_normalized = operations.validate_operation_request(
-                effective_operation_id, effective_parameters, deepline_catalog=context.deepline_catalog,
-            )
+            try:
+                effective_normalized = operations.validate_operation_request(
+                    effective_operation_id, effective_parameters, deepline_catalog=context.deepline_catalog,
+                )
+            except operations.OperationError:
+                # Distinguish an absent frozen score route from malformed input.
+                # This extra catalog read runs only after validation fails.
+                if (route is not None
+                        and effective_operation_id == "deepline.execute"
+                        and context.deepline_catalog is not None):
+                    try:
+                        allowed_tools = deepline_catalog.allowed_tool_ids(context.deepline_catalog)
+                    except deepline_catalog.CatalogError as exc:
+                        raise BrokerError("broker_unavailable") from exc
+                    if effective_parameters.get("tool") not in allowed_tools:
+                        return _error_result("capability_unavailable", {
+                            "operation_id": operation_id,
+                            "provider": operation.provider,
+                            "funding_source": funding_source,
+                            "provider_attempt": provider_attempt,
+                            "outcome": "not_dispatched",
+                            "actual_microusd": 0,
+                        })
+                raise
             secret = self._credential_for(context, effective_operation.provider) if self._credential_for else self._key_for(effective_operation.provider)
             if not isinstance(secret, str) or not secret:
                 raise BrokerError("miner_credentials_unavailable" if funding_source == "miner_key" else "broker_unavailable")

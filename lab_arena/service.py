@@ -65,6 +65,7 @@ _TELEMETRY_FAILED_CODES = frozenset({"broker_unavailable", "provider_unavailable
 _TELEMETRY_OPERATION_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}\.[a-z][a-z0-9_]{0,31}$")
 _TELEMETRY_ERROR_CODES = operations.ERROR_CODES | frozenset({
     "broker_unavailable", "budget_refused", "call_refused", "call_uncertain",
+    "capability_unavailable",
     "invalid_request", "lease_stale", "miner_credentials_unavailable",
     "miner_provider_not_configured", "model_not_allowed",
     "provider_request_refused", "provider_unavailable",

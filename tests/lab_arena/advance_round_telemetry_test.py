@@ -9,6 +9,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from gateway.observability.otel_bootstrap import configure_arena_otel
 from lab_arena import telemetry
+from lab_arena.driver import _advance_active
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStoreError
 
@@ -96,3 +97,38 @@ def test_exporter_failure_does_not_stop_real_round_transition(observed_service):
     assert service.advance_round("round") is publication
     assert service._lock.acquire(blocking=False)
     service._lock.release()
+
+
+def test_publish_store_error_names_safe_resource_on_nested_advance_spans(observed_service):
+    service, exporter, row = observed_service
+    row["status"] = "scored"
+    service.active_rounds = lambda: [{"round_id": "private-round"}]
+    canary = "secret-prompt-SQL-https://private.invalid/token"
+    failure = ArenaStoreError(
+        canary, operation="rpc", resource="lab_arena_transition_round",
+        http_status=503, code="PGRST301",
+    )
+    calls = []
+
+    def fail(round_id):
+        calls.append(round_id)
+        raise failure
+
+    service.publish = fail
+    assert _advance_active(service) == "failed advance_round private-round: ArenaStoreError"
+    assert calls == ["private-round"]
+    spans = {span.attributes["arena.stage"]: span
+             for span in exporter.get_finished_spans()}
+    assert spans["active_rounds"].attributes["arena.outcome"] == "ok"
+    expected = {
+        "arena.store_operation": "rpc",
+        "arena.store_resource": "lab_arena_transition_round",
+        "arena.store_http_status": 503,
+        "arena.store_code": "PGRST301",
+    }
+    for name in ("advance_publish", "advance_round"):
+        attributes = spans[name].attributes
+        assert attributes["arena.outcome"] == "failed"
+        assert attributes["arena.error_type"] == "ArenaStoreError"
+        assert {key: attributes[key] for key in expected} == expected
+    assert canary not in repr([dict(span.attributes) for span in spans.values()])

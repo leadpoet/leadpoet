@@ -108,11 +108,13 @@ def flush(timeout_millis: int = 1000) -> None:
 
 
 def _store_error_metadata(error: Optional[BaseException]) -> Mapping[str, Any]:
-    """Read only existing diagnostics from the exact temporary-store error."""
+    """Read existing diagnostics from exact built-in store errors only."""
     try:
-        from lab_arena.store import ArenaStoreUnavailable, safe_store_error_metadata
+        from lab_arena.store import (
+            ArenaStoreError, ArenaStoreUnavailable, safe_store_error_metadata,
+        )
 
-        if type(error) is ArenaStoreUnavailable:
+        if type(error) in (ArenaStoreError, ArenaStoreUnavailable):
             return safe_store_error_metadata(error.__dict__.get("store_error"))
     except BaseException:
         pass

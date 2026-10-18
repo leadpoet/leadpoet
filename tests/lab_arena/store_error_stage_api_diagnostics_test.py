@@ -10,7 +10,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from gateway.observability.otel_bootstrap import configure_arena_otel, STORE_ERROR_SPAN_FIELDS
 from lab_arena import telemetry
 from lab_arena.api import create_app
-from lab_arena.store import ArenaStore, ArenaStoreUnavailable, PostgrestTransport
+from lab_arena.store import ArenaStore, ArenaStoreError, ArenaStoreUnavailable, PostgrestTransport
 from tests.lab_arena.advance_round_telemetry_test import observed_service
 from tests.lab_arena.test_lab_arena_api import StubService
 
@@ -104,14 +104,22 @@ def test_real_claim_route_exports_private_diagnostic_and_keeps_response_and_retr
         database.close()
 
 
-@pytest.mark.parametrize('error_kind', ['unrelated', 'subclass', 'unknown_metadata'])
+@pytest.mark.parametrize('error_kind', [
+    'unrelated', 'subclass', 'unknown_metadata',
+    'base_subclass', 'base_unknown_metadata',
+])
 def test_stage_does_not_trust_spoofed_or_unknown_error_metadata(monkeypatch, error_kind):
     class Untrusted(ArenaStoreUnavailable):
         pass
+    class UntrustedBase(ArenaStoreError):
+        pass
     error = (ValueError(CANARY) if error_kind == 'unrelated' else
-             Untrusted(CANARY) if error_kind == 'subclass' else ArenaStoreUnavailable(CANARY))
+             Untrusted(CANARY) if error_kind == 'subclass' else
+             UntrustedBase(CANARY) if error_kind == 'base_subclass' else
+             ArenaStoreError(CANARY) if error_kind == 'base_unknown_metadata' else
+             ArenaStoreUnavailable(CANARY))
     error.store_error = dict(operation='rpc', resource=CLAIM, code='55P03')
-    if error_kind == 'unknown_metadata':
+    if error_kind in ('unknown_metadata', 'base_unknown_metadata'):
         error.store_error = dict(operation=CANARY, resource=CANARY, message=CANARY)
     exporter = InMemorySpanExporter()
     monkeypatch.setattr(telemetry, '_recorder', configure_arena_otel(None, span_exporter=exporter))
@@ -192,10 +200,11 @@ def test_claim_context_does_not_cross_concurrent_threadpool_requests(monkeypatch
     {'arena.store_http_status': True}, {'arena.store_message': CANARY},
     {'arena.outcome': 'ok'}, {'arena.error_type': 'ValueError'},
 ])
-def test_final_stage_export_rejects_injected_diagnostics(monkeypatch, patch):
+@pytest.mark.parametrize('error_type', ['ArenaStoreUnavailable', 'ArenaStoreError'])
+def test_final_stage_export_rejects_injected_diagnostics(monkeypatch, patch, error_type):
     exporter = InMemorySpanExporter()
     recorder = configure_arena_otel(None, span_exporter=exporter)
-    recorder.record('advance_expire_leases', 'failed', error_type='ArenaStoreUnavailable',
+    recorder.record('advance_expire_leases', 'failed', error_type=error_type,
                     store_error=dict(operation='rpc', resource=CLAIM, code='55P03'))
     valid, = exporter.get_finished_spans()
     exporter.clear()

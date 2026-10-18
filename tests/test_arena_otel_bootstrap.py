@@ -162,6 +162,42 @@ def test_stage_span_carries_only_the_approved_attributes():
     assert span.attributes["arena.count"] == 3
 
 
+def test_billing_lookup_stage_exports_only_bounded_context_on_failure():
+    exp = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exp))
+    try:
+        context = {'round_id': 'arena-2026-10-18', 'lane': 'execute',
+                   'run_scoped': False}
+        with pytest.raises(ValueError):
+            with telemetry.stage('reconcile_deepline_billing_lookup',
+                                 billing_lookup=context):
+                context['cursor_entry_id'] = 5121031
+                raise ValueError('private provider body')
+        (span,) = exp.get_finished_spans()
+        assert span.attributes['arena.round_id'] == 'arena-2026-10-18'
+        assert span.attributes['arena.billing_lane'] == 'execute'
+        assert span.attributes['arena.cursor_entry_id'] == 5121031
+        assert span.attributes['arena.run_scoped'] is False
+        assert span.attributes['arena.outcome'] == 'failed'
+        assert 'private provider body' not in str(span.attributes)
+    finally:
+        telemetry.install_recorder(None)
+
+
+def test_billing_lookup_context_rejects_unapproved_values():
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record('reconcile_deepline_billing_lookup', 'idle', billing_lookup={
+        'round_id': 'arena-2026-10-18/private-secret', 'lane': 'execute',
+        'cursor_entry_id': 4, 'run_scoped': False})
+    recorder.record('driver_tick', 'ok', billing_lookup={
+        'round_id': 'arena-2026-10-18', 'lane': 'execute',
+        'cursor_entry_id': 4, 'run_scoped': False})
+    spans = exp.get_finished_spans()
+    assert len(spans) == 2
+    assert all('arena.round_id' not in span.attributes for span in spans)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

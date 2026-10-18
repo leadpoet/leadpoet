@@ -5537,6 +5537,7 @@ class ArenaService:
         self, round_id: str, *, run_id: str = "",
         successful_execute_only: bool = False, score_only: bool = False,
         limit: int = 1,
+        lookup_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Reserve a bounded cursor page before its billing reads begin."""
         cursor_key = (round_id, run_id)
@@ -5548,6 +5549,9 @@ class ArenaService:
                    if score_only else self._deepline_reconciliation_after)
         with self._lock:
             after_entry_id = cursors.get(cursor_key, 0)
+        if lookup_context is not None:
+            # Report the exact cursor sent to the RPC, not a second racy read.
+            lookup_context["cursor_entry_id"] = after_entry_id
         options = ({"successful_execute_only": True} if successful_execute_only else
                    {"score_only": True} if score_only else {})
         items = self._store.list_deepline_cost_reconciliations(
@@ -5602,10 +5606,18 @@ class ArenaService:
                     if missing <= 0:
                         return
                     page_limit = min(_DEEPLINE_BILLING_PAGE_LIMIT, missing)
+                    lookup_context: Dict[str, Any] = {
+                        "round_id": round_id,
+                        "lane": ("execute" if options.get("successful_execute_only") else
+                                 "score" if options.get("score_only") else "general"),
+                        "run_scoped": bool(options.get("run_id")),
+                    }
                     try:
-                        with telemetry.stage("reconcile_deepline_billing_lookup") as observed:
+                        with telemetry.stage("reconcile_deepline_billing_lookup",
+                                             billing_lookup=lookup_context) as observed:
                             items = self._deepline_cost_candidates(
                                 round_id, limit=page_limit,
+                                lookup_context=lookup_context,
                                 **options,
                             )
                             observed.count = len(items)

@@ -1145,7 +1145,9 @@ def _validating_exporter(
     def _task_violation(span: Any, attributes: Dict[str, Any]) -> Optional[str]:
         attributes = _without_store_error_fields(attributes, allowed=(
             attributes.get("arena.outcome") == "failed"
-            and attributes.get("arena.error_type") == "ArenaStoreUnavailable"
+            and attributes.get("arena.error_type") in (
+                "ArenaStoreError", "ArenaStoreUnavailable"
+            )
         ))
         if attributes is None:
             return "store_error"

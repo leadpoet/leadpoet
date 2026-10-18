@@ -199,6 +199,7 @@ ARENA_PROVIDER_ERROR_CODES = frozenset(
         # broker._error_result / BrokerError
         "broker_unavailable",
         "budget_refused",
+        "capability_unavailable",
         "call_refused",
         "call_uncertain",
         "invalid_request",

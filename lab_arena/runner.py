@@ -78,6 +78,7 @@ QUOTA_SNAPSHOT_CACHE_SECONDS = QUOTA_SNAPSHOT_CACHE_MILLISECONDS / 1000.0
 # (first byte 0x00: the judge shim) or an HTTP request (an ASCII method).
 HTTP_FIRST_BYTES = b"GPHDO"
 HTTP_ERROR_STATUS = {
+    "capability_unavailable": 400,
     "budget_exhausted": 402, "budget_refused": 402,
     "miner_credentials_unavailable": 402, "miner_provider_not_configured": 400,
     "call_refused": 402, "provider_request_refused": 403,

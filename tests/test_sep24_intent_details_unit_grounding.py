@@ -1257,6 +1257,64 @@ def test_bounded_semantic_repair_accepts_distinct_additional_financing(
     assert receipt["checks"]["facts_supported"] is True
 
 
+@pytest.mark.parametrize("initial_status", ["UNPROVEN", "CONTRADICTED"])
+@pytest.mark.parametrize("report_attribution", [False, True])
+def test_absolute_funding_date_repair_gets_unconditional_date_standard(
+    monkeypatch, initial_status, report_attribution,
+):
+    # Route/projection contract only: the mocked second verdict does not prove
+    # model semantics. The paid saved-source probe covers that separately.
+    quote = "The company announced a $30 million seed round."
+    paragraph = (
+        "A report dated March 2, 2026 says the company announced a $30 million seed round."
+        if report_attribution else
+        "Example raised $30 million in a new seed round on March 2, 2026."
+    )
+    inputs = _inputs(paragraph, quote, supporting_quote=quote)
+    verdict = inputs[2][0]["judge_verdict"]
+    verdict.pop("authoritative_date")
+    verdict.pop("authoritative_date_basis")
+    calls = 0
+
+    async def judge(prompt, **kwargs):
+        nonlocal calls
+        calls += 1
+        document = _prompt_document(prompt)
+        if calls == 1:
+            return json.dumps(_response(document, [{
+                "unit_id": 0, "contains_factual_claim": True,
+                "status": initial_status, "evidence": [_binding(document, quote)],
+            }], facts_supported=False))
+        control = json.loads(prompt)["bounded_unit_repair_control"]["units"][0]
+        assert control["semantic_recheck_reason"] == (
+            "evidence_bound_unproven_verdict" if initial_status == "UNPROVEN"
+            else "contradicted_verdict"
+        )
+        assert "relative_time_target" not in control
+        system = kwargs["system_prompt"]
+        general = system.split("For relative_time_grounding_review", 1)[0]
+        assert "For every semantic recheck" in general
+        assert "published or first\nobserved" in general
+        assert "explicitly links that same activity to the date" in general
+        assert '"effective today"' in general
+        assert "A recap of an older event does not establish a new event" in general
+        assert "date or distinct event is not established, return UNPROVEN" in general
+        assert "only for incompatible facts about that same event" in general
+        assert "Truthful attribution" in general
+        evidence = [_binding(document, quote)]
+        if report_attribution:
+            evidence.append(_binding(document, "2026-03-02"))
+        return json.dumps(_semantic_repair_response(
+            0, "VERIFIED" if report_attribution else "UNPROVEN", evidence,
+        ))
+
+    monkeypatch.setattr(verification_helpers, "openrouter_chat", judge)
+    receipt = asyncio.run(intent_details.review_intent_details(*inputs))
+
+    assert calls == 2
+    assert receipt["decision"] == ("match" if report_attribution else "mismatch")
+
+
 @pytest.mark.parametrize(
     "defect", ["wrong_amount", "wrong_actor", "wrong_date", "wrong_entity"],
 )

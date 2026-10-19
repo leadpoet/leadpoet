@@ -830,31 +830,38 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
         matched = matched if type(matched) is int and matched >= 0 else None
         references: list[int] = []
         finding_urls = raw_finding.get("source_urls")
-        finding_url = (
-            finding_urls[0]
-            if isinstance(finding_urls, list) and len(finding_urls) == 1
-            else ""
-        )
-        supporting_index = append_source(
-            kind="non_qualifying_supporting_quotes",
-            admitted_text=_texts(
-                raw_finding.get("supporting_quotes"), maximum=2, length=700,
-            ),
-            matched_icp_signal=matched,
-            source_url=finding_url,
-        )
-        if supporting_index is not None:
-            references.append(supporting_index)
-        contradicting_index = append_source(
-            kind="non_qualifying_contradicting_quotes",
-            admitted_text=_texts(
-                raw_finding.get("contradicting_quotes"), maximum=2, length=700,
-            ),
-            matched_icp_signal=matched,
-            source_url=finding_url,
-        )
-        if contradicting_index is not None:
-            references.append(contradicting_index)
+        quote_sources = _mapping(raw_finding.get("quote_sources"))
+        publication_dates: dict[str, list[dict[str, str]]] = {}
+        for observation in (raw_finding.get("source_publication_observations") or [])[:5]:
+            publication_dates.setdefault(observation["url"], []).append({
+                "date":observation["date"], "basis":observation["basis"],
+            })
+        dated_quote_urls: set[str] = set()
+        for field, kind in (("supporting_quotes", "non_qualifying_supporting_quotes"),
+                            ("contradicting_quotes", "non_qualifying_contradicting_quotes")):
+            grouped: dict[str, list[str]] = {}
+            sources = quote_sources.get(field) or []
+            for index, quote in enumerate(_texts(raw_finding.get(field), maximum=2, length=700)):
+                source_url = sources[index] if index < len(sources) else ""
+                source_url = source_url if isinstance(source_url, str) and source_url in (finding_urls or []) else ""
+                grouped.setdefault(source_url, []).append(quote)
+            for source_url, quotes in grouped.items():
+                source_index = append_source(
+                    kind=kind, admitted_text=quotes, matched_icp_signal=matched, source_url=source_url,
+                    observed_dates=publication_dates.get(source_url, ()),
+                )
+                if source_index is not None:
+                    references.append(source_index)
+                    dated_quote_urls.add(source_url)
+        for source_url, dates in publication_dates.items():
+            if source_url in dated_quote_urls:
+                continue
+            source_index = append_source(
+                kind="verified_source_context", matched_icp_signal=matched,
+                source_url=source_url, observed_dates=dates,
+            )
+            if source_index is not None:
+                references.append(source_index)
         non_qualifying_projection.append({
             "matched_icp_signal": matched,
             "same_entity_check": raw_finding.get("same_entity_check", ""),
@@ -1207,14 +1214,75 @@ def review_evidence(
                         or len(non_qualifying) >= _NON_QUALIFYING_CONTEXT_MAX_ITEMS
                     ):
                         continue
-                    used_urls = [
-                        url for url in _texts(
-                            evaluation.get("evidence_urls_used"),
-                            maximum=2,
-                            length=2_048,
-                        )
-                        if url in declared_urls
+                    cited_urls = _texts(evaluation.get("evidence_urls_used"), maximum=5, length=2_048)
+                    supplied_urls = _texts(evaluation.get("source_urls_supplied"), maximum=5, length=2_048)
+                    # Only host-retained fetched context can bind a quote or
+                    # publication date. A model date tag/submitted date cannot.
+                    source_contexts = [
+                        context for context in (trace.get("verified_source_context") or [])[:5]
+                        if isinstance(context, Mapping)
+                        and evaluation.get("same_entity_check") == "pass"
+                        and context.get("url") in cited_urls
+                        and context.get("url") in supplied_urls
+                        and isinstance(context.get("text"), str) and context["text"]
                     ]
+                    used_urls = [url for url in cited_urls if url in declared_urls or any(
+                        context["url"] == url for context in source_contexts
+                    )]
+                    supporting_quotes = _texts(evaluation.get("supporting_quotes"), maximum=2, length=700)
+                    from qualification.scoring.intent_verification_three_stage import (
+                        _url_on_verified_company_identity, _verified_company_identity_context,
+                    )
+                    identity = _mapping(_mapping(_mapping(
+                        company_fit_receipt.get("dimension_evidence")
+                    ).get("identity")).get("web_identity_receipt"))
+                    verified_identity = _verified_company_identity_context(identity, require_linkedin=True)
+                    for context in source_contexts:
+                        excerpt = context["text"]
+                        if (not verified_identity or len(excerpt) > 700
+                            or not _url_on_verified_company_identity(context["url"], verified_identity)
+                            or not _calendar_date_spans(excerpt)):
+                            continue
+                        if excerpt in supporting_quotes:
+                            continue
+                        if len(supporting_quotes) < 2:
+                            supporting_quotes.append(excerpt)
+                        else:
+                            unassigned = next((i for i, quote in reversed(list(enumerate(supporting_quotes)))
+                                if not any(_quote_is_bound(quote, [source["text"]]) for source in source_contexts)), None)
+                            if unassigned is not None:
+                                supporting_quotes[unassigned] = excerpt
+                        break
+                    quote_sources = {}
+                    for field in ("supporting_quotes", "contradicting_quotes"):
+                        sources = []
+                        quotes = supporting_quotes if field == "supporting_quotes" else _texts(evaluation.get(field), maximum=2, length=700)
+                        for quote in quotes:
+                            bound_urls = {context["url"] for context in source_contexts
+                                          if _quote_is_bound(quote, [context["text"]])}
+                            # Ambiguous or unavailable bodies cannot assign the
+                            # quote to a sole surviving miner-declared URL.
+                            url = next(iter(bound_urls)) if len(bound_urls) == 1 else ""
+                            sources.append(url if len(url) <= 512 else "")
+                        quote_sources[field] = sources
+                    publication_observations = []
+                    for context in source_contexts:
+                        if len(context["url"]) > 512:
+                            continue
+                        candidates = [(context.get("source_publication_date"), "source_publication_date")]
+                        candidates.extend((value, "source_body_dateline_date") for value in _texts(
+                            context.get("source_body_dateline_dates"), maximum=20, length=10,
+                        ))
+                        for observed, basis in candidates:
+                            if not isinstance(observed, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", observed):
+                                continue
+                            try:
+                                date.fromisoformat(observed)
+                            except ValueError:
+                                continue
+                            observation = {"url":context["url"], "date":observed, "basis":basis}
+                            if observation not in publication_observations:
+                                publication_observations.append(observation)
                     if not used_urls:
                         continue
                     index = result.get("matched_icp_signal")
@@ -1230,6 +1298,8 @@ def review_evidence(
                             else ""
                         ),
                         "source_urls": [url[:512] for url in used_urls],
+                        "quote_sources": quote_sources,
+                        "source_publication_observations": publication_observations,
                         "submitted_claim_context": _texts(
                             [
                                 signal.description
@@ -1239,11 +1309,7 @@ def review_evidence(
                             maximum=2,
                             length=700,
                         ),
-                        "supporting_quotes": _texts(
-                            evaluation.get("supporting_quotes"),
-                            maximum=2,
-                            length=700,
-                        ),
+                        "supporting_quotes": supporting_quotes,
                         "contradicting_quotes": _texts(
                             evaluation.get("contradicting_quotes"),
                             maximum=2,
@@ -2213,6 +2279,15 @@ Different rounds, events, sources, or clauses are not interchangeable.
 The ICP's primary and optional-bonus criteria describe requested events, not evidence.
 An optional bonus need not have happened, but any paragraph assertion that it
 did happen still requires the same factual support as every other assertion.
+
+For every semantic recheck, distinguish when a source was published or first
+observed from when the reported activity occurred. A publication date supports
+the report's date; it supports an event date only when admitted evidence
+explicitly links that same activity to the date, for example "effective today".
+A recap of an older event does not establish a new event. If the asserted event
+date or distinct event is not established, return UNPROVEN. Use CONTRADICTED
+only for incompatible facts about that same event. Truthful attribution of what
+a dated report says does not itself assert that the event happened on that date.
 
 For relative_time_grounding_review, first classify the exact disputed clause,
 then classify every other factual clause in the unit. Bind a date to the same

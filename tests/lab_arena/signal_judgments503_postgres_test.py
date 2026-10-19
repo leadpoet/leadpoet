@@ -8,10 +8,12 @@ import threading
 
 import pytest
 
-from lab_arena import contracts
+from lab_arena import contact_policy, contracts
+from lab_arena.service import ArenaService, LocalObjectStore, ServiceError
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, hash_lease_token
 from tests.lab_arena import legacy_company_cache501_postgres_test as prior
 from tests.lab_arena import company_judgments_postgres_test as company
+from tests.test_arena_score_integrity import _icp, _public_company
 
 
 SCRIPTS = Path(__file__).parents[2] / "scripts"
@@ -75,6 +77,175 @@ def _enable_round(database, round_id: str) -> dict:
         cur.execute("SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s", (round_id,))
         config = cur.fetchone()[0]
     return config
+
+
+def _signal_service(store, leased, tmp_path):
+    """Use the real handler, frozen round, database store, and output reader."""
+    submitted = _public_company("Acme", domain="acme.example", signal_date="2099-10-19")
+    score_run = store.get_run(leased["run_id"])
+    configuration = store.get_round(score_run["round_id"])["configuration_doc"]
+    output_schema = contact_policy.output_schema(configuration)
+    if output_schema == "leadpoet.lab_arena.output.v6":
+        submitted.pop("fit_summary")
+        submitted.pop("fit_evidence_urls")
+        submitted["intent_details"] = "Acme's product launch creates a timely buying trigger."
+        submitted["intent_signals"][0].pop("why_now")
+        submitted["intent_signals"][0].pop("snippet")
+    objects = LocalObjectStore(tmp_path)
+    executed = store.get_run(leased["scored_run_id"])
+    objects.put(executed["output_ref"], json.dumps({
+        "schema_version": output_schema,
+        "companies": [submitted],
+    }).encode())
+    service = ArenaService.__new__(ArenaService)
+    service._store = store
+    service._objects = objects
+    service._require_round_ownership = lambda _: None
+    service._hot_round = lambda round_id: store.get_round(round_id)
+    service.evaluation_icps = lambda _: [_icp()]
+    request = {
+        "company_index": 0, "signal_index": 0,
+        "verified_company_identity": {
+            "decision": "match", "observed_domain": "acme.example",
+        },
+        "verified_funding_stage_context": [],
+    }
+    signal = submitted["intent_signals"][0]
+    url = signal["url"]
+    quote = signal.get("snippet") or "Acme launched the product."
+    judgment = {
+        "raw": 54.0, "after_decay": 54.0, "decay": 1.0,
+        "confidence": 90, "date_status": "in_window",
+        "date_verdict": "in_window", "claim_support_verdict": "supported",
+        "matched_icp_signal": 0, "evidence_type": "UNSPECIFIED",
+        "evidence_urls": [url],
+        "judge_verdict": {
+            "decision": "verified", "pipeline_decision": "approve",
+            "claim_support_verdict": "supported", "client_ready": True,
+            "verification_trace": {
+                "evidence_url": url, "evidence_urls": [url],
+                "evidence_source": "company_news",
+                "extracted_signal_date": signal["date"],
+                "verified_source_context": [{"url": url, "text": quote}],
+                "intent_verdict": {"signal_evaluations": [{
+                    "signal_status": "supported", "same_entity_check": "pass",
+                    "verification_mode": "source_grounded",
+                    "supporting_quotes": [quote], "evidence_urls_used": [url],
+                }]},
+                "final_disposition": "approve",
+            },
+        },
+    }
+    return service, request, judgment
+
+
+def _make_baseline(database, rid, participants):
+    """Freeze the fixture's first participant as the broker's real king."""
+    baseline_hotkey = participants[0]["miner_hotkey"]
+    with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL session_replication_role=replica")
+        cur.execute("UPDATE public.lab_arena_submissions SET is_king=true WHERE submission_id=%s",
+                    (participants[0]["submission_id"],))
+        cur.execute("UPDATE public.lab_arena_rounds SET participants=jsonb_set(participants,'{0,is_king}','true'::jsonb),configuration_doc=jsonb_set(configuration_doc,'{baseline_hotkey}',%s::jsonb) WHERE round_id=%s",
+                    (json.dumps(baseline_hotkey), rid))
+    return baseline_hotkey
+
+
+def _store_terminal(service, leased, token, request, judgment):
+    miss = service.handle_signal_judgment(leased["run_id"], token, {**request, "operation": "claim"})
+    assert miss["status"] == "miss"
+    assert service.handle_signal_judgment(leased["run_id"], token, {
+        **request, "operation": "complete", "reference": miss["reference"],
+        "judgment": judgment,
+    })["status"] == "stored"
+    return miss
+
+
+def test_same_score_lease_reuses_its_terminal_signal(store, database, tmp_path):
+    rid = "arena-2026-09-11-own503"
+    participants, _ = prior.open_new(store, round_id=rid, markers_by_submission=[["one"]])
+    _enable_round(database, rid)
+    baseline_hotkey = _make_baseline(database, rid, participants)
+    leased, token, _, _ = company.claim(store, rid, baseline_hotkey, excluded=[baseline_hotkey])
+    assert leased["status"] == "leased" and leased["miner_hotkey"] == baseline_hotkey
+    service, request, judgment = _signal_service(store, leased, tmp_path)
+    miss = _store_terminal(service, leased, token, request, judgment)
+    source = store.get_signal_judgment(miss["reference"]["cache_key"], miss["reference"]["authority_slot"])
+    assert baseline_hotkey in source["runner_authority_exclusions"]
+    hit = service.handle_signal_judgment(leased["run_id"], token, {**request, "operation": "claim"})
+    assert hit == {"status": "hit", "reference": miss["reference"], "judgment": judgment}
+
+
+@pytest.mark.parametrize("tamper", ["claim_hash", "generation", "source_run"])
+def test_same_run_hit_rejects_changed_authority(store, database, tmp_path, tamper):
+    rid = "arena-2026-09-11-bound503"
+    participants, _ = prior.open_new(store, round_id=rid, markers_by_submission=[["one"]])
+    _enable_round(database, rid)
+    runner = _make_baseline(database, rid, participants)
+    leased, token, _, _ = company.claim(store, rid, runner, excluded=[runner])
+    service, request, judgment = _signal_service(store, leased, tmp_path)
+    miss = _store_terminal(service, leased, token, request, judgment)
+    with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL session_replication_role=replica")
+        if tamper == "claim_hash":
+            cur.execute("UPDATE public.lab_arena_runs SET claim_request_hash=%s WHERE run_id=%s",
+                        ("sha256:" + "e" * 64, leased["run_id"]))
+        elif tamper == "generation":
+            cur.execute("UPDATE public.lab_arena_runs SET lease_generation=lease_generation+1 WHERE run_id=%s",
+                        (leased["run_id"],))
+        else:
+            cur.execute("UPDATE public.lab_arena_signal_judgments SET source_scored_run_id=%s WHERE cache_key=%s AND authority_slot=%s",
+                        ("wrong-execute-run", miss["reference"]["cache_key"], miss["reference"]["authority_slot"]))
+    with pytest.raises(ServiceError, match="signal_judgment_cache_invalid"):
+        service.handle_signal_judgment(leased["run_id"], token, {**request, "operation": "claim"})
+    with pytest.raises(ServiceError, match="signal_judgment_lease_invalid"):
+        service.handle_signal_judgment(leased["run_id"], "wrong-token", {**request, "operation": "claim"})
+
+
+def test_later_score_run_cannot_reuse_own_prior_signal(store, database, tmp_path):
+    rid = "arena-2026-09-11-retry503"
+    participants, _ = prior.open_new(store, round_id=rid, markers_by_submission=[["one"]])
+    _enable_round(database, rid)
+    runner = _make_baseline(database, rid, participants)
+    first, first_token, _, _ = company.claim(store, rid, runner, excluded=[runner])
+    service, request, judgment = _signal_service(store, first, tmp_path)
+    miss = _store_terminal(service, first, first_token, request, judgment)
+    assert store.complete_attempt(
+        run_id=first["run_id"], lease_token_hash=hash_lease_token(first_token),
+        result={"terminal_status": "judge_error"}, terminal_cause="judge_error",
+        output_ref="", company_judgment_evidence=[], output_hash="",
+        completion_request_hash="sha256:" + "e" * 64,
+    )["status"] == "failed"
+    with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL session_replication_role=replica")
+        cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE round_id=%s AND kind='score' AND status='pending'",
+                    (rid,))
+    second, second_token, _, _ = company.claim(store, rid, runner, excluded=[runner])
+    assert second["status"] == "leased" and second["run_id"] != first["run_id"]
+    second_service, _, _ = _signal_service(store, second, tmp_path)
+    second_claim = second_service.handle_signal_judgment(
+        second["run_id"], second_token, {**request, "operation": "claim"}
+    )
+    assert second_claim["status"] == "miss"
+    assert second_claim["reference"]["authority_slot"] != miss["reference"]["authority_slot"]
+
+
+def test_other_miner_hits_terminal_signal_while_source_is_leased(store, database, tmp_path):
+    rid = "arena-2026-09-11-cross503"
+    participants, _ = prior.open_new(store, round_id=rid, markers_by_submission=[["one"], ["two"]])
+    _enable_round(database, rid)
+    runner = _make_baseline(database, rid, participants)
+    first, first_token, _, _ = company.claim(store, rid, runner, parallelism=2, excluded=[runner])
+    assert first["miner_hotkey"] == runner
+    service, request, judgment = _signal_service(store, first, tmp_path)
+    miss = _store_terminal(service, first, first_token, request, judgment)
+    second, second_token, _, _ = company.claim(store, rid, runner, parallelism=2, excluded=[runner])
+    assert second["status"] == "leased" and second["miner_hotkey"] != runner
+    second_service, _, _ = _signal_service(store, second, tmp_path)
+    assert second_service.handle_signal_judgment(
+        second["run_id"], second_token, {**request, "operation": "claim"}
+    ) == {"status": "hit", "reference": miss["reference"], "judgment": judgment}
+    assert store.get_run(first["run_id"])["status"] == "leased"
 
 
 def test_signal_hit_and_stale_lease_are_bound_to_source(store, database):

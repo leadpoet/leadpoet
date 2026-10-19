@@ -5338,6 +5338,16 @@ class ArenaService:
                         raise signal_judgments.SignalJudgmentError("accepted signal evidence changed")
                     source_run = self._store.get_run(str(source.get("source_score_run_id") or ""))
                     exclusions = source.get("runner_authority_exclusions")
+                    same_current_lease = (
+                        source.get("source_score_run_id") == run_id
+                        and source_run is not None
+                        and source_run.get("run_id") == run_id
+                        and source_run.get("status") == "leased"
+                        and source_run.get("lease_token_hash") == lease_hash
+                        and source_run.get("claim_request_hash") == run.get("claim_request_hash")
+                        and source_run.get("lease_generation") == run.get("lease_generation")
+                        and source_run.get("runner_hotkey") == run.get("runner_hotkey")
+                    )
                     if (source_run is None or source_run.get("kind") != "score"
                         or source_run.get("status") not in ("leased", "accepted", "failed")
                         or source_run.get("round_id") != run.get("round_id")
@@ -5347,7 +5357,7 @@ class ArenaService:
                         or source_run.get("lease_generation") != source.get("source_lease_generation")
                         or not isinstance(exclusions, list)
                         or source.get("source_runner_hotkey") not in exclusions
-                        or run.get("miner_hotkey") in exclusions):
+                        or (run.get("miner_hotkey") in exclusions and not same_current_lease)):
                         raise signal_judgments.SignalJudgmentError("accepted signal source is invalid")
                     return {"status": "hit", "reference": reference, "judgment": judgment}
                 if result.get("status") == "miss":

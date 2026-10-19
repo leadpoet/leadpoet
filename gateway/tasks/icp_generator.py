@@ -1094,7 +1094,7 @@ OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
 FINAL CHECK before output (for every ICP):
 1. Is `verified_example_company` a real, currently-operating company? If not, REWRITE with broader constraints.
 2. Does the named example company actually match ALL the ICP's stated criteria — including the specific `required_attribute` and `intent_signal`? If not, REWRITE.
-3. SUPPLY CHECK: can you name at least THREE more real, currently-operating companies (four total) that verifiably match this ICP's specific `required_attribute` and `intent_signal`? If you cannot, the attribute or intent is too narrow — keep the specific WORDING but broaden the requirement (or broaden geography/stage/employee band) until many real companies match. Specific phrasing, broad candidate pool.
+3. SUPPLY CHECK: prefer criteria where you reasonably expect at least a few real, currently-operating companies, ideally 5+, to genuinely fit ALL requirements together. Avoid overly narrow combinations unlikely to have viable companies; keep ICPs challenging but reasonably answerable. This is a heuristic, not a request to research, verify, or list five companies.
 4. Are the `product_service` and `required_attribute` specific, descriptive value propositions (like a real sales brief) rather than bare categories or the "offers or provides X" template?
 5. Is each `intent_signal` a specific fulfillment-style sentence naming the behavior and the kind of evidence, rather than a bare label?
 6. Is the geography broad enough that real candidates exist?

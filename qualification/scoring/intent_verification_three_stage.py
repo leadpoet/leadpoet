@@ -5756,7 +5756,26 @@ async def verify_three_stage(
             "job_publisher_relationship": job_publisher_relationship,
             "verified_job_source_urls": verified_job_source_urls,
         })
-        if client_ready or (
+        cited_wrong_entity_urls = {
+            _normalize_url(url)
+            for url in s3_item.get("evidence_urls_used") or []
+        }
+        grounded_wrong_entity = bool(
+            verified_identity_context
+            and s3_item.get("verification_mode") == "source_grounded"
+            and s3_item.get("signal_status") == "wrong_entity"
+            and s3_item.get("same_entity_check") == "fail"
+            and any(
+                _normalize_url(item.get("url") or "") in cited_wrong_entity_urls
+                and any(
+                    _grounded_exact_text(item.get("text") or "", quote)
+                    for field in ("supporting_quotes", "contradicting_quotes")
+                    for quote in (s3_item.get(field) or [])
+                )
+                for item in contents.get("results") or []
+            )
+        )
+        if client_ready or grounded_wrong_entity or (
             verified_identity_context
             and s3_item.get("verification_mode") == "source_grounded"
             and s3_item.get("same_entity_check") == "pass"

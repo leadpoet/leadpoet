@@ -109,6 +109,12 @@ from qualification.scoring.competition import (
     _semantic_hash,
     intent_unavailability_requires_retry,
 )
+from qualification.scoring.signal_judgment_cache import (
+    SignalJudgmentCacheError,
+    current_exchange,
+    invoke_exchange,
+    reusable_terminal_judgment,
+)
 from leadpoet_verifier.identity.normalization import (
     NormalizationError,
     is_label_subdomain,
@@ -10912,6 +10918,10 @@ async def score_company_competition_intent(
                 intent_signals_detail=signal_results,
                 verifier_gate_receipts=gate_receipts or None,
             )
+    except SignalJudgmentCacheError:
+        # An invalid trusted cache response is an infrastructure failure, not
+        # a terminal company or intent mismatch.
+        raise
     except Exception as e:
         logger.error(f"Competition intent scoring failed: {e}")
         return _zero_company_breakdown(f"LLM scoring error: {str(e)[:100]}")
@@ -11394,7 +11404,8 @@ async def score_company_competition_intent_signal(
     else:
         evidence_groups = [[signal] for signal in company.intent_signals]
 
-    for evidence_group in evidence_groups:
+    signal_exchange = current_exchange() if integrity_policy else None
+    for signal_index, evidence_group in enumerate(evidence_groups):
         signal = evidence_group[0]
         domain = _extract_domain(signal.url)
         if not integrity_policy and domain in seen_domains:
@@ -11462,9 +11473,17 @@ async def score_company_competition_intent_signal(
             if integrity_policy and _evidence_type_for(matched_idx) == "FUNDING"
             else None
         )
+        funding_context_urls = [
+            str(context[field])
+            for context in funding_stage_context or []
+            if isinstance(context, Mapping)
+            for field in ("url", "final_url")
+            if context.get(field)
+        ]
         terminal_cache_key = ""
         if (
             integrity_policy
+            and signal_exchange is None
             and retry_evidence_context_key
             and isinstance(intent_terminal_retry_cache, MutableMapping)
         ):
@@ -11489,7 +11508,38 @@ async def score_company_competition_intent_signal(
                     signal_results.append(deepcopy(dict(cached)))
                     continue
                 intent_terminal_retry_cache.pop(terminal_cache_key, None)
-        score, confidence, date_status, content_found_date, _matched_idx = (
+        exchange_request = None
+        exchange_reference = None
+        if signal_exchange is not None:
+            exchange_request = {
+                "operation": "claim",
+                "signal_index": signal_index,
+                "verified_company_identity": deepcopy(verified_company_identity),
+                "verified_funding_stage_context": deepcopy(
+                    list(funding_stage_context or [])
+                ),
+            }
+            response = await invoke_exchange(signal_exchange, exchange_request)
+            if not isinstance(response, Mapping) or response.get("reference") is None:
+                raise SignalJudgmentCacheError("signal cache claim is invalid")
+            exchange_reference = response["reference"]
+            if response.get("status") == "hit":
+                cached = response.get("judgment")
+                if not reusable_terminal_judgment(
+                    cached, expected_urls=evidence_urls,
+                    expected_index=matched_idx,
+                    expected_evidence_type=_evidence_type_for(matched_idx),
+                    allowed_context_urls=funding_context_urls,
+                ):
+                    raise SignalJudgmentCacheError("signal cache hit is invalid")
+                reused = deepcopy(dict(cached))
+                reused["signal_judgment_reference"] = deepcopy(exchange_reference)
+                signal_results.append(reused)
+                continue
+            if response.get("status") != "miss" or "judgment" in response:
+                raise SignalJudgmentCacheError("signal cache claim status is invalid")
+        try:
+            score, confidence, date_status, content_found_date, _matched_idx = (
             await _score_single_intent_signal(
                 signal,
                 signal_icp,
@@ -11514,7 +11564,22 @@ async def score_company_competition_intent_signal(
                    if funding_stage_context else {}),
                 **({"evidence_signals": evidence_group} if integrity_policy else {}),
             )
-        )
+            )
+        except BaseException:
+            if exchange_request is not None:
+                try:
+                    await invoke_exchange(signal_exchange, {
+                        **exchange_request,
+                        "operation": "complete",
+                        "reference": exchange_reference,
+                        "judgment": None,
+                    })
+                except Exception as release_error:
+                    logger.error(
+                        "Signal cache release failed after scoring error: %s",
+                        type(release_error).__name__,
+                    )
+            raise
         if no_time_decay:
             after_decay, decay = score, 1.0 if score > 0 else 0.0
         else:
@@ -11579,6 +11644,31 @@ async def score_company_competition_intent_signal(
                if integrity_policy else {}),
             **({"judge_verdict": judge_verdict} if judge_verdict else {}),
         }
+        if exchange_request is not None:
+            terminal = reusable_terminal_judgment(
+                signal_result, expected_urls=evidence_urls,
+                expected_index=matched_idx,
+                expected_evidence_type=_evidence_type_for(matched_idx),
+                allowed_context_urls=funding_context_urls,
+            )
+            response = await invoke_exchange(signal_exchange, {
+                **exchange_request,
+                "operation": "complete",
+                "reference": exchange_reference,
+                "judgment": deepcopy(signal_result) if terminal else None,
+            })
+            if (
+                not isinstance(response, Mapping)
+                or response.get("reference") != exchange_reference
+                or response.get("status") not in (
+                    {"stored", "existing"} if terminal else {"released"}
+                )
+            ):
+                raise SignalJudgmentCacheError("signal cache completion is invalid")
+            if terminal:
+                signal_result["signal_judgment_reference"] = deepcopy(
+                    response["reference"]
+                )
         signal_results.append(signal_result)
         if (
             terminal_cache_key

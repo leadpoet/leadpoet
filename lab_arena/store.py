@@ -59,6 +59,18 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_signal_authority_exclusions_v1": (("p_run_id", "text"),),
+    "lab_arena_claim_signal_judgment_v1": (
+        ("p_run_id", "text"), ("p_lease_token_hash", "text"),
+        ("p_company_index", "integer"), ("p_signal_index", "integer"),
+        ("p_scope", "jsonb"),
+    ),
+    "lab_arena_complete_signal_judgment_v1": (
+        ("p_run_id", "text"), ("p_lease_token_hash", "text"),
+        ("p_company_index", "integer"), ("p_signal_index", "integer"),
+        ("p_scope", "jsonb"), ("p_reference", "jsonb"),
+        ("p_judgment", "jsonb"), ("p_judgment_hash", "text"),
+    ),
     "lab_arena_register_reviewer_runtime_v1": (
         ("p_grading_image_digest", "text"), ("p_grading_image_reference", "text"),
         ("p_runtime_image_digest", "text"), ("p_runtime_image_reference", "text"),
@@ -321,6 +333,8 @@ TABLES = (
     "lab_arena_chain_outcomes",
     "lab_arena_judgment_cache",
     "lab_arena_company_judgments",
+    "lab_arena_signal_judgments",
+    "lab_arena_signal_judgment_uses",
 )
 ROUND_MODE_FILTER = "configuration_doc->>mode"
 PROMOTION_OUTCOME_FILTER = "publication_doc->king_decision->>outcome"
@@ -2466,6 +2480,63 @@ class ArenaStore:
                 "source_scored_run_id,source_runner_hotkey,created_at"
             ),
         )
+
+    def claim_signal_judgment(
+        self, *, run_id: str, lease_token_hash: str, company_index: int,
+        signal_index: int, scope: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_claim_signal_judgment_v1", {
+                "p_run_id": run_id, "p_lease_token_hash": lease_token_hash,
+                "p_company_index": company_index, "p_signal_index": signal_index,
+                "p_scope": dict(scope),
+            },
+        ), "signal judgment claim")
+
+    def complete_signal_judgment(
+        self, *, run_id: str, lease_token_hash: str, company_index: int,
+        signal_index: int, scope: Mapping[str, Any], reference: Mapping[str, Any],
+        judgment: Optional[Mapping[str, Any]], judgment_hash: str,
+    ) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_complete_signal_judgment_v1", {
+                "p_run_id": run_id, "p_lease_token_hash": lease_token_hash,
+                "p_company_index": company_index, "p_signal_index": signal_index,
+                "p_scope": dict(scope), "p_reference": dict(reference),
+                "p_judgment": dict(judgment) if judgment is not None else None,
+                "p_judgment_hash": judgment_hash,
+            },
+        ), "signal judgment completion")
+
+    def get_signal_judgment(self, cache_key: str, authority_slot: int) -> Optional[Dict[str, Any]]:
+        rows = self._transport.select(
+            "lab_arena_signal_judgments",
+            filters={"cache_key": cache_key, "authority_slot": authority_slot},
+            limit=2,
+            columns=("cache_key,authority_slot,signal_input_hash,scope_doc,judgment_hash,"
+                     "judgment_doc,source_score_run_id,source_scored_run_id,"
+                     "source_runner_hotkey,source_claim_request_hash,"
+                     "source_lease_generation,runner_authority_exclusions"),
+        )
+        if len(rows) > 1:
+            raise ArenaStoreError("signal judgment authority is not unique")
+        return rows[0] if rows else None
+
+    def get_signal_judgment_uses(self, run_id: str) -> List[Dict[str, Any]]:
+        return self._transport.select(
+            "lab_arena_signal_judgment_uses", filters={"run_id": run_id},
+            order="company_index", limit=500,
+            columns=("run_id,company_index,signal_index,cache_key,authority_slot,"
+                     "signal_input_hash,source_score_run_id,judgment_hash"),
+        )
+
+    def signal_authority_exclusions(self, run_id: str) -> List[str]:
+        result = self._transport.rpc(
+            "lab_arena_signal_authority_exclusions_v1", {"p_run_id": run_id}
+        )
+        if not isinstance(result, list) or any(not isinstance(value, str) or not value for value in result):
+            raise ArenaStoreError("signal authority exclusions are invalid")
+        return result
 
     def get_company_judgment(
         self, cache_key: str, authority_slot: int

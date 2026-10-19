@@ -903,6 +903,15 @@ class HttpArenaApiClient:
             timeout_seconds=api_timeout_seconds,
         )
 
+    def signal_judgment(self, run_id: str, lease_token: str, request: Mapping[str, Any]) -> Dict[str, Any]:
+        from lab_arena.signal_cache_control import validate_request
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", run_id):
+            raise RunnerError("invalid signal cache run")
+        return self._post(
+            "/arena/v1/runs/%s/signal-judgment" % run_id, validate_request(request),
+            headers={"x-lab-arena-lease": lease_token}, timeout_seconds=30.0,
+        )
+
     def quota_usage(
         self,
         run_id: str,
@@ -2176,6 +2185,30 @@ class WorkerSocketServer:
             return shim.encode_worker_error("quota_unavailable")
         return contracts.canonical_json(snapshot).encode("utf-8")
 
+    def _handle_signal_judgment_control(self, raw: bytes) -> Optional[bytes]:
+        from lab_arena import signal_cache_control
+        try:
+            frame = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if not isinstance(frame, Mapping) or frame.get("schema_version") != signal_cache_control.SCHEMA:
+            return None
+        state = self._state
+        try:
+            if (len(raw) > signal_cache_control.MAX_BYTES
+                or set(frame) != {"schema_version", "request"}
+                or state.lease.get("kind") != "score"
+                or (state.lease.get("scorer_policy") or {}).get("signal_judgment_policy") != signal_cache_control.POLICY):
+                raise ValueError("signal cache control is not authorized")
+            request = signal_cache_control.validate_request(frame["request"])
+            result = self._api.signal_judgment(state.lease["run_id"], state.lease_token, request)
+            encoded = contracts.canonical_json(result).encode("utf-8")
+            if len(encoded) > signal_cache_control.MAX_BYTES:
+                raise ValueError("signal cache response too large")
+            return encoded
+        except (RunnerError, ValueError, TypeError):
+            return contracts.canonical_json({"status": "unavailable"}).encode("utf-8")
+
     def _handle_decision_control(self, raw: bytes) -> Optional[bytes]:
         """Capture one bounded model report without dispatching a provider call."""
 
@@ -3042,6 +3075,9 @@ class WorkerSocketServer:
     ) -> bytes:
         """The judge shim's transport: one length-prefixed operation frame."""
 
+        control_response = self._handle_signal_judgment_control(raw)
+        if control_response is not None:
+            return control_response
         control_response = self._handle_quota_control(raw)
         if control_response is not None:
             return control_response

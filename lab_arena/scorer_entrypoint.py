@@ -64,6 +64,9 @@ def score_input(
             if observations is not None else {}
         ),
     )
+    if policy.get("signal_judgment_policy") == "signal_judgment_v1":
+        from lab_arena.signal_cache_control import exchange
+        scorer._signal_judgment_exchange = exchange
     item = {"scored_run_id": scored_run_id}
     completed_judgments = []
     completed_breakdowns = []

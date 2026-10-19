@@ -15217,7 +15217,7 @@ def test_stealth_fetch_requires_existing_provider_key(monkeypatch):
 def test_only_exact_http_400_provider_hint_requests_stealth_retry(
     monkeypatch, body, expects_retry,
 ):
-    async def fake_bounded(_session, url):
+    async def fake_bounded(_session, url, **_kwargs):
         return 400, url, body
 
     monkeypatch.setattr(investigator, "_fetch_bounded_html", fake_bounded)

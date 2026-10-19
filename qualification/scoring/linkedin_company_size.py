@@ -1060,11 +1060,75 @@ def extract_linkedin_company_size(text: Any) -> Optional[dict[str, str]]:
     return None
 
 
+def _profile_body_matches_company_identity(
+    text: str, identity: Mapping[str, Any],
+) -> bool:
+    """Bind the profile's own website or title, never a name mentioned in prose."""
+
+    domain = _canonical_company_domain(identity.get("registrable_dns_domain"))
+    names = {_company_name(identity.get("normalized_name"))}
+    aliases = identity.get("verified_legal_name_aliases")
+    if isinstance(aliases, list):
+        names.update(_company_name(value) for value in aliases[:3])
+    names.discard("")
+    if not domain or not names:
+        return False
+    lines = text[:PROFILE_MAX_CHARACTERS].splitlines()
+    before_about: list[str] = []
+    about_lines: list[str] = []
+    in_about = False
+    for line in lines:
+        visible = line.strip().strip("*").strip()
+        if _ABOUT_SECTION_HEADING.fullmatch(visible):
+            in_about = True
+            continue
+        if in_about:
+            if _ABOUT_SECTION_END_HEADING.fullmatch(visible):
+                break
+            about_lines.append(visible)
+        elif visible:
+            before_about.append(visible)
+    # The labelled profile website is a stronger binding than a display name,
+    # which may use a legal name or tagline. An explicit different website must
+    # not be overridden by a matching name elsewhere on the page.
+    websites: list[str] = []
+    for index, line in enumerate(about_lines):
+        match = re.fullmatch(
+            r"(?:Website|Site web|Site)(?:\s*:\s*|\s+|$)(.*)",
+            line.replace("**", ""), re.I,
+        )
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if not value:
+            value = next(
+                (value for value in about_lines[index + 1:index + 4] if value), "",
+            )
+        markdown = re.fullmatch(r"\[[^\]]*\]\((https?://[^\s)]+)\)", value)
+        value = markdown.group(1) if markdown else value
+        websites.append(value)
+    if websites:
+        return all(
+            _structured_company_domain_matches(domain, value) for value in websites
+        )
+    # Accept only the profile title or heading before About. A customer, partner,
+    # or expected company named in the description cannot bind this profile.
+    for line in before_about[:10]:
+        heading = re.fullmatch(r"#\s+(.+)", line)
+        title = re.fullmatch(r"(.+?)\s*\|\s*LinkedIn", line, re.I)
+        if heading or title:
+            name = (title or heading).group(1)
+            name = re.sub(r"\s*\|\s*LinkedIn\s*$", "", name, flags=re.I)
+            return _company_name(name) in names
+    return False
+
+
 async def fetch_current_linkedin_company_size(
     profile_url: str,
     *,
     diagnostic: Optional[dict[str, str]] = None,
     source_text_sink: Optional[dict[str, str]] = None,
+    expected_company_identity: Optional[Mapping[str, Any]] = None,
 ) -> Optional[CurrentLinkedInCompanySizeResult]:
     """Return exact size proof, explicit no-size content, or retryable failure.
 
@@ -1074,6 +1138,10 @@ async def fetch_current_linkedin_company_size(
     failures, other status failures, and malformed results return ``None``.
     An optional caller-owned sink receives one bounded safe response body or
     exact-source absence metadata; neither enters public results or diagnostics.
+    When an independent expected identity is supplied, the profile body must
+    bind that company before its employee range can become size evidence. A
+    missing or different body identity is insufficient evidence, not a provider
+    failure; the raw body remains available for separate investigation.
     """
 
     requested_slug = linkedin_company_page_slug(profile_url)
@@ -1275,6 +1343,11 @@ async def fetch_current_linkedin_company_size(
         source_text_sink.clear()
         source_text_sink.update({"url": returned_url, "text": text})
     extracted = extract_linkedin_company_size(text)
+    if (
+        expected_company_identity is not None
+        and not _profile_body_matches_company_identity(text, expected_company_identity)
+    ):
+        extracted = None
     if extracted is None:
         return {
             "outcome": CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,

@@ -3360,7 +3360,9 @@ def test_structured_size_fallback_is_reused_across_sonar_repair(monkeypatch):
         verdict["industry_matches"] = True if len(provider_calls) > 1 else None
         return verdict, ""
 
-    async def exa_fetch(url, *, diagnostic, source_text_sink=None):
+    async def exa_fetch(
+        url, *, diagnostic, source_text_sink=None, expected_company_identity=None,
+    ):
         del diagnostic, source_text_sink
         exa_fetches.append(url)
         return {"outcome": "insufficient_evidence", "url": url}
@@ -5463,7 +5465,7 @@ def test_verified_homepage_profile_replaces_unbound_size_citation_once(
     quote = "Company size\n11-50 employees"
     calls, pending = _install_exa_bodies(monkeypatch, {
         "statuses": [{"status": "success", "source": "crawled"}],
-        "results": [{"url": profile_url, "text": f"## About\n{quote}"}],
+        "results": [{"url": profile_url, "text": f"# Acme\n## About\n{quote}"}],
     })
     verdict = _verdict(employee_url=employee_url)
     if wrong_observed_profile:
@@ -5533,7 +5535,7 @@ def test_verified_profile_selection_needs_no_submitted_or_model_profile_match(mo
         "statuses": [{"status": "success", "source": "crawled"}],
         "results": [{
             "url": "https://linkedin.com/company/acme",
-            "text": "## About\nCompany size\n11-50 employees",
+            "text": "# Acme\n## About\nCompany size\n11-50 employees",
         }],
     })
     verdict = _verdict(employee_url="https://linkedin.com/company/other")

@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: evidence recovery and verified ICP supply
+
+On 2026-10-19 the user authorized the four remaining fixes: bind fetched
+LinkedIn size evidence to the correct company, reuse fetched affirmative
+company evidence in the existing reviewer, recover inaccessible intent evidence
+through bounded same-event corroboration, and verify future ICP supply before
+freezing. This includes focused failure/negative controls, bounded paid and
+reward-disabled production tests, safe push/merge, scorer-image publication,
+canonical gateway/normal-validator deployment and live verification. Preserve
+frozen rounds, accepted results, qualification standards, competition and cost
+policies, credentials and concurrent work. Recovery must remain bounded and
+must not accept unsupported facts or substitute a different event. No new
+reviewer, scoring path or recovery framework. Authority ends after deployment
+and validation. Report the agent-versus-deterministic recommendation afterward.
+
 ## Scoped production authorization: signal judgment reuse
 
 On 2026-10-19 the user authorized the smallest durable fix for identical

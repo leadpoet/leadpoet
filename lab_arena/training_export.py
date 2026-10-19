@@ -431,7 +431,7 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
     policy = configuration.get("sourcing_cost_eligibility_policy")
     unavailable = lambda reason: {"status": "unavailable", "reason": reason,
                                   "policy": policy if isinstance(policy, str) else None}
-    if policy != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
+    if policy not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES:
         return unavailable("per_icp_policy_not_configured")
     if (configuration.get("integrity_policy") != "arena_integrity_v1"
             or scored is None or run.get("status") != "accepted"
@@ -479,6 +479,9 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
             "competition_sourcing_microusd", "execution_icp_cap_microusd",
             "cost_per_company_cap_microusd", "eligibility_cap_microusd",
         )
+        flat_policy = policy == contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        expected_cap = (configuration.get("execution_icp_cap_microusd") if flat_policy
+                        else configuration.get("cost_per_company_microusd", 0) * len(qualified))
         if (type(snapshot.get("icp_position")) is not int
                 or snapshot["icp_position"] != run["icp_position"]
                 or any(type(snapshot.get(key)) is not int or snapshot[key] < 0
@@ -492,13 +495,14 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                 or snapshot["execution_icp_cap_microusd"] != configuration.get("execution_icp_cap_microusd")
                 or snapshot["cost_per_company_cap_microusd"] != configuration.get("cost_per_company_microusd")
                 or snapshot["eligibility_cap_microusd"] != (
-                    snapshot["cost_per_company_cap_microusd"] * len(qualified))):
+                    expected_cap)):
             raise ValueError("cost snapshot does not match frozen policy")
         reason = snapshot.get("eligibility_reason")
         if reason in ("provider_calls_inflight", "provider_cost_uncertain"):
             return {**unavailable(reason), "observed_at": timestamp,
                     "source_rpc": "lab_arena_icp_cost_eligibility"}
-        if (reason not in ("eligible", "cost_per_company_exceeded")
+        exceeded_reason = "execution_cap_exceeded" if flat_policy else "cost_per_company_exceeded"
+        if (reason not in ("eligible", exceeded_reason)
                 or type(snapshot.get("eligible")) is not bool
                 or snapshot["eligible"] != (reason == "eligible")
                 or snapshot["eligible"] != (
@@ -676,7 +680,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         reader=cost_eligibility_reader,
     )
     if (config.get("sourcing_cost_eligibility_policy")
-            == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
             and example["competition_cost_eligibility"]["status"] != "available"):
         reasons["costs"].add("competition_cost_eligibility_unavailable")
     snapshots = dict(input_snapshots or {})

@@ -518,6 +518,7 @@ def build_service_from_environment(mode: str):
         promotion_margin=_promotion_margin_from_environment(),
         parallel_twenty_icp_execution=True,
         per_icp_cost_policy=True,
+        flat_per_icp_cost_policy=True,
         baseline_hotkey=_required("LAB_ARENA_BASELINE_HOTKEY"),
         baseline_source_url=_baseline_source_url_from_environment(mode),
         max_challengers=_max_challengers_from_environment(),

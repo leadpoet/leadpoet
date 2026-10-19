@@ -1515,7 +1515,7 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             )
             if (
                 configuration.get("sourcing_cost_eligibility_policy")
-                != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
             ):
                 open_cost_fields += ("uncertain_calls",)
             # Current-policy failed-call uncertainty remains audit metadata;

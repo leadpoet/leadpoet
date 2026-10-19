@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from lab_arena import contracts, public_dashboard
 
 
@@ -139,10 +141,14 @@ def test_new_policy_projection_rejects_incomplete_successful_call_counters():
     assert "eligible" not in baseline
 
 
-def test_per_icp_policy_projects_its_cap_and_omits_legacy_aggregate_cap():
+@pytest.mark.parametrize('policy,company_cap,eligibility_cap,reason', [
+    (contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY, 800_000, 1_600_000, 'cost_per_company_exceeded'),
+    (contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY, 4_000_000, 4_000_000, 'execution_cap_exceeded'),
+])
+def test_per_icp_policy_projects_its_cap_and_omits_legacy_aggregate_cap(policy, company_cap, eligibility_cap, reason):
     row = _published_row(policy=True)
     row["configuration_doc"]["sourcing_cost_eligibility_policy"] = (
-        contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        policy
     )
     ranking = row["publication_doc"]["final_ranking"][0]
     ranking["eligible"] = True
@@ -153,18 +159,18 @@ def test_per_icp_policy_projects_its_cap_and_omits_legacy_aggregate_cap():
         "eligible_icp_count": 19,
         "competition_sourcing_microusd": 9_000_000,
         "execution_icp_cap_microusd": 4_000_000,
-        "cost_per_company_cap_microusd": 800_000,
+        "cost_per_company_cap_microusd": company_cap,
         "execution_cap_microusd": 80_000_000,
         "per_icp": [
             {
                 "icp_position": position,
                 "returned_company_count": 5,
                 "qualified_company_count": 2,
-                "competition_sourcing_microusd": 1_600_000 + (position == 2),
-                "eligibility_cap_microusd": 1_600_000,
+                "competition_sourcing_microusd": eligibility_cap + (position == 2),
+                "eligibility_cap_microusd": eligibility_cap,
                 "eligible": position != 2,
                 "eligibility_reason": (
-                    "cost_per_company_exceeded" if position == 2 else "eligible"
+                    reason if position == 2 else "eligible"
                 ),
             }
             for position in range(20)
@@ -175,9 +181,10 @@ def test_per_icp_policy_projects_its_cap_and_omits_legacy_aggregate_cap():
 
     cost = public_dashboard.round_summary(row)["baseline"]["cost_summary"]
 
-    assert cost["sourcing_cost_eligibility_policy"] == (
-        "successful_calls_per_icp_v1"
-    )
+    assert cost["sourcing_cost_eligibility_policy"] == policy
+    assert cost["cost_per_company_cap_microusd"] == company_cap
+    assert cost["per_icp"][2]["eligibility_cap_microusd"] == eligibility_cap
+    assert cost["per_icp"][2]["eligibility_reason"] == reason
     assert cost["execution_icp_cap_microusd"] == 4_000_000
     assert cost["per_icp"][2]["eligible"] is False
     assert "execution_cap_microusd" not in cost

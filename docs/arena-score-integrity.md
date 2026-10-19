@@ -55,7 +55,8 @@ source pages are missing (404/410). Provider outages remain retryable.
 New rounds allow up to 20 minutes per judge job. Frozen rounds retain their
 original limits. Evidence standards, retry counts, and cost caps do not change.
 
-For rounds using `successful_calls_per_icp_v1`, baseline and miner models use
+For rounds using `successful_calls_flat_per_icp_v1` or the earlier
+`successful_calls_per_icp_v1`, baseline and miner models use
 the same $4 sourcing admission limit for each ICP. The existing provider ledger
 combines all providers and execution attempts for that ICP. Retries do not reset
 spending. An admitted call can finish above $4; its full charge and response are
@@ -71,10 +72,12 @@ can take confirmed spend above the cap. Current-policy judge admission also
 uses confirmed charges only, with its existing separate submission-wide cap.
 Judge charges never enter sourcing spend or qualification cost eligibility.
 
-After normal quality scoring, each ICP has a successful-sourcing cost allowance
-of $0.80 multiplied by its verified qualified companies. Five companies
-allow $4; two allow $1.60. Ignored, duplicate, irrelevant, excess, or failed companies
-add no allowance. A cost-ineligible ICP contributes zero to the competition
+New rounds freeze `successful_calls_flat_per_icp_v1`. After normal quality
+scoring, each ICP has a fixed $4 successful-sourcing cost allowance, independent
+of its qualified-company count. Exactly $4 passes; any amount above $4 fails.
+Quality and quantity scoring, the five-company maximum, and false-positive
+penalties remain unchanged. A company that does not qualify does not earn score.
+A cost-ineligible ICP contributes zero to the competition
 aggregate; its raw quality score and costs remain recorded. It does not remove
 scores from other ICPs or disqualify the whole submission.
 
@@ -84,10 +87,16 @@ billed them. In-flight calls and unresolved successful sourcing costs keep their
 existing fail-closed treatment. Actual billing and competition costs are reported
 separately; judge costs do not enter sourcing eligibility.
 
-Historical rounds retain their frozen rules. Under `successful_calls_v1`, the
-runtime admission limit was $80 for the submission, and final successful sourcing
+Existing rounds retain their frozen rules. Under `successful_calls_per_icp_v1`,
+the final allowance remains $0.80 multiplied by verified qualified companies.
+Under `successful_calls_v1`, the runtime admission limit was $80 for the submission, and final successful sourcing
 spend was compared with $0.80 times all qualified pairs across its ICPs. Published
 historical results are not rewritten.
+
+The existing quota response keeps its field names for agent compatibility.
+`per_qualified_pair_cap_microusd` is 4,000,000 for flat-policy rounds and 800,000
+for legacy per-company rounds. In the flat policy it describes the allowance
+available even with one company; it is never multiplied by company count.
 
 ## Inputs, admission, and repeated judgments
 

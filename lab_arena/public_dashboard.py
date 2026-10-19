@@ -262,7 +262,7 @@ def _cost_projection(
         return {}
     per_icp_policy = (
         sourcing_cost_eligibility_policy
-        == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
     )
     if per_icp_policy:
         scalar_keys = (
@@ -316,7 +316,7 @@ def _cost_projection(
             return {}
         projected_summary.update({
             "sourcing_cost_eligibility_policy": (
-                contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                sourcing_cost_eligibility_policy
             ),
             "per_icp": sorted(rows, key=lambda row: row["icp_position"]),
             "execution": execution,
@@ -585,7 +585,7 @@ def _completed_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, Any]:
     configuration = row.get("configuration_doc") or {}
     if (row.get("status") in {"open", "committed", "stage1", "stage1_closed", "published", "cancelled"}
         or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
-        or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY):
+        or configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
         return {}
     return service.completed_submission_scores(row)
 
@@ -599,7 +599,7 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
     execution_policy = configuration.get("execution_sequence_policy")
     per_icp_policy = (
         configuration.get("sourcing_cost_eligibility_policy")
-        == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
     )
     published_stage1 = _rankings(row, "stage1_ranking") if per_icp_policy else {}
     final_rankings = _rankings(row, "final_ranking") if per_icp_policy else {}
@@ -637,7 +637,7 @@ def _stage1_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, float]:
                     final_rankings.get(submission_id) or {},
                     configuration=configuration,
                     sourcing_cost_eligibility_policy=(
-                        contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                        configuration.get("sourcing_cost_eligibility_policy")
                     ),
                 ).get("cost_summary")
                 if not isinstance(frozen_cost, Mapping):

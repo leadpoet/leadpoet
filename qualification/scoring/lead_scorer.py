@@ -82,6 +82,7 @@ from qualification.scoring.company_evidence_investigator import (
     PRIVATE_FETCHED_PAGES_KEY,
     _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
+    _bound_linkedin_headquarters_source,
     _complete_verified_first_party_identity,
     _plain_text,
     _priority_headquarters_navigation_source,
@@ -3161,6 +3162,7 @@ def _investigator_prefetched_pages(
     ] = None,
     structured_profile_description_evidence: Optional[Mapping[str, Any]] = None,
     structured_profile_headquarters_evidence: Optional[Mapping[str, Any]] = None,
+    linkedin_profile_source: Optional[Mapping[str, str]] = None,
     verified_identity: Optional[Mapping[str, Any]] = None,
     include_structured_description: bool = False,
     include_structured_headquarters: bool = False,
@@ -3282,6 +3284,23 @@ def _investigator_prefetched_pages(
         if len(candidates) >= MAX_PREFETCHED_PAGES:
             break
         candidates.setdefault(url, page)
+    profile = linkedin_profile_source or {}
+    profile_url = profile.get("url", "")
+    profile_text = profile.get("text", "")
+    identity = verified_identity or {}
+    if (
+        include_structured_headquarters
+        and len(candidates) < MAX_PREFETCHED_PAGES
+        and profile_url in submitted_source_urls
+        and _bound_linkedin_headquarters_source(
+            profile_url, profile_url, profile_text, {
+                "verified_name": identity.get("normalized_name"),
+                "verified_domain": identity.get("registrable_dns_domain"),
+                "verified_linkedin_slug": identity.get("linkedin_company_slug"),
+            },
+        )
+    ):
+        candidates.setdefault(profile_url, {"final_url": profile_url, "text": profile_text})
     pages, final_urls = _validated_prefetched_pages(
         candidates,
         submitted_source_urls=submitted_source_urls,
@@ -7595,6 +7614,7 @@ async def _run_targeted_company_evidence_investigation(
     structured_profile_invocation_cache: Optional[dict[str, Any]] = None,
     structured_profile_description_evidence: Optional[Mapping[str, Any]] = None,
     structured_profile_headquarters_evidence: Optional[Mapping[str, Any]] = None,
+    linkedin_profile_source: Optional[Mapping[str, str]] = None,
     prior_result: Optional[CompanyFitDecisionResult] = None,
     required_attribute_source_cache: Optional[
         dict[str, dict[str, Any]]
@@ -7811,6 +7831,10 @@ async def _run_targeted_company_evidence_investigation(
     )
     source_candidates = [
         *(
+            [(linkedin_profile_source or {}).get("url")]
+            if "geography" in investigation_targets else []
+        ),
+        *(
             [structured_profile_headquarters_evidence.get("url")]
             if "geography" in investigation_targets
             and isinstance(structured_profile_headquarters_evidence, Mapping)
@@ -8013,6 +8037,7 @@ async def _run_targeted_company_evidence_investigation(
             structured_profile_headquarters_evidence=(
                 structured_profile_headquarters_evidence
             ),
+            linkedin_profile_source=linkedin_profile_source,
             verified_identity=investigation_verified_identity,
             include_structured_description="stage" in investigation_targets,
             include_structured_headquarters="geography" in investigation_targets,
@@ -8988,6 +9013,7 @@ async def _llm_reverify_company(
                 structured_profile_identity_evidence
             ),
             structured_profile_invocation_cache=current_profile_cache,
+            linkedin_profile_source=linkedin_profile_source_sink,
             structured_profile_description_evidence=(
                 current_profile_cache.get(
                     "structured_profile_description_evidence"
@@ -9536,6 +9562,7 @@ async def _llm_reverify_company(
                     structured_profile_identity_evidence
                 ),
                 structured_profile_invocation_cache=current_profile_cache,
+                linkedin_profile_source=linkedin_profile_source_sink,
                 structured_profile_description_evidence=(
                     current_profile_cache.get(
                         "structured_profile_description_evidence"

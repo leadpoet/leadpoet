@@ -163,9 +163,11 @@ excludes judge calls. `successful_microusd` is settled successful sourcing;
 `settled_microusd` includes billed failures. `reserved_or_uncertain_microusd`
 retains historical holds for audit; it is not spend and migration 321 excludes it
 from sourcing admission. New execute lifecycle reservations carry amount zero.
-The response includes in-flight/unresolved call counts, the admission cap,
-and the allowance per qualified company. Qualification is known
-only after judging. Models own their stopping decisions; this read changes
+The response includes in-flight/unresolved call counts and the $4 admission cap.
+The compatibility field `per_qualified_pair_cap_microusd` is 4,000,000 for new
+flat-policy rounds: the allowance is $4 per ICP, independent of qualified count.
+Frozen legacy rounds retain their $0.80-per-qualified-company rule and field value
+of 800,000. Models own their stopping decisions; this read changes
 neither admission nor scoring. Default version 1 responses remain unchanged.
 
 The gateway shares a Responses reliability gate across rounds by OpenRouter

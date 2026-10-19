@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: validator recovery and model-test findings
+
+On 2026-10-19 the user authorized fixing the repeated validator prior-epoch
+recovery failure and the shadow-test worker-identity assertions, plus auditing
+the seven rejected companies from `arena-2026-10-19-modelsfinal` and fixing any
+proved sourcing or judging defect. This includes protected read-only evidence,
+narrow code changes, focused regressions, bounded provider/reward-disabled
+verification, safe push/merge, exact scorer-image publication when needed, and
+canonical gateway/normal-validator deployment and live verification. Preserve
+qualification standards, budgets, model choices, frozen rounds, accepted and
+published results, provider accounting, rewards, chain authority, credentials,
+and concurrent work. No manual weight vectors, history rewrites, weakened trust
+checks, or new recovery framework. Authority ends after fixes are deployed and
+verified; unproved quality improvements must remain explicitly unproved.
+
 ## Scoped production authorization: evidence recovery and verified ICP supply
 
 On 2026-10-19 the user authorized the four remaining fixes: bind fetched

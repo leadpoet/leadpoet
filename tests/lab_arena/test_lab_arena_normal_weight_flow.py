@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import socketserver
 import subprocess
 import urllib.error
 import urllib.request
@@ -525,6 +526,17 @@ def _public_api(key, clock):
         "https://arena.example", keypair=key, network="finney", netuid=71,
         now=lambda: clock().timestamp(),
     )
+
+
+@pytest.fixture(autouse=True)
+def local_worker_socket_polling(monkeypatch):
+    """Avoid a half-second shutdown wait per in-process fixture assignment."""
+    serve_forever = socketserver.ThreadingUnixStreamServer.serve_forever
+
+    def serve_local(server, poll_interval=0.01):
+        return serve_forever(server, poll_interval=poll_interval)
+
+    monkeypatch.setattr(socketserver.ThreadingUnixStreamServer, "serve_forever", serve_local)
 
 
 @pytest.fixture(autouse=True)

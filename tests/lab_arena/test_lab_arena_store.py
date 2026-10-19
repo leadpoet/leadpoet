@@ -664,6 +664,8 @@ def test_store_boundary_contains_only_current_arena_durable_state():
         "lab_arena_chain_outcomes",
         "lab_arena_judgment_cache",
         "lab_arena_company_judgments",
+        "lab_arena_signal_judgments",
+        "lab_arena_signal_judgment_uses",
     )
     for removed in (
         "lab_arena_append_generation_attempt",

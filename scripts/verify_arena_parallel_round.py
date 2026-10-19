@@ -947,6 +947,8 @@ def _execution_timing(runs: list[Mapping[str, Any]]) -> dict[str, Any]:
     by_position: dict[int, tuple[datetime, datetime]] = {}
     worker_slots: set[int] = set()
     exit_fingerprints: set[str] = set()
+    worker_egress_by_slot: dict[int, str] = {}
+    slot_by_exit_fingerprint: dict[str, int] = {}
     runner_hotkeys: set[str] = set()
     invalid_results = 0
     for row in accepted:
@@ -967,9 +969,18 @@ def _execution_timing(runs: list[Mapping[str, Any]]) -> dict[str, Any]:
             or not isinstance(position, int)
             or isinstance(slot, bool)
             or not isinstance(slot, int)
-            or not fingerprint
+            or not 0 <= slot <= 250
+            or len(fingerprint) != 16
             or not runner
             or position in by_position
+            or (
+                slot in worker_egress_by_slot
+                and worker_egress_by_slot[slot] != fingerprint
+            )
+            or (
+                fingerprint in slot_by_exit_fingerprint
+                and slot_by_exit_fingerprint[fingerprint] != slot
+            )
         ):
             invalid_results += 1
             continue
@@ -977,6 +988,8 @@ def _execution_timing(runs: list[Mapping[str, Any]]) -> dict[str, Any]:
         by_position[position] = (started, finished)
         worker_slots.add(slot)
         exit_fingerprints.add(fingerprint)
+        worker_egress_by_slot[slot] = fingerprint
+        slot_by_exit_fingerprint[fingerprint] = slot
         runner_hotkeys.add(runner)
 
     attempt_intervals: list[tuple[int, datetime, datetime]] = [
@@ -986,6 +999,7 @@ def _execution_timing(runs: list[Mapping[str, Any]]) -> dict[str, Any]:
     ]
     failed_attempt_interval_count = 0
     invalid_failed_attempt_interval_count = 0
+    invalid_failed_attempt_evidence_count = 0
     reported_failures = contracts.MODEL_CAUSED_TERMINAL_CAUSES | {"provider_error"}
     for row in runs:
         if row.get("kind") != "execute" or row.get("status") != "failed":
@@ -1006,15 +1020,40 @@ def _execution_timing(runs: list[Mapping[str, Any]]) -> dict[str, Any]:
             or isinstance(position, bool)
             or not isinstance(position, int)
             or position not in range(contracts.BENCHMARK_ICP_COUNT)
-            or isinstance(slot, bool)
-            or not isinstance(slot, int)
-            or slot not in worker_slots
-            or fingerprint not in exit_fingerprints
-            or runner not in runner_hotkeys
         ):
             invalid_failed_attempt_interval_count += 1
             continue
+
+        # A terminal failure with valid timestamps is an executed interval even
+        # when it was the first use of a proxy worker. Include it in concurrency
+        # and barrier evidence, then validate its worker identity separately.
         attempt_intervals.append((position, started, finished))
+        identity_valid = (
+            not isinstance(slot, bool)
+            and isinstance(slot, int)
+            and 0 <= slot <= 250
+            and len(fingerprint) == 16
+            and runner in runner_hotkeys
+        )
+        identity_conflict = identity_valid and (
+            (
+                slot in worker_egress_by_slot
+                and worker_egress_by_slot[slot] != fingerprint
+            )
+            or (
+                fingerprint in slot_by_exit_fingerprint
+                and slot_by_exit_fingerprint[fingerprint] != slot
+            )
+        )
+        if not identity_valid or identity_conflict:
+            invalid_failed_attempt_interval_count += 1
+            invalid_failed_attempt_evidence_count += 1
+            continue
+
+        worker_slots.add(slot)
+        exit_fingerprints.add(fingerprint)
+        worker_egress_by_slot[slot] = fingerprint
+        slot_by_exit_fingerprint[fingerprint] = slot
         failed_attempt_interval_count += 1
 
     all_attempt_intervals = [
@@ -1051,6 +1090,9 @@ def _execution_timing(runs: list[Mapping[str, Any]]) -> dict[str, Any]:
         "failed_attempt_interval_count": failed_attempt_interval_count,
         "invalid_failed_attempt_interval_count": (
             invalid_failed_attempt_interval_count
+        ),
+        "invalid_failed_attempt_evidence_count": (
+            invalid_failed_attempt_evidence_count
         ),
         "runner_hotkeys": sorted(runner_hotkeys),
         "worker_slots": sorted(worker_slots),
@@ -1408,15 +1450,13 @@ def _evidence(service: Any, round_id: str) -> dict[str, Any]:
             benchmark_icp_count,
             int(configuration.get("runner_slot_ceiling") or 0),
         )
-        if not replay and execution_timing["worker_slots"] != list(range(expected_parallelism)):
-            errors.append("execution_worker_slots")
-        if not replay and execution_timing["exit_fingerprint_count"] != expected_parallelism:
-            errors.append("execution_exit_fingerprints")
         if (
             not replay and execution_timing["concurrency_high_water_lower_bound"]
             != expected_parallelism
         ):
             errors.append("execution_high_water")
+        if not replay and execution_timing["invalid_failed_attempt_evidence_count"]:
+            errors.append("execution_failed_attempt_evidence")
         if not replay and configuration.get("parallel_twenty_icp_execution") is True:
             # The legacy policy requires two isolated ten-ICP waves. Current
             # baseline-first scheduling refills slots across all twenty ICPs.

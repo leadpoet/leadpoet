@@ -12025,7 +12025,7 @@ async def _score_single_intent_signal(
             "evidence_clarification": result.get("evidence_clarification"),
             "intent_verdict": intent_verdict,
             **({"verified_source_context": result["verified_source_context"]}
-               if result.get("client_ready") and result.get("verified_source_context") else {}),
+               if result.get("verified_source_context") else {}),
             "final_disposition": result.get("decision"),
         }
 

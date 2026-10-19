@@ -5756,7 +5756,12 @@ async def verify_three_stage(
             "job_publisher_relationship": job_publisher_relationship,
             "verified_job_source_urls": verified_job_source_urls,
         })
-        if client_ready:
+        if client_ready or (
+            verified_identity_context
+            and s3_item.get("verification_mode") == "source_grounded"
+            and s3_item.get("same_entity_check") == "pass"
+            and s3_item.get("signal_status") in {"supported", "partially_supported", "contradicted"}
+        ):
             cited = {_normalize_url(url) for url in s3_item.get("evidence_urls_used") or []}
             if (
                 row.get("_article_archive_card") is True
@@ -5776,18 +5781,45 @@ async def verify_three_stage(
                 ]
                 if _normalize_url(url) in cited
             }
-            # The paragraph review needs the source context, not only the
-            # signal judge's chosen quotes. Reuse fetched, cited pages; no
-            # submitted snippets or additional provider calls enter this path.
-            result["verified_source_context"] = [
-                {
-                    "url": declared[_normalize_url(item["url"])],
-                    "text": (
+            def retained_text(item):
+                if client_ready:
+                    return (
                         item["text"]
                         if item.get("url") in [*row.get("_funding_stage_source_urls", []), *row.get("_funding_company_source_urls", [])]
                         else _retained_source_context_text(item.get("text"))
-                    ),
+                    )
+                from qualification.scoring.intent_details import (
+                    _calendar_date_spans, _continuous_source_window, _quote_is_bound,
+                )
+
+                header = (item.get("text") or "")[:1000]
+                dates = _calendar_date_spans(header)
+                if dates and _url_on_verified_company_identity(item["url"], verified_identity_context):
+                    start, end = dates[0]
+                    # Literal source text, not inferred publication/event metadata.
+                    return _continuous_source_window(header, 700, [header[start:end]])
+                # Rejected findings need compact source attribution, not extra
+                # full pages in the persisted output or paragraph page budget.
+                for field in ("supporting_quotes", "contradicting_quotes"):
+                    for raw_quote in (s3_item.get(field) or [])[:2]:
+                        quote = raw_quote[:700] if isinstance(raw_quote, str) else ""
+                        if quote and _quote_is_bound(quote, [item.get("text") or ""]):
+                            return quote
+                return _retained_source_context_text(item.get("text"))[:700]
+
+            # The paragraph review needs the source context, not only the
+            # signal judge's chosen quotes. Reuse fetched, cited pages; no
+            # submitted snippets or additional provider calls enter this path.
+            from qualification.scoring.intent_details import _body_dateline_dates
+
+            result["verified_source_context"] = [
+                {
+                    "url": declared[_normalize_url(item["url"])],
+                    "text": retained_text(item),
                     "source_publication_date": item.get("source_publication_date") or "",
+                    **({"source_body_dateline_dates": _body_dateline_dates(item.get("text") or "")}
+                       if not client_ready and _url_on_verified_company_identity(item["url"], verified_identity_context)
+                       else {}),
                     **({"source_role": "matched_company_stage"}
                        if item.get("url") in row.get("_funding_stage_source_urls", [])
                        else {"source_role": "first_party_context", "final_url": item["meta"]["final_url"]}

@@ -217,7 +217,7 @@ def test_review_keeps_non_qualifying_findings_separate_from_verified_coverage():
         "source_index": 2,
         "evidence_kind": "non_qualifying_contradicting_quotes",
         "matched_icp_signal": 1,
-        "source_url": "https://acme.example/berlin",
+        # Without a fetched body this legacy quote has no proven URL binding.
         "admitted_text": ["Acme opened no office in Berlin."],
     }]
     company_refs = result["verified_company_evidence"]["industry"][

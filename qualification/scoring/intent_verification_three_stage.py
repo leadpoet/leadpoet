@@ -3202,7 +3202,8 @@ async def _find_same_event_source(row: Mapping[str, Any]) -> Dict[str, Any]:
             ranked.append((-overlap, url))
     if not ranked:
         return {"status": "unproven", "reason": "no_same_event_locator"}
-    ranked.sort()
+    # Preserve the provider's relevance order when lexical overlap ties.
+    ranked.sort(key=lambda item: item[0])
     return {"status": "selected", "reason": "bounded_same_event_search",
             "selected_urls": [ranked[0][1]]}
 

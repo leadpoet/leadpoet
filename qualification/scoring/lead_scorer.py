@@ -5132,6 +5132,7 @@ async def _refresh_linkedin_employee_size_observation(
             )
         return unavailable
 
+    expected_company_identity = dict(verified_homepage_identity)
     if anchor_slug:
         identity_matches = anchor_slug == evidence_slug
     else:
@@ -5151,6 +5152,15 @@ async def _refresh_linkedin_employee_size_observation(
             )
             and receipt.get("observed_linkedin_slug") == evidence_slug
         )
+        if identity_matches:
+            expected_company_identity = {
+                "normalized_name": receipt["observed_name"],
+                "registrable_dns_domain": receipt["observed_domain"],
+                "linkedin_company_slug": receipt["observed_linkedin_slug"],
+                "verified_legal_name_aliases": receipt.get(
+                    "verified_legal_name_aliases", [],
+                ),
+            }
     if not identity_matches:
         # A model-supplied profile that cannot bind to the observed company is
         # unusable evidence. No profile request failed in this path.
@@ -5169,6 +5179,7 @@ async def _refresh_linkedin_employee_size_observation(
             profile_url,
             diagnostic=fetch_diagnostic,
             source_text_sink=linkedin_profile_source_sink,
+            expected_company_identity=expected_company_identity,
         )
         source_local_failure = (
             current is None
@@ -5189,6 +5200,7 @@ async def _refresh_linkedin_employee_size_observation(
                 profile_url,
                 diagnostic=fetch_diagnostic,
                 source_text_sink=linkedin_profile_source_sink,
+                expected_company_identity=expected_company_identity,
             )
         invocation_cache["evidence"] = current
         current = invocation_cache["evidence"]

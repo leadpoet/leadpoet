@@ -448,12 +448,12 @@ Return ownership with controlling_owner spelled in the primary quote.
 Set control_status=current_control and owner_type=private_equity only when both
 facts hold for this exact company and same owner. Use null for other targets or
 when no relationship is proved.
-The primary exact quote must name the company and owner and prove current
-control. Supporting quote 1 must classify that owner when the primary does not;
-use fetched context to bind owner aliases. Slot 2 is extra alias/context proof.
-Both quotes may come from one page. In reason, explain control and same-owner PE
-identity. If either link or current applicability is missing or contradicted,
-return UNPROVEN or a proven different stage; do not fill gaps with inference.
+The primary quote must name the owner and prove current control. It must name
+the company or use a company alias explicitly bound in same-page cited support.
+Supporting quote 1 must classify the owner if the primary does not; bind owner
+aliases from fetched context. Slot 2 is extra alias/context proof.
+In reason, explain control and same-owner PE. If either link or current
+applicability is missing or contradicted, return UNPROVEN or a proven different stage.
 For stage, observed_value is the proven current stage. Use VERIFIED for a match,
 CONTRADICTED for a proven different stage, UNPROVEN if current stage is unknown.
 Never put the disproved stage in observed_value.
@@ -2594,6 +2594,8 @@ def _semantic_ownership_proof(
     raw: Any,
     control_quote: str,
     identity_names: set[str],
+    *,
+    same_page_identity_quotes: Sequence[str] = (),
 ) -> bool:
     """Bind the investigator's ownership judgment to literal source entities.
 
@@ -2623,9 +2625,10 @@ def _semantic_ownership_proof(
     if owner_identity_names & company_names or not any(
         re.search(
             r"(?<!\w)" + r"[^a-z0-9]*".join(re.escape(c) for c in name) + r"(?!\w)",
-            control_quote.casefold(),
+            quote.casefold(),
         )
         for name in company_names if len(name) >= 2
+        for quote in (control_quote, *same_page_identity_quotes)
     ):
         return False
 
@@ -2718,6 +2721,71 @@ def _validated_findings(
         else:
             evidence_url = _safe_https_url(finding["evidence_url"])
             fetched_text = fetched_pages.get(evidence_url, "")
+            semantic_pe_ownership = False
+            if target == "stage":
+                # Imported at validation time because lead_scorer owns the
+                # canonical stage vocabulary and imports this investigator.
+                from qualification.scoring.lead_scorer import (
+                    _CANONICAL_COMPANY_STAGES,
+                    _acquired_stage_quote_supports_names,
+                    _normalize_company_stage,
+                    _private_equity_linked_support_proves_ownership,
+                    _stage_evidence_supports_observation,
+                    _stage_quote_supports_observation,
+                )
+
+                normalized_stage = _normalize_company_stage(
+                    finding["observed_value"]
+                )
+                linked_pe_support: list[dict[str, str]] = []
+                linked_pe_support_invalid = bool(
+                    normalized_stage == "private equity"
+                    and raw.get("ownership") is not None
+                    and any(
+                        not isinstance(
+                            raw.get(f"supporting_evidence_{field}_{index}", ""),
+                            str,
+                        )
+                        for index in (1, 2) for field in ("url", "quote")
+                    )
+                )
+                if (
+                    normalized_stage == "private equity"
+                    and raw_support and not linked_pe_support_invalid
+                ):
+                    for item in raw_support:
+                        url = _safe_https_url(item["url"])
+                        quote = item["quote"]
+                        if (
+                            not url or not isinstance(quote, str)
+                            or not quote or len(quote) > 2000
+                            or not _quote_occurs(quote, fetched_pages.get(url, ""))
+                        ):
+                            linked_pe_support = []
+                            linked_pe_support_invalid = True
+                            break
+                        linked_pe_support.append({"url": url, "quote": quote})
+                linked_pe_ownership = bool(
+                    linked_pe_support
+                    and _private_equity_linked_support_proves_ownership(
+                        tuple(stage_attribution_names),
+                        finding["evidence_quote"],
+                        tuple(item["quote"] for item in linked_pe_support),
+                    )
+                )
+                semantic_pe_ownership = (
+                    normalized_stage == "private equity"
+                    and not linked_pe_support_invalid
+                    and _semantic_ownership_proof(
+                        raw.get("ownership"),
+                        finding["evidence_quote"],
+                        stage_attribution_names,
+                        same_page_identity_quotes=tuple(
+                            item["quote"] for item in linked_pe_support
+                            if item["url"] == evidence_url
+                        ),
+                    )
+                )
             if not evidence_url or not finding["evidence_quote"].strip():
                 finding.update(
                     status="UNPROVEN",
@@ -2772,6 +2840,7 @@ def _validated_findings(
                     finding["evidence_quote"],
                     stage_attribution_names if target == "stage" else attribution_names,
                 )
+                and not (target == "stage" and semantic_pe_ownership)
                 and not (
                     target == "stage"
                     and _quote_names_domain_styled_stage_company(
@@ -2837,65 +2906,6 @@ def _validated_findings(
                     reason="source quote did not identify the investigated company",
                 )
             elif target == "stage":
-                # Imported at validation time because lead_scorer owns the
-                # canonical stage vocabulary and imports this investigator.
-                from qualification.scoring.lead_scorer import (
-                    _CANONICAL_COMPANY_STAGES,
-                    _acquired_stage_quote_supports_names,
-                    _normalize_company_stage,
-                    _private_equity_linked_support_proves_ownership,
-                    _stage_evidence_supports_observation,
-                    _stage_quote_supports_observation,
-                )
-
-                normalized_stage = _normalize_company_stage(
-                    finding["observed_value"]
-                )
-                linked_pe_support: list[dict[str, str]] = []
-                linked_pe_support_invalid = bool(
-                    normalized_stage == "private equity"
-                    and raw.get("ownership") is not None
-                    and any(
-                        not isinstance(
-                            raw.get(f"supporting_evidence_{field}_{index}", ""),
-                            str,
-                        )
-                        for index in (1, 2) for field in ("url", "quote")
-                    )
-                )
-                if (
-                    normalized_stage == "private equity"
-                    and raw_support and not linked_pe_support_invalid
-                ):
-                    for item in raw_support:
-                        url = _safe_https_url(item["url"])
-                        quote = item["quote"]
-                        if (
-                            not url or not isinstance(quote, str)
-                            or not quote or len(quote) > 2000
-                            or not _quote_occurs(quote, fetched_pages.get(url, ""))
-                        ):
-                            linked_pe_support = []
-                            linked_pe_support_invalid = True
-                            break
-                        linked_pe_support.append({"url": url, "quote": quote})
-                linked_pe_ownership = bool(
-                    linked_pe_support
-                    and _private_equity_linked_support_proves_ownership(
-                        tuple(stage_attribution_names),
-                        finding["evidence_quote"],
-                        tuple(item["quote"] for item in linked_pe_support),
-                    )
-                )
-                semantic_pe_ownership = (
-                    normalized_stage == "private equity"
-                    and not linked_pe_support_invalid
-                    and _semantic_ownership_proof(
-                        raw.get("ownership"),
-                        finding["evidence_quote"],
-                        stage_attribution_names,
-                    )
-                )
                 if normalized_stage not in _CANONICAL_COMPANY_STAGES:
                     finding.update(
                         status="UNPROVEN",

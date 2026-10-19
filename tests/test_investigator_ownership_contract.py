@@ -266,11 +266,80 @@ def test_source_bound_owner_alias_is_judged_by_existing_investigator():
     assert project(claim) == COMPANY_FIT_MATCH
 
 
+def test_same_page_cited_company_alias_binds_primary_control_quote():
+    control = "Pinecrest Capital holds 70 percent of all votes at Clear."
+    alias = "Clear Capital (Clear) develops software for businesses."
+    raw = finding(
+        evidence_quote=control,
+        supporting_evidence_url_2=CONTROL_URL,
+        supporting_evidence_quote_2=alias,
+    )
+    claim = validate(raw, pages={
+        CONTROL_URL: f"{control} {alias}", CLASSIFICATION_URL: CLASSIFICATION,
+    })
+    assert claim["status"] == "VERIFIED"
+    assert claim["ownership"] == OWNERSHIP
+    assert claim["evidence_quote"] == control
+    assert claim["supporting_evidence"] == [
+        {"url": CLASSIFICATION_URL, "quote": CLASSIFICATION},
+        {"url": CONTROL_URL, "quote": alias},
+    ]
+    assert project(claim) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("defect", [
+    "wrong_company", "unloaded_quote", "unloaded_url", "cross_page",
+    "uncited_body", "split_identity", "owner_only_in_support", "self_owner",
+    "null_ownership", "former_control",
+])
+def test_company_alias_cannot_bypass_quote_source_owner_or_contract_gates(defect):
+    control = "Pinecrest Capital holds 70 percent of all votes at Clear."
+    alias = "Clear Capital (Clear) develops software for businesses."
+    raw = finding(
+        evidence_quote=control,
+        supporting_evidence_url_2=CONTROL_URL,
+        supporting_evidence_quote_2=alias,
+    )
+    pages = {CONTROL_URL: f"{control} {alias}", CLASSIFICATION_URL: CLASSIFICATION}
+    if defect == "wrong_company":
+        alias = "Different Company (Clear) develops software for businesses."
+        raw["supporting_evidence_quote_2"] = alias
+        pages[CONTROL_URL] = f"{control} {alias}"
+    elif defect == "unloaded_quote":
+        pages[CONTROL_URL] = control
+    elif defect == "unloaded_url":
+        raw["supporting_evidence_url_2"] = ALIAS_URL
+    elif defect == "cross_page":
+        raw["supporting_evidence_url_2"] = ALIAS_URL
+        pages[ALIAS_URL] = alias
+    elif defect == "uncited_body":
+        raw["supporting_evidence_url_2"] = ""
+        raw["supporting_evidence_quote_2"] = ""
+    elif defect == "split_identity":
+        raw["supporting_evidence_quote_2"] = "Capital is the remainder of an unrelated name."
+        pages[CONTROL_URL] = f"{control} {raw['supporting_evidence_quote_2']}"
+    elif defect == "owner_only_in_support":
+        control = "An investor holds 70 percent of all votes at Clear."
+        raw["evidence_quote"] = control
+        pages[CONTROL_URL] = f"{control} {alias} Pinecrest Capital is mentioned elsewhere."
+    elif defect == "self_owner":
+        raw["ownership"]["controlling_owner"] = "Clear Capital"
+    elif defect == "null_ownership":
+        raw["ownership"] = None
+    else:
+        raw["ownership"]["control_status"] = "former"
+    claim = validate(raw, pages=pages)
+    assert claim["status"] == "UNPROVEN"
+    assert "ownership" not in claim
+    assert project(claim) == COMPANY_FIT_UNAVAILABLE
+
+
 def test_prompt_assigns_same_owner_classification_to_slot_one_and_existing_model():
     prompt = investigator._SYSTEM_PROMPT
-    assert "Supporting quote 1 must classify that owner when the primary does not" in prompt
+    assert "Supporting quote 1 must classify the owner if the primary does not" in prompt
     assert "Slot 2 is extra alias/context proof" in prompt
-    assert "use fetched context to bind owner aliases" in prompt
+    assert "bind owner\naliases from fetched context" in prompt
+    assert "company alias explicitly bound in same-page cited support" in prompt
 
 
 def test_primary_can_prove_both_links_while_second_slot_retains_additional_context():

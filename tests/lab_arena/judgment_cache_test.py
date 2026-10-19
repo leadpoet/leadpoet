@@ -397,3 +397,31 @@ def test_evidence_normalization_does_not_throw_for_valid_public_hosts(url):
     document = _input()
     document["companies"][0]["intent_signals"][0]["url"] = url
     assert _scope(document)["cache_key"]
+
+
+def test_whole_group_evidence_preserves_exact_database_lease_authority_order():
+    scope = _scope(_input())
+    output = scoring.build_scoring_output("run-a", [{"final_score": 80.0}])
+    database_order = ["z-owner", "validator-a", "A-owner"]
+    assert database_order != sorted(database_order)
+    snapshot = judgment_cache.build_evidence_snapshot(
+        output=output, cache_scope=scope, source_score_run_id="score-a", source_scored_run_id="run-a",
+        source_output_ref="arena/round/scores/items/score-a.json", source_runner_hotkey="validator-a",
+        runner_authority_exclusions=database_order,
+    )
+    assert snapshot["runner_authority_exclusions"] == database_order
+    assert judgment_cache.validate_evidence_snapshot(
+        snapshot, cache_key=scope["cache_key"], evidence_hash=contracts.document_hash(snapshot),
+    ) == snapshot
+    for invalid in ([], ["validator-a", "validator-a"], ["validator-a", ""], ["validator-a", {}], ["foreign"]):
+        with pytest.raises(judgment_cache.JudgmentCacheError, match="authority"):
+            judgment_cache.build_evidence_snapshot(
+                output=output, cache_scope=scope, source_score_run_id="score-a", source_scored_run_id="run-a",
+                source_output_ref="arena/round/scores/items/score-a.json", source_runner_hotkey="validator-a",
+                runner_authority_exclusions=invalid,
+            )
+        forged = {**snapshot, "runner_authority_exclusions": invalid}
+        with pytest.raises(judgment_cache.JudgmentCacheError, match="authority"):
+            judgment_cache.validate_evidence_snapshot(
+                forged, cache_key=scope["cache_key"], evidence_hash=contracts.document_hash(forged),
+            )

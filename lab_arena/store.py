@@ -152,6 +152,14 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_icp_set_date", "date"), ("p_scorer_image_digest", "text"),
         ("p_scorer_image_reference", "text"), ("p_deepline_catalog", "jsonb"),
     ),
+
+    "lab_arena_commit_round_v4": (
+        ("p_round_id", "text"), ("p_participants", "jsonb"),
+        ("p_benchmark_ref", "text"), ("p_evaluation_date", "text"),
+        ("p_icp_set_date", "date"), ("p_scorer_image_digest", "text"),
+        ("p_scorer_image_reference", "text"), ("p_deepline_catalog", "jsonb"),
+        ("p_company_judgment_policy", "text"),
+    ),
     "lab_arena_create_round": (("p_round_id", "text"), ("p_configuration_doc", "jsonb")),
     "lab_arena_transition_round": (("p_round_id", "text"), ("p_expected_status", "text"), ("p_next_status", "text"), ("p_patch", "jsonb")),
     "lab_arena_activate_reward": (("p_round_id", "text"), ("p_reward_basis", "jsonb"), ("p_signing_key_doc", "jsonb")),
@@ -324,7 +332,7 @@ COMPETITION_CONFIGURATION_FIELDS = (
 )
 CURRENT_CONFIGURATION_FIELDS = (
     "mode", "schedule", "stage_1_icp_count", "stage_2_icp_count", "promotion_margin",
-    "integrity_policy", "contact_policy", "company_quality_policy", "intent_details_policy",
+    "integrity_policy", "contact_policy", "company_quality_policy", "company_judgment_policy", "intent_details_policy",
 )
 PUBLIC_CONFIGURATION_FIELDS = tuple(dict.fromkeys(
     COMPETITION_CONFIGURATION_FIELDS + CURRENT_CONFIGURATION_FIELDS + ("baseline_hotkey",)
@@ -333,7 +341,7 @@ PUBLIC_CONFIGURATION_COLUMN = "configuration_doc:lab_arena_public_configuration_
 PUBLIC_RESULTS_CONFIGURATION_FIELDS = (
     "mode", "network_name", "netuid", "schedule",
     "benchmark_disclosure_policy", "stage_1_icp_count", "stage_2_icp_count",
-    "integrity_policy", "contact_policy", "company_quality_policy",
+    "integrity_policy", "contact_policy", "company_quality_policy", "company_judgment_policy",
     "intent_details_policy", "scorer_policy",
 )
 # Fixed computed projections for direct SQL and PostgREST transports.
@@ -1475,12 +1483,14 @@ class ArenaStore:
         scorer_image_digest: str,
         scorer_image_reference: str,
         deepline_catalog: Optional[Mapping[str, Any]] = None,
+        company_judgment_policy: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Atomically commit an explicit Day 0 bank date for new-policy rounds."""
 
         return _require_mapping(
             self._transport.rpc(
-                ("lab_arena_commit_round_v3" if deepline_catalog is not None
+                ("lab_arena_commit_round_v4" if company_judgment_policy is not None
+                 else "lab_arena_commit_round_v3" if deepline_catalog is not None
                  else "lab_arena_commit_round_v2"),
                 {
                     "p_round_id": round_id,
@@ -1490,8 +1500,10 @@ class ArenaStore:
                     "p_icp_set_date": icp_set_date,
                     "p_scorer_image_digest": scorer_image_digest,
                     "p_scorer_image_reference": scorer_image_reference,
-                    **({"p_deepline_catalog": dict(deepline_catalog)}
-                       if deepline_catalog is not None else {}),
+                    **({"p_deepline_catalog": dict(deepline_catalog) if deepline_catalog is not None else None,
+                         "p_company_judgment_policy": company_judgment_policy}
+                       if company_judgment_policy is not None else
+                       {"p_deepline_catalog": dict(deepline_catalog)} if deepline_catalog is not None else {}),
                 },
             ),
             "commit_round_v2",

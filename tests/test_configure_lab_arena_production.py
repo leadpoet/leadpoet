@@ -204,6 +204,16 @@ def test_contacts_scopes_are_mutually_exclusive():
 
 @pytest.mark.parametrize("option,role,updates", [
     (
+        ["--company-judgment-from", "2026-10-19T00:00:00Z"],
+        "company_judgment_from_only",
+        {"LAB_ARENA_COMPANY_JUDGMENT_FROM": "2026-10-19T00:00:00+00:00"},
+    ),
+    (
+        ["--company-judgment-from", ""],
+        "company_judgment_from_only",
+        {"LAB_ARENA_COMPANY_JUDGMENT_FROM": ""},
+    ),
+    (
         ["--company-quality-from", "2026-09-13T00:00:00Z"],
         "company_quality_from_only",
         {"LAB_ARENA_COMPANY_QUALITY_FROM": "2026-09-13T00:00:00+00:00"},
@@ -898,6 +908,49 @@ def test_remote_company_quality_activation_preserves_other_settings(tmp_path, va
         },
     ))
     assert updated == {**initial, "LAB_ARENA_COMPANY_QUALITY_FROM": value.replace("Z", "+00:00")}
+
+
+@pytest.mark.parametrize("value", ["2026-10-19T00:00:00Z", ""])
+def test_remote_company_cache_activation_preserves_grading_and_image(tmp_path, value):
+    initial = {
+        "KEEP": "same", "LAB_ARENA_COMPANY_QUALITY_FROM": "",
+        "LAB_ARENA_SCORER_IMAGE": "keep-image", "LAB_ARENA_MODE": "live",
+    }
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path, json.dumps(initial), request_override={
+            "role": "company_judgment_from_only",
+            "updates": {"LAB_ARENA_COMPANY_JUDGMENT_FROM": value},
+            "aliases": {}, "service_key": "",
+        },
+    ))
+    assert updated == {**initial, "LAB_ARENA_COMPANY_JUDGMENT_FROM": value.replace("Z", "+00:00")}
+
+
+@pytest.mark.parametrize("overrides,expected", [
+    ({"updates": {"LAB_ARENA_COMPANY_JUDGMENT_FROM": "2026-10-19T00:00:00"}}, "company_judgment_from_timestamp_invalid"),
+    ({"updates": {"LAB_ARENA_COMPANY_JUDGMENT_FROM": "2026-10-19T00:00:00Z", "KEEP": "changed"}}, "company_judgment_from_scope_invalid"),
+    ({"secret_id": "leadpoet/prod/validator/env"}, "company_judgment_from_scope_invalid"),
+])
+def test_remote_company_cache_activation_rejects_invalid_scope(tmp_path, overrides, expected):
+    request = {
+        "role": "company_judgment_from_only",
+        "updates": {"LAB_ARENA_COMPANY_JUDGMENT_FROM": "2026-10-19T00:00:00Z"},
+        "aliases": {}, "service_key": "", **overrides,
+    }
+    result = _run_remote_with_fake_aws(
+        tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
+        request_override=request,
+    )
+    assert result == {"ok": False, "code": expected}
+
+
+def test_company_cache_activation_cannot_change_quality_at_same_time():
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args([
+            "--company-judgment-from", "2026-10-19T00:00:00Z",
+            "--company-quality-from", "2026-10-19T00:00:00Z",
+            "--allowed-account", "493765492819",
+        ])
 
 
 @pytest.mark.parametrize("value", ["2026-09-15T00:00:00Z", ""])

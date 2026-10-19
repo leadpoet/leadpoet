@@ -82,6 +82,7 @@ def build_scorer_policy(
     provider_profile: str = "lab_arena",
     scoring_adapter_version: str = SCORING_ADAPTER_VERSION_V1,
     company_quality: bool = False,
+    company_judgment_cache: bool = False,
     intent_details: bool = False,
     provider_observation_handoff: bool = False,
     normalize_intent_scale: bool = False,
@@ -92,6 +93,7 @@ def build_scorer_policy(
         "schema_version": contracts.SCORER_POLICY_SCHEMA_VERSION,
         "scoring_adapter_version": scoring_adapter_version,
         **({"company_quality_policy": "company_quality_v1"} if company_quality else {}),
+        **({"company_judgment_policy": "company_judgment_v1"} if company_judgment_cache else {}),
         **({"intent_details_policy": "intent_details_v1"} if intent_details else {}),
         "fp_penalty_points": 10.0,
         "fp_unverified_primary_penalty_points": 10.0,
@@ -722,29 +724,8 @@ def score_work_item(
                 # A recovered company can resolve to an earlier, already
                 # accepted identity. Regroup in original order without
                 # invoking the judge again or replacing its first verdict.
-                from qualification.scoring.arena_integrity import company_fit_verified, mark_duplicate_companies
-                original = mark_duplicate_companies(sliced, limit=len(sliced))
-                seen = set()
-                canonical_by_alias = {}
-                verified_indexes = set()
-                for breakdown in result:
-                    identity_key = breakdown.get("company_identity_key")
-                    aliases = breakdown.get("company_identity_alias_keys") or [identity_key]
-                    index = breakdown["company_index"]
-                    fit_verified = company_fit_verified(breakdown)
-                    duplicate_of = original[index].duplicate_of_index
-                    intersecting = seen.intersection(aliases)
-                    if duplicate_of in verified_indexes or (fit_verified and intersecting):
-                        breakdown.update({BREAKDOWN_SCORE_FIELD: 0.0,
-                            "company_qualified": False, "duplicate_company": True,
-                            "failure_reason": "duplicate_company_identity"})
-                        if intersecting:
-                            breakdown["company_identity_key"] = canonical_by_alias[sorted(intersecting)[0]]
-                    if fit_verified and not breakdown.get("duplicate_company") and identity_key:
-                        seen.update(aliases)
-                        for alias in aliases:
-                            canonical_by_alias.setdefault(alias, breakdown["company_identity_key"])
-                        verified_indexes.add(index)
+                from qualification.scoring.competition import regroup_legacy_company_breakdowns
+                result = regroup_legacy_company_breakdowns(sliced, result)
             return result
         unresolved_set = set(unresolved)
         unresolved_failures = [
@@ -768,6 +749,60 @@ def score_work_item(
     )
 
 
+def project_company_judgments(*args, **kwargs):
+    """Convert invalid context replay into the gateway's scoring failure type."""
+    from qualification.scoring.competition import apply_company_judgment_context
+    try:
+        return apply_company_judgment_context(*args, **kwargs)
+    except (TypeError, ValueError) as exc:
+        raise ScoringError("company judgment destination context is invalid") from exc
+
+
+def _score_legacy_company_work_item(
+    item, *, icp, companies, scorer, cache_context, max_scored_companies=0,
+    on_company_judgments=None,
+):
+    from lab_arena import company_judgments
+    from qualification.scoring.competition import apply_company_judgment_context, raw_company_judgment
+    lease = company_judgments.validate_lease_context(cache_context)
+    sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
+    refs = sorted(lease["hits"] + lease["misses"], key=lambda ref: ref["company_index"])
+    if len(refs) != len(sliced):
+        raise ScoringError("company cache lease does not cover this output")
+    raw_by_key = {hit["cache_key"]: hit["evidence_doc"]["raw_judgment"] for hit in lease["hits"]}
+    first_miss = {}
+    for miss in lease["misses"]:
+        first_miss.setdefault(miss["cache_key"], miss)
+    new_judgments = []
+    def resolve(index):
+        ref = refs[index]
+        key = ref["cache_key"]
+        if key not in raw_by_key:
+            rows = score_work_item(item, icp=icp, companies=[sliced[index]], scorer=scorer,
+                                   _original_company_indexes=[index])
+            if len(rows) != 1:
+                raise ScoringError("intrinsic company judgment is missing")
+            raw = {**raw_company_judgment(rows[0]), "company_judgment_policy": company_judgments.POLICY}
+            if not company_judgments.raw_judgment_is_cacheable(raw):
+                raise ScoringError("company judgment is not terminal")
+            raw_by_key[key] = raw
+            new_judgments.append({**first_miss[key], "raw_judgment": raw})
+            validated = company_judgments.validate_new_company_judgments(
+                new_judgments, lease_context=lease, require_complete=False,
+            )
+            if on_company_judgments is not None:
+                on_company_judgments(validated)
+        return raw_by_key[key]
+    scored, _ = verify.bucket_skip(icp, sliced, max_scored_companies=max_scored_companies)
+    full = apply_company_judgment_context(sliced, [None] * len(sliced), company_quality=False,
+                                        scored_indexes=scored, resolve_raw=resolve)
+    validate_breakdowns_for_item(full, icp=icp, companies=sliced,
+        max_scored_companies=max_scored_companies, integrity_policy=True)
+    return full, company_judgments.validate_new_company_judgments(
+        new_judgments, lease_context=lease, require_complete=False,
+    )
+
+
 def score_quality_work_item(
     item: Mapping[str, Any], *, icp: Mapping[str, Any],
     companies: Sequence[Mapping[str, Any]], scorer: Scorer,
@@ -780,8 +815,14 @@ def score_quality_work_item(
         apply_company_judgment_context, bucket_skipped_judgment, raw_company_judgment,
     )
 
+    if not getattr(scorer, "integrity_policy", False):
+        raise ScoringError("company judgments require integrity scoring")
     if not getattr(scorer, "company_quality", False):
-        raise ScoringError("company quality scorer is required")
+        return _score_legacy_company_work_item(
+            item, icp=icp, companies=companies, scorer=scorer,
+            cache_context=cache_context, max_scored_companies=max_scored_companies,
+            on_company_judgments=on_company_judgments,
+        )
     lease = company_judgments.validate_lease_context(cache_context)
     sliced = verify.slice_first_n(companies, verify.icp_company_goal(icp))
     refs = sorted(lease["hits"] + lease["misses"], key=lambda ref: ref["company_index"])
@@ -980,8 +1021,8 @@ def build_scoring_input(
     }
     if company_judgment_cache is not None:
         from lab_arena import company_judgments, quality_policy
-        if not quality_policy.scorer_enabled(policy):
-            raise ScoringError("company judgments require company quality policy")
+        if not company_judgments.enabled(policy):
+            raise ScoringError("company judgments require frozen cache policy")
         document["company_judgment_cache"] = company_judgments.validate_lease_context(company_judgment_cache)
     if prior_terminal_breakdowns is not None:
         document["prior_terminal_breakdowns"] = validate_terminal_breakdowns_for_work_item(
@@ -1125,7 +1166,8 @@ def validate_terminal_breakdowns_for_work_item(
     )
     validated_policy = contracts.validate_scorer_policy(policy)
     if (not contact_policy.integrity_adapter(validated_policy["scoring_adapter_version"])
-        or quality_policy.scorer_enabled(validated_policy)):
+        or quality_policy.scorer_enabled(validated_policy)
+        or validated_policy.get("company_judgment_policy")):
         raise ScoringError("terminal breakdowns require legacy integrity scoring")
     try:
         contracts.check_strict_document(rows, contracts.PUBLICATION_LIMITS)

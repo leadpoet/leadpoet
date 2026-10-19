@@ -31,7 +31,8 @@ def run_scorer(*, score_input: Callable[..., Any], scoring: Any, quality_policy:
 
     result = score_input(
         document, **({"on_company_judgments": checkpoint}
-                     if quality_policy.scorer_enabled(document["scorer_policy"])
+                     if (quality_policy.scorer_enabled(document["scorer_policy"])
+                         or document["scorer_policy"].get("company_judgment_policy") == "company_judgment_v1")
                      else {"on_terminal_breakdowns": terminal_checkpoint}),
     )
     write_output(result)

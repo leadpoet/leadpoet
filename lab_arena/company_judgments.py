@@ -1,7 +1,7 @@
 """Per-company accepted-judgment identities and evidence envelopes.
 
 The gateway builds reusable identities from the exact normalized input seen by
-the company-quality scorer.  Company position and run metadata stay in refs,
+the frozen integrity or company-quality scorer.  Company position and run metadata stay in refs,
 outside the reusable scope.  A trusted claim assigns the authority slot; the
 validator may return a raw company judgment only for a miss in that claim.
 """
@@ -12,6 +12,20 @@ import json
 from typing import Any, Dict, Mapping, Sequence
 
 from lab_arena import contact_policy, contracts, quality_policy
+
+
+POLICY = "company_judgment_v1"
+
+
+def enabled(configuration: Mapping[str, Any]) -> bool:
+    """Select reuse without changing the frozen company grading policy."""
+    marker = configuration.get("company_judgment_policy")
+    if marker is not None and marker != POLICY:
+        raise CompanyJudgmentError("unsupported company judgment policy")
+    return marker == POLICY or quality_policy.enabled(configuration)
+
+
+scorer_enabled = enabled
 
 
 CACHE_SCOPE_SCHEMA_VERSION = "leadpoet.lab_arena.company_judgment_scope.v1"
@@ -78,8 +92,8 @@ def effective_company_inputs(document: Mapping[str, Any]) -> list[Dict[str, Any]
     if not isinstance(document, Mapping):
         raise CompanyJudgmentError("scoring input must be an object")
     policy = document.get("scorer_policy")
-    if not isinstance(policy, Mapping) or not quality_policy.scorer_enabled(policy):
-        raise CompanyJudgmentError("company quality scorer policy is required")
+    if not isinstance(policy, Mapping) or not enabled(policy):
+        raise CompanyJudgmentError("company judgment scorer policy is required")
     if not contact_policy.integrity_adapter(
         str(policy.get("scoring_adapter_version") or "")
     ):
@@ -110,7 +124,7 @@ def effective_company_inputs(document: Mapping[str, Any]) -> list[Dict[str, Any]
             contacts_required=contact_policy.scorer_enabled(policy),
             contact_source_evidence=document.get("contact_source_evidence"),
             provider_observations=observations,
-            company_quality=True,
+            company_quality=quality_policy.scorer_enabled(policy),
         )
     except (TypeError, ValueError) as exc:
         raise CompanyJudgmentError(
@@ -127,7 +141,8 @@ def effective_company_inputs(document: Mapping[str, Any]) -> list[Dict[str, Any]
     return [
         {
             "schema_version": "leadpoet.lab_arena.effective_company_input.v1",
-            "company_quality_policy": quality_policy.POLICY,
+            **({"company_quality_policy": quality_policy.POLICY}
+               if quality_policy.scorer_enabled(policy) else {"company_judgment_policy": POLICY}),
             "buyer_requirements": _json_copy(buyer_requirements),
             "company": _json_copy(row),
             "scorer_policy": copied_policy,
@@ -146,14 +161,19 @@ def build_company_scopes(
     scorer_image_digest: str,
     scorer_image_reference: str,
     integrity_policy: str,
-    company_quality_policy: str,
+    company_quality_policy: str = "",
+    company_judgment_policy: str = "",
 ) -> list[Dict[str, Any]]:
     """Build reusable company refs while keeping destination indexes outside keys."""
 
     if integrity_policy != "arena_integrity_v1":
         raise CompanyJudgmentError("company judgments require integrity policy")
-    if company_quality_policy != quality_policy.POLICY:
-        raise CompanyJudgmentError("unsupported company quality policy")
+    policy = scoring_input.get("scorer_policy") or {}
+    if (company_quality_policy != str(policy.get("company_quality_policy") or "")
+        or company_judgment_policy != str(policy.get("company_judgment_policy") or "")
+        or bool(company_quality_policy) == bool(company_judgment_policy)
+        or not enabled(policy)):
+        raise CompanyJudgmentError("company judgment scope policy differs from scorer")
     identity = {
         "round_id": str(round_id),
         "network_name": str(network_name),
@@ -176,7 +196,8 @@ def build_company_scopes(
         scope = {
             "schema_version": CACHE_SCOPE_SCHEMA_VERSION,
             "integrity_policy": integrity_policy,
-            "company_quality_policy": company_quality_policy,
+            **({"company_quality_policy": company_quality_policy}
+               if company_quality_policy else {"company_judgment_policy": company_judgment_policy}),
             **identity,
             "evaluation_date": effective["evaluation_date"],
             "company_input_hash": company_input_hash,
@@ -244,7 +265,35 @@ def raw_judgment_is_cacheable(raw_judgment: Mapping[str, Any]) -> bool:
         scorer_breakdown_has_retryable_infrastructure_failure,
     )
 
-    if company_fit_verified(copied) and not company_quality_identity_verified(
+    if copied.get("company_judgment_policy") == POLICY:
+        # Legacy judgments keep their independently verified aliases, without
+        # imposing the later company-quality identity contract.
+        if copied.get("bucket_skipped") is True:
+            return False
+        try:
+            from lab_arena.scoring import ScoringError
+            from qualification.scoring.competition import has_verified_primary_intent, _intent_details_gate_passed
+            row = {key: value for key, value in copied.items() if key != "company_judgment_policy"}
+            row.update(company_index=0, duplicate_company=False, company_qualified=bool(
+                company_fit_verified(row) and float(row["final_score"]) > 0
+            ))
+            from lab_arena.scoring import _validate_integrity_breakdown_rows
+            _validate_integrity_breakdown_rows([row], [0])
+            if float(row["final_score"]) > 0 and not (
+                company_fit_verified(row) and has_verified_primary_intent(row.get("intent_signals_detail") or [])
+                and _intent_details_gate_passed(row)
+            ):
+                return False
+            receipts = row.get("verifier_gate_receipts")
+            if not isinstance(receipts, list) or not any(
+                isinstance(receipt, Mapping) and receipt.get("gate") == "company_fit"
+                and receipt.get("decision") in {"match", "mismatch", "unavailable"}
+                for receipt in receipts
+            ):
+                return False
+        except (ValueError, TypeError, KeyError, ScoringError):
+            return False
+    elif company_fit_verified(copied) and not company_quality_identity_verified(
         verified_identity_receipt(copied.get("verifier_gate_receipts"))
     ):
         return False
@@ -252,6 +301,25 @@ def raw_judgment_is_cacheable(raw_judgment: Mapping[str, Any]) -> bool:
     return not scorer_breakdown_has_retryable_infrastructure_failure(
         copied, integrity_policy=True
     )
+
+
+def validated_consumed_indexes(result: Mapping[str, Any], *, company_count: int) -> list[int]:
+    """Require the gateway's bounded accepted projection metadata."""
+    indexes = result.get("company_judgment_consumed_indexes")
+    if (not isinstance(indexes, list) or len(indexes) > 5
+        or any(type(index) is not int or not 0 <= index < company_count for index in indexes)
+        or indexes != sorted(set(indexes))):
+        raise CompanyJudgmentError("company judgment consumed indexes are invalid")
+    return list(indexes)
+
+
+def validate_raw_judgment_mode(raw: Mapping[str, Any], scope: Mapping[str, Any]) -> None:
+    """A caller cannot weaken quality validation by labeling its raw verdict."""
+    if not isinstance(raw, Mapping) or not isinstance(scope, Mapping):
+        raise CompanyJudgmentError("company judgment mode requires objects")
+    expected = POLICY if scope.get("company_judgment_policy") == POLICY else None
+    if raw.get("company_judgment_policy") != expected:
+        raise CompanyJudgmentError("company judgment mode differs from its frozen scope")
 
 
 def _validate_lease_item(
@@ -380,6 +448,7 @@ def build_evidence_snapshot(
 
     ref = validate_company_ref(company_ref)
     row = _json_copy(new_judgment)
+    validate_raw_judgment_mode(row.get("raw_judgment") or {}, ref["scope_doc"])
     if set(row) != {
         "company_index", "cache_key", "company_input_hash", "authority_slot",
         "raw_judgment",
@@ -399,10 +468,13 @@ def build_evidence_snapshot(
         or isinstance(runner_authority_exclusions, (str, bytes, bytearray))
     ):
         raise CompanyJudgmentError("company judgment authority is incomplete")
-    exclusions = sorted(set(runner_authority_exclusions))
+    # The trusted lease list uses the database collation. Preserve its exact
+    # order for SQL's source binding; Python ordering can differ by locale.
+    exclusions = list(runner_authority_exclusions)
     if (
         not exclusions
         or any(not isinstance(item, str) or not item for item in exclusions)
+        or len(set(exclusions)) != len(exclusions)
         or source_runner_hotkey not in exclusions
     ):
         raise CompanyJudgmentError("company judgment authority is incomplete")
@@ -488,8 +560,8 @@ def validate_evidence_snapshot(
     if (
         not isinstance(exclusions, list)
         or not exclusions
-        or exclusions != sorted(set(exclusions))
         or any(not isinstance(item, str) or not item for item in exclusions)
+        or len(set(exclusions)) != len(exclusions)
         or copied["source_runner_hotkey"] not in exclusions
     ):
         raise CompanyJudgmentError("company judgment authority is incomplete")

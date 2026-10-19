@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: company judgment cache coverage
+
+On 2026-10-19 the user authorized the smallest durable fix for identical
+company evidence receiving different judgments across submissions. This includes
+protected production inspection, narrow code and exact committed migrations,
+focused concurrency and recovery tests, safe push and merge, scorer image
+build/publication, canonical gateway/normal-validator deployment, and bounded
+reward-disabled live verification. Use existing company-cache storage and leases.
+Separate cache activation from company-quality grading. Preserve grading,
+qualification, duplicate handling, budgets, actual costs, validator authority,
+frozen historical rounds, accepted work, rewards and concurrent changes.
+Enable the new cache mode only in future round configuration with its tested
+scorer image. Do not rescore history or cache incomplete provider failures.
+This scope ends after deployment and production verification.
+
 ## Scoped production authorization: source-download read recovery
 
 On 2026-10-19 the user authorized investigation and a narrow general fix for

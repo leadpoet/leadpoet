@@ -20,6 +20,7 @@ BEGIN
   RAISE EXCEPTION 'signal migration503 already or partly installed' USING ERRCODE='55000';
  END IF;
 END; $signal_preflight$;
+GRANT CREATE ON SCHEMA public TO lab_arena_owner;
 
 CREATE TABLE public.lab_arena_signal_judgments (
   cache_key TEXT NOT NULL CHECK (cache_key ~ '^sha256:[0-9a-f]{64}$'),
@@ -289,5 +290,6 @@ BEGIN
  EXECUTE new_def;
 END; $signal_company_authority$;
 
+REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
 NOTIFY pgrst,'reload schema';
 COMMIT;

@@ -2280,6 +2280,15 @@ The ICP's primary and optional-bonus criteria describe requested events, not evi
 An optional bonus need not have happened, but any paragraph assertion that it
 did happen still requires the same factual support as every other assertion.
 
+For every semantic recheck, distinguish when a source was published or first
+observed from when the reported activity occurred. A publication date supports
+the report's date; it supports an event date only when admitted evidence
+explicitly links that same activity to the date, for example "effective today".
+A recap of an older event does not establish a new event. If the asserted event
+date or distinct event is not established, return UNPROVEN. Use CONTRADICTED
+only for incompatible facts about that same event. Truthful attribution of what
+a dated report says does not itself assert that the event happened on that date.
+
 For relative_time_grounding_review, first classify the exact disputed clause,
 then classify every other factual clause in the unit. Bind a date to the same
 coverage, report, source, or event whose timing the disputed clause asserts.

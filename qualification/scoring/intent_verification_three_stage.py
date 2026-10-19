@@ -3218,6 +3218,15 @@ def _build_final_judge_prompt(
             "Keep source_event_date bound to the event you established.\n"
             + json.dumps(row["_funding_stage_source_urls"])
         )
+    if (row.get("_integrity_policy") and row.get("_evidence_type") == "FUNDING"
+        and row.get("_funding_company_source_urls")):
+        suffix += (
+            "\nAdditional server-retained first-party company sources below are "
+            "company context, not MATCH-stage or event-identity proof. Reconcile "
+            "their actual text and dates with the submitted funding claim under "
+            "the same event rules above; they do not replace submitted evidence.\n"
+            + json.dumps(row["_funding_company_source_urls"])
+        )
     if "_ats_employer_ownership" in row:
         suffix += (
             "\n\nATS EMPLOYER OWNERSHIP:\n"
@@ -3824,7 +3833,8 @@ def _apply_guardrails(
     supplied_urls = list(row.get("claimed_source_urls") or [])
     claimed = {_normalize_url(url) for url in supplied_urls}
     stage_urls = (
-        row.get("_funding_stage_source_urls") or []
+        [*(row.get("_funding_stage_source_urls") or []),
+         *(row.get("_funding_company_source_urls") or [])]
         if row.get("_integrity_policy") and row.get("_evidence_type") == "FUNDING"
         else []
     )
@@ -5135,11 +5145,18 @@ async def verify_three_stage(
         row["_ats_employer_ownership"] = ats_ownership
     # ── STAGE 3: source-grounded final judge ───────────────────────
     funding_stage_sources = []
+    stage_context_valid = False
+    validated_stage_url = ""
     if (
         integrity_policy and row.get("_evidence_type") == "FUNDING"
         and verified_identity_context
         and isinstance(verified_funding_stage_context, (list, tuple))
-        and len(verified_funding_stage_context) == 1
+        and 1 <= len(verified_funding_stage_context) <= 2
+        and (len(verified_funding_stage_context) == 1 or (
+            isinstance(verified_funding_stage_context[1], Mapping)
+            and set(verified_funding_stage_context[1]) == {"dimension", "url", "final_url", "text"}
+            and verified_funding_stage_context[1].get("dimension") == "first_party_context"
+        ))
     ):
         context = verified_funding_stage_context[0]
         if (
@@ -5150,19 +5167,43 @@ async def verify_three_stage(
             and 0 < len(context["text"]) <= MAX_SCRAPED_CHARS
             and _prompt_exact_url_or_empty(context.get("url")) == context.get("url")
             and context.get("url")
-            and _normalize_url(context["url"]) not in {
-                _normalize_url(url) for url in row["claimed_source_urls"]
-            }
         ):
-            funding_stage_sources = [{
-                "url": context["url"], "text": context["text"],
-                "title": "Server-retained MATCH stage source (not event identity proof)",
-                "meta": {"source_role": "matched_company_stage"},
-            }]
-            row["_funding_stage_source_urls"] = [context["url"]]
-            contents = {**contents, "results": [
-                *contents["results"], *funding_stage_sources,
-            ]}
+            stage_context_valid = True
+            validated_stage_url = context["url"]
+            if _normalize_url(context["url"]) not in {
+                _normalize_url(url) for url in row["claimed_source_urls"]
+            }:
+                source = {
+                    "url": context["url"], "text": context["text"],
+                    "title": "Server-retained MATCH stage source (not event identity proof)",
+                    "meta": {"source_role": "matched_company_stage"},
+                }
+                row["_funding_stage_source_urls"] = [context["url"]]
+                funding_stage_sources.append(source)
+                contents = {**contents, "results": [*contents["results"], source]}
+                combined_text += "\n" + context["text"]
+    if stage_context_valid and len(verified_funding_stage_context) == 2:
+        from qualification.scoring.lead_scorer import _validated_first_party_source_context
+
+        auxiliary = verified_funding_stage_context[1]
+        context = None
+        if (isinstance(auxiliary, Mapping)
+            and set(auxiliary) == {"dimension", "url", "final_url", "text"}
+            and auxiliary.get("dimension") == "first_party_context"):
+            context = _validated_first_party_source_context(
+                auxiliary["url"], {"final_url": auxiliary["final_url"], "text": auxiliary["text"]},
+                verified_company_identity, company_name=company_name,
+            )
+        if context and _normalize_url(context["url"]) not in {
+            _normalize_url(url) for url in [*row["claimed_source_urls"], validated_stage_url]
+        }:
+            source = {"url": context["url"], "text": context["text"],
+                      "title": "Server-retained first-party company source (not stage or event proof)",
+                      "meta": {"source_role": "first_party_context", "final_url": context["final_url"]}}
+            funding_stage_sources.append(source)
+            row["_funding_stage_source_urls"] = [validated_stage_url]
+            row["_funding_company_source_urls"] = [context["url"]]
+            contents = {**contents, "results": [*contents["results"], source]}
             combined_text += "\n" + context["text"]
     s3_prompt = _build_final_judge_prompt(
         row,
@@ -5731,6 +5772,7 @@ async def verify_three_stage(
                 _normalize_url(url): url for url in [
                     *row["claimed_source_urls"],
                     *row.get("_funding_stage_source_urls", []),
+                    *row.get("_funding_company_source_urls", []),
                 ]
                 if _normalize_url(url) in cited
             }
@@ -5742,13 +5784,14 @@ async def verify_three_stage(
                     "url": declared[_normalize_url(item["url"])],
                     "text": (
                         item["text"]
-                        if item.get("url") in row.get("_funding_stage_source_urls", [])
+                        if item.get("url") in [*row.get("_funding_stage_source_urls", []), *row.get("_funding_company_source_urls", [])]
                         else _retained_source_context_text(item.get("text"))
                     ),
                     "source_publication_date": item.get("source_publication_date") or "",
                     **({"source_role": "matched_company_stage"}
                        if item.get("url") in row.get("_funding_stage_source_urls", [])
-                       else {}),
+                       else {"source_role": "first_party_context", "final_url": item["meta"]["final_url"]}
+                       if item.get("url") in row.get("_funding_company_source_urls", []) else {}),
                 }
                 for item in (contents.get("results") or [])[:3 + len(funding_stage_sources)]
                 if _normalize_url(item.get("url") or "") in declared

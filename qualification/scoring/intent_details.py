@@ -560,6 +560,30 @@ def _continuous_source_window(
     return best
 
 
+def _funding_auxiliary_source_window(
+    value: str, maximum_bytes: int, anchors: Sequence[str], authoritative_date: Any,
+) -> str:
+    """Keep a judge-established date only when literally present in this body."""
+
+    date_anchor = ""
+    if isinstance(authoritative_date, str):
+        try:
+            established = date.fromisoformat(authoritative_date)
+        except ValueError:
+            established = None
+        if established is not None:
+            forms = [authoritative_date]
+            for month in (established.strftime("%B"), established.strftime("%b"),
+                          established.strftime("%b") + "."):
+                forms.extend((f"{month} {established.day}, {established.year}",
+                              f"{established.day} {month} {established.year}"))
+            date_anchor = next((match.group() for form in forms
+                                if (match := re.search(re.escape(form), value, re.IGNORECASE))), "")
+    # This selects a continuous excerpt, not an inferred event/publication date.
+    # Quotes outside the window remain verified observations in the projection.
+    return _continuous_source_window(value, maximum_bytes, [date_anchor, *anchors])
+
+
 def _source_overlap_score(paragraph: str, source_text: str) -> int:
     """Count exact normalized four-word spans shared with the paragraph."""
 
@@ -1249,7 +1273,7 @@ def review_evidence(
                 quotes.extend(_texts(item.get("supporting_quotes"), maximum=6, length=2_000))
                 urls.extend(_texts(
                     item.get("evidence_urls_used"),
-                    maximum=4 if result.get("evidence_type") == "FUNDING" else 3,
+                    maximum=5 if result.get("evidence_type") == "FUNDING" else 3,
                     length=2_048,
                 ))
         if not quotes:
@@ -1258,6 +1282,7 @@ def review_evidence(
         if not declared_urls and isinstance(trace.get("evidence_url"), str):
             declared_urls = [trace["evidence_url"]]
         stage_urls = []
+        company_context_urls = []
         if result.get("evidence_type") == "FUNDING" and company_fit_receipt.get("decision") == "match":
             stage = _mapping(_mapping(company_fit_receipt.get("dimension_evidence")).get("stage"))
             stage_evidence = _mapping(stage.get("web_evidence"))
@@ -1267,9 +1292,9 @@ def review_evidence(
                 if isinstance(evaluation, Mapping)
                 and evaluation.get("signal_status") == "supported"
                 and evaluation.get("same_entity_check") == "pass"
-                for url in _texts(evaluation.get("source_urls_supplied"), maximum=4, length=2_048)
+                for url in _texts(evaluation.get("source_urls_supplied"), maximum=5, length=2_048)
             }
-            for raw in (trace.get("verified_source_context") or [])[:4]:
+            for raw in (trace.get("verified_source_context") or [])[:5]:
                 context = _mapping(raw)
                 if (
                     stage.get("decision") == "match"
@@ -1282,14 +1307,35 @@ def review_evidence(
                 ):
                     stage_urls = [stage_url]
                     break
-            declared_urls.extend(stage_urls)
+            from qualification.scoring.lead_scorer import _validated_first_party_source_context
+
+            identity = _mapping(_mapping(
+                _mapping(company_fit_receipt.get("dimension_evidence")).get("identity")
+            ).get("web_identity_receipt"))
+            for raw in (trace.get("verified_source_context") or [])[:5]:
+                context = _mapping(raw)
+                source_url = context.get("url")
+                if (context.get("source_role") != "first_party_context"
+                    or source_url not in urls or source_url not in supplied):
+                    continue
+                bound = _validated_first_party_source_context(
+                    source_url, {"final_url": context.get("final_url"), "text": context.get("text")},
+                    identity, company_name=company.company_name,
+                )
+                if bound and any(_quote_is_bound(quote, [bound["text"]]) for quote in quotes):
+                    company_context_urls = [source_url]
+                    break
+            declared_urls.extend([*stage_urls, *company_context_urls])
         urls = [url for url in dict.fromkeys(urls) if url in declared_urls] or declared_urls
         source_context = []
-        for raw in (trace.get("verified_source_context") or [])[:3 + len(stage_urls)]:
+        for raw in (trace.get("verified_source_context") or [])[:3 + len(stage_urls) + len(company_context_urls)]:
             item = _mapping(raw)
             if item.get("url") not in urls or not isinstance(item.get("text"), str):
                 continue
             text = (
+                _funding_auxiliary_source_window(
+                    item["text"], _MAX_SOURCE_CONTEXT_BYTES, quotes, verdict.get("authoritative_date"),
+                ) if item.get("url") in company_context_urls else
                 _continuous_source_window(item["text"], _MAX_SOURCE_CONTEXT_BYTES, quotes)
                 if item.get("url") in stage_urls
                 else _utf8_prefix(item["text"], _MAX_SOURCE_CONTEXT_BYTES)
@@ -1301,7 +1347,9 @@ def review_evidence(
                 "text": text,
                 "source_publication_date": item.get("source_publication_date") or "",
                 **({"source_role": "matched_company_stage"}
-                   if item.get("url") in stage_urls else {}),
+                   if item.get("url") in stage_urls else
+                   {"source_role": "first_party_context", "final_url": item.get("final_url")}
+                   if item.get("url") in company_context_urls else {}),
             }
             body_dates = _body_dateline_dates(text)
             if body_dates:
@@ -1603,7 +1651,7 @@ def review_evidence(
     for item in with_context:
         remaining = intent_context_budget // len(with_context)
         stage_handoff = any(
-            context.get("source_role") == "matched_company_stage"
+            context.get("source_role") in {"matched_company_stage", "first_party_context"}
             for context in item["source_context"]
         )
         for offset, context in enumerate(item["source_context"]):
@@ -1612,9 +1660,11 @@ def review_evidence(
                 if stage_handoff else remaining
             )
             context["text"] = (
+                _funding_auxiliary_source_window(
+                    context["text"], allowance, item["supporting_quotes"], item.get("authoritative_date"),
+                ) if context.get("source_role") == "first_party_context" else
                 _continuous_source_window(context["text"], allowance, item["supporting_quotes"])
-                if stage_handoff
-                else _utf8_prefix(context["text"], allowance)
+                if stage_handoff else _utf8_prefix(context["text"], allowance)
             )
             used = len(context["text"].encode("utf-8"))
             remaining -= used

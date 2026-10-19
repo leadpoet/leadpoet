@@ -2577,7 +2577,8 @@ _PARAGRAPH_COMPANY_CONTEXT_DIMENSIONS = (
     "first_party_context",
 )
 _MAX_PARAGRAPH_COMPANY_CONTEXTS = 2
-_MAX_RETAINED_INVESTIGATOR_CONTEXTS = 4
+# Four final dimensions, one submitted attribute page, one fetched auxiliary.
+_MAX_RETAINED_INVESTIGATOR_CONTEXTS = 4 + 1 + 1
 _MATCHED_COMPANY_RETRY_IDENTITY_KEY = "verified_identity"
 _MATCHED_COMPANY_RETRY_PAGES_KEY = "pages"
 
@@ -2786,19 +2787,10 @@ def _retain_matched_investigator_source_contexts(
                 prior = source_sink.get(url)
                 if isinstance(prior, Mapping):
                     page, final_url = prior.get("text"), prior.get("final_url")
-            if (
-                not isinstance(page, str)
-                or not page
-                or len(page) > MAX_PAGE_CHARACTERS
-                or not isinstance(final_url, str)
-                or _valid_web_evidence_url(url) != url
-                or _valid_web_evidence_url(final_url) != final_url
-                or urlsplit(url).scheme != "https"
-                or urlsplit(final_url).scheme != "https"
-                or _registrable_domain(url) != domain
-                or _registrable_domain(final_url) != domain
-                or submitted_name not in _compact_company_name(page)
-            ):
+            if _validated_first_party_source_context(
+                url, {"final_url": final_url, "text": page}, identity,
+                company_name=company.company_name,
+            ) is None:
                 continue
             phrase_overlap = _source_overlap_score(company.intent_details, page)
             term_overlap = _source_term_overlap(company.intent_details, page)
@@ -2882,8 +2874,10 @@ def _retain_matched_company_retry_sources(
     retry_cache: Optional[MutableMapping[str, Any]],
     source_cache: Mapping[str, Mapping[str, Any]],
     result: CompanyFitDecisionResult,
+    *,
+    funding_contexts: Sequence[Mapping[str, str]] = (),
 ) -> None:
-    """Persist only final matched-dimension pages in one outer retry scope."""
+    """Persist matched pages and admitted funding context in the existing retry scope."""
 
     if retry_cache is None:
         return
@@ -2905,6 +2899,20 @@ def _retain_matched_company_retry_sources(
     if not admitted:
         return
     retained = _matched_company_retry_prefetched_pages(retry_cache, identity)
+    # A funding retry must keep the already fetched counterevidence alongside
+    # its stage source, within the unchanged three-page prefetch allowance.
+    auxiliary = next((context for context in funding_contexts
+                      if context.get("dimension") == "first_party_context"), None)
+    if auxiliary is not None:
+        preferred = [auxiliary, *(context for context in funding_contexts
+                                  if context.get("dimension") == "stage")]
+        priority = {context["url"]: {
+            "final_url": str(source_cache[context["url"]]["final_url"]),
+            "text": context["text"],
+        } for context in preferred if context["url"] in source_cache}
+        retained = dict(list({**priority, **{url: page for url, page in retained.items()
+                                            if url not in priority}}.items())[:MAX_PREFETCHED_PAGES])
+        admitted = {**priority, **admitted}
     for url, page in admitted.items():
         if url in retained:
             retained[url] = page
@@ -10423,6 +10431,69 @@ def _matched_investigator_source_contexts(
     return contexts
 
 
+def _validated_first_party_source_context(
+    source_url: Any, entry: Any, identity: Any, *, company_name: str,
+) -> Optional[dict[str, str]]:
+    """Bind an already fetched page to one complete verified company identity."""
+
+    if (
+        not isinstance(identity, Mapping) or identity.get("decision") != "match"
+        or not all(isinstance(identity.get(key), str) and identity[key].strip()
+                   for key in ("observed_name", "observed_domain", "observed_linkedin_slug"))
+        or not isinstance(source_url, str)
+        or not isinstance(entry, Mapping) or set(entry) != {"final_url", "text"}
+        or not isinstance(entry.get("final_url"), str)
+        or not source_url.startswith("https://")
+        or not entry["final_url"].startswith("https://")
+        or _valid_web_evidence_url(source_url) != source_url
+        or _valid_web_evidence_url(entry["final_url"]) != entry["final_url"]
+    ):
+        return None
+    name = _compact_company_name(company_name)
+    domain = str(identity["observed_domain"]).casefold()
+    pages, final_urls = _validated_returned_fetched_pages(
+        {source_url: entry}, submitted_source_urls=(source_url,),
+    )
+    text = pages.get(source_url)
+    if (
+        not name
+        or not isinstance(text, str) or name not in _compact_company_name(text)
+        or _registrable_domain(source_url) != domain
+        or _registrable_domain(final_urls.get(source_url)) != domain
+    ):
+        return None
+    return {"dimension": "first_party_context", "url": source_url,
+            "final_url": final_urls[source_url], "text": text}
+
+
+def _matched_first_party_source_context(
+    company_fit: CompanyFitDecisionResult, source_cache: Optional[Mapping[str, Any]],
+    company: Optional["CompanyOutput"], *, paragraph: str, excluded_urls: Sequence[str] = (),
+) -> Optional[dict[str, str]]:
+    """Reuse the existing one relevant first-party auxiliary, before ranking."""
+
+    if (company is None or company_fit.decision != COMPANY_FIT_MATCH
+        or not _complete_company_identity(company_fit)
+        or not isinstance(source_cache, Mapping)
+        or len(source_cache) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS):
+        return None
+    from qualification.scoring.intent_details import _source_overlap_score, _source_term_overlap
+
+    identity = verified_identity_receipt([company_fit.receipt("company_fit")])
+    matched_urls = {context["url"] for context in
+                    _matched_investigator_source_contexts(company_fit, source_cache)}
+    for url, entry in source_cache.items():
+        if url in matched_urls or url in excluded_urls:
+            continue
+        context = _validated_first_party_source_context(
+            url, entry, identity, company_name=company.company_name,
+        )
+        if context and (_source_overlap_score(paragraph, context["text"])
+                        or _source_term_overlap(paragraph, context["text"]) >= 3):
+            return context
+    return None
+
+
 def _matched_company_source_contexts(
     company_fit: CompanyFitDecisionResult,
     required_attribute_source_cache: Optional[Mapping[str, Any]],
@@ -10507,48 +10578,12 @@ def _matched_company_source_contexts(
             "url": submitted_url,
             "text": source_entry["text"],
         })
-    if (
-        company is not None
-        and company_fit.decision == COMPANY_FIT_MATCH
-        and submitted_name
-        and isinstance(identity, Mapping)
-        and isinstance(matched_company_source_cache, Mapping)
-        and len(matched_company_source_cache)
-        <= _MAX_RETAINED_INVESTIGATOR_CONTEXTS
-    ):
-        domain = str(identity.get("observed_domain") or "").casefold()
-        matched_urls = {context["url"] for context in contexts}
-        for url, entry in matched_company_source_cache.items():
-            if url in matched_urls or not isinstance(entry, Mapping):
-                continue
-            final_url, page = entry.get("final_url"), entry.get("text")
-            if (
-                not isinstance(url, str)
-                or not isinstance(final_url, str)
-                or not isinstance(page, str)
-                or not page
-                or len(page) > MAX_PAGE_CHARACTERS
-                or _valid_web_evidence_url(url) != url
-                or _valid_web_evidence_url(final_url) != final_url
-                or urlsplit(url).scheme != "https"
-                or urlsplit(final_url).scheme != "https"
-                or not domain
-                or _registrable_domain(url) != domain
-                or _registrable_domain(final_url) != domain
-                or submitted_name not in _compact_company_name(page)
-                or not (
-                    _source_overlap_score(paragraph, page)
-                    or _source_term_overlap(paragraph, page) >= 3
-                )
-            ):
-                continue
-            contexts.append({
-                "dimension": "first_party_context",
-                "url": url,
-                "final_url": final_url,
-                "text": page,
-            })
-            break
+    auxiliary = _matched_first_party_source_context(
+        company_fit, matched_company_source_cache, company, paragraph=paragraph,
+        excluded_urls=[context["url"] for context in contexts],
+    )
+    if auxiliary is not None:
+        contexts.append(auxiliary)
     deduplicated: list[dict[str, str]] = []
     seen_urls: set[str] = set()
     for context in contexts:
@@ -10752,9 +10787,7 @@ async def score_company_competition_intent(
         ),
     )
     _retain_matched_company_retry_sources(
-        matched_company_retry_source_cache,
-        matched_company_source_cache,
-        company_fit,
+        matched_company_retry_source_cache, matched_company_source_cache, company_fit,
     )
     gate_receipts = [company_fit.receipt("company_fit")]
     if company_fit.decision != COMPANY_FIT_MATCH:
@@ -10774,6 +10807,27 @@ async def score_company_competition_intent(
         str(evidence_type or "").upper() == "FUNDING"
         for evidence_type in getattr(icp, "intent_signal_evidence_types", None) or []
     ) else []
+    if funding_stage_context:
+        attribute = getattr(company, "required_attribute", None)
+        attribute_url = _valid_web_evidence_url(getattr(attribute, "evidence_url", None))
+        attribute_entry = matched_company_source_cache.get(attribute_url)
+        attribute_context = _validated_first_party_source_context(
+            attribute_url, attribute_entry, verified_identity_receipt(gate_receipts),
+            company_name=company.company_name,
+        )
+        excluded = [attribute_url] if attribute_context and _quote_occurs(
+            getattr(attribute, "evidence_quote", ""), attribute_context["text"],
+        ) else []
+        auxiliary = _matched_first_party_source_context(
+            company_fit, matched_company_source_cache, company,
+            paragraph=company.intent_details or "", excluded_urls=excluded,
+        )
+        if auxiliary is not None:
+            funding_stage_context.append(auxiliary)
+            _retain_matched_company_retry_sources(
+                matched_company_retry_source_cache, matched_company_source_cache, company_fit,
+                funding_contexts=funding_stage_context,
+            )
     try:
         (
             intent_raw,

@@ -419,15 +419,14 @@ A server-prefetched structured profile projection labelled
 "harvestapi_get_company locations.headquarter=true" supplies already fetched,
 exact company-bound HQ facts. You may quote that projection for geography;
 do not infer HQ from other profile locations or submitted source claims.
-The current first-party priority and conflict rules below still apply.
-Prefer a known current first-party contact or about navigation locator and
-fetch it before relying on a generic profile location. A navigation label is
-only a locator: its page must contain an explicit company-bound HQ statement.
-When a fetched current company contact or about page explicitly identifies that
-company's headquarters, use that location and its exact continuous source quote
-over a different undated third-party profile HQ. That profile discrepancy alone
-does not require a dated move announcement and does not make the current
-first-party headquarters fact UNPROVEN.
+Use verified exact-company LinkedIn headquarters first, including a validated
+About Headquarters field or the server-fetched locations.headquarter=true
+projection. A valid outside-region LinkedIn HQ remains a contradiction; do not
+replace it with a matching web location. Use company contact/about pages and
+other web evidence only when LinkedIn supplies no usable explicit HQ. A generic
+profile location, inaccessible profile, or wrong-entity profile is not usable HQ.
+A navigation label is only a locator: its page must contain an explicit
+company-bound HQ statement.
 If the headquarters heading omits the company name, first use one continuous
 adjacent span that includes both the investigated company's name and the
 heading with its address when that span exists on the fetched page.
@@ -445,7 +444,7 @@ States headquarters, a state. Use a quote that explicitly identifies the
 location as the headquarters or principal executive office. Do not decide
 whether that location is inside a requested region; the deterministic scorer
 does that after the investigation. Compare sources for the exact company using
-the first-party priority above. If current first-party sources disagree, or a
+the LinkedIn-first priority above. If fallback first-party sources disagree, or a
 dated company-bound source gives a newer conflicting headquarters, resolve the
 chronology with source dates or an explicit move statement; otherwise return
 UNPROVEN. A factory opening cannot prove an HQ move.
@@ -2481,6 +2480,24 @@ def _bound_linkedin_headquarters_finding(
         finding["evidence_url"], final_url, text, identity_anchor,
     ):
         return False
+    field = _linkedin_about_headquarters_field(text)
+    return bool(
+        field
+        and _quote_occurs(field, finding["evidence_quote"])
+        and (
+            _resolve_country(finding["observed_country"]) != "united states"
+            or finding["observed_state"]
+        )
+        and _quote_supports_headquarters(
+            field, observed_country=finding["observed_country"],
+            observed_state=finding["observed_state"],
+        )
+    )
+
+
+def _linkedin_about_headquarters_field(text: str) -> str:
+    """Return the single explicit About HQ field, never generic locations."""
+
     lines = text.splitlines()
     in_about = False
     fields = []
@@ -2501,19 +2518,7 @@ def _bound_linkedin_headquarters_finding(
                 if lines[end].strip():
                     fields.append("\n".join(lines[index:end + 1]).strip())
                     break
-    if len(fields) != 1:
-        return False
-    return bool(
-        _quote_occurs(fields[0], finding["evidence_quote"])
-        and (
-            _resolve_country(finding["observed_country"]) != "united states"
-            or finding["observed_state"]
-        )
-        and _quote_supports_headquarters(
-            fields[0], observed_country=finding["observed_country"],
-            observed_state=finding["observed_state"],
-        )
-    )
+    return fields[0] if len(fields) == 1 else ""
 
 
 def _bound_structured_headquarters_finding(

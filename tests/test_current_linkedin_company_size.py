@@ -4587,7 +4587,7 @@ def test_size_refresh_reuses_profile_fetched_first_for_public_stage(
     ]
     assert cache["structured_employee_size_applicable"] is True
     assert cache["structured_evidence"]["employee_count"] == "11-50"
-    assert len(exa_calls) == (0 if direct_conflict else 2)
+    assert len(exa_calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -5133,7 +5133,7 @@ def test_unbound_or_unknown_structured_company_type_cannot_contradict_public(
     assert result.details["dimension_decisions"]["stage"] != COMPANY_FIT_MISMATCH
 
 
-def test_exa_size_short_circuits_structured_fallback(monkeypatch):
+def test_exa_size_survives_structured_hq_lookup_without_size(monkeypatch):
     async def provider(**_kwargs):
         return _verdict(observed_size=None, size_matches=None, employee_url=""), ""
 
@@ -5145,7 +5145,7 @@ def test_exa_size_short_circuits_structured_fallback(monkeypatch):
         }
 
     async def unexpected_structured(*_args, **_kwargs):
-        raise AssertionError("usable Exa evidence must stop the fallback")
+        return None  # The shared profile lookup also checks HQ.
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)
@@ -5490,7 +5490,7 @@ def test_verified_homepage_profile_replaces_unbound_size_citation_once(
         return observation, ""
 
     async def unexpected_structured(*_args, **_kwargs):
-        raise AssertionError("complete current-profile size needs no fallback")
+        return None  # The shared profile lookup also checks HQ.
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(lead_scorer, "_request_company_reverify_json", provider)

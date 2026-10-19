@@ -1,0 +1,2236 @@
+{
+  "provenance": "Public company fields retained from original accepted-submission provider receipts. Stored judge facts are model claims, not independently reverified web source bodies. No historical score is recomputed.",
+  "companies": [
+    {
+      "company_name": "MongoDB",
+      "round_id": "arena-2026-10-05",
+      "submission_id": "sub-02f800e14b860e5a57b6adfa70453cc3",
+      "icp_position": 7,
+      "company_index": 0,
+      "structured_profile": {
+        "name": "MongoDB",
+        "linkedinUrl": "https://www.linkedin.com/company/mongodbinc/",
+        "website": "http://www.mongodb.com",
+        "employeeCountRange": {
+          "start": 5001,
+          "end": 10000
+        },
+        "locations": [
+          {
+            "country": "JP",
+            "city": "Chiyodaku, Chuo",
+            "geographicArea": "Tokyo",
+            "line1": "4 F & 5F GYB Akihabara ",
+            "line2": "Building 2-25 Kanda Sudacho",
+            "postalCode": "104-0041",
+            "headquarter": false,
+            "description": "Japan",
+            "parsed": {
+              "text": "Tokyo, Japan",
+              "countryCode": "JP",
+              "regionCode": null,
+              "country": "Japan",
+              "countryFull": "Japan",
+              "state": "Tokyo",
+              "city": "Tokyo"
+            }
+          },
+          {
+            "country": "GB",
+            "city": "London ",
+            "geographicArea": "UK",
+            "line1": "16 Hatfields",
+            "line2": "3rd Floor",
+            "postalCode": "SE1 8DJ",
+            "headquarter": false,
+            "description": "London Office",
+            "parsed": {
+              "text": "London, United Kingdom",
+              "countryCode": "GB",
+              "regionCode": null,
+              "country": "UK",
+              "countryFull": "United Kingdom",
+              "state": "England",
+              "city": "London"
+            }
+          },
+          {
+            "country": "IE",
+            "city": "Dublin",
+            "geographicArea": "Ireland",
+            "line1": "3 Shelbourne Building, Crampton Avenue, Ballsbridge",
+            "line2": "3rd Floor",
+            "postalCode": "4",
+            "headquarter": false,
+            "description": "Dublin Office",
+            "parsed": {
+              "text": "Dublin, Ireland",
+              "countryCode": "IE",
+              "regionCode": null,
+              "country": "Ireland",
+              "countryFull": "Ireland",
+              "state": "Leinster",
+              "city": "Dublin"
+            }
+          },
+          {
+            "country": "MX",
+            "city": "Santa Fe",
+            "geographicArea": "Mexico City, Distrito Federal",
+            "line1": "495 Av. Javier Barros Sierra",
+            "line2": null,
+            "postalCode": "01376",
+            "headquarter": false,
+            "description": "Mexico City",
+            "parsed": {
+              "text": "Mexico City, Mexico",
+              "countryCode": "MX",
+              "regionCode": null,
+              "country": "Mexico",
+              "countryFull": "Mexico",
+              "state": "Ciudad de M\u00e9xico",
+              "city": "Mexico City"
+            }
+          },
+          {
+            "country": "IL",
+            "city": "Tel Aviv",
+            "geographicArea": "Tel Aviv",
+            "line1": "144 Menachem Begin Road",
+            "line2": "Wework, 34th Floor",
+            "postalCode": "6492102",
+            "headquarter": false,
+            "description": "Tel Aviv",
+            "parsed": {
+              "text": "Tel Aviv, Israel",
+              "countryCode": "IL",
+              "regionCode": null,
+              "country": "Israel",
+              "countryFull": "Israel",
+              "state": "Tel Aviv District",
+              "city": "Tel Aviv"
+            }
+          },
+          {
+            "country": "CA",
+            "city": "Toronto",
+            "geographicArea": "Ontario",
+            "line1": "219 Dufferin St",
+            "line2": "Suite #303B",
+            "postalCode": "M6K 3J1",
+            "headquarter": false,
+            "description": "Toronto",
+            "parsed": {
+              "text": "Toronto, Canada",
+              "countryCode": "CA",
+              "regionCode": null,
+              "country": "Canada",
+              "countryFull": "Canada",
+              "state": "Ontario",
+              "city": "Toronto"
+            }
+          },
+          {
+            "country": "IT",
+            "city": "Milan",
+            "geographicArea": "Milan",
+            "line1": "Via Pietro Paleocapa 7",
+            "line2": "5th floor, Suite 501 - 504",
+            "postalCode": "20121",
+            "headquarter": false,
+            "description": "Milan",
+            "parsed": {
+              "text": "Milan, Italy",
+              "countryCode": "IT",
+              "regionCode": null,
+              "country": "Italy",
+              "countryFull": "Italy",
+              "state": "Lombardy",
+              "city": "Milan"
+            }
+          },
+          {
+            "country": "AU",
+            "city": "NSW",
+            "geographicArea": "NSW",
+            "line1": "Level 7",
+            "line2": "Chinatown Centre 405 Sussex Street, Haymarket",
+            "postalCode": "2000",
+            "headquarter": false,
+            "description": "Sydney Office",
+            "parsed": {
+              "text": "Australia",
+              "countryCode": "AU",
+              "regionCode": null,
+              "country": "Australia",
+              "countryFull": "Australia"
+            }
+          },
+          {
+            "country": "AU",
+            "city": "Melbourne",
+            "geographicArea": "Melbourne",
+            "line1": "MongoDB c/o Spaces",
+            "line2": "Lvl 2, 161 Collins Street",
+            "postalCode": "3000",
+            "headquarter": false,
+            "description": "Melbourne",
+            "parsed": {
+              "text": "Melbourne, Australia",
+              "countryCode": "AU",
+              "regionCode": null,
+              "country": "Australia",
+              "countryFull": "Australia",
+              "state": "Victoria",
+              "city": "Melbourne"
+            }
+          },
+          {
+            "country": "AE",
+            "city": "Dubai Internet City",
+            "geographicArea": "Dubai",
+            "line1": "First Steps Business Center ",
+            "line2": "Building 16",
+            "postalCode": null,
+            "headquarter": false,
+            "description": "Dubai Office",
+            "parsed": {
+              "text": "Dubai, United Arab Emirates",
+              "countryCode": "AE",
+              "regionCode": null,
+              "country": "United Arab Emirates",
+              "countryFull": "United Arab Emirates",
+              "state": "Dubai",
+              "city": "Dubai"
+            }
+          },
+          {
+            "country": "FR",
+            "city": "Paris",
+            "geographicArea": "Paris",
+            "line1": "20 Rue Quentin Bauchart",
+            "line2": "Level 2",
+            "postalCode": "75008",
+            "headquarter": false,
+            "description": "Paris",
+            "parsed": {
+              "text": "Paris, France",
+              "countryCode": "FR",
+              "regionCode": null,
+              "country": "France",
+              "countryFull": "France",
+              "state": "\u00cele-de-France",
+              "city": "Paris"
+            }
+          },
+          {
+            "country": "DE",
+            "city": "Frankfurt am Main",
+            "geographicArea": "Frankfurt",
+            "line1": "WeWork Goetheplatz",
+            "line2": "Neue Rothofstra\u00dfe 13-19",
+            "postalCode": "60313 ",
+            "headquarter": false,
+            "description": "Frankfurt",
+            "parsed": {
+              "text": "Frankfurt am Main, Germany",
+              "countryCode": "DE",
+              "regionCode": null,
+              "country": "Germany",
+              "countryFull": "Germany",
+              "state": "Hesse",
+              "city": "Frankfurt am Main"
+            }
+          },
+          {
+            "country": "DE",
+            "city": "Berlin",
+            "geographicArea": "Berlin ",
+            "line1": "We Work",
+            "line2": "Kurf\u00fcrstendamm 11",
+            "postalCode": "10719",
+            "headquarter": false,
+            "description": "Berlin",
+            "parsed": {
+              "text": "Berlin, Germany",
+              "countryCode": "DE",
+              "regionCode": null,
+              "country": "Germany",
+              "countryFull": "Germany",
+              "state": "Berlin",
+              "city": "Berlin"
+            }
+          },
+          {
+            "country": "DE",
+            "city": "Munich",
+            "geographicArea": "Munich",
+            "line1": "Design Offices, M\u00fcnchen Highlight Tower",
+            "line2": "Mies-van-der-Rohe-Stra\u00dfe 8",
+            "postalCode": "D-80807",
+            "headquarter": false,
+            "description": "Munich",
+            "parsed": {
+              "text": "Munich, Germany",
+              "countryCode": "DE",
+              "regionCode": null,
+              "country": "Germany",
+              "countryFull": "Germany",
+              "state": "Bavaria",
+              "city": "Munich"
+            }
+          },
+          {
+            "country": "KR",
+            "city": "Gangnam-gu",
+            "geographicArea": "Seoul",
+            "line1": "Seoul Gangnam Haesung ",
+            "line2": "Building (1905) 4/F, Haesung Building 504 Teheran-ro",
+            "postalCode": "06178",
+            "headquarter": false,
+            "description": "Seoul",
+            "parsed": {
+              "text": "Seoul, South Korea",
+              "countryCode": "KR",
+              "regionCode": null,
+              "country": "Korea, Republic of",
+              "countryFull": "South Korea",
+              "state": "Seoul",
+              "city": "Seoul"
+            }
+          },
+          {
+            "country": "CN",
+            "city": "Chaoyang District",
+            "geographicArea": "Beijing ",
+            "line1": "15/F China World Tower 3 ",
+            "line2": "Office #1555 1 Jianguomenwai Avenue",
+            "postalCode": "100004",
+            "headquarter": false,
+            "description": "Beijing",
+            "parsed": {
+              "text": "Beijing, People's Republic of China",
+              "countryCode": "CN",
+              "regionCode": null,
+              "country": "China",
+              "countryFull": "People's Republic of China",
+              "state": "Beijing",
+              "city": "Beijing"
+            }
+          },
+          {
+            "country": "CN",
+            "city": "PR China",
+            "geographicArea": "Shanghai ",
+            "line1": "Room730, 7/F, One ICC",
+            "line2": "No 999, Middle Huaihai Road",
+            "postalCode": "200031",
+            "headquarter": false,
+            "description": "Shanghai",
+            "parsed": {
+              "text": "Shanghai, People's Republic of China",
+              "countryCode": "CN",
+              "regionCode": null,
+              "country": "China",
+              "countryFull": "People's Republic of China",
+              "state": "Shanghai",
+              "city": "Shanghai"
+            }
+          },
+          {
+            "country": "CN",
+            "city": "Futian District",
+            "geographicArea": "Shenzhen ",
+            "line1": "Futian New World Centre",
+            "line2": "23/F, New World Centre,No. 6009, Yitian Road",
+            "postalCode": "518035",
+            "headquarter": false,
+            "description": "Shenzhen",
+            "parsed": {
+              "text": "Shenzhen, People's Republic of China",
+              "countryCode": "CN",
+              "regionCode": null,
+              "country": "China",
+              "countryFull": "People's Republic of China",
+              "state": "Guangdong",
+              "city": "Shenzhen"
+            }
+          },
+          {
+            "country": "NL",
+            "city": "Amsterdam",
+            "geographicArea": "Netherlands",
+            "line1": "Spacesworks",
+            "line2": "4th floor Barbara Strozzilaan 101",
+            "postalCode": "1083 HN ",
+            "headquarter": false,
+            "description": "Amsterdam",
+            "parsed": {
+              "text": "Amsterdam, Netherlands",
+              "countryCode": "NL",
+              "regionCode": null,
+              "country": "Netherlands",
+              "countryFull": "Netherlands",
+              "state": "North Holland",
+              "city": "Amsterdam"
+            }
+          },
+          {
+            "country": "ES",
+            "city": "Madrid",
+            "geographicArea": "Spain",
+            "line1": "Av. de Europa 19",
+            "line2": "Alcobendas",
+            "postalCode": "28108",
+            "headquarter": false,
+            "description": "Madrid",
+            "parsed": {
+              "text": "Madrid, Spain",
+              "countryCode": "ES",
+              "regionCode": null,
+              "country": "Spain",
+              "countryFull": "Spain",
+              "state": "Madrid",
+              "city": "Madrid"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Atlanta",
+            "geographicArea": "GA",
+            "line1": "3340 Peachtree Rd. NE",
+            "line2": "Suite 1800",
+            "postalCode": "30326",
+            "headquarter": false,
+            "description": "Atlanta",
+            "parsed": {
+              "text": "Atlanta, GA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Georgia",
+              "city": "Atlanta"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Burlington",
+            "geographicArea": "MA",
+            "line1": "100 Summit Drive",
+            "line2": null,
+            "postalCode": "01803",
+            "headquarter": false,
+            "description": "Boston",
+            "parsed": {
+              "text": "Burlington, MA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Massachusetts",
+              "city": "Burlington"
+            }
+          },
+          {
+            "country": "US",
+            "city": "San Francisco",
+            "geographicArea": "CA",
+            "line1": "660 York Street",
+            "line2": null,
+            "postalCode": "94110",
+            "headquarter": false,
+            "description": "San Francisco",
+            "parsed": {
+              "text": "San Francisco, CA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "California",
+              "city": "San Francisco"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Palo Alto",
+            "geographicArea": "California",
+            "line1": "100 Forrest Avenue",
+            "line2": null,
+            "postalCode": "94301",
+            "headquarter": false,
+            "description": "Bay Area Office",
+            "parsed": {
+              "text": "Palo Alto, CA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "California",
+              "city": "Palo Alto"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Austin",
+            "geographicArea": "TX",
+            "line1": "3711 S. Mopac Expressway",
+            "line2": "Building 1, Suite 200",
+            "postalCode": "78746",
+            "headquarter": false,
+            "description": "Austin",
+            "parsed": {
+              "text": "Austin, TX, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Texas",
+              "city": "Austin"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Lombard",
+            "geographicArea": "IL",
+            "line1": "377 E Butterfield Road",
+            "line2": "Suite 260",
+            "postalCode": "60148",
+            "headquarter": false,
+            "description": "Chicago",
+            "parsed": {
+              "text": "Lombard, IL, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Illinois",
+              "city": "Lombard"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Plano",
+            "geographicArea": "TX",
+            "line1": "5851 Legacy Circle",
+            "line2": "6th Floor",
+            "postalCode": "75024",
+            "headquarter": false,
+            "description": "Dallas",
+            "parsed": {
+              "text": "Plano, TX, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Texas",
+              "city": "Plano"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Vienna",
+            "geographicArea": "VA",
+            "line1": "8614 Westwood Center Drive",
+            "line2": "Suite #705",
+            "postalCode": "22182",
+            "headquarter": false,
+            "description": "Washington D.C.",
+            "parsed": {
+              "text": "Vienna, VA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Virginia",
+              "city": "Vienna"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Philadelphia",
+            "geographicArea": "Philadelphia",
+            "line1": "1601 Market St.",
+            "line2": null,
+            "postalCode": "19103",
+            "headquarter": false,
+            "description": "Philadelphia",
+            "parsed": {
+              "text": "Philadelphia, PA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Pennsylvania",
+              "city": "Philadelphia"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Bellevue",
+            "geographicArea": "WA",
+            "line1": "Lincoln Square",
+            "line2": "10400 NE 4th St",
+            "postalCode": "98004",
+            "headquarter": false,
+            "description": "Seattle",
+            "parsed": {
+              "text": "Bellevue, WA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Washington",
+              "city": "Bellevue"
+            }
+          },
+          {
+            "country": "US",
+            "city": "New York",
+            "geographicArea": "NY",
+            "line1": "1633 Broadway",
+            "line2": "38th Floor",
+            "postalCode": "10019",
+            "headquarter": true,
+            "description": "New York City Office",
+            "parsed": {
+              "text": "New York City, NY, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "New York",
+              "city": "New York City"
+            }
+          },
+          {
+            "country": "HK",
+            "city": "Tsim Sha Tsui",
+            "geographicArea": "Kowloon",
+            "line1": "10/F Wharf T&T Centre",
+            "line2": "Harbour City, 7 Canton Road",
+            "postalCode": "7",
+            "headquarter": false,
+            "description": "Hong Kong",
+            "parsed": {
+              "text": "Kowloon, Hong Kong",
+              "countryCode": "HK",
+              "regionCode": null,
+              "country": "Hong Kong",
+              "countryFull": "Hong Kong",
+              "state": "Kowloon City",
+              "city": "Kowloon"
+            }
+          },
+          {
+            "country": "IN",
+            "city": "Bengaluru",
+            "geographicArea": "Karnataka",
+            "line1": "WeWork Koramangala",
+            "line2": "Prestige Atlanta 80 Feet Main Road, Koramangala 1A Block Koramangala",
+            "postalCode": "560034",
+            "headquarter": false,
+            "description": "Bengaluru",
+            "parsed": {
+              "text": "Bengaluru, India",
+              "countryCode": "IN",
+              "regionCode": null,
+              "country": "India",
+              "countryFull": "India",
+              "state": "Karnataka",
+              "city": "Bengaluru"
+            }
+          },
+          {
+            "country": "IN",
+            "city": "Gurgaon",
+            "geographicArea": "Haryana",
+            "line1": "Building No. 10 C, DLF Cyber City, Phase II",
+            "line2": "14th Floor",
+            "postalCode": "122002",
+            "headquarter": false,
+            "description": "India Office",
+            "parsed": {
+              "text": "Gurgaon, India",
+              "countryCode": "IN",
+              "regionCode": null,
+              "country": "India",
+              "countryFull": "India",
+              "state": "Haryana",
+              "city": "Gurgaon"
+            }
+          }
+        ],
+        "id": "783611"
+      },
+      "profile_call_identity": "sha256:03fee391be03abd1a915f805c77448c18a5b96198cf48b9fde40a88cfb6bc785",
+      "profile_response_sha256": "sha256:434876a84a6add78185c232ec310e759a92dad32122e4e20edb2a4c0f405a42c",
+      "stored_judge_selected_facts": [
+        {
+          "call_identity": "sha256:5f8a873a6017ae94b074f45bb96dc5673d38537a349be11ece8d3aef46a26264",
+          "selected_fields": {
+            "observed_employee_count": "5,001-10,000",
+            "observed_hq_country": "United States",
+            "observed_hq_state": "New York",
+            "geography_evidence_url": "https://www.mongodb.com/company/office-locations",
+            "geography_evidence_quote": "MongoDB is a global company with US headquarters in New York City and International headquarters in Dublin.",
+            "employee_size_evidence_url": "https://www.linkedin.com/company/mongodbinc",
+            "employee_size_evidence_quote": "Public Company \u00b7 Founded 2007 \u00b7 5001-10000 employees \u00b7 939233 followers"
+          },
+          "evidence_class": "stored_model_claim_not_independently_reverified_source_body"
+        }
+      ]
+    },
+    {
+      "company_name": "Dynatrace",
+      "round_id": "arena-2026-10-05",
+      "submission_id": "sub-02f800e14b860e5a57b6adfa70453cc3",
+      "icp_position": 7,
+      "company_index": 1,
+      "structured_profile": {
+        "name": "Dynatrace",
+        "linkedinUrl": "https://www.linkedin.com/company/dynatrace/",
+        "website": "https://www.dynatrace.com",
+        "employeeCountRange": {
+          "start": 5001,
+          "end": 10000
+        },
+        "locations": [
+          {
+            "country": "US",
+            "city": "Boston",
+            "geographicArea": "Massachusetts",
+            "line1": "280 Congress St",
+            "line2": null,
+            "postalCode": "02210",
+            "headquarter": true,
+            "description": "Global Headquarters",
+            "parsed": {
+              "text": "Boston, MA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Massachusetts",
+              "city": "Boston"
+            }
+          },
+          {
+            "country": "AT",
+            "city": "Linz",
+            "geographicArea": null,
+            "line1": "Am F\u00fcnfundzwanziger Turm 20",
+            "line2": null,
+            "postalCode": "4040",
+            "headquarter": false,
+            "description": "Linz | Engineering Headquarters",
+            "parsed": {
+              "text": "Linz, Austria",
+              "countryCode": "AT",
+              "regionCode": null,
+              "country": "Austria",
+              "countryFull": "Austria",
+              "state": "Upper Austria",
+              "city": "Linz"
+            }
+          },
+          {
+            "country": "CH",
+            "city": "Zurich",
+            "geographicArea": null,
+            "line1": "Badenerstrasse 587",
+            "line2": null,
+            "postalCode": "8048",
+            "headquarter": false,
+            "description": "Switzerland Office",
+            "parsed": {
+              "text": "Z\u00fcrich, Switzerland",
+              "countryCode": "CH",
+              "regionCode": null,
+              "country": "Switzerland",
+              "countryFull": "Switzerland",
+              "state": "Z\u00fcrich",
+              "city": "Z\u00fcrich"
+            }
+          },
+          {
+            "country": "GB",
+            "city": "Maidenhead",
+            "geographicArea": "England",
+            "line1": "60 Norden Road",
+            "line2": null,
+            "postalCode": "SL6 4AY",
+            "headquarter": false,
+            "description": "UK Office",
+            "parsed": {
+              "text": "Maidenhead, United Kingdom",
+              "countryCode": "GB",
+              "regionCode": null,
+              "country": "UK",
+              "countryFull": "United Kingdom",
+              "state": "England",
+              "city": "Maidenhead"
+            }
+          },
+          {
+            "country": "DE",
+            "city": "Munich",
+            "geographicArea": null,
+            "line1": "Konrad-Zuse-Platz 8",
+            "line2": null,
+            "postalCode": "81829",
+            "headquarter": false,
+            "description": "Germany Office",
+            "parsed": {
+              "text": "Munich, Germany",
+              "countryCode": "DE",
+              "regionCode": null,
+              "country": "Germany",
+              "countryFull": "Germany",
+              "state": "Bavaria",
+              "city": "Munich"
+            }
+          },
+          {
+            "country": "SG",
+            "city": "Singapore",
+            "geographicArea": "Singapore",
+            "line1": "250 North Bridge Rd",
+            "line2": "#37-02 Raffles City Tower",
+            "postalCode": "179101",
+            "headquarter": false,
+            "description": "Singapore Office",
+            "parsed": {
+              "text": "Singapore, Singapore",
+              "countryCode": "SG",
+              "regionCode": null,
+              "country": "Singapore",
+              "countryFull": "Singapore",
+              "state": "Central Singapore Community Development Council",
+              "city": "Singapore"
+            }
+          },
+          {
+            "country": "FR",
+            "city": "Boulogne-Billancourt",
+            "geographicArea": "IdF",
+            "line1": "27 Quai Alphonse le Gallo",
+            "line2": null,
+            "postalCode": "92100",
+            "headquarter": false,
+            "description": "Paris Office",
+            "parsed": {
+              "text": "Boulogne-Billancourt, France",
+              "countryCode": "FR",
+              "regionCode": null,
+              "country": "France",
+              "countryFull": "France",
+              "state": "\u00cele-de-France",
+              "city": "Boulogne-Billancourt"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Detroit",
+            "geographicArea": "Michigan",
+            "line1": "2000 Brush St",
+            "line2": null,
+            "postalCode": "48226",
+            "headquarter": false,
+            "description": "Detroit Office",
+            "parsed": {
+              "text": "Detroit, MI, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Michigan",
+              "city": "Detroit"
+            }
+          },
+          {
+            "country": "US",
+            "city": "San Mateo",
+            "geographicArea": "California",
+            "line1": "951 Mariners Island Blvd",
+            "line2": "410",
+            "postalCode": "94404",
+            "headquarter": false,
+            "description": "San Mateo Office",
+            "parsed": {
+              "text": "San Mateo, CA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "California",
+              "city": "San Mateo"
+            }
+          },
+          {
+            "country": "PL",
+            "city": "Gda\u0144sk",
+            "geographicArea": null,
+            "line1": "Al. Grunwaldzka 411",
+            "line2": null,
+            "postalCode": "80-309",
+            "headquarter": false,
+            "description": "Gda\u0144sk Office",
+            "parsed": {
+              "text": "Gda\u0144sk, Poland",
+              "countryCode": "PL",
+              "regionCode": null,
+              "country": "Poland",
+              "countryFull": "Poland",
+              "state": "Pomeranian Voivodeship",
+              "city": "Gda\u0144sk"
+            }
+          },
+          {
+            "country": "ES",
+            "city": "Barcelona",
+            "geographicArea": "Catalonia",
+            "line1": "Avinguda Diagonal, 211",
+            "line2": null,
+            "postalCode": "08018",
+            "headquarter": false,
+            "description": "Barcelona Office",
+            "parsed": {
+              "text": "Barcelona, Spain",
+              "countryCode": "ES",
+              "regionCode": null,
+              "country": "Spain",
+              "countryFull": "Spain",
+              "state": "Catalonia",
+              "city": "Barcelona"
+            }
+          },
+          {
+            "country": "AT",
+            "city": "Graz",
+            "geographicArea": "Styria",
+            "line1": "M\u00e4lzereigasse 4",
+            "line2": null,
+            "postalCode": "8020",
+            "headquarter": false,
+            "description": "Graz Office",
+            "parsed": {
+              "text": "Graz, Austria",
+              "countryCode": "AT",
+              "regionCode": null,
+              "country": "Austria",
+              "countryFull": "Austria",
+              "state": "Styria",
+              "city": "Graz"
+            }
+          },
+          {
+            "country": "AT",
+            "city": "Hagenberg",
+            "geographicArea": "Upper Austria",
+            "line1": "Softwarepark 32",
+            "line2": "Business Campus One",
+            "postalCode": "4232",
+            "headquarter": false,
+            "description": "Hagenberg Office",
+            "parsed": {
+              "text": "Hagenberg im M\u00fchlkreis, Austria",
+              "countryCode": "AT",
+              "regionCode": null,
+              "country": "Austria",
+              "countryFull": "Austria",
+              "state": "Upper Austria",
+              "city": "Hagenberg im M\u00fchlkreis"
+            }
+          },
+          {
+            "country": "AT",
+            "city": "Klagenfurt am W\u00f6rthersee",
+            "geographicArea": null,
+            "line1": "Lakeside B08a",
+            "line2": null,
+            "postalCode": "9020",
+            "headquarter": false,
+            "description": "Klagenfurt Office",
+            "parsed": {
+              "text": "Klagenfurt am W\u00f6rthersee, Austria",
+              "countryCode": "AT",
+              "regionCode": null,
+              "country": "Austria",
+              "countryFull": "Austria",
+              "state": "Carinthia",
+              "city": "Klagenfurt am W\u00f6rthersee"
+            }
+          },
+          {
+            "country": "AT",
+            "city": "Vienna",
+            "geographicArea": null,
+            "line1": "Wiedner G\u00fcrtel 13",
+            "line2": "Dynatrace Austria GmbH, THE ICON VIENNA",
+            "postalCode": "1100",
+            "headquarter": false,
+            "description": "Vienna Office",
+            "parsed": {
+              "text": "Vienna, Austria",
+              "countryCode": "AT",
+              "regionCode": null,
+              "country": "Austria",
+              "countryFull": "Austria",
+              "state": "Vienna",
+              "city": "Vienna"
+            }
+          },
+          {
+            "country": "AT",
+            "city": "Linz",
+            "geographicArea": null,
+            "line1": "Hafenstr. 35",
+            "line2": null,
+            "postalCode": "4020",
+            "headquarter": false,
+            "description": "Linz Office | Winterhafen",
+            "parsed": {
+              "text": "Linz, Austria",
+              "countryCode": "AT",
+              "regionCode": null,
+              "country": "Austria",
+              "countryFull": "Austria",
+              "state": "Upper Austria",
+              "city": "Linz"
+            }
+          },
+          {
+            "country": "CA",
+            "city": "Montreal",
+            "geographicArea": null,
+            "line1": "1000 de la Gauchetiere Street West",
+            "line2": "24th Floor",
+            "postalCode": "H3B 4W5",
+            "headquarter": false,
+            "description": "Canada Office",
+            "parsed": {
+              "text": "Montr\u00e9al, Canada",
+              "countryCode": "CA",
+              "regionCode": null,
+              "country": "Canada",
+              "countryFull": "Canada",
+              "state": "Quebec",
+              "city": "Montr\u00e9al"
+            }
+          },
+          {
+            "country": "AU",
+            "city": "Brisbane QLD",
+            "geographicArea": null,
+            "line1": "240 Queen Street",
+            "line2": "Christie Conference Centre",
+            "postalCode": "4000",
+            "headquarter": false,
+            "description": "Brisbane Office",
+            "parsed": {
+              "text": "Brisbane, Australia",
+              "countryCode": "AU",
+              "regionCode": null,
+              "country": "Australia",
+              "countryFull": "Australia",
+              "state": "Queensland",
+              "city": "Brisbane"
+            }
+          },
+          {
+            "country": "AU",
+            "city": "Melbourne",
+            "geographicArea": "Victoria",
+            "line1": "477 Collins St",
+            "line2": "Level 3",
+            "postalCode": "3000",
+            "headquarter": false,
+            "description": "Melbourne Office",
+            "parsed": {
+              "text": "Melbourne, Australia",
+              "countryCode": "AU",
+              "regionCode": null,
+              "country": "Australia",
+              "countryFull": "Australia",
+              "state": "Victoria",
+              "city": "Melbourne"
+            }
+          },
+          {
+            "country": "AU",
+            "city": "North Sydney",
+            "geographicArea": null,
+            "line1": "100 Miller Street",
+            "line2": "Level 18",
+            "postalCode": "2060",
+            "headquarter": false,
+            "description": "Sydney Office",
+            "parsed": {
+              "text": "North Sydney, Australia",
+              "countryCode": "AU",
+              "regionCode": null,
+              "country": "Australia",
+              "countryFull": "Australia",
+              "state": "New South Wales",
+              "city": "North Sydney"
+            }
+          },
+          {
+            "country": "CN",
+            "city": "Beijing",
+            "geographicArea": null,
+            "line1": "No. 2 Ke Xue Yuan South Road, Haidian District",
+            "line2": "Unit 1508, 15/F, South Tower C, Raycom Info Tech Park",
+            "postalCode": "100190",
+            "headquarter": false,
+            "description": "Beijing Office",
+            "parsed": {
+              "text": "Beijing, People's Republic of China",
+              "countryCode": "CN",
+              "regionCode": null,
+              "country": "China",
+              "countryFull": "People's Republic of China",
+              "state": "Beijing",
+              "city": "Beijing"
+            }
+          },
+          {
+            "country": "CN",
+            "city": "Shanghai",
+            "geographicArea": null,
+            "line1": "No.369, Jiangsu Road, Chang Ning District",
+            "line2": "Unit 18G, Zhao Feng World Trade Building",
+            "postalCode": "200050",
+            "headquarter": false,
+            "description": "Shanghai Office",
+            "parsed": {
+              "text": "Shanghai, People's Republic of China",
+              "countryCode": "CN",
+              "regionCode": null,
+              "country": "China",
+              "countryFull": "People's Republic of China",
+              "state": "Shanghai",
+              "city": "Shanghai"
+            }
+          },
+          {
+            "country": "BR",
+            "city": "Sao Paulo SP ",
+            "geographicArea": null,
+            "line1": "Av das Na\u00e7\u00f5es Unidas, 14171 15 and. Vila Gertrudes",
+            "line2": null,
+            "postalCode": "04794-000",
+            "headquarter": false,
+            "description": "Brazil Office",
+            "parsed": {
+              "text": "S\u00e3o Paulo, Brazil",
+              "countryCode": "BR",
+              "regionCode": null,
+              "country": "Brazil",
+              "countryFull": "Brazil",
+              "state": "S\u00e3o Paulo",
+              "city": "S\u00e3o Paulo"
+            }
+          },
+          {
+            "country": "MX",
+            "city": "Col. Napoles",
+            "geographicArea": null,
+            "line1": "Av. Insurgentes Sur 863 piso 7",
+            "line2": "Dynatrace de Mexico S. de R.L. de C.V",
+            "postalCode": "03810",
+            "headquarter": false,
+            "description": "Mexico Office",
+            "parsed": {
+              "text": "Mexico",
+              "countryCode": "MX",
+              "regionCode": null,
+              "country": "Mexico",
+              "countryFull": "Mexico"
+            }
+          },
+          {
+            "country": "KR",
+            "city": "Seoul",
+            "geographicArea": null,
+            "line1": "#09-122, 9F, 7, Teheraon-ro 5-gil Gangnam-gu",
+            "line2": null,
+            "postalCode": "06134",
+            "headquarter": false,
+            "description": "Dynatrace Korea Ltd.",
+            "parsed": {
+              "text": "Seoul, South Korea",
+              "countryCode": "KR",
+              "regionCode": null,
+              "country": "Korea, Republic of",
+              "countryFull": "South Korea",
+              "state": "Seoul",
+              "city": "Seoul"
+            }
+          },
+          {
+            "country": "EE",
+            "city": "Tallinn",
+            "geographicArea": null,
+            "line1": "Rotermanni 6",
+            "line2": null,
+            "postalCode": "10111",
+            "headquarter": false,
+            "description": "Tallinn Office",
+            "parsed": {
+              "text": "Tallinn, Estonia",
+              "countryCode": "EE",
+              "regionCode": null,
+              "country": "Estonia",
+              "countryFull": "Estonia",
+              "state": "Harju County",
+              "city": "Tallinn"
+            }
+          },
+          {
+            "country": "CZ",
+            "city": "Brno",
+            "geographicArea": "South Moravian Region",
+            "line1": "P\u0159\u00edzova 9",
+            "line2": null,
+            "postalCode": "602 00",
+            "headquarter": false,
+            "description": "Brno Office",
+            "parsed": {
+              "text": "Brno, Czech Republic",
+              "countryCode": "CZ",
+              "regionCode": null,
+              "country": "Czechia",
+              "countryFull": "Czech Republic",
+              "state": "Jihomoravsk\u00fd kraj",
+              "city": "Brno"
+            }
+          }
+        ],
+        "id": "125999"
+      },
+      "profile_call_identity": "sha256:85dacfcf4a25fd8d9d2121cda0a2226ca1e8cd2ab3f91054e40da6655c9283c0",
+      "profile_response_sha256": "sha256:97401b8403ed3d83fc939f460d2f92ae31d0961a1931bc13e77a65cb26b3be2a",
+      "stored_judge_selected_facts": [
+        {
+          "call_identity": "sha256:a08dc244a17529391b454ab676eecfddc565cb9cad46a0348f8d8f3c0d996f64",
+          "selected_fields": {
+            "observed_employee_count": "5,001-10,000",
+            "observed_hq_country": "United States",
+            "observed_hq_state": "Massachusetts",
+            "geography_evidence_url": "https://www.dynatrace.com/company/locations/",
+            "geography_evidence_quote": "- ### Massachusetts (Headquarters)\nDynatrace LLC\n280 Congress Street, 11th Floor\nBoston, MA, 02210\nUnited States of America",
+            "employee_size_evidence_url": "https://www.linkedin.com/company/dynatrace/life",
+            "employee_size_evidence_quote": "We're 5,200+ people powering a market\u2011leading observability and security platform."
+          },
+          "evidence_class": "stored_model_claim_not_independently_reverified_source_body"
+        }
+      ]
+    },
+    {
+      "company_name": "Qualys",
+      "round_id": "arena-2026-10-05",
+      "submission_id": "sub-02f800e14b860e5a57b6adfa70453cc3",
+      "icp_position": 7,
+      "company_index": 2,
+      "structured_profile": {
+        "name": "Qualys",
+        "linkedinUrl": "https://www.linkedin.com/company/qualys/",
+        "website": "https://www.qualys.com",
+        "employeeCountRange": {
+          "start": 1001,
+          "end": 5000
+        },
+        "locations": [
+          {
+            "country": "JP",
+            "city": "Tokyo",
+            "geographicArea": null,
+            "line1": "1 Chome-11\u756a1\u53f7 Marunouchi, Chiyoda City, Tokyo 100-6213, Japan",
+            "line2": null,
+            "postalCode": null,
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Tokyo, Japan",
+              "countryCode": "JP",
+              "regionCode": null,
+              "country": "Japan",
+              "countryFull": "Japan",
+              "state": "Tokyo",
+              "city": "Tokyo"
+            }
+          },
+          {
+            "country": "FR",
+            "city": "Courbevoie",
+            "geographicArea": null,
+            "line1": "7 Pl. de la D\u00e9fense",
+            "line2": null,
+            "postalCode": "92400",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Courbevoie, France",
+              "countryCode": "FR",
+              "regionCode": null,
+              "country": "France",
+              "countryFull": "France",
+              "state": "\u00cele-de-France",
+              "city": "Courbevoie"
+            }
+          },
+          {
+            "country": "GB",
+            "city": "Reading",
+            "geographicArea": null,
+            "line1": "Green Park, 100 Brook Dr, RG2 6UJ",
+            "line2": null,
+            "postalCode": null,
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Reading, United Kingdom",
+              "countryCode": "GB",
+              "regionCode": null,
+              "country": "UK",
+              "countryFull": "United Kingdom",
+              "state": "England",
+              "city": "Reading"
+            }
+          },
+          {
+            "country": "DE",
+            "city": "M\u00fcnchen",
+            "geographicArea": null,
+            "line1": "M\u00fcnchen Flughafen, Terminalstra\u00dfe Mitte 18",
+            "line2": null,
+            "postalCode": "85356 ",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Munich, Germany",
+              "countryCode": "DE",
+              "regionCode": null,
+              "country": "Germany",
+              "countryFull": "Germany",
+              "state": "Bavaria",
+              "city": "Munich"
+            }
+          },
+          {
+            "country": "NL",
+            "city": "Amsterdam",
+            "geographicArea": null,
+            "line1": "De Lairessestraat 145, 1075 HJ ",
+            "line2": null,
+            "postalCode": null,
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Amsterdam, Netherlands",
+              "countryCode": "NL",
+              "regionCode": null,
+              "country": "Netherlands",
+              "countryFull": "Netherlands",
+              "state": "North Holland",
+              "city": "Amsterdam"
+            }
+          },
+          {
+            "country": "SG",
+            "city": "Singapore",
+            "geographicArea": null,
+            "line1": " 3 Church St, level 8 Samsung Hub, Singapore 049483",
+            "line2": null,
+            "postalCode": null,
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Singapore, Singapore",
+              "countryCode": "SG",
+              "regionCode": null,
+              "country": "Singapore",
+              "countryFull": "Singapore",
+              "state": "Central Singapore Community Development Council",
+              "city": "Singapore"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Foster City",
+            "geographicArea": "CA",
+            "line1": "919 E Hillsdale Blvd",
+            "line2": null,
+            "postalCode": "94404",
+            "headquarter": true,
+            "description": null,
+            "parsed": {
+              "text": "Foster City, CA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "California",
+              "city": "Foster City"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Raleigh",
+            "geographicArea": "North Carolina",
+            "line1": "4020 Westchase Blvd",
+            "line2": null,
+            "postalCode": "27607",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Raleigh, NC, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "North Carolina",
+              "city": "Raleigh"
+            }
+          },
+          {
+            "country": "HK",
+            "city": "Central",
+            "geographicArea": null,
+            "line1": "1 Harbour View St, Central, Hong Kong",
+            "line2": null,
+            "postalCode": null,
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Central, Hong Kong",
+              "countryCode": "HK",
+              "regionCode": null,
+              "country": "Hong Kong",
+              "countryFull": "Hong Kong",
+              "state": "Central and Western District",
+              "city": "Central"
+            }
+          },
+          {
+            "country": "IT",
+            "city": "Milano",
+            "geographicArea": null,
+            "line1": "Via Libero Temolo, 4, 20126 Milano MI, Italy",
+            "line2": null,
+            "postalCode": null,
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Milan, Italy",
+              "countryCode": "IT",
+              "regionCode": null,
+              "country": "Italy",
+              "countryFull": "Italy",
+              "state": "Lombardy",
+              "city": "Milan"
+            }
+          },
+          {
+            "country": "AU",
+            "city": "Sydney",
+            "geographicArea": "New South Wales",
+            "line1": "39/2 Park St",
+            "line2": null,
+            "postalCode": "2000",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Sydney, Australia",
+              "countryCode": "AU",
+              "regionCode": null,
+              "country": "Australia",
+              "countryFull": "Australia",
+              "state": "New South Wales",
+              "city": "Sydney"
+            }
+          },
+          {
+            "country": "IN",
+            "city": "Pune",
+            "geographicArea": "Pune",
+            "line1": "Survey No. 20, 10th to 16th Floor, Tower B Panchshil Business Park, ",
+            "line2": null,
+            "postalCode": "411005",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Pune, India",
+              "countryCode": "IN",
+              "regionCode": null,
+              "country": "India",
+              "countryFull": "India",
+              "state": "Maharashtra",
+              "city": "Pune"
+            }
+          }
+        ],
+        "id": "8561"
+      },
+      "profile_call_identity": "sha256:0679c90e9ff7ce0d8bd8f7de0b9d18882692f5290fc1b0a03a94ed4894205fee",
+      "profile_response_sha256": "sha256:1293beb638d915a08a8d4fbe4b39038a395029a48a082185c58c1383e7cba865",
+      "stored_judge_selected_facts": [
+        {
+          "call_identity": "sha256:9581ccc34ec180eeb09720160d646fe59c522675000371685631ea9b1a3fe3a4",
+          "selected_fields": {
+            "observed_employee_count": 501,
+            "observed_hq_country": "United States",
+            "observed_hq_state": "California",
+            "geography_evidence_url": "https://investor.qualys.com/static-files/d12a1bf4-5ebf-4a13-b899-ba9fb161e6b3",
+            "geography_evidence_quote": "The Company is headquartered in Foster City, California",
+            "employee_size_evidence_url": "https://www.linkedin.com/company/qualys",
+            "employee_size_evidence_quote": "1001-5000 employees"
+          },
+          "evidence_class": "stored_model_claim_not_independently_reverified_source_body"
+        },
+        {
+          "call_identity": "sha256:a63e87f253ad540a95db53b9eb4cc83ac2bef2ead562e98d90001d4939edecf2",
+          "selected_fields": {
+            "observed_employee_count": 501,
+            "observed_hq_country": "United States",
+            "observed_hq_state": "California",
+            "geography_evidence_url": "https://investor.qualys.com/static-files/d12a1bf4-5ebf-4a13-b899-ba9fb161e6b3",
+            "geography_evidence_quote": "The Company is headquartered in Foster City, California",
+            "employee_size_evidence_url": "https://www.linkedin.com/company/qualys",
+            "employee_size_evidence_quote": "1001-5000 employees"
+          },
+          "evidence_class": "stored_model_claim_not_independently_reverified_source_body"
+        }
+      ]
+    },
+    {
+      "company_name": "Cloudflare",
+      "round_id": "arena-2026-10-05",
+      "submission_id": "sub-02f800e14b860e5a57b6adfa70453cc3",
+      "icp_position": 7,
+      "company_index": 3,
+      "structured_profile": {
+        "name": "Cloudflare",
+        "linkedinUrl": "https://www.linkedin.com/company/cloudflare/",
+        "website": "https://www.cloudflare.com",
+        "employeeCountRange": {
+          "start": 1001,
+          "end": 5000
+        },
+        "locations": [
+          {
+            "country": "JP",
+            "city": "Tokyo",
+            "geographicArea": null,
+            "line1": "26-1 Sakuragaoka-cho",
+            "line2": "Shibuya-ku, Level 15 Cerulean Tower",
+            "postalCode": "150-8512",
+            "headquarter": false,
+            "description": "Cloudflare - Tokyo",
+            "parsed": {
+              "text": "Tokyo, Japan",
+              "countryCode": "JP",
+              "regionCode": null,
+              "country": "Japan",
+              "countryFull": "Japan",
+              "state": "Tokyo",
+              "city": "Tokyo"
+            }
+          },
+          {
+            "country": "FR",
+            "city": "Paris",
+            "geographicArea": "\u00cele-de-France",
+            "line1": "6, Place de la Madeleine",
+            "line2": "Mailing Address Only",
+            "postalCode": "75008",
+            "headquarter": false,
+            "description": "Cloudflare - Paris",
+            "parsed": {
+              "text": "Paris, France",
+              "countryCode": "FR",
+              "regionCode": null,
+              "country": "France",
+              "countryFull": "France",
+              "state": "\u00cele-de-France",
+              "city": "Paris"
+            }
+          },
+          {
+            "country": "BE",
+            "city": "Brussels",
+            "geographicArea": "Brussels Region",
+            "line1": "Rue de la Loi 38",
+            "line2": null,
+            "postalCode": "1000",
+            "headquarter": false,
+            "description": "Cloudflare - Brussels",
+            "parsed": {
+              "text": "Brussels, Belgium",
+              "countryCode": "BE",
+              "regionCode": null,
+              "country": "Belgium",
+              "countryFull": "Belgium",
+              "state": "Brussels-Capital Region",
+              "city": "Brussels"
+            }
+          },
+          {
+            "country": "GB",
+            "city": "London",
+            "geographicArea": "England",
+            "line1": "Westminster Bridge Road",
+            "line2": "6th Floor, Riverside Building, County Hall",
+            "postalCode": "SE1 7PB",
+            "headquarter": false,
+            "description": "Cloudflare - London",
+            "parsed": {
+              "text": "London, United Kingdom",
+              "countryCode": "GB",
+              "regionCode": null,
+              "country": "UK",
+              "countryFull": "United Kingdom",
+              "state": "England",
+              "city": "London"
+            }
+          },
+          {
+            "country": "PT",
+            "city": "Lisbon",
+            "geographicArea": null,
+            "line1": "Pra\u00e7a Marqu\u00eas de Pombal 14",
+            "line2": "7th floor",
+            "postalCode": "1250-162",
+            "headquarter": false,
+            "description": "Cloudflare - Lisbon",
+            "parsed": {
+              "text": "Lisbon, Portugal",
+              "countryCode": "PT",
+              "regionCode": null,
+              "country": "Portugal",
+              "countryFull": "Portugal",
+              "state": "Lisbon",
+              "city": "Lisbon"
+            }
+          },
+          {
+            "country": "DE",
+            "city": "Munich",
+            "geographicArea": "Bavaria",
+            "line1": "Rosental 7",
+            "line2": null,
+            "postalCode": "80331",
+            "headquarter": false,
+            "description": "Cloudflare - M\u00fcnchen",
+            "parsed": {
+              "text": "Munich, Germany",
+              "countryCode": "DE",
+              "regionCode": null,
+              "country": "Germany",
+              "countryFull": "Germany",
+              "state": "Bavaria",
+              "city": "Munich"
+            }
+          },
+          {
+            "country": "CN",
+            "city": "Beijing",
+            "geographicArea": "Chaoyang District Beijing",
+            "line1": "16 South Guangshun Street",
+            "line2": "Donghuang Building 17th Floor",
+            "postalCode": "100015",
+            "headquarter": false,
+            "description": "Clouudflare - Beijing",
+            "parsed": {
+              "text": "Beijing, People's Republic of China",
+              "countryCode": "CN",
+              "regionCode": null,
+              "country": "China",
+              "countryFull": "People's Republic of China",
+              "state": "Beijing",
+              "city": "Beijing"
+            }
+          },
+          {
+            "country": "SG",
+            "city": "Singapore",
+            "geographicArea": "Singapore",
+            "line1": "120 Robinson Road",
+            "line2": "Frasers Tower #35-01",
+            "postalCode": "069547",
+            "headquarter": false,
+            "description": "Cloudflare - Singapore",
+            "parsed": {
+              "text": "Singapore, Singapore",
+              "countryCode": "SG",
+              "regionCode": null,
+              "country": "Singapore",
+              "countryFull": "Singapore",
+              "state": "Central Singapore Community Development Council",
+              "city": "Singapore"
+            }
+          },
+          {
+            "country": "US",
+            "city": "San Francisco",
+            "geographicArea": "California",
+            "line1": "101 Townsend St",
+            "line2": null,
+            "postalCode": "94107",
+            "headquarter": true,
+            "description": "Cloudflare HQ - San Francisco",
+            "parsed": {
+              "text": "San Francisco, CA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "California",
+              "city": "San Francisco"
+            }
+          },
+          {
+            "country": "US",
+            "city": "San Jose",
+            "geographicArea": "California",
+            "line1": "10 Almaden Blvd",
+            "line2": "Suite 200",
+            "postalCode": "95113",
+            "headquarter": false,
+            "description": "Cloudflare - San Jose",
+            "parsed": {
+              "text": "San Jose, CA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "California",
+              "city": "San Jose"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Champaign",
+            "geographicArea": "Illinois",
+            "line1": "301 N Neil St",
+            "line2": "Suite 440",
+            "postalCode": "61820",
+            "headquarter": false,
+            "description": "Cloudflare - Champaign",
+            "parsed": {
+              "text": "Champaign, IL, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Illinois",
+              "city": "Champaign"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Austin",
+            "geographicArea": "Texas",
+            "line1": "405 Comal St",
+            "line2": null,
+            "postalCode": "78702",
+            "headquarter": false,
+            "description": "Cloudflare - Austin",
+            "parsed": {
+              "text": "Austin, TX, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Texas",
+              "city": "Austin"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Washington",
+            "geographicArea": "District of Columbia",
+            "line1": "1401 K St NW",
+            "line2": null,
+            "postalCode": "20005",
+            "headquarter": false,
+            "description": "Cloudflare - Washington DC",
+            "parsed": {
+              "text": "Washington, DC, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "District of Columbia",
+              "city": "Washington"
+            }
+          },
+          {
+            "country": "AU",
+            "city": "Sydney",
+            "geographicArea": "NSW",
+            "line1": "20 Martin Place",
+            "line2": "Level 10",
+            "postalCode": "2000",
+            "headquarter": false,
+            "description": "Cloudflare - Sydney",
+            "parsed": {
+              "text": "Sydney, Australia",
+              "countryCode": "AU",
+              "regionCode": null,
+              "country": "Australia",
+              "countryFull": "Australia",
+              "state": "New South Wales",
+              "city": "Sydney"
+            }
+          }
+        ],
+        "id": "407222"
+      },
+      "profile_call_identity": "sha256:daaa0c247d6b1ca4bd6d8e612fcc37db5be58a54be2ab9a7ab18c81a48775a8f",
+      "profile_response_sha256": "sha256:3dbb57ef9e8bebcbcba8673dce24e3ecce449c0d240013c89de16b55d3ace73a",
+      "stored_judge_selected_facts": [
+        {
+          "call_identity": "sha256:3dd1a8e0c1fe795aa6141668515538e3387a9d80678aaff04fcbe48264b11d40",
+          "selected_fields": {
+            "observed_employee_count": "5,001-10,000",
+            "observed_hq_country": "United States",
+            "observed_hq_state": "California",
+            "geography_evidence_url": "https://www.cloudflare.com/about/",
+            "geography_evidence_quote": "San Francisco (HQ)",
+            "employee_size_evidence_url": "https://finance.yahoo.com/quote/NET/profile/",
+            "employee_size_evidence_quote": "**5,156**"
+          },
+          "evidence_class": "stored_model_claim_not_independently_reverified_source_body"
+        }
+      ]
+    },
+    {
+      "company_name": "Zscaler",
+      "round_id": "arena-2026-10-05",
+      "submission_id": "sub-02f800e14b860e5a57b6adfa70453cc3",
+      "icp_position": 7,
+      "company_index": 4,
+      "structured_profile": {
+        "name": "Zscaler",
+        "linkedinUrl": "https://www.linkedin.com/company/zscaler/",
+        "website": "https://www.zscaler.com",
+        "employeeCountRange": {
+          "start": 5001,
+          "end": 10000
+        },
+        "locations": [
+          {
+            "country": "FR",
+            "city": "Paris",
+            "geographicArea": null,
+            "line1": "Southern Europe, Middle-East & Africa Office",
+            "line2": "33, rue de Berri",
+            "postalCode": "75008",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Paris, France",
+              "countryCode": "FR",
+              "regionCode": null,
+              "country": "France",
+              "countryFull": "France",
+              "state": "\u00cele-de-France",
+              "city": "Paris"
+            }
+          },
+          {
+            "country": "DE",
+            "city": "Munich",
+            "geographicArea": "Bavaria",
+            "line1": "Central & Eastern Europe Office",
+            "line2": "Schatzbogen 52",
+            "postalCode": "81829",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Munich, Germany",
+              "countryCode": "DE",
+              "regionCode": null,
+              "country": "Germany",
+              "countryFull": "Germany",
+              "state": "Bavaria",
+              "city": "Munich"
+            }
+          },
+          {
+            "country": "CR",
+            "city": "Escazu",
+            "geographicArea": null,
+            "line1": null,
+            "line2": null,
+            "postalCode": null,
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Escaz\u00fa, Costa Rica",
+              "countryCode": "CR",
+              "regionCode": null,
+              "country": "Costa Rica",
+              "countryFull": "Costa Rica",
+              "state": "San Jos\u00e9 Province",
+              "city": "Escaz\u00fa"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Atlanta",
+            "geographicArea": "Georgia",
+            "line1": "Corporate Office: Atlanta",
+            "line2": "375 Northridge Road, Suite 520",
+            "postalCode": "30350",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Atlanta, GA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Georgia",
+              "city": "Atlanta"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Santa Clara",
+            "geographicArea": "California",
+            "line1": "4401 Great America Pkwy",
+            "line2": null,
+            "postalCode": "95054",
+            "headquarter": true,
+            "description": "Headquarters",
+            "parsed": {
+              "text": "Santa Clara, CA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "California",
+              "city": "Santa Clara"
+            }
+          },
+          {
+            "country": "IN",
+            "city": "Bangalore",
+            "geographicArea": null,
+            "line1": "Corporate Office: Bangalore",
+            "line2": "#101 Shreshtha Bhoomi, No.87, 1st Floor, K.R. Road",
+            "postalCode": "560 004",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Bengaluru, India",
+              "countryCode": "IN",
+              "regionCode": null,
+              "country": "India",
+              "countryFull": "India",
+              "state": "Karnataka",
+              "city": "Bengaluru"
+            }
+          }
+        ],
+        "id": "234625"
+      },
+      "profile_call_identity": "sha256:8c2bb29dc8f8ebc0f1520cda9ede9ef690dde41d5d0a6cefcab6a22ffc247cd1",
+      "profile_response_sha256": "sha256:80aebb26620a590472bc1c2b3e4f3571e4a6875cdf67aff859fa3aebe25ecebf",
+      "stored_judge_selected_facts": [
+        {
+          "call_identity": "sha256:0b6ef6f0afe617345325d0a3975c3bb536781e444f4c6b30b4b34f8b19f115e5",
+          "selected_fields": {
+            "observed_employee_count": "5,001-10,000",
+            "observed_hq_country": "United States",
+            "observed_hq_state": "California",
+            "geography_evidence_url": "https://www.zscaler.com/company/contact",
+            "geography_evidence_quote": "### Santa Clara, CA (Worldwide HQ)\n4401 Great America Parkway\nSanta Clara, CA 95054",
+            "employee_size_evidence_url": "https://www.linkedin.com/company/zscaler",
+            "employee_size_evidence_quote": "Public Company \u00b7 Founded 2008 \u00b7 5001-10000 employees \u00b7 538225 followers"
+          },
+          "evidence_class": "stored_model_claim_not_independently_reverified_source_body"
+        }
+      ]
+    },
+    {
+      "company_name": "Akamai Technologies",
+      "round_id": "arena-2026-10-05",
+      "submission_id": "sub-0b426775c686c498551bc7791261e86d",
+      "icp_position": 7,
+      "company_index": 3,
+      "structured_profile": {
+        "name": "Akamai Technologies",
+        "linkedinUrl": "https://www.linkedin.com/company/akamai-technologies/",
+        "website": "https://www.akamai.com",
+        "employeeCountRange": {
+          "start": 5001,
+          "end": 10000
+        },
+        "locations": [
+          {
+            "country": "CH",
+            "city": "Zurich",
+            "geographicArea": null,
+            "line1": "Pfingstweidstr. 60",
+            "line2": null,
+            "postalCode": "8005",
+            "headquarter": false,
+            "description": "European HQ",
+            "parsed": {
+              "text": "Z\u00fcrich, Switzerland",
+              "countryCode": "CH",
+              "regionCode": null,
+              "country": "Switzerland",
+              "countryFull": "Switzerland",
+              "state": "Z\u00fcrich",
+              "city": "Z\u00fcrich"
+            }
+          },
+          {
+            "country": "FR",
+            "city": "Paris",
+            "geographicArea": "\u00cele-de-France",
+            "line1": "69, Boulevard Haussmann",
+            "line2": null,
+            "postalCode": "75008",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Paris, France",
+              "countryCode": "FR",
+              "regionCode": null,
+              "country": "France",
+              "countryFull": "France",
+              "state": "\u00cele-de-France",
+              "city": "Paris"
+            }
+          },
+          {
+            "country": "GB",
+            "city": "Staines",
+            "geographicArea": "UK",
+            "line1": "First Floor, Charta House",
+            "line2": "30-38 Church Street",
+            "postalCode": "TW18 4EP",
+            "headquarter": false,
+            "description": "Akamai Limited UK",
+            "parsed": {
+              "text": "Staines, United Kingdom",
+              "countryCode": "GB",
+              "regionCode": null,
+              "country": "UK",
+              "countryFull": "United Kingdom",
+              "state": "England",
+              "city": "Staines"
+            }
+          },
+          {
+            "country": "SG",
+            "city": "Singapore",
+            "geographicArea": "Singapore",
+            "line1": "1 Raffles Pl",
+            "line2": null,
+            "postalCode": "048616",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Singapore, Singapore",
+              "countryCode": "SG",
+              "regionCode": null,
+              "country": "Singapore",
+              "countryFull": "Singapore",
+              "state": "Central Singapore Community Development Council",
+              "city": "Singapore"
+            }
+          },
+          {
+            "country": "US",
+            "city": "San Mateo",
+            "geographicArea": "CA",
+            "line1": "3125 Clearview Way",
+            "line2": null,
+            "postalCode": "94402",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "San Mateo, CA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "California",
+              "city": "San Mateo"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Cambridge",
+            "geographicArea": "MA",
+            "line1": "8 Cambridge Center",
+            "line2": null,
+            "postalCode": "02142",
+            "headquarter": true,
+            "description": null,
+            "parsed": {
+              "text": "Cambridge, MA, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Massachusetts",
+              "city": "Cambridge"
+            }
+          },
+          {
+            "country": "US",
+            "city": "Fort Lauderdale",
+            "geographicArea": "FL",
+            "line1": "200 E Las Olas Blvd",
+            "line2": null,
+            "postalCode": "33301",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Fort Lauderdale, FL, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "Florida",
+              "city": "Fort Lauderdale"
+            }
+          },
+          {
+            "country": "US",
+            "city": "New York",
+            "geographicArea": "NY",
+            "line1": "352 Park Avenue South, 8th Floor",
+            "line2": null,
+            "postalCode": "10010",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "New York City, NY, United States",
+              "countryCode": "US",
+              "regionCode": null,
+              "country": "United States",
+              "countryFull": "United States of America",
+              "state": "New York",
+              "city": "New York City"
+            }
+          },
+          {
+            "country": "IL",
+            "city": "Herzliya",
+            "geographicArea": "Tel Aviv",
+            "line1": "HaMada 3",
+            "line2": null,
+            "postalCode": "46733",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Tel Aviv, Israel",
+              "countryCode": "IL",
+              "regionCode": null,
+              "country": "Israel",
+              "countryFull": "Israel",
+              "state": "Tel Aviv District",
+              "city": "Tel Aviv"
+            }
+          },
+          {
+            "country": "IN",
+            "city": "Bengaluru",
+            "geographicArea": "Karnataka",
+            "line1": "Outer Ring Road",
+            "line2": null,
+            "postalCode": "560103",
+            "headquarter": false,
+            "description": null,
+            "parsed": {
+              "text": "Bengaluru, India",
+              "countryCode": "IN",
+              "regionCode": null,
+              "country": "India",
+              "countryFull": "India",
+              "state": "Karnataka",
+              "city": "Bengaluru"
+            }
+          }
+        ],
+        "id": "3925"
+      },
+      "profile_call_identity": "sha256:e079d7a5248233c9ccfe86ea6876922d6068282c3d2dc6000a211f0c08923eab",
+      "profile_response_sha256": "sha256:10dca8c99f4ae9fa141fff5f8a2ce9f13c921eafe51fcdd561f6eac7e3642f09",
+      "stored_judge_selected_facts": [
+        {
+          "call_identity": "sha256:692e31c0299a05fc14a69ca7dbff6a215766a18bd315b51c5c34208259727d76",
+          "selected_fields": {
+            "observed_employee_count": "5,001-10,000",
+            "observed_hq_country": "United States",
+            "observed_hq_state": "Massachusetts",
+            "geography_evidence_url": "https://www.akamai.com/company",
+            "geography_evidence_quote": "Akamai Corporate Headquarters 145 Broadway Cambridge, MA 02142",
+            "employee_size_evidence_url": "https://www.forbes.com/companies/akamai-technologies/",
+            "employee_size_evidence_quote": "Employees 3,850"
+          },
+          "evidence_class": "stored_model_claim_not_independently_reverified_source_body"
+        }
+      ],
+      "independently_verified_web_conflict": {
+        "source_body_proof": {
+          "run_id": "arena-2026-10-19-signalcacheproof:baseline-2026-10-19-signalcacheproof:1:1:score:1",
+          "call_identity": "sha256:fd04fd4341cc801e237ae89f3c0acb3aa0fde4aa53afbf5246e6fed0d24cd734",
+          "provider": "deepline",
+          "operation_id": "scrapingdog.scrape",
+          "response_sha256": "sha256:579fda7b1a551d2686664296e87f6d1d2629d68a03a0e6f8a5dcb8a2ddb0e87d",
+          "hits": [
+            {
+              "json_path": ".text",
+              "parent_urls": [],
+              "excerpt": "Incorporated: 1998 Akamai Technologies, Inc. is publicly traded: (NASDAQ: AKAM) See global locations Go to investor relations site Akamai at a Glance $4.21B Annual revenue in 2025 11,500+ Employees worldwide 700+ Cities spanned by Akamai Our global edge network delivers the scale and resilience needed to power and secure digital experiences worldwide. \\r\\n\"}}\"> Our global edge network delivers the scale",
+              "canonical_urls": []
+            }
+          ]
+        },
+        "request_url_binding": {
+          "source_call_identity": "sha256:fd04fd4341cc801e237ae89f3c0acb3aa0fde4aa53afbf5246e6fed0d24cd734",
+          "run_id": "arena-2026-10-19-signalcacheproof:baseline-2026-10-19-signalcacheproof:1:1:score:1",
+          "request_hash": "sha256:34589acfc6d88f64da2de0e137b8d34de1c05810b55c0fddf38e25a2d521d1a3",
+          "company_source_urls": [
+            {
+              "path": ".admitted_parameters.url",
+              "url": "https://www.akamai.com/company"
+            },
+            {
+              "path": ".effective_parameters.payload.url",
+              "url": "https://www.akamai.com/company"
+            },
+            {
+              "path": ".hashed_parameters.url",
+              "url": "https://www.akamai.com/company"
+            },
+            {
+              "path": ".normalized_parameters.url",
+              "url": "https://www.akamai.com/company"
+            },
+            {
+              "path": ".outbound.body.payload.url",
+              "url": "https://www.akamai.com/company"
+            }
+          ],
+          "production_write_count": 0
+        },
+        "linkedin_range": "5,001-10,000",
+        "web_employee_count": "11,500+",
+        "web_bucket": "10,001+",
+        "same_country_state": true
+      }
+    }
+  ]
+}

@@ -6896,14 +6896,14 @@ def test_fiuu_parent_listing_stays_an_explicit_unproven_stage_control():
     assert "Never inherit Public or another stage" in prompt
 
 
-def test_headquarters_source_priority_preserves_current_first_party_conflicts():
+def test_headquarters_source_priority_uses_linkedin_then_current_first_party():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
-    assert "use that location and its exact continuous source quote" in prompt
+    assert "Use verified exact-company LinkedIn headquarters first" in prompt
     assert "one continuous adjacent span that includes both the investigated company's name" in prompt
     assert "matching country-qualified Headquarters heading" in prompt
-    assert "over a different undated third-party profile HQ" in prompt
-    assert "If current first-party sources disagree" in prompt
+    assert "Use company contact/about pages and other web evidence only when LinkedIn supplies no usable explicit HQ" in prompt
+    assert "If fallback first-party sources disagree" in prompt
     assert "source dates or an explicit move statement" in prompt
     assert "return UNPROVEN" in prompt
     assert "A factory opening cannot prove an HQ move" in prompt
@@ -9177,7 +9177,7 @@ def test_linkedin_primary_rejects_wrong_identity_member_count_and_linkedin_confl
         )
 
 
-def test_arena_conflict_check_collects_structured_size_without_replacing_direct_proof(
+def test_bound_linkedin_size_replaces_conflicting_direct_web_proof(
     monkeypatch,
 ):
     structured = {
@@ -9221,15 +9221,16 @@ def test_arena_conflict_check_collects_structured_size_without_replacing_direct_
         collect_structured_conflict=True,
     ))
 
-    assert refreshed == verdict
+    assert refreshed["observed_employee_count"] is None
+    assert cache["linkedin_employee_size_verified"] is True
     assert cache["structured_evidence"] == structured
     assert calls == [
         ("acme.example", "https://www.linkedin.com/company/acme")
     ]
-    assert _employee_size_sources_conflict(refreshed, structured) is True
+    assert _employee_size_sources_conflict(refreshed, structured) is False
 
 
-def test_oxpay_unproven_geography_keeps_employee_conflict(monkeypatch):
+def test_oxpay_unproven_geography_keeps_linkedin_employee_proof(monkeypatch):
     """A same-entity repair may omit size without erasing bound profile proof."""
 
     company = _company(
@@ -9465,7 +9466,7 @@ def test_oxpay_unproven_geography_keeps_employee_conflict(monkeypatch):
         "provider": 1,
         "investigator": 1,
         "structured": 1,
-        "current": 0,
+        "current": 2,
     }
     assert grounding_calls == 2
     assert result.decision == COMPANY_FIT_UNAVAILABLE
@@ -9473,7 +9474,7 @@ def test_oxpay_unproven_geography_keeps_employee_conflict(monkeypatch):
         COMPANY_FIT_MATCH
     )
     assert result.details["dimension_evidence"]["employee_size"] == structured
-    assert result.details["employee_size_conflict"] is True
+    assert result.details["employee_size_conflict"] is False
 
 
 @pytest.mark.parametrize(
@@ -11401,11 +11402,11 @@ def test_repaired_real_employee_range_conflict_stays_unproven():
     )
 
 
-def test_structured_conflict_check_does_not_expand_calls_for_matching_headcount(
+def test_matching_web_headcount_checks_linkedin_before_fallback(
     monkeypatch,
 ):
     async def unexpected_fetch(*_args, **_kwargs):
-        raise AssertionError("matching direct evidence must not add a provider call")
+        return None  # LinkedIn is checked before retaining complete web proof.
 
     monkeypatch.setattr(
         lead_scorer,
@@ -11429,12 +11430,12 @@ def test_structured_conflict_check_does_not_expand_calls_for_matching_headcount(
     ))
 
     assert refreshed == verdict
-    assert "structured_attempted" not in cache
+    assert cache["structured_attempted"] is True
 
 
-def test_non_arena_mismatch_does_not_add_structured_fetch(monkeypatch):
+def test_non_arena_web_mismatch_checks_linkedin_before_fallback(monkeypatch):
     async def unexpected_fetch(*_args, **_kwargs):
-        raise AssertionError("ordinary scoring must not add a structured provider call")
+        return None  # LinkedIn is checked before retaining complete web proof.
 
     monkeypatch.setattr(
         lead_scorer,
@@ -11462,7 +11463,7 @@ def test_non_arena_mismatch_does_not_add_structured_fetch(monkeypatch):
     ))
 
     assert refreshed == verdict
-    assert "structured_attempted" not in cache
+    assert cache["structured_attempted"] is True
 
 
 def test_fetched_current_headcount_repairs_a_nonconflicting_false_negative():

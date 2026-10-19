@@ -64,13 +64,22 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
 class _Rows:
     """Minimal read-only store for the existing accepted-evidence validators."""
 
-    def __init__(self, runs, submission, caches, companies):
+    def __init__(self, runs, submission, caches, companies, *, round_row,
+                 signal_uses, signal_rows):
         self.runs = runs
         self.submission = submission
+        self.round_row = round_row
         self.caches = {row["cache_key"]: row for row in caches}
         self.companies = {(row["cache_key"], row["authority_slot"]): row for row in companies}
+        self.signal_uses = signal_uses
+        self.signals = {(row["cache_key"], row["authority_slot"]): row for row in signal_rows}
         if len(self.caches) != len(caches) or len(self.companies) != len(companies):
             raise ExportError("ambiguous_cache_rows")
+        if len(self.signals) != len(signal_rows):
+            raise ExportError("signal_authority_ambiguous")
+
+    def get_round(self, round_id):
+        return self.round_row if self.round_row.get("round_id") == round_id else None
 
     def get_run(self, run_id):
         return self.runs.get(run_id)
@@ -84,6 +93,47 @@ class _Rows:
     def get_company_judgment(self, key, slot):
         return self.companies.get((key, slot))
 
+    def signal_authority_exclusions(self, run_id):
+        """Replay the immutable union in signal_authority_exclusions_v1."""
+        source = self.get_run(run_id)
+        if source is None or self.get_round(source.get("round_id")) is None:
+            raise ExportError("signal_source_missing")
+        exclusions = (source.get("claim_response") or {}).get("runner_authority_exclusions")
+        policy = (self.round_row.get("configuration_doc") or {}).get("scorer_policy") or {}
+        if policy.get("signal_judgment_policy") != signal_judgments.POLICY:
+            return exclusions
+        groups = [exclusions]
+        positions = set()
+        for use in self.signal_uses:
+            if use.get("run_id") != run_id:
+                continue
+            position = (use.get("company_index"), use.get("signal_index"))
+            if position in positions:
+                raise ExportError("signal_use_invalid")
+            positions.add(position)
+            authority = self.signals.get((use.get("cache_key"), use.get("authority_slot")))
+            if authority is None:
+                raise ExportError("signal_authority_missing")
+            if any(use.get(key) != authority.get(key) for key in (
+                    "source_score_run_id", "signal_input_hash", "judgment_hash")):
+                raise ExportError("signal_source_mismatch")
+            groups.append(authority.get("runner_authority_exclusions"))
+        if any(not isinstance(group, list) or any(not isinstance(key, str) for key in group)
+               for group in groups):
+            raise ExportError("signal_authority_exclusions_invalid")
+        members = {key for group in groups for key in group}
+        # SQL orders by the database collation. Use the recorded ordering only
+        # after proving exact membership from the independent immutable rows.
+        for row in self.companies.values():
+            evidence = row.get("evidence_doc") or {}
+            recorded = evidence.get("runner_authority_exclusions")
+            if (evidence.get("source_score_run_id") == run_id
+                    and isinstance(recorded, list)
+                    and all(isinstance(key, str) for key in recorded)
+                    and len(recorded) == len(members) and set(recorded) == members):
+                return list(recorded)
+        raise ExportError("signal_authority_exclusions_mismatch")
+
 
 def _evidence_reader(store, objects):
     # These methods only read the injected store/object interfaces. Deliberately
@@ -95,6 +145,14 @@ def _evidence_reader(store, objects):
         _company_quality_breakdowns = ArenaService._company_quality_breakdowns
         _validated_company_judgment_lease = ArenaService._validated_company_judgment_lease
         _company_judgment_evidence = ArenaService._company_judgment_evidence
+
+        def _round(self, round_id):
+            # Offline assembly has one exact frozen round, with no service
+            # ownership, lifecycle, or current-policy lookup.
+            row = self._store.get_round(round_id)
+            if row is None:
+                raise ExportError("source_round_missing")
+            return row
 
     class BoundedObjects:
         def get(self, ref):
@@ -781,7 +839,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         try:
             policy = config["scorer_policy"]
             sliced = verify.slice_first_n(output["companies"], verify.icp_company_goal(icp))
-            reader = _evidence_reader(_Rows(by_id, submission_row, cache_rows, company_judgment_rows), objects)
+            reader = _evidence_reader(_Rows(
+                by_id, submission_row, cache_rows, company_judgment_rows,
+                round_row=round_row, signal_uses=signal_judgment_uses,
+                signal_rows=signal_judgment_rows,
+            ), objects)
             breakdowns = reader._verified_breakdowns(judge, icp=icp, companies=sliced, policy=policy)
             result = verify.scored_row(run["submission_id"], run["icp_position"], run_id, icp, output["companies"], breakdowns, policy)
             if run.get("per_icp_score") is None or abs(Decimal(str(result["per_icp_score"])) - Decimal(str(run["per_icp_score"]))) > Decimal("0.000001"):

@@ -11,7 +11,7 @@ from lab_arena import company_judgments, contracts, scoring, signal_judgments, v
 from lab_arena.training_export import ExportError, _signal_authority_evidence, assemble_example
 from scripts.export_arena_training import export_run
 from tests.lab_arena.training_export_test import (
-    OUTPUT_REF, add_call, per_icp_cost_fixture, save_input,
+    OUTPUT_REF, add_call, per_icp_cost_fixture, per_icp_cost_reader, save_input,
 )
 
 
@@ -269,3 +269,198 @@ def test_original_signal_from_current_score_links_existing_charge_once():
     assert result["judgment"]["signal_source_provider_calls"] == []
     assert result["judgment"]["signal_source_provider_call_refs"][0]["location"] == "provider_calls"
     assert result["judgment"]["signal_source_cost_attribution"]["confirmed_actual_microusd"] == 42
+
+
+def _company_cache_fixture(*, whole_company_hit=False, signal_policy=True):
+    """Actual company authority validation, including a transitive signal hit."""
+    from tests.test_arena_score_integrity import _positive_breakdown
+
+    values = _signal_fixture()
+    execute, judge, signal_source = values["runs"]
+    config = values["round_row"]["configuration_doc"]
+    config["company_judgment_policy"] = company_judgments.POLICY
+    policy = config["scorer_policy"]
+    if not signal_policy:
+        policy = {key: value for key, value in policy.items() if key != "signal_judgment_policy"}
+        config["scorer_policy"] = policy
+        values["signal_judgment_uses"] = []
+        values["signal_judgment_rows"] = []
+        values["signal_source_ledger_rows"] = []
+    icp = json.loads(values["objects"].values["benchmark"])["icps"][0]
+    companies = json.loads(values["objects"].values[OUTPUT_REF])["companies"]
+    document = scoring.build_scoring_input(
+        scored_run_id=execute["run_id"], icp=icp, companies=companies,
+        policy=policy, evaluation_date=values["round_row"]["evaluation_date"],
+    )
+    ref = company_judgments.build_company_scopes(
+        scoring_input=document, round_id=judge["round_id"], network_name="finney", netuid=71,
+        scorer_image_digest=config["scorer_image_digest"],
+        scorer_image_reference=config["scorer_image_reference"],
+        integrity_policy="arena_integrity_v1", company_judgment_policy=company_judgments.POLICY,
+    )[0]
+    raw = _positive_breakdown("Acme", "acme.example")
+    raw["company_judgment_policy"] = company_judgments.POLICY
+    if signal_policy:
+        signal = values["signal_judgment_rows"][0]
+        raw["intent_signals_detail"] = [{
+            **signal["judgment_doc"],
+            "signal_judgment_reference": signal_judgments.reference(signal["scope_doc"], 0),
+            "counted_in_aggregate": True,
+        }]
+    breakdowns = scoring.project_company_judgments(companies, [raw], company_quality=False)
+    from qualification.scoring.competition import raw_company_judgment
+    raw = {**raw_company_judgment(breakdowns[0]),
+           "company_judgment_policy": company_judgments.POLICY}
+    source = judge
+    source_index = 0
+    if whole_company_hit:
+        source = copy.deepcopy(judge)
+        source.update(run_id="company:source", scored_run_id="execute:company-source",
+                      output_ref="company-source-output")
+        values["runs"].append(source)
+        source_index = 1
+        # The current row is first; its immutable source used the second slot.
+        source["company_judgment_refs"] = [ref, {**ref, "company_index": source_index}]
+    source.update(runner_hotkey="validator-company", claim_request_id="company-claim")
+    source["claim_response"] = {"runner_authority_exclusions": [source["runner_hotkey"]]}
+    judge["company_judgment_refs"] = [ref]
+    item = {key: ref[key] for key in ("company_index", "cache_key", "company_input_hash")}
+    item["authority_slot"] = 0
+    new = {**item, "company_index": source_index, "raw_judgment": raw}
+    source_output = scoring.build_scoring_output(source["scored_run_id"], breakdowns,
+                                                company_judgments=[new])
+    values["objects"].put(source["output_ref"], contracts.canonical_json(source_output).encode())
+    exclusions = [source["runner_hotkey"]]
+    if signal_policy:
+        exclusions = [signal_source["runner_hotkey"], source["runner_hotkey"]]
+        values["signal_judgment_uses"][0].update(run_id=source["run_id"], company_index=source_index)
+    evidence = company_judgments.build_evidence_snapshot(
+        new_judgment=new, company_ref={**ref, "company_index": source_index},
+        source_score_run_id=source["run_id"], source_scored_run_id=source["scored_run_id"],
+        source_output_ref=source["output_ref"], source_output_hash=contracts.document_hash(source_output),
+        source_runner_hotkey=source["runner_hotkey"], source_claim_request_id=source["claim_request_id"],
+        source_claim_request_hash=source["claim_request_hash"], source_lease_generation=source["lease_generation"],
+        source_completion_request_hash="sha256:" + "e" * 64,
+        runner_authority_exclusions=exclusions,
+    )
+    values["company_judgment_rows"] = [{
+        "cache_key": ref["cache_key"], "authority_slot": 0,
+        "company_input_hash": ref["company_input_hash"], "scope_doc": ref["scope_doc"],
+        "evidence_doc": evidence, "evidence_hash": contracts.document_hash(evidence),
+        **{key: evidence[key] for key in (
+            "source_score_run_id", "source_scored_run_id", "source_runner_hotkey")},
+    }]
+    lease = {"schema_version": company_judgments.LEASE_SCHEMA_VERSION,
+             "hits": [], "misses": [item]}
+    if whole_company_hit:
+        lease.update(hits=[{**item, "evidence_doc": evidence,
+                            "evidence_hash": contracts.document_hash(evidence)}], misses=[])
+        values["objects"].put(judge["output_ref"], contracts.canonical_json(
+            scoring.build_scoring_output(execute["run_id"], breakdowns, company_judgments=[])).encode())
+    judge.setdefault("claim_response", {})["company_judgment_cache"] = lease
+    judge["result_doc"]["company_judgment_consumed_indexes"] = [0]
+    document["company_judgment_cache"] = lease
+    save_input(values["objects"], judge["run_id"], "score", document)
+    scored = verify.scored_row(
+        execute["submission_id"], 0, execute["run_id"], icp, companies, breakdowns, policy,
+    )
+    record = scoring.run_scores_for_store(
+        {"rows": [scored], "integrity_policy": "arena_integrity_v1"}, [execute],
+    )[0]
+    execute.update(per_icp_score=record["per_icp_score"], qualification_doc=record["qualification_doc"])
+    return values
+
+
+class _CompanyExportStore:
+    def __init__(self, values):
+        self.values = values
+
+    def get_run(self, run_id):
+        return next((row for row in self.values["runs"] if row["run_id"] == run_id), None)
+
+    def get_round(self, round_id):
+        row = self.values["round_row"]
+        return row if row["round_id"] == round_id else None
+
+    def get_submission(self, submission_id):
+        row = self.values["submission_row"]
+        return row if row["submission_id"] == submission_id else None
+
+    def list_runs(self, round_id):
+        return [row for row in self.values["runs"] if row["round_id"] == round_id]
+
+    def list_ledger(self, *, run_id, after_entry_id=None, limit=1000):
+        return [row for row in self.values["signal_source_ledger_rows"]
+                if row["run_id"] == run_id and (after_entry_id is None or row["entry_id"] > after_entry_id)][:limit]
+
+    def get_judgment_cache(self, key):
+        return None
+
+    def get_company_judgment(self, key, slot):
+        return next((row for row in self.values["company_judgment_rows"]
+                     if (row["cache_key"], row["authority_slot"]) == (key, slot)), None)
+
+    def get_signal_judgment_uses(self, run_id):
+        return [row for row in self.values["signal_judgment_uses"] if row["run_id"] == run_id]
+
+    def get_signal_judgment(self, key, slot):
+        return next((row for row in self.values["signal_judgment_rows"]
+                     if (row["cache_key"], row["authority_slot"]) == (key, slot)), None)
+
+    def icp_cost_eligibility(self, **identity):
+        return per_icp_cost_reader(spend=0, reason="eligible")(**identity)["eligibility"]
+
+
+@pytest.mark.parametrize("whole_company_hit", [False, True])
+def test_export_entrypoint_validates_company_and_transitive_signal_authority(whole_company_hit):
+    values = _company_cache_fixture(whole_company_hit=whole_company_hit)
+    result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
+    evidence = result["judgment"]["company_authority_evidence"][0]["evidence_doc"]
+    assert evidence["runner_authority_exclusions"] == ["validator-source", "validator-company"]
+    assert result["judgment"]["per_icp_score"] == values["runs"][0]["per_icp_score"]
+    signal = result["judgment"]["signal_authority_evidence"][0]
+    assert signal["company_index"] == 0
+    assert signal["use"]["company_index"] == int(whole_company_hit)
+    assert signal["authority"]["source_score_run_id"] == "judge:source"
+    assert result["competition_cost_eligibility"]["status"] == "available"
+
+
+@pytest.mark.parametrize("fault", [
+    "missing_source", "wrong_round", "source_claim", "source_output",
+    "missing_signal", "signal_exclusions", "source_exclusions",
+    "use_conflict", "duplicate_use", "missing_use",
+])
+def test_export_entrypoint_keeps_company_signal_authority_fail_closed(fault):
+    values = _company_cache_fixture(whole_company_hit=True)
+    source = values["runs"][-1]
+    if fault == "missing_source":
+        values["runs"].remove(source)
+    elif fault == "wrong_round":
+        source["round_id"] = "other-round"
+    elif fault == "source_claim":
+        source["claim_request_hash"] = "sha256:" + "f" * 64
+    elif fault == "source_output":
+        values["objects"].put(source["output_ref"], b"{}")
+    elif fault == "missing_signal":
+        values["signal_judgment_rows"] = []
+    elif fault == "signal_exclusions":
+        values["signal_judgment_rows"][0]["runner_authority_exclusions"] = ["forged-validator"]
+    elif fault == "source_exclusions":
+        source["claim_response"]["runner_authority_exclusions"] = ["forged-validator"]
+    elif fault == "use_conflict":
+        values["signal_judgment_uses"][0]["source_score_run_id"] = "forged-source"
+    elif fault == "duplicate_use":
+        values["signal_judgment_uses"].append(copy.deepcopy(values["signal_judgment_uses"][0]))
+    else:
+        values["signal_judgment_uses"] = []
+    result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
+    assert "judgment" not in result
+    assert "judge_evidence_unverified" in result["completeness"]["incomplete_reasons"]
+
+
+@pytest.mark.parametrize("whole_company_hit", [False, True])
+def test_export_entrypoint_validates_historical_company_authority_without_signal_policy(whole_company_hit):
+    values = _company_cache_fixture(whole_company_hit=whole_company_hit, signal_policy=False)
+    result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
+    assert result["judgment"]["company_authority_evidence"]
+    assert "signal_authority_evidence" not in result["judgment"]

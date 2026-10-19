@@ -757,15 +757,30 @@ class PostgrestTransport(StoreTransport):
                     params=query,
                 )
                 break
-            except (httpx.ReadError, httpx.ReadTimeout) as exc:
+            except (httpx.ReadError, httpx.ReadTimeout, httpx.ConnectError,
+                    httpx.ConnectTimeout, httpx.WriteError, httpx.WriteTimeout,
+                    httpx.RemoteProtocolError) as exc:
                 if attempt:
                     raise ArenaStoreUnavailable(
                         "select %s transport failure: %s" % (table, type(exc).__name__),
                         operation="select", resource=table, transport_error=type(exc).__name__,
                     ) from exc
+            except httpx.PoolTimeout as exc:
+                raise ArenaStoreUnavailable(
+                    "select %s transport failure: %s" % (table, type(exc).__name__),
+                    operation="select", resource=table, transport_error=type(exc).__name__,
+                ) from exc
             except httpx.HTTPError as exc:
                 raise ArenaStoreError("select %s transport failure: %s" % (table, type(exc).__name__), operation="select", resource=table, transport_error=type(exc).__name__) from exc
-        self._raise_for_status(response, "select %s" % table, operation="select", resource=table)
+        try:
+            self._raise_for_status(response, "select %s" % table, operation="select", resource=table)
+        except ArenaStoreError as exc:
+            if response.status_code in {429, 502, 503, 504}:
+                raise ArenaStoreUnavailable(
+                    "select %s temporarily unavailable" % table,
+                    **exc.store_error,
+                ) from exc
+            raise
         rows = response.json()
         if not isinstance(rows, list):
             raise ArenaStoreError("select %s returned a non-list" % table, operation="select", resource=table, http_status=response.status_code)

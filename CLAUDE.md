@@ -1,5 +1,15 @@
 # Agent Instructions
 
+## Scoped production authorization: source-download read recovery
+
+On 2026-10-19 the user authorized investigation and a narrow general fix for
+an isolated public-source download failure. This includes protected read-only
+production evidence, focused fault and success controls, safe push and merge,
+canonical gateway/normal-validator deployment, and bounded live verification.
+Preserve source-disclosure permissions, database writes, grading, accepted work,
+billing, rewards, credentials and concurrent changes. This authority ends after
+the read-recovery fix is deployed and verified.
+
 ## Scoped production authorization: future flat ICP cost eligibility
 
 The user authorized a flat $4 successful-sourcing eligibility limit for future

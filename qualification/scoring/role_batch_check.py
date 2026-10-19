@@ -31,7 +31,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-MODEL = "google/gemini-2.5-flash"
+MODEL = os.environ.get("ARENA_ROLE_BATCH_MODEL", "google/gemini-3.5-flash-lite")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 TIMEOUT_SECONDS = 30
 NUM_RETRIES = 3

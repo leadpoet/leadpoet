@@ -659,7 +659,12 @@ def test_policy_is_plain_and_binds_environment_fail_closed():
         policy, environ=environ, credentials=credentials
     )
     assert applied == policy["scoring_adapter_version"]
-    assert environ == {**credentials, "ARENA_INTENT_EVIDENCE_MODEL": "openai/gpt-6-luna"}
+    assert environ == {
+        **credentials,
+        "ARENA_INTENT_EVIDENCE_MODEL": "openai/gpt-6-luna",
+        "ARENA_INTENT_DETAILS_REVIEW_MODEL": "anthropic/claude-sonnet-5.5",
+        "ARENA_ROLE_BATCH_MODEL": "google/gemini-3.5-flash-lite",
+    }
     assert environ["DEEPLINE_API_KEY"] == credentials["DEEPLINE_API_KEY"]
     with pytest.raises(scoring.ScorerPolicyConflict):
         scoring.apply_policy_to_environment(policy, environ={"OPENROUTER_API_KEY": "different-secret"}, credentials=credentials)

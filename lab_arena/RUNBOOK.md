@@ -72,7 +72,7 @@ A miner submits one local source directory. The helper:
 5. signs a final request so the Arena can validate and accept the bytes.
 
 Acceptance queues a full-source review. A separate gateway worker sends every
-file and bundled prompt to `anthropic/claude-sonnet-5`, using the OpenRouter
+file and bundled prompt to `anthropic/claude-sonnet-5.5`, using the OpenRouter
 runtime key encrypted for that exact submission and miner. It has no organizer
 key fallback. The daily organizer baseline is exempt; a miner submitting the
 same baseline code still requires review with the miner's key.

@@ -126,6 +126,7 @@ JUDGE_SOURCE_FILES = (
     "qualification/scoring/company_evidence_investigator.py",
     "qualification/scoring/lead_scorer.py",
     "qualification/scoring/intent_signal_gate.py",
+    "qualification/scoring/intent_details.py",
     "qualification/scoring/verification_helpers.py",
     "qualification/scoring/role_batch_check.py",
     "qualification/scoring/company_verification.py",
@@ -161,3 +162,46 @@ def test_signed_judge_models_cover_every_model_literal_in_the_judge_source():
     assert source_models, "no judge model literals found; the scan pattern is stale"
     assert source_models <= policy_models, sorted(source_models - policy_models)
     assert policy_models <= source_models, sorted(policy_models - source_models)
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_current_and_frozen_judge_policies_use_exact_catalog_models(historical):
+    models = dict(scoring.DEFAULT_JUDGE_MODELS)
+    assert models["intent_details_review"] == "anthropic/claude-sonnet-5.5"
+    assert models["role_batch_check"] == "google/gemini-3.5-flash-lite"
+    if historical:
+        models.update({
+            "intent_details_review": "anthropic/claude-sonnet-4.5",
+            "role_batch_check": "google/gemini-2.5-flash",
+        })
+    frozen_policy = scoring.build_scorer_policy(judge_models=models)
+    before = contracts.canonical_json(frozen_policy)
+    catalog_ids = set(models.values()) | set(scoring.DEFAULT_JUDGE_MODELS.values())
+    catalog_ids |= {"google/gemini-3.5-flash-lite:other", "anthropic/claude-sonnet-5.5-20260928"}
+    prices = {
+        "google/gemini-3.5-flash-lite": ("0.0000003", "0.0000025"),
+        "anthropic/claude-sonnet-5.5": ("0.000002", "0.00001"),
+    }
+    table = br.price_table_from_models_response({"data": [
+        {"id": model, "pricing": dict(zip(("prompt", "completion"), prices.get(model, ("0.000001", "0.000002"))))}
+        for model in sorted(catalog_ids)
+    ]}, fetched_at="2026-10-21T00:00:00Z")
+    broker = br.Broker(
+        store=None, key_for=lambda provider: "test-only-placeholder", price_table=table,
+        judge_models=tuple(frozen_policy["judge_models"].values()), transport=None,
+    )
+    for model in set(models.values()):
+        parameters = {"model": model, "messages": [{"role": "user", "content": "review"}]}
+        normalized, output_tokens = broker._openrouter_parameters(parameters, kind="score")
+        assert normalized["model"] == model
+        assert br.max_openrouter_cost_microusd(
+            table, model, normalized, max_output_tokens=output_tokens,
+        ) > 0
+    denied = catalog_ids - set(models.values())
+    if not historical:
+        denied |= {"google/gemini-2.5-flash", "anthropic/claude-sonnet-4.5"}
+    for model in denied:
+        with pytest.raises(br.BrokerError) as failure:
+            broker._openrouter_parameters({"model": model, "messages": []}, kind="score")
+        assert failure.value.code == "model_not_allowed"
+    assert contracts.canonical_json(frozen_policy) == before

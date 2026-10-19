@@ -122,6 +122,7 @@ from leadpoet_verifier.identity.normalization import (
 )
 from qualification.scoring.linkedin_company_size import (
     _canonical_company_domain,
+    _profile_body_matches_company_identity,
     CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
     MALFORMED_RESPONSE_FAILURE_REASON,
     PROFILE_MAX_CHARACTERS,
@@ -7315,7 +7316,10 @@ def _settle_recovered_local_headcount_refresh(
         and final_profile and linkedin_company_page_slug(final_profile) == slug
         and _dimension_web_evidence(projected, "employee_size") == {"url": url, "quote": quote}
         and quote and _quote_occurs(quote, pages.get(url, ""))
-        and _quote_names_company(quote, {_compact_company_name(identity.get("normalized_name"))})
+        and (
+            _quote_names_company(quote, {_compact_company_name(identity.get("normalized_name"))})
+            or _profile_body_matches_company_identity(pages.get(url, ""), identity)
+        )
         and _quote_supports_headcount(quote, finding["observed_value"])
     ):
         invocation_cache["refresh_outcome"] = "verified"

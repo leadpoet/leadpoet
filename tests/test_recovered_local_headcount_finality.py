@@ -127,3 +127,30 @@ def test_other_healthy_unproven_dimensions_can_finish_after_local_recovery():
     assert not scorer._has_explicitly_unproven_fit_dimensions(
         projected, incomplete, icp=icp, linkedin_refresh_outcome=cache["refresh_outcome"], investigation_receipt=receipt,
     )
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("# Acme\n## About us\nCompany size 201–500 employees", True),
+    ("# OtherCo\n## About us\nAcme is a customer.\nCompany size 201–500 employees", False),
+    ("# Acme\n## About us\nWebsite\nhttps://other.example/\nCompany size 201–500 employees", False),
+])
+def test_already_validated_size_quote_can_use_separate_bound_profile_heading(body, expected):
+    cache, finding, investigation, projected, icp = fixture()
+    # This control concerns completion of an already validated/projected
+    # finding. It does not change the investigator's grading validator.
+    quote = "Company size 201–500 employees"
+    finding.update(observed_value="201-500", evidence_quote=quote)
+    icp = icp.model_copy(update={"employee_count": "201-500"})
+    projected.update(observed_employee_count="201-500", employee_size_evidence_quote=quote)
+    investigation[investigator.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] = body
+    assert settle(cache, finding, investigation, projected, icp) is expected
+    assert cache["refresh_outcome"] == ("verified" if expected else "retryable_failure")
+
+
+def test_body_binding_does_not_replace_a_missing_projected_finding():
+    cache, finding, investigation, projected, icp = fixture()
+    quote = "Company size 51-200 employees"
+    finding["evidence_quote"] = quote
+    investigation[investigator.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] = "# Acme\n## About us\n" + quote
+    projected["observed_employee_count"] = None
+    assert not settle(cache, finding, investigation, projected, icp)

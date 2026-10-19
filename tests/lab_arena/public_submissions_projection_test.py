@@ -108,14 +108,15 @@ def _service(row, *, full=False, now=CUTOFF + timedelta(hours=13)):
                                       network_name="finney", netuid=71)
     service._clock = lambda: now
     service._completed_scores_lock = threading.Lock()
-    service._completed_scores_cache = {row["round_id"]: {
-        "generation": row["status_generation"],
-        "completed": {"champion": row["publication_doc"]["final_ranking"][1]},
-        "refreshed_at": time.monotonic(), "refreshing": False,
-    }}
+    service._completed_scores_cache = {}
     # This route test holds refresh admission closed. Worker generation fences
     # and lazy full reads are covered in completed_model_scores_test.py.
     service._completed_scores_refresh_slots = threading.BoundedSemaphore(0)
+    service.completed_submission_scores(row)
+    if row["round_id"] in service._completed_scores_cache:
+        entry = service._completed_scores_cache[row["round_id"]]
+        entry["completed"] = {"champion": row["publication_doc"]["final_ranking"][1]}
+        entry["refreshed_at"] = time.monotonic()
     if full:
         service._public_submissions_round = service._round
     return service, transport

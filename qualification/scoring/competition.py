@@ -78,6 +78,7 @@ _SYSTEMIC_INTENT_STAGE_MARKERS = (
     "transport_error",
     "exception",
     "exa_failed",
+    "exa_http_error",
     "exa_transient_exhausted",
     "http_429",
     "http_5",
@@ -1504,6 +1505,16 @@ def _intent_detail_has_source_local_failure(detail: Any) -> bool:
             for marker in _SYSTEMIC_INTENT_STAGE_MARKERS
         ):
             return False
+        if (
+            attempt.get("source") == "none"
+            and attempt.get("sd_stage") == "genuine_404"
+            and attempt.get("exa_stage") == "exa_target_not_found"
+            and _confirmed_exa_target_absence(attempt.get("exa_target_absence"))
+        ):
+            # A corroborating URL can be absent while another source only
+            # exhausted content. Keep that mixed result source-local without
+            # claiming that the original URL itself was proved absent.
+            continue
         if (
             attempt.get("source") == "scrapingdog_ashby_api_fallback"
             and attempt.get("stage") == "ashby_posting_not_listed"

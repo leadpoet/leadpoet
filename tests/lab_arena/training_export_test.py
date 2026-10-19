@@ -720,7 +720,8 @@ def per_icp_cost_fixture():
 
 def per_icp_cost_reader(*, spend=1_145_340, reason="cost_per_company_exceeded",
                         secret=None, round_id="arena-2026-10-16",
-                        submission_id="baseline-2026-10-16", icp_position=0):
+                        submission_id="baseline-2026-10-16", icp_position=0,
+                        excluded=None, flat=False):
     unresolved = 42 if reason == "provider_cost_uncertain" else 0
     unresolved_calls = 1 if reason in ("provider_cost_uncertain", "provider_calls_inflight") else 0
     def read(**identity):
@@ -732,12 +733,15 @@ def per_icp_cost_reader(*, spend=1_145_340, reason="cost_per_company_exceeded",
                                 "eligibility_reason": reason,
                                 "competition_sourcing_microusd": spend,
                                 "execution_icp_cap_microusd": 4_000_000,
-                                "cost_per_company_cap_microusd": 800_000,
-                                "eligibility_cap_microusd": 800_000,
-                                "execution": {"successful_microusd": spend - unresolved,
+                                "cost_per_company_cap_microusd": 4_000_000 if flat else 800_000,
+                                "eligibility_cap_microusd": 4_000_000 if flat else 800_000,
+                                "execution": {"successful_microusd": spend - unresolved + (excluded or 0),
                                               "success_unresolved_microusd": unresolved,
                                               "inflight_calls": int(reason == "provider_calls_inflight"),
-                                              "success_unresolved_calls": unresolved_calls},
+                                              "success_unresolved_calls": unresolved_calls,
+                                              **({"competition_successful_microusd": spend - unresolved,
+                                                  "excluded_infrastructure_successful_microusd": excluded}
+                                                 if excluded is not None else {})},
                                 "private_marker": secret}}
     return read
 
@@ -796,6 +800,79 @@ def test_eligible_snapshot_is_distinct_from_actual_paid_cost():
     assert result["competition_cost_eligibility"]["eligible"] is True
     assert result["competition_cost_eligibility"]["competition_sourcing_microusd"] == 500_000
     assert result["judgment"]["per_icp_score"] == 12.75
+
+
+@pytest.mark.parametrize("flat", [False, True])
+@pytest.mark.parametrize("excluded", [None, 0, 405_351])
+def test_cost_snapshot_uses_competition_successful_spend_and_preserves_raw_cost(flat, excluded):
+    values = per_icp_cost_fixture()
+    config = values["round_row"]["configuration_doc"]
+    if excluded is not None:
+        config["infrastructure_retry_cost_policy"] = "trusted_infrastructure_v1"
+    if flat:
+        config.update(sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+                      cost_per_company_microusd=4_000_000)
+    raw_spend = 622_159 + (excluded or 0)
+    add_call(values)
+    values["ledger_rows"][-1]["amount_microusd"] = raw_spend
+    result = assemble_example(**values, cost_eligibility_reader=per_icp_cost_reader(
+        spend=622_159, reason="eligible", excluded=excluded, flat=flat))
+    decision = result["competition_cost_eligibility"]
+    assert decision["status"] == "available"
+    assert decision["competition_sourcing_microusd"] == 622_159
+    assert decision["eligible"] is True
+    assert decision["eligibility_cap_microusd"] == (4_000_000 if flat else 800_000)
+    assert result["costs"]["confirmed_actual_microusd"] == raw_spend
+    assert result["provider_calls"][0]["actual_microusd"] == raw_spend
+    assert result["judgment"]["per_icp_score"] == 12.75
+
+
+@pytest.mark.parametrize("field,value", [
+    ("competition_successful_microusd", -1),
+    ("excluded_infrastructure_successful_microusd", -1),
+    ("competition_successful_microusd", True),
+    ("excluded_infrastructure_successful_microusd", "405351"),
+    ("competition_successful_microusd", None),
+    ("excluded_infrastructure_successful_microusd", None),
+    ("successful_microusd", 622_159),
+    ("competition_successful_microusd", 622_160),
+    ("excluded_infrastructure_successful_microusd", 405_350),
+])
+def test_malformed_competition_cost_split_is_unavailable(field, value):
+    reader = per_icp_cost_reader(spend=622_159, reason="eligible", excluded=405_351)
+    def malformed(**identity):
+        observed = reader(**identity)
+        observed["eligibility"]["execution"][field] = value
+        return observed
+    decision = assemble_example(**per_icp_cost_fixture(),
+                                cost_eligibility_reader=malformed)["competition_cost_eligibility"]
+    assert decision["status"] == "unavailable"
+    assert decision["reason"] == "cost_authority_unavailable"
+    assert "eligible" not in decision and "competition_sourcing_microusd" not in decision
+
+
+@pytest.mark.parametrize("missing", ["competition_successful_microusd",
+                                     "excluded_infrastructure_successful_microusd"])
+def test_partial_competition_cost_split_is_unavailable(missing):
+    reader = per_icp_cost_reader(spend=622_159, reason="eligible", excluded=405_351)
+    def partial(**identity):
+        observed = reader(**identity)
+        observed["eligibility"]["execution"].pop(missing)
+        return observed
+    decision = assemble_example(**per_icp_cost_fixture(),
+                                cost_eligibility_reader=partial)["competition_cost_eligibility"]
+    assert decision["reason"] == "cost_authority_unavailable"
+
+
+def test_competition_cost_split_does_not_accept_raw_spend_as_sourcing_cost():
+    reader = per_icp_cost_reader(spend=622_159, reason="eligible", excluded=405_351)
+    def raw_spend(**identity):
+        observed = reader(**identity)
+        observed["eligibility"]["competition_sourcing_microusd"] = 1_027_510
+        return observed
+    decision = assemble_example(**per_icp_cost_fixture(),
+                                cost_eligibility_reader=raw_spend)["competition_cost_eligibility"]
+    assert decision["reason"] == "cost_authority_unavailable"
 
 
 def test_export_run_wires_one_read_only_cost_rpc_with_verified_qualified_count():
@@ -909,10 +986,11 @@ def test_verified_cached_judgment_controls_cost_snapshot_and_bad_cache_blocks_it
     assert invalid["competition_cost_eligibility"]["status"] == "unavailable"
 
 
+@pytest.mark.parametrize("excluded", [None, 405_351])
 @pytest.mark.parametrize("reason", ["provider_calls_inflight", "provider_cost_uncertain"])
-def test_unsettled_cost_authority_is_explicitly_unavailable(reason):
+def test_unsettled_cost_authority_is_explicitly_unavailable(reason, excluded):
     result = assemble_example(**per_icp_cost_fixture(),
-                              cost_eligibility_reader=per_icp_cost_reader(reason=reason))
+                              cost_eligibility_reader=per_icp_cost_reader(reason=reason, excluded=excluded))
     decision = result["competition_cost_eligibility"]
     assert decision["status"] == "unavailable" and decision["reason"] == reason
     assert "eligible" not in decision and "competition_sourcing_microusd" not in decision
@@ -936,14 +1014,15 @@ def test_failed_call_unknown_fee_does_not_hide_final_successful_sourcing_decisio
     assert result["competition_cost_eligibility"]["eligible"] is True
 
 
-def test_successful_call_unknown_fee_keeps_successful_sourcing_decision_unavailable():
+@pytest.mark.parametrize("excluded", [None, 405_351])
+def test_successful_call_unknown_fee_keeps_successful_sourcing_decision_unavailable(excluded):
     values = per_icp_cost_fixture()
     add_call(values, status="uncertain")
     values["ledger_rows"][-1]["entry_doc"].update(
         reason="worker_reported", call={"call_succeeded": True,
                                         "reason": "missing_provider_cost", "provider_status": 200})
     result = assemble_example(**values, cost_eligibility_reader=per_icp_cost_reader(
-        reason="provider_cost_uncertain"))
+        reason="provider_cost_uncertain", excluded=excluded))
     assert result["provider_calls"][0]["accounting_state"] == "uncertain"
     assert result["completeness"]["dimensions"]["costs"] is False
     decision = result["competition_cost_eligibility"]

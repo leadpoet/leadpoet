@@ -475,6 +475,17 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
         execution = snapshot["execution"]
         if not isinstance(execution, Mapping):
             raise ValueError("execution cost state is not a mapping")
+        successful = execution["successful_microusd"]
+        split = ("competition_successful_microusd",
+                 "excluded_infrastructure_successful_microusd")
+        if any(key in execution for key in split):
+            # Migration 478 preserves raw spend and excludes proved failed
+            # infrastructure attempts only from competition spend. Both parts
+            # must account for the unchanged raw successful total.
+            if (any(type(execution.get(key)) is not int or execution[key] < 0 for key in split)
+                    or successful != sum(execution[key] for key in split)):
+                raise ValueError("execution cost split is invalid")
+            successful = execution["competition_successful_microusd"]
         numbers = (
             "competition_sourcing_microusd", "execution_icp_cap_microusd",
             "cost_per_company_cap_microusd", "eligibility_cap_microusd",
@@ -490,8 +501,7 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                        for key in ("successful_microusd", "success_unresolved_microusd",
                                    "inflight_calls", "success_unresolved_calls"))
                 or snapshot["competition_sourcing_microusd"] != (
-                    execution["successful_microusd"]
-                    + execution["success_unresolved_microusd"])
+                    successful + execution["success_unresolved_microusd"])
                 or snapshot["execution_icp_cap_microusd"] != configuration.get("execution_icp_cap_microusd")
                 or snapshot["cost_per_company_cap_microusd"] != configuration.get("cost_per_company_microusd")
                 or snapshot["eligibility_cap_microusd"] != (

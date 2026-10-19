@@ -989,6 +989,11 @@ def test_ownership_stage_proof_prefers_private_equity_over_acquired():
             True,
         ),
         ("series b", "Acme raises $40M Series B", True),
+        ("series a", "ThreatAware Secures $25M Series A Funding from One Peak", True),
+        ("series a", "ThreatAware never secures $25M Series A Funding", False),
+        ("series a", "If ThreatAware secures $25M Series A Funding, it will expand.", False),
+        ("series a", "ThreatAware secures $25M Series A Funding subject to closing conditions.", False),
+        ("series a", "ThreatAware secures $25M Series B Funding", False),
         ("seed", "Acme raises a $4M Seed round", True),
         ("series a", "Acme raises $40M Series B", False),
         ("series b", "Acme never raises $40M Series B", False),
@@ -1080,6 +1085,16 @@ def test_series_stage_statements_require_current_completed_proof(
     expected,
 ):
     assert _stage_quote_supports_observation(observed, quote) is expected
+
+
+def test_first_party_secures_series_a_headline_can_support_stage():
+    verdict = {
+        "observed_company_stage": "Series A",
+        "stage_matches": True,
+        "stage_evidence_url": "https://threataware.com/insights/blogs/25M-Series-A-Funding",
+        "stage_evidence_quote": "ThreatAware Secures $25M Series A Funding from One Peak",
+    }
+    assert _decision_from_observed_stage(verdict, "series a") == COMPANY_FIT_MATCH
 
 
 @pytest.mark.parametrize(

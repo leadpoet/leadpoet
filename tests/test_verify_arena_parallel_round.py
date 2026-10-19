@@ -1024,6 +1024,7 @@ def test_published_evidence_requires_all_configured_outputs_scores_and_costs():
         "runner_hotkeys": ["runner-hotkey"],
         "worker_slots": list(range(10)),
         "exit_fingerprint_count": 10,
+        "invalid_failed_attempt_evidence_count": 0,
         "concurrency_evidence": "overlapping_valid_attempt_intervals",
         "physical_concurrency_evidence": "operator_sandbox_pid_observations_required",
         "concurrency_high_water_lower_bound": 10,
@@ -1080,6 +1081,145 @@ def test_published_evidence_requires_all_configured_outputs_scores_and_costs():
     incomplete = verification._evidence(service, ROUND_ID)
     assert incomplete["proof"]["complete"] is False
     assert "execute_accepted_uniqueness" in incomplete["proof"]["errors"]
+
+
+def test_published_evidence_accepts_sequential_proxy_worker_rotation():
+    service = Service(count=2)
+    service.store.row["configuration_doc"]["runner_slot_ceiling"] = 1
+    service.config.defaults.runner_slot_ceiling = 1
+    execution = [run for run in service.store.runs if run["kind"] == "execute"]
+    for position, run in enumerate(execution):
+        run["result_doc"]["started_at"] = (
+            "2026-09-14T00:01:%02dZ" % (position * 11)
+        )
+        run["result_doc"]["finished_at"] = (
+            "2026-09-14T00:01:%02dZ" % (position * 11 + 10)
+        )
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["proof"] == {"complete": True, "errors": []}
+    assert document["execution_timing"]["worker_slots"] == [0, 1]
+    assert document["execution_timing"]["exit_fingerprint_count"] == 2
+    assert document["execution_timing"]["concurrency_high_water_lower_bound"] == 1
+
+
+def test_published_evidence_rejects_worker_slot_egress_identity_conflict():
+    service = Service(count=2)
+    execution = [run for run in service.store.runs if run["kind"] == "execute"]
+    execution[1]["result_doc"]["resource_summary"]["web_egress"][
+        "exit_fingerprint"
+    ] = execution[0]["result_doc"]["resource_summary"]["web_egress"][
+        "exit_fingerprint"
+    ]
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["execution_timing"]["invalid_result_count"] == 1
+    assert "execution_result_evidence" in document["proof"]["errors"]
+
+
+def test_failed_attempt_registers_new_worker_and_contributes_to_overlap_cap():
+    service = Service(count=2)
+    service.store.row["configuration_doc"]["runner_slot_ceiling"] = 1
+    service.config.defaults.runner_slot_ceiling = 1
+    execution = [run for run in service.store.runs if run["kind"] == "execute"]
+    for position, run in enumerate(execution):
+        run["result_doc"]["started_at"] = (
+            "2026-09-14T00:01:%02dZ" % (position * 11)
+        )
+        run["result_doc"]["finished_at"] = (
+            "2026-09-14T00:01:%02dZ" % (position * 11 + 10)
+        )
+    failed = {
+        **execution[1],
+        "run_id": "execute-1-initial-failed",
+        "status": "failed",
+        "output_ref": "",
+        "per_icp_score": None,
+        "result_doc": {
+            **execution[1]["result_doc"],
+            "terminal_status": "model_error",
+            "started_at": "2026-09-14T00:01:09Z",
+            "finished_at": "2026-09-14T00:01:12Z",
+            "resource_summary": {
+                "web_egress": {
+                    "worker_slot": 2,
+                    "exit_fingerprint": "exit000000000002",
+                }
+            },
+        },
+    }
+    service.store.runs.append(failed)
+
+    document = verification._evidence(service, ROUND_ID)
+
+    timing = document["execution_timing"]
+    assert timing["failed_attempt_interval_count"] == 1
+    assert timing["worker_slots"] == [0, 1, 2]
+    assert timing["concurrency_high_water_lower_bound"] == 2
+    assert "execution_high_water" in document["proof"]["errors"]
+
+
+def test_failed_attempt_worker_identity_conflict_fails_proof():
+    service = Service(count=2)
+    execution = [run for run in service.store.runs if run["kind"] == "execute"]
+    failed = {
+        **execution[1],
+        "run_id": "execute-1-conflicting-failure",
+        "status": "failed",
+        "output_ref": "",
+        "per_icp_score": None,
+        "result_doc": {
+            **execution[1]["result_doc"],
+            "terminal_status": "model_error",
+            "resource_summary": {
+                "web_egress": {
+                    "worker_slot": 0,
+                    "exit_fingerprint": "exit000000000001",
+                }
+            },
+        },
+    }
+    service.store.runs.append(failed)
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["execution_timing"]["invalid_failed_attempt_evidence_count"] == 1
+    assert "execution_failed_attempt_evidence" in document["proof"]["errors"]
+
+
+def test_failed_attempt_without_result_is_not_a_concurrency_interval():
+    service = Service(count=2)
+    execution = [run for run in service.store.runs if run["kind"] == "execute"]
+    failed = {
+        **execution[1],
+        "run_id": "execute-1-failed-before-result",
+        "status": "failed",
+        "output_ref": "",
+        "per_icp_score": None,
+        "result_doc": {},
+    }
+    service.store.runs.append(failed)
+
+    document = verification._evidence(service, ROUND_ID)
+
+    timing = document["execution_timing"]
+    assert document["proof"] == {"complete": True, "errors": []}
+    assert timing["failed_attempt_interval_count"] == 0
+    assert timing["invalid_failed_attempt_interval_count"] == 1
+    assert timing["invalid_failed_attempt_evidence_count"] == 0
+
+
+def test_published_evidence_rejects_execution_above_slot_ceiling():
+    service = Service(count=2)
+    service.store.row["configuration_doc"]["runner_slot_ceiling"] = 1
+    service.config.defaults.runner_slot_ceiling = 1
+
+    document = verification._evidence(service, ROUND_ID)
+
+    assert document["execution_timing"]["concurrency_high_water_lower_bound"] == 2
+    assert "execution_high_water" in document["proof"]["errors"]
 
 
 def _provider_cost_row(service, kind):
@@ -1376,6 +1516,12 @@ def test_failed_second_batch_attempt_cannot_hide_an_early_batch_start():
             "terminal_status": "model_error",
             "started_at": "2026-09-14T00:00:09Z",
             "finished_at": "2026-09-14T00:00:10Z",
+            "resource_summary": {
+                "web_egress": {
+                    "worker_slot": 20,
+                    "exit_fingerprint": "exit000000000020",
+                }
+            },
         },
     }
     service.store.runs.append(failed_early)
@@ -1383,6 +1529,7 @@ def test_failed_second_batch_attempt_cannot_hide_an_early_batch_start():
     document = verification._evidence(service, ROUND_ID)
 
     assert document["execution_timing"]["failed_attempt_interval_count"] == 1
+    assert document["execution_timing"]["worker_slots"][-1] == 20
     assert (
         document["execution_timing"]["second_batch_earliest_start"]
         == "2026-09-14T00:00:09Z"

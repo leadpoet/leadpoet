@@ -203,6 +203,10 @@ def test_contacts_scopes_are_mutually_exclusive():
 
 
 @pytest.mark.parametrize("option,role,updates", [
+    (["--signal-judgment-from", "2026-10-20T00:00:00Z"], "signal_judgment_from_only",
+     {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": "2026-10-20T00:00:00+00:00"}),
+    (["--signal-judgment-from", ""], "signal_judgment_from_only",
+     {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": ""}),
     (
         ["--company-judgment-from", "2026-10-19T00:00:00Z"],
         "company_judgment_from_only",
@@ -995,3 +999,46 @@ def test_remote_intent_details_activation_rejects_bad_scope_or_timestamp(tmp_pat
         request_override={"role": "intent_details_from_only", "updates": updates, "aliases": {}, "service_key": ""},
     )
     assert result == {"ok": False, "code": expected}
+
+
+@pytest.mark.parametrize("value", ["2026-10-19T00:00:00Z", ""])
+def test_remote_signal_cache_activation_preserves_grading_and_image(tmp_path, value):
+    initial = {
+        "KEEP": "same", "LAB_ARENA_COMPANY_QUALITY_FROM": "",
+        "LAB_ARENA_SCORER_IMAGE": "keep-image", "LAB_ARENA_MODE": "live",
+    }
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path, json.dumps(initial), request_override={
+            "role": "signal_judgment_from_only",
+            "updates": {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": value},
+            "aliases": {}, "service_key": "",
+        },
+    ))
+    assert updated == {**initial, "LAB_ARENA_SIGNAL_JUDGMENT_FROM": value.replace("Z", "+00:00")}
+
+
+@pytest.mark.parametrize("overrides,expected", [
+    ({"updates": {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": "2026-10-19T00:00:00"}}, "signal_judgment_from_timestamp_invalid"),
+    ({"updates": {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": "2026-10-19T00:00:00Z", "KEEP": "changed"}}, "signal_judgment_from_scope_invalid"),
+    ({"secret_id": "leadpoet/prod/validator/env"}, "signal_judgment_from_scope_invalid"),
+])
+def test_remote_signal_cache_activation_rejects_invalid_scope(tmp_path, overrides, expected):
+    request = {
+        "role": "signal_judgment_from_only",
+        "updates": {"LAB_ARENA_SIGNAL_JUDGMENT_FROM": "2026-10-19T00:00:00Z"},
+        "aliases": {}, "service_key": "", **overrides,
+    }
+    result = _run_remote_with_fake_aws(
+        tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
+        request_override=request,
+    )
+    assert result == {"ok": False, "code": expected}
+
+
+def test_signal_cache_activation_cannot_change_quality_at_same_time():
+    with pytest.raises(SystemExit):
+        MODULE.build_parser().parse_args([
+            "--signal-judgment-from", "2026-10-19T00:00:00Z",
+            "--company-quality-from", "2026-10-19T00:00:00Z",
+            "--allowed-account", "493765492819",
+        ])

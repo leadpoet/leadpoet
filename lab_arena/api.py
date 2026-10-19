@@ -273,6 +273,21 @@ def create_app(service: ArenaService) -> FastAPI:
             disconnected,
         )
 
+    @app.post("/arena/v1/runs/{run_id}/signal-judgment")
+    async def signal_judgment(
+        run_id: str, request: Request,
+        x_lab_arena_lease: Optional[str] = Header(default=None),
+    ) -> JSONResponse:
+        from lab_arena.signal_cache_control import MAX_BYTES
+        lease_token = _lease_header(x_lab_arena_lease)
+        document = await _read_json(request, limits=contracts.StrictLimits(
+            max_depth=32, max_list_items=1000, max_object_keys=1000,
+            max_string_bytes=MAX_BYTES, max_total_bytes=MAX_BYTES,
+        ))
+        return await no_store_public_call(
+            service.handle_signal_judgment, run_id, lease_token, document,
+        )
+
     @app.post("/arena/v1/runs/{run_id}/trajectory")
     async def append_trajectory(
         run_id: str,

@@ -31,7 +31,7 @@ def _ledger(store, run_id):
 
 def export_run(store, objects, run_id):
     """Read only the requested round and its referenced accepted authorities."""
-    from lab_arena.training_export import ExportError, assemble_example
+    from lab_arena.training_export import ExportError, _select_judge, assemble_example
 
     execution = store.get_run(run_id)
     if execution is None or execution.get("kind") != "execute":
@@ -59,6 +59,21 @@ def export_run(store, objects, run_id):
             cached = store.get_company_judgment(*identity)
             if cached is not None:
                 company_rows[identity] = cached
+    signal_uses, signal_rows, signal_source_ledger = [], {}, []
+    if ((round_row.get("configuration_doc") or {}).get("scorer_policy") or {}).get("signal_judgment_policy") == "signal_judgment_v1":
+        judge = _select_judge(execution, runs)
+        if judge is not None:
+            origin_ids = {row["source_score_run_id"] for row in company_rows.values()}
+            for score_id in sorted({judge["run_id"]} | origin_ids):
+                signal_uses.extend(store.get_signal_judgment_uses(score_id))
+            for use in signal_uses:
+                identity = (use["cache_key"], use["authority_slot"])
+                if identity not in signal_rows:
+                    signal_rows[identity] = store.get_signal_judgment(*identity)
+            source_ids = {row["source_score_run_id"] for row in signal_rows.values() if row is not None}
+            related_ids = {row["run_id"] for row in related}
+            signal_source_ledger = [entry for source_id in sorted(source_ids - related_ids)
+                                    for entry in _ledger(store, source_id)]
     def cost_eligibility_reader(**identity):
         # The stable database RPC is the competition authority for per-ICP
         # successful-sourcing cost. Keep its observation time with the result.
@@ -69,6 +84,9 @@ def export_run(store, objects, run_id):
     return assemble_example(run_id=run_id, round_row=round_row, submission_row=submission,
                             runs=runs, ledger_rows=ledger, objects=objects,
                             cache_rows=list(caches.values()), company_judgment_rows=list(company_rows.values()),
+                            signal_judgment_uses=signal_uses,
+                            signal_judgment_rows=[row for row in signal_rows.values() if row is not None],
+                            signal_source_ledger_rows=signal_source_ledger,
                             cost_eligibility_reader=cost_eligibility_reader)
 
 

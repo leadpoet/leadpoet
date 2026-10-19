@@ -118,7 +118,9 @@ def _bound_source():
     evidence = _evidence(ref)
     output = scoring.build_scoring_failure("execute-1", "judge_error", company_judgments=[_new(ref)])
     evidence["source_output_hash"] = contracts.document_hash(output)
-    source = {"kind": "score", "status": "failed", "terminal_cause": "judge_error",
+    source = {"run_id": evidence["source_score_run_id"],
+              "round_id": ref["scope_doc"]["round_id"],
+              "kind": "score", "status": "failed", "terminal_cause": "judge_error",
               "runner_hotkey": evidence["source_runner_hotkey"],
               "scored_run_id": evidence["source_scored_run_id"],
               "output_ref": evidence["source_output_ref"],
@@ -132,6 +134,7 @@ def _bound_source():
               **{key: evidence[key] for key in ("source_score_run_id", "source_scored_run_id", "source_runner_hotkey")}}
     service = ArenaService.__new__(ArenaService)
     service._store = SimpleNamespace(get_company_judgment=lambda *_: cached, get_run=lambda *_: source)
+    service._round = lambda _: {"configuration_doc": {"scorer_policy": {}}}
     service._objects = SimpleNamespace(get_bounded=lambda *_: json.dumps(output).encode())
     return service, cached, source, output, ref
 

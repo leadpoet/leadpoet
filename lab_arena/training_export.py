@@ -15,7 +15,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
-from lab_arena import contracts, contact_policy, integrity, reviewer_runtime, scoring, source_bundle, verify
+from lab_arena import company_judgments, contracts, contact_policy, integrity, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
 from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
@@ -106,6 +106,154 @@ def _evidence_reader(store, objects):
     reader = EvidenceReader()
     reader._store, reader._objects = store, BoundedObjects()
     return reader
+
+
+def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
+                               scoring_input, uses, authority_rows, company_rows, runs,
+                               round_row):
+    """Resolve every emitted signal reference against its original frozen row."""
+    if (scoring_input.get("scorer_policy") or {}).get("signal_judgment_policy") != signal_judgments.POLICY:
+        if uses or any(
+            "signal_judgment_reference" in detail
+            for breakdown in breakdowns
+            for detail in breakdown.get("intent_signals_detail", [])
+        ):
+            raise ExportError("signal_policy_not_frozen")
+        return None
+    if len(scored_company_indexes) != len(breakdowns):
+        raise ExportError("signal_company_index_mismatch")
+    # Persisted input snapshots are canonical JSON and therefore sorted by
+    # key. The gateway's effective-company projector requires construction
+    # order, so restore only its exact frozen fields and drop lease context.
+    fields = ("schema_version", "scored_run_id", "icp", "companies",
+              "scorer_policy", "evaluation_date")
+    if scoring_input.get("scorer_policy", {}).get("scoring_adapter_version") == "qualification_contacts_v3":
+        fields += ("contact_source_evidence",)
+    if set(scoring_input) - {"company_judgment_cache", "prior_terminal_breakdowns"} != set(fields):
+        raise ExportError("signal_scoring_input_changed")
+    frozen_input = {field: scoring_input[field] for field in fields}
+    by_use = {}
+    for use in uses:
+        position = (use.get("run_id"), use.get("company_index"), use.get("signal_index"))
+        if (position in by_use or any(type(value) is not int or value < 0 for value in position[1:])):
+            raise ExportError("signal_use_invalid")
+        by_use[position] = use
+    by_authority = {}
+    for row in authority_rows:
+        identity = (row.get("cache_key"), row.get("authority_slot"))
+        if identity in by_authority:
+            raise ExportError("signal_authority_ambiguous")
+        by_authority[identity] = row
+    evidence = []
+    seen = set()
+    config = round_row["configuration_doc"]
+    company_by_identity = {(row["cache_key"], row["authority_slot"]): row for row in company_rows}
+    lease = (judge.get("claim_response") or {}).get("company_judgment_cache") or {}
+    lease_by_index = {row["company_index"]: row for row in
+                      list(lease.get("hits") or []) + list(lease.get("misses") or [])}
+    def source_position(company_index, signal_index, reference):
+        current_refs = judge.get("company_judgment_refs") or []
+        if company_index >= len(current_refs):
+            return None
+        current_ref = company_judgments.validate_company_ref(current_refs[company_index])
+        item = lease_by_index.get(company_index)
+        if (item is None or item.get("cache_key") != current_ref["cache_key"]
+                or item.get("company_input_hash") != current_ref["company_input_hash"]):
+            return None
+        company_row = company_by_identity.get((item["cache_key"], item["authority_slot"]))
+        if company_row is None:
+            return None
+        source = runs.get(company_row.get("source_score_run_id"))
+        if source is None:
+            return None
+        positions = []
+        for ref in source.get("company_judgment_refs") or []:
+            if (ref.get("cache_key") != current_ref["cache_key"]
+                    or ref.get("company_input_hash") != current_ref["company_input_hash"]):
+                continue
+            source_ref = company_judgments.validate_company_ref(ref)
+            position = (source["run_id"], source_ref["company_index"], signal_index)
+            use = by_use.get(position)
+            if use is None:
+                continue
+            if reference is not None and (
+                use.get("cache_key") != reference.get("cache_key")
+                or use.get("authority_slot") != reference.get("authority_slot")
+                or use.get("signal_input_hash") != reference.get("signal_input_hash")
+            ):
+                continue
+            positions.append(position)
+        return positions[0] if len(positions) == 1 else None
+    for company_index, breakdown in zip(scored_company_indexes, breakdowns):
+        details = breakdown.get("intent_signals_detail", [])
+        if not isinstance(details, list):
+            raise ExportError("signal_details_invalid")
+        for signal_index, detail in enumerate(details):
+            if not isinstance(detail, Mapping):
+                raise ExportError("signal_detail_invalid")
+            reference = detail.get("signal_judgment_reference")
+            if reference is not None and not isinstance(reference, Mapping):
+                raise ExportError("signal_reference_invalid")
+            position = (judge["run_id"], company_index, signal_index)
+            use = by_use.get(position)
+            if use is None:
+                position = source_position(company_index, signal_index, reference)
+                use = by_use.get(position)
+            if reference is None:
+                if use is not None:
+                    raise ExportError("signal_use_without_reference")
+                continue
+            if use is None or position in seen:
+                raise ExportError("signal_reference_without_use")
+            seen.add(position)
+            identity = (use.get("cache_key"), use.get("authority_slot"))
+            row = by_authority.get(identity)
+            if row is None or not isinstance(row.get("scope_doc"), Mapping):
+                raise ExportError("signal_authority_missing")
+            scope_doc = row["scope_doc"]
+            scope = signal_judgments.build_scope(
+                scoring_input=frozen_input, company_index=company_index,
+                signal_index=signal_index,
+                verified_company_identity=scope_doc.get("verified_company_identity"),
+                verified_funding_stage_context=scope_doc.get("verified_funding_stage_context"),
+                round_id=judge["round_id"],
+                network_name=round_row["arena_network_name"],
+                netuid=int(round_row.get("arena_netuid") or 0),
+                scorer_image_digest=config["scorer_image_digest"],
+                scorer_image_reference=config["scorer_image_reference"],
+            )
+            if (scope_doc != scope
+                    or signal_judgments.validate_reference(reference, scope) != reference
+                    or identity != (reference["cache_key"], reference["authority_slot"])
+                    or use.get("signal_input_hash") != scope["signal_input_hash"]
+                    or row.get("signal_input_hash") != scope["signal_input_hash"]):
+                raise ExportError("signal_scope_mismatch")
+            raw = copy.deepcopy(dict(detail))
+            raw.pop("signal_judgment_reference", None)
+            raw.pop("counted_in_aggregate", None)
+            judgment = signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
+            source_id = row.get("source_score_run_id")
+            source = runs.get(source_id)
+            if (raw != judgment
+                    or row.get("judgment_hash") != contracts.document_hash(judgment)
+                    or use.get("judgment_hash") != row["judgment_hash"]
+                    or use.get("source_score_run_id") != source_id
+                    or source is None or source.get("kind") != "score"
+                    or source.get("status") not in {"accepted", "failed", "leased"}
+                    or source.get("round_id") != judge["round_id"]
+                    or source.get("scored_run_id") != row.get("source_scored_run_id")
+                    or source.get("runner_hotkey") != row.get("source_runner_hotkey")
+                    or source.get("claim_request_hash") != row.get("source_claim_request_hash")
+                    or source.get("lease_generation") != row.get("source_lease_generation")):
+                raise ExportError("signal_source_mismatch")
+            evidence.append({
+                "company_index": company_index, "signal_index": signal_index,
+                "reference": copy.deepcopy(reference),
+                "use": copy.deepcopy(use), "authority": copy.deepcopy(row),
+            })
+    if not {key for key in by_use if key[0] == judge["run_id"]}.issubset(seen):
+        raise ExportError("signal_use_without_reference")
+    return evidence
 
 
 def _select_judge(run, runs):
@@ -542,6 +690,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                      ledger_rows: Sequence[Mapping[str, Any]], objects: Any,
                      cache_rows: Sequence[Mapping[str, Any]] = (),
                      company_judgment_rows: Sequence[Mapping[str, Any]] = (),
+                     signal_judgment_uses: Sequence[Mapping[str, Any]] = (),
+                     signal_judgment_rows: Sequence[Mapping[str, Any]] = (),
+                     signal_source_ledger_rows: Sequence[Mapping[str, Any]] = (),
                      input_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
                      cost_eligibility_reader: Callable[..., Mapping[str, Any]] | None = None) -> dict:
     """Assemble one exact execution. Missing evidence produces explicit gaps.
@@ -762,6 +913,69 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                     actual_icp.pop(key, None)
                 if actual_icp != expected_icp or document.get("evaluation_date") != round_row.get("evaluation_date"):
                     reasons["exact_inputs"].add("runtime_input_context_mismatch")
+    signal_policy = (config.get("scorer_policy") or {}).get("signal_judgment_policy") == signal_judgments.POLICY
+    unmarked_signal_evidence = bool(signal_judgment_uses or signal_judgment_rows or signal_source_ledger_rows) or any(
+        "signal_judgment_reference" in detail
+        for breakdown in (example.get("judgment") or {}).get("breakdowns", [])
+        for detail in breakdown.get("intent_signals_detail", [])
+        if isinstance(detail, Mapping)
+    )
+    if signal_policy or unmarked_signal_evidence:
+        try:
+            if judge is None or "judgment" not in example or judge["run_id"] not in snapshots:
+                raise ExportError("signal_judge_evidence_missing")
+            evidence = _signal_authority_evidence(
+                judge=judge, breakdowns=example["judgment"]["breakdowns"],
+                scored_company_indexes=scored["scored_company_indexes"],
+                scoring_input=snapshots[judge["run_id"]]["input"],
+                uses=signal_judgment_uses, authority_rows=signal_judgment_rows,
+                company_rows=company_judgment_rows, runs=by_id,
+                round_row=round_row,
+            )
+            example["judgment"]["signal_authority_evidence"] = evidence
+            source_ids = {item["authority"]["source_score_run_id"] for item in evidence}
+            external_source_ids = source_ids - run_ids
+            selected_source_ledger = [row for row in signal_source_ledger_rows
+                                      if row.get("run_id") in external_source_ids]
+            source_calls, source_gaps = _calls(
+                selected_source_ledger, external_source_ids, objects,
+                {source_id: index for index, source_id in enumerate(sorted(external_source_ids))},
+            )
+            for source_id in external_source_ids:
+                source = by_id[source_id]
+                if any(row.get(key) != source.get(key) for row in selected_source_ledger
+                       if row.get("run_id") == source_id
+                       for key in ("round_id", "submission_id", "miner_hotkey")):
+                    raise ExportError("signal_source_ledger_context_mismatch")
+                expected_count = ((source.get("result_doc") or {}).get("resource_summary") or {}).get("provider_call_count")
+                logical_calls = {call.get("action_sequence") for call in source_calls
+                                 if call["run_id"] == source_id and type(call.get("action_sequence")) is int}
+                if type(expected_count) is not int or expected_count != len(logical_calls):
+                    source_gaps.add("signal_source_provider_capture_unverified")
+            example["judgment"]["signal_source_provider_calls"] = source_calls
+            source_call_refs = [
+                {"source_score_run_id": call["run_id"],
+                 "call_identity": call["call_identity"],
+                 "location": "provider_calls" if call in calls else "signal_source_provider_calls"}
+                for call in calls + source_calls if call["run_id"] in source_ids
+            ]
+            example["judgment"]["signal_source_provider_call_refs"] = source_call_refs
+            example["judgment"]["signal_source_cost_attribution"] = {
+                "scope": "original_source_score_runs",
+                "source_score_run_ids": sorted(source_ids),
+                "confirmed_actual_microusd": sum(
+                    call.get("actual_microusd") or 0
+                    for call in calls + source_calls if call["run_id"] in source_ids
+                ),
+                "included_in_execution_cost_run_ids": sorted(source_ids & run_ids),
+                "external_source_run_ids": sorted(external_source_ids),
+            }
+            reasons["research_process"].update(source_gaps)
+        except (ExportError, signal_judgments.SignalJudgmentError, KeyError, IndexError, TypeError, ValueError):
+            reasons["input_output_label"].add("signal_authority_unverified")
+            example.pop("judgment", None)
+            example["companies"] = []
+            scored = None
     example["input_snapshots"] = {key: snapshots[key] for key in sorted(snapshot_ids) if key in snapshots}
     if not selected_ids.issubset(snapshots):
         reasons["exact_inputs"].add("runtime_input_snapshot_missing")

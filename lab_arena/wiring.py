@@ -539,6 +539,7 @@ def build_service_from_environment(mode: str):
         contacts_from=None,
         company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None,
         company_judgment_from=os.environ.get("LAB_ARENA_COMPANY_JUDGMENT_FROM") or None,
+        signal_judgment_from=os.environ.get("LAB_ARENA_SIGNAL_JUDGMENT_FROM") or None,
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
         benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
         execution_sequence_from=os.environ.get(

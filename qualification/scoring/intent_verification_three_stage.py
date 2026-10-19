@@ -3122,6 +3122,90 @@ def _confirmed_source_absence(
     )
 
 
+def _unusable_source_allows_same_event_search(
+    contents: Mapping[str, Any], requested_url: str,
+) -> bool:
+    """Separate a source-local miss from an unfinished provider request.
+
+    This permits discovery, not an absence verdict. Unknown or mixed errors
+    must retain the existing retryable unavailable result.
+    """
+
+    if contents.get("results"):
+        return False
+    statuses = contents.get("statuses")
+    if not isinstance(statuses, list) or len(statuses) != 1:
+        return False
+    status = statuses[0]
+    if not isinstance(status, Mapping) or (
+        status.get("url") != requested_url or status.get("source") != "none"
+    ):
+        return False
+    sd_stage = str(status.get("sd_stage") or "")
+    sd_error = str(status.get("sd_error") or "")
+    # Generic 400/403 can also be provider credential or request errors. Do
+    # not infer a local denial from those labels alone.
+    local_sd_errors = _SD_CONTENT_ESCALATION_VERDICTS | {"http_422", "pdf_binary"}
+    if not (
+        (sd_stage == "genuine_404" and sd_error == "http_404")
+        or (sd_error in local_sd_errors
+            and sd_stage == "all_tiers_exhausted:" + sd_error)
+    ):
+        return False
+    return bool(
+        (status.get("exa_stage") == "exa_thin"
+         and status.get("exa_error") == "<300 chars")
+        or (status.get("exa_stage") == "exa_no_results"
+            and status.get("exa_error") == "[]")
+        or _confirmed_source_absence(contents, requested_url)
+        or (status.get("exa_stage") == "exa_no_results"
+            and _canonical_target_crawl_failure_receipt(
+                status.get("exa_target_crawl_failure")
+            ) is not None)
+    )
+
+
+async def _find_same_event_source(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """One bounded use of existing URL-only discovery; never evidence."""
+
+    from qualification.scoring import company_evidence_investigator as investigator
+
+    key = str(os.environ.get("EXA_API_KEY") or "").strip()
+    if not key:
+        return {"status": "unavailable", "reason": "search_provider_unavailable"}
+    query = (
+        str(row.get("company") or "")[:100] + " "
+        + str(row.get("claim") or "")[:300] + " "
+        + str(row.get("signal_date") or "")
+        + " official company announcement or event organizer"
+    )
+    try:
+        # One request, no retry or model search loop. The existing provider
+        # transport and broker retain their admission/accounting behavior.
+        async with investigator.aiohttp.ClientSession(
+            timeout=investigator.aiohttp.ClientTimeout(total=30),
+        ) as session:
+            discovery = await investigator._search_web(session, query, key=key)
+    except (investigator.aiohttp.ClientError, asyncio.TimeoutError,
+            RuntimeError, ValueError):
+        return {"status": "unavailable", "reason": "search_provider_unavailable"}
+    original = {_normalize_url(url) for url in row["claimed_source_urls"]}
+    tokens = _link_tokens(row.get("claim")) | _link_tokens(row.get("company"))
+    ranked = []
+    for item in discovery.get("results") or []:
+        url = _prompt_exact_url_or_empty(item.get("url"))
+        if not url or _normalize_url(url) in original:
+            continue
+        overlap = len(tokens & _link_tokens(str(item.get("title") or "") + " " + url))
+        if overlap:
+            ranked.append((-overlap, url))
+    if not ranked:
+        return {"status": "unproven", "reason": "no_same_event_locator"}
+    ranked.sort()
+    return {"status": "selected", "reason": "bounded_same_event_search",
+            "selected_urls": [ranked[0][1]]}
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Prompts — per-evidence-type builders live in qualification.scoring.prompts
 # ─────────────────────────────────────────────────────────────────────
@@ -3247,8 +3331,16 @@ def _build_final_judge_prompt(
     if row.get("_same_event_resolution") is True:
         suffix += (
             "\n\nONE-HOP SAME-EVENT SOURCE RESOLUTION:\n"
-            "The additional URL or URLs were selected only from visible links "
-            "on the exact submitted page. That link relationship is a locator, "
+            + ("The original submitted page was unusable. One alternative URL "
+               "was selected by bounded search. Search titles and snippets are "
+               "locators only and are not supplied as evidence. Require fetched "
+               "text from the official company, event organizer, or authoritative "
+               "original-event publisher to prove its authority and the company's "
+               "actual role in that same event. The selected URL is a locator, "
+               if row.get("_unavailable_source_resolution") is True else
+               "The additional URL or URLs were selected only from visible links "
+               "on the exact submitted page. That link relationship is a locator, ")
+            +
             "not evidence. Approve only if fetched linked-page text independently "
             "binds the target company, the exact same event in miner_claim, and "
             "the target ICP signal. Cite at least one linked URL and an exact "
@@ -4939,6 +5031,71 @@ async def verify_three_stage(
         and not _confirmed_source_absence(fetched_contents, url)
         for url in row["claimed_source_urls"]
     )
+    unavailable_source_resolution: Optional[Dict[str, Any]] = None
+    if (
+        not contents["results"]
+        and integrity_policy and stage1_soft_reject
+        and len(row["claimed_source_urls"]) == 1
+        and not is_hiring_claim
+        and _unusable_source_allows_same_event_search(
+            fetched_contents, row["claimed_source_urls"][0],
+        )
+    ):
+        unavailable_source_resolution = {
+            "attempted": True, **await _find_same_event_source(row),
+        }
+        if unavailable_source_resolution["status"] == "unavailable":
+            source_absent = False
+            contents["statuses"].append({
+                "url": _prompt_url_origin_or_empty(fetch_source_url),
+                "source": "exa_search", "stage": "search_provider_unavailable",
+            })
+        selected_urls = unavailable_source_resolution.get("selected_urls") or []
+        if selected_urls:
+            alternative_fetched = await _fetch_sd_then_exa(selected_urls)
+            alternative = _project_contents_for_prompt(alternative_fetched)
+            selected_key = _normalize_url(selected_urls[0])
+            alternative_results = [
+                item for item in alternative["results"]
+                if _normalize_url(item.get("url") or "") == selected_key
+                and str(item.get("text") or "").strip()
+            ]
+            contents = {
+                "results": alternative_results,
+                "statuses": [*contents["statuses"], *alternative["statuses"]],
+            }
+            unavailable_source_resolution["status"] = "unproven"
+            unavailable_source_resolution["reason"] = (
+                "bounded_same_event_search" if alternative_results
+                else "selected_link_fetch_unproven"
+            )
+            if not alternative_results:
+                source_absent = False
+            if alternative_results:
+                row = {**row, "claimed_source_urls": [
+                    *row["claimed_source_urls"], *selected_urls,
+                ], "_same_event_resolution": True,
+                    "_unavailable_source_resolution": True}
+                # An inaccessible original property cannot confer publisher
+                # identity on an independently discovered alternative.
+                _on_lead_domain = _url_on_lead_domain(
+                    selected_urls[0], company_website, company_linkedin,
+                )
+                _on_verified_company_property = _url_on_verified_company_identity(
+                    selected_urls[0], verified_identity_context,
+                )
+                official_publisher_binding = (
+                    _on_verified_company_property if company_quality else _on_lead_domain
+                )
+                if company_quality:
+                    row["_source_on_verified_company_property"] = _on_verified_company_property
+                incomplete_bundle = False
+                source_publication_dates = list(dict.fromkeys(
+                    str(item.get("source_publication_date") or "")
+                    for item in alternative_results
+                    if item.get("source_publication_date")
+                ))
+                fetched_urls = {selected_key}
     if not contents["results"] or incomplete_bundle:
         return {
             "client_ready": False,
@@ -4959,6 +5116,8 @@ async def verify_three_stage(
             },
             "stage3": None,
             "company_check": None,
+            **({"source_resolution": unavailable_source_resolution}
+               if unavailable_source_resolution is not None else {}),
             "verdict": {
                 "signal_evaluations": [{
                     "signal_status": "unable_to_verify",
@@ -5235,12 +5394,37 @@ async def verify_three_stage(
                 "error": s3_envelope.get("_error"),
             },
             "company_check": company_check,
+            **({"source_resolution": unavailable_source_resolution}
+               if unavailable_source_resolution is not None else {}),
         }
     s3_verdict_raw = (s3_envelope.get("answer") or {})
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
     _bind_approximate_event_month(s3_item, combined_text, str(row["claim"]))
-    same_event_resolution: Optional[Dict[str, Any]] = None
+    same_event_resolution = unavailable_source_resolution
+    if unavailable_source_resolution is not None:
+        outcome = _same_event_resolution_outcome(
+            s3_verdict, contents["results"],
+            unavailable_source_resolution.get("selected_urls") or [],
+            submitted_claim=str(row["claim"]),
+        )
+        if "same_event_as_submitted:verified" not in (s3_item.get("risk_notes") or []):
+            outcome = "unproven"
+        if outcome == "verified" and not _has_grounded_source_event_date(
+            s3_item, combined_text,
+        ):
+            # A new publication date cannot date the inaccessible event.
+            outcome = "unproven"
+        same_event_resolution["status"] = outcome
+        if outcome == "unproven" and s3_item.get("signal_status") in {
+            "supported", "partially_supported",
+        }:
+            # A normal positive judgment is insufficient when the original
+            # page was unavailable and same-event identity was not proved.
+            s3_item["signal_status"] = "unable_to_verify"
+            s3_item.setdefault("unsupported_parts", []).append(
+                "Alternative source did not ground the original company event and date"
+            )
     same_event_candidates = _same_event_link_candidates(contents, row)
     has_grounded_event_date = (
         _has_grounded_source_event_date(s3_item, combined_text)
@@ -5254,6 +5438,7 @@ async def verify_three_stage(
     )
     should_resolve_same_event = bool(
         integrity_policy
+        and unavailable_source_resolution is None
         and len(bundle) <= 1
         and not is_hiring_claim
         and (same_event_candidates or archive_url)
@@ -5503,7 +5688,7 @@ async def verify_three_stage(
             "complete target and address the earlier grounded context.\n"
             + prior_evidence_context
         )
-    if clarification_kind is not None:
+    if clarification_kind is not None and unavailable_source_resolution is None:
         clarification_receipt_key = (
             "identity_clarification"
             if clarification_kind == "identity"

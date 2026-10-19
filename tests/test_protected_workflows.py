@@ -33,6 +33,7 @@ def test_retired_trust_surfaces_are_absent_from_inventory():
 
 
 def test_current_release_and_runtime_identity_boundaries_remain_protected():
+    assert "__module__" in PROTECTED_SYMBOLS["gateway/chain_startup.py"]
     assert {
         "materialize_gateway_code_hash_runtime",
         "iter_gateway_code_hash_payloads",

@@ -1,5 +1,15 @@
 # Agent Instructions
 
+## Scoped production authorization: gateway chain startup recovery
+
+On 2026-10-19 the user authorized the narrow fix for temporary Finney
+connection failures during gateway startup, including focused recovery and
+failure controls, safe push and merge, canonical deployment, and live
+verification. Keep recovery within the existing startup deadline. Preserve
+readiness, chain authority, attestation, release checks, scoring, credentials,
+operator controls, and concurrent work. No new recovery framework or altered
+chain endpoint. This authority ends after deployment and verification.
+
 ## Scoped production authorization: validator recovery and model-test findings
 
 On 2026-10-19 the user authorized fixing the repeated validator prior-epoch

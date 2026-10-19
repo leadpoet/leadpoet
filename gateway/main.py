@@ -146,91 +146,18 @@ async def lifespan(app: FastAPI):
     print(f"   Benefits: Zero memory leaks, zero HTTP 429 errors")
     print("="*80 + "\n")
     
-    # Create async subtensor with timeout + retry (handles network delays)
-    MAX_RETRIES = 3
-    TIMEOUT_SECONDS = 30
-    async_subtensor = None
-    
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            print(f"🔄 Attempt {attempt}/{MAX_RETRIES}: Connecting to {BITTENSOR_NETWORK}...")
-            
-            # Wrap AsyncSubtensor creation in timeout (prevents infinite hang)
-            async_subtensor = await asyncio.wait_for(
-                asyncio.create_task(bt.AsyncSubtensor(network=BITTENSOR_NETWORK).__aenter__()),
-                timeout=TIMEOUT_SECONDS
-            )
-            
-            print("✅ AsyncSubtensor created (WebSocket active)")
-            print(f"   Endpoint: {async_subtensor.chain_endpoint}")
-            print(f"   Connected on attempt {attempt}")
-            print("")
-            break  # Success - exit retry loop
-            
-        except asyncio.TimeoutError:
-            _record_sentry_retry(
-                "authority.dependency_unreadable",
-                component="gateway",
-                stage="chain_runtime_startup",
-                attempt=attempt,
-                attempts=MAX_RETRIES,
-                dependency="finney",
-                runtime_sha=GITHUB_COMMIT,
-            )
-            print(f"⚠️  Attempt {attempt}/{MAX_RETRIES}: Connection timeout after {TIMEOUT_SECONDS}s")
-            if attempt < MAX_RETRIES:
-                wait_time = 5 * attempt  # Progressive backoff: 5s, 10s, 15s
-                print(f"   Retrying in {wait_time}s...")
-                await asyncio.sleep(wait_time)
-            else:
-                _capture_sentry_failure(
-                    "authority.dependency_unreadable",
-                    component="gateway",
-                    stage="chain_runtime_startup",
-                    terminal=True,
-                    retryable=True,
-                    fail_closed=True,
-                    attempts=MAX_RETRIES,
-                    dependency="finney",
-                    timed_out=True,
-                    runtime_sha=GITHUB_COMMIT,
-                )
-                print(f"❌ FATAL: Failed to connect to {BITTENSOR_NETWORK} after {MAX_RETRIES} attempts")
-                print(f"   Check network connectivity and Bittensor chain status")
-                raise RuntimeError(f"AsyncSubtensor connection failed after {MAX_RETRIES} attempts")
-                
-        except Exception as e:
-            _record_sentry_retry(
-                "authority.dependency_unreadable",
-                component="gateway",
-                stage="chain_runtime_startup",
-                attempt=attempt,
-                attempts=MAX_RETRIES,
-                dependency="finney",
-                exception_class=type(e).__name__,
-                runtime_sha=GITHUB_COMMIT,
-            )
-            print(f"⚠️  Attempt {attempt}/{MAX_RETRIES}: Connection error: {e}")
-            if attempt < MAX_RETRIES:
-                wait_time = 5 * attempt
-                print(f"   Retrying in {wait_time}s...")
-                await asyncio.sleep(wait_time)
-            else:
-                _capture_sentry_failure(
-                    "authority.dependency_unreadable",
-                    component="gateway",
-                    stage="chain_runtime_startup",
-                    exception=e,
-                    terminal=True,
-                    retryable=True,
-                    fail_closed=True,
-                    attempts=MAX_RETRIES,
-                    dependency="finney",
-                    runtime_sha=GITHUB_COMMIT,
-                )
-                print(f"❌ FATAL: Failed to initialize AsyncSubtensor: {e}")
-                raise
-    
+    from gateway.chain_startup import connect_async_subtensor
+
+    async_subtensor = await connect_async_subtensor(
+        bt.AsyncSubtensor,
+        network=BITTENSOR_NETWORK,
+        runtime_sha=GITHUB_COMMIT,
+        record_retry=_record_sentry_retry,
+        capture_failure=_capture_sentry_failure,
+    )
+    print("AsyncSubtensor created (WebSocket active)")
+    print(f"   Endpoint: {async_subtensor.chain_endpoint}")
+
     # ════════════════════════════════════════════════════════════════
     # CRYPTO PREFLIGHT: prove the lazily-imported verification stack
     # works in THIS runtime before serving. The binding verifier fails

@@ -3009,6 +3009,7 @@ def _daily_source_service(source):
     service._config = SimpleNamespace(
         daily_icp_source=source,
         defaults=SimpleNamespace(
+            company_judgment_from=None,
             scorer_image_digest=configuration["scorer_image_digest"],
             scorer_image_reference=configuration["scorer_image_reference"],
         ),

@@ -166,6 +166,16 @@ def _evidence_reader(store, objects):
     return reader
 
 
+def _signal_details(breakdown):
+    # Terminal company-fit failures have no signal judgment and encode null.
+    details = breakdown.get("intent_signals_detail")
+    if details is None:
+        return []
+    if not isinstance(details, list):
+        raise ExportError("signal_details_invalid")
+    return details
+
+
 def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
                                scoring_input, uses, authority_rows, company_rows, runs,
                                round_row):
@@ -174,7 +184,7 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
         if uses or any(
             "signal_judgment_reference" in detail
             for breakdown in breakdowns
-            for detail in breakdown.get("intent_signals_detail", [])
+            for detail in _signal_details(breakdown)
         ):
             raise ExportError("signal_policy_not_frozen")
         return None
@@ -182,12 +192,22 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
         raise ExportError("signal_company_index_mismatch")
     # Persisted input snapshots are canonical JSON and therefore sorted by
     # key. The gateway's effective-company projector requires construction
-    # order, so restore only its exact frozen fields and drop lease context.
+    # order, so restore only its exact frozen fields and drop runtime context.
     fields = ("schema_version", "scored_run_id", "icp", "companies",
               "scorer_policy", "evaluation_date")
     if scoring_input.get("scorer_policy", {}).get("scoring_adapter_version") == "qualification_contacts_v3":
         fields += ("contact_source_evidence",)
-    if set(scoring_input) - {"company_judgment_cache", "prior_terminal_breakdowns"} != set(fields):
+    config = round_row["configuration_doc"]
+    runtime_fields = {"company_judgment_cache", "prior_terminal_breakdowns"}
+    # The runner adds this frozen discovery catalog to both execution and
+    # score inputs. It is not an effective input to the gateway's signal judge.
+    if config.get("deepline_catalog") is not None:
+        if ("deepline_catalog" not in scoring_input
+                or contracts.canonical_json(scoring_input["deepline_catalog"])
+                != contracts.canonical_json(config["deepline_catalog"])):
+            raise ExportError("signal_frozen_catalog_mismatch")
+        runtime_fields.add("deepline_catalog")
+    if set(scoring_input) - runtime_fields != set(fields):
         raise ExportError("signal_scoring_input_changed")
     frozen_input = {field: scoring_input[field] for field in fields}
     by_use = {}
@@ -204,26 +224,25 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
         by_authority[identity] = row
     evidence = []
     seen = set()
-    config = round_row["configuration_doc"]
     company_by_identity = {(row["cache_key"], row["authority_slot"]): row for row in company_rows}
     lease = (judge.get("claim_response") or {}).get("company_judgment_cache") or {}
     lease_by_index = {row["company_index"]: row for row in
                       list(lease.get("hits") or []) + list(lease.get("misses") or [])}
-    def source_position(company_index, signal_index, reference):
+    def source_positions(company_index, signal_index, reference):
         current_refs = judge.get("company_judgment_refs") or []
         if company_index >= len(current_refs):
-            return None
+            return []
         current_ref = company_judgments.validate_company_ref(current_refs[company_index])
         item = lease_by_index.get(company_index)
         if (item is None or item.get("cache_key") != current_ref["cache_key"]
                 or item.get("company_input_hash") != current_ref["company_input_hash"]):
-            return None
+            return []
         company_row = company_by_identity.get((item["cache_key"], item["authority_slot"]))
         if company_row is None:
-            return None
+            return []
         source = runs.get(company_row.get("source_score_run_id"))
         if source is None:
-            return None
+            return []
         positions = []
         for ref in source.get("company_judgment_refs") or []:
             if (ref.get("cache_key") != current_ref["cache_key"]
@@ -241,11 +260,15 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             ):
                 continue
             positions.append(position)
-        return positions[0] if len(positions) == 1 else None
+        return positions
     for company_index, breakdown in zip(scored_company_indexes, breakdowns):
-        details = breakdown.get("intent_signals_detail", [])
-        if not isinstance(details, list):
-            raise ExportError("signal_details_invalid")
+        details = _signal_details(breakdown)
+        if not details and any(
+            (position[0] == judge["run_id"] and position[1] == company_index)
+            or source_positions(company_index, position[2], None)
+            for position in by_use
+        ):
+            raise ExportError("signal_use_without_reference")
         for signal_index, detail in enumerate(details):
             if not isinstance(detail, Mapping):
                 raise ExportError("signal_detail_invalid")
@@ -255,7 +278,8 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
             position = (judge["run_id"], company_index, signal_index)
             use = by_use.get(position)
             if use is None:
-                position = source_position(company_index, signal_index, reference)
+                positions = source_positions(company_index, signal_index, reference)
+                position = positions[0] if len(positions) == 1 else None
                 use = by_use.get(position)
             if reference is None:
                 if use is not None:
@@ -979,7 +1003,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     unmarked_signal_evidence = bool(signal_judgment_uses or signal_judgment_rows or signal_source_ledger_rows) or any(
         "signal_judgment_reference" in detail
         for breakdown in (example.get("judgment") or {}).get("breakdowns", [])
-        for detail in breakdown.get("intent_signals_detail", [])
+        for detail in _signal_details(breakdown)
         if isinstance(detail, Mapping)
     )
     if signal_policy or unmarked_signal_evidence:

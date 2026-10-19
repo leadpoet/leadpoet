@@ -464,3 +464,187 @@ def test_export_entrypoint_validates_historical_company_authority_without_signal
     result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
     assert result["judgment"]["company_authority_evidence"]
     assert "signal_authority_evidence" not in result["judgment"]
+
+
+def _add_frozen_catalog(values):
+    from lab_arena.training_input import read_input
+    from tests.lab_arena.test_deepline_catalog import frozen
+
+    catalog = frozen()
+    values["round_row"]["configuration_doc"]["deepline_catalog"] = catalog
+    judge = values["runs"][1]
+    document = read_input(values["objects"], judge["run_id"], "score",
+                          judge["lease_generation"], judge["claim_request_hash"])["input"]
+    document["deepline_catalog"] = copy.deepcopy(catalog)
+    return judge, document
+
+
+@pytest.mark.parametrize("whole_company_hit", [False, True])
+def test_export_entrypoint_accepts_runner_injected_frozen_catalog(whole_company_hit):
+    values = _company_cache_fixture(whole_company_hit=whole_company_hit)
+    judge, document = _add_frozen_catalog(values)
+    save_input(values["objects"], judge["run_id"], "score", document)
+    result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
+    assert result["judgment"]["per_icp_score"] == values["runs"][0]["per_icp_score"]
+    assert len(result["judgment"]["signal_authority_evidence"]) == 1
+    assert result["competition_cost_eligibility"]["status"] == "available"
+
+
+@pytest.mark.parametrize("fault", [
+    "changed_catalog", "catalog_json_type", "missing_catalog", "unfrozen_catalog",
+    "null_catalog", "unknown_field", "changed_effective_input",
+])
+def test_export_entrypoint_rejects_changed_catalog_or_unrecognized_score_input(fault):
+    values = _company_cache_fixture(whole_company_hit=True)
+    judge, document = _add_frozen_catalog(values)
+    if fault == "changed_catalog":
+        document["deepline_catalog"]["tools"][0]["description"] = "changed"
+    elif fault == "catalog_json_type":
+        # Python equality treats False and 0 as equal; exact JSON does not.
+        document["deepline_catalog"]["allow_people"] = 0
+    elif fault == "missing_catalog":
+        del document["deepline_catalog"]
+    elif fault == "unfrozen_catalog":
+        del values["round_row"]["configuration_doc"]["deepline_catalog"]
+    elif fault == "null_catalog":
+        document["deepline_catalog"] = None
+    elif fault == "unknown_field":
+        document["unrecognized_context"] = {}
+    else:
+        document["companies"][0]["intent_signals"][0]["snippet"] = "changed effective evidence"
+    save_input(values["objects"], judge["run_id"], "score", document)
+    result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
+    assert "judgment" not in result
+    assert "signal_authority_unverified" in result["completeness"]["incomplete_reasons"]
+
+
+def _mixed_fit_fixture(*, signal_policy=True):
+    """One positive company and one terminal fit failure with null details."""
+    from qualification.scoring.competition import raw_company_judgment
+    from tests.test_arena_score_integrity import _positive_breakdown
+
+    values = _company_cache_fixture(signal_policy=signal_policy)
+    execute, judge = values["runs"][:2]
+    config = values["round_row"]["configuration_doc"]
+    output = json.loads(values["objects"].values[OUTPUT_REF])
+    failed_company = copy.deepcopy(output["companies"][0])
+    failed_company.update(company_name="Other", company_website="https://other.example")
+    output["companies"].append(failed_company)
+    values["objects"].put(OUTPUT_REF, contracts.canonical_json(output).encode())
+    icp = json.loads(values["objects"].values["benchmark"])["icps"][0]
+    document = scoring.build_scoring_input(
+        scored_run_id=execute["run_id"], icp=icp, companies=output["companies"],
+        policy=config["scorer_policy"], evaluation_date=values["round_row"]["evaluation_date"],
+    )
+    refs = company_judgments.build_company_scopes(
+        scoring_input=document, round_id=judge["round_id"], network_name="finney", netuid=71,
+        scorer_image_digest=config["scorer_image_digest"],
+        scorer_image_reference=config["scorer_image_reference"],
+        integrity_policy="arena_integrity_v1", company_judgment_policy=company_judgments.POLICY,
+    )
+    raw = values["company_judgment_rows"][0]["evidence_doc"]["raw_judgment"]
+    failed = _positive_breakdown("Other", "other.example")
+    failed.update(final_score=0.0, intent_signal_raw=0.0, intent_signal_final=0.0,
+                  intent_signals_detail=None, failure_reason="company_fit_mismatch",
+                  company_judgment_policy=company_judgments.POLICY)
+    failed["verifier_gate_receipts"][0]["decision"] = "mismatch"
+    breakdowns = scoring.project_company_judgments(output["companies"], [raw, failed], company_quality=False)
+    failed = {**raw_company_judgment(breakdowns[1]), "company_judgment_policy": company_judgments.POLICY}
+    misses = [{**{key: ref[key] for key in ("company_index", "cache_key", "company_input_hash")},
+               "authority_slot": 0} for ref in refs]
+    new = [{**item, "raw_judgment": value} for item, value in zip(misses, [raw, failed])]
+    score_output = scoring.build_scoring_output(execute["run_id"], breakdowns, company_judgments=new)
+    values["objects"].put(judge["output_ref"], contracts.canonical_json(score_output).encode())
+    first_evidence = values["company_judgment_rows"][0]["evidence_doc"]
+    provenance = {key: first_evidence[key] for key in first_evidence if key.startswith("source_")}
+    provenance["source_output_hash"] = contracts.document_hash(score_output)
+    values["company_judgment_rows"] = []
+    for ref, judgment in zip(refs, new):
+        evidence = company_judgments.build_evidence_snapshot(
+            new_judgment=judgment, company_ref=ref, **provenance,
+            runner_authority_exclusions=first_evidence["runner_authority_exclusions"],
+        )
+        values["company_judgment_rows"].append({
+            "cache_key": ref["cache_key"], "company_input_hash": ref["company_input_hash"],
+            "authority_slot": 0, "scope_doc": ref["scope_doc"],
+            "evidence_doc": evidence, "evidence_hash": contracts.document_hash(evidence),
+            **{key: evidence[key] for key in (
+                "source_score_run_id", "source_scored_run_id", "source_runner_hotkey")},
+        })
+    judge["company_judgment_refs"] = refs
+    lease = {"schema_version": company_judgments.LEASE_SCHEMA_VERSION, "hits": [], "misses": misses}
+    judge["claim_response"]["company_judgment_cache"] = lease
+    judge["result_doc"]["company_judgment_consumed_indexes"] = [0, 1]
+    document["company_judgment_cache"] = lease
+    save_input(values["objects"], judge["run_id"], "score", document)
+    scored = verify.scored_row(execute["submission_id"], 0, execute["run_id"], icp,
+                               output["companies"], breakdowns, config["scorer_policy"])
+    record = scoring.run_scores_for_store(
+        {"rows": [scored], "integrity_policy": "arena_integrity_v1"}, [execute],
+    )[0]
+    execute.update(per_icp_score=record["per_icp_score"], qualification_doc=record["qualification_doc"])
+    return values
+
+
+def test_export_entrypoint_keeps_positive_and_null_fit_failure_signal_labels():
+    values = _mixed_fit_fixture()
+    judge, document = _add_frozen_catalog(values)
+    save_input(values["objects"], judge["run_id"], "score", document)
+    result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
+    assert len(result["judgment"]["signal_authority_evidence"]) == 1
+    assert result["companies"][0]["judgment"]["company_qualified"] is True
+    assert result["companies"][1]["judgment"]["company_qualified"] is False
+    assert result["companies"][1]["judgment"]["intent_signals_detail"] is None
+    assert result["competition_cost_eligibility"]["status"] == "available"
+
+
+def test_historical_export_keeps_positive_and_null_fit_failure_without_signal_policy():
+    values = _mixed_fit_fixture(signal_policy=False)
+    result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
+    assert result["companies"][1]["judgment"]["intent_signals_detail"] is None
+    assert "signal_authority_evidence" not in result["judgment"]
+
+
+def test_export_entrypoint_rejects_signal_use_attached_to_null_fit_failure():
+    values = _mixed_fit_fixture()
+    values["signal_judgment_uses"].append({**values["signal_judgment_uses"][0], "company_index": 1})
+    result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
+    assert "judgment" not in result
+    assert "signal_authority_unverified" in result["completeness"]["incomplete_reasons"]
+
+
+@pytest.mark.parametrize("signal_policy", [False, True])
+@pytest.mark.parametrize("details", [{}, "", 0, False])
+def test_signal_authority_rejects_malformed_non_list_details(details, signal_policy):
+    values = _mixed_fit_fixture(signal_policy=signal_policy)
+    judge = values["runs"][1]
+    score_output = json.loads(values["objects"].values[judge["output_ref"]])
+    score_output["breakdowns"][1]["intent_signals_detail"] = details
+    from lab_arena.training_input import read_input
+    scoring_input = read_input(values["objects"], judge["run_id"], "score",
+                               judge["lease_generation"], judge["claim_request_hash"])["input"]
+    with pytest.raises(ExportError, match="signal_details_invalid"):
+        _signal_authority_evidence(
+            judge=judge, breakdowns=score_output["breakdowns"], scored_company_indexes=[0, 1],
+            scoring_input=scoring_input, uses=values["signal_judgment_uses"],
+            authority_rows=values["signal_judgment_rows"], company_rows=values["company_judgment_rows"],
+            runs={row["run_id"]: row for row in values["runs"]}, round_row=values["round_row"],
+        )
+
+
+@pytest.mark.parametrize("details", [None, []])
+def test_empty_company_hit_details_reject_inherited_signal_uses(details):
+    values = _company_cache_fixture(whole_company_hit=True)
+    judge = values["runs"][1]
+    breakdowns = json.loads(values["objects"].values[judge["output_ref"]])["breakdowns"]
+    breakdowns[0]["intent_signals_detail"] = details
+    from lab_arena.training_input import read_input
+    scoring_input = read_input(values["objects"], judge["run_id"], "score",
+                               judge["lease_generation"], judge["claim_request_hash"])["input"]
+    with pytest.raises(ExportError, match="signal_use_without_reference"):
+        _signal_authority_evidence(
+            judge=judge, breakdowns=breakdowns, scored_company_indexes=[0],
+            scoring_input=scoring_input, uses=values["signal_judgment_uses"],
+            authority_rows=values["signal_judgment_rows"], company_rows=values["company_judgment_rows"],
+            runs={row["run_id"]: row for row in values["runs"]}, round_row=values["round_row"],
+        )

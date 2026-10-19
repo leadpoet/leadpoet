@@ -387,9 +387,132 @@ def test_unused_ownership_object_does_not_change_headcount_target():
 
 
 def test_proven_pe_can_contradict_a_requested_venture_stage():
-    claim = validate(finding(status="CONTRADICTED"))
+    claim = validate(finding(status="CONTRADICTED"), requested_stage="Series B")
     assert claim["status"] == "CONTRADICTED"
     assert project(claim, requested="Series B") == COMPANY_FIT_MISMATCH
+
+
+@pytest.mark.parametrize("requested, observed, quote, status, expected", [
+    ("Private Equity", "Private Equity", CONTROL, "VERIFIED", "VERIFIED"),
+    ("Private Equity", "Private Equity", CONTROL, "CONTRADICTED", "UNPROVEN"),
+    ("Series B", "Private Equity", CONTROL, "CONTRADICTED", "CONTRADICTED"),
+    ("Series B", "Private Equity", CONTROL, "VERIFIED", "UNPROVEN"),
+    ("Private Equity", "Public", "Clear Capital common stock is listed on NASDAQ under ticker CLEAR.", "CONTRADICTED", "CONTRADICTED"),
+    ("Private Equity", "Public", "Clear Capital common stock is listed on NASDAQ under ticker CLEAR.", "VERIFIED", "UNPROVEN"),
+    ("Series C+", "Series D", "Clear Capital raised a Series D funding round.", "VERIFIED", "VERIFIED"),
+    ("Series C+", "Series D", "Clear Capital raised a Series D funding round.", "CONTRADICTED", "UNPROVEN"),
+])
+def test_stage_status_must_agree_with_existing_canonical_match_semantics(requested, observed, quote, status, expected):
+    claim = validate(finding(
+        observed_value=observed, evidence_quote=quote, status=status,
+    ), requested_stage=requested)
+    assert claim["status"] == expected
+    if expected == "UNPROVEN":
+        assert claim["evidence_url"] == ""
+        assert claim["evidence_quote"] == ""
+        assert "ownership" not in claim
+        assert project(claim, requested=requested) == COMPANY_FIT_UNAVAILABLE
+        assert "stage status disagreed" in claim["reason"]
+
+
+def test_absent_requested_stage_keeps_legacy_status_handling():
+    claim = validate(finding(status="CONTRADICTED"))
+    assert claim["status"] == "CONTRADICTED"
+
+
+def test_captured_insurance_owner_contradiction_gets_one_bounded_unproven_correction(monkeypatch):
+    # Captured from the October 19 exact-source model run, unchanged semantic
+    # fields: prose rejects PE while status/value/ownership disagree.
+    owner_url = "https://controlled-evidence.example/insurance-owner"
+    strategies_url = "https://controlled-evidence.example/group-strategies"
+    owner_text = (
+        "Clear Capital’s controlling shareholder is Orion Insurance, an operating insurance company. "
+        "The interest is held in Orion Insurance’s general-account investment portfolio."
+    )
+    strategies_text = (
+        "Orion Group has separate insurance and private equity businesses. "
+        "Orion Insurance operates the insurance business. Orion Private Equity manages private equity funds. "
+        "Orion Private Equity and its funds hold no ownership interest in Clear Capital."
+    )
+    captured = {
+        "new_name": "Clear Capital",
+        "ownership": {"control_status": "current_control", "owner_type": "private_equity", "controlling_owner": "Orion Insurance"},
+        "evidence_url": owner_url,
+        "supporting_evidence_url_2": strategies_url,
+        "observed_industry": "Financial Services", "activity_role": "supplier_operator",
+        "observed_value": "Private Equity", "observed_subindustry": "Insurance",
+        "status": "CONTRADICTED", "target": "stage",
+        "evidence_quote": "Clear Capital’s controlling shareholder is Orion Insurance, an operating insurance company.",
+        "old_name": "Clear Capital", "observed_country": "United States",
+        "shared_linkedin_slug": "clear-capital",
+        "reason": (
+            "The company Clear Capital is controlled by Orion Insurance, but Orion Insurance is an operating "
+            "insurance company, not a private equity owner (as confirmed by the group strategies source stating "
+            "Orion Insurance operates the insurance business and Orion Private Equity holds no ownership interest). "
+            "Therefore, Private Equity stage and ownership is contradicted or unproven because the owner is an "
+            "insurance company rather than private equity."
+        ),
+        "supporting_evidence_quote_2": "Orion Private Equity and its funds hold no ownership interest in Clear Capital.",
+        "supporting_evidence_quote_1": "Orion Insurance operates the insurance business.",
+        "new_domain": "clearcapital.com", "supporting_evidence_url_1": strategies_url,
+        "observed_state": "California", "old_domain": "clearcapital.com",
+    }
+    pages = {owner_url: owner_text, strategies_url: strategies_text}
+    rejected = validate(captured, pages=pages, requested_stage="private equity")
+    assert rejected["status"] == "UNPROVEN"
+    assert "stage status disagreed" in rejected["reason"]
+    assert project(rejected) == COMPANY_FIT_UNAVAILABLE
+    requests = []
+    searches = []
+
+    async def fake_post(_session, _url, *, headers, payload):
+        del headers
+        validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        raw = copy.deepcopy(captured)
+        if len(requests) > 1:
+            raw.update(status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote="", ownership=None)
+            for slot in (1, 2):
+                raw[f"supporting_evidence_url_{slot}"] = ""
+                raw[f"supporting_evidence_quote_{slot}"] = ""
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": "submit_findings", "arguments": json.dumps({"findings": [raw]})},
+        }]}}]}
+
+    async def fake_search(_session, query, *, key):
+        del key
+        searches.append(query)
+        return {"results": []}
+
+    async def unexpected_fetch(*_args, **_kwargs):
+        pytest.fail("A consistency correction must use loaded sources.")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
+    monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
+    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", unexpected_fetch)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Clear Capital", "website": "https://clearcapital.com/"},
+        targets=("stage",), requested_stage="Private Equity",
+        prior_observations={"submitted_source_urls": list(pages)},
+        prefetched_pages={url: {"final_url": url, "text": text} for url, text in pages.items()},
+    ))
+    assert len(requests) == 2
+    assert len(searches) == 1
+    assert result["usage"]["reasoning_turns"] == 2
+    assert result["usage"]["fetch_calls"] == 0
+    assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
+    feedback = json.loads(requests[-1]["messages"][-1]["content"])
+    assert feedback["rejected_findings"][0]["reason"] == rejected["reason"]
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
+    assert result["_validated_stage_finding"] == {}
+    assert result["claims"]["stage"]["status"] == "UNPROVEN"
+    assert project(result["claims"]["stage"]) == COMPANY_FIT_UNAVAILABLE
 
 
 @pytest.mark.parametrize("corrected", [True, False])

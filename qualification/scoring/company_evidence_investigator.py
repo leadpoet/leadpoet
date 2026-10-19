@@ -2651,6 +2651,7 @@ def _validated_findings(
     first_party_domains: set[str],
     identity_names: Optional[set[str]] = None,
     identity_anchor: Optional[Mapping[str, Any]] = None,
+    requested_stage: str = "",
     priority_headquarters_url: str = "",
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
 ) -> Optional[dict[str, dict[str, Any]]]:
@@ -2733,6 +2734,7 @@ def _validated_findings(
                 from qualification.scoring.lead_scorer import (
                     _CANONICAL_COMPANY_STAGES,
                     _acquired_stage_quote_supports_names,
+                    _company_stage_matches,
                     _normalize_company_stage,
                     _private_equity_linked_support_proves_ownership,
                     _stage_evidence_supports_observation,
@@ -2742,6 +2744,7 @@ def _validated_findings(
                 normalized_stage = _normalize_company_stage(
                     finding["observed_value"]
                 )
+                normalized_requested_stage = _normalize_company_stage(requested_stage)
                 linked_pe_support: list[dict[str, str]] = []
                 linked_pe_support_invalid = bool(
                     normalized_stage == "private equity"
@@ -2923,6 +2926,21 @@ def _validated_findings(
                             + ". Series C and later completed priced-equity "
                             "rounds, including their extensions, use series c+. "
                             "Do not infer a value from the requested stage."
+                        ),
+                    )
+                elif normalized_requested_stage and (
+                    (status == "VERIFIED") != _company_stage_matches(
+                        normalized_stage, normalized_requested_stage,
+                    )
+                ):
+                    finding.update(
+                        status="UNPROVEN",
+                        evidence_url="",
+                        evidence_quote="",
+                        reason=(
+                            "stage status disagreed with the requested and observed "
+                            "stages; VERIFIED requires a match and CONTRADICTED "
+                            "requires a different stage"
                         ),
                     )
                 elif normalized_stage == "private equity" and (
@@ -4512,6 +4530,7 @@ async def investigate_company_evidence(
                         first_party_domains=first_party_domains,
                         identity_names=identity_names,
                         identity_anchor=identity_anchor,
+                        requested_stage=normalized_requested_stage,
                         structured_headquarters_evidence=structured_headquarters_evidence,
                         priority_headquarters_url=(
                             _priority_headquarters_navigation_source(

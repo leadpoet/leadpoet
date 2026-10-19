@@ -12082,6 +12082,8 @@ async def _score_single_intent_signal(
             "identity_clarification": result.get("identity_clarification"),
             "ats_employer_ownership": result.get("ats_employer_ownership"),
             "evidence_clarification": result.get("evidence_clarification"),
+            **({"source_resolution": result["source_resolution"]}
+               if result.get("source_resolution") else {}),
             "intent_verdict": intent_verdict,
             **({"verified_source_context": result["verified_source_context"]}
                if result.get("verified_source_context") else {}),

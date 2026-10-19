@@ -50,6 +50,10 @@ from qualification.scoring.linkedin_company_size import (
     PROVIDER_ERROR_FAILURE_REASON,
     UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
+    _ABOUT_SECTION_HEADING,
+    _ABOUT_SECTION_END_HEADING,
+    _is_linkedin_access_wall,
+    _profile_body_matches_company_identity,
     _strict_linkedin_company_profile_url,
     fetch_current_linkedin_company_size,
     linkedin_company_page_slug,
@@ -408,6 +412,9 @@ count from associated members or accept either conflicting range by default.
 If the profile cannot be fetched or its evidence remains conflicting, return
 UNPROVEN. All ordinary fetched-text, identity and quote checks still apply.
 For geography, find the current headquarters of the investigated company.
+An already fetched exact LinkedIn profile may also prove HQ when its own body
+binds the verified company. Quote its About Headquarters field; generic
+locations or search snippets are not HQ proof.
 A server-prefetched structured profile projection labelled
 "harvestapi_get_company locations.headquarter=true" supplies already fetched,
 exact company-bound HQ facts. You may quote that projection for geography;
@@ -2439,6 +2446,76 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bound_linkedin_headquarters_source(
+    url: str,
+    final_url: str,
+    text: str,
+    identity_anchor: Mapping[str, Any],
+) -> bool:
+    """Bind an already fetched exact profile body to the verified company."""
+
+    profile = _strict_linkedin_company_profile_url(url)
+    return bool(
+        profile
+        and _strict_linkedin_company_profile_url(final_url) == profile
+        and linkedin_company_page_slug(profile)
+        == identity_anchor.get("verified_linkedin_slug")
+        and isinstance(text, str) and 0 < len(text) <= PROFILE_MAX_CHARACTERS
+        and not _is_linkedin_access_wall(text)
+        and _profile_body_matches_company_identity(text, {
+            "normalized_name": identity_anchor.get("verified_name"),
+            "registrable_dns_domain": identity_anchor.get("verified_domain"),
+        })
+    )
+
+
+def _bound_linkedin_headquarters_finding(
+    finding: Mapping[str, Any],
+    text: str,
+    final_url: str,
+    identity_anchor: Mapping[str, Any],
+) -> bool:
+    """Accept only the exact profile About section's explicit HQ field."""
+
+    if not _bound_linkedin_headquarters_source(
+        finding["evidence_url"], final_url, text, identity_anchor,
+    ):
+        return False
+    lines = text.splitlines()
+    in_about = False
+    fields = []
+    for index, line in enumerate(lines):
+        visible = line.strip().strip("*").strip()
+        if _ABOUT_SECTION_HEADING.fullmatch(visible):
+            in_about = True
+            continue
+        if not in_about:
+            continue
+        if (
+            _ABOUT_SECTION_END_HEADING.fullmatch(visible)
+            or re.fullmatch(r"(?:#{1,6}\s*)?Locations", visible, re.I)
+        ):
+            break
+        if visible.casefold() == "headquarters":
+            for end in range(index + 1, len(lines)):
+                if lines[end].strip():
+                    fields.append("\n".join(lines[index:end + 1]).strip())
+                    break
+    if len(fields) != 1:
+        return False
+    return bool(
+        _quote_occurs(fields[0], finding["evidence_quote"])
+        and (
+            _resolve_country(finding["observed_country"]) != "united states"
+            or finding["observed_state"]
+        )
+        and _quote_supports_headquarters(
+            fields[0], observed_country=finding["observed_country"],
+            observed_state=finding["observed_state"],
+        )
+    )
+
+
 def _bound_structured_headquarters_finding(
     finding: Mapping[str, Any],
     evidence: Optional[Mapping[str, Any]],
@@ -2596,6 +2673,14 @@ def _validated_findings(
                         finding, structured_headquarters_evidence, identity_anchor,
                     )
                 )
+                or (
+                    target == "geography"
+                    and _bound_linkedin_headquarters_finding(
+                        finding, fetched_text,
+                        (fetched_final_urls or {}).get(evidence_url, ""),
+                        identity_anchor or {},
+                    )
+                )
             ):
                 finding.update(
                     status="UNPROVEN",
@@ -2646,6 +2731,14 @@ def _validated_findings(
                             (fetched_final_urls or {}).get(evidence_url) or ""
                         ),
                         first_party_domains,
+                        identity_anchor or {},
+                    )
+                )
+                and not (
+                    target == "geography"
+                    and _bound_linkedin_headquarters_finding(
+                        finding, fetched_text,
+                        (fetched_final_urls or {}).get(evidence_url, ""),
                         identity_anchor or {},
                     )
                 )
@@ -3589,6 +3682,18 @@ async def investigate_company_evidence(
                 elif (
                     priority_source_kind == "company"
                     and len(fetched_pages) >= MAX_PREFETCHED_PAGES
+                    and not (
+                        priority_source_url == _priority_headquarters_navigation_source(
+                            requested_targets, bounded_homepage_navigation_locators,
+                        )
+                        and any(
+                            _bound_linkedin_headquarters_source(
+                                url, fetched_final_urls.get(url, ""), text,
+                                identity_anchor,
+                            )
+                            for url, text in fetched_pages.items()
+                        )
+                    )
                 ):
                     priority_source_url = ""
 

@@ -182,23 +182,11 @@ later.
 A linked archive card dates the article; it does not prove that its transaction
 completed or changed the company's stage. If material chronology or
 transaction type remains unresolved, return stage UNPROVEN.
-For Private Equity, a completed majority acquisition or explicit current
-majority/control relationship does not expire merely because its announcement
-is old. Do not require a recent transaction or an arbitrary evidence age cutoff.
-Still perform current-stage discovery and resolve concrete later exits, sales,
-listings, and other material ownership conflicts. Within the existing fetch
-budget, inspect a useful known current first-party about, ownership, or investor
-locator when it can resolve ownership; fetch its body before citing it.
-Navigation labels and search snippets are locators, never ownership proof.
-When the ownership quote explicitly names a majority or controlling sponsor
-but does not classify that sponsor, use the existing supporting_evidence_url_1
-and supporting_evidence_quote_1 fields (then pair 2 if needed) for a separate
-exact loaded-source quote that explicitly names that SAME sponsor as a private
-equity/private-markets firm or describes its private equity funds. The primary
-quote must itself bind current control or a completed majority transaction to
-the investigated company. An investor name, minority investment, portfolio
-label, pending agreement, or classification of a different sponsor is not
-enough. Explain the relationship; leave stage UNPROVEN if it is unsupported.
+Private Equity requires current control of this company by a PE owner. Old
+completed control does not expire by age; still perform current-stage discovery
+and resolve concrete later exits, sales or listings. Within the existing fetch
+budget, fetch a useful current first-party ownership, about or investor locator
+if it can resolve ownership. Navigation and snippets are not proof.
 Some requests include server-prefetched sources that were already fetched by
 the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
@@ -450,11 +438,25 @@ dated company-bound source gives a newer conflicting headquarters, resolve the
 chronology with source dates or an explicit move statement; otherwise return
 UNPROVEN. A factory opening cannot prove an HQ move.
 
-Private Equity stage means current controlling private-equity ownership of
-the investigated company. Being a private-equity investor, managing funds, or
-investing in other companies does not establish this ownership stage. Fetch
-and quote explicit current ownership/control evidence; the existing ownership
-proof gate still applies. Otherwise return UNPROVEN or a proven different stage.
+For Private Equity, prove company -> current controlling owner -> same owner's
+PE identity from fetched text. Check subject, object, negation and chronology.
+Majority shareholding, voting control or completed controlling acquisitions can
+qualify; economic ownership cannot override explicit contrary control rights.
+The company's own investments, fund management, portfolio clients, advisory ties,
+minority stakes, pending deals and former owners do not prove it is PE-owned.
+Return ownership with controlling_owner spelled in the primary quote.
+Set control_status=current_control and owner_type=private_equity only when both
+facts hold for this exact company and same owner. Use null for other targets or
+when no relationship is proved.
+The primary exact quote must name the company and owner and prove current
+control. Supporting quote 1 must classify that owner when the primary does not;
+use fetched context to bind owner aliases. Slot 2 is extra alias/context proof.
+Both quotes may come from one page. In reason, explain control and same-owner PE
+identity. If either link or current applicability is missing or contradicted,
+return UNPROVEN or a proven different stage; do not fill gaps with inference.
+For stage, observed_value is the proven current stage. Use VERIFIED for a match,
+CONTRADICTED for a proven different stage, UNPROVEN if current stage is unknown.
+Never put the disproved stage in observed_value.
 
 For a proven stage, observed_value must be a non-null canonical value: Seed,
 Series A, Series B, Series C+, Private Equity, Public, or Acquired. Use the value
@@ -659,6 +661,31 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "supporting_evidence_quote_1": {"type": "string"},
                                 "supporting_evidence_url_2": {"type": "string"},
                                 "supporting_evidence_quote_2": {"type": "string"},
+                                **({"ownership": {
+                                    "type": ["object", "null"],
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "controlling_owner": {
+                                            "type": "string", "maxLength": 200,
+                                        },
+                                        "control_status": {
+                                            "type": "string",
+                                            "description": (
+                                                "One of: current_control, minority, "
+                                                "pending, former, unproven."
+                                            ),
+                                        },
+                                        "owner_type": {
+                                            "type": "string",
+                                            "description": (
+                                                "One of: private_equity, other, unproven."
+                                            ),
+                                        },
+                                    },
+                                    "required": [
+                                        "controlling_owner", "control_status", "owner_type",
+                                    ],
+                                }} if "stage" in requested_targets else {}),
                                 "old_name": {"type": "string"},
                                 "new_name": {"type": "string"},
                                 "old_domain": {"type": "string"},
@@ -678,6 +705,7 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "supporting_evidence_quote_2", "old_name",
                                 "new_name", "old_domain", "new_domain",
                                 "shared_linkedin_slug", "reason",
+                                *(["ownership"] if "stage" in requested_targets else []),
                             ],
                         },
                     },
@@ -2562,6 +2590,49 @@ def _bound_structured_headquarters_finding(
     return state.casefold() == str(finding.get("observed_state") or "").casefold()
 
 
+def _semantic_ownership_proof(
+    raw: Any,
+    control_quote: str,
+    identity_names: set[str],
+) -> bool:
+    """Bind the investigator's ownership judgment to literal source entities.
+
+    The existing investigator judges control, owner type and current stage.
+    These checks validate its small contract and entity links, not those facts.
+    Citation grounding is checked separately before this contract can qualify.
+    """
+    if not isinstance(raw, Mapping) or set(raw) != {
+        "controlling_owner", "control_status", "owner_type",
+    }:
+        return False
+    owner = raw.get("controlling_owner")
+    if (
+        not isinstance(owner, str) or not owner.strip() or len(owner) > 200
+        or owner != owner.strip()
+        or raw.get("control_status") != "current_control"
+        or raw.get("owner_type") != "private_equity"
+    ):
+        return False
+    # Stage identity keys use compact _company_name values. Allow punctuation
+    # and spaces within that literal identity, while retaining word boundaries.
+    company_names = {_company_name(name) for name in identity_names if name}
+    owner_identity_names = {
+        _company_name(owner), re.sub(r"[^a-z0-9]+", "", owner.casefold()),
+    }
+    if owner_identity_names & company_names or not any(
+        re.search(
+            r"(?<!\w)" + r"\W*".join(re.escape(c) for c in name) + r"(?!\w)",
+            control_quote.casefold(),
+        )
+        for name in company_names if len(name) >= 2
+    ):
+        return False
+
+    owner_words = " ".join(re.findall(r"\w+", owner.casefold()))
+    quote_words = " ".join(re.findall(r"\w+", control_quote.casefold()))
+    return bool(owner_words) and f" {owner_words} " in f" {quote_words} "
+
+
 def _validated_findings(
     arguments: Any,
     *,
@@ -2780,8 +2851,21 @@ def _validated_findings(
                     finding["observed_value"]
                 )
                 linked_pe_support: list[dict[str, str]] = []
-                linked_pe_support_invalid = False
-                if normalized_stage == "private equity" and raw_support:
+                linked_pe_support_invalid = bool(
+                    normalized_stage == "private equity"
+                    and raw.get("ownership") is not None
+                    and any(
+                        not isinstance(
+                            raw.get(f"supporting_evidence_{field}_{index}", ""),
+                            str,
+                        )
+                        for index in (1, 2) for field in ("url", "quote")
+                    )
+                )
+                if (
+                    normalized_stage == "private equity"
+                    and raw_support and not linked_pe_support_invalid
+                ):
                     for item in raw_support:
                         url = _safe_https_url(item["url"])
                         quote = item["quote"]
@@ -2802,6 +2886,15 @@ def _validated_findings(
                         tuple(item["quote"] for item in linked_pe_support),
                     )
                 )
+                semantic_pe_ownership = (
+                    normalized_stage == "private equity"
+                    and not linked_pe_support_invalid
+                    and _semantic_ownership_proof(
+                        raw.get("ownership"),
+                        finding["evidence_quote"],
+                        stage_attribution_names,
+                    )
+                )
                 if normalized_stage not in _CANONICAL_COMPANY_STAGES:
                     finding.update(
                         status="UNPROVEN",
@@ -2816,15 +2909,22 @@ def _validated_findings(
                             "Do not infer a value from the requested stage."
                         ),
                     )
-                elif normalized_stage == "private equity" and not (
-                    _stage_evidence_supports_observation(
-                        normalized_stage,
-                        finding["evidence_quote"],
-                        evidence_url=evidence_url,
-                        first_party_domains=tuple(first_party_domains),
-                        identity_names=tuple(stage_attribution_names),
+                elif normalized_stage == "private equity" and (
+                    (
+                        raw.get("ownership") is not None
+                        and not semantic_pe_ownership
                     )
-                    or linked_pe_ownership
+                    or not (
+                        _stage_evidence_supports_observation(
+                            normalized_stage,
+                            finding["evidence_quote"],
+                            evidence_url=evidence_url,
+                            first_party_domains=tuple(first_party_domains),
+                            identity_names=tuple(stage_attribution_names),
+                        )
+                        or linked_pe_ownership
+                        or semantic_pe_ownership
+                    )
                 ):
                     finding.update(
                         status="UNPROVEN",
@@ -2898,8 +2998,13 @@ def _validated_findings(
                         evidence_quote="",
                         reason="source quote did not name the submitted venture stage",
                     )
-                if linked_pe_ownership and finding["status"] != "UNPROVEN":
+                if (
+                    (linked_pe_ownership or semantic_pe_ownership)
+                    and finding["status"] != "UNPROVEN"
+                ):
                     finding["supporting_evidence"] = linked_pe_support
+                    if semantic_pe_ownership:
+                        finding["ownership"] = dict(raw["ownership"])
             elif target == "headcount" and not _quote_supports_headcount(
                 finding["evidence_quote"], finding["observed_value"]
             ):

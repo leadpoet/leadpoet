@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: bounded ownership evidence interpretation
+
+On 2026-10-19 the user authorized a narrow ownership-evidence improvement inside
+the existing bounded investigator, after testing current behavior against real
+sources and positive/negative controls. This includes protected inspection,
+bounded provider and reward-disabled production tests, narrow source changes,
+safe push/merge, scorer-image publication, and canonical gateway/normal-validator
+deployment and verification. Require affirmative current-control evidence and
+PE classification for the same owner. Preserve other qualification standards,
+scoring and cost rules, existing investigation/recovery limits, frozen rounds,
+accepted judgments, rewards, credentials, and concurrent work. Do not add a
+second reviewer, synonym dictionary, recovery layer, or change historical scores.
+Only deploy a measured improvement without regression on negative controls.
+This authority ends after deployment and live verification.
+
 ## Scoped production authorization: gateway chain startup recovery
 
 On 2026-10-19 the user authorized the narrow fix for temporary Finney

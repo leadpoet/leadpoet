@@ -15,6 +15,21 @@ second reviewer, synonym dictionary, recovery layer, or change historical scores
 Only deploy a measured improvement without regression on negative controls.
 This authority ends after deployment and live verification.
 
+## Scoped production authorization: LinkedIn-first size and headquarters
+
+On 2026-10-19 the user authorized verified LinkedIn evidence as the first
+source for both employee size and headquarters, with web evidence used only
+when the matching LinkedIn field is unavailable or unusable. This includes
+narrow source-order changes, rigorous tests using previously submitted
+companies and failure controls, bounded reward-disabled live verification,
+safe push/merge, exact scorer-image publication, and canonical gateway and
+normal-validator deployment and verification. Preserve identity/source checks,
+other qualification rules, frozen rounds, accepted work, company and signal
+caches, costs, training evidence, credentials, rewards, weights and concurrent
+work. A valid LinkedIn mismatch must not be replaced by favorable web evidence.
+No historical rescoring, new dependencies or new verification architecture.
+This authority ends after deployment and live verification.
+
 ## Scoped production authorization: gateway chain startup recovery
 
 On 2026-10-19 the user authorized the narrow fix for temporary Finney

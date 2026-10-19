@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: October 19 audit and future grading
+
+On 2026-10-19 the user authorized protected production audit and narrow general
+fixes for confirmed faults, focused tests, safe push and merge, and canonical
+deployment. This includes the exact server-verified bidirectional LinkedIn
+redirect-alias correction for future grading only. Preserve all frozen
+current-round grading, accepted and published work, provider accounting,
+credentials, operator controls and concurrent work. Do not rescore accepted
+work or apply this alias correction through frozen-runtime overlays.
+The owning root agent controls review, push, merge and deployment. This scope
+ends after the October 19 audit and live verification complete.
+
 ## Scoped production authorization: October 17 audit and October 18 full cycle
 
 On 2026-10-17 the user authorized a full October 17 audit and continuous

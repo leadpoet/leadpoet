@@ -3630,7 +3630,7 @@ async def _resolve_observed_linkedin_redirect_alias(
     company: CompanyOutput,
     verdict: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Project an exact LinkedIn redirect final URL into a web observation."""
+    """Bind either redirect direction to the submitted LinkedIn anchor."""
 
     resolved = dict(verdict)
     # Provider JSON must never be able to declare server transport evidence.
@@ -3641,52 +3641,68 @@ async def _resolve_observed_linkedin_redirect_alias(
         if "observed_company_linkedin" in resolved
         else "observed_linkedin"
     )
-    requested_url = resolved.get(observed_field)
+    observed_url = resolved.get(observed_field)
+    submitted_url = company.company_linkedin
     submitted_slug = linkedin_company_page_slug(company.company_linkedin)
-    requested_slug = linkedin_company_page_slug(requested_url)
+    observed_slug = linkedin_company_page_slug(observed_url)
     if (
         not submitted_slug
-        or not requested_slug
-        or submitted_slug == requested_slug
+        or not observed_slug
+        or submitted_slug == observed_slug
         or submitted_slug.isdigit()
-        or requested_slug.isdigit()
-        or not is_linkedin_evidence_url(requested_url)
+        or observed_slug.isdigit()
     ):
         return resolved
-    try:
-        parsed = urlsplit(str(requested_url))
-    except ValueError:
-        return resolved
-    if parsed.scheme.casefold() != "https":
+
+    def is_https_company_page(url: Any) -> bool:
+        if not is_linkedin_evidence_url(url) or not linkedin_company_page_slug(url):
+            return False
+        try:
+            return urlsplit(url).scheme.casefold() == "https"
+        except ValueError:
+            return False
+
+    if not all(is_https_company_page(url) for url in (observed_url, submitted_url)):
         return resolved
 
     timeout = aiohttp.ClientTimeout(total=5.0, connect=3.0)
+    verified_redirect = None
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            _status, final_url, _text = await _fetch_bounded_html(
-                session,
-                str(requested_url),
-            )
+            # Either the homepage/submission or the observation may retain the
+            # old URL. Only a redirect to the other exact slug binds the pair;
+            # names and domains still need their normal checks.
+            for requested_url, target_slug in (
+                (observed_url, submitted_slug),
+                (submitted_url, observed_slug),
+            ):
+                try:
+                    _status, final_url, _text = await _fetch_bounded_html(
+                        session, requested_url,
+                    )
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                    continue
+                if (
+                    not is_https_company_page(final_url)
+                    or linkedin_company_page_slug(final_url) != target_slug
+                    or final_url == requested_url
+                ):
+                    continue
+                verified_redirect = (
+                    final_url if target_slug == submitted_slug else submitted_url,
+                    requested_url,
+                    final_url,
+                )
+                break
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         return resolved
-    final_slug = linkedin_company_page_slug(final_url)
-    if (
-        not final_slug
-        or final_slug != submitted_slug
-        or not is_linkedin_evidence_url(final_url)
-        or str(final_url) == str(requested_url)
-    ):
-        return resolved
-    try:
-        final_parsed = urlsplit(str(final_url))
-    except ValueError:
-        return resolved
-    if final_parsed.scheme.casefold() != "https":
-        return resolved
-
-    resolved[observed_field] = str(final_url)
-    resolved[_VERIFIED_LINKEDIN_REDIRECT_REQUESTED] = str(requested_url)
-    resolved[_VERIFIED_LINKEDIN_REDIRECT_FINAL] = str(final_url)
+    if verified_redirect is not None:
+        # Publish the proof only after the transport context exits successfully.
+        # Keep the receipt bound to the original claim and retain both URLs.
+        projected_url, requested_url, final_url = verified_redirect
+        resolved[observed_field] = projected_url
+        resolved[_VERIFIED_LINKEDIN_REDIRECT_REQUESTED] = requested_url
+        resolved[_VERIFIED_LINKEDIN_REDIRECT_FINAL] = final_url
     return resolved
 
 
@@ -3733,13 +3749,15 @@ def _web_identity_receipt(
     redirect_requested_url = verdict.get(_VERIFIED_LINKEDIN_REDIRECT_REQUESTED)
     redirect_final_url = verdict.get(_VERIFIED_LINKEDIN_REDIRECT_FINAL)
     if (
-        receipt.get("decision") == COMPANY_FIT_MATCH
-        and isinstance(redirect_requested_url, str)
+        isinstance(redirect_requested_url, str)
         and isinstance(redirect_final_url, str)
-        and redirect_final_url == observed_values["linkedin"]
         and linkedin_company_page_slug(redirect_requested_url)
-        and linkedin_company_page_slug(redirect_final_url)
+        and receipt.get("observed_linkedin_slug")
         == receipt.get("submitted_linkedin_slug")
+        and receipt.get("submitted_linkedin_slug") in {
+            linkedin_company_page_slug(redirect_requested_url),
+            linkedin_company_page_slug(redirect_final_url),
+        }
     ):
         receipt.update(
             observed_linkedin_requested_url=redirect_requested_url,
@@ -3747,8 +3765,9 @@ def _web_identity_receipt(
             requested_observed_linkedin_slug=(
                 linkedin_company_page_slug(redirect_requested_url)
             ),
-            reason_code="verified_linkedin_redirect_alias",
         )
+        if receipt.get("decision") == COMPANY_FIT_MATCH:
+            receipt["reason_code"] = "verified_linkedin_redirect_alias"
     structured_receipt = _structured_profile_alias_identity_receipt(
         company,
         receipt,

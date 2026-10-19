@@ -2613,15 +2613,16 @@ def _semantic_ownership_proof(
         or raw.get("owner_type") != "private_equity"
     ):
         return False
-    # Stage identity keys use compact _company_name values. Allow punctuation
-    # and spaces within that literal identity, while retaining word boundaries.
+    # Stage identity keys discard non-ASCII letters as well as punctuation and
+    # spaces. Allow those characters inside the same literal identity, while
+    # retaining outer word boundaries on the original Unicode quote.
     company_names = {_company_name(name) for name in identity_names if name}
     owner_identity_names = {
         _company_name(owner), re.sub(r"[^a-z0-9]+", "", owner.casefold()),
     }
     if owner_identity_names & company_names or not any(
         re.search(
-            r"(?<!\w)" + r"\W*".join(re.escape(c) for c in name) + r"(?!\w)",
+            r"(?<!\w)" + r"[^a-z0-9]*".join(re.escape(c) for c in name) + r"(?!\w)",
             control_quote.casefold(),
         )
         for name in company_names if len(name) >= 2

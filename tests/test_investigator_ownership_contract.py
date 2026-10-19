@@ -129,6 +129,26 @@ def test_semantic_ownership_binds_compact_multiword_company_and_punctuation(quot
     assert project(claim) == COMPANY_FIT_MATCH
 
 
+@pytest.mark.parametrize("company", ["Crédit Mutuel", "München Kapital", "Société Générale", "Straße Networks"])
+def test_unicode_company_identity_uses_existing_compact_normalization(company):
+    quote = f"Pinecrest Capital holds 70 percent of all votes at {company}."
+    claim = validate(finding(evidence_quote=quote), company=company)
+    assert claim["status"] == "VERIFIED"
+    assert claim["ownership"] == OWNERSHIP
+    assert project(claim) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("quoted_company", [
+    "PréCrédit Mutuel", "Crédit Mutuelle", "Crédit Mutuelx", "Crédit Mutuelé",
+    "Crédit Mutuelétude", "Other Company",
+])
+def test_unicode_company_match_keeps_original_outer_word_boundaries(quoted_company):
+    quote = f"Pinecrest Capital holds 70 percent of all votes at {quoted_company}."
+    claim = validate(finding(evidence_quote=quote), company="Crédit Mutuel")
+    assert claim["status"] == "UNPROVEN"
+    assert project(claim) == COMPANY_FIT_UNAVAILABLE
+
+
 def test_ownership_and_both_exact_support_spans_are_retained_without_mutating_input():
     alias = "Pinecrest Capital operates under the registered name Pinecrest Capital LP."
     raw = finding(supporting_evidence_url_2=ALIAS_URL, supporting_evidence_quote_2=alias)

@@ -9,6 +9,7 @@ import pytest
 
 from lab_arena import contracts
 from lab_arena.service import ArenaService
+from lab_arena.store import PUBLIC_CONFIGURATION_FIELDS
 
 
 @pytest.fixture()
@@ -348,3 +349,246 @@ def test_at_most_two_refresh_workers_run_and_failed_worker_releases_slot(complet
     assert service.completed_submission_scores(rows[2]) == {}
     _wait_for_scores(service, rows[2], lambda _: not service._completed_scores_cache[rows[2]["round_id"]]["refreshing"])
     assert calls == ["arena-0", "arena-1", "arena-2"]
+
+
+SAFE_CLOSURES = [
+    ("stage1_scoring", "stage1_judged"),
+    ("stage1_judged", "stage1_scored"),
+    ("stage2_scoring", "stage2_judged"),
+    ("stage2_judged", "scored"),
+]
+
+
+def _warm_verified_scores(service, row):
+    scores = {"baseline": {"final_score": 1.75}, "miner": {"final_score": 0}}
+    service._read_completed_submission_scores = Mock(return_value=scores)
+    _wait_for_scores(service, row, lambda result: result == scores and not
+                     service._completed_scores_cache[row["round_id"]]["refreshing"])
+    return scores
+
+
+@pytest.mark.parametrize("before,after", SAFE_CLOSURES)
+def test_normal_closure_keeps_verified_scores_during_fresh_refresh(completed, before, after):
+    service, row, _, _, _ = completed
+    row["status"] = before
+    prior = _warm_verified_scores(service, row)
+    old_entry = service._completed_scores_cache[row["round_id"]]
+    started, finish = threading.Event(), threading.Event()
+    fresh = {**prior, "new-model": {"final_score": 12}}
+
+    def read(_row, *, on_completed, should_continue):
+        started.set()
+        assert finish.wait(2)
+        assert should_continue()
+        for sid, score in fresh.items():
+            on_completed(sid, score)
+        return fresh
+
+    service._read_completed_submission_scores = Mock(side_effect=read)
+    row.update(status=after, status_generation=row["status_generation"] + 1)
+    try:
+        assert service.completed_submission_scores(row) == prior
+        assert started.wait(2)
+        entry = service._completed_scores_cache[row["round_id"]]
+        assert entry is not old_entry
+        assert entry["completed"] is not old_entry["completed"]
+        assert entry["refreshed_at"] == 0
+        assert service.completed_submission_scores(row) == prior
+    finally:
+        finish.set()
+    assert _wait_for_scores(service, row, lambda result: result == fresh) == fresh
+    assert service._read_completed_submission_scores.call_count == 1
+
+
+@pytest.mark.parametrize("old_compact", [False, True])
+def test_closure_identity_matches_existing_compact_projection(completed, old_compact):
+    from lab_arena.store import PUBLIC_CONFIGURATION_COLUMN
+    from tests.lab_arena.competition_summary_projection_test import _project
+
+    service, row, _, _, _ = completed
+    row["configuration_doc"].update({
+        "mode": "live", "network_name": "finney", "netuid": 71,
+        "schedule": {"final_scoring_close": "2026-10-19T22:00:00Z"},
+        "baseline_hotkey": None, "scorer_policy": {"private": True},
+        "deepline_catalog": {"private": True},
+    })
+    columns = "round_id,status,status_generation,participants," + PUBLIC_CONFIGURATION_COLUMN
+    compact = _project(row, columns)
+    service._round = Mock(return_value=row)
+    first = compact if old_compact else row
+    prior = _warm_verified_scores(service, first)
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(0)
+    row.update(status="stage2_judged", status_generation=2)
+    next_row = row if old_compact else _project(row, columns)
+    assert service.completed_submission_scores(next_row) == prior
+    # Explicit null stays distinct from an omitted field through that projection.
+    next_row = deepcopy(next_row)
+    next_row.update(status="scored", status_generation=3)
+    next_row["configuration_doc"].pop("baseline_hotkey")
+    assert service.completed_submission_scores(next_row) == {}
+
+
+@pytest.mark.parametrize("key", PUBLIC_CONFIGURATION_FIELDS)
+def test_closure_rejects_changed_public_configuration(completed, key):
+    service, row, _, _, _ = completed
+    _warm_verified_scores(service, row)
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(0)
+    row.update(status="stage2_judged", status_generation=2)
+    row["configuration_doc"][key] = "changed"
+    assert service.completed_submission_scores(row) == {}
+
+
+@pytest.mark.parametrize("change", ["participant", "nested_config", "config_type"])
+@pytest.mark.parametrize("increment", [0, 1])
+def test_closure_identity_is_a_snapshot_not_mutable_input(completed, change, increment):
+    service, row, _, _, _ = completed
+    row["configuration_doc"].update(schedule={"version": 0}, netuid=0)
+    _warm_verified_scores(service, row)
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(0)
+    row.update(status="stage2_judged" if increment else "stage2_scoring",
+               status_generation=1 + increment)
+    if change == "participant":
+        row["participants"][0]["submission_id"] = "different"
+    elif change == "nested_config":
+        row["configuration_doc"]["schedule"]["version"] = 1
+    else:
+        row["configuration_doc"]["netuid"] = False
+    assert service.completed_submission_scores(row) == {}
+
+
+@pytest.mark.parametrize("after,increment", [
+    ("stage2_judged", 0), ("stage2_judged", 2),  # Same generation or skipped generation.
+    ("scored", 1), ("stage2_scoring", 1),       # Skipped phase or unrelated generation.
+    ("stage1_scoring", 1), ("cancelled", 1), ("published", 1),
+])
+def test_other_phase_or_generation_changes_invalidate(completed, after, increment):
+    service, row, _, _, _ = completed
+    _warm_verified_scores(service, row)
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(0)
+    row.update(status=after, status_generation=row["status_generation"] + increment)
+    assert service.completed_submission_scores(row) == {}
+
+
+@pytest.mark.parametrize("before,after", [
+    ("stage1_scored", "stage2"), ("stage2", "stage2_closed"),
+    ("stage2_closed", "stage2_scoring"), ("stage2_judged", "stage2_scoring"),
+])
+def test_unapproved_forward_edges_and_rewinds_invalidate(completed, before, after):
+    service, row, _, _, _ = completed
+    row["status"] = before
+    _warm_verified_scores(service, row)
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(0)
+    row.update(status=after, status_generation=row["status_generation"] + 1)
+    assert service.completed_submission_scores(row) == {}
+
+
+@pytest.mark.parametrize("old_status", ["stage2_scoring", "open", "cancelled"])
+@pytest.mark.parametrize("compact", [False, True])
+def test_delayed_old_request_cannot_evict_carried_scores_or_new_worker(completed, old_status, compact):
+    service, row, _, _, _ = completed
+    prior = _warm_verified_scores(service, row)
+    old = deepcopy(row)
+    old["status"] = old_status
+    if compact:
+        from lab_arena.store import PUBLIC_CONFIGURATION_COLUMN
+        from tests.lab_arena.competition_summary_projection_test import _project
+        old = _project(old, "round_id,status,status_generation,participants," + PUBLIC_CONFIGURATION_COLUMN)
+    started, finish = threading.Event(), threading.Event()
+    fresh = {"miner": {"final_score": 61}}
+
+    def read(_row, *, on_completed, should_continue):
+        started.set()
+        assert finish.wait(2)
+        on_completed("miner", fresh["miner"])
+        return fresh
+
+    service._read_completed_submission_scores = Mock(side_effect=read)
+    row.update(status="stage2_judged", status_generation=2)
+    try:
+        assert service.completed_submission_scores(row) == prior
+        assert started.wait(2)
+        entry = service._completed_scores_cache[row["round_id"]]
+        assert service.completed_submission_scores(old) == {}
+        assert service._completed_scores_cache[row["round_id"]] is entry
+        assert entry["refreshing"] and entry["completed"] == prior
+    finally:
+        finish.set()
+    assert _wait_for_scores(service, row, lambda result: result == fresh) == fresh
+    assert service._read_completed_submission_scores.call_count == 1
+
+
+def test_old_refresh_cannot_overwrite_carried_entry(completed):
+    service, row, _, _, _ = completed
+    prior = _warm_verified_scores(service, row)
+    old_started, release_old, old_finished = (threading.Event() for _ in range(3))
+    new_started, release_new = threading.Event(), threading.Event()
+
+    def read(refresh_row, *, on_completed, should_continue):
+        if refresh_row["status_generation"] == 1:
+            old_started.set()
+            assert release_old.wait(2)
+            assert not should_continue()
+            on_completed("miner", {"final_score": 99})
+            old_finished.set()
+            return {"miner": {"final_score": 99}}
+        new_started.set()
+        assert release_new.wait(2)
+        return prior
+
+    service._read_completed_submission_scores = Mock(side_effect=read)
+    service._completed_scores_cache[row["round_id"]]["refreshed_at"] -= 16
+    try:
+        assert service.completed_submission_scores(row) == prior
+        assert old_started.wait(2)
+        row = {**row, "status": "stage2_judged", "status_generation": 2}
+        assert service.completed_submission_scores(row) == prior
+        assert new_started.wait(2)
+        entry = service._completed_scores_cache[row["round_id"]]
+        release_old.set()
+        assert old_finished.wait(2)
+        assert entry["completed"] == prior
+        assert service._completed_scores_cache[row["round_id"]] is entry
+    finally:
+        release_old.set()
+        release_new.set()
+    _wait_for_scores(service, row, lambda _: not entry["refreshing"])
+    assert entry["completed"] == prior
+
+
+def test_carried_score_removed_by_fresh_cost_check(completed):
+    service, row, _, _, eligibility = completed
+    assert _wait_for_scores(service, row, lambda scores: "miner" in scores)
+    eligibility.update(eligible=False, eligibility_reason="provider_cost_uncertain")
+    removed, finish = threading.Event(), threading.Event()
+    original_read = service._read_completed_submission_scores
+
+    def read(refresh_row, *, on_completed, should_continue):
+        result = original_read(refresh_row, on_completed=on_completed, should_continue=should_continue)
+        removed.set()
+        assert finish.wait(2)
+        return result
+
+    service._read_completed_submission_scores = read
+    row.update(status="stage2_judged", status_generation=2)
+    # The request gets the previously verified value; its fresh eligibility check
+    # still removes it, rather than treating carryover as permanent authority.
+    try:
+        assert service.completed_submission_scores(row)["miner"]["final_score"] == 60
+        assert removed.wait(2)
+        assert service._completed_scores_cache[row["round_id"]]["refreshing"]
+        assert service.completed_submission_scores(row) == {}
+    finally:
+        finish.set()
+    _wait_for_scores(service, row, lambda result: not result and not
+                     service._completed_scores_cache[row["round_id"]]["refreshing"])
+    assert service.completed_submission_scores(row) == {}
+
+
+def test_successful_same_phase_refresh_replaces_prior_value(completed):
+    service, row, _, _, _ = completed
+    _warm_verified_scores(service, row)
+    fresh = {"miner": {"final_score": 61}}
+    service._read_completed_submission_scores = Mock(return_value=fresh)
+    service._completed_scores_cache[row["round_id"]]["refreshed_at"] -= 16
+    assert _wait_for_scores(service, row, lambda result: result == fresh) == fresh
+    assert service._read_completed_submission_scores.call_count == 1

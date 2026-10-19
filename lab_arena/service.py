@@ -37,6 +37,7 @@ from lab_arena.store import (
     ArenaStoreUnavailable,
     CURRENT_CONFIGURATION_FIELDS,
     PUBLIC_CONFIGURATION_COLUMN,
+    PUBLIC_CONFIGURATION_FIELDS,
     PUBLIC_RESULTS_CONFIGURATION_FIELDS,
     hash_lease_token,
     safe_store_error_metadata,
@@ -6367,22 +6368,46 @@ class ArenaService:
         models appear as each check finishes; costs are rechecked on refresh.
         """
         configuration = row.get("configuration_doc") or {}
-        if (row.get("status") not in {
-            "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
-            "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
-        } or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
-            or configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
-            with self._completed_scores_lock:
-                self._completed_scores_cache.pop(str(row["round_id"]), None)
-            return {}
         round_id = str(row["round_id"])
         generation = int(row.get("status_generation") or 0)
+        status = row.get("status")
+        # Compact and full reads share these fields. Normal closure preserves
+        # the private configuration and scoring plans under the DB write-once
+        # guards; no other phase/generation change can reuse verified scores.
+        identity = contracts.canonical_json({
+            "participants": row.get("participants") or [],
+            "configuration": {key: configuration[key] for key in PUBLIC_CONFIGURATION_FIELDS
+                              if key in configuration},
+        })
         worker = None
         with self._completed_scores_lock:
             cached = self._completed_scores_cache.get(round_id)
-            if cached is None or cached["generation"] != generation:
-                cached = {"generation": generation, "completed": {}, "refreshed_at": 0.0,
-                          "refreshing": False}
+            # A delayed request must not roll back a newer entry or evict its
+            # carried scores, including when the old row is no longer eligible.
+            if cached is not None and cached["generation"] > generation:
+                return {}
+            if (status not in {
+                "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
+                "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
+            } or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
+                or configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
+                self._completed_scores_cache.pop(round_id, None)
+                return {}
+            if (cached is None or cached["generation"] != generation
+                    or cached["status"] != status or cached["identity"] != identity):
+                carry = bool(
+                    cached is not None and generation == cached["generation"] + 1
+                    and cached["identity"] == identity
+                    and (cached["status"], status) in {
+                        ("stage1_scoring", "stage1_judged"),
+                        ("stage1_judged", "stage1_scored"),
+                        ("stage2_scoring", "stage2_judged"),
+                        ("stage2_judged", "scored"),
+                    }
+                )
+                cached = {"generation": generation, "status": status, "identity": identity,
+                          "completed": dict(cached["completed"]) if carry else {},
+                          "refreshed_at": 0.0, "refreshing": False}
                 self._completed_scores_cache[round_id] = cached
                 # Public summaries enumerate a bounded recent history.
                 if len(self._completed_scores_cache) > 8:

@@ -91,10 +91,10 @@ def _answer(event_date, *, urls=None):
 
 def _run(monkeypatch, *, event_date="2025-08-26", context=None,
          body=RECAP_TEXT, evidence_type="FUNDING", urls=None, fetched=True,
-         publication_date="", metadata=None):
+         publication_date="", metadata=None, max_age_days=365, extra_sources=()):
     fetch = AsyncMock(return_value={"results": [
         {"url": SECONDARY, "text": body, "meta": metadata or {},
-         "source_publication_date": publication_date},
+         "source_publication_date": publication_date}, *extra_sources,
     ] if fetched else [], "statuses": []})
     provider = AsyncMock(return_value=_answer(event_date, urls=urls))
     monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetch)
@@ -102,11 +102,13 @@ def _run(monkeypatch, *, event_date="2025-08-26", context=None,
     verdicts = []
     with use_evaluation_date("2026-10-19"):
         result = asyncio.run(lead_scorer._score_single_intent_signal(
-            _signal(), _icp(evidence_type), None, "Aurasell", "https://aurasell.ai/",
+            _signal(), _icp(evidence_type).model_copy(update={"intent_max_age_days": max_age_days}), None, "Aurasell", "https://aurasell.ai/",
             company_linkedin="https://www.linkedin.com/company/aurasell",
             trust_signal_date=True, stage1_soft_reject=True, llm_only_intent_gate=True,
             integrity_policy=True, company_quality=True,
-            verified_company_identity=IDENTITY, evidence_signals=[_signal()],
+            verified_company_identity=IDENTITY, evidence_signals=[_signal(), *[
+                _signal().model_copy(update={"url": source["url"]}) for source in extra_sources
+            ]],
             verified_funding_stage_context=context, verdict_out=verdicts,
         ))
     return result, verdicts, fetch, provider
@@ -333,3 +335,285 @@ def test_changed_funding_context_invalidates_positive_terminal_retry_cache(monke
         asyncio.run(run(CONTEXT))
         asyncio.run(run({**CONTEXT, "text": STAGE_TEXT + " Updated source body."}))
     assert single.await_count == expected_calls
+
+# Redacted public facts reproduce the source-loss shape; model verdicts below
+# are stubs that test evidence plumbing, not proof of semantic judgment.
+LATER = "https://press.example/aurasell-product"
+LATER_CONTEXT = {"dimension": "stage", "url": LATER,
+                 "text": "February 12, 2026. About Aurasell: " + QUOTE}
+AUXILIARY = {"dimension": "first_party_context", "url": PRIMARY,
+             "final_url": PRIMARY, "text": STAGE_TEXT}
+
+
+def _six_source_shape():
+    from types import SimpleNamespace
+    from qualification.scoring.company_evidence_investigator import PRIVATE_FETCHED_PAGES_KEY
+
+    company = _company().model_copy(update={
+        "intent_details": "Aurasell has raised a $30 million Seed round from N47, Menlo Ventures, and Unusual Ventures.",
+        "required_attribute": SimpleNamespace(
+            evidence_url="https://aurasell.ai/attribute", evidence_quote="Aurasell supplies software.",
+        ),
+    })
+    fit = _fit()
+    fit.details["dimension_evidence"]["stage"]["web_evidence"]["url"] = LATER
+    pages = {f"https://aurasell.ai/{d}": {
+        "final_url": f"https://aurasell.ai/{d}", "text": f"Aurasell {d}",
+    } for d in ("industry", "employee_size", "geography")}
+    pages.update({
+        LATER: {"final_url": LATER, "text": LATER_CONTEXT["text"]},
+        "https://aurasell.ai/attribute": {"final_url": "https://aurasell.ai/attribute", "text": "Aurasell supplies software."},
+        PRIMARY: {"final_url": PRIMARY, "text": STAGE_TEXT},
+    })
+    sink = {}
+    lead_scorer._retain_matched_investigator_source_contexts(
+        sink, fit, {PRIVATE_FETCHED_PAGES_KEY: pages}, company=company,
+    )
+    return company, fit, sink
+
+
+def test_four_matches_attribute_and_one_fetched_auxiliary_fit_existing_map():
+    company, fit, sink = _six_source_shape()
+    assert lead_scorer._MAX_RETAINED_INVESTIGATOR_CONTEXTS == 4 + 1 + 1
+    assert len(sink) == 6 and sink[PRIMARY]["text"] == STAGE_TEXT
+    auxiliary = lead_scorer._matched_first_party_source_context(
+        fit, sink, company, paragraph=company.intent_details,
+        excluded_urls=[company.required_attribute.evidence_url],
+    )
+    assert auxiliary == AUXILIARY
+
+
+@pytest.mark.parametrize("evidence_type", ["FUNDING", "PRODUCT_LAUNCH"])
+def test_whole_company_handoff_keeps_aux_before_paragraph_cap(monkeypatch, evidence_type):
+    company, fit, sink = _six_source_shape()
+    async def fake_fit(*args, **kwargs):
+        kwargs["matched_company_source_sink"].update(sink)
+        return fit
+    score = AsyncMock(return_value=(0, 0, 0, 0, True, []))
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", fake_fit)
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent_signal", score)
+    retry = {}
+    asyncio.run(lead_scorer.score_company_competition_intent(
+        company, _icp(evidence_type), 0, 0, set(), integrity_policy=True,
+        matched_company_retry_source_cache=retry,
+    ))
+    context = score.await_args.kwargs.get("verified_funding_stage_context")
+    if evidence_type == "FUNDING":
+        assert context == [LATER_CONTEXT, AUXILIARY]
+        assert list(retry["pages"])[:2] == [PRIMARY, LATER]
+    else:
+        assert context is None and PRIMARY not in retry["pages"]
+    assert len(retry["pages"]) <= 3
+
+
+@pytest.mark.parametrize("mutation", ["other_domain", "redirect", "company", "empty", "oversize", "extra_field", "http"])
+def test_invalid_auxiliary_never_reaches_funding_judge(monkeypatch, mutation):
+    context = copy.deepcopy(AUXILIARY)
+    if mutation == "other_domain": context.update(url="https://other.example/round", final_url="https://other.example/round")
+    elif mutation == "redirect": context["final_url"] = "https://other.example/login"
+    elif mutation == "company": context["text"] = "An unrelated company raised a Seed round."
+    elif mutation == "empty": context["text"] = ""
+    elif mutation == "oversize": context["text"] = "Aurasell " + "x" * 24000
+    elif mutation == "extra_field": context["proof"] = "model says verified"
+    elif mutation == "http": context["url"] = context["final_url"] = "http://aurasell.ai/round"
+    _, _, _, provider = _run(monkeypatch, context=[LATER_CONTEXT, context], urls=[SECONDARY])
+    assert STAGE_TEXT not in provider.await_args.args[2]
+
+
+@pytest.mark.parametrize("new_date,body", [
+    ("2025-08-26", RECAP_TEXT),
+    ("2026-02-14", "Aurasell closed a new Series A on February 14, 2026."),
+    ("2026-02-14", "Aurasell closed a separate new Seed extension on February 14, 2026."),
+])
+def test_funding_judge_receives_full_aux_with_no_extra_fetch_or_model_call(monkeypatch, new_date, body):
+    result, receipts, fetch, provider = _run(
+        monkeypatch, event_date=new_date, body=body,
+        context=[LATER_CONTEXT, AUXILIARY], urls=[SECONDARY, LATER, PRIMARY],
+    )
+    assert fetch.await_count == provider.await_count == 1
+    prompt = provider.await_args.args[2]
+    assert body in prompt and STAGE_TEXT in prompt and LATER_CONTEXT["text"] in prompt
+    assert "not MATCH-stage or event-identity proof" in prompt
+    assert (result[0] == 0) == (new_date == "2025-08-26")
+    auxiliary = next(x for x in receipts[-1]["verification_trace"]["verified_source_context"] if x["url"] == PRIMARY)
+    assert auxiliary == {"url": PRIMARY, "text": STAGE_TEXT, "source_publication_date": "",
+                         "source_role": "first_party_context", "final_url": PRIMARY}
+
+
+def test_claimed_stage_source_dedup_still_allows_distinct_auxiliary(monkeypatch):
+    stage = {**LATER_CONTEXT, "url": SECONDARY, "text": RECAP_TEXT}
+    _, receipts, fetch, provider = _run(
+        monkeypatch, context=[stage, AUXILIARY], urls=[SECONDARY, PRIMARY],
+    )
+    assert fetch.await_count == provider.await_count == 1
+    assert STAGE_TEXT in provider.await_args.args[2]
+    retained = receipts[-1]["verification_trace"]["verified_source_context"]
+    assert len([x for x in retained if x["url"] == SECONDARY]) == 1
+    assert any(x["url"] == PRIMARY for x in retained)
+
+
+@pytest.mark.parametrize("urls", [[PRIMARY], [LATER, PRIMARY]])
+def test_auxiliary_never_replaces_submitted_evidence(monkeypatch, urls):
+    result, _, _, _ = _run(monkeypatch, context=[LATER_CONTEXT, AUXILIARY], urls=urls)
+    assert result[0] == 0
+
+
+def test_uncited_auxiliary_is_not_projected_as_verified_context(monkeypatch):
+    _, receipts, _, _ = _run(monkeypatch, context=[LATER_CONTEXT, AUXILIARY], urls=[SECONDARY, LATER])
+    assert PRIMARY not in {x["url"] for x in receipts[-1]["verification_trace"]["verified_source_context"]}
+
+
+def test_legacy_alias_is_not_subject_to_new_exact_name_gate():
+    context = lead_scorer._validated_first_party_source_context(
+        PRIMARY, {"final_url": PRIMARY, "text": "Legacy Alias supplies software."}, IDENTITY,
+        company_name="Legacy Alias",
+    )
+    assert context is not None
+
+
+def test_auxiliary_changed_body_invalidates_existing_terminal_cache_key():
+    args = ({}, IDENTITY, [_signal()], "funding", "FUNDING", 365, {})
+    first = lead_scorer._intent_terminal_retry_key(*args, [LATER_CONTEXT, AUXILIARY])
+    changed = lead_scorer._intent_terminal_retry_key(*args, [LATER_CONTEXT, {**AUXILIARY, "text": STAGE_TEXT + " New round."}])
+    assert first != changed
+
+
+def test_retry_reserves_existing_three_slots_for_auxiliary_and_stage():
+    company, fit, sink = _six_source_shape()
+    retry = {}
+    lead_scorer._retain_matched_company_retry_sources(retry, sink, fit)
+    assert len(retry["pages"]) == 3 and PRIMARY not in retry["pages"]
+    lead_scorer._retain_matched_company_retry_sources(
+        retry, sink, fit, funding_contexts=[LATER_CONTEXT, AUXILIARY],
+    )
+    identity = lead_scorer._matched_company_result_retry_identity(fit)
+    reused = lead_scorer._matched_company_retry_prefetched_pages(retry, identity)
+    assert list(reused)[:2] == [PRIMARY, LATER] and len(reused) == 3
+    assert reused[PRIMARY]["text"] == STAGE_TEXT
+
+
+@pytest.mark.parametrize("original_count", [1, 3])
+@pytest.mark.parametrize("mutation", [None, "uncited", "not_supplied", "wrong_domain", "forged_role"])
+def test_auxiliary_receipt_projection_is_cited_bound_and_date_preserving(monkeypatch, mutation, original_count):
+    text = "August 26, 2025. Aurasell launches. " + "padding " * 600 + QUOTE
+    _, receipts, _, _ = _run(monkeypatch, event_date="2025-08-26",
+        context=[LATER_CONTEXT, {**AUXILIARY, "text": text}], urls=[SECONDARY, LATER, PRIMARY], max_age_days=900)
+    receipt = copy.deepcopy(receipts[-1])
+    evaluation = receipt["verification_trace"]["intent_verdict"]["signal_evaluations"][0]
+    original_urls = [SECONDARY]
+    if original_count == 3:
+        extra_urls = ["https://news.example/original-two", "https://news.example/original-three"]
+        original_urls.extend(extra_urls)
+        evaluation["evidence_urls_used"] = [*original_urls, LATER, PRIMARY]
+        evaluation["source_urls_supplied"] = [*original_urls, LATER, PRIMARY]
+        receipt["verification_trace"]["verified_source_context"][1:1] = [
+            {"url": url, "text": "Additional original event source."} for url in extra_urls
+        ]
+    auxiliary = next(x for x in receipt["verification_trace"]["verified_source_context"] if x["url"] == PRIMARY)
+    if mutation == "uncited": evaluation["evidence_urls_used"].remove(PRIMARY)
+    elif mutation == "not_supplied": evaluation["source_urls_supplied"].remove(PRIMARY)
+    elif mutation == "wrong_domain": auxiliary["final_url"] = "https://other.example/round"
+    elif mutation == "forged_role": auxiliary["source_role"] = "model_verified"
+    row = {"raw":54.0,"after_decay":54.0,"matched_icp_signal":0,"evidence_type":"FUNDING",
+           "evidence_urls":original_urls,"judge_verdict":receipt}
+    company = _company().model_copy(update={"intent_details":"Aurasell raised funding for its software."})
+    fit = _fit()
+    fit.details["dimension_evidence"]["stage"]["web_evidence"]["url"] = LATER
+    document = intent_details.review_evidence(company, _icp(), [row], fit.receipt("company_fit"))
+    admitted = [x for x in document["admitted_evidence"] if x.get("source_url") == PRIMARY
+                and x["evidence_kind"] == "verified_source_context"]
+    if mutation:
+        assert admitted == []
+    else:
+        assert len(admitted) == 1
+        assert "August 26, 2025" in admitted[0]["admitted_text"][0]
+        assert PRIMARY in document["verified_signals"][0]["source_urls"]
+        assert sum(len(t.encode()) for x in document["admitted_evidence"]
+                   if x["evidence_kind"] == "verified_source_context" for t in x["admitted_text"]) <= intent_details._MAX_SOURCE_CONTEXT_BYTES
+
+
+def test_auxiliary_window_does_not_invent_missing_judge_date():
+    body = "Aurasell raised Seed funding. " + "x" * 5000
+    value = intent_details._funding_auxiliary_source_window(body, 500, ["Aurasell raised"], "2025-08-26")
+    assert "2025" not in value and value in body
+
+
+@pytest.mark.parametrize("date_value,expected_positive", [("2025-08-26", False), ("2026-02-14", True)])
+def test_hermetic_whole_company_uses_existing_funding_date_gate(monkeypatch, date_value, expected_positive):
+    company, fit, sink = _six_source_shape()
+    async def fake_fit(*args, **kwargs):
+        kwargs["matched_company_source_sink"].update(sink)
+        return fit
+    fetch = AsyncMock(return_value={"results":[{"url":SECONDARY,"text":RECAP_TEXT,"meta":{}}],"statuses":[]})
+    provider = AsyncMock(return_value=_answer(date_value, urls=[SECONDARY,LATER,PRIMARY]))
+    paragraph = AsyncMock(return_value={"contract_id":"intent-details:v1","decision":"match"})
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", fake_fit)
+    monkeypatch.setattr(verifier, "_fetch_sd_then_exa", fetch)
+    monkeypatch.setattr(verifier, "_call_openrouter", provider)
+    monkeypatch.setattr(intent_details, "review_intent_details", paragraph)
+    with use_evaluation_date("2026-10-19"):
+        score = asyncio.run(lead_scorer.score_company_competition_intent(
+            company, _icp(), 0, 0, set(), integrity_policy=True, company_quality=True,
+        ))
+    assert (score.final_score > 0) == expected_positive
+    assert fetch.await_count == provider.await_count == 1
+    assert paragraph.await_count == int(expected_positive)
+    assert STAGE_TEXT in provider.await_args.args[2]
+
+
+def test_unverified_attribute_can_still_use_existing_auxiliary_fallback():
+    company, fit, sink = _six_source_shape()
+    # A submitted quote mismatch prevents the special attribute role, but does
+    # not erase an independently fetched relevant first-party company page.
+    company.required_attribute.evidence_url = PRIMARY
+    company.required_attribute.evidence_quote = "An absent submitted quote."
+    selected = lead_scorer._matched_company_source_contexts(
+        fit, None, None, sink, paragraph=company.intent_details, company=company,
+    )
+    assert any(c["dimension"] == "first_party_context" and c["url"] == PRIMARY for c in selected)
+
+
+@pytest.mark.parametrize("aux_size", [5700, 23900])
+def test_five_source_prompt_keeps_urls_and_existing_balanced_bound(monkeypatch, aux_size):
+    text = STAGE_TEXT + " x" * ((aux_size-len(STAGE_TEXT))//2)
+    extra = [{"url":f"https://news.example/source-{i}","text":"Aurasell event. " + "z " * 29000,"meta":{}}
+             for i in (2,3)]
+    _, _, fetch, provider = _run(
+        monkeypatch, event_date="2025-08-26", body=RECAP_TEXT + " y" * 29000,
+        context=[LATER_CONTEXT, {**AUXILIARY,"text":text}], extra_sources=extra,
+        urls=[SECONDARY, *(source["url"] for source in extra), LATER, PRIMARY],
+    )
+    prompt = provider.await_args.args[2]
+    assert len(prompt) <= 95000
+    assert all(url in prompt for url in [SECONDARY, *(source["url"] for source in extra),LATER,PRIMARY])
+    assert "August 26, 2025" in prompt
+    if aux_size == 5700:
+        assert text in prompt
+    # The existing balanced limiter may excerpt the 24KB body; do not claim
+    # universal full-body survival or fabricate a missing date after clipping.
+    assert fetch.await_count == provider.await_count == 1
+
+
+@pytest.mark.parametrize("literal_date", [True, False])
+def test_auxiliary_initial_window_keeps_late_literal_date_without_inventing_one(monkeypatch, literal_date):
+    text = "Aurasell. " + QUOTE + " padding" * 2300
+    if literal_date:
+        text += " August 26, 2025. Aurasell financing announcement."
+    assert 12000 < len(text.encode()) < 24000
+    _, receipts, _, _ = _run(
+        monkeypatch, event_date="2025-08-26", max_age_days=900,
+        context=[LATER_CONTEXT, {**AUXILIARY, "text":text}],
+        urls=[SECONDARY,LATER,PRIMARY],
+    )
+    fit = _fit()
+    fit.details["dimension_evidence"]["stage"]["web_evidence"]["url"] = LATER
+    row = {"raw":54.0,"after_decay":54.0,"matched_icp_signal":0,"evidence_type":"FUNDING",
+           "evidence_urls":[SECONDARY],"judge_verdict":receipts[-1]}
+    company = _company().model_copy(update={"intent_details":"Aurasell raised funding for its software."})
+    document = intent_details.review_evidence(company,_icp(),[row],fit.receipt("company_fit"))
+    source = next(v for v in document["admitted_evidence"] if v.get("source_url")==PRIMARY
+                  and v["evidence_kind"]=="verified_source_context")
+    retained = source["admitted_text"][0]
+    assert ("August 26, 2025" in retained) is literal_date
+    assert retained in text
+    assert len(retained.encode()) <= intent_details._MAX_SOURCE_CONTEXT_BYTES

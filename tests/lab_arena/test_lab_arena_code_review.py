@@ -89,8 +89,9 @@ def test_prepare_request_contains_every_file_in_full_and_pydantic_style_passes()
     members = _pydantic_style_source()
     prepared = code_review.prepare_request(_archive(members))
 
-    assert prepared.parameters["model"] == "anthropic/claude-sonnet-5"
+    assert prepared.parameters["model"] == "anthropic/claude-sonnet-5.5"
     assert prepared.parameters["max_tokens"] == 16_384
+    assert not {"temperature", "top_p", "top_k"} & prepared.parameters.keys()
     assert prepared.parameters["transforms"] == []
     assert prepared.parameters["plugins"] == [
         {"id": "context-compression", "enabled": False}
@@ -223,13 +224,33 @@ def test_large_full_source_review_passes_with_fresh_unmodified_router_proof(pipe
 def test_large_review_accepts_verified_catalog_canonical_endpoint():
     prepared, response = _large_complete_review()
     selected = response["openrouter_metadata"]["endpoints"]["available"][0]
-    selected.update({"provider": "Amazon Bedrock", "model": "anthropic/claude-sonnet-5-20260630"})
+    selected.update({"provider": "Amazon Bedrock", "model": "anthropic/claude-sonnet-5.5-20260928"})
     assert code_review.parse_response(response, prepared).passed
 
 
+def test_prepared_historical_review_retains_its_exact_canonical_endpoint():
+    members = _pydantic_style_source()
+    members["large.txt"] = b"public source line\n" * 80_000
+    prepared = code_review.prepare_request(
+        _archive(members), model="anthropic/claude-sonnet-5",
+    )
+    assert prepared.requires_context_integrity
+    response = _openrouter_response(prepared)
+    response["openrouter_metadata"] = _integrity_metadata(prepared)
+    endpoint = response["openrouter_metadata"]["endpoints"]["available"][0]
+    endpoint["model"] = "anthropic/claude-sonnet-5-20260630"
+    response["usage"] = {"prompt_tokens": 400_000}
+    assert code_review.parse_response(response, prepared).passed
+    endpoint["model"] = "anthropic/claude-sonnet-5.5-20260928"
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, prepared)
+    assert failure.value.response_reason == "context_integrity"
+
+
 @pytest.mark.parametrize("endpoint_model", [
-    "anthropic/claude-sonnet-5-20260701", "anthropic/claude-sonnet-5.5",
-    "anthropic/claude-sonnet-5-20260630:other",
+    "anthropic/claude-sonnet-5.5-20260929", "anthropic/claude-sonnet-5",
+    "anthropic/claude-sonnet-5-20260630",
+    "anthropic/claude-sonnet-5.5-20260928:other",
 ])
 def test_large_review_rejects_unverified_endpoint_model_identity(endpoint_model):
     prepared, response = _large_complete_review()

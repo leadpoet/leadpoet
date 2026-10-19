@@ -26,10 +26,10 @@ SCORING_ADAPTER_VERSION_V1 = "qualification_style_v1"
 DEFAULT_JUDGE_MODELS = {
     "company_fit_reverification": "perplexity/sonar",
     "intent_signal_judge": "openai/gpt-6-luna",
-    "intent_details_review": "anthropic/claude-sonnet-4.5",
+    "intent_details_review": "anthropic/claude-sonnet-5.5",
     "intent_three_stage_stage3": "perplexity/sonar-pro",
     "intent_fetched_evidence": "openai/gpt-6-luna",
-    "role_batch_check": "google/gemini-2.5-flash",
+    "role_batch_check": "google/gemini-3.5-flash-lite",
 }
 CREDENTIAL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
@@ -137,10 +137,16 @@ def apply_policy_to_environment(
     evidence_model = models.get("intent_fetched_evidence") or models.get(
         "intent_three_stage_stage3"
     )
-    if evidence_model:
-        if bindings.get("ARENA_INTENT_EVIDENCE_MODEL", evidence_model) != evidence_model:
-            raise ScorerPolicyConflict("evidence reviewer conflicts with the frozen model policy")
-        bindings["ARENA_INTENT_EVIDENCE_MODEL"] = evidence_model
+    model_bindings = {
+        "ARENA_INTENT_EVIDENCE_MODEL": evidence_model,
+        "ARENA_INTENT_DETAILS_REVIEW_MODEL": models.get("intent_details_review"),
+        "ARENA_ROLE_BATCH_MODEL": models.get("role_batch_check"),
+    }
+    for name, model in model_bindings.items():
+        if model:
+            if bindings.get(name, model) != model:
+                raise ScorerPolicyConflict("reviewer conflicts with the frozen model policy")
+            bindings[name] = model
     for name, value in bindings.items():
         existing = environ.get(name)
         if existing is not None and existing != value:

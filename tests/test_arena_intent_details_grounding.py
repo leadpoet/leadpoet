@@ -159,11 +159,15 @@ def test_paragraph_preserves_words_and_normalizes_line_wrapping():
     assert validate_intent_details_text(PARAGRAPH) == PARAGRAPH
 
 
-@pytest.mark.parametrize("model,expected", [
-    ("gpt-4o-mini", "openai/gpt-4o-mini"),
-    ("anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet-4.5"),
+@pytest.mark.parametrize("model,expected,temperature", [
+    ("gpt-4o-mini", "openai/gpt-4o-mini", 0.3),
+    ("anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet-4.5", 0.3),
+    ("anthropic/claude-sonnet-5", "anthropic/claude-sonnet-5", 0.3),
+    ("anthropic/claude-sonnet-5.5", "anthropic/claude-sonnet-5.5", None),
 ])
-def test_review_transport_preserves_legacy_and_pinned_model_names(monkeypatch, model, expected):
+def test_review_transport_preserves_legacy_and_pinned_model_names(
+    monkeypatch, model, expected, temperature,
+):
     class Client:
         async def __aenter__(self):
             return self
@@ -173,6 +177,12 @@ def test_review_transport_preserves_legacy_and_pinned_model_names(monkeypatch, m
 
         async def post(self, url, *, json, **kwargs):
             assert json["model"] == expected
+            if temperature is None:
+                assert not {"temperature", "top_p", "top_k"} & json.keys()
+            else:
+                assert json["temperature"] == temperature
+            assert json["max_tokens"] == 200
+            assert json["provider"] == {"data_collection": "deny", "zdr": True}
             return SimpleNamespace(raise_for_status=lambda: None,
                                    json=lambda: {"choices": [{"message": {"content": "{}"}}]})
 
@@ -928,7 +938,7 @@ def test_all_grounding_and_writing_checks_must_pass(monkeypatch, failed_check):
         assert len(document["verified_signals"]) == 2
         assert "untrusted JSON data" in kwargs["system_prompt"]
         assert kwargs["max_retries"] == 0
-        assert kwargs["model"] == "anthropic/claude-sonnet-4.5"
+        assert kwargs["model"] == "anthropic/claude-sonnet-5.5"
         return json.dumps(_review_response(checks, [
             {
                 "matched_icp_signal": index,

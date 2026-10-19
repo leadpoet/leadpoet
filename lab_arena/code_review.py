@@ -19,13 +19,15 @@ from typing import Any, Dict, Mapping, NoReturn, Tuple
 from lab_arena import contracts, source_bundle
 
 
-DEFAULT_REVIEW_MODEL = "anthropic/claude-sonnet-5"
-# Exact public catalog id -> canonical_slug, verified 2026-10-06:
-# https://openrouter.ai/api/v1/models?q=claude-sonnet-5
+DEFAULT_REVIEW_MODEL = "anthropic/claude-sonnet-5.5"
+# Exact public catalog id -> canonical_slug, verified 2026-10-19:
+# https://openrouter.ai/api/v1/models?q=claude-sonnet-5.5
 # Router endpoint metadata may report this canonical identity rather than the
 # requested id. No other dates, suffixes, or model families are interchangeable.
 _REVIEW_MODEL_CANONICAL_SLUGS = {
-    DEFAULT_REVIEW_MODEL: "anthropic/claude-sonnet-5-20260630",
+    DEFAULT_REVIEW_MODEL: "anthropic/claude-sonnet-5.5-20260928",
+    # Preserve validation for prepared reviews that selected the old model.
+    "anthropic/claude-sonnet-5": "anthropic/claude-sonnet-5-20260630",
 }
 DEFAULT_MAX_OUTPUT_TOKENS = 16_384
 DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000

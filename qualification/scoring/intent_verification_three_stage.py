@@ -2451,6 +2451,7 @@ def _canonical_target_absence_receipt(value: Any) -> Optional[Dict[str, Any]]:
 _EXA_TARGET_CRAWL_FAILURES = {
     ("CRAWL_LIVECRAWL_TIMEOUT", 504),
     ("CRAWL_UNKNOWN_ERROR", 500),
+    ("SOURCE_NOT_AVAILABLE", 403),
 }
 
 

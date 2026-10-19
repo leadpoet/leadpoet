@@ -179,8 +179,10 @@ def test_review_transport_preserves_legacy_and_pinned_model_names(
             assert json["model"] == expected
             if temperature is None:
                 assert not {"temperature", "top_p", "top_k"} & json.keys()
+                assert json["reasoning"] == {"effort": "low"}
             else:
                 assert json["temperature"] == temperature
+                assert "reasoning" not in json
             assert json["max_tokens"] == 200
             assert json["provider"] == {"data_collection": "deny", "zdr": True}
             return SimpleNamespace(raise_for_status=lambda: None,
@@ -190,6 +192,72 @@ def test_review_transport_preserves_legacy_and_pinned_model_names(
     assert asyncio.run(verification_helpers.openrouter_chat(
         "review", model=model, api_key="test-only-placeholder", max_retries=0,
     )) == "{}"
+
+
+@pytest.mark.parametrize("model", [
+    "anthropic/claude-sonnet-5.5", "anthropic/claude-sonnet-4.5",
+    "anthropic/claude-sonnet-5", "openai/gpt-4o-mini",
+])
+def test_review_800_token_json_keeps_model_settings_through_format_and_provider_retries(
+    monkeypatch, model,
+):
+    import httpx
+
+    requests = []
+    waits = []
+    schema = {"type": "json_schema", "json_schema": {
+        "name": "review", "strict": True,
+        "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    }}
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, *, json, **kwargs):
+            requests.append(json)
+            request = httpx.Request("POST", url)
+            if len(requests) == 1:
+                return httpx.Response(400, text="json_schema response_format unsupported", request=request)
+            if len(requests) == 2:
+                return httpx.Response(503, text="provider unavailable", request=request)
+            return httpx.Response(200, json={"choices": [{
+                "finish_reason": "stop", "message": {"content": "{}"},
+            }]}, request=request)
+
+    async def sleep(delay):
+        waits.append(delay)
+
+    monkeypatch.setattr(verification_helpers.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(verification_helpers.asyncio, "sleep", sleep)
+    response = asyncio.run(verification_helpers.openrouter_chat(
+        "review", model=model, api_key="test-only-placeholder", max_retries=2,
+        system_prompt="Use the supplied evidence.", response_format=schema, max_tokens=800,
+    ))
+    assert json.loads(response) == {}
+    assert len(requests) == 3
+    assert waits == [3.0]
+    assert requests[0]["response_format"] == schema
+    assert [request["response_format"] for request in requests[1:]] == [
+        {"type": "json_object"}, {"type": "json_object"},
+    ]
+    for request in requests:
+        assert request["model"] == model
+        assert request["max_tokens"] == 800
+        assert request["messages"] == [
+            {"role": "system", "content": "Use the supplied evidence."},
+            {"role": "user", "content": "review"},
+        ]
+        assert request["provider"] == {"data_collection": "deny", "zdr": True}
+        if model == "anthropic/claude-sonnet-5.5":
+            assert request["reasoning"] == {"effort": "low"}
+            assert not {"temperature", "top_p", "top_k"} & request.keys()
+        else:
+            assert request["temperature"] == 0.3
+            assert "reasoning" not in request
 
 
 def test_review_keeps_non_qualifying_findings_separate_from_verified_coverage():

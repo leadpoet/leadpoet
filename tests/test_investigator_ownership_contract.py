@@ -64,7 +64,10 @@ def validate(raw, *, pages=None, company="Clear Capital", **kwargs):
 def project(claim, requested="Private Equity"):
     verdict = {
         "observed_company_stage": claim["observed_value"],
-        "stage_matches": requested == "Private Equity",
+        "stage_matches": lead_scorer._company_stage_matches(
+            lead_scorer._normalize_company_stage(claim["observed_value"]),
+            lead_scorer._normalize_company_stage(requested),
+        ),
         "dimension_evidence": {"stage": {
             "url": claim["evidence_url"], "quote": claim["evidence_quote"],
             "supporting_evidence": claim["supporting_evidence"],
@@ -396,9 +399,9 @@ def test_proven_pe_can_contradict_a_requested_venture_stage():
     ("Private Equity", "Private Equity", CONTROL, "VERIFIED", "VERIFIED"),
     ("Private Equity", "Private Equity", CONTROL, "CONTRADICTED", "UNPROVEN"),
     ("Series B", "Private Equity", CONTROL, "CONTRADICTED", "CONTRADICTED"),
-    ("Series B", "Private Equity", CONTROL, "VERIFIED", "UNPROVEN"),
+    ("Series B", "Private Equity", CONTROL, "VERIFIED", "CONTRADICTED"),
     ("Private Equity", "Public", "Clear Capital common stock is listed on NASDAQ under ticker CLEAR.", "CONTRADICTED", "CONTRADICTED"),
-    ("Private Equity", "Public", "Clear Capital common stock is listed on NASDAQ under ticker CLEAR.", "VERIFIED", "UNPROVEN"),
+    ("Private Equity", "Public", "Clear Capital common stock is listed on NASDAQ under ticker CLEAR.", "VERIFIED", "CONTRADICTED"),
     ("Series C+", "Series D", "Clear Capital raised a Series D funding round.", "VERIFIED", "VERIFIED"),
     ("Series C+", "Series D", "Clear Capital raised a Series D funding round.", "CONTRADICTED", "UNPROVEN"),
 ])
@@ -413,6 +416,31 @@ def test_stage_status_must_agree_with_existing_canonical_match_semantics(request
         assert "ownership" not in claim
         assert project(claim, requested=requested) == COMPANY_FIT_UNAVAILABLE
         assert "stage status disagreed" in claim["reason"]
+    elif expected == "CONTRADICTED":
+        assert project(claim, requested=requested) == COMPANY_FIT_MISMATCH
+        assert claim["evidence_quote"] == quote
+    else:
+        assert project(claim, requested=requested) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("defect", ["unloaded_primary", "malformed_ownership", "invalid_support", "wrong_company"])
+def test_different_stage_status_normalization_does_not_promote_invalid_evidence(defect):
+    raw = finding()
+    pages = {CONTROL_URL: CONTROL, CLASSIFICATION_URL: CLASSIFICATION}
+    if defect == "unloaded_primary":
+        del pages[CONTROL_URL]
+    elif defect == "malformed_ownership":
+        raw["ownership"] = {**OWNERSHIP, "control_status": "former"}
+    elif defect == "invalid_support":
+        raw["supporting_evidence_quote_1"] = "An unsupported classification."
+    else:
+        raw["evidence_quote"] = CONTROL.replace("Clear Capital", "Other Company")
+        pages[CONTROL_URL] = raw["evidence_quote"]
+    claim = validate(raw, pages=pages, requested_stage="Series B")
+    assert claim["status"] == "UNPROVEN"
+    assert claim["evidence_quote"] == ""
+    assert "ownership" not in claim
+    assert project(claim, requested="Series B") == COMPANY_FIT_UNAVAILABLE
 
 
 def test_absent_requested_stage_keeps_legacy_status_handling():

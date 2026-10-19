@@ -2928,8 +2928,8 @@ def _validated_findings(
                             "Do not infer a value from the requested stage."
                         ),
                     )
-                elif normalized_requested_stage and (
-                    (status == "VERIFIED") != _company_stage_matches(
+                elif normalized_requested_stage and status == "CONTRADICTED" and (
+                    _company_stage_matches(
                         normalized_stage, normalized_requested_stage,
                     )
                 ):
@@ -2939,8 +2939,7 @@ def _validated_findings(
                         evidence_quote="",
                         reason=(
                             "stage status disagreed with the requested and observed "
-                            "stages; VERIFIED requires a match and CONTRADICTED "
-                            "requires a different stage"
+                            "stages; CONTRADICTED requires a different stage"
                         ),
                     )
                 elif normalized_stage == "private equity" and (
@@ -3039,6 +3038,16 @@ def _validated_findings(
                     finding["supporting_evidence"] = linked_pe_support
                     if semantic_pe_ownership:
                         finding["ownership"] = dict(raw["ownership"])
+                # Preserve a proven different stage when VERIFIED described
+                # the observed fact instead of its match to the request.
+                if (
+                    finding["status"] == "VERIFIED"
+                    and normalized_requested_stage
+                    and not _company_stage_matches(
+                        normalized_stage, normalized_requested_stage,
+                    )
+                ):
+                    finding["status"] = "CONTRADICTED"
             elif target == "headcount" and not _quote_supports_headcount(
                 finding["evidence_quote"], finding["observed_value"]
             ):

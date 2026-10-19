@@ -805,16 +805,195 @@ def _intent_details_gate_passed(breakdown: Mapping[str, Any]) -> bool:
     )
 
 
+def legacy_prejudgment_duplicate(
+    normalized_company: Mapping[str, Any], company_index: int,
+    verified_identity_key_by_alias: Mapping[str, str], *,
+    company: Mapping[str, Any], contacts_required: bool = False,
+) -> dict[str, Any] | None:
+    """The historical submitted-alias gate, before any provider call."""
+    submitted_identity = canonical_company_identity(normalized_company)
+    submitted_alias_keys = company_identity_alias_keys(submitted_identity)
+    identity_key = next((verified_identity_key_by_alias[alias] for alias in submitted_alias_keys
+                         if alias in verified_identity_key_by_alias), None)
+    if identity_key is None:
+        return None
+    duplicate = _model_contract_incompatible_breakdown()
+    duplicate.update({
+        "failure_reason": "Duplicate company identity", "company_index": company_index,
+        "company_identity_key": identity_key,
+        "company_identity_alias_keys": list(submitted_alias_keys),
+        "company_qualified": False, "duplicate_company": True,
+    })
+    if contacts_required:
+        _merge_contact_breakdown(duplicate, _not_evaluated_contact(company))
+    return duplicate
+
+
+def legacy_postjudgment_context(
+    breakdown: dict[str, Any], *, company: Mapping[str, Any],
+    normalized_company: Mapping[str, Any], company_index: int,
+    verified_identity_key_by_alias: dict[str, str],
+) -> Mapping[str, Any]:
+    """Apply the historical observed-alias and qualification decisions."""
+    submitted_identity = canonical_company_identity(normalized_company)
+    submitted_alias_keys = company_identity_alias_keys(submitted_identity)
+    receipts = breakdown.get("verifier_gate_receipts")
+    fit_verified = company_fit_verified(receipts)
+    observed_receipt = verified_identity_receipt(receipts)
+    contact_company = _verified_company_for_contact(
+        company, observed_receipt
+    )
+    verified_identity = canonical_company_identity(
+        normalized_company,
+        verified_identity_receipt=observed_receipt,
+    )
+    current_identity_key = (
+        verified_identity.key if observed_receipt else submitted_identity.key
+    )
+    identity_alias_keys = tuple(dict.fromkeys(
+        (*submitted_alias_keys, *company_identity_alias_keys(verified_identity))
+    ))
+    prior_identity_key = next(
+        (
+            verified_identity_key_by_alias[alias]
+            for alias in identity_alias_keys
+            if alias in verified_identity_key_by_alias
+        ),
+        None,
+    )
+    duplicate_company = bool(
+        fit_verified and prior_identity_key is not None
+    )
+    identity_key = prior_identity_key or current_identity_key
+    if duplicate_company:
+        for field, value in (
+            ("icp_fit", 0.0),
+            ("decision_maker", 0.0),
+            ("intent_signal_raw", 0.0),
+            ("time_decay_multiplier", 1.0),
+            ("intent_signal_final", 0.0),
+            ("cost_penalty", 0.0),
+            ("time_penalty", 0.0),
+            ("final_score", 0.0),
+        ):
+            breakdown[field] = value
+        breakdown["failure_reason"] = "Duplicate company identity"
+    primary_verified = has_verified_primary_intent(
+        breakdown.get("intent_signals_detail") or []
+    )
+    paragraph_verified = _intent_details_gate_passed(breakdown)
+    company_qualified = bool(
+        fit_verified
+        and primary_verified
+        and paragraph_verified
+        and float(breakdown.get("final_score") or 0) > 0
+        and not duplicate_company
+    )
+    breakdown.update({
+        "company_index": company_index,
+        "company_identity_key": identity_key,
+        "company_identity_alias_keys": list(identity_alias_keys),
+        "company_qualified": company_qualified,
+        "duplicate_company": duplicate_company,
+    })
+    if fit_verified and paragraph_verified and not duplicate_company:
+        for alias in identity_alias_keys:
+            verified_identity_key_by_alias[alias] = identity_key
+    return contact_company
+
+
+def apply_legacy_company_judgment_context(
+    companies: Sequence[Mapping[str, Any]], raw_breakdowns: Sequence[Mapping[str, Any] | None],
+    *, scored_indexes: Sequence[int] | None = None,
+    resolve_raw: Callable[[int], Mapping[str, Any]] | None = None,
+    consumed_indexes: set[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Replay the historical gates; omitted intrinsic rows must be proved skips."""
+    if len(companies) != len(raw_breakdowns):
+        raise CompetitionScorerInputError("company judgments must cover every company")
+    allowed = set(range(len(companies)) if scored_indexes is None else scored_indexes)
+    seen: dict[str, str] = {}
+    result = []
+    for index, company in enumerate(companies):
+        if index not in allowed:
+            continue
+        normalized = _normalized_company(company, integrity_policy=True)
+        duplicate = legacy_prejudgment_duplicate(normalized, index, seen, company=company)
+        if duplicate is not None:
+            result.append(duplicate)
+            continue
+        from gateway.qualification.models import CompanyOutput
+        try:
+            CompanyOutput(**normalized)
+        except ValidationError:
+            incompatible = _model_contract_incompatible_breakdown()
+            submitted_identity = canonical_company_identity(normalized)
+            incompatible.update(company_index=index, company_identity_key=submitted_identity.key,
+                company_identity_alias_keys=list(company_identity_alias_keys(submitted_identity)),
+                company_qualified=False, duplicate_company=False)
+            result.append(incompatible)
+            continue
+        raw = resolve_raw(index) if resolve_raw is not None else raw_breakdowns[index]
+        if raw is None or raw.get("bucket_skipped"):
+            raise CompetitionScorerInputError("company judgment is missing for an unskipped row")
+        if consumed_indexes is not None:
+            consumed_indexes.add(index)
+        row = json.loads(json.dumps(raw, allow_nan=False))
+        row.pop("company_judgment_policy", None)
+        legacy_postjudgment_context(
+            row, company=company, normalized_company=normalized, company_index=index,
+            verified_identity_key_by_alias=seen,
+        )
+        result.append(row)
+    return regroup_legacy_company_breakdowns(companies, result)
+
+
+def regroup_legacy_company_breakdowns(companies, result):
+    """Preserve the historical final regroup after company retry recovery."""
+    from qualification.scoring.arena_integrity import mark_duplicate_companies
+    original = mark_duplicate_companies(companies, limit=len(companies))
+    seen = set()
+    canonical_by_alias = {}
+    verified_indexes = set()
+    for breakdown in result:
+        identity_key = breakdown.get("company_identity_key")
+        aliases = breakdown.get("company_identity_alias_keys") or [identity_key]
+        index = breakdown["company_index"]
+        fit_verified = company_fit_verified(breakdown)
+        duplicate_of = original[index].duplicate_of_index
+        intersecting = seen.intersection(aliases)
+        if duplicate_of in verified_indexes or (fit_verified and intersecting):
+            breakdown.update({"final_score": 0.0,
+                "company_qualified": False, "duplicate_company": True,
+                "failure_reason": "duplicate_company_identity"})
+            if intersecting:
+                breakdown["company_identity_key"] = canonical_by_alias[sorted(intersecting)[0]]
+        if fit_verified and not breakdown.get("duplicate_company") and identity_key:
+            seen.update(aliases)
+            for alias in aliases:
+                canonical_by_alias.setdefault(alias, breakdown["company_identity_key"])
+            verified_indexes.add(index)
+    return result
+
+
 def apply_company_judgment_context(
     companies: Sequence[Mapping[str, Any]],
     raw_breakdowns: Sequence[Mapping[str, Any]],
-    *, contacts_required: bool = False,
+    *, contacts_required: bool = False, company_quality: bool = True,
+    scored_indexes: Sequence[int] | None = None,
+    resolve_raw: Callable[[int], Mapping[str, Any]] | None = None,
+    consumed_indexes: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Bind immutable single-company decisions to this list's verified identities.
 
     Inputs cover every first-N slot, including explicit bucket-skipped zeros.
     Only independently verified aliases can reserve another company's identity.
     """
+    if not company_quality:
+        return apply_legacy_company_judgment_context(
+            companies, raw_breakdowns, scored_indexes=scored_indexes, resolve_raw=resolve_raw,
+            consumed_indexes=consumed_indexes,
+        )
     from qualification.company_quality import normalize_company_claim
     from qualification.scoring.company_fit_decision import company_quality_receipt_matches_claim
 
@@ -1074,33 +1253,14 @@ class CompetitionCompanyScorer:
             contact_company = dict(company)
             submitted_identity = canonical_company_identity(normalized_company)
             submitted_alias_keys = company_identity_alias_keys(submitted_identity)
-            if (
-                self.integrity_policy
-                and any(
-                    alias in verified_identity_key_by_alias
-                    for alias in submitted_alias_keys
+            if self.integrity_policy:
+                duplicate = legacy_prejudgment_duplicate(
+                    normalized_company, company_index, verified_identity_key_by_alias,
+                    company=company, contacts_required=self.contacts_required,
                 )
-            ):
-                identity_key = next(
-                    verified_identity_key_by_alias[alias]
-                    for alias in submitted_alias_keys
-                    if alias in verified_identity_key_by_alias
-                )
-                duplicate = _model_contract_incompatible_breakdown()
-                duplicate.update({
-                    "failure_reason": "Duplicate company identity",
-                    "company_index": company_index,
-                    "company_identity_key": identity_key,
-                    "company_identity_alias_keys": list(submitted_alias_keys),
-                    "company_qualified": False,
-                    "duplicate_company": True,
-                })
-                if self.contacts_required:
-                    _merge_contact_breakdown(
-                        duplicate, _not_evaluated_contact(company)
-                    )
-                retain_row(duplicate)
-                continue
+                if duplicate is not None:
+                    retain_row(duplicate)
+                    continue
             try:
                 company_model = company_type(**normalized_company)
             except ValidationError:
@@ -1181,68 +1341,11 @@ class CompetitionCompanyScorer:
                 else dict(result)
             )
             if self.integrity_policy:
-                receipts = breakdown.get("verifier_gate_receipts")
-                fit_verified = company_fit_verified(receipts)
-                observed_receipt = verified_identity_receipt(receipts)
-                contact_company = _verified_company_for_contact(
-                    company, observed_receipt
+                contact_company = legacy_postjudgment_context(
+                    breakdown, company=company, normalized_company=normalized_company,
+                    company_index=company_index,
+                    verified_identity_key_by_alias=verified_identity_key_by_alias,
                 )
-                verified_identity = canonical_company_identity(
-                    normalized_company,
-                    verified_identity_receipt=observed_receipt,
-                )
-                current_identity_key = (
-                    verified_identity.key if observed_receipt else submitted_identity.key
-                )
-                identity_alias_keys = tuple(dict.fromkeys(
-                    (*submitted_alias_keys, *company_identity_alias_keys(verified_identity))
-                ))
-                prior_identity_key = next(
-                    (
-                        verified_identity_key_by_alias[alias]
-                        for alias in identity_alias_keys
-                        if alias in verified_identity_key_by_alias
-                    ),
-                    None,
-                )
-                duplicate_company = bool(
-                    fit_verified and prior_identity_key is not None
-                )
-                identity_key = prior_identity_key or current_identity_key
-                if duplicate_company:
-                    for field, value in (
-                        ("icp_fit", 0.0),
-                        ("decision_maker", 0.0),
-                        ("intent_signal_raw", 0.0),
-                        ("time_decay_multiplier", 1.0),
-                        ("intent_signal_final", 0.0),
-                        ("cost_penalty", 0.0),
-                        ("time_penalty", 0.0),
-                        ("final_score", 0.0),
-                    ):
-                        breakdown[field] = value
-                    breakdown["failure_reason"] = "Duplicate company identity"
-                primary_verified = has_verified_primary_intent(
-                    breakdown.get("intent_signals_detail") or []
-                )
-                paragraph_verified = _intent_details_gate_passed(breakdown)
-                company_qualified = bool(
-                    fit_verified
-                    and primary_verified
-                    and paragraph_verified
-                    and float(breakdown.get("final_score") or 0) > 0
-                    and not duplicate_company
-                )
-                breakdown.update({
-                    "company_index": company_index,
-                    "company_identity_key": identity_key,
-                    "company_identity_alias_keys": list(identity_alias_keys),
-                    "company_qualified": company_qualified,
-                    "duplicate_company": duplicate_company,
-                })
-                if fit_verified and paragraph_verified and not duplicate_company:
-                    for alias in identity_alias_keys:
-                        verified_identity_key_by_alias[alias] = identity_key
             if self.contacts_required:
                 if breakdown.get("company_qualified") is True:
                     from qualification.scoring.contact_verification import (

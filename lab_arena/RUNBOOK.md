@@ -315,6 +315,14 @@ Set these values on the Arena service host:
 - the three host provider keys listed above
 - `LAB_ARENA_SCORER_IMAGE`: a public tag or digest; startup resolves it to a
   digest for trusted scoring
+- `LAB_ARENA_COMPANY_JUDGMENT_FROM`: optional timezone-aware timestamp for
+  company judgment reuse under the existing integrity grader. It applies to
+  company-only rounds whose submission period starts at or after this time.
+  At the normal open-to-committed transition, the service freezes the reuse
+  policy with the tested scorer image and catalog. An already-open round can
+  opt in at that transition; a committed or published round cannot change.
+  Reuse requires the same round, ICP, scorer policy, company input, and valid
+  authority scope. This setting does not enable company-quality grading.
 - `LAB_ARENA_RUNNER_HOTKEYS`: planned runner capacity. New rounds count only
   validators eligible under the shared gateway rule: on mainnet, registered
   permitted validators with at least 75,000 effective stake weight. Testnet

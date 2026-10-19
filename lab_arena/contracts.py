@@ -846,6 +846,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("integrity_policy", "str", required=False, choices=("arena_integrity_v1",)),
     F("contact_policy", "str", required=False, choices=("contacts_v1",)),
     F("company_quality_policy", "str", required=False, choices=("company_quality_v1",)),
+    F("company_judgment_policy", "str", required=False, choices=("company_judgment_v1",)),
     F("intent_details_policy", "str", required=False, choices=("intent_details_v1",)),
     # Optional only for rounds created before explicit benchmark disclosure.
     F(
@@ -933,6 +934,13 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     is_integrity = integrity.enabled(config)
     has_contacts = contact_policy.enabled(config)
     has_quality = quality_policy.enabled(config)
+    if config.get("company_judgment_policy") != config["scorer_policy"].get("company_judgment_policy"):
+        raise ArenaContractError("company judgments require matching scorer policy")
+    if config.get("company_judgment_policy") and (
+        not is_integrity or has_contacts or has_quality
+        or config["scorer_policy"].get("scoring_adapter_version") != "qualification_integrity_v2"
+    ):
+        raise ArenaContractError("company judgments require legacy company-only integrity policy")
     has_intent_details = intent_details_policy.enabled(config)
     checkpoint_profile = CHECKPOINT_DEADLINE_PROFILES.get(
         config.get("checkpoint_deadline_policy")
@@ -1268,6 +1276,7 @@ SCORER_POLICY_FIELDS = (
     F("schema_version", "str", choices=(SCORER_POLICY_SCHEMA_VERSION,)),
     F("scoring_adapter_version", "str", minimum=1, maximum=64),
     F("company_quality_policy", "str", required=False, choices=("company_quality_v1",)),
+    F("company_judgment_policy", "str", required=False, choices=("company_judgment_v1",)),
     F("intent_details_policy", "str", required=False, choices=("intent_details_v1",)),
     F("fp_penalty_points", "float", minimum=0, maximum=10),
     F("fp_unverified_primary_penalty_points", "float", minimum=0, maximum=10),
@@ -1284,6 +1293,8 @@ SCORER_POLICY_FIELDS = (
 
 def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     policy = validate_document(document, SCORER_POLICY_FIELDS)
+    if policy.get("company_judgment_policy") and (policy.get("company_quality_policy") or policy["scoring_adapter_version"] != "qualification_integrity_v2"):
+        raise ArenaContractError("legacy company judgments require company-only integrity scoring")
     if policy.get("company_quality_policy") and policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):
         raise ArenaContractError("company quality requires integrity scoring")
     if policy.get("company_quality_policy") and policy["max_scored_companies"] != 0:
@@ -1432,6 +1443,8 @@ RUN_RESULT_FIELDS = (
     F("schema_version", "str", choices=(RUN_RESULT_SCHEMA_VERSION,)),
     # The completion RPC stamps this binding for failed partial judgments.
     F("company_judgment_completion_request_hash", "sha256", required=False),
+    # The gateway overwrites this bounded diagnostic after its accepted replay.
+    F("company_judgment_consumed_indexes", "list[int]", minimum=0, maximum=5, required=False),
     F(
         "resource_summary",
         "object",

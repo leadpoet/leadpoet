@@ -52,7 +52,7 @@ def score_input(
         environ=os.environ,
         credentials=dict(PLACEHOLDER_CREDENTIALS),
     )
-    from lab_arena import contact_policy, quality_policy
+    from lab_arena import company_judgments, contact_policy
     scorer = scoring.lab_scorer(
         policy,
         **(
@@ -90,7 +90,7 @@ def score_input(
 
     try:
         with use_evaluation_date(str(document.get("evaluation_date") or "")):
-            if quality_policy.scorer_enabled(policy):
+            if company_judgments.enabled(policy):
                 cache_context = document.get("company_judgment_cache")
                 if not isinstance(cache_context, dict):
                     raise scoring.ScoringError(
@@ -132,7 +132,7 @@ def score_input(
                 else ""
             ),
             **({"company_judgments": completed_judgments}
-               if quality_policy.scorer_enabled(policy) else {}),
+               if company_judgments.enabled(policy) else {}),
             **({"terminal_breakdowns": completed_breakdowns}
                if completed_breakdowns else {}),
         )
@@ -141,7 +141,7 @@ def score_input(
         breakdowns,
         **(
             {"company_judgments": new_judgments}
-            if quality_policy.scorer_enabled(policy)
+            if company_judgments.enabled(policy)
             else {}
         ),
     )

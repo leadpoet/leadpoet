@@ -4469,7 +4469,7 @@ def _partial_company_judgment_output(document, lease):
         output = scoring.validate_scoring_output_document(document)
         if "terminal_breakdowns" in output:
             if (lease.get("kind") != "score"
-                or quality_policy.enabled(lease)):
+                or company_judgments.enabled(lease)):
                 return None
             scoring.validate_terminal_breakdowns_for_work_item(
                 output["terminal_breakdowns"],

@@ -181,8 +181,9 @@ def build_evidence_snapshot(
         )
     ):
         raise JudgmentCacheError("judgment authority provenance is incomplete")
-    exclusions = sorted(set(runner_authority_exclusions))
-    if not exclusions or source_runner_hotkey not in exclusions:
+    # SQL binds the exact trusted lease array, whose order uses DB collation.
+    exclusions = list(runner_authority_exclusions)
+    if not exclusions or len(set(exclusions)) != len(exclusions) or source_runner_hotkey not in exclusions:
         raise JudgmentCacheError("judgment authority provenance is incomplete")
     snapshot = {
         "schema_version": EVIDENCE_SCHEMA_VERSION,
@@ -234,7 +235,7 @@ def validate_evidence_snapshot(
     if (
         not isinstance(exclusions, list)
         or any(not isinstance(hotkey, str) or not hotkey for hotkey in exclusions)
-        or exclusions != sorted(set(exclusions))
+        or len(set(exclusions)) != len(exclusions)
         or copied["source_runner_hotkey"] not in exclusions
     ):
         raise JudgmentCacheError("judgment authority provenance is incomplete")

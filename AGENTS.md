@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: current Arena models for future rounds
+
+On 2026-10-19 the user authorized upgrading active Gemini 2.5 Flash to a tested
+current Gemini model, and active Claude Sonnet 4.5/5 to Sonnet 5.5, including
+the promoted baseline. This includes protected inspection, bounded provider
+and isolated reward-disabled live tests, narrow compatibility and price updates,
+safe push and merge, exact scorer-image build/publication and selection, and
+canonical gateway/normal-validator deployment and verification. Preserve all
+existing frozen rounds including October 20, scoring rules, prompts and sourcing
+strategy, the $4 budget, retries, billing, accepted results, rewards, credentials,
+and concurrent work. Do not rewrite historical policies or remove unused secret
+settings. Authority ends when future-round model selection and live compatibility
+are verified.
+
 ## Scoped production authorization: company judgment cache coverage
 
 On 2026-10-19 the user authorized the smallest durable fix for identical

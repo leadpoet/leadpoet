@@ -63,7 +63,9 @@ from qualification.scoring.verification_helpers import (
 
 # Use only scorer models already pinned by the signed Arena policy. This does
 # not add a new model or role to that policy.
-INVESTIGATOR_MODEL = "google/gemini-2.5-flash"
+INVESTIGATOR_MODEL = os.environ.get(
+    "ARENA_ROLE_BATCH_MODEL", "google/gemini-3.5-flash-lite",
+)
 POSITIVE_SEMANTIC_REVIEW_MODEL = "openai/gpt-6-luna"
 MAX_REASONING_TURNS = 8
 MAX_INCOMPLETE_SUBMIT_RETRIES = 1

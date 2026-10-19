@@ -38,7 +38,7 @@ class LeaseStore(FakeLedgerStore):
         return super().mark_uncertain(**kwargs)
 
 
-def _wired_factory(monkeypatch):
+def _wired_factory(monkeypatch, *, prices=None):
     store = LeaseStore()
     provider = FakeTransport(responses=[(200, {"data": []})])
     fake_chain = SimpleNamespace(close=lambda: None)
@@ -75,7 +75,8 @@ def _wired_factory(monkeypatch):
     monkeypatch.setattr(wiring, "_daily_cutoff_hour_from_environment", lambda: None)
     monkeypatch.setattr(wiring, "_pool_percent_from_environment", lambda: 0)
     monkeypatch.setattr(wiring, "_baseline_source_url_from_environment", lambda _mode: "https://example.com/baseline")
-    monkeypatch.setattr(wiring.broker_module, "fetch_openrouter_price_table", price_table)
+    monkeypatch.setattr(wiring.broker_module, "fetch_openrouter_price_table",
+                        price_table if prices is None else lambda: prices)
     monkeypatch.setattr(wiring.broker_module, "HttpxProviderTransport", lambda: provider)
 
     class Keys:
@@ -176,3 +177,33 @@ def test_shadow_replay_route_refuses_unbound_frozen_round_before_paid_call(monke
         with pytest.raises(broker.BrokerError, match="broker_unavailable"):
             service.config.broker_factory(service, changed)
     assert not store.calls and not provider.sent
+
+
+@pytest.mark.parametrize("historical", [False, True])
+def test_gateway_broker_uses_round_judge_models_instead_of_current_defaults(monkeypatch, historical):
+    from lab_arena import scoring
+
+    current = dict(scoring.DEFAULT_JUDGE_MODELS)
+    frozen = dict(current)
+    frozen.update({
+        "intent_details_review": "anthropic/claude-sonnet-4.5",
+        "role_batch_check": "google/gemini-2.5-flash",
+    })
+    table = price_table()
+    pricing = {component: "0" for component in broker.PRICED_COMPONENTS}
+    pricing.update(prompt="0.000001", completion="0.000002")
+    table["models"].update({model: dict(pricing) for model in (*current.values(), *frozen.values())})
+    service, _store, _provider = _wired_factory(monkeypatch, prices=table)
+    service.scorer_policy = {"judge_models": current}
+    selected = frozen if historical else current
+    instance = service.config.broker_factory(service, {"configuration_doc": {
+        "lease_ttl_seconds": 3600, "scorer_policy": {"judge_models": selected},
+    }})
+    for model in set(selected.values()):
+        parameters, _ = instance._openrouter_parameters({
+            "model": model, "messages": [{"role": "user", "content": "review"}],
+        }, kind="score")
+        assert parameters["model"] == model
+    for model in set((*current.values(), *frozen.values())) - set(selected.values()):
+        with pytest.raises(broker.BrokerError, match="model_not_allowed"):
+            instance._openrouter_parameters({"model": model, "messages": []}, kind="score")

@@ -605,13 +605,16 @@ async def openrouter_chat(
                 payload: Dict[str, Any] = {
                     "model": model if "/" in model else f"openai/{model}",
                     "messages": messages,
-                    "temperature": 0.3,
                     "max_tokens": max_tokens,
                     "provider": {
                         "data_collection": "deny",
                         "zdr": True,
                     },
                 }
+                # Sonnet 5.5 rejects sampling controls. Older frozen reviewers
+                # retain their original temperature.
+                if payload["model"] != "anthropic/claude-sonnet-5.5":
+                    payload["temperature"] = 0.3
                 if response_format is not None:
                     payload["response_format"] = response_format
 

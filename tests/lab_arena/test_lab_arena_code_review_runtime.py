@@ -424,7 +424,7 @@ def test_large_review_preserves_runtime_integrity_and_actual_cost(case):
             body["openrouter_metadata"] = {
                 "requested": parameters["model"], "strategy": "direct", "attempt": 1,
                 "endpoints": {"total": 1, "available": [{
-                    "provider": "Amazon Bedrock", "model": "anthropic/claude-sonnet-5-20260630", "selected": True,
+                    "provider": "Amazon Bedrock", "model": "anthropic/claude-sonnet-5.5-20260928", "selected": True,
                 }]},
                 "pipeline": [],
             }

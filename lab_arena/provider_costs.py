@@ -100,8 +100,10 @@ _OPENROUTER_INSURED_PLAIN_MODELS = frozenset(
         # does not constrain Arena routing or normal native billing.
         "anthropic/claude-sonnet-4.5",
         "anthropic/claude-sonnet-5",
+        "anthropic/claude-sonnet-5.5",
         "google/gemini-2.5-flash",
         "google/gemini-2.5-flash-lite",
+        "google/gemini-3.5-flash-lite",
         "openai/gpt-4o-mini",
         "openai/gpt-5.5",
         "openai/gpt-5.6-sol",

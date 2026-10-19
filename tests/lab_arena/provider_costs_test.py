@@ -820,6 +820,8 @@ def test_openrouter_insured_error_requires_zero_valid_request_price(pricing):
     (
         "anthropic/claude-sonnet-4.5",
         "anthropic/claude-sonnet-5",
+        "anthropic/claude-sonnet-5.5",
+        "google/gemini-3.5-flash-lite",
         "openai/gpt-5.5",
         "openai/gpt-5.6-sol",
     ),

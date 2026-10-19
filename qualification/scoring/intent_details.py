@@ -10,6 +10,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import os
 import re
 from datetime import date
 from typing import Any, Mapping, Sequence
@@ -21,7 +22,9 @@ from qualification.scoring.linkedin_company_size import (
 )
 
 
-REVIEW_MODEL = "anthropic/claude-sonnet-4.5"  # Listed as intent_details_review in lab_arena.scoring.
+REVIEW_MODEL = os.environ.get(
+    "ARENA_INTENT_DETAILS_REVIEW_MODEL", "anthropic/claude-sonnet-5.5",
+)  # Listed as intent_details_review in lab_arena.scoring.
 REVIEW_TIMEOUT_SECONDS = 45
 # Supplement the authoritative verified evidence without consuming its fixed
 # source-context budget. The paragraph remains responsible for grounding every

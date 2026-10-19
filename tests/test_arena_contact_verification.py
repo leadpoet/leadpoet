@@ -1253,7 +1253,11 @@ def test_semantic_role_numeric_id_transition_is_bound_and_fail_closed(
     ))
 
     assert len(requests) == (2 if returned_id == "1" and match is False else 1)
-    prompt = requests[0][1]["json"]["messages"][1]["content"]
+    parameters = requests[0][1]["json"]
+    assert parameters["model"] == "google/gemini-3.5-flash-lite"
+    assert parameters["temperature"] == 0
+    assert parameters["max_tokens"] == 800
+    prompt = parameters["messages"][1]["content"]
     assert "id=1" in prompt
     assert role in prompt
     assert duties in prompt

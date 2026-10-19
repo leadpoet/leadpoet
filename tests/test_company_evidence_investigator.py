@@ -217,6 +217,9 @@ def test_undated_completed_round_requires_dates_only_for_material_chronology(
     async def fake_post(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
+        assert payload["model"] == "google/gemini-3.5-flash-lite"
+        assert payload["temperature"] == 0.0
+        assert payload["max_tokens"] == investigator.REASONING_MAX_TOKENS
         if unresolved_competing_stage:
             finding = _finding(
                 "stage",

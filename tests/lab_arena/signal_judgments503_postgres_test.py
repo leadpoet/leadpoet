@@ -24,9 +24,18 @@ def database():
     try:
         with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
             cur.execute((SCRIPTS / "502-lab-arena-company-judgment-finality.sql").read_text())
-            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon,authenticated,service_role,lab_arena_service")
-            cur.execute("ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon,authenticated,service_role,lab_arena_service")
+            cur.execute("CREATE ROLE signal503_migrator NOLOGIN NOSUPERUSER INHERIT")
+            cur.execute("GRANT lab_arena_owner TO signal503_migrator")
+            cur.execute("GRANT USAGE,CREATE ON SCHEMA public TO signal503_migrator WITH GRANT OPTION")
+            cur.execute("ALTER DEFAULT PRIVILEGES FOR ROLE signal503_migrator IN SCHEMA public GRANT ALL ON TABLES TO anon,authenticated,service_role,lab_arena_service")
+            cur.execute("ALTER DEFAULT PRIVILEGES FOR ROLE signal503_migrator IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon,authenticated,service_role,lab_arena_service")
+            cur.execute("SELECT has_schema_privilege('lab_arena_owner','public','CREATE')")
+            assert cur.fetchone() == (False,)
+            cur.execute("SET ROLE signal503_migrator")
             cur.execute((SCRIPTS / "503-lab-arena-signal-judgment-cache.sql").read_text())
+            cur.execute("RESET ROLE")
+            cur.execute("SELECT has_schema_privilege('lab_arena_owner','public','CREATE')")
+            assert cur.fetchone() == (False,)
         yield db
     finally:
         gen.close()

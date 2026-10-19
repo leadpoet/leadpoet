@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: public listing evidence and ICP wording
+
+On 2026-10-19 the user authorized the definite fixes from the score-depth
+investigation: general Public-stage evidence recognition and generated ICP
+required/bonus wording. This includes focused positive/negative regression
+checks, safe push/merge, scorer-image publication, canonical deployment, and
+bounded reward-disabled production verification. Preserve frozen rounds,
+accepted work, qualification standards, costs, rewards and concurrent changes.
+Do not change historical scores or broaden ICP feasibility/retrieval scope.
+This authority ends after deployment and verification.
+
 ## Scoped production authorization: company judgment cache coverage
 
 On 2026-10-19 the user authorized the smallest durable fix for identical

@@ -394,15 +394,18 @@ _PUBLIC_COMPANY_ALIAS_RE = re.compile(
     r'no\s+longer|planned|proposed|expected)\b))'
     r'[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*(?:\s+[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*){0,7}”)'
     r'(?:\s+or\s+the\s+(?:"Company"|“Company”))?\)\s+'
-    r'(?=\(\s*(?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\))'
+    r'(?=\(\s*(?i:nasdaq|nyse|asx)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\))'
 )
 _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(r"\bpublicly\s+traded\b", re.I),
     re.compile(r"\bpublicly\s+listed\s+(?:shares?|stock)\b", re.I),
     re.compile(
-        r"(?:^|[.!?;:\n]\s*|(?:--|[–—])\s*)"
+        r"(?:(?:^|[.!?;:\n]\s*|(?:--|[–—])\s*)"
         r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+){1,8}"
-        r"\(\s*(?i:nasdaq|nyse)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\)",
+        r"|(?<=[a-z])\s+"
+        r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*(?<!\.)|(?:[A-Z]\.)+|[&+])\s+){0,7}"
+        r"(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+)"
+        r"\(\s*(?i:nasdaq|nyse|asx)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\)",
     ),
     re.compile(
         r"\b(?:shares?|stock)\b.{0,35}\b(?:listed|trad(?:e|es|ed))\s+on\b",
@@ -410,7 +413,7 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
     ),
     re.compile(
         r"\blisted(?:\s+company)?\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
-        r"stock\s+exchange|london\s+stock\s+exchange|lse|euronext|tsx|asx|"
+        r"stock\s+exchange|london\s+stock\s+exchange|lse|euronext|tsx|asx|australian\s+securities\s+exchange|"
         r"hkex|hong\s+kong\s+stock\s+exchange|tokyo\s+stock\s+exchange|"
         r"dubai\s+financial\s+market)\b",
         re.I,
@@ -455,11 +458,11 @@ _PUBLIC_CONDITIONAL_EXCHANGE_TRADING_CONTEXT_RE = re.compile(
 _PUBLIC_TICKER_STAGE_PROOF_PATTERNS = (
     re.compile(
         r"\b(?i:ticker)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*"
-        r"\((?i:nasdaq|nyse)\)(?!\s*/)",
+        r"\((?i:nasdaq|nyse|asx)\)(?!\s*/)",
     ),
     re.compile(
         r"\b(?i:ticker)\s*/\s*(?i:isin)\s*:\s*"
-        r"[A-Z][A-Z0-9.-]{0,9}\s*\((?i:nasdaq|nyse)\)\s*/\s*"
+        r"[A-Z][A-Z0-9.-]{0,9}\s*\((?i:nasdaq|nyse|asx)\)\s*/\s*"
         r"[A-Z]{2}[A-Z0-9]{9}[0-9]\b",
     ),
 )
@@ -825,7 +828,7 @@ def _public_quote_has_bound_market_locator(
             if not names:
                 return False
             # Parenthetical exchange forms name the issuer inside the match.
-            if re.search(r"\(\s*(?:nasdaq|nyse)\s*:", match.group(0), re.I):
+            if re.search(r"\(\s*(?:nasdaq|nyse|asx)\s*:", match.group(0), re.I):
                 candidate = match.group(0)
             else:
                 prefix = quote[max(0, match.start() - 180):match.start()]
@@ -836,6 +839,28 @@ def _public_quote_has_bound_market_locator(
                     flags=re.I,
                 )
                 candidate = re.split(r"[,;.!?\n]|\bwhose\b", prefix, flags=re.I)[-1]
+                if pattern in (_PUBLIC_STAGE_PROOF_PATTERNS[4], _PUBLIC_SEMANTIC_LISTING_RE):
+                    # Listing prose can put an appositive between the issuer
+                    # and the exchange. Bind its subject, not another company
+                    # named elsewhere in the same first-party page.
+                    clause = re.split(r"[;!?\n]|\.(?=\s+[A-Z])", prefix)[-1]
+                    if re.search(
+                        r"\b(?:(?:subsidiary|parent(?:\s+company)?|owner)\s+of|"
+                        r"partner(?:ing)?\s+(?:of|with)|conditionally)\b",
+                        clause, re.I,
+                    ) and not re.search(r"\band\s+(?:is|are|remains)\s*$", clause, re.I):
+                        continue
+                    listing_clause = re.split(
+                        r"[.!?;\n]|\b(?:and|but|while|although|however)\b",
+                        quote[match.start():match.end() + 80], maxsplit=1, flags=re.I,
+                    )[0]
+                    if re.search(r"\b(?:subject\s+to|if|unless)\b", listing_clause, re.I):
+                        continue
+                    subject = re.match(r"(.+?)\s+(?:is|are|remains)\b", clause, re.I)
+                    if subject:
+                        candidate = subject.group(1)
+                    if re.search(r"\b(?:bonds?|debt|notes?|funds?|etfs?)\b", candidate, re.I):
+                        continue
                 if re.search(
                     r"\b(?:parent(?:\s+company)?|investor|owner|sponsor)\b",
                     candidate,
@@ -923,8 +948,27 @@ def _stage_evidence_supports_observation(
             or any(
                 (match := pattern.search(quote))
                 and (
-                    pattern is not _PUBLIC_STAGE_PROOF_PATTERNS[2]
+                    pattern not in (
+                        _PUBLIC_STAGE_PROOF_PATTERNS[2],
+                        _PUBLIC_STAGE_PROOF_PATTERNS[4],
+                        _PUBLIC_SEMANTIC_LISTING_RE,
+                    )
                     or _public_quote_has_bound_market_locator(quote, identity_names)
+                    or (
+                        not identity_names
+                        and pattern is not _PUBLIC_STAGE_PROOF_PATTERNS[2]
+                        and not re.search(r"\basx\b|australian\s+securities\s+exchange", quote, re.I)
+                    )
+                    or (
+                        lexical_support
+                        and pattern in (_PUBLIC_STAGE_PROOF_PATTERNS[4], _PUBLIC_SEMANTIC_LISTING_RE)
+                        and re.search(
+                            r"\bour\s+(?:class\s+[a-z]\s+)?"
+                            r"(?:(?:common|ordinary)\s+)?(?:shares?|stock)\s+"
+                            r"(?:(?:is|are|remains?)\s+)?(?:currently\s+)?$",
+                            quote[max(0, match.start() - 120):match.start()], re.I,
+                        )
+                    )
                 )
                 and (
                     pattern not in _PUBLIC_EXCHANGE_TRADING_STAGE_PROOF_PATTERNS
@@ -947,7 +991,10 @@ def _stage_evidence_supports_observation(
                 )
                 for pattern in _PUBLIC_STRONG_CURRENT_PATTERNS
             )
-            or semantic_public_listing
+            or (
+                semantic_public_listing
+                and _public_quote_has_bound_market_locator(quote, identity_names)
+            )
             or current_exchange_profile
         )
     return bool(

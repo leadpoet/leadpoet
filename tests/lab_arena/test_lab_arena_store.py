@@ -64,7 +64,10 @@ def test_startup_requires_exact_one_replacement_attempt_capability(limit):
             store.submission_replacement_schema()
 
 
-@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
+@pytest.mark.parametrize("error_type", [
+    httpx.ReadTimeout, httpx.ReadError, httpx.ConnectTimeout, httpx.ConnectError,
+    httpx.WriteTimeout, httpx.WriteError, httpx.RemoteProtocolError,
+])
 @pytest.mark.parametrize("recovers", [True, False])
 def test_select_retries_one_read_failure_without_changing_query(error_type, recovers):
     requests = []
@@ -86,14 +89,57 @@ def test_select_retries_one_read_failure_without_changing_query(error_type, reco
                 transport.select("lab_arena_rounds", **kwargs)
             assert isinstance(caught.value.__cause__, error_type)
             assert "private transport diagnostic" not in str(caught.value)
+            assert caught.value.store_error == {
+                "operation": "select", "resource": "lab_arena_rounds",
+                "transport_error": error_type.__name__,
+            }
     assert len(requests) == 2
     assert requests[0].method == requests[1].method == "GET"
     assert requests[0].url == requests[1].url
     assert requests[0].headers == requests[1].headers
 
 
+@pytest.mark.parametrize("failure", [httpx.PoolTimeout, 429, 502, 503, 504])
+def test_select_temporary_pressure_is_unavailable_without_retry(failure):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if isinstance(failure, type):
+            raise failure("private transport diagnostic", request=request)
+        return httpx.Response(failure, json={"code": "PGRST000", "message": "private diagnostic"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=client)
+        with pytest.raises(ArenaStoreUnavailable) as caught:
+            transport.select("lab_arena_rounds")
+    expected = {"operation": "select", "resource": "lab_arena_rounds"}
+    expected.update({"transport_error": "PoolTimeout"} if isinstance(failure, type)
+                    else {"http_status": failure, "code": "PGRST000"})
+    assert caught.value.store_error == expected
+    assert caught.value.transaction_rolled_back is False
+    assert "private" not in str(caught.value)
+    assert len(requests) == 1 and requests[0].method == "GET"
+
+
+@pytest.mark.parametrize("error_type", [httpx.LocalProtocolError, httpx.UnsupportedProtocol])
+def test_select_local_configuration_errors_remain_base_without_retry(error_type):
+    requests = []
+    def handler(request):
+        requests.append(request)
+        raise error_type("private diagnostic", request=request)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        transport = PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=client)
+        with pytest.raises(ArenaStoreError) as caught:
+            transport.select("lab_arena_rounds")
+    assert not isinstance(caught.value, ArenaStoreUnavailable)
+    assert len(requests) == 1
+
+
 @pytest.mark.parametrize("response", [
+    httpx.Response(401, json={"message": "not authorized"}),
     httpx.Response(403, json={"message": "permission denied"}),
+    httpx.Response(400, json={"code": "PGRST100", "message": "invalid filter"}),
     httpx.Response(200, json={"unexpected": "object"}),
     httpx.Response(200, content=b"invalid JSON"),
 ])
@@ -112,7 +158,10 @@ def test_select_does_not_retry_authorization_or_contract_errors(response):
     assert len(requests) == 1
 
 
-@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError, httpx.ConnectError, httpx.WriteTimeout])
+@pytest.mark.parametrize("error_type", [
+    httpx.ReadTimeout, httpx.ReadError, httpx.ConnectTimeout, httpx.ConnectError,
+    httpx.WriteTimeout, httpx.WriteError, httpx.RemoteProtocolError, httpx.PoolTimeout,
+])
 def test_rpc_transport_failure_is_typed_without_replay(error_type):
     requests = []
 
@@ -330,6 +379,7 @@ def test_bulk_round_rpc_response_loss_is_not_blindly_replayed(error_type, bulk_f
 
 
 @pytest.mark.parametrize("response", [
+    *[httpx.Response(status, json={"code": "PGRST000"}) for status in (429, 502, 503, 504)],
     httpx.Response(403, json={"code": "42501", "message": "permission denied"}),
     httpx.Response(200, content=b"invalid JSON"),
 ])

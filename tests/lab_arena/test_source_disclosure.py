@@ -2,10 +2,17 @@
 
 import io
 import tarfile
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import httpx
 import pytest
+from fastapi.testclient import TestClient
 
+from lab_arena.api import create_app
+from lab_arena.service import ArenaService, ServiceConfig
+from lab_arena.store import ArenaStore, PostgrestTransport
 from lab_arena.source_disclosure import (
     MAX_PREVIEW_FILE_BYTES, SourceDisclosureError, disclosure_status, public_source_code,
 )
@@ -59,6 +66,107 @@ class Objects:
         self.reads += 1
         assert ref == "private-source" and len(self.payload) <= limit
         return self.payload
+
+
+@pytest.fixture
+def source_route():
+    """Use the real route/service/store with the existing disclosure fixtures."""
+    with ExitStack() as stack:
+        def build(fault, *, published):
+            payload = bundle({"harness.py": "def run_icp(icp): return []\n"})
+            objects = Objects(payload)
+            reads = []
+            row = round_row()
+            row["configuration_doc"]["mode"] = "live"
+            sub = submission(status="frozen" if published else "rejected", source_size_bytes=len(payload))
+
+            def handler(request):
+                assert request.method == "GET"
+                reads.append(request)
+                response = fault(request)
+                if response is not None:
+                    return response
+                values = [sub] if request.url.path.endswith("/lab_arena_submissions") else [row]
+                return httpx.Response(200, json=values)
+
+            def unused(*args, **kwargs):
+                pytest.fail("public source read called a write/provider dependency")
+
+            database = stack.enter_context(httpx.Client(transport=httpx.MockTransport(handler)))
+            service = ArenaService(ServiceConfig(
+                mode="live", store=ArenaStore(PostgrestTransport("https://project.example", service_key="sb_secret_test", http_client=database)),
+                object_store=objects, signer=None, chain=SimpleNamespace(),
+                verify_signature=unused, daily_icp_source=unused,
+                banned_hotkeys_source=unused, broker_factory=unused, clock=lambda: PUBLISHED,
+            ))
+            api = stack.enter_context(TestClient(create_app(service), raise_server_exceptions=False))
+            return api, objects, reads
+        yield build
+
+
+@pytest.mark.parametrize("error_type", [
+    httpx.ReadTimeout, httpx.ReadError, httpx.ConnectTimeout, httpx.ConnectError,
+    httpx.WriteTimeout, httpx.WriteError, httpx.RemoteProtocolError,
+])
+@pytest.mark.parametrize("table", ["lab_arena_submissions", "lab_arena_rounds"])
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("recovers", [False, True])
+def test_source_route_transient_read_failure_is_bounded(
+    source_route, error_type, table, published, recovers,
+):
+    failures = 0
+    armed = True
+    def fault(request):
+        nonlocal failures
+        if armed and request.url.path.endswith("/" + table) and (not recovers or failures == 0):
+            failures += 1
+            raise error_type("private diagnostic", request=request)
+    api, objects, reads = source_route(fault, published=published)
+    first = api.get("/arena/v1/submissions/sub-preview/code")
+    expected = 200 if published else 403
+    assert first.status_code == (expected if recovers else 503)
+    assert len(reads) == (3 if recovers else (2 if table == "lab_arena_submissions" else 3))
+    if not recovers:
+        assert first.json() == {"status": "unavailable", "code": "arena_store_unavailable"}
+        assert first.headers["retry-after"] == "1"
+        assert objects.reads == 0
+    assert first.headers["cache-control"] == "no-store"
+    assert first.headers["x-content-type-options"] == "nosniff"
+    assert "private diagnostic" not in first.text
+    armed = False
+    second = api.get("/arena/v1/submissions/sub-preview/code")
+    assert second.status_code == expected
+    if published:
+        assert second.json()["files"] == [{"path": "harness.py", "content": "def run_icp(icp): return []\n"}]
+    else:
+        assert second.json()["code"] == "source_not_public" and objects.reads == 0
+
+
+@pytest.mark.parametrize("failure", [httpx.PoolTimeout, 429, 502, 503, 504])
+@pytest.mark.parametrize("table", ["lab_arena_submissions", "lab_arena_rounds"])
+def test_source_route_temporary_pressure_does_not_retry(source_route, failure, table):
+    armed = True
+    def fault(request):
+        if armed and request.url.path.endswith("/" + table):
+            if isinstance(failure, type):
+                raise failure("private diagnostic", request=request)
+            return httpx.Response(failure, json={"message": "private diagnostic", "code": "PGRST000"})
+    api, objects, reads = source_route(fault, published=False)
+    first = api.get("/arena/v1/submissions/sub-preview/code")
+    assert first.status_code == 503 and first.headers["retry-after"] == "1"
+    assert first.headers["cache-control"] == "no-store"
+    assert "private diagnostic" not in first.text
+    assert len(reads) == (1 if table == "lab_arena_submissions" else 2)
+    armed = False
+    assert api.get("/arena/v1/submissions/sub-preview/code").status_code == 403
+    assert objects.reads == 0
+
+
+def test_source_route_missing_submission_stays_404(source_route):
+    api, objects, reads = source_route(lambda request: httpx.Response(200, json=[]), published=False)
+    response = api.get("/arena/v1/submissions/sub-missing/code")
+    assert response.status_code == 404 and response.json()["code"] == "submission_missing"
+    assert len(reads) == 1 and objects.reads == 0
 
 
 def test_late_submission_released_at_evaluation_not_after_24_hours():

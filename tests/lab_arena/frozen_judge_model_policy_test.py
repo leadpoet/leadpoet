@@ -78,13 +78,16 @@ class Client:
 
 verification_helpers.httpx.AsyncClient = Client
 asyncio.run(verification_helpers.openrouter_chat(
-    "review", model=intent_details.REVIEW_MODEL, max_retries=0,
+    "review", model=intent_details.REVIEW_MODEL, max_retries=0, max_tokens=800,
 ))
 assert requests[-1]["model"] == models["intent_details_review"]
+assert requests[-1]["max_tokens"] == 800
 if models["intent_details_review"] == "anthropic/claude-sonnet-5.5":
     assert not {"temperature", "top_p", "top_k"} & requests[-1].keys()
+    assert requests[-1]["reasoning"] == {"effort": "low"}
 else:
     assert requests[-1]["temperature"] == 0.3
+    assert "reasoning" not in requests[-1]
 asyncio.run(role_batch_check._judge_chunk(
     Client(), "test-only-placeholder", ["VP Sales"], [{"id": 1, "role": "VP Sales"}],
 ))

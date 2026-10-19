@@ -122,6 +122,7 @@ from leadpoet_verifier.identity.normalization import (
 )
 from qualification.scoring.linkedin_company_size import (
     _canonical_company_domain,
+    _profile_body_matches_company_identity,
     CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE,
     MALFORMED_RESPONSE_FAILURE_REASON,
     PROFILE_MAX_CHARACTERS,
@@ -7268,6 +7269,65 @@ def _project_investigator_headcount(
     return projected
 
 
+def _settle_recovered_local_headcount_refresh(
+    invocation_cache: Optional[dict[str, Any]],
+    finding: Optional[Mapping[str, Any]],
+    investigation: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    projected: Mapping[str, Any],
+    *,
+    icp: ICPPrompt,
+) -> bool:
+    """Settle a local profile miss after exact fetched headcount recovery."""
+
+    if not isinstance(invocation_cache, dict) or not isinstance(finding, Mapping):
+        return False
+    original = invocation_cache.get("evidence")
+    if not (
+        invocation_cache.get("refresh_outcome") == "retryable_failure"
+        and isinstance(original, Mapping)
+        and original.get("outcome") == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+        and invocation_cache.get("structured_failure") is True
+        and invocation_cache.get("structured_failure_reason") == SOURCE_BLOCKED_FAILURE_REASON
+        and invocation_cache.get(VERIFIER_FAILURE_DETAIL_KEY) == SOURCE_BLOCKED_FAILURE_REASON
+        and investigation.get("_completed_submit") is True
+        and investigation.get("failure_reason") == ""
+        and finding.get("target") == "headcount"
+        and finding.get("status") in {"VERIFIED", "CONTRADICTED"}
+        and isinstance(finding.get("observed_value"), str)
+        and finding["observed_value"] in LINKEDIN_EMPLOYEE_BUCKETS
+        and projected.get("observed_employee_count") == finding["observed_value"]
+        and _decision_from_observed_employee_size(dict(projected), icp)
+        in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
+    ):
+        return False
+    url = _valid_web_evidence_url(finding.get("evidence_url"))
+    profile = _strict_linkedin_company_profile_url(url)
+    expected_profile = _strict_linkedin_company_profile_url(invocation_cache.get("profile_url"))
+    slug = str(identity.get("linkedin_company_slug") or "").strip().casefold()
+    quote = str(finding.get("evidence_quote") or "").strip()
+    pages, final_urls = _validated_returned_fetched_pages(
+        investigation.get(PRIVATE_FETCHED_PAGES_KEY), submitted_source_urls=(url,),
+    )
+    final_profile = _strict_linkedin_company_profile_url(final_urls.get(url))
+    if (
+        profile and profile == expected_profile
+        and slug and linkedin_company_page_slug(profile) == slug
+        and final_profile and linkedin_company_page_slug(final_profile) == slug
+        and _dimension_web_evidence(projected, "employee_size") == {"url": url, "quote": quote}
+        and quote and _quote_occurs(quote, pages.get(url, ""))
+        and (
+            _quote_names_company(quote, {_compact_company_name(identity.get("normalized_name"))})
+            or _profile_body_matches_company_identity(pages.get(url, ""), identity)
+        )
+        and _quote_supports_headcount(quote, finding["observed_value"])
+    ):
+        invocation_cache["refresh_outcome"] = "verified"
+        invocation_cache.pop(VERIFIER_FAILURE_DETAIL_KEY, None)
+        return True
+    return False
+
+
 def _project_investigator_industry(
     verdict: Mapping[str, Any],
     finding: Optional[Mapping[str, Any]],
@@ -8272,6 +8332,13 @@ async def _run_targeted_company_evidence_investigation(
         employee_size_conflict=employee_size_conflict,
         company_quality=company_quality,
     )
+    if _settle_recovered_local_headcount_refresh(
+        structured_profile_invocation_cache, headcount_finding, investigation,
+        investigation_verified_identity, projected, icp=icp,
+    ):
+        investigation_receipt["prior_linkedin_refresh_failure_reason"] = (
+            SOURCE_BLOCKED_FAILURE_REASON
+        )
     if headcount_conflict_resolved:
         projected_result.details["employee_size_conflict_receipt"] = {
             "status": headcount_finding["status"],

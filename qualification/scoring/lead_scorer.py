@@ -41,7 +41,7 @@ from qualification.scoring.pre_checks import (
     check_country_match,
     run_company_zero_checks,
 )
-from qualification.scoring.country_data import US_STATES
+from qualification.scoring.country_data import COUNTRIES, US_STATES
 from qualification.scoring.verification_helpers import (
     is_generic_intent_description,
     check_future_date,
@@ -83,6 +83,9 @@ from qualification.scoring.company_evidence_investigator import (
     _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
     _bound_linkedin_headquarters_source,
+    _bound_linkedin_headquarters_finding,
+    _bound_structured_headquarters_finding,
+    _linkedin_about_headquarters_field,
     _complete_verified_first_party_identity,
     _plain_text,
     _priority_headquarters_navigation_source,
@@ -1434,7 +1437,6 @@ def _decision_from_observed_employee_size(verdict: dict, icp: ICPPrompt) -> str:
     ):
         return COMPANY_FIT_UNAVAILABLE
     observed = str(observed_value).strip()
-    flag = strict_company_fit_boolean(verdict.get("employee_size_matches"))
     if not observed:
         return COMPANY_FIT_UNAVAILABLE
     from qualification.employee_buckets import (
@@ -1458,8 +1460,6 @@ def _decision_from_observed_employee_size(verdict: dict, icp: ICPPrompt) -> str:
     if not bucket or not targets_verified:
         return COMPANY_FIT_UNAVAILABLE
     canonical_match = bucket in targets
-    if flag is None or flag is not canonical_match:
-        return COMPANY_FIT_UNAVAILABLE
     return COMPANY_FIT_MATCH if canonical_match else COMPANY_FIT_MISMATCH
 
 
@@ -1720,6 +1720,10 @@ def _canonical_observed_geography_match(
     requested_states = requested_states.union(requested_region_states)
     state_matches = True
     if requested_states:
+        if _resolve_country(observed) and not is_united_states(observed):
+            # A proven foreign HQ cannot match a requested US state/region.
+            # Its missing US state is not a missing fact that web may replace.
+            return False
         observed_state = _canonical_us_state(
             verdict.get("observed_hq_state"),
             case_insensitive_abbreviation=company_quality,
@@ -5071,40 +5075,26 @@ async def _refresh_linkedin_employee_size_observation(
     """Replace a LinkedIn size observation only after exact identity binding."""
 
     evidence_url = _dimension_web_evidence(verdict, "employee_size")["url"]
-    evidence_slug = ""
-    if not is_linkedin_evidence_url(evidence_url):
-        direct_decision = _decision_with_web_evidence(
+    direct_web_decision = (
+        _decision_with_web_evidence(
             _decision_from_observed_employee_size(dict(verdict), icp),
             _dimension_web_evidence(verdict, "employee_size"),
-        )
-        if direct_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}:
-            # A fresh repair can replace an unusable LinkedIn citation with
-            # complete direct evidence. Do not retain the earlier outcome.
+        ) if not is_linkedin_evidence_url(evidence_url)
+        else COMPANY_FIT_UNAVAILABLE
+    )
+
+    def web_fallback() -> dict[str, Any]:
+        # Missing or failed LinkedIn evidence is not a numerical mismatch.
+        # A complete independent web fact may resolve this dimension only
+        # after the bound LinkedIn paths supplied no usable size.
+        if direct_web_decision in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}:
             invocation_cache["refresh_outcome"] = "verified"
-            anchor_name = str(
-                verified_homepage_identity.get("normalized_name") or ""
-            ).strip()
-            anchor_domain = str(
-                verified_homepage_identity.get("registrable_dns_domain") or ""
-            ).strip()
-            anchor_slug = str(
-                verified_homepage_identity.get("linkedin_company_slug") or ""
-            ).strip().casefold()
-            if (
-                collect_structured_conflict
-                and direct_decision == COMPANY_FIT_MISMATCH
-                and anchor_name
-                and anchor_domain
-                and anchor_slug
-            ):
-                await _fetch_structured_linkedin_profile_once(
-                    verified_homepage_identity,
-                    invocation_cache,
-                    collect_identity=collect_structured_conflict,
-                )
-                # This is a secondary conflict check. Its failure cannot erase
-                # complete direct evidence or become a provider failure.
+            invocation_cache.pop(VERIFIER_FAILURE_DETAIL_KEY, None)
             return dict(verdict)
+        return unavailable
+
+    evidence_slug = ""
+    if not is_linkedin_evidence_url(evidence_url):
         anchor_fields = (
             "normalized_name",
             "registrable_dns_domain",
@@ -5263,15 +5253,6 @@ async def _refresh_linkedin_employee_size_observation(
     )
     current_source_url = current.get("url") if isinstance(current, Mapping) else None
     current_quote = current.get("quote") if isinstance(current, Mapping) else None
-    current_web_evidence_usable = bool(
-        isinstance(current_employee_count, str)
-        and _normalize_linkedin_employee_bucket(current_employee_count)
-        == current_employee_count
-        and isinstance(current_source_url, str)
-        and current_source_url
-        and isinstance(current_quote, str)
-        and current_quote
-    )
     anchor_domain = str(
         verified_homepage_identity.get("registrable_dns_domain") or ""
     ).strip()
@@ -5282,8 +5263,7 @@ async def _refresh_linkedin_employee_size_observation(
         verified_homepage_identity.get("linkedin_company_slug") or ""
     ).strip().casefold()
     if (
-        not current_web_evidence_usable
-        and anchor_name
+        anchor_name
         and anchor_domain
         and anchor_slug == evidence_slug
     ):
@@ -5306,10 +5286,11 @@ async def _refresh_linkedin_employee_size_observation(
         icp,
     ) in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}:
         invocation_cache["refresh_outcome"] = "verified"
+        invocation_cache["linkedin_employee_size_verified"] = True
         invocation_cache.pop(VERIFIER_FAILURE_DETAIL_KEY, None)
         return unavailable
     if not isinstance(current, Mapping):
-        return unavailable
+        return web_fallback()
     if current.get("outcome") == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE:
         # The identity-bound current profile controls this dimension even when
         # the separate model observation was malformed or incomplete.
@@ -5317,7 +5298,7 @@ async def _refresh_linkedin_employee_size_observation(
             invocation_cache["refresh_outcome"] = (
                 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
             )
-        return unavailable
+        return web_fallback()
     employee_count = current_employee_count
     source_url = current_source_url
     quote = current_quote
@@ -5332,8 +5313,11 @@ async def _refresh_linkedin_employee_size_observation(
         or not quote
     ):
         invocation_cache["refresh_outcome"] = "retryable_failure"
-        return unavailable
+        return web_fallback()
     projected = dict(unavailable)
+    invocation_cache["refresh_outcome"] = "verified"
+    invocation_cache.pop(VERIFIER_FAILURE_DETAIL_KEY, None)
+    invocation_cache["linkedin_employee_size_verified"] = True
     projected.update(
         observed_employee_count=employee_count,
         employee_size_matches=employee_count in targets,
@@ -5345,6 +5329,136 @@ async def _refresh_linkedin_employee_size_observation(
         nested_copy = dict(projected["dimension_evidence"])
         nested_copy["employee_size"] = {"url": source_url, "quote": quote}
         projected["dimension_evidence"] = nested_copy
+    return projected
+
+
+def _project_verified_linkedin_headquarters(
+    verdict: Mapping[str, Any],
+    *,
+    verified_identity: Mapping[str, Any],
+    invocation_cache: dict[str, Any],
+    linkedin_profile_source: Optional[Mapping[str, str]],
+    icp: ICPPrompt,
+    company: CompanyOutput,
+    company_quality: bool,
+    validated_geography_finding: Optional[Mapping[str, Any]] = None,
+) -> dict[str, Any]:
+    """Prefer exact server-fetched LinkedIn HQ facts to broad web observations."""
+
+    anchor = {
+        "verified_name": verified_identity.get("normalized_name"),
+        "verified_domain": verified_identity.get("registrable_dns_domain"),
+        "verified_linkedin_slug": verified_identity.get("linkedin_company_slug"),
+    }
+    source = invocation_cache.get("structured_profile_headquarters_evidence")
+    finding: dict[str, Any] = {}
+    structured_selected = False
+    if isinstance(source, Mapping):
+        candidate = {
+            "status": "VERIFIED", "evidence_url": source.get("url"),
+            "evidence_quote": source.get("text"),
+            "observed_country": source.get("country"),
+            "observed_state": source.get("state"),
+        }
+        if _bound_structured_headquarters_finding(candidate, source, anchor):
+            finding = candidate
+            structured_selected = True
+    raw = linkedin_profile_source or {}
+    url, text = raw.get("url", ""), raw.get("text", "")
+    if not finding and _bound_linkedin_headquarters_source(url, url, text, anchor):
+        field = _linkedin_about_headquarters_field(text)
+        # Reuse the existing exact-field validator and canonical locality
+        # tables. Ambiguous or unknown text supplies no authoritative HQ.
+        candidates = []
+        state_names = {value.casefold() for value in US_STATES.values()}
+        for country, _alpha2, _alpha3, _continent in COUNTRIES:
+            if country != "United States" and (
+                country.casefold() in state_names
+                or not re.search(r"(?<!\w)" + re.escape(country) + r"(?!\w)", field, re.I)
+            ):
+                continue
+            states = set(US_STATES.values()) if country == "United States" else {""}
+            for state in sorted(states):
+                candidate = {
+                    "status": "VERIFIED", "evidence_url": url,
+                    "evidence_quote": field,
+                    "observed_country": country, "observed_state": state,
+                }
+                if field and _bound_linkedin_headquarters_finding(
+                    candidate, text, url, anchor,
+                ):
+                    candidates.append(candidate)
+        if len(candidates) == 1:
+            finding = candidates[0]
+    if not finding:
+        return dict(verdict)
+    if (
+        _resolve_country(finding["observed_country"]) == "united states"
+        and not finding["observed_state"]
+        and (
+            company_quality
+            or _canonical_observed_geography_match({
+                "observed_hq_country": finding["observed_country"],
+                "observed_hq_state": "",
+            }, icp, company_quality=company_quality) is None
+        )
+        and _resolve_country(verdict.get("observed_hq_country")) == "united states"
+        and not is_linkedin_evidence_url(_dimension_web_evidence(verdict, "geography")["url"])
+        and _decision_with_web_evidence(
+            _decision_from_observed_geography(
+                dict(verdict), icp, company=company, company_quality=company_quality,
+            ),
+            _dimension_web_evidence(verdict, "geography"),
+        ) in {COMPANY_FIT_MATCH, COMPANY_FIT_MISMATCH}
+    ):
+        # LinkedIn established the country but supplied no required US state.
+        # Complete compatible web HQ evidence may fill this missing fact.
+        return dict(verdict)
+    semantic_geography = _geography_needs_semantic_resolution(icp)
+    reviewed = validated_geography_finding or {}
+    reviewed_bound = bool(
+        reviewed.get("status") in {"VERIFIED", "CONTRADICTED"}
+        and _resolve_country(reviewed.get("observed_country"))
+        == _resolve_country(finding["observed_country"])
+        and (
+            _bound_structured_headquarters_finding(reviewed, source, anchor)
+            if structured_selected else (
+                _bound_linkedin_headquarters_finding(reviewed, text, url, anchor)
+                if text else False
+            )
+        )
+    )
+    if semantic_geography and reviewed_bound:
+        finding = dict(reviewed)
+    projected = _project_investigator_geography(
+        verdict, finding, icp=icp, company=company, company_quality=company_quality,
+    )
+    if _dimension_web_evidence(projected, "geography") != {
+        "url": finding["evidence_url"], "quote": finding["evidence_quote"],
+    }:
+        # The selected LinkedIn HQ can lack a requested state. Keep its
+        # known country/evidence open for review instead of restoring an
+        # incompatible web fact just because comparison was unavailable.
+        projected.update(
+            observed_hq_country=finding["observed_country"],
+            observed_hq_state=finding["observed_state"], geography_matches=None,
+            geography_evidence_url=finding["evidence_url"],
+            geography_evidence_quote=finding["evidence_quote"],
+        )
+        if isinstance(projected.get("dimension_evidence"), Mapping):
+            projected["dimension_evidence"] = {
+                **projected["dimension_evidence"], "geography": {
+                    "url": finding["evidence_url"], "quote": finding["evidence_quote"],
+                },
+            }
+    if semantic_geography and not reviewed_bound:
+        # A bound HQ fact is not a semantic match for a city or other custom
+        # locality. The existing reviewer must judge that exact LinkedIn fact.
+        projected["geography_matches"] = None
+    if _dimension_web_evidence(projected, "geography") == {
+        "url": finding["evidence_url"], "quote": finding["evidence_quote"],
+    }:
+        invocation_cache["linkedin_headquarters_verified"] = True
     return projected
 
 
@@ -6849,6 +6963,8 @@ def _targeted_company_investigation_dimensions(
     verified_structured_identity: Optional[Mapping[str, Any]] = None,
     verified_transport_domain: str = "",
     homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
+    verified_linkedin_employee_size: bool = False,
+    verified_linkedin_headquarters: bool = False,
 ) -> tuple[str, ...]:
     """Select only fact gaps and unsupported semantic company disputes."""
 
@@ -6930,7 +7046,7 @@ def _targeted_company_investigation_dimensions(
         and conflict_receipt.get("resolution")
         == "structured_linkedin_employee_count_range_primary"
     )
-    if not linkedin_primary and (
+    if not verified_linkedin_employee_size and not linkedin_primary and (
         employee_size_conflict
         or dimensions.get("employee_size")
         in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
@@ -6968,7 +7084,10 @@ def _targeted_company_investigation_dimensions(
     # only when the broad verifier did not establish a usable headquarters.
     if dimensions.get("geography") == COMPANY_FIT_UNAVAILABLE:
         targets.append("geography")
-    elif dimensions.get("geography") == COMPANY_FIT_MATCH:
+    elif (
+        dimensions.get("geography") == COMPANY_FIT_MATCH
+        and not verified_linkedin_headquarters
+    ):
         # A third-party HQ match cannot bypass a known first-party contact or
         # about page. The locator is only a fetch target, never an HQ claim.
         raw_evidence = (
@@ -8299,6 +8418,17 @@ async def _run_targeted_company_evidence_investigation(
         company=company,
         company_quality=company_quality,
     )
+    if isinstance(structured_profile_invocation_cache, dict):
+        projected = _project_verified_linkedin_headquarters(
+            projected, verified_identity=investigation_verified_identity,
+            invocation_cache=structured_profile_invocation_cache,
+            linkedin_profile_source=linkedin_profile_source, icp=icp,
+            company=company, company_quality=company_quality,
+            validated_geography_finding=(
+                claims.get("geography")
+                if isinstance(claims.get("geography"), Mapping) else None
+            ),
+        )
     rebrand_claim = claims.get("rebrand")
     verified_rebrand_identity = (
         rebrand_claim if isinstance(rebrand_claim, Mapping) else {}
@@ -8637,6 +8767,8 @@ async def _llm_reverify_company(
         if isinstance(candidate_homepage_identity, Mapping):
             unresolved_homepage_identity = candidate_homepage_identity
     current_profile_cache: dict[str, Any] = {}
+    if linkedin_profile_source_sink is None:
+        linkedin_profile_source_sink = {}
     # Retained pages are admitted lazily only when this attempt cites their
     # exact URL. Unused pages from an earlier attempt must not consume this
     # attempt's two-URL grounding allowance.
@@ -8806,6 +8938,12 @@ async def _llm_reverify_company(
             collect_structured_conflict=evidence_investigator,
             linkedin_profile_source_sink=linkedin_profile_source_sink,
         )
+        verdict = _project_verified_linkedin_headquarters(
+            verdict, verified_identity=profile_identity,
+            invocation_cache=current_profile_cache,
+            linkedin_profile_source=linkedin_profile_source_sink,
+            icp=icp, company=company, company_quality=company_quality,
+        )
     structured_employee_size_evidence = (
         current_profile_cache.get("structured_evidence")
         if current_profile_cache.get("structured_employee_size_applicable")
@@ -8924,6 +9062,12 @@ async def _llm_reverify_company(
             verified_structured_identity=structured_profile_identity_evidence,
             verified_transport_domain=verified_transport_domain,
             homepage_navigation_locators=verified_homepage_navigation_locators,
+            verified_linkedin_employee_size=bool(
+                current_profile_cache.get("linkedin_employee_size_verified")
+            ),
+            verified_linkedin_headquarters=bool(
+                current_profile_cache.get("linkedin_headquarters_verified")
+            ),
         )
         if require_company_fit_dimensions and evidence_investigator
         else ()
@@ -9407,9 +9551,20 @@ async def _llm_reverify_company(
             repaired_verdict,
             company,
             icp,
-            verified_homepage_identity=verified_identity,
+            verified_homepage_identity=profile_identity,
             invocation_cache=current_profile_cache,
             collect_structured_conflict=evidence_investigator,
+            linkedin_profile_source_sink=linkedin_profile_source_sink,
+        )
+        repaired_verdict = _project_verified_linkedin_headquarters(
+            repaired_verdict, verified_identity=profile_identity,
+            invocation_cache=current_profile_cache,
+            linkedin_profile_source=linkedin_profile_source_sink,
+            icp=icp, company=company, company_quality=company_quality,
+            validated_geography_finding=(
+                claims.get("geography")
+                if isinstance(claims.get("geography"), Mapping) else None
+            ),
         )
     structured_employee_size_evidence = (
         current_profile_cache.get("structured_evidence")
@@ -9524,6 +9679,12 @@ async def _llm_reverify_company(
                 verified_structured_identity=structured_profile_identity_evidence,
                 verified_transport_domain=verified_transport_domain,
                 homepage_navigation_locators=verified_homepage_navigation_locators,
+                verified_linkedin_employee_size=bool(
+                    current_profile_cache.get("linkedin_employee_size_verified")
+                ),
+                verified_linkedin_headquarters=bool(
+                    current_profile_cache.get("linkedin_headquarters_verified")
+                ),
             )
         )
         post_repair_positive_semantic_review = (

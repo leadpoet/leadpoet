@@ -327,7 +327,7 @@ def test_hq_prefetch_keeps_known_first_party_page_and_does_not_truncate_it():
     assert list(pages) == [first_party, PROFILE]
     assert pages[first_party]["text"] == first_party_text
     assert pages[PROFILE]["text"] == HQ_TEXT
-    assert "current first-party priority and conflict rules" in investigator._SYSTEM_PROMPT
+    assert "Use verified exact-company LinkedIn headquarters first" in investigator._SYSTEM_PROMPT
 
 
 def test_structured_hq_does_not_overflow_or_truncate_an_existing_full_profile():

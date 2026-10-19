@@ -247,9 +247,9 @@ unfinished jobs or backfill historical failures.
 ### Provider costs
 
 The current sourcing policy gives each ICP a $4.00 sourcing admission limit.
-Final cost eligibility allows $0.80 per verified qualified company/contact
-pair for that ICP. New rounds freeze
-`successful_calls_per_icp_v1`; existing rounds retain their stored policy.
+Final cost eligibility allows $4.00 of successful sourcing cost for that ICP,
+independent of qualified-company count. New rounds freeze
+`successful_calls_flat_per_icp_v1`; existing rounds retain their stored policy.
 OpenRouter uses the provider's
 `usage.cost`, not the admission-only management key. Scrapingdog uses the
 existing endpoint credit map at $0.00005 per credit; approved routes absent
@@ -281,9 +281,10 @@ provider outage do not gain that exception. The gateway release preflight
 requires migration 246's private schema capability.
 
 Sourcing reservations are serialized per ICP across its attempts. Different
-ICPs have separate budgets and can run in parallel. Admission counts settled
-spend and unresolved reservations. Only one paid sourcing call can be in flight
-for an ICP. A call admitted below $4 may finish above $4; record its full charge
+ICPs have separate budgets and can run in parallel. Admission counts confirmed
+spend, including billed failures; pending costs do not reserve money. Multiple
+admitted calls may be in flight for an ICP. A call admitted below $4 may finish
+above $4; record its full charge
 and retain its result, then refuse further paid calls for that ICP. Valid
 output is still scored, and the other ICPs continue. The admission limit is
 not an absolute upstream charge ceiling.
@@ -293,11 +294,12 @@ under its frozen per-ICP policy. Successful paid calls count, including retry
 calls and calls whose result the model does not use. Failed calls do not enter
 competition sourcing cost; their actual billing and unresolved reservations
 remain recorded separately. A successful call with an unknown charge blocks
-cost eligibility until resolved. An ICP above $0.80 times its qualified-pair
-count contributes zero to the final average; its original quality score stays
+cost eligibility until resolved. Under the flat policy, an ICP above $4
+contributes zero to the final average; its original quality score stays
 in the run ledger. The other ICPs retain their own eligibility. These rules
-apply equally to baseline and miner models. Independent judge cost has its
-existing $50 cap and is reported separately. Credentials and provider payloads
+apply equally to baseline and miner models. Existing rounds marked
+`successful_calls_per_icp_v1` retain their $0.80-times-qualified-count allowance.
+Independent judge cost has its existing $50 cap and is reported separately. Credentials and provider payloads
 are not part of the public cost summary.
 
 ## Required service configuration

@@ -237,6 +237,10 @@ PROVIDER_CALL_SCHEMA_VERSION = "leadpoet.lab_arena.provider_call.v1"
 SUBMISSION_COSTS_SCHEMA_VERSION = "leadpoet.lab_arena.submission_costs.v1"
 SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_v1"
 PER_ICP_SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_per_icp_v1"
+FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY = "successful_calls_flat_per_icp_v1"
+PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES = (
+    PER_ICP_SUCCESSFUL_CALLS_COST_POLICY, FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+)
 INFRASTRUCTURE_RETRY_COST_POLICY = "trusted_infrastructure_v1"
 PER_ICP_POLICY_BUDGET_STOP_REASONS = frozenset(
     {"money_cap", "per_icp_quota", "stage_quota"}
@@ -885,8 +889,9 @@ ROUND_CONFIGURATION_FIELDS = (
     F("scorer_policy", "object"),
     F("deepline_catalog", "object", required=False),
     F("execution_cap_microusd", "int", minimum=1),
-    # New rounds freeze the final cost-per-returned-company eligibility rule.
-    # It is optional only so historical configuration documents stay valid.
+    # Legacy policies use a per-qualified-company allowance. Flat per-ICP
+    # rounds retain this field as a one-company compatibility allowance only.
+    # It is optional so historical configuration documents stay valid.
     F(
         "cost_per_company_microusd",
         "int",
@@ -900,7 +905,7 @@ ROUND_CONFIGURATION_FIELDS = (
         "sourcing_cost_eligibility_policy",
         "str",
         required=False,
-        choices=(SUCCESSFUL_CALLS_COST_POLICY, PER_ICP_SUCCESSFUL_CALLS_COST_POLICY),
+        choices=(SUCCESSFUL_CALLS_COST_POLICY, *PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES),
     ),
     F(
         "execution_icp_cap_microusd",
@@ -968,19 +973,24 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         raise ArenaContractError("round promotion margin cannot be null")
     if (
         config.get("sourcing_cost_eligibility_policy")
-        == PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+        in PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
     ):
         if not is_integrity:
             raise ArenaContractError("per-ICP cost policy requires integrity receipts")
+        expected_company_cap = (
+            PER_ICP_EXECUTION_CAP_MICROUSD
+            if config["sourcing_cost_eligibility_policy"] == FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            else PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
+        )
         if (
             config.get("execution_icp_cap_microusd")
             != PER_ICP_EXECUTION_CAP_MICROUSD
             or config.get("cost_per_company_microusd")
-            != PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
+            != expected_company_cap
         ):
             raise ArenaContractError("per-ICP cost policy requires fixed cost limits")
     if (config.get("infrastructure_retry_cost_policy") is not None
-        and config.get("sourcing_cost_eligibility_policy") != PER_ICP_SUCCESSFUL_CALLS_COST_POLICY):
+        and config.get("sourcing_cost_eligibility_policy") not in PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
         raise ArenaContractError("infrastructure retry cost policy requires per-ICP costs")
     if (
         "benchmark_disclosure_policy" in config
@@ -1031,7 +1041,7 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         if catalog["allow_people"] != (config.get("contact_policy") == "contacts_v1"):
             raise ArenaContractError("Deepline catalog must match the round contact policy")
     if call_quotas["deepline"] == 0 or scoring_call_quotas["deepline"] == 0:
-        if catalog is None or config.get("sourcing_cost_eligibility_policy") != PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
+        if catalog is None or config.get("sourcing_cost_eligibility_policy") not in PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES:
             raise ArenaContractError("budget-only Deepline requires a frozen catalog and per-ICP cost policy")
     if not config["scorer_image_reference"].endswith("@" + config["scorer_image_digest"]):
         raise ArenaContractError("scorer image reference must pin the scorer image digest")

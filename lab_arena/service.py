@@ -525,6 +525,9 @@ class RoundDefaults:
     cost_per_company_microusd: int = DEFAULT_COST_PER_COMPANY_MICROUSD
     execution_icp_cap_microusd: int = DEFAULT_EXECUTION_ICP_CAP_MICROUSD
     per_icp_cost_policy: bool = False
+    # Production opts new rounds into the flat allowance. Existing callers and
+    # frozen rounds keep their explicit historical policy.
+    flat_per_icp_cost_policy: bool = False
     scoring_cap_microusd: int = 50_000_000
     runner_hotkeys: Tuple[str, ...] = ()
     # The service freezes its public execution ceiling into each new round.
@@ -731,7 +734,7 @@ def _partial_baseline_transition_deadline(
         or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
         or configuration.get("integrity_policy") != "arena_integrity_v1"
         or configuration.get("sourcing_cost_eligibility_policy")
-            != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
     ):
         return None
     schedule = configuration["schedule"]
@@ -1109,7 +1112,8 @@ class ArenaService:
             raise ServiceError(
                 "successful_call_cost_schema_unavailable", 500
             ) from exc
-        if getattr(self._config.defaults, "per_icp_cost_policy", False):
+        if (getattr(self._config.defaults, "per_icp_cost_policy", False)
+                or getattr(self._config.defaults, "flat_per_icp_cost_policy", False)):
             try:
                 self._store.per_icp_cost_schema()
             except ArenaStoreError as exc:
@@ -1289,7 +1293,7 @@ class ArenaService:
         source = getattr(self._config, "deepline_catalog_source", None)
         if source is None or configuration.get("deepline_catalog") is not None:
             return
-        if configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
+        if configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES:
             return
         from lab_arena.deepline_catalog import validate_catalog
         configuration["deepline_catalog"] = validate_catalog(source(
@@ -1337,9 +1341,14 @@ class ArenaService:
             "scoring_wall_clock_seconds": contracts.SCORING_WALL_CLOCK_SECONDS,
             "scorer_policy": self._scorer_policy,
             "execution_cap_microusd": defaults.execution_cap_microusd,
-            "cost_per_company_microusd": defaults.cost_per_company_microusd,
+            "cost_per_company_microusd": (
+                contracts.PER_ICP_EXECUTION_CAP_MICROUSD
+                if defaults.flat_per_icp_cost_policy else defaults.cost_per_company_microusd
+            ),
             "sourcing_cost_eligibility_policy": (
-                contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                if defaults.flat_per_icp_cost_policy
+                else contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
                 if defaults.per_icp_cost_policy
                 else contracts.SUCCESSFUL_CALLS_COST_POLICY
             ),
@@ -1362,7 +1371,7 @@ class ArenaService:
             )
         elif defaults.parallel_twenty_icp_execution:
             document["parallel_twenty_icp_execution"] = True
-        if defaults.per_icp_cost_policy:
+        if defaults.per_icp_cost_policy or defaults.flat_per_icp_cost_policy:
             document["execution_icp_cap_microusd"] = (
                 defaults.execution_icp_cap_microusd
             )
@@ -2938,7 +2947,7 @@ class ArenaService:
         configuration = row.get("configuration_doc") or {}
         baselines = [p for p in row.get("participants") or [] if p.get("is_king")]
         if (configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
-            or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            or configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
             or configuration.get("integrity_policy") != integrity.POLICY
             or quality_policy.enabled(configuration)
             or type(configuration.get("max_attempts_per_assignment")) is not int
@@ -3716,7 +3725,7 @@ class ArenaService:
                 round_row.get("configuration_doc", {}).get(
                     "sourcing_cost_eligibility_policy"
                 )
-                == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
             ):
                 qualified_by_position = (
                     publication_reads.qualified_counts(submission_id, sorted(wanted))
@@ -3881,7 +3890,7 @@ class ArenaService:
             hard_reason = "provider_calls_inflight"
         summary = {
             "sourcing_cost_eligibility_policy": (
-                contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                round_row["configuration_doc"]["sourcing_cost_eligibility_policy"]
             ),
             "execution_icp_cap_microusd": int(
                 round_row["configuration_doc"]["execution_icp_cap_microusd"]
@@ -4052,7 +4061,7 @@ class ArenaService:
         configuration = round_row.get("configuration_doc") or {}
         if (
             configuration.get("sourcing_cost_eligibility_policy")
-            == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
         ):
             return self._submission_per_icp_cost_eligibility(
                 round_row,
@@ -5109,10 +5118,10 @@ class ArenaService:
             )
         if (
             configuration.get("sourcing_cost_eligibility_policy")
-            == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
         ):
             lease["sourcing_cost_eligibility_policy"] = (
-                contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                configuration["sourcing_cost_eligibility_policy"]
             )
         return lease
 
@@ -5861,7 +5870,7 @@ class ArenaService:
             and (round_row.get("configuration_doc") or {}).get(
                 "sourcing_cost_eligibility_policy"
             )
-            == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
             and not any(
                 entry.get("entry_kind") == "refusal"
                 and (entry.get("entry_doc") or {}).get("reason")
@@ -6362,7 +6371,7 @@ class ArenaService:
             "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
             "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
         } or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
-            or configuration.get("sourcing_cost_eligibility_policy") != contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY):
+            or configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
             with self._completed_scores_lock:
                 self._completed_scores_cache.pop(str(row["round_id"]), None)
             return {}

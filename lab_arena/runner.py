@@ -4227,7 +4227,7 @@ class AssignmentExecutor:
             per_icp_budget_stop_ended_attempt = (
                 not scoring_run
                 and lease.get("sourcing_cost_eligibility_policy")
-                == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+                in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
                 and bool(budget_stop_sequences)
                 and len(infrastructure_sequences) == len(infrastructure_failures)
                 and max(budget_stop_sequences)

@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: future flat ICP cost eligibility
+
+The user authorized a flat $4 successful-sourcing eligibility limit for future
+Arena rounds, retaining the $4 paid-call admission limit. This includes narrow
+policy and agent-pacing changes, exact committed migrations, focused tests,
+safe push/merge, canonical deployment and bounded live verification. Preserve
+all existing frozen rounds, quality scoring, penalties, judges, provider billing,
+retry/recovery, baseline/miner parity, promotion, rewards and concurrent work.
+Do not add cost allocation or another scoring formula. This authority ends
+after deployment and end-to-end policy verification.
+
 ## Scoped production authorization: October 19 audit and future grading
 
 On 2026-10-19 the user authorized protected production audit and narrow general

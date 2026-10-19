@@ -217,7 +217,10 @@ def test_company_only_canonicalization_removes_contact_fields() -> None:
 
     assert "target_roles" not in generated
     assert "target_seniority" not in generated
-    assert generated["prompt"] == source["prompt"]
+    prose, requirements = generated["prompt"].split("\n\nIntent qualification:\n")
+    assert prose == source["prompt"]
+    assert f"Required primary intent ({generated['intent_max_age_days']} days): {generated['intent_signal']}" in requirements
+    assert "an optional bonus cannot replace it" in requirements
 
 
 def test_contact_generation_prompt_keeps_natural_prompt_company_only(

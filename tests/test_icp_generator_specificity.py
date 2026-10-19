@@ -131,3 +131,76 @@ def test_prompt_no_longer_instructs_barebone_shapes():
     assert "fulfillment style" in text.lower() or "fulfillment-style" in text.lower()
     assert "specific" in text.lower()
     assert "broad enough that many real companies" in text.lower()
+
+
+def test_generated_brief_states_structured_required_and_bonus_intents():
+    primary = "Announced a strategic partnership in the last 12 months."
+    bonus = "Announced a leadership change in the last 12 months."
+    original = {
+        "prompt": "Australian payment companies with partnerships or leadership changes.",
+        "industry": "Financial Services", "sub_industry": "Payments",
+        "country": "Australia", "company_stage": "Public",
+        "employee_count": ["51-200", "201-500"],
+        "product_service": "Payments", "required_attribute": "Provides payments",
+        "intent_signal": primary, "intent_signals": [primary, bonus],
+        "intent_category": "PARTNERSHIP", "intent_max_age_days": 180,
+    }
+    out = canonicalize_generated_icp(original, industry="Financial Services", sub_industry="Payments")
+    assert out["prompt"].startswith(original["prompt"])
+    assert f"Required primary intent (180 days): {primary}" in out["prompt"]
+    assert f"Optional bonus intent (365 days): {bonus}" in out["prompt"]
+    assert "These intent requirements govern qualification." in out["prompt"]
+    assert "an optional bonus cannot replace it" in out["prompt"]
+    for key in ("country", "company_stage", "employee_count", "product_service", "required_attribute",
+                "intent_signal", "intent_signals", "intent_category", "intent_max_age_days"):
+        assert out[key] == original[key]
+    repeated = canonicalize_generated_icp(out, industry="Financial Services", sub_industry="Payments")
+    assert repeated == out
+
+
+def test_generated_brief_single_intent_preserves_alternatives_within_the_signal():
+    primary = "Launched a new product or major platform capability."
+    out = canonicalize_generated_icp({
+        "prompt": "Software companies in Canada.", "employee_count": ["51-200"],
+        "intent_signal": primary, "intent_signals": [primary],
+        "intent_category": "PRODUCT_LAUNCH", "intent_max_age_days": 365,
+    }, industry="Software", sub_industry="B2B SaaS")
+    assert f"Required primary intent (365 days): {primary}" in out["prompt"]
+    assert "Optional bonus intent (" not in out["prompt"]
+    assert out["bonus_intents"] == []
+
+
+def test_fallback_briefs_use_the_same_required_bonus_contract(monkeypatch):
+    primary = "Announced a strategic partnership"
+    bonus = "Announced a leadership change"
+    monkeypatch.setattr(ig.random, "sample", lambda population, count: [primary, bonus])
+    # Exercise each real fallback company-prose template without changing its
+    # filters or treating 'or' inside a single event as a separator.
+    real_choice = ig.random.choice
+    for index in range(5):
+        monkeypatch.setattr(ig.random, "choice", lambda values, index=index:
+            values[index] if len(values) == 5 and all(isinstance(v, str) for v in values)
+            and any("We're selling" in v for v in values) else real_choice(values))
+        out = ig.generate_single_icp(f"brief-{index}", industry="Software")
+        prose, requirements = out["prompt"].split("\n\nIntent qualification:\n")
+        assert primary.lower() not in prose.lower()
+        assert bonus.lower() not in prose.lower()
+        assert f"Required primary intent (365 days): {primary}" in requirements
+        assert f"Optional bonus intent (365 days): {bonus}" in requirements
+
+
+def test_intent_section_survives_contact_projection_and_recanonicalization():
+    from lab_arena.integrity import company_only_icp
+
+    out = canonicalize_generated_icp({
+        "prompt": "Software companies in Canada.", "employee_count": ["51-200"],
+        "intent_signal": SPECIFIC_INTENT, "intent_signals": [SPECIFIC_INTENT],
+        "intent_category": "PRODUCT_LAUNCH", "intent_max_age_days": 365,
+        "product_service": "A software platform", "target_roles": ["CEO"],
+    }, industry="Software", sub_industry="B2B SaaS", contacts_required=True)
+    repeated = canonicalize_generated_icp(out, industry="Software", sub_industry="B2B SaaS", contacts_required=True)
+    assert repeated == out
+    assert out["prompt"].count("Target contacts:") == 1
+    projected = company_only_icp(out)
+    assert "Target contacts:" not in projected["prompt"]
+    assert f"Required primary intent (365 days): {SPECIFIC_INTENT}" in projected["prompt"]

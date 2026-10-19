@@ -808,7 +808,8 @@ def canonicalize_generated_icp(
         radius=_configured_employee_bucket_radius() if employee_bucket_radius is None else employee_bucket_radius,
         all_buckets=_configured_employee_all_buckets() if all_employee_buckets is None else all_employee_buckets,
     )
-    prompt = str(normalized.get("prompt") or "")
+    # Replace only our generated intent section when this contract is reapplied.
+    prompt = str(normalized.get("prompt") or "").split("\n\nIntent qualification:\n", 1)[0]
     if raw_employee_count and isinstance(raw_employee_count, str):
         prompt = prompt.replace(str(raw_employee_count), _employee_count_display(allowed_employee_counts))
     elif raw_employee_count and employee_count:
@@ -843,6 +844,14 @@ def canonicalize_generated_icp(
                 "intent_max_age_days": intent_max_age_days_for_category(category),
             }
         )
+
+    # The structured primary/bonus contract governs qualification, even if the
+    # generated company prose accidentally describes the events as alternatives.
+    prompt = prompt.rstrip() + "\n\nIntent qualification:\n"
+    prompt += f"Required primary intent ({intent_max_age_days} days): {intent_signal}\n"
+    for bonus in bonus_intents:
+        prompt += f"Optional bonus intent ({bonus['intent_max_age_days']} days): {bonus['intent_signal']}\n"
+    prompt += "These intent requirements govern qualification. The primary intent is required; an optional bonus cannot replace it."
 
     contact_fields: Dict[str, Any] = {}
     if contacts_required:
@@ -986,6 +995,7 @@ Each ICP's `prompt` field should sound like a different real salesperson typed i
 - Descriptive / detailed ("Searching for...")
 
 Never use job titles, seniority levels, "decision-makers", "executives", or any contact-level descriptor. Company-only.
+Describe company filters only in `prompt`; put event requirements in the structured intent fields. The service appends their exact required-primary and optional-bonus wording. Do not describe the two events as alternatives or require both in `prompt`.
 
 CONSTRAINT LISTS (use ONLY these values)
 
@@ -994,6 +1004,7 @@ ORDERED INDUSTRY SLOTS (one ICP per slot, in this order; repeated names are inte
 
 INTENT SIGNAL — WRITE IT LIKE A REAL SALES-INTELLIGENCE BRIEF (not a generic label):
 Pick 1-2 intents per ICP. Do NOT output a bare category like "Launched a new product".
+The first intent is required for qualification. A second intent is an optional bonus and cannot replace the first. Keep `intent_signal` identical to the first `intent_signals` entry.
 Write each intent as a specific, descriptive sentence in the style a real buyer would
 brief a sourcing team — name the kind of behavior and the kind of evidence that proves
 it. Match the intent to the industry.
@@ -1450,27 +1461,25 @@ def generate_single_icp(
 
     country = geography.split(",")[0].strip()
     size_text = f"with {employee_count_range} employees"
-    signals_text = " or ".join([s.lower() for s in intent_signals])
 
     # COMPANY-only prompt templates — never mention people, titles, or
     # seniority. The miner returns a company, not a contact.
     prompt_templates = [
         f"I need {stage_text} {sub_industry} companies {size_text} in {country}. "
-        f"Showing signals: {signals_text}. We sell {product}.",
+        f"We sell {product}.",
 
         f"Looking for {sub_industry} ({industry}) companies "
-        f"at {stage_text}, {size_text}, based in {country}. "
-        f"Intent indicators: {signals_text}.",
+        f"at {stage_text}, {size_text}, based in {country}.",
 
         f"Searching for {sub_industry} companies "
-        f"({company_stage}, {employee_count_range} employees) in {country} "
-        f"that are {signals_text}. Selling {product}.",
+        f"({company_stage}, {employee_count_range} employees) in {country}. "
+        f"Selling {product}.",
 
         f"{company_stage} {sub_industry} companies in {country} "
-        f"({employee_count_range} employees). Signals: {signals_text}.",
+        f"({employee_count_range} employees).",
 
-        f"What {stage_text} {sub_industry} companies in {country} "
-        f"are {signals_text}? We're selling {product}.",
+        f"What {stage_text} {sub_industry} companies are in {country}? "
+        f"We're selling {product}.",
     ]
 
     prompt = random.choice(prompt_templates)

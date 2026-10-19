@@ -21,7 +21,9 @@ from qualification.scoring.lead_scorer import (
     _evidence_has_no_established_source_conflict,
     _ground_required_attribute_evidence,
     _llm_reverify_company,
+    _linkedin_post_actor_slug,
     _reverify_decision,
+    _valid_web_evidence_url,
 )
 
 
@@ -207,6 +209,40 @@ def test_registered_alias_and_verified_rebrand_names_are_eligible() -> None:
             "new_name": "Multiverse",
         },
     )
+
+
+@pytest.mark.parametrize("host", ["co.uk", "blogspot.com"])
+def test_non_company_source_host_does_not_abort_stage_reverification(host) -> None:
+    url = f"https://{host}/posts/multiversecomputing_update-1"
+    # A source URL is not a submitted company identity. Its public/private
+    # suffix cannot establish a LinkedIn actor, but existing evidence rules
+    # still determine whether its quoted fact is usable.
+    assert _valid_web_evidence_url(url) == url
+    assert _linkedin_post_actor_slug(url) == ""
+    verdict = _verdict()
+    verdict.update(stage_matches=True, stage_evidence_url=url,
+                   stage_evidence_quote="Multiverse completed its Series A round.")
+    result = _reverify_decision(
+        verdict, "", "Series A", company=_company(),
+        verified_homepage_identity=_anchor(),
+    )
+    assert result.decision == COMPANY_FIT_MATCH
+    # No actor does not substitute for the required evidence quote.
+    verdict["stage_evidence_quote"] = ""
+    result = _reverify_decision(
+        verdict, "", "Series A", company=_company(),
+        verified_homepage_identity=_anchor(),
+    )
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+
+
+def test_actor_check_preserves_lookalike_and_malformed_url_controls() -> None:
+    assert _linkedin_post_actor_slug(
+        "https://linkedin.com.evil.example/posts/multiversecomputing_update-1"
+    ) == ""
+    assert _valid_web_evidence_url(
+        "https://user:password@linkedin.com/posts/multiversecomputing_update-1"
+    ) == ""
 
 
 def test_publisher_collision_requires_complete_verified_homepage_anchor() -> None:

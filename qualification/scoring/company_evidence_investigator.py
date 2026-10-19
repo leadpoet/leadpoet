@@ -374,18 +374,19 @@ UNPROVEN because it does not prove absence of another activity.
 For a requested required_attribute finding, judge that criterion separately
 from industry. For an explicit OR, prove one allowed alternative and all shared
 qualifiers; for AND, prove every conjunct for the same company and product.
-Keep independent product/service requirements in their own check.
-A quoted product capability plus a different exact
-company-bound quote for commercial terms can jointly prove a compound
-attribute when both sources were actually fetched or server-prefetched.
-The industry finding may provide the product/activity quote, but cannot by
-itself prove a separate recurring, customer, commercial, or milestone term.
-Cite the source and exact quote for the conjunct not established by the
-industry finding; explain how the loaded sources jointly prove the complete
-criterion. If a conjunct remains unsupported by concrete company-bound source
-evidence, return UNPROVEN, even if the company likely qualifies. CONTRADICTED
-requires direct company-bound counterevidence, not a page's silence. A generic
-platform, software, pricing
+Keep independent product/service requirements in their own check; every
+mandatory condition still needs proof there.
+Judge the whole attribute from all loaded company-bound facts. Rejecting a
+citation does not reject independent evidence of the company's own offering.
+Subsidiary facts require explicit parent binding.
+If industry's fetched activity quote proves the whole attribute, reuse its URL
+and quote; no different source is required. Industry labels or VERIFIED status
+alone never prove an attribute.
+For compound attributes, prove every actual condition for the same company and
+product with exact loaded company-bound quotes; explain their joint proof.
+Do not add conditions absent from the criterion. Missing required proof or
+unresolved conflicting facts mean UNPROVEN. CONTRADICTED requires direct
+company-bound counterevidence, not silence. A generic platform, software, pricing
 contact, license, or customer quote never proves recurring terms by inference.
 Equivalent semantic evidence is sufficient: concrete source facts about the
 capability and its relationship to the same company and product may establish
@@ -4628,7 +4629,10 @@ async def investigate_company_evidence(
                                     )
                         non_rejected_source_context = (
                             []
-                            if scoped_correction_active
+                            if (
+                                scoped_correction_active
+                                and "required_attribute" not in scoped_correction_targets
+                            )
                             else _untrusted_non_rejected_source_context(
                                 targets=requested_targets,
                                 findings=claims,
@@ -4709,6 +4713,22 @@ async def investigate_company_evidence(
                                     else ""
                                 )
                                 + (
+                                    "Reassess the exact required attribute against all "
+                                    "loaded company-bound evidence, including the own "
+                                    "product/activity quote used for industry. Rejection "
+                                    "of the submitted attribute citation does not reject "
+                                    "independent evidence. Reuse the industry quote only "
+                                    "if its facts prove the complete attribute; preserve "
+                                    "every required qualifier and condition. Do not "
+                                    "transfer a subsidiary's facts to its parent or "
+                                    "infer attribute proof from an industry status. "
+                                    if any(
+                                        item.get("target") == "required_attribute"
+                                        for item in rejected
+                                    )
+                                    else ""
+                                )
+                                + (
                                     "The supporting classification URL/quote was not present "
                                     "in its fetched source. Repair that pair from an already "
                                     "loaded page, or fetch its exact source if needed and "
@@ -4741,6 +4761,16 @@ async def investigate_company_evidence(
                                     else ""
                                 )
                                 + (
+                                    "The feedback includes exact loaded-source context "
+                                    "from retained findings. Use its source facts as "
+                                    "candidate evidence for the pending attribute, not "
+                                    "its prior status as proof. Reassess every attribute "
+                                    "condition and any conflicting facts. Do not resubmit "
+                                    "or revise the server-retained findings. "
+                                    if non_rejected_source_context and scoped_correction_active
+                                    else ""
+                                )
+                                + (
                                     "The feedback includes untrusted source-bound context "
                                     "for non-rejected targets. Re-review it; prior statuses "
                                     "and observations are not authoritative. If you revise "
@@ -4757,7 +4787,7 @@ async def investigate_company_evidence(
                                     "an explicit product/service OR is not narrowed by a broad "
                                     "sector category label joined with and; independently required "
                                     "BOTH/ALL capabilities remain mandatory. "
-                                    if non_rejected_source_context
+                                    if non_rejected_source_context and not scoped_correction_active
                                     else ""
                                 )
                                 + (

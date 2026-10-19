@@ -15,6 +15,22 @@ must not accept unsupported facts or substitute a different event. No new
 reviewer, scoring path or recovery framework. Authority ends after deployment
 and validation. Report the agent-versus-deterministic recommendation afterward.
 
+## Scoped production authorization: signal judgment reuse
+
+On 2026-10-19 the user authorized the smallest durable fix for identical
+signal evidence receiving different judgments when companion signals differ.
+This includes protected inspection, narrow source changes and exact committed
+migrations if required, focused concurrency/recovery/authority tests, safe
+push and merge, exact scorer-image build/publication, canonical gateway and
+normal-validator deployment, and bounded reward-disabled live verification.
+Reuse only identical effective signal inputs within the same frozen round,
+ICP and scorer policy. Preserve company-level caches and qualification,
+paragraph review, scoring rules, actual provider accounting, budgets, original
+judge attribution, validator authority, historical rounds, accepted work,
+rewards and concurrent changes. Enable only through future frozen policy.
+Do not rescore history or cache incomplete provider failures. This scope ends
+after deployment and live verification.
+
 ## Scoped production authorization: public listing evidence and ICP wording
 
 On 2026-10-19 the user authorized the definite fixes from the score-depth

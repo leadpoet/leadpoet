@@ -1277,6 +1277,7 @@ SCORER_POLICY_FIELDS = (
     F("scoring_adapter_version", "str", minimum=1, maximum=64),
     F("company_quality_policy", "str", required=False, choices=("company_quality_v1",)),
     F("company_judgment_policy", "str", required=False, choices=("company_judgment_v1",)),
+    F("signal_judgment_policy", "str", required=False, choices=("signal_judgment_v1",)),
     F("intent_details_policy", "str", required=False, choices=("intent_details_v1",)),
     F("fp_penalty_points", "float", minimum=0, maximum=10),
     F("fp_unverified_primary_penalty_points", "float", minimum=0, maximum=10),
@@ -1293,6 +1294,8 @@ SCORER_POLICY_FIELDS = (
 
 def validate_scorer_policy(document: Any) -> Dict[str, Any]:
     policy = validate_document(document, SCORER_POLICY_FIELDS)
+    if policy.get("signal_judgment_policy") and policy.get("company_judgment_policy") != "company_judgment_v1":
+        raise ArenaContractError("signal judgments require company judgment reuse")
     if policy.get("company_judgment_policy") and (policy.get("company_quality_policy") or policy["scoring_adapter_version"] != "qualification_integrity_v2"):
         raise ArenaContractError("legacy company judgments require company-only integrity scoring")
     if policy.get("company_quality_policy") and policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):

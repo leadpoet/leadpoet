@@ -784,8 +784,14 @@ def _score_legacy_company_work_item(
         ref = refs[index]
         key = ref["cache_key"]
         if key not in raw_by_key:
-            rows = score_work_item(item, icp=icp, companies=[sliced[index]], scorer=scorer,
-                                   _original_company_indexes=[index])
+            from contextlib import nullcontext
+            from qualification.scoring.signal_judgment_cache import install_exchange
+            signal_exchange = getattr(scorer, "_signal_judgment_exchange", None)
+            async def exchange_signal(request):
+                return await signal_exchange({**request, "company_index": index})
+            with install_exchange(exchange_signal) if signal_exchange is not None else nullcontext():
+                rows = score_work_item(item, icp=icp, companies=[sliced[index]], scorer=scorer,
+                                       _original_company_indexes=[index])
             if len(rows) != 1:
                 raise ScoringError("intrinsic company judgment is missing")
             raw = {**raw_company_judgment(rows[0]), "company_judgment_policy": company_judgments.POLICY}

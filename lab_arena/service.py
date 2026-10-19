@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations
-from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, trajectory, validator_events
+from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, signal_judgments, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -554,6 +554,7 @@ class RoundDefaults:
     contacts_from: Optional[str] = None
     company_quality_from: Optional[str] = None
     company_judgment_from: Optional[str] = None
+    signal_judgment_from: Optional[str] = None
     intent_details_from: Optional[str] = None
     # Frozen only into newly created integrity rounds. Existing rounds keep
     # their original policy, including after a gateway restart.
@@ -667,6 +668,16 @@ class ServiceConfig:
                     raise ValueError("company judgments require integrity activation")
             except (ValueError, AttributeError) as exc:
                 raise ServiceError("company_judgment_activation_invalid", 500) from exc
+        if self.defaults.signal_judgment_from is not None:
+            try:
+                activation = datetime.fromisoformat(self.defaults.signal_judgment_from.replace("Z", "+00:00"))
+                if self.defaults.company_judgment_from is None or activation.tzinfo is None:
+                    raise ValueError("signal judgments require company judgments")
+                company_activation = datetime.fromisoformat(self.defaults.company_judgment_from.replace("Z", "+00:00"))
+                if activation < company_activation:
+                    raise ValueError("signal judgments precede company judgments")
+            except (ValueError, AttributeError) as exc:
+                raise ServiceError("signal_judgment_activation_invalid", 500) from exc
         if self.defaults.company_quality_from is not None:
             try:
                 activation = datetime.fromisoformat(self.defaults.company_quality_from.replace("Z", "+00:00"))
@@ -1450,6 +1461,12 @@ class ArenaService:
                 provider_observation_handoff=True,
             )
         self._activate_company_judgments(document)
+        if (defaults.signal_judgment_from is not None
+            and document.get("company_judgment_policy") == company_judgments.POLICY
+            and _parse_iso(document["schedule"]["submission_open"])
+            >= datetime.fromisoformat(defaults.signal_judgment_from.replace("Z", "+00:00"))):
+            document["scorer_policy"] = dict(document["scorer_policy"],
+                signal_judgment_policy="signal_judgment_v1")
         if defaults.normalize_intent_scale and integrity.enabled(document):
             document["scorer_policy"] = dict(document["scorer_policy"], env_bindings={
                 **document["scorer_policy"]["env_bindings"],
@@ -2557,7 +2574,11 @@ class ArenaService:
         if (activation is None
             or _parse_iso(document["schedule"]["submission_open"]) < datetime.fromisoformat(activation.replace("Z", "+00:00"))):
             return False
-        if not integrity.enabled(document) or contact_policy.enabled(document) or quality_policy.enabled(document):
+        # Other grading modes own their existing cache semantics. A legacy
+        # cache activation must not prevent their future rounds from opening.
+        if contact_policy.enabled(document) or quality_policy.enabled(document):
+            return False
+        if not integrity.enabled(document):
             raise ServiceError("company_judgments_require_legacy_company_integrity", 503)
         self._require_company_quality_schema()
         document["company_judgment_policy"] = company_judgments.POLICY
@@ -3192,8 +3213,10 @@ class ArenaService:
             != evidence["source_claim_request_hash"]
             or int(source.get("lease_generation") or 0)
             != evidence["source_lease_generation"]
-            or (source.get("claim_response") or {}).get(
-                "runner_authority_exclusions"
+            or (
+                self._store.signal_authority_exclusions(str(source["run_id"]))
+                if ((self._round(str(source["round_id"])) or {}).get("configuration_doc") or {}).get("scorer_policy", {}).get("signal_judgment_policy") == signal_judgments.POLICY
+                else (source.get("claim_response") or {}).get("runner_authority_exclusions")
             ) != evidence["runner_authority_exclusions"]
             or cached.get("source_score_run_id")
             != evidence["source_score_run_id"]
@@ -5219,6 +5242,135 @@ class ArenaService:
             deepline_catalog=configuration.get("deepline_catalog"),
         )
 
+    def handle_signal_judgment(
+        self, run_id: str, lease_token: str,
+        request: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Resolve one signal under the current score lease and frozen input."""
+
+        run = self._store.get_run(run_id)
+        if run is None:
+            raise ServiceError("run_missing", 404)
+        self._require_round_ownership(str(run.get("round_id") or ""))
+        if (
+            run.get("kind") != "score"
+            or run.get("status") != "leased"
+            or run.get("lease_token_hash") != hash_lease_token(lease_token)
+        ):
+            raise ServiceError("signal_judgment_lease_invalid", 403)
+        round_row = self._hot_round(str(run["round_id"]))
+        if round_row is None:
+            raise ServiceError("round_missing", 404)
+        configuration = round_row.get("configuration_doc") or {}
+        policy = configuration.get("scorer_policy") or {}
+        if policy.get("signal_judgment_policy") != signal_judgments.POLICY:
+            raise ServiceError("signal_judgment_policy_unavailable", 409)
+        if not isinstance(request, Mapping):
+            raise ServiceError("signal_judgment_request_invalid", 400)
+        operation = request.get("operation")
+        company_index = request.get("company_index")
+        signal_index = request.get("signal_index")
+        if operation not in ("claim", "complete") or type(company_index) is not int or type(signal_index) is not int:
+            raise ServiceError("signal_judgment_request_invalid", 400)
+        executed = self._store.get_run(str(run.get("scored_run_id") or ""))
+        if executed is None or executed.get("status") != "accepted" or not executed.get("output_ref"):
+            raise ServiceError("scored_run_missing", 500)
+        try:
+            output = json.loads(self._objects.get_bounded(
+                str(executed["output_ref"]), MAX_OUTPUT_BYTES
+            ).decode("utf-8"))
+            companies = validate_output_document(
+                output, expected_schema_version=contact_policy.output_schema(configuration)
+            )["companies"]
+            icp = self.evaluation_icps(str(run["round_id"]))[int(run["icp_position"])]
+            scoring_input = scoring.build_scoring_input(
+                scored_run_id=str(executed["run_id"]),
+                icp=integrity.agent_visible_icp(
+                    icp, contacts_required=contact_policy.enabled(configuration)
+                ),
+                companies=companies, policy=policy,
+                evaluation_date=str(round_row.get("evaluation_date") or ""),
+                contact_source_evidence=(
+                    contact_evidence.resolve_sources(self._store, executed, companies)
+                    if contact_policy.enabled(configuration) else None
+                ),
+                provider_observations=(
+                    provider_observations.resolve_observations(
+                        self._store, executed, companies,
+                        str(round_row.get("evaluation_date") or ""),
+                    ) if intent_details_policy.enabled(configuration)
+                    and provider_observations.enabled(policy) else None
+                ),
+            )
+            scope = signal_judgments.build_scope(
+                scoring_input=scoring_input, company_index=company_index,
+                signal_index=signal_index,
+                verified_company_identity=request.get("verified_company_identity"),
+                verified_funding_stage_context=request.get("verified_funding_stage_context"),
+                round_id=str(run["round_id"]),
+                network_name=str(round_row.get("arena_network_name") or ""),
+                netuid=int(round_row.get("arena_netuid") or 0),
+                scorer_image_digest=str(configuration.get("scorer_image_digest") or ""),
+                scorer_image_reference=str(configuration.get("scorer_image_reference") or ""),
+            )
+        except (ValueError, TypeError, KeyError, IndexError, OutputInvalid,
+                scoring.ScoringError, signal_judgments.SignalJudgmentError,
+                company_judgments.CompanyJudgmentError) as exc:
+            raise ServiceError("signal_judgment_input_invalid", 400) from exc
+        lease_hash = hash_lease_token(lease_token)
+        if operation == "claim":
+            result = self._store.claim_signal_judgment(
+                run_id=run_id, lease_token_hash=lease_hash,
+                company_index=company_index, signal_index=signal_index,
+                scope=scope,
+            )
+            if result.get("status") in ("busy", "pending"):
+                return {"status": result["status"]}
+            try:
+                reference = signal_judgments.validate_reference(result.get("reference"), scope)
+                if result.get("status") == "hit":
+                    judgment = signal_judgments.validate_judgment(result.get("judgment"), scope)
+                    source = self._store.get_signal_judgment(reference["cache_key"], reference["authority_slot"])
+                    if (source is None or source.get("signal_input_hash") != reference["signal_input_hash"]
+                        or source.get("scope_doc") != scope
+                        or source.get("judgment_hash") != contracts.document_hash(judgment)
+                        or source.get("judgment_doc") != judgment):
+                        raise signal_judgments.SignalJudgmentError("accepted signal evidence changed")
+                    source_run = self._store.get_run(str(source.get("source_score_run_id") or ""))
+                    exclusions = source.get("runner_authority_exclusions")
+                    if (source_run is None or source_run.get("kind") != "score"
+                        or source_run.get("status") not in ("leased", "accepted", "failed")
+                        or source_run.get("round_id") != run.get("round_id")
+                        or source_run.get("scored_run_id") != source.get("source_scored_run_id")
+                        or source_run.get("runner_hotkey") != source.get("source_runner_hotkey")
+                        or source_run.get("claim_request_hash") != source.get("source_claim_request_hash")
+                        or source_run.get("lease_generation") != source.get("source_lease_generation")
+                        or not isinstance(exclusions, list)
+                        or source.get("source_runner_hotkey") not in exclusions
+                        or run.get("miner_hotkey") in exclusions):
+                        raise signal_judgments.SignalJudgmentError("accepted signal source is invalid")
+                    return {"status": "hit", "reference": reference, "judgment": judgment}
+                if result.get("status") == "miss":
+                    return {"status": "miss", "reference": reference}
+            except signal_judgments.SignalJudgmentError as exc:
+                raise ServiceError("signal_judgment_cache_invalid", 500) from exc
+            raise ServiceError("signal_judgment_claim_invalid", 500)
+        try:
+            reference = signal_judgments.validate_reference(request.get("reference"), scope)
+            judgment = (signal_judgments.validate_judgment(request["judgment"], scope)
+                        if request.get("judgment") is not None else None)
+        except signal_judgments.SignalJudgmentError as exc:
+            raise ServiceError("signal_judgment_result_invalid", 400) from exc
+        result = self._store.complete_signal_judgment(
+            run_id=run_id, lease_token_hash=lease_hash,
+            company_index=company_index, signal_index=signal_index,
+            scope=scope, reference=reference, judgment=judgment,
+            judgment_hash=contracts.document_hash(judgment) if judgment is not None else "",
+        )
+        if result.get("status") not in ("stored", "existing", "released", "pending"):
+            raise ServiceError("signal_judgment_completion_invalid", 500)
+        return {"status": result["status"], "reference": reference}
+
     def handle_quota_snapshot(
         self,
         run_id: str,
@@ -6145,8 +6297,10 @@ class ArenaService:
                                 completion_request_hash
                             ),
                             runner_authority_exclusions=(
-                                run.get("claim_response") or {}
-                            ).get("runner_authority_exclusions"),
+                                self._store.signal_authority_exclusions(run_id)
+                                if (round_row.get("configuration_doc") or {}).get("scorer_policy", {}).get("signal_judgment_policy") == signal_judgments.POLICY
+                                else (run.get("claim_response") or {}).get("runner_authority_exclusions")
+                            ),
                         )
                         company_judgment_evidence.append({
                             "cache_key": evidence["cache_key"],
@@ -7010,6 +7164,7 @@ class ArenaService:
         *,
         round_id: str,
         completed_company: bool = False,
+        completed_signal: bool = False,
     ) -> bool:
         """Bind one accepted judgment to its accepted execution without leaking ids."""
 
@@ -7020,7 +7175,8 @@ class ArenaService:
         return (
             score_run.get("kind") == "score"
             and (score_run.get("status") == "accepted"
-                 or (completed_company and score_run.get("status") == "failed"))
+                 or (completed_company and score_run.get("status") == "failed")
+                 or (completed_signal and score_run.get("status") in ("leased", "failed")))
             and execution_run.get("kind") == "execute"
             and execution_run.get("status") == "accepted"
             and type(score_stage) is int
@@ -7079,6 +7235,76 @@ class ArenaService:
             ) from exc
         return source_runner_hotkey
 
+    def _add_signal_attribution(
+        self,
+        attributed: Dict[str, bool],
+        *,
+        source_ids: Optional[set[str]],
+        company_source_run_id: str,
+        company_indexes: set[int],
+        current_score_run_id: str,
+        round_id: str,
+        runs_by_id: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        """Credit immutable original signal sources used by this company."""
+
+        uses = self._store.get_signal_judgment_uses(company_source_run_id)
+        seen: set[tuple[int, int]] = set()
+        for use in uses:
+            if use.get("company_index") not in company_indexes:
+                continue
+            signal_index = use.get("signal_index")
+            use_position = (use.get("company_index"), signal_index)
+            if (use.get("run_id") != company_source_run_id
+                or type(signal_index) is not int or use_position in seen):
+                raise scoring.ScoringError("signal attribution use is invalid")
+            seen.add(use_position)
+            cache_key = str(use.get("cache_key") or "")
+            authority_slot = use.get("authority_slot")
+            if type(authority_slot) is not int or authority_slot < 0:
+                raise scoring.ScoringError("signal attribution slot is invalid")
+            row = self._store.get_signal_judgment(cache_key, authority_slot)
+            if row is None or any(row.get(field) != use.get(field) for field in (
+                "cache_key", "authority_slot", "signal_input_hash",
+                "source_score_run_id", "judgment_hash",
+            )):
+                raise scoring.ScoringError("signal attribution evidence is missing")
+            scope = row.get("scope_doc")
+            if not isinstance(scope, Mapping) or scope.get("round_id") != round_id:
+                raise scoring.ScoringError("signal attribution scope is invalid")
+            if (scope.get("cache_key") != cache_key
+                or contracts.document_hash({key: value for key, value in scope.items() if key != "cache_key"}) != cache_key
+                or scope.get("signal_input_hash") != row.get("signal_input_hash")
+                or row.get("judgment_hash") != contracts.document_hash(row.get("judgment_doc"))):
+                raise scoring.ScoringError("signal attribution hash is invalid")
+            try:
+                signal_judgments.validate_judgment(row.get("judgment_doc"), scope)
+            except signal_judgments.SignalJudgmentError as exc:
+                raise scoring.ScoringError("signal attribution judgment is invalid") from exc
+            source_id = str(row.get("source_score_run_id") or "")
+            source = runs_by_id.get(source_id)
+            execution = runs_by_id.get(str(row.get("source_scored_run_id") or ""))
+            if (source is None or execution is None
+                or source.get("runner_hotkey") != row.get("source_runner_hotkey")
+                or source.get("claim_request_hash") != row.get("source_claim_request_hash")
+                or int(source.get("lease_generation") or 0) != row.get("source_lease_generation")
+                or not self._same_scoring_membership(
+                    source, execution, round_id=round_id, completed_signal=True
+                )):
+                raise scoring.ScoringError("signal attribution source is invalid")
+            hotkey = str(row["source_runner_hotkey"])
+            exclusions = row.get("runner_authority_exclusions")
+            if (not isinstance(exclusions, list) or hotkey not in exclusions
+                or len(exclusions) != len(set(exclusions))):
+                raise scoring.ScoringError("signal attribution exclusions are invalid")
+            try:
+                contracts.require_hotkey(hotkey)
+            except ArenaContractError as exc:
+                raise scoring.ScoringError("signal attribution hotkey is invalid") from exc
+            if source_ids is not None:
+                source_ids.add(source_id)
+            attributed[hotkey] = attributed.get(hotkey, False) or source_id != current_score_run_id
+
     def _score_run_attribution(
         self,
         score_run: Mapping[str, Any],
@@ -7096,6 +7322,12 @@ class ArenaService:
             raise scoring.ScoringError("scoring attribution membership is invalid")
         score_run_id = str(score_run["run_id"])
         attributed: Dict[str, bool] = {}
+        signal_policy = (
+            hasattr(self._store, "get_signal_judgment_uses")
+            and ((self._round(round_id).get("configuration_doc") or {})
+                 .get("scorer_policy") or {}).get("signal_judgment_policy")
+            == signal_judgments.POLICY
+        )
 
         if score_run.get("company_judgment_refs") is not None:
             try:
@@ -7165,6 +7397,14 @@ class ArenaService:
                     if source_ids is not None:
                         source_ids.add(score_run_id)
                     attributed[hotkey] = attributed.get(hotkey, False)
+                    if signal_policy:
+                        self._add_signal_attribution(
+                            attributed, source_ids=source_ids,
+                            company_source_run_id=score_run_id,
+                            company_indexes={int(item["company_index"])},
+                            current_score_run_id=score_run_id, round_id=round_id,
+                            runs_by_id=runs_by_id,
+                        )
                     continue
                 hotkey = self._validated_attribution_source(
                     source_score_run_id=str(evidence["source_score_run_id"]),
@@ -7178,6 +7418,25 @@ class ArenaService:
                     source_ids.add(str(evidence["source_score_run_id"]))
                 reused = str(evidence["source_score_run_id"]) != score_run_id
                 attributed[hotkey] = attributed.get(hotkey, False) or reused
+                if signal_policy:
+                    source_score = runs_by_id.get(str(evidence["source_score_run_id"])) or {}
+                    source_indexes = {
+                        int(source_ref["company_index"])
+                        for source_ref in source_score.get("company_judgment_refs") or []
+                        if isinstance(source_ref, Mapping)
+                        and source_ref.get("cache_key") == evidence["cache_key"]
+                        and source_ref.get("company_input_hash") == evidence["company_input_hash"]
+                        and type(source_ref.get("company_index")) is int
+                    }
+                    if not source_indexes:
+                        raise scoring.ScoringError("signal attribution company source is missing")
+                    self._add_signal_attribution(
+                        attributed, source_ids=source_ids,
+                        company_source_run_id=str(evidence["source_score_run_id"]),
+                        company_indexes=source_indexes,
+                        current_score_run_id=score_run_id, round_id=round_id,
+                        runs_by_id=runs_by_id,
+                    )
             return attributed
 
         cache_key = str(score_run.get("judgment_cache_key") or "")

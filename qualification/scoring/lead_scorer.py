@@ -10766,6 +10766,14 @@ async def score_company_competition_intent(
     if company.company_name:
         seen_companies.add(company.company_name.lower().strip())
 
+    funding_stage_context = [
+        context for context in _matched_investigator_source_contexts(
+            company_fit, matched_company_source_cache,
+        ) if context["dimension"] == "stage"
+    ] if integrity_policy and any(
+        str(evidence_type or "").upper() == "FUNDING"
+        for evidence_type in getattr(icp, "intent_signal_evidence_types", None) or []
+    ) else []
     try:
         (
             intent_raw,
@@ -10780,6 +10788,8 @@ async def score_company_competition_intent(
             integrity_policy=integrity_policy,
             company_quality=company_quality,
             verified_company_identity=verified_identity_receipt(gate_receipts),
+            **({"verified_funding_stage_context": funding_stage_context}
+               if funding_stage_context else {}),
             intent_terminal_retry_cache=intent_terminal_retry_cache,
             retry_evidence_context_key=retry_evidence_context_key,
         )
@@ -11133,7 +11143,7 @@ def _company_stage_matches(observed: str, requested: str) -> bool:
 
 def _intent_terminal_retry_key(
     context_key, verified_company_identity, evidence_group, target_signal,
-    evidence_type, max_age_days, scoring_flags,
+    evidence_type, max_age_days, scoring_flags, verified_funding_stage_context=None,
 ) -> str:
     return _semantic_hash({
         "schema_version": "leadpoet.intent_terminal_retry.v1",
@@ -11143,6 +11153,8 @@ def _intent_terminal_retry_key(
         "target_signal": str(target_signal or ""),
         "evidence_type": evidence_type, "max_age_days": max_age_days,
         "scoring_flags": dict(scoring_flags),
+        **({"verified_funding_stage_context": verified_funding_stage_context}
+           if verified_funding_stage_context else {}),
     })
 
 
@@ -11240,6 +11252,7 @@ async def score_company_competition_intent_signal(
     verified_company_identity: Optional[Mapping[str, Any]] = None,
     intent_terminal_retry_cache: Optional[MutableMapping[str, Any]] = None,
     retry_evidence_context_key: str = "",
+    verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
 ) -> Tuple[float, float, float, int, bool, List[dict]]:
     """Score CompanyOutput intent signals with capped-sum breadth rewards.
 
@@ -11343,6 +11356,11 @@ async def score_company_competition_intent_signal(
                     }
                 )
         evidence_urls = [item.url for item in evidence_group]
+        funding_stage_context = (
+            verified_funding_stage_context
+            if integrity_policy and _evidence_type_for(matched_idx) == "FUNDING"
+            else None
+        )
         terminal_cache_key = ""
         if (
             integrity_policy
@@ -11357,7 +11375,7 @@ async def score_company_competition_intent_signal(
                     "no_time_decay": no_time_decay,
                     "integrity_policy": integrity_policy,
                     "company_quality": company_quality,
-                },
+                }, funding_stage_context,
             )
             if terminal_cache_key in intent_terminal_retry_cache:
                 cached = intent_terminal_retry_cache[terminal_cache_key]
@@ -11391,6 +11409,8 @@ async def score_company_competition_intent_signal(
                 company_quality=company_quality,
                 verified_company_identity=verified_company_identity,
                 verdict_out=signal_verdicts,
+                **({"verified_funding_stage_context": funding_stage_context}
+                   if funding_stage_context else {}),
                 **({"evidence_signals": evidence_group} if integrity_policy else {}),
             )
         )
@@ -11887,6 +11907,7 @@ async def _score_single_intent_signal(
     verified_company_identity: Optional[Mapping[str, Any]] = None,
     verdict_out: Optional[List[dict]] = None,
     evidence_signals: Optional[Sequence["IntentSignal"]] = None,
+    verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
 ) -> Tuple[float, int, str, Optional[str], int]:
     """
     Verify and score a single intent signal.
@@ -12165,6 +12186,8 @@ async def _score_single_intent_signal(
                 company_quality=company_quality,
                 verified_company_identity=verified_company_identity,
                 buyer_max_age_days=buyer_max_age_days,
+                **({"verified_funding_stage_context": verified_funding_stage_context}
+                   if verified_funding_stage_context else {}),
                 **({"evidence_bundle": [
                     {"url": item.url, "description": item.description,
                      "date": item.date, "snippet": item.snippet}

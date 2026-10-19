@@ -66,7 +66,7 @@ import re
 import time
 from datetime import date
 from html.parser import HTMLParser
-from typing import Any, Dict, List, Literal, Mapping, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, TypedDict
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
@@ -3196,6 +3196,28 @@ def _build_final_judge_prompt(
         suffix += _verified_company_identity_instructions(
             row, verified_identity_context
         )
+    if (
+        row.get("_integrity_policy") and row.get("_evidence_type") == "FUNDING"
+        and row.get("_funding_stage_source_urls")
+    ):
+        suffix += (
+            "\n\nREUSED MATCHED COMPANY STAGE SOURCES:\n"
+            "The server-retained stage sources below were already fetched for "
+            "this verified company. A stage MATCH proves neither event identity "
+            "nor freshness. Reconcile their actual text and dates with the "
+            "submitted funding source in this same review. Decide whether it "
+            "reports the same completed event, a genuinely new round or extension, "
+            "or leaves that relationship unresolved. Matching stage, amount or "
+            "investors alone does not establish the same event. A later recap or "
+            "product launch cannot supply a new date for an older funding event; "
+            "an older stage source must not veto a separately proved new round. "
+            "Do not choose the oldest date automatically or invent a date when "
+            "event identity or timing is unproved. The submitted source must "
+            "still support the submitted claim; stage evidence alone cannot "
+            "replace it. Cite the sources actually used and exact grounded quotes. "
+            "Keep source_event_date bound to the event you established.\n"
+            + json.dumps(row["_funding_stage_source_urls"])
+        )
     if "_ats_employer_ownership" in row:
         suffix += (
             "\n\nATS EMPLOYER OWNERSHIP:\n"
@@ -3800,6 +3822,13 @@ def _apply_guardrails(
     cited URL is off-list (or no URLs were cited), downgrade the status to
     unable_to_verify."""
     supplied_urls = list(row.get("claimed_source_urls") or [])
+    claimed = {_normalize_url(url) for url in supplied_urls}
+    stage_urls = (
+        row.get("_funding_stage_source_urls") or []
+        if row.get("_integrity_policy") and row.get("_evidence_type") == "FUNDING"
+        else []
+    )
+    supplied_urls.extend(stage_urls)
     supplied = {_normalize_url(url) for url in supplied_urls}
     for item in (verdict.get("signal_evaluations") or []):
         item["source_urls_supplied"] = list(supplied_urls)
@@ -3815,10 +3844,14 @@ def _apply_guardrails(
             item["evidence_urls_used"] = list(evidence)
             normalized_evidence = [_normalize_url(url) for url in evidence]
             bad = [u for u in normalized_evidence if u not in supplied]
-            if bad or not normalized_evidence:
+            if (
+                bad or not normalized_evidence
+                or (stage_urls and not claimed.intersection(normalized_evidence))
+            ):
                 item["signal_status"] = "unable_to_verify"
                 item.setdefault("risk_notes", []).append(
-                    "Provider used non-supplied evidence URL."
+                    "Provider used non-supplied evidence URL or omitted submitted evidence."
+                    if stage_urls else "Provider used non-supplied evidence URL."
                 )
     return verdict
 
@@ -4555,6 +4588,7 @@ async def verify_three_stage(
     verified_company_identity: Optional[Mapping[str, Any]] = None,
     buyer_max_age_days: Optional[int] = None,
     evidence_bundle: Optional[List[Dict[str, Any]]] = None,
+    verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Intent verification using fetched evidence and a source-grounded judge.
 
@@ -5100,6 +5134,36 @@ async def verify_three_stage(
         )
         row["_ats_employer_ownership"] = ats_ownership
     # ── STAGE 3: source-grounded final judge ───────────────────────
+    funding_stage_sources = []
+    if (
+        integrity_policy and row.get("_evidence_type") == "FUNDING"
+        and verified_identity_context
+        and isinstance(verified_funding_stage_context, (list, tuple))
+        and len(verified_funding_stage_context) == 1
+    ):
+        context = verified_funding_stage_context[0]
+        if (
+            isinstance(context, Mapping)
+            and set(context) == {"dimension", "url", "text"}
+            and context.get("dimension") == "stage"
+            and isinstance(context.get("text"), str)
+            and 0 < len(context["text"]) <= MAX_SCRAPED_CHARS
+            and _prompt_exact_url_or_empty(context.get("url")) == context.get("url")
+            and context.get("url")
+            and _normalize_url(context["url"]) not in {
+                _normalize_url(url) for url in row["claimed_source_urls"]
+            }
+        ):
+            funding_stage_sources = [{
+                "url": context["url"], "text": context["text"],
+                "title": "Server-retained MATCH stage source (not event identity proof)",
+                "meta": {"source_role": "matched_company_stage"},
+            }]
+            row["_funding_stage_source_urls"] = [context["url"]]
+            contents = {**contents, "results": [
+                *contents["results"], *funding_stage_sources,
+            ]}
+            combined_text += "\n" + context["text"]
     s3_prompt = _build_final_judge_prompt(
         row,
         contents,
@@ -5664,7 +5728,10 @@ async def verify_three_stage(
                 # cites only the card when resolving the missing date.
                 cited.add(_normalize_url(row["claimed_source_urls"][0]))
             declared = {
-                _normalize_url(url): url for url in row["claimed_source_urls"]
+                _normalize_url(url): url for url in [
+                    *row["claimed_source_urls"],
+                    *row.get("_funding_stage_source_urls", []),
+                ]
                 if _normalize_url(url) in cited
             }
             # The paragraph review needs the source context, not only the
@@ -5673,10 +5740,17 @@ async def verify_three_stage(
             result["verified_source_context"] = [
                 {
                     "url": declared[_normalize_url(item["url"])],
-                    "text": _retained_source_context_text(item.get("text")),
+                    "text": (
+                        item["text"]
+                        if item.get("url") in row.get("_funding_stage_source_urls", [])
+                        else _retained_source_context_text(item.get("text"))
+                    ),
                     "source_publication_date": item.get("source_publication_date") or "",
+                    **({"source_role": "matched_company_stage"}
+                       if item.get("url") in row.get("_funding_stage_source_urls", [])
+                       else {}),
                 }
-                for item in (contents.get("results") or [])[:3]
+                for item in (contents.get("results") or [])[:3 + len(funding_stage_sources)]
                 if _normalize_url(item.get("url") or "") in declared
             ]
     return result

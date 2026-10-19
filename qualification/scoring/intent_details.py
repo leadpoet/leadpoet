@@ -1247,25 +1247,61 @@ def review_evidence(
                 if item.get("signal_status") != "supported" or item.get("same_entity_check") != "pass":
                     continue
                 quotes.extend(_texts(item.get("supporting_quotes"), maximum=6, length=2_000))
-                urls.extend(_texts(item.get("evidence_urls_used"), maximum=3, length=2_048))
+                urls.extend(_texts(
+                    item.get("evidence_urls_used"),
+                    maximum=4 if result.get("evidence_type") == "FUNDING" else 3,
+                    length=2_048,
+                ))
         if not quotes:
             raise ValueError("verified signal lacks supporting source quotes")
         declared_urls = _texts(result.get("evidence_urls"), maximum=3, length=2_048)
         if not declared_urls and isinstance(trace.get("evidence_url"), str):
             declared_urls = [trace["evidence_url"]]
+        stage_urls = []
+        if result.get("evidence_type") == "FUNDING" and company_fit_receipt.get("decision") == "match":
+            stage = _mapping(_mapping(company_fit_receipt.get("dimension_evidence")).get("stage"))
+            stage_evidence = _mapping(stage.get("web_evidence"))
+            stage_url, stage_quote = stage_evidence.get("url"), stage_evidence.get("quote")
+            supplied = {
+                url for evaluation in evaluations or []
+                if isinstance(evaluation, Mapping)
+                and evaluation.get("signal_status") == "supported"
+                and evaluation.get("same_entity_check") == "pass"
+                for url in _texts(evaluation.get("source_urls_supplied"), maximum=4, length=2_048)
+            }
+            for raw in (trace.get("verified_source_context") or [])[:4]:
+                context = _mapping(raw)
+                if (
+                    stage.get("decision") == "match"
+                    and context.get("source_role") == "matched_company_stage"
+                    and context.get("url") == stage_url
+                    and stage_url in urls and stage_url in supplied
+                    and isinstance(stage_quote, str) and stage_quote
+                    and isinstance(context.get("text"), str)
+                    and _quote_is_bound(stage_quote, [context["text"]])
+                ):
+                    stage_urls = [stage_url]
+                    break
+            declared_urls.extend(stage_urls)
         urls = [url for url in dict.fromkeys(urls) if url in declared_urls] or declared_urls
         source_context = []
-        for raw in (trace.get("verified_source_context") or [])[:3]:
+        for raw in (trace.get("verified_source_context") or [])[:3 + len(stage_urls)]:
             item = _mapping(raw)
             if item.get("url") not in urls or not isinstance(item.get("text"), str):
                 continue
-            text = _utf8_prefix(item["text"], _MAX_SOURCE_CONTEXT_BYTES)
+            text = (
+                _continuous_source_window(item["text"], _MAX_SOURCE_CONTEXT_BYTES, quotes)
+                if item.get("url") in stage_urls
+                else _utf8_prefix(item["text"], _MAX_SOURCE_CONTEXT_BYTES)
+            )
             if not text:
                 continue
             context = {
                 "url": item["url"],
                 "text": text,
                 "source_publication_date": item.get("source_publication_date") or "",
+                **({"source_role": "matched_company_stage"}
+                   if item.get("url") in stage_urls else {}),
             }
             body_dates = _body_dateline_dates(text)
             if body_dates:
@@ -1566,8 +1602,20 @@ def review_evidence(
     context_bytes_used = 0
     for item in with_context:
         remaining = intent_context_budget // len(with_context)
-        for context in item["source_context"]:
-            context["text"] = _utf8_prefix(context["text"], remaining)
+        stage_handoff = any(
+            context.get("source_role") == "matched_company_stage"
+            for context in item["source_context"]
+        )
+        for offset, context in enumerate(item["source_context"]):
+            allowance = (
+                remaining // (len(item["source_context"]) - offset)
+                if stage_handoff else remaining
+            )
+            context["text"] = (
+                _continuous_source_window(context["text"], allowance, item["supporting_quotes"])
+                if stage_handoff
+                else _utf8_prefix(context["text"], allowance)
+            )
             used = len(context["text"].encode("utf-8"))
             remaining -= used
             context_bytes_used += used

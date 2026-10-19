@@ -2244,7 +2244,14 @@ def _linkedin_post_actor_slug(source_url: str) -> str:
         parsed = urlsplit(source_url)
     except (TypeError, ValueError):
         return ""
-    if _registrable_domain(source_url) != "linkedin.com":
+    try:
+        source_domain = _registrable_domain(source_url)
+    except NormalizationError:
+        # A web source need not be a registrable company domain. This narrow
+        # author check establishes no LinkedIn actor; evidence grounding still
+        # decides whether the source supports the company fact.
+        return ""
+    if source_domain != "linkedin.com":
         return ""
     match = re.search(r"/posts/([^/?#_]+)_", parsed.path, re.I)
     return match.group(1).strip().casefold() if match else ""

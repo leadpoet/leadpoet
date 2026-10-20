@@ -357,6 +357,98 @@ def test_primary_can_prove_both_links_while_second_slot_retains_additional_conte
     assert claim["supporting_evidence"] == [{"url": ALIAS_URL, "quote": alias}]
 
 
+@pytest.mark.parametrize("classification", [
+    "Pinecrest Capital is a private equity firm.",
+    "Pinecrest Capital is a PRIVATE\tEQUITY firm.",
+    "Pinecrest Capital is a private-equity firm.",
+    "Pinecrest Capital is a private–equity firm.",
+])
+@pytest.mark.parametrize("slot", ["primary", "support_1"])
+def test_semantic_route_requires_bounded_canonical_pe_text_in_primary_or_classification(classification, slot):
+    raw = finding()
+    if slot == "primary":
+        raw.update(
+            evidence_quote=f"{CONTROL} {classification}",
+            supporting_evidence_url_1="", supporting_evidence_quote_1="",
+        )
+    else:
+        raw["supporting_evidence_quote_1"] = classification
+    pages = {CONTROL_URL: raw["evidence_quote"], CLASSIFICATION_URL: classification}
+    claim = validate(raw, pages=pages)
+    assert claim["status"] == "VERIFIED"
+    assert claim["ownership"] == OWNERSHIP
+    assert project(claim) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("classification", [
+    "Pinecrest Capital is a private-markets allocation manager.",
+    "Pinecrest Capital invests in property loans and minority holdings.",
+    "Pinecrest Capital is a private equityholder.",
+    "Pinecrest Capital is an unprivate equity company.",
+    "Pinecrest Capital is a privateequity firm.",
+])
+def test_ownership_fields_cannot_replace_canonical_pe_source_grounding(classification):
+    raw = finding(supporting_evidence_quote_1=classification)
+    claim = validate(raw, pages={CONTROL_URL: CONTROL, CLASSIFICATION_URL: classification})
+    assert claim["status"] == "UNPROVEN"
+    assert "ownership" not in claim
+    assert project(claim) == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize("location", ["support_2", "uncited_body", "reason"])
+def test_pe_anchor_cannot_come_from_extra_context_or_uncited_text(location):
+    ordinary = "Pinecrest Capital manages investment allocations."
+    raw = finding(supporting_evidence_quote_1=ordinary)
+    pages = {CONTROL_URL: CONTROL, CLASSIFICATION_URL: ordinary}
+    if location == "support_2":
+        raw.update(supporting_evidence_url_2=ALIAS_URL, supporting_evidence_quote_2=CLASSIFICATION)
+        pages[ALIAS_URL] = CLASSIFICATION
+    elif location == "uncited_body":
+        pages[CONTROL_URL] += " " + CLASSIFICATION
+    else:
+        raw["reason"] = CLASSIFICATION
+    claim = validate(raw, pages=pages)
+    assert claim["status"] == "UNPROVEN"
+    assert project(claim) == COMPANY_FIT_UNAVAILABLE
+
+
+def test_null_ownership_keeps_legacy_private_markets_literal_route():
+    quote = "Clear Capital is controlled by Pinecrest Capital, a private-markets firm."
+    assert lead_scorer._stage_quote_supports_observation("private equity", quote)
+    raw = finding(evidence_quote=quote, supporting_evidence_url_1="", supporting_evidence_quote_1="")
+    assert validate(raw)["status"] == "UNPROVEN"
+    raw["ownership"] = None
+    assert validate(raw)["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("case", ["m01", "m02"])
+def test_captured_missing_owner_classification_cannot_be_accepted(case):
+    url = f"https://harborfield.example/news/{case}"
+    if case == "m01":
+        control = "Vela Holdings is Harborfield’s current controlling shareholder."
+        support_1 = ""
+        support_2 = ""
+        reason = "Vela Holdings is Harborfield's current controlling shareholder, establishing Private Equity stage under current control."
+    else:
+        control = "Harborfield’s current controlling shareholder is Vela Holdings."
+        support_1 = "Vela Holdings allocates capital to privately negotiated property loans, infrastructure credit and selected minority holdings in unlisted businesses."
+        support_2 = "It describes these activities as its private-markets allocation strategy."
+        reason = (
+            "Harborfield is currently controlled by Vela Holdings, which is a private equity / private-markets allocation entity "
+            "(allocating capital to privately negotiated property loans, infrastructure credit, and unlisted minority holdings, fulfilling the PE control requirement)."
+        )
+    raw = finding(
+        evidence_url=url, evidence_quote=control,
+        supporting_evidence_url_1=url if support_1 else "", supporting_evidence_quote_1=support_1,
+        supporting_evidence_url_2=url if support_2 else "", supporting_evidence_quote_2=support_2,
+        ownership={**OWNERSHIP, "controlling_owner": "Vela Holdings"}, reason=reason,
+    )
+    claim = validate(raw, company="Harborfield", pages={url: " ".join((control, support_1, support_2))})
+    assert claim["status"] == "UNPROVEN"
+    assert "ownership" not in claim
+    assert project(claim) == COMPANY_FIT_UNAVAILABLE
+
+
 @pytest.mark.parametrize("missing", [False, True])
 @pytest.mark.parametrize("quote, expected", [(LITERAL, "VERIFIED"), (CONTROL, "UNPROVEN")])
 def test_missing_or_null_ownership_keeps_existing_literal_gate(missing, quote, expected):

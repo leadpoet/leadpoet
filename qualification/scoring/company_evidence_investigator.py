@@ -443,10 +443,12 @@ Majority shareholding, voting control or completed controlling acquisitions can
 qualify; economic ownership cannot override explicit contrary control rights.
 The company's own investments, fund management, portfolio clients, advisory ties,
 minority stakes, pending deals and former owners do not prove it is PE-owned.
-Return ownership with controlling_owner spelled in the primary quote.
+Spell ownership.controlling_owner as in the primary quote.
 Set control_status=current_control and owner_type=private_equity only when both
 facts hold for this exact company and same owner. Use null for other targets or
-when no relationship is proved.
+when unproven.
+Cite private-equity classification in primary or support 1; control or
+private-markets allocation activity alone is insufficient.
 The primary quote must name the owner and prove current control. It must name
 the company or use a company alias explicitly bound in same-page cited support.
 Supporting quote 1 must classify the owner if the primary does not; bind owner
@@ -2601,6 +2603,7 @@ def _semantic_ownership_proof(
     identity_names: set[str],
     *,
     same_page_identity_quotes: Sequence[str] = (),
+    classification_quote: str = "",
 ) -> bool:
     """Bind the investigator's ownership judgment to literal source entities.
 
@@ -2618,6 +2621,13 @@ def _semantic_ownership_proof(
         or owner != owner.strip()
         or raw.get("control_status") != "current_control"
         or raw.get("owner_type") != "private_equity"
+    ):
+        return False
+    # Necessary quoted PE grounding, not proof of classification or same owner.
+    # Support slot 2 and uncited page text cannot replace classification slot 1.
+    if not any(
+        re.search(r"\bprivate[\s\-\u2010-\u2015]+equity\b", _normalized_span(quote))
+        for quote in (control_quote, classification_quote)
     ):
         return False
     # Stage identity keys discard non-ASCII letters as well as punctuation and
@@ -2788,6 +2798,7 @@ def _validated_findings(
                         raw.get("ownership"),
                         finding["evidence_quote"],
                         stage_attribution_names,
+                        classification_quote=raw.get("supporting_evidence_quote_1", ""),
                         same_page_identity_quotes=tuple(
                             item["quote"] for item in linked_pe_support
                             if item["url"] == evidence_url

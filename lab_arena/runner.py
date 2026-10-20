@@ -190,6 +190,9 @@ _PICKUP_FAILURE_REASONS = frozenset({"request_failed", "claim_denied"})
 _IDLE_CLAIM_STATUSES = frozenset({
     "no_pending", "no_open_round", "stage_closed", "paused", "no_free_slot", "cache_busy",
 })
+_DEFINITE_CLAIM_STATUSES = _IDLE_CLAIM_STATUSES | frozenset({
+    "leased", "rejected", "request_id_reused", "no_work",
+})
 _ACTIVE_RESCAN_CLAIM_STATUSES = frozenset({"no_pending", "no_free_slot", "paused"})
 _CLAIM_AVAILABILITY_CODES = frozenset(
     {
@@ -4730,6 +4733,10 @@ class Runner:
         self._round_ids: List[str] = [config.round_id] if config.round_id else []
         self._pending_completion_cursor = ""
         self._pending_completion_next_poll = 0.0
+        # A timed-out claim can commit after all short retries fail. Preserve
+        # its exact signature/hash across outer polls, without a second allocator.
+        # This is process-local: it does not recover claims lost before restart.
+        self._pending_claims: Dict[str, Dict[str, Any]] = {}
         self._report_capacity()
 
     def _capacity_snapshot(self) -> Tuple[int, int]:
@@ -4813,28 +4820,43 @@ class Runner:
         if capacity < 1:
             self._report_claim_status("no_local_capacity", round_id)
             return {"status": "no_pending"}
-        envelope = contracts.build_signed_request(
-            scope=contracts.SCOPE_CLAIM,
-            round_id=round_id,
-            hotkey=config.identity.hotkey,
-            body={"declared_parallelism": capacity,
-                  "proxy_execution_version": contracts.PROXY_EXECUTION_VERSION,
-                  "output_schema_versions": sorted(
-                      SUPPORTED_OUTPUT_SCHEMA_VERSIONS
-                  ),
-                  # The singular field keeps compatibility with a 45-minute
-                  # service. New services use the full supported profile list.
-                  "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY,
-                  "checkpoint_deadline_policies": list(
-                      contracts.CHECKPOINT_DEADLINE_POLICIES
-                  )},
-            timestamp=int(config.clock().timestamp()),
-            sign_message=config.identity.sign,
-        )
+        envelope = self._pending_claims.get(round_id)
+        if envelope is None:
+            envelope = contracts.build_signed_request(
+                scope=contracts.SCOPE_CLAIM,
+                round_id=round_id,
+                hotkey=config.identity.hotkey,
+                body={"declared_parallelism": capacity,
+                      "proxy_execution_version": contracts.PROXY_EXECUTION_VERSION,
+                      "output_schema_versions": sorted(
+                          SUPPORTED_OUTPUT_SCHEMA_VERSIONS
+                      ),
+                      # The singular field keeps compatibility with a 45-minute
+                      # service. New services use the full supported profile list.
+                      "checkpoint_deadline_policy": contracts.CHECKPOINT_DEADLINE_POLICY,
+                      "checkpoint_deadline_policies": list(
+                          contracts.CHECKPOINT_DEADLINE_POLICIES
+                      )},
+                timestamp=int(config.clock().timestamp()),
+                sign_message=config.identity.sign,
+            )
+            self._pending_claims[round_id] = envelope
         retry_delays = iter(tuple(config.claim_retry_seconds))
         while True:
+            if abs(int(config.clock().timestamp()) - envelope["timestamp"]) > contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS:
+                # Re-signing changes the request hash and lease token. An old
+                # ambiguous allocation must stay blocked, not become a new ID.
+                self._report_claim_status("request_failed", round_id)
+                raise RunnerError("pending claim timestamp expired; allocation remains unresolved")
             try:
                 response = config.api.claim(envelope)
+                if not isinstance(response, Mapping):
+                    raise RunnerError("Arena claim returned a non-object")
+                status = response.get("status")
+                if status != "leased" and abs(int(config.clock().timestamp()) - envelope["timestamp"]) > contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS:
+                    raise RunnerError("pending claim timestamp expired; allocation remains unresolved")
+                if isinstance(status, str) and status in _DEFINITE_CLAIM_STATUSES:
+                    self._pending_claims.pop(round_id)
                 self._report_claim_status(response.get("status"), round_id)
                 if (config.operational_logger is not None and isinstance(response.get("status"), str)
                     and response["status"] in (_IDLE_CLAIM_STATUSES | {"leased"})):

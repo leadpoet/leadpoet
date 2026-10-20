@@ -29,6 +29,11 @@ def database():
                     cur.execute('GRANT SELECT ON public.'+relation+' TO leadpoet_parity_reader,lab_arena_service')
                 cur.execute("SELECT jsonb_build_array(pg_get_userbyid(c.relowner),(SELECT jsonb_agg(jsonb_build_array(pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable,pg_get_userbyid(a.grantor)) ORDER BY pg_get_userbyid(a.grantee),a.privilege_type) FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner)))a WHERE a.grantee<>c.relowner),c.relrowsecurity,c.relforcerowsecurity,c.reloptions) FROM pg_class c WHERE c.oid='public.lab_arena_published_results_v1'::regclass")
                 assert cur.fetchone()[0]==['lab_arena_owner',[['lab_arena_service','SELECT',False,'lab_arena_owner'],['leadpoet_parity_reader','SELECT',False,'lab_arena_owner']],False,False,['security_invoker=true']]
+                # Match postgres's live public-schema defaults. A new private
+                # history table must remove these inherited grants explicitly.
+                cur.execute('ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO anon,service_role')
+                cur.execute('ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON TABLES TO leadpoet_parity_reader')
+                cur.execute('ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon,authenticated,service_role')
                 cur.execute(SQL.read_text());cur.execute(SQL.read_text())
         yield db
     finally:gen.close()
@@ -602,3 +607,21 @@ def test_score_batch_floor_cas_is_strict_and_atomic(database,bad_floor):
             correct=[good,{**bad,'scoring_generation_floor':floor}]
             cur.execute('SELECT public.lab_arena_record_run_scores(%s,2::smallint,%s::jsonb)',(row['round_id'],json.dumps(correct)));assert cur.fetchone()[0]['recorded']==2
     finally:store.close()
+
+
+def test_private_revision_objects_remove_inherited_public_schema_grants(database):
+    with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
+        cur.execute("SELECT jsonb_agg(jsonb_build_array(defaclrole,defaclnamespace,defaclobjtype,defaclacl::TEXT) ORDER BY oid) FROM pg_default_acl")
+        defaults_before = cur.fetchone()[0]
+        cur.execute(SQL.read_text())
+        cur.execute("SELECT jsonb_agg(jsonb_build_array(defaclrole,defaclnamespace,defaclobjtype,defaclacl::TEXT) ORDER BY oid) FROM pg_default_acl")
+        assert cur.fetchone()[0] == defaults_before
+        cur.execute("SELECT jsonb_agg(jsonb_build_array(pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable,pg_get_userbyid(a.grantor))) FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE c.oid='public.lab_arena_scoring_supersessions'::regclass AND a.grantee<>c.relowner")
+        assert cur.fetchone()[0] == [['lab_arena_service','SELECT',False,'lab_arena_owner']]
+        for role in ('anon','authenticated','service_role','leadpoet_parity_reader','lab_arena_service'):
+            cur.execute("SELECT has_function_privilege(%s,'public.lab_arena_supersede_role_model_v1(text,jsonb,bigint,bigint,text,jsonb,text,text)','EXECUTE'),has_function_privilege(%s,'public.lab_arena_scoring_operator_hold_v1(text,jsonb,bigint,bigint,bigint,text,text,boolean)','EXECUTE'),has_function_privilege(%s,'public.lab_arena_scoring_policy_history_v1(text)','EXECUTE')",(role,role,role))
+            assert cur.fetchone() == (False,False,role=='lab_arena_service')
+        # The grant is still a live creator default and still applies to
+        # existing audited relations; only this new private table loses it.
+        cur.execute("SELECT EXISTS(SELECT 1 FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl)a WHERE d.defaclrole='postgres'::regrole AND d.defaclnamespace='public'::regnamespace AND d.defaclobjtype='r' AND a.grantee='leadpoet_parity_reader'::regrole AND a.privilege_type='SELECT'),has_table_privilege('leadpoet_parity_reader','public.lab_arena_restart_claim_control','SELECT')")
+        assert cur.fetchone() == (True,True)

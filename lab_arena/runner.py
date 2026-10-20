@@ -97,6 +97,7 @@ REQUIREMENT_RE = re.compile(
 )
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
+TRAINING_CAPTURE_TIMEOUT_SECONDS = 10.0
 COMPLETION_RECOVERY_RETRY_SECONDS = (
     2.0, 5.0, 10.0, 20.0, 30.0, 45.0,
     60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 80.0,
@@ -851,7 +852,9 @@ class HttpArenaApiClient:
             raise RunnerError("training input exceeds capture limit")
         return self._post(
             "/arena/v1/runs/%s/training-input" % run_id, document,
-            headers={"x-lab-arena-lease": lease_token}, timeout_seconds=2.0,
+            headers={"x-lab-arena-lease": lease_token},
+            timeout_seconds=TRAINING_CAPTURE_TIMEOUT_SECONDS,
+            preserve_http_status=True,
         )
 
     def training_observations(
@@ -862,7 +865,9 @@ class HttpArenaApiClient:
             raise RunnerError("training observations exceed capture limit")
         return self._post(
             "/arena/v1/runs/%s/training-observations" % run_id, document,
-            headers={"x-lab-arena-lease": lease_token}, timeout_seconds=2.0,
+            headers={"x-lab-arena-lease": lease_token},
+            timeout_seconds=TRAINING_CAPTURE_TIMEOUT_SECONDS,
+            preserve_http_status=True,
         )
 
     def provider(
@@ -3601,6 +3606,23 @@ def _record_trajectory(
         print("Arena trajectory upload failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
 
 
+def _log_training_capture_failure(kind: str, exc: Exception) -> None:
+    """Keep capture diagnostics bounded and free of exception or response text."""
+    def class_name(value: BaseException) -> str:
+        name = type(value).__name__
+        return name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", name) else "unknown"
+
+    cause = exc.__cause__
+    transport = class_name(cause) if isinstance(cause, httpx.HTTPError) else "-"
+    status = _bounded_http_status(getattr(exc, "http_status", None))
+    print(
+        "Arena training %s capture failed: exception_class=%s http_status=%s transport_cause=%s"
+        % (kind if kind in {"input", "observations"} else "unknown",
+           class_name(exc), status if status is not None else "-", transport),
+        file=sys.stderr, flush=True,
+    )
+
+
 def _record_training_input(
     config: RunnerConfig, lease: Mapping[str, Any], lease_token: str,
     document: Mapping[str, Any],
@@ -3618,11 +3640,11 @@ def _record_training_input(
                     continue
                 raise
             if not isinstance(response, Mapping) or response.get("status") != "stored":
-                raise RunnerError("training input capture rejected")
+                raise RunnerError("training input capture rejected", http_status=getattr(response, "http_status", None))
             break
     except Exception as exc:
         try:
-            print("Arena training input capture failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
+            _log_training_capture_failure("input", exc)
         except Exception:
             pass
 
@@ -3646,14 +3668,14 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
                 result = send(str(lease["run_id"]), lease_token, document)
                 if (not isinstance(result, Mapping) or result.get("status") != "stored"
                         or not isinstance(result.get("payload_sha256"), str) or not contracts.SHA256_RE.fullmatch(result["payload_sha256"])):
-                    raise RunnerError("training observations rejected")
+                    raise RunnerError("training observations rejected", http_status=getattr(result, "http_status", None))
                 return {**summary, "status": "stored", "payload_sha256": result["payload_sha256"]}
             except Exception:
                 if attempt:
                     raise
     except Exception as exc:
         try:
-            print("Arena training observations capture failed: %s" % type(exc).__name__, file=sys.stderr, flush=True)
+            _log_training_capture_failure("observations", exc)
         except Exception:
             pass
     return summary

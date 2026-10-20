@@ -424,6 +424,18 @@ shapes fail the build. The tool
 checks the actual added image layer and unchanged process configuration.
 For already separated graders, the grading file remains byte-identical.
 
+For a frozen grader whose unresolved semantic-review return bypasses its
+completed-investigation settlement, explicitly add
+`--completed-investigation-finality` during both build and `--verify-image`.
+This exact-source correction moves the grader's existing settlement block
+before the initial and post-repair semantic exits. It retains the strict
+malformed-profile exhaustion proof, source-local failure classification,
+identity requirements and provider retries. It imports no current grader.
+Unknown or partially corrected source fails closed. Independently verify the
+composed image and its affected paths before registering its runtime mapping.
+Only new lease generations select the registered runtime; existing leases and
+accepted cache authorities retain their original identity and results.
+
 Deploy a verified composition through the trusted reviewer-runtime mapping.
 The mapping is separate from frozen round configuration. A score lease pins
 the selected runtime when its generation starts. A later deployment cannot

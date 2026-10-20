@@ -18064,14 +18064,14 @@ def finality_scorer(request, monkeypatch):
 @pytest.mark.parametrize('phase', ['initial', 'post_repair'])
 @pytest.mark.parametrize('profile_reason', ['source_blocked', 'malformed_response'])
 @pytest.mark.parametrize('fault', ['', 'provider_error', 'incomplete', 'unbound_fetch', 'positive_claim', 'identity', 'research_provider_error', 'missing_fetch', 'unresolved_transport', 'other_source_recovery', 'same_source_recovery'])
-def test_oct20_completed_semantic_review_keeps_existing_source_finality(
+def test_completed_semantic_review_keeps_existing_source_finality(
     monkeypatch, finality_scorer, phase, profile_reason, fault,
 ):
     """Actual failure shapes, through the async verifier's two semantic exits.
 
     Source content and ICP wording are synthetic. The three UNPROVEN claims,
     completed receipt, fetched-page lengths and profile diagnostics reproduce
-    the recorded Qsic/Vanguard failures; no stored judgment is regraded.
+    the recorded source-failure shapes; no stored judgment is regraded.
     """
     company = _company(name='Acme', website='https://acme.example/', linkedin='')
     icp = _icp(required_attribute='Supplies software.')

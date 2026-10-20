@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -10,10 +11,15 @@ import pytest
 from lab_arena import company_judgments, contracts, runner, scorer_entrypoint, scoring
 from lab_arena.service import ArenaService
 from qualification.scoring.competition import apply_company_judgment_context
+from qualification.scoring import company_verification, lead_scorer
+from qualification.scoring.company_fit_decision import company_fit_match
 from tests.lab_arena.company_judgments_test import _input, _miss, _new, _refs, _evidence
 from tests.lab_arena.test_lab_arena_runner import BridgingRuntime, scoring_lease
 from tests.lab_arena.trajectory_runner_test import LoggingApi, run_model
 from tests.test_arena_company_quality_policy import _positive_breakdown
+from tests.test_homepage_web_identity_conflict import (
+    HOMEPAGE, _company, _completed_qsic_review, _icp, _settle_qsic, _web_receipt,
+)
 
 
 def _lease(document):
@@ -53,6 +59,81 @@ def test_failed_company_does_not_erase_completed_siblings_or_stop_later_companie
     assert scoring.scoring_output_from_bytes(json.dumps(output).encode()) == output
     with pytest.raises(company_judgments.CompanyJudgmentError, match="every miss"):
         company_judgments.validate_new_company_judgments(output["company_judgments"], lease_context=document["company_judgment_cache"])
+
+
+def test_completed_identity_conflict_zero_survives_later_judge_error(monkeypatch):
+    async def fetch(_session, _url):
+        return 200, "https://qsic.com/", HOMEPAGE
+
+    async def web(*_args, **_kwargs):
+        return company_fit_match("web claims fit", details={
+            "identity_decision": "match",
+            "identity_receipt": _web_receipt(),
+            "dimension_decisions": {
+                "employee_size": "match", "industry": "match",
+                "geography": "match",
+            },
+            "dimension_evidence": {
+                key: {"url": "https://getqsic.com/", "quote": "QSIC"}
+                for key in ("employee_size", "industry", "geography")
+            },
+        })
+
+    monkeypatch.setattr(company_verification, "_fetch_bounded_html", fetch)
+    monkeypatch.setattr(lead_scorer, "_llm_reverify_company", web)
+    bound = asyncio.run(lead_scorer._verify_company_fit(
+        _company(), _icp(), 0, 0, set(), require_https_transport=True,
+    ))
+    identity = bound.details["dimension_evidence"]["identity"]["web_identity_receipt"]
+    assert identity["reason_code"] == "homepage_web_identity_conflict_unresolved"
+    assert {key: identity[key] for key in (
+        "decision", "evidence_source", "submitted_name", "submitted_domain",
+        "submitted_linkedin_slug", "observed_name", "observed_domain",
+        "observed_linkedin_slug",
+    )} == {
+        "decision": "unavailable", "evidence_source": "company_web_reverification",
+        "submitted_name": "qsic", "submitted_domain": "qsic.com",
+        "submitted_linkedin_slug": "", "observed_name": "qsic",
+        "observed_domain": "qsic.com", "observed_linkedin_slug": "qsic",
+    }
+    completed, verdict, icp = _completed_qsic_review(identity)
+    settled = _settle_qsic(completed, verdict, icp)
+    assert settled is not None
+    assert settled.details["failure_class"] == "insufficient_fit_evidence"
+    document = _input()
+    document["company_judgment_cache"] = _lease(document)
+    attempted = []
+    progress = []
+
+    def judge(companies, buyer, reference):
+        name = companies[0]["company_name"]
+        attempted.append(name)
+        if name == "B":
+            raise scoring.ScoringError("provider unavailable", failure_reason="provider_error")
+        raw = _positive_breakdown(name, name.lower() + ".example", name.lower())
+        if name == "A":
+            raw.update(final_score=0.0, icp_fit=0.0,
+                       failure_reason="Company fit unavailable: unproven identity")
+            raw["verifier_gate_receipts"][0] = settled.receipt("company_fit")
+        return apply_company_judgment_context(companies, [raw])
+
+    judge.company_quality = judge.integrity_policy = True
+    judge.contacts_required = False
+    monkeypatch.setattr(scoring, "lab_scorer", lambda *_a, **_k: judge)
+    monkeypatch.setattr(scoring, "apply_policy_to_environment", lambda *_a, **_k: None)
+    monkeypatch.setenv(scorer_entrypoint.shim.TRUSTED_SCORER_ENV, "1")
+    output = scorer_entrypoint.score_input(
+        document, on_company_judgments=lambda rows: progress.append(copy.deepcopy(rows)),
+    )
+    assert output["failure"] == "judge_error"
+    assert attempted.count("A") == 1
+    assert attempted.count("B") == 3
+    assert [row["company_index"] for row in output["company_judgments"]] == [0, 2, 3, 4]
+    zero = output["company_judgments"][0]["raw_judgment"]
+    assert zero["final_score"] == 0.0
+    assert zero["verifier_gate_receipts"][0]["failure_class"] == "insufficient_fit_evidence"
+    assert progress[0][0]["company_index"] == 0
+    assert scoring.scoring_output_from_bytes(json.dumps(output).encode()) == output
 
 
 def test_atomic_output_survives_process_failure_after_completed_company(tmp_path, monkeypatch):

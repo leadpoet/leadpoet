@@ -150,7 +150,7 @@ class EcrScorerImageAccess:
             raise ScorerImageAccessError("ecr_manifest_invalid")
         returned = response.get("images")
         failures = response.get("failures") or []
-        if not isinstance(returned, list) or len(returned) != 1 or failures:
+        if not isinstance(returned, list) or not returned or failures:
             raise ScorerImageAccessError("ecr_manifest_unavailable")
         image = returned[0]
         if not isinstance(image, Mapping):
@@ -158,6 +158,19 @@ class EcrScorerImageAccess:
         image_id = image.get("imageId")
         manifest_text = image.get("imageManifest")
         media_type = image.get("imageManifestMediaType")
+        # ECR may return one row per tag for the same requested digest. Accept
+        # those rows only when they describe the exact same pinned manifest.
+        for duplicate in returned[1:]:
+            duplicate_id = duplicate.get("imageId") if isinstance(duplicate, Mapping) else None
+            if (
+                not isinstance(duplicate_id, Mapping)
+                or duplicate.get("registryId") != self.registry_id
+                or duplicate.get("repositoryName") != self.repository
+                or duplicate_id.get("imageDigest") != image_digest
+                or duplicate.get("imageManifest") != manifest_text
+                or duplicate.get("imageManifestMediaType") != media_type
+            ):
+                raise ScorerImageAccessError("ecr_manifest_invalid")
         if (
             image.get("registryId") != self.registry_id
             or image.get("repositoryName") != self.repository

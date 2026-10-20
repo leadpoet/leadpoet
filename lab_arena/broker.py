@@ -2400,6 +2400,8 @@ def _complete_declared_tool_calls(message: Mapping[str, Any], request: Mapping[s
     tools = request.get("tools")
     if not isinstance(calls, list) or not calls or not isinstance(tools, list):
         return False
+    if request.get("parallel_tool_calls") is False and len(calls) > 1:
+        return False
     declared: Dict[str, Mapping[str, Any]] = {}
     for tool in tools:
         if not isinstance(tool, Mapping) or tool.get("type") != "function":
@@ -4547,6 +4549,16 @@ class Broker:
                     "judgment_cache_canonical": canonical_scope,
                     "judgment_cache_scope": json.loads(canonical_scope),
                 })
+                if (
+                    effective_operation_id == "openrouter.chat"
+                    and effective_normalized.get("parallel_tool_calls") is False
+                ):
+                    # Keep the request/cache identity unchanged. The atomic
+                    # source lookup must skip historical noncompliant replies
+                    # before creating a zero-cost destination settlement.
+                    reservation_arguments["call_doc"][
+                        "judgment_cache_single_tool_required"
+                    ] = True
         operation_timeout_seconds = min(
             max(1, int(timeout_ms)) / 1000.0,
             float(effective_operation.timeout_seconds),

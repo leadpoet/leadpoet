@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import base64
+import copy
 import threading
 from dataclasses import replace
 
@@ -108,6 +110,11 @@ class JudgmentLedger(FakeLedgerStore):
                     source.get("uncertain_doc", {}).get("judgment_cache_response")
                 )
                 if isinstance(terminal, dict) and terminal.get("judgment_cache_eligible") is True:
+                    if arguments["call_doc"].get("judgment_cache_single_tool_required") is True:
+                        body = json.loads(base64.b64decode(terminal["body_b64"]))
+                        if any(len((choice.get("message") or {}).get("tool_calls") or []) > 1
+                               for choice in body.get("choices") or []):
+                            continue
                     copied = {
                         **terminal,
                         "judgment_cache_key": key,
@@ -486,3 +493,76 @@ def test_tool_call_malformed_or_undeclared_does_not_freeze_response():
         assert not broker._complete_judgment_response(
             "openrouter.chat", request, status=200, body=body, call_succeeded=True,
         )
+
+
+def _research_tool_request(parallel=False):
+    return {
+        "model": _MODEL, "messages": [{"role": "user", "content": "Research Acme."}],
+        "tools": [{"type": "function", "function": {
+            "name": name, "strict": True, "parameters": {
+                "type": "object", "additionalProperties": False,
+                "required": [key], "properties": {key: {"type": "string"}},
+            },
+        }} for name, key in (("fetch_page", "url"), ("search_web", "query"))],
+        "tool_choice": "required", "max_tokens": 200,
+        **({"parallel_tool_calls": parallel} if parallel is not None else {}),
+    }
+
+
+def _research_tool_answer(names):
+    return {"choices": [{"finish_reason": "tool_calls", "message": {
+        "content": None, "tool_calls": [{"id": "call-" + str(i), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(
+                {"url": "https://acme.example"} if name == "fetch_page" else {"query": "Acme"}
+            )}} for i, name in enumerate(names)],
+    }}], "usage": {"cost": "0.000021"}}
+
+
+@pytest.mark.parametrize("names", [
+    ("fetch_page", "fetch_page", "search_web"),  # retained 57 / cached 67
+    ("fetch_page", "fetch_page", "fetch_page"),  # retained 63
+])
+def test_single_tool_request_skips_historical_paid_multi_source_once(names):
+    store = JudgmentLedger()
+    multi = _research_tool_answer(names)
+    single = _research_tool_answer(("search_web",))
+    instance, _, transport = _broker(store, [(200, multi), (200, single)])
+    request = _research_tool_request(False)
+    source = _call(instance, _context("legacy-multi"), request)
+    source_call = store.calls[source.call["call_identity"]]
+    assert source_call["terminal"].get("judgment_cache_eligible") is not True
+    # A response retained by the old gateway remains paid and unmodified.
+    source_call["terminal"]["judgment_cache_eligible"] = True
+    before = copy.deepcopy(source_call)
+    fresh = _call(instance, _context("fresh-single"), request)
+    hit = _call(instance, _context("single-hit"), request)
+    same_paid = _call(instance, _context("legacy-multi"), request)
+    assert fresh.status == hit.status == same_paid.status == 200
+    assert fresh.call.get("cached") is None and hit.call["cached"] is True
+    assert len(transport.sent) == 2
+    assert store.calls[source.call["call_identity"]] == before
+    assert all(x["call_doc"]["judgment_cache_single_tool_required"] is True
+               for x in store.judgment_reserves)
+
+
+@pytest.mark.parametrize("parallel", [True, None])
+def test_allowed_multi_tool_request_still_reuses_response(parallel):
+    store = JudgmentLedger()
+    answer = _research_tool_answer(("fetch_page", "search_web"))
+    instance, _, transport = _broker(store, [(200, answer)])
+    request = _research_tool_request(parallel)
+    source = _call(instance, _context("allowed-source"), request)
+    hit = _call(instance, _context("allowed-hit"), request)
+    assert source.status == hit.status == 200 and hit.call["cached"] is True
+    assert len(transport.sent) == 1
+    assert all("judgment_cache_single_tool_required" not in x["call_doc"]
+               for x in store.judgment_reserves)
+
+
+@pytest.mark.parametrize("count,expected", [(0, False), (1, True), (2, False), (3, False)])
+def test_explicit_single_tool_cache_eligibility_preserves_zero_and_single(count, expected):
+    assert broker._complete_judgment_response(
+        "openrouter.chat", _research_tool_request(False), status=200,
+        body=json.dumps(_research_tool_answer(("search_web",) * count)).encode(),
+        call_succeeded=True,
+    ) is expected

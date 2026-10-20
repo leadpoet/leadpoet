@@ -12,7 +12,7 @@ import pytest
 from tests.lab_arena import claim_eligibility_fast_paths509_postgres_test as fast
 
 ROOT = Path(__file__).parents[2]
-SQL = ROOT / 'scripts/510-lab-arena-score-expiry-start-proof.sql'
+SQL = ROOT / 'scripts/511-lab-arena-score-expiry-start-proof.sql'
 PRE = fast.POST
 POST = 'ccf306a3d6fddbe92f22f90cc2c0c401847eb4d80eb3a160cf06fa6ba6aa9987'
 
@@ -149,9 +149,9 @@ def test_exact_migration_security_replay_and_only_two_inference_predicates_chang
             metadata = fast.metadata(cur)
             rows = fast.latest.rows(cur)
             expire_before = fast.definition(cur, 'public.lab_arena_expire_leases(text)')
-            cur.execute('CREATE ROLE score510_migrator NOLOGIN NOSUPERUSER INHERIT')
-            cur.execute('GRANT lab_arena_owner TO score510_migrator')
-            cur.execute('GRANT USAGE,CREATE ON SCHEMA public TO score510_migrator')
+            cur.execute('CREATE ROLE score511_migrator NOLOGIN NOSUPERUSER INHERIT')
+            cur.execute('GRANT lab_arena_owner TO score511_migrator')
+            cur.execute('GRANT USAGE,CREATE ON SCHEMA public TO score511_migrator')
         conn.commit()
         for digest, error in ((PRE, 'preimage differs'), (POST, 'postimage differs')):
             with conn.cursor() as cur, pytest.raises(pg.Error, match=error):
@@ -166,7 +166,7 @@ def test_exact_migration_security_replay_and_only_two_inference_predicates_chang
                 cur.execute(SQL.read_text())
         conn.rollback()
         with conn.cursor() as cur:
-            cur.execute('SET ROLE score510_migrator')
+            cur.execute('SET ROLE score511_migrator')
             cur.execute(SQL.read_text())
             after = fast.definition(cur)
             cur.execute(SQL.read_text())

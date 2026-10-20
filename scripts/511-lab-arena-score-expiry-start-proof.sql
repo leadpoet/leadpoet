@@ -3,7 +3,7 @@
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='30s';
-DO $score_expiry_start_proof510$
+DO $score_expiry_start_proof511$
 DECLARE
   target OID:=to_regprocedure('public.lab_arena_claim_assignment(text,text,integer,integer,text[],text,text,text,integer)');
   definition TEXT;
@@ -118,6 +118,6 @@ $handoff_new$)
     RAISE EXCEPTION 'Score expiry start proof readback differs' USING ERRCODE='55000';
   END IF;
 END;
-$score_expiry_start_proof510$;
+$score_expiry_start_proof511$;
 NOTIFY pgrst,'reload schema';
 COMMIT;

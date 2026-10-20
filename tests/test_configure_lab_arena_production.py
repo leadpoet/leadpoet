@@ -238,6 +238,16 @@ def test_contacts_scopes_are_mutually_exclusive():
         {"LAB_ARENA_INTENT_DETAILS_FROM": ""},
     ),
     (
+        ["--reasoning-capture-from", "2026-10-21T00:00:00Z"],
+        "reasoning_capture_from_only",
+        {"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00+00:00"},
+    ),
+    (
+        ["--reasoning-capture-from", ""],
+        "reasoning_capture_from_only",
+        {"LAB_ARENA_REASONING_CAPTURE_FROM": ""},
+    ),
+    (
         ["--contacts-from", "2026-09-13T00:00:00Z"],
         "contacts_from_only",
         {"LAB_ARENA_CONTACTS_FROM": "2026-09-13T00:00:00+00:00"},
@@ -997,6 +1007,33 @@ def test_remote_intent_details_activation_rejects_bad_scope_or_timestamp(tmp_pat
     result = _run_remote_with_fake_aws(
         tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
         request_override={"role": "intent_details_from_only", "updates": updates, "aliases": {}, "service_key": ""},
+    )
+    assert result == {"ok": False, "code": expected}
+
+
+@pytest.mark.parametrize("value", ["2026-10-21T00:00:00Z", ""])
+def test_remote_reasoning_capture_activation_preserves_other_settings(tmp_path, value):
+    initial = {"KEEP": "same", "LAB_ARENA_INTENT_DETAILS_FROM": "2026-09-15T00:00:00+00:00",
+               "LAB_ARENA_SCORER_IMAGE": "keep-image", "LAB_ARENA_MODE": "live"}
+    updated = json.loads(_run_remote_with_fake_aws(
+        tmp_path, json.dumps(initial), request_override={
+            "role": "reasoning_capture_from_only",
+            "updates": {"LAB_ARENA_REASONING_CAPTURE_FROM": value},
+            "aliases": {}, "service_key": "",
+        },
+    ))
+    assert updated == {**initial, "LAB_ARENA_REASONING_CAPTURE_FROM": value.replace("Z", "+00:00")}
+
+
+@pytest.mark.parametrize("updates,expected", [
+    ({"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00"}, "reasoning_capture_from_timestamp_invalid"),
+    ({"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00Z", "KEEP": "changed"},
+     "reasoning_capture_from_scope_invalid"),
+])
+def test_remote_reasoning_capture_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
+    result = _run_remote_with_fake_aws(
+        tmp_path, json.dumps({"KEEP": "same"}), expect_success=False,
+        request_override={"role": "reasoning_capture_from_only", "updates": updates, "aliases": {}, "service_key": ""},
     )
     assert result == {"ok": False, "code": expected}
 

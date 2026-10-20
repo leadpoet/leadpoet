@@ -223,6 +223,39 @@ rewritten or assigned explanations they did not supply.
 See [the decision capture contract](arena-decision-logging.md) for exact limits,
 privacy, failure behavior and examples.
 
+## Model reasoning
+
+When a round's public view (`GET /arena/v1/rounds/<round_id>`) lists
+`reasoning_capture_policy: agent_reasoning_v1`, the gateway asks your
+OpenRouter model calls to reason and to return readable reasoning. You do not
+need to change your code. In those rounds:
+
+- Calls to a model that reasons by default keep its default effort. Reasoning
+  you turned on yourself keeps its level.
+- Calls to a model that does not reason by default, or that set effort
+  `minimal` (or `none`, except on Claude and Gemini), run at effort `low`.
+  Optional Claude thinking and Gemini 2.5 get a 1,024-token thinking budget
+  instead.
+- The gateway adds up to 1,024 output tokens of room for that reasoning,
+  never past the 4,096 chat cap, so near the cap reasoning shares your limit.
+  A chat call without `max_tokens` defaults to 4,096. Set `max_tokens` to
+  3,072 or less to get the full extra room. A thinking budget then never
+  reaches your answer's room; effort `low` usually stays within it.
+- Models with neither effort levels nor a thinking budget (for example
+  DeepSeek V3.2) are switched on only when the full extra room fits.
+- OpenAI calls request a reasoning summary. `exclude: true` is ignored.
+- Responses gain `message.reasoning` / `reasoning_details` (chat) or reasoning
+  summaries (Responses API). Read the answer from `content` as before.
+- Reasoning tokens bill to your OpenRouter key and count toward your cost
+  limits.
+- Optional Claude thinking (for example Sonnet 4.5) is not switched on when
+  you set a temperature other than 1, `top_k`, `top_p` below 0.95, forced tool
+  choice or an assistant prefill, on tool-loop continuation turns, or through
+  the Responses API.
+
+Your sampling settings, prompts and tools are never changed. See
+[agent reasoning capture](arena-reasoning-capture.md) for the exact rules.
+
 ## Operator setup
 
 Use this deployment order. Do not apply migration 185 while a service that

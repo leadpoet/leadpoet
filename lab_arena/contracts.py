@@ -917,6 +917,10 @@ ROUND_CONFIGURATION_FIELDS = (
     ),
     F("infrastructure_retry_cost_policy", "str", required=False,
       choices=(INFRASTRUCTURE_RETRY_COST_POLICY,)),
+    # Agent model calls reason and return readable reasoning. Absence keeps
+    # every historical round's provider requests unchanged.
+    F("reasoning_capture_policy", "str", required=False, choices=("agent_reasoning_v1",)),
+    F("reasoning_model_profiles", "object", required=False),
     F("scoring_cap_microusd", "int", minimum=1),
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
@@ -1000,6 +1004,17 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     if (config.get("infrastructure_retry_cost_policy") is not None
         and config.get("sourcing_cost_eligibility_policy") not in PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
         raise ArenaContractError("infrastructure retry cost policy requires per-ICP costs")
+    if ("reasoning_capture_policy" in config) != ("reasoning_model_profiles" in config):
+        raise ArenaContractError("reasoning capture policy and model profiles are frozen together")
+    if "reasoning_capture_policy" in config:
+        from lab_arena import reasoning_capture
+        try:
+            if not reasoning_capture.enabled(config) or not reasoning_capture.validate_profiles(
+                config["reasoning_model_profiles"]
+            ):
+                raise ValueError("reasoning model profiles are empty")
+        except ValueError as exc:
+            raise ArenaContractError("invalid reasoning capture policy") from exc
     if (
         "benchmark_disclosure_policy" in config
         and config["benchmark_disclosure_policy"] is None

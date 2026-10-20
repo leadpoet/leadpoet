@@ -24,9 +24,15 @@ MAX_OBJECT_BYTES = 8 * 1024 * 1024
 MAX_COMPRESSED_BYTES = MAX_OBJECT_BYTES + 64 * 1024
 MAX_VALUE_NODES = 250_000
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-_HIDDEN_KEYS = frozenset({
-    "reasoning_content", "hidden_reasoning", "encrypted_content", "reasoning_details",
-})
+# Provider reasoning is kept when the provider returns it as readable text and
+# removed when it is opaque: encrypted state, signatures or redacted thinking.
+# The reason code stays "hidden_reasoning" so stored objects keep validating.
+_OPAQUE_KEYS = frozenset({"reasoning_content", "hidden_reasoning", "encrypted_content"})
+_READABLE_FIELDS = {"reasoning.summary": "summary", "reasoning.text": "text", "thinking": "thinking"}
+_OPAQUE_TYPES = frozenset({"reasoning.encrypted", "redacted_thinking"})
+_REASONING_TYPES = frozenset({"reasoning", *_READABLE_FIELDS, *_OPAQUE_TYPES})
+# Opaque only inside typed reasoning items; both names are common elsewhere.
+_OPAQUE_ITEM_FIELDS = frozenset({"signature", "data"})
 _CONFIG_KEYS = frozenset({
     "effort", "summary", "context", "max_tokens", "exclude", "enabled",
 })
@@ -71,6 +77,44 @@ def unavailable(reason: str = "capture_failed") -> dict[str, Any]:
 def _canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+
+def empty_value(value: Any) -> bool:
+    return value is None or (isinstance(value, (str, list, dict)) and len(value) == 0)
+
+
+def reasoning_kind(item: Mapping[str, Any]) -> str | None:
+    """``readable``, ``opaque`` or ``None`` for a typed provider reasoning item."""
+    kind = item.get("type")
+    if not isinstance(kind, str) or kind not in _REASONING_TYPES:
+        return None
+    if kind in _OPAQUE_TYPES:
+        return "opaque"
+    field_name = _READABLE_FIELDS.get(kind)
+    if field_name is not None:
+        text = item.get(field_name)
+        # Gemini returns "reasoning.text" items that carry only a signature.
+        if not isinstance(text, str) or not text.strip():
+            return "opaque"
+    return "readable"
+
+
+def readable_reasoning_item(item: Any) -> bool:
+    return isinstance(item, Mapping) and reasoning_kind(item) == "readable"
+
+
+def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_config: bool) -> bool:
+    """Whether one normalized key holds opaque provider reasoning."""
+    if name in _OPAQUE_KEYS:
+        return True
+    if item_kind is not None and name in _OPAQUE_ITEM_FIELDS:
+        return True
+    if name == "reasoning_details":
+        return not isinstance(child, list)  # A list is filtered item by item.
+    if name == "reasoning":
+        # A string is the provider's readable reasoning text.
+        return not (child is None or isinstance(child, str) or safe_config)
+    return False
 
 
 def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
@@ -136,7 +180,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
             return text
         if isinstance(item, Mapping):
             result = {}
-            typed_reasoning = item.get("type") == "reasoning"
+            item_kind = reasoning_kind(item)
             for key, child in item.items():
                 if not isinstance(key, str):
                     raise CaptureError("request_key_invalid")
@@ -164,11 +208,21 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 ) and not empty_credential:
                     result[key] = "[REDACTED]"
                     reasons.add("credential")
-                elif normalized in _HIDDEN_KEYS or (normalized == "reasoning" and not safe_config) or (
-                    typed_reasoning and normalized == "content"
-                ):
-                    result[key] = "[REDACTED]"
-                    reasons.add("hidden_reasoning")
+                elif opaque_reasoning_field(normalized, child, item_kind, safe_config):
+                    if empty_value(child):
+                        result[key] = child  # Nothing is hidden in an empty value.
+                    else:
+                        result[key] = "[REDACTED]"
+                        reasons.add("hidden_reasoning")
+                elif normalized == "reasoning_details":
+                    entries = []
+                    for index, entry in enumerate(child):
+                        if readable_reasoning_item(entry) or empty_value(entry):
+                            entries.append(clean(entry, (*path, key, str(index))))
+                        else:
+                            entries.append("[REDACTED]")
+                            reasons.add("hidden_reasoning")
+                    result[key] = entries
                 else:
                     result[key] = clean(child, (*path, key))
             return result

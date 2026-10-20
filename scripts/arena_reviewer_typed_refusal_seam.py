@@ -144,7 +144,10 @@ _INVESTIGATOR_CATCH_NEW = '''        safe_final_url = public_http_url(safe_final
 '''
 
 
-def _convert(source: bytes, *, deltas: tuple) -> bytes:
+def _convert(
+    source: bytes, *, deltas: tuple,
+    allowed_partial_states: tuple[tuple[str, ...], ...] = (),
+) -> bytes:
     try:
         text = source.decode("utf-8")
         module = ast.parse(text)
@@ -152,7 +155,7 @@ def _convert(source: bytes, *, deltas: tuple) -> bytes:
         raise TypedRefusalSeamError("grading source must be valid UTF-8 Python") from exc
     if "\r" in text:
         raise TypedRefusalSeamError("grading source must use LF newlines")
-    states = set()
+    states = []
     for name, old, new in deltas:
         module = ast.parse(text)
         found = [node for node in module.body
@@ -165,28 +168,30 @@ def _convert(source: bytes, *, deltas: tuple) -> bytes:
         stop = sum(map(len, lines[:found[0].end_lineno]))
         counts = (text.count(old), text.count(new))
         if counts == (1, 0):
-            states.add("original")
+            states.append("original")
             if not start <= text.find(old) < stop:
                 raise TypedRefusalSeamError("correction block moved outside helper")
             text = text.replace(old, new, 1)
         elif counts == (0, 1):
-            states.add("corrected")
+            states.append("corrected")
             if not start <= text.find(new) < stop:
                 raise TypedRefusalSeamError("correction block moved outside helper")
         else:
             raise TypedRefusalSeamError("unrecognized or partial correction block")
-    if len(states) != 1:
+    if len(set(states)) != 1 and tuple(states) not in allowed_partial_states:
         raise TypedRefusalSeamError("partially corrected grading source")
     compile(text, "frozen_typed_refusal.py", "exec")
     return text.encode("utf-8")
 
 
 def convert_verification_seam(source: bytes) -> bytes:
+    # The frozen c098 image already has the prior v1 transport correction.
+    # Its only remaining old block is the homepage catch.
     return _convert(source, deltas=(
         ("_ArenaProviderFetchError", _VERIFIER_CLASS_OLD, _VERIFIER_CLASS_NEW),
         ("_fetch_bounded_html", _VERIFIER_FETCH_OLD, _VERIFIER_FETCH_NEW),
         ("verify_company_exists", _VERIFIER_CATCH_OLD, _VERIFIER_CATCH_NEW),
-    ))
+    ), allowed_partial_states=(("corrected", "corrected", "original"),))
 
 
 def convert_investigator_seam(source: bytes) -> bytes:

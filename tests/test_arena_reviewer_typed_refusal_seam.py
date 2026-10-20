@@ -57,6 +57,22 @@ def test_exact_helper_bytes_only_and_idempotent():
     assert ast.parse(new_v) and ast.parse(new_i)
 
 
+def test_prior_verifier_correction_only_adds_reviewed_homepage_catch():
+    (_, corrected), _ = _sources()
+    prior = corrected.replace(
+        seam._VERIFIER_CATCH_NEW.encode(), seam._VERIFIER_CATCH_OLD.encode(), 1,
+    )
+    assert seam.convert_verification_seam(prior) == corrected
+    assert seam.convert_verification_seam(corrected) == corrected
+    for old, new in (
+        (seam._VERIFIER_CLASS_OLD, seam._VERIFIER_CLASS_NEW),
+        (seam._VERIFIER_FETCH_OLD, seam._VERIFIER_FETCH_NEW),
+    ):
+        unexpected = prior.replace(new.encode(), old.encode(), 1)
+        with pytest.raises(seam.TypedRefusalSeamError, match="partial"):
+            seam.convert_verification_seam(unexpected)
+
+
 @pytest.mark.parametrize("file,fault", [
     ("verifier", "unknown"), ("verifier", "partial"),
     ("verifier", "crlf"), ("verifier", "utf8"),

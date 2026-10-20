@@ -144,7 +144,7 @@ def test_source_route_transient_read_failure_is_bounded(
 
 @pytest.mark.parametrize("failure", [httpx.PoolTimeout, 429, 502, 503, 504])
 @pytest.mark.parametrize("table", ["lab_arena_submissions", "lab_arena_rounds"])
-def test_source_route_temporary_pressure_does_not_retry(source_route, failure, table):
+def test_source_route_temporary_pressure_keeps_bounded_retry(source_route, failure, table):
     armed = True
     def fault(request):
         if armed and request.url.path.endswith("/" + table):
@@ -156,7 +156,10 @@ def test_source_route_temporary_pressure_does_not_retry(source_route, failure, t
     assert first.status_code == 503 and first.headers["retry-after"] == "1"
     assert first.headers["cache-control"] == "no-store"
     assert "private diagnostic" not in first.text
-    assert len(reads) == (1 if table == "lab_arena_submissions" else 2)
+    expected_reads = 1 if table == "lab_arena_submissions" else 2
+    # Local pool pressure still fails immediately; transient HTTP reads use
+    # the same one-retry budget as ambiguous transport failures.
+    assert len(reads) == expected_reads + (0 if failure is httpx.PoolTimeout else 1)
     armed = False
     assert api.get("/arena/v1/submissions/sub-preview/code").status_code == 403
     assert objects.reads == 0

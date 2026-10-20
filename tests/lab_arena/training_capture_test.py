@@ -95,6 +95,37 @@ def test_secret_redaction_is_explicit_without_changing_safe_reasoning_config(tmp
     assert restored["admitted_parameters"]["reasoning"] == {"effort": "high", "exclude": True}
 
 
+@pytest.mark.parametrize("encoding_depth", [0, 1, 2])
+@pytest.mark.parametrize("value", [
+    r'{\"url\":\"https://example.com/?api_key=secret,\"next\":\"data\",\"last\":\"more\"}',
+    r'{\"url\":\"https://example.com/?api_key=[REDACTED],\"last\":\"more\"}',
+])
+def test_escaped_json_url_redaction_preserves_fields_and_is_a_fixed_point(value, encoding_depth):
+    for _ in range(encoding_depth):
+        value = json.dumps(value)
+    cleaned, _ = capture.sanitize_training_value(value)
+    assert cleaned == value.replace("=secret", "=[REDACTED]")
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+def test_escaped_url_boundary_preserves_query_values_and_known_secret_redaction():
+    from urllib.parse import parse_qsl, urlsplit
+
+    ordinary = "https://example.com/?q=one,two;three&keep=visible"
+    assert capture.sanitize_training_value(ordinary) == (ordinary, [])
+    sensitive = ordinary + "&token=private-token"
+    cleaned, reasons = capture.sanitize_training_value(sensitive)
+    assert dict(parse_qsl(urlsplit(cleaned).query)) == {
+        "q": "one,two;three", "keep": "visible", "token": "[REDACTED]"}
+    assert reasons == ["credential"]
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+    value = r'{\"url\":\"https://example.com/?api_key=secret;\"next\":\"known-private-token\"}'
+    cleaned, reasons = capture.sanitize_training_value(value, secrets=("known-private-token",))
+    assert cleaned == value.replace("=secret", "=[REDACTED]").replace("known-private-token", "[REDACTED]")
+    assert reasons == ["credential"]
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
 @pytest.mark.parametrize("value", [None, "", {}, []])
 def test_empty_credential_fields_roundtrip_without_false_redactions(tmp_path, value):
     document = _document()

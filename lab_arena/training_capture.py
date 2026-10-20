@@ -42,7 +42,11 @@ _CONFIG_KEYS = frozenset({
 _PARAMETER_KEYS = frozenset({
     "admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters",
 })
-_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+# Escaped JSON quotes (and their adjacent separators) delimit embedded URLs.
+# Including the comma/backslash in a query value lets URL normalization remove
+# them, so the later credential scan consumes another JSON field on each pass.
+# Check an escape run only at its start, so long backslash runs stay linear.
+_URL_RE = re.compile(r"https?://(?:(?![,;]?(?<!\\)\\+[\"'])[^\s<>\"'])+", re.IGNORECASE)
 _URL_SECRET_KEYS = frozenset({
     "key", "token", "sig", "signature", "auth", "credential", "credentials",
     "x_amz_credential", "x_amz_signature", "x_amz_security_token", "session_token",

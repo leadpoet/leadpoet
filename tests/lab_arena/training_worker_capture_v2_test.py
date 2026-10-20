@@ -1,5 +1,6 @@
 """Focused proof of cooperative training capture and worker socket receipts."""
 
+import copy
 import hashlib
 import json
 import shutil
@@ -127,6 +128,46 @@ def test_old_worker_artifact_remains_readable():
     objects = Objects()
     objects.put(training_observations.object_ref("execute:1", 1, CLAIM_HASH), compressed)
     assert training_observations.read_snapshot(objects, "execute:1", "execute", 1, CLAIM_HASH) == snapshot
+
+
+@pytest.mark.parametrize("body", [
+    r'{\"url\":\"https://example.com/?api_key=secret,\"next\":\"data\",\"last\":\"more\"}',
+    r'{\"url\":\"https://example.com/?api_key=[REDACTED],\"last\":\"more\"}',
+])
+def test_escaped_json_web_body_keeps_worker_hashes_through_upload_and_read(tmp_path, body):
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    server = runner.WorkerSocketServer(tmp_path / "unused.sock", FakeApi([]), state)
+    capture = json.dumps({
+        "schema_version": lab_arena_checkpoint.TRAINING_SCHEMA_VERSION,
+        "control": lab_arena_checkpoint.TRAINING_CONTROL, "kind": "web_fetch", "depends_on": [],
+        "data": {"url": "https://example.com/", "final_url": "https://example.com/",
+                 "retrieved_at": "2026-10-19T00:00:00Z", "status": 200,
+                 "content_type": "text/html", "body": body},
+    }).encode()
+    assert json.loads(server._handle_training_control(capture))["observation_id"] == 0
+    assert json.loads(server._handle_training_control(capture))["observation_id"] == 1
+    payload = state.worker_observations.document()
+    assert payload["complete"] and not state.calls
+    stored = payload["agent_observations"][0]["data"]
+    assert stored["body"] == body.replace("=secret", "=[REDACTED]")
+    assert stored["stored_body_sha256"] == "sha256:" + hashlib.sha256(stored["body"].encode()).hexdigest()
+    assert payload["agent_observations"][1]["data"]["body_ref"] == 0
+
+    snapshot, compressed = training_observations.build_snapshot(
+        "execute:1", "execute", payload, lease_generation=1, claim_request_hash=CLAIM_HASH)
+    assert snapshot["payload"] == payload
+    objects = Objects()
+    objects.put(training_observations.object_ref("execute:1", 1, CLAIM_HASH), compressed)
+    assert training_observations.read_snapshot(objects, "execute:1", "execute", 1, CLAIM_HASH) == snapshot
+
+    for field, invalid in (("stored_body_sha256", "sha256:" + "f" * 64),
+                           ("stored_body_bytes", stored["stored_body_bytes"] + 1),
+                           ("body", stored["body"] + "tampered")):
+        tampered = copy.deepcopy(payload)
+        tampered["agent_observations"][0]["data"][field] = invalid
+        with pytest.raises(training_observations.ObservationError, match="hash_invalid"):
+            training_observations.build_snapshot("execute:1", "execute", tampered,
+                lease_generation=1, claim_request_hash=CLAIM_HASH)
 
 
 def test_web_privacy_and_false_agent_ack_cannot_prove_receipt(tmp_path, monkeypatch):

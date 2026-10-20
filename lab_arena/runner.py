@@ -5103,6 +5103,13 @@ class Runner:
         log = self._config.operational_logger
         phase = "execution"
         try:
+            if lease.get("claim_recovery") == "resolved":
+                try:
+                    expires = datetime.fromisoformat(str(lease["lease_expires_at"]).replace("Z", "+00:00"))
+                    if expires.tzinfo is None or expires <= self._config.clock():
+                        raise ValueError("recovered lease expired")
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    raise RunnerError("recovered lease expired or invalid before dispatch") from None
             envelope = self._executor.execute(lease, str(lease["lease_token"]), lease["icp"])
             phase = "completion"
             result = self._complete_with_retries(envelope)

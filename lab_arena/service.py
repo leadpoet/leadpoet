@@ -4997,11 +4997,11 @@ class ArenaService:
             raise ServiceError("claim_recovery_invalid", 400)
         return claim
 
-    def _recovered_claim_is_live(
+    def _recovered_claim_expiry(
         self, *, response: Mapping[str, Any], claim: Mapping[str, Any],
         token: str, round_id: str,
-    ) -> bool:
-        """Do not dispatch a stored lease after expiry or a changed owner."""
+    ) -> Optional[str]:
+        """Return the current expiry only for this exact owned, live lease."""
 
         run = self._store.get_run(str(response.get("run_id") or ""))
         current_round = self._store.get_round(round_id)
@@ -5032,7 +5032,7 @@ class ArenaService:
                 "stage2_scoring", "stage2_judged", "scored",
             )))
         )
-        return (
+        live = (
             run.get("status") == "leased"
             and run.get("runner_hotkey") == claim["hotkey"]
             and hmac.compare_digest(
@@ -5044,6 +5044,23 @@ class ArenaService:
             and current_round.get("status") not in TERMINAL_STATUSES
             and expiry.astimezone(timezone.utc) > self.now()
         )
+        return expiry.astimezone(timezone.utc).isoformat() if live else None
+
+    def _finalize_claim_recovery(
+        self, lease: Dict[str, Any], original: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        if original is None:
+            return lease
+        current_expiry = self._recovered_claim_expiry(
+            response=lease, claim=original, token=lease["lease_token"],
+            round_id=lease["round_id"],
+        )
+        if current_expiry is None:
+            return {"status": "no_work", "claim_recovery": "resolved",
+                    "claim_recovery_request_id": original["request_id"]}
+        # A provider heartbeat may have renewed the durable lease after its
+        # cached claim response. Report that verified deadline; never renew it.
+        return dict(lease, lease_expires_at=current_expiry)
 
     def _require_validator_authority(self, hotkey: str) -> None:
         """Require validator identity for existing work, without a stake gate."""
@@ -5188,7 +5205,7 @@ class ArenaService:
             return (dict(response, claim_recovery="unresolved",
                          claim_recovery_request_id=original["request_id"])
                     if original is not None else response)
-        if original is not None and not self._recovered_claim_is_live(
+        if original is not None and not self._recovered_claim_expiry(
             response=response, claim=claim, token=token, round_id=round_id,
         ):
             return {"status": "no_work", "claim_recovery": "resolved",
@@ -5305,7 +5322,7 @@ class ArenaService:
                         lease["prior_terminal_breakdowns"] = prior
                 except (scoring.ScoringError, ServiceError, ValueError, OutputInvalid) as exc:
                     raise ServiceError("legacy_checkpoint_invalid", 503) from exc
-            return lease
+            return self._finalize_claim_recovery(lease, original)
         # An execution uses the participant's private source archive under the
         # same trusted Python image as every other agent.
         participant = next((p for p in round_row.get("participants") or [] if p["submission_id"] == response.get("submission_id")), None)
@@ -5347,7 +5364,7 @@ class ArenaService:
             lease["sourcing_cost_eligibility_policy"] = (
                 configuration["sourcing_cost_eligibility_policy"]
             )
-        return lease
+        return self._finalize_claim_recovery(lease, original)
 
     def _run_context(self, run_id: str, lease_token: str) -> Tuple[Dict[str, Any], broker_module.RunContext]:
         run = self._store.get_run(run_id)

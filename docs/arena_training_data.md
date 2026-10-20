@@ -166,13 +166,14 @@ Privacy filtering and exact replay are separate properties from label validity.
 ## Remaining boundaries
 
 - Direct HTTPS egress itself records connection/byte totals, not page contents.
-  The optional worker SDK now accepts the exact text returned at an agent's fetch
-  boundary, URL, final URL, retrieval time and dependencies. It stores these once
-  in the existing private worker artifact and references repeated bodies by hash.
-  These are cooperative reports, not independently observed HTTPS contents. The
-  exporter retains a web-coverage gap even when some pages are captured. Historical
-  TLS traffic and unreported miner fetches cannot be reconstructed. No TLS
-  interception proxy is introduced.
+  The trusted launcher automatically observes consumed responses in supported
+  Python clients, without miner configuration. Text, URL, retrieval time, byte
+  hash and partial-read status go into the existing private worker artifact.
+  Repeated bodies use hash references. These sandbox observations are not
+  authenticated proof against a dishonest agent. The exporter retains its
+  web-coverage gap: native clients, subprocesses, custom transports and internal
+  variables remain unverified. Historical TLS contents cannot be recovered.
+  No TLS interception proxy is introduced.
 - Historical local frozen-catalog discovery has no paid ledger reservation. Its
   diagnostic events can be abbreviated. New worker observations retain the full
   returned catalog, while the exporter continues to reject an unexplained count
@@ -197,15 +198,30 @@ Privacy filtering and exact replay are separate properties from label validity.
   zero qualified companies, or an incomplete judgment. Keep the explicit proof
   dimensions; do not collapse these cases into a success flag.
 
-### Optional agent capture API
+### Automatic capture and optional state API
 
-The existing mounted `lab_arena_checkpoint` module provides `record_web_fetch`,
+The launcher mounts a read-only recorder before importing the submitted harness.
+It observes existing reads in stdlib/urllib, urllib3/requests, httpx and aiohttp.
+It does not add reads, change model requests, force reasoning, or alter scoring.
+Full successful managed-provider reads receive a hash-only acknowledgment.
+Plaintext web bytes must round-trip through their encoding before storage;
+unsupported binary/encoding/size cases are reported as gaps. Partial reads are
+marked incomplete. Exact duplicate acknowledgments from existing hooks are
+collapsed; distinct fetch events retain their own context.
+
+A background queue has 128 slots, a shared 16 MiB body-buffer limit and a 6 MiB
+per-body limit. Recording adds CPU/memory overhead. Shutdown waits at most 250 ms
+for the sender, then writes a bounded status sidecar; this is not a zero-timing-
+impact guarantee at the execution deadline. The host folds that report into the
+same private artifact. Missing reports, overflow and unfinished sends mark
+capture incomplete and do not replace the agent's result.
+
+The existing mounted `lab_arena_checkpoint` module still provides `record_web_fetch`,
 `record_response_received` and `record_state_snapshot`. They are best-effort calls:
-capture failure must not change the agent result or accounting. Agents must call
-them at the fetch/read/state boundary. The shipped baseline adapter records its
-direct web results, fully read successful worker responses, completed phase
-barriers and a final coverage summary. Other submissions need the same explicit
-instrumentation before their full local process can be selected for training.
+capture failure must not change the agent result or accounting. Existing explicit
+hooks remain compatible. State that is absent from prompts and outputs is not
+inferred by the recorder; optional state/dependency reports remain available.
+Automatic capture does not prove complete local state or parallel-step dataflow.
 
 The v2 worker artifact remains bound to one run, lease generation and claim hash.
 It contains `response_receipts` and `agent_observations` alongside the original

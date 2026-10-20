@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
-from lab_arena import contracts, operations, training_capture, training_input
+from lab_arena import contracts, lab_arena_checkpoint, operations, training_capture, training_input
 
 LEGACY_SCHEMA_VERSION = "leadpoet.lab_arena.training_observations.v1"
 SCHEMA_VERSION = "leadpoet.lab_arena.training_observations.v2"
@@ -187,7 +187,8 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
         required_web = {"url", "final_url", "retrieved_at", "status", "content_type",
                         "body_sha256", "body_bytes", "stored_body_sha256", "stored_body_bytes",
                         "body", "body_ref"}
-        if (set(data) != required_web or not _url(data["url"]) or not _url(data["final_url"])
+        if (set(data) not in (required_web, required_web | {"capture"})
+                or not _url(data["url"]) or not _url(data["final_url"])
                 or not _timestamp(data["retrieved_at"])
                 or type(data["status"]) is not int or not 100 <= data["status"] <= 599
                 or not isinstance(data["content_type"], str) or len(data["content_type"]) > 256
@@ -201,6 +202,11 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
                 or data["body"] is not None and not isinstance(data["body"], str)
                 or data["body_ref"] is not None and (type(data["body_ref"]) is not int or data["body_ref"] < 0)):
             raise ObservationError("web_fetch_invalid")
+        if "capture" in data:
+            try:
+                lab_arena_checkpoint.validate_web_capture_metadata(data["capture"])
+            except (ValueError, LookupError):
+                raise ObservationError("web_capture_invalid") from None
     elif value["kind"] == "response_received":
         if (set(data) != {"call_identity", "status", "body_sha256", "body_bytes"}
                 or not isinstance(data["call_identity"], str) or not contracts.SHA256_RE.fullmatch(data["call_identity"])
@@ -224,6 +230,11 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
         raise ObservationError("agent_privacy_invalid")
     redactions = sorted(set(redactions) | set(privacy["redactions"]))
     if value["kind"] == "web_fetch" and cleaned["body"] is not None:
+        if "capture" in data and not privacy["redacted"]:
+            try:
+                lab_arena_checkpoint.validate_web_capture_metadata(data["capture"], data["body"])
+            except (ValueError, LookupError, UnicodeError):
+                raise ObservationError("web_capture_bytes_invalid") from None
         stored = cleaned["body"].encode("utf-8")
         if len(stored) > MAX_WEB_BODY_BYTES:
             raise ObservationError("web_fetch_size_limit")
@@ -299,6 +310,13 @@ class Buffer:
         self.agent_observation_count += 1
         try:
             cleaned = clean_agent_observation(value, secrets)
+            if cleaned["kind"] == "response_received":
+                # A runtime observer and an existing agent hook can acknowledge
+                # the same read. Keep one exact receipt and its stable ID.
+                for previous in reversed(self.agent_observations):
+                    if previous["kind"] == "response_received" and previous["data"] == cleaned["data"]:
+                        self.agent_observation_count -= 1
+                        return previous["id"]
             web_key = None
             if cleaned["kind"] == "web_fetch" and cleaned["data"]["body"] is not None:
                 web_key = (cleaned["data"]["body_sha256"], cleaned["data"]["stored_body_sha256"])
@@ -314,7 +332,13 @@ class Buffer:
             self.size_bytes += size
             if web_key is not None and cleaned["data"]["body"] is not None:
                 self.web_body_by_hash[web_key] = cleaned["id"]
-            if cleaned["kind"] == "capture_failure":
+            if (cleaned["kind"] == "capture_failure"
+                    or cleaned["kind"] == "web_fetch"
+                    and cleaned["data"].get("capture", {}).get("complete") is False
+                    or cleaned["kind"] == "state_snapshot"
+                    and cleaned["data"]["name"] == "automatic_capture_summary"
+                    and isinstance(cleaned["data"]["value"], dict)
+                    and cleaned["data"]["value"].get("complete") is False):
                 self.failures.add("capture_incomplete")
             return cleaned["id"]
         except Exception:
@@ -386,7 +410,13 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
                 bodies[row["id"]] = data
     if document["complete"] and (document["response_receipt_count"] != len(receipts)
             or document["agent_observation_count"] != len(agent_rows)
-            or any(row["write_state"] != "socket_written" for row in receipts)):
+            or any(row["write_state"] != "socket_written" for row in receipts)
+            or any(row["kind"] == "web_fetch" and row["data"].get("capture", {}).get("complete") is False
+                   or row["kind"] == "state_snapshot"
+                   and row["data"]["name"] == "automatic_capture_summary"
+                   and isinstance(row["data"]["value"], dict)
+                   and row["data"]["value"].get("complete") is False
+                   for row in cleaned_agent)):
         raise ObservationError("completeness_invalid")
     return {**document, "observations": cleaned, "response_receipts": cleaned_receipts,
             "agent_observations": cleaned_agent}

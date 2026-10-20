@@ -59,6 +59,7 @@ SANDBOX_AGENT_SOURCE_DIR = SANDBOX_AGENT_DIR + "/source"
 SANDBOX_AGENT_DEPENDENCY_DIR = SANDBOX_AGENT_DIR + "/deps"
 SANDBOX_AGENT_ENTRYPOINT_PATH = SANDBOX_AGENT_DIR + "/entrypoint.py"
 SANDBOX_AGENT_CHECKPOINT_PATH = SANDBOX_AGENT_DIR + "/lab_arena_checkpoint.py"
+SANDBOX_AUTOMATIC_CAPTURE_PATH = SANDBOX_AGENT_DIR + "/automatic_capture.py"
 SANDBOX_AGENT_CODEX_PATH = SANDBOX_AGENT_DIR + "/lab_arena_codex.py"
 SANDBOX_WEB_BRIDGE_PATH = SANDBOX_AGENT_DIR + "/web_egress_bridge.py"
 SANDBOX_WEB_SOCKET_NAME = "web.sock"
@@ -69,6 +70,7 @@ SANDBOX_SOCKET_NAME = "worker.sock"
 SANDBOX_SOCKET_PATH = SANDBOX_SOCKET_DIR + "/" + SANDBOX_SOCKET_NAME
 INPUT_FILE_NAME = "icp.json"
 OUTPUT_FILE_NAME = "companies.json"
+AUTOMATIC_CAPTURE_SUMMARY_NAME = ".arena-automatic-capture.json"
 SANDBOX_INPUT_PATH = SANDBOX_INPUT_DIR + "/" + INPUT_FILE_NAME
 SANDBOX_OUTPUT_PATH = SANDBOX_OUTPUT_DIR + "/" + OUTPUT_FILE_NAME
 SANDBOX_HOSTNAME = "leadpoet-lab-arena"
@@ -177,6 +179,7 @@ class SandboxSpec:
     dependency_dir: Optional[Path] = None
     agent_entrypoint_path: Optional[Path] = None
     checkpoint_module_path: Optional[Path] = None
+    automatic_capture_path: Optional[Path] = None
     codex_module_path: Optional[Path] = None
     # Only newly opted-in execute leases receive this credential-free bridge.
     # runsc still has no external network; AF_INET permits its private loopback.
@@ -238,6 +241,11 @@ class SandboxSpec:
             if not checkpoint_path.is_absolute() or self.source_dir is None:
                 raise SandboxSpecError("checkpoint module requires an absolute trusted path and agent source")
             object.__setattr__(self, "checkpoint_module_path", checkpoint_path)
+        if self.automatic_capture_path is not None:
+            capture_path = Path(self.automatic_capture_path)
+            if not capture_path.is_absolute() or self.source_dir is None or self.checkpoint_module_path is None:
+                raise SandboxSpecError("automatic capture requires trusted source and checkpoint mounts")
+            object.__setattr__(self, "automatic_capture_path", capture_path)
         if self.web_bridge_path is not None:
             bridge = Path(self.web_bridge_path)
             if not bridge.is_absolute() or self.source_dir is None:
@@ -414,6 +422,13 @@ def oci_spec(spec: SandboxSpec) -> Dict[str, Any]:
             "destination": SANDBOX_AGENT_CHECKPOINT_PATH,
             "type": "bind",
             "source": str(spec.checkpoint_module_path),
+            "options": ["bind", "ro", "nosuid", "nodev", "noexec"],
+        })
+    if spec.automatic_capture_path is not None:
+        mounts.append({
+            "destination": SANDBOX_AUTOMATIC_CAPTURE_PATH,
+            "type": "bind",
+            "source": str(spec.automatic_capture_path),
             "options": ["bind", "ro", "nosuid", "nodev", "noexec"],
         })
     linux = {
@@ -595,6 +610,8 @@ class SandboxResult:
     output_error: Optional[str] = None
     # Trusted host observation only; no submitted output or exception detail.
     checkpoint_output_invalid: bool = False
+    # Bounded sandbox report only; never scoring or billing authority.
+    automatic_capture_summary: Optional[Dict[str, Any]] = None
 
 
 def read_output(spec: SandboxSpec, *, max_bytes: int = MAX_OUTPUT_BYTES) -> Optional[bytes]:
@@ -604,7 +621,10 @@ def read_output(spec: SandboxSpec, *, max_bytes: int = MAX_OUTPUT_BYTES) -> Opti
     enforced while reading, not from a stat the model could race.
     """
 
-    path = spec.output_path
+    return _read_bounded_output(spec.output_path, max_bytes=max_bytes)
+
+
+def _read_bounded_output(path: Path, *, max_bytes: int) -> Optional[bytes]:
     descriptor = None
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -627,6 +647,24 @@ def read_output(spec: SandboxSpec, *, max_bytes: int = MAX_OUTPUT_BYTES) -> Opti
     if len(data) > max_bytes:
         raise SandboxOutputError("output exceeds %d bytes" % max_bytes)
     return data
+
+
+def read_automatic_capture_summary(spec: SandboxSpec) -> Optional[Dict[str, Any]]:
+    """Read a passive flush report without changing output acceptance."""
+    if spec.automatic_capture_path is None:
+        return None
+    unavailable = {"source": "runtime_http_v1", "complete": False, "failure": "summary_unavailable"}
+    try:
+        raw = _read_bounded_output(
+            spec.output_dir / AUTOMATIC_CAPTURE_SUMMARY_NAME, max_bytes=16_384,
+        )
+        document = json.loads(raw) if raw is not None else None
+        if (not isinstance(document, dict) or document.get("source") != "runtime_http_v1"
+                or type(document.get("complete")) is not bool):
+            return unavailable
+        return document
+    except (SandboxOutputError, ValueError, UnicodeError, RecursionError):
+        return unavailable
 
 
 class _BoundedCapture:
@@ -871,6 +909,13 @@ def require_safe_agent_mounts(spec: SandboxSpec) -> None:
             raise SandboxSpecError("trusted checkpoint module is unavailable") from exc
         if not stat.S_ISREG(checkpoint_info.st_mode) or checkpoint_info.st_mode & 0o222:
             raise SandboxSpecError("trusted checkpoint module must be a read-only regular file")
+    if spec.automatic_capture_path is not None:
+        try:
+            capture_info = os.lstat(spec.automatic_capture_path)
+        except OSError as exc:
+            raise SandboxSpecError("trusted automatic capture module is unavailable") from exc
+        if not stat.S_ISREG(capture_info.st_mode) or capture_info.st_mode & 0o222:
+            raise SandboxSpecError("trusted automatic capture module must be a read-only regular file")
 
 
 def run_sandbox(
@@ -1120,6 +1165,7 @@ def run_sandbox(
             output_path=str(spec.output_path),
             output_error=output_error,
             checkpoint_output_invalid=latest_checkpoint_invalid,
+            automatic_capture_summary=read_automatic_capture_summary(spec),
         )
     finally:
         if process is not None and process.poll() is None:

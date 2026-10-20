@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import codecs
 import os
 import socket
 import tempfile
@@ -55,8 +56,34 @@ class QuotaUnavailable(RuntimeError):
     """The passive quota snapshot could not be read safely."""
 
 
+def validate_web_capture_metadata(value: Any, body: str | None = None) -> dict[str, Any]:
+    """Validate reported runtime context; it is not an origin attestation."""
+    if (not isinstance(value, dict) or set(value) != {
+            "source", "complete", "encoding", "received_body_sha256", "received_body_bytes"}
+            or value["source"] != "runtime_http_v1"
+            or type(value["complete"]) is not bool
+            or not isinstance(value["encoding"], str) or not 1 <= len(value["encoding"]) <= 64
+            or any(not (c.isascii() and (c.isalnum() or c in "-_.")) for c in value["encoding"])
+            or not isinstance(value["received_body_sha256"], str)
+            or len(value["received_body_sha256"]) != 71
+            or not value["received_body_sha256"].startswith("sha256:")
+            or any(c not in "0123456789abcdef" for c in value["received_body_sha256"][7:])
+            or type(value["received_body_bytes"]) is not int
+            or not 0 <= value["received_body_bytes"] <= MAX_TRAINING_WEB_BODY_BYTES):
+        raise ValueError("web capture metadata is invalid")
+    codec = codecs.lookup(value["encoding"])
+    if not getattr(codec, "_is_text_encoding", False):
+        raise ValueError("web capture encoding is invalid")
+    if body is not None:
+        received = body.encode(value["encoding"], errors="strict")
+        if (len(received) != value["received_body_bytes"]
+                or "sha256:" + hashlib.sha256(received).hexdigest() != value["received_body_sha256"]):
+            raise ValueError("web capture bytes do not match")
+    return dict(value)
+
+
 def validate_training_frame(value: Any) -> dict[str, Any]:
-    """Validate the opt-in capture control; run identity comes from the host."""
+    """Validate capture reports; run identity comes from the host."""
     if (not isinstance(value, Mapping) or set(value) != {
             "schema_version", "control", "kind", "depends_on", "data"}
             or value.get("schema_version") != TRAINING_SCHEMA_VERSION
@@ -71,11 +98,14 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
     data = value["data"]
     kind = value["kind"]
     if kind == "web_fetch":
-        if (set(data) != {"url", "final_url", "retrieved_at", "status", "content_type", "body"}
+        fields = {"url", "final_url", "retrieved_at", "status", "content_type", "body"}
+        if (set(data) not in (fields, fields | {"capture"})
                 or any(not isinstance(data[key], str) for key in ("url", "final_url", "retrieved_at", "content_type", "body"))
                 or type(data["status"]) is not int or not 100 <= data["status"] <= 599
                 or len(data["body"].encode("utf-8")) > MAX_TRAINING_WEB_BODY_BYTES):
             raise ValueError("training frame is invalid")
+        if "capture" in data:
+            validate_web_capture_metadata(data["capture"], data["body"])
     elif kind == "response_received":
         if (set(data) != {"call_identity", "status", "body_sha256", "body_bytes"}
                 or not isinstance(data["call_identity"], str) or not isinstance(data["body_sha256"], str)
@@ -139,7 +169,8 @@ def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | No
 
 def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str,
                      body: str, retrieved_at: str | None = None,
-                     depends_on: list[str] | None = None) -> int | None:
+                     depends_on: list[str] | None = None,
+                     capture: dict[str, Any] | None = None) -> int | None:
     """Report exact text returned by a cooperative direct-web fetch."""
     try:
         body_size = len(body.encode("utf-8")) if isinstance(body, str) else -1
@@ -149,9 +180,12 @@ def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str
         reason = "size_limit" if body_size > MAX_TRAINING_WEB_BODY_BYTES else "invalid_value"
         _record_training("capture_failure", {"category": "web_fetch", "reason": reason}, depends_on)
         return None
-    return _record_training("web_fetch", {"url": url, "final_url": final_url, "status": status,
+    data = {"url": url, "final_url": final_url, "status": status,
         "content_type": content_type, "body": body,
-        "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat()}, depends_on)
+        "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat()}
+    if capture is not None:
+        data["capture"] = capture
+    return _record_training("web_fetch", data, depends_on)
 
 
 def record_response_received(*, call_identity: str, status: int, body: bytes | None = None,

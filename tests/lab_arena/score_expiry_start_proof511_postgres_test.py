@@ -4,12 +4,14 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import socket
 from unittest.mock import patch
 import uuid
 
 import pytest
 
 from tests.lab_arena import claim_eligibility_fast_paths509_postgres_test as fast
+from tests.lab_arena import claim_admission_transition509_510_postgres_test as transition
 
 ROOT = Path(__file__).parents[2]
 SQL = ROOT / 'scripts/511-lab-arena-score-expiry-start-proof.sql'
@@ -19,14 +21,18 @@ POST = 'ccf306a3d6fddbe92f22f90cc2c0c401847eb4d80eb3a160cf06fa6ba6aa9987'
 
 @pytest.fixture(scope='module')
 def database():
-    gen = fast.database.__wrapped__()
+    # The concurrent510index and complete current company/signal schema are
+    # part of this fixture; our tests change only the511claim source.
+    gen = transition.database.__wrapped__()
     db = next(gen)
     try:
-        with db[0].connect(**db[1]) as conn:
-            fast.apply(conn)
         yield db
     finally:
         gen.close()
+        # The nested hermetic fixture must stop its own local PostgreSQL.
+        with socket.socket() as probe:
+            probe.settimeout(1)
+            assert probe.connect_ex((db[1]['host'], int(db[1]['port']))) != 0
 
 
 @pytest.fixture(scope='module')
@@ -147,6 +153,9 @@ def test_exact_migration_security_replay_and_only_two_inference_predicates_chang
             before = fast.definition(cur)
             assert hashlib.sha256(before.encode()).hexdigest() == PRE
             metadata = fast.metadata(cur)
+            cur.execute("SELECT pg_get_indexdef(indexrelid),indisvalid,indisready FROM pg_index WHERE indexrelid='public.lab_arena_runs_score_cooldown_claim_idx'::regclass")
+            index_metadata = cur.fetchone()
+            assert index_metadata[1:] == (True, True)
             rows = fast.latest.rows(cur)
             expire_before = fast.definition(cur, 'public.lab_arena_expire_leases(text)')
             cur.execute('CREATE ROLE score511_migrator NOLOGIN NOSUPERUSER INHERIT')
@@ -181,6 +190,8 @@ def test_exact_migration_security_replay_and_only_two_inference_predicates_chang
                 expected = expected.replace(old, new)
             assert after == expected
             assert fast.definition(cur, 'public.lab_arena_expire_leases(text)') == expire_before
+            cur.execute("SELECT pg_get_indexdef(indexrelid),indisvalid,indisready FROM pg_index WHERE indexrelid='public.lab_arena_runs_score_cooldown_claim_idx'::regclass")
+            assert cur.fetchone() == index_metadata
             assert fast.latest.rows(cur) == rows
             host_guard = '    -- lab_arena_active_host_fault_claim_guard_v1:'
             end_guard = '    -- lab_arena_zero_call_score_runner_cooldown_v1:'
@@ -325,3 +336,15 @@ def test_retained_paid_ledger_excludes_zero_call_inference_without_erasing_costs
         with conn.cursor() as cur:
             cur.execute('SELECT to_jsonb(l) FROM public.lab_arena_ledger l ORDER BY entry_id')
             assert cur.fetchall() == before
+
+
+def test_after511_cached_failure_retry_keeps_completed_company_authorities(database):
+    with database[0].connect(**database[1]) as conn:
+        apply(conn)
+    transition.test_company_failure_retry_preserves_completed_authorities_and_finishes(database)
+
+
+def test_after511_full_current_schema_completes_and_publishes_normal_round(database, tmp_path, monkeypatch):
+    with database[0].connect(**database[1]) as conn:
+        apply(conn)
+    transition.test_latest_schema_retains_complete_normal_round_aggregate_and_publication(database, tmp_path, monkeypatch)

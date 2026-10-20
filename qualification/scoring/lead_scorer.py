@@ -609,6 +609,13 @@ def _has_affirmed_stage_proof(
                 text[max(0, match.start() - 100):match.start()],
                 flags=re.I,
             )[-1]
+            if (
+                pattern is _PUBLIC_STAGE_PROOF_PATTERNS[2]
+                and re.match(r"[.!?;:\n]", match.group(0))
+            ):
+                # The ticker proof itself starts a new sentence. Negation of
+                # a different issuer in the preceding sentence cannot reach it.
+                prefix = ""
             suffix = text[match.end():match.end() + 60]
             suffix_clause = re.split(r"[.!?;:\n]", suffix, maxsplit=1)[0]
             proof_suffix_clause = (
@@ -822,6 +829,19 @@ def _public_claims_share_clause(
     ))
 
 
+def _public_proof_match_is_negated(quote: str, match: re.Match) -> bool:
+    """Apply the existing stage-negation check to this market proof span."""
+
+    if re.match(r"[.!?;:\n]", match.group(0)):
+        return False
+    prefix = re.split(
+        r"[.!?;:\n]|\bbut\b|\bhowever\b",
+        quote[max(0, match.start() - 100):match.start()],
+        flags=re.I,
+    )[-1]
+    return _has_stage_proof_uncertainty(prefix)
+
+
 def _public_quote_has_bound_market_locator(
     quote: str,
     identity_names: Sequence[str],
@@ -836,6 +856,8 @@ def _public_quote_has_bound_market_locator(
     }
     for pattern in _PUBLIC_STRONG_CURRENT_PATTERNS:
         for match in pattern.finditer(quote):
+            if _public_proof_match_is_negated(quote, match):
+                continue
             if not names:
                 return False
             # Parenthetical exchange forms name the issuer inside the match.
@@ -953,13 +975,18 @@ def _stage_evidence_supports_observation(
         source_domain = ""
     if source_domain and source_domain in set(first_party_domains):
         return bool(
-            re.search(
-                r"\bpublicly\s+(?:traded|listed\s+(?:shares?|stock))\b",
-                quote,
-                re.I,
+            any(
+                not _public_proof_match_is_negated(quote, match)
+                for match in re.finditer(
+                    r"\bpublicly\s+(?:traded|listed\s+(?:shares?|stock))\b",
+                    quote, re.I,
+                )
             )
             or any(
-                (match := pattern.search(quote))
+                (match := next((
+                    item for item in pattern.finditer(quote)
+                    if not _public_proof_match_is_negated(quote, item)
+                ), None))
                 and (
                     pattern not in (
                         _PUBLIC_STAGE_PROOF_PATTERNS[2],

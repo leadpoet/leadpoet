@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
@@ -149,6 +150,74 @@ def test_ecr_provider_returns_only_the_exact_manifest_descriptor_set():
     assert {call["layerDigest"] for call in client.blob_calls} == {
         item["digest"] for item in document["blobs"]
     }
+
+
+def _two_tagged_rows(client: _Ecr, *, change: str = "") -> None:
+    original = client.batch_get_image
+
+    def batch_get_image(**kwargs):
+        response = original(**kwargs)
+        first = response["images"][0]
+        first["imageId"]["imageTag"] = "first-tag"
+        second = copy.deepcopy(first)
+        second["imageId"]["imageTag"] = "second-tag"
+        if change == "digest":
+            second["imageId"]["imageDigest"] = "sha256:" + "f" * 64
+        elif change == "manifest":
+            second["imageManifest"] += " "
+        elif change == "media_type":
+            second["imageManifestMediaType"] = "other/type"
+        elif change == "registry":
+            second["registryId"] = "000000000000"
+        elif change == "repository":
+            second["repositoryName"] = "other/repo"
+        elif change == "malformed_row":
+            second = None
+        elif change == "malformed_id":
+            second["imageId"] = None
+        response["images"].append(second)
+        if change == "failure":
+            response["failures"] = [{"failureCode": "ImageNotFound"}]
+        return response
+
+    client.batch_get_image = batch_get_image
+
+
+def test_ecr_provider_accepts_identical_digest_rows_with_distinct_tags():
+    manifest = _manifest()[0]
+    client = _Ecr(manifest)
+    _two_tagged_rows(client)
+    digest = _digest(manifest)
+
+    result = _provider(client)("%s/%s@%s" % (REGISTRY, REPOSITORY, digest), digest)
+
+    assert result["image_digest"] == digest
+    assert len(result["blobs"]) == 20
+    assert len(client.manifest_calls) == 1
+    assert len(client.blob_calls) == 20
+
+
+@pytest.mark.parametrize("change,code", [
+    ("digest", "ecr_manifest_invalid"),
+    ("manifest", "ecr_manifest_invalid"),
+    ("media_type", "ecr_manifest_invalid"),
+    ("registry", "ecr_manifest_invalid"),
+    ("repository", "ecr_manifest_invalid"),
+    ("malformed_row", "ecr_manifest_invalid"),
+    ("malformed_id", "ecr_manifest_invalid"),
+    ("failure", "ecr_manifest_unavailable"),
+])
+def test_ecr_provider_rejects_conflicting_or_failed_duplicate_rows(change, code):
+    manifest = _manifest()[0]
+    client = _Ecr(manifest)
+    _two_tagged_rows(client, change=change)
+    digest = _digest(manifest)
+
+    with pytest.raises(ScorerImageAccessError) as caught:
+        _provider(client)("%s/%s@%s" % (REGISTRY, REPOSITORY, digest), digest)
+
+    assert caught.value.code == code
+    assert client.blob_calls == []
 
 
 @pytest.mark.parametrize(

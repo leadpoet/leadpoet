@@ -38,6 +38,14 @@ class CompositionError(ValueError):
     pass
 
 
+def bounded_build_tag(reference: str) -> str:
+    """Keep Docker's 128-character tag limit without dropping repair identity."""
+    repository, _, tag = reference.rpartition(":")
+    if len(tag) > 128:
+        tag = tag[:111] + "-" + hashlib.sha256(tag.encode("utf-8")).hexdigest()[:16]
+    return repository + ":" + tag
+
+
 def checked_output(args: list[str], **kwargs: Any) -> str:
     return subprocess.check_output(args, text=True, **kwargs).strip()
 
@@ -293,6 +301,7 @@ def main() -> int:
             + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
         )
         if not args.verify_image:
+            tag = bounded_build_tag(tag)
             for name, data in files.items():
                 path = root / "overlay" / name
                 path.parent.mkdir(parents=True, exist_ok=True)

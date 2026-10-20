@@ -447,7 +447,7 @@ Spell ownership.controlling_owner as in the primary quote.
 Set control_status=current_control and owner_type=private_equity only when both
 facts hold for this exact company and same owner. Use null for other targets or
 when unproven.
-Cite private-equity classification in primary or support 1; control or
+Cite PE/private-markets firm proof in primary or support 1; control or
 private-markets allocation activity alone is insufficient.
 The primary quote must name the owner and prove current control. It must name
 the company or use a company alias explicitly bound in same-page cited support.
@@ -2604,6 +2604,7 @@ def _semantic_ownership_proof(
     *,
     same_page_identity_quotes: Sequence[str] = (),
     classification_quote: str = "",
+    literal_ownership_proved: bool = False,
 ) -> bool:
     """Bind the investigator's ownership judgment to literal source entities.
 
@@ -2623,9 +2624,10 @@ def _semantic_ownership_proof(
         or raw.get("owner_type") != "private_equity"
     ):
         return False
-    # Necessary quoted PE grounding, not proof of classification or same owner.
+    # Retain existing literal ownership proofs; otherwise require quoted PE
+    # grounding, which alone does not prove classification or the same owner.
     # Support slot 2 and uncited page text cannot replace classification slot 1.
-    if not any(
+    if not literal_ownership_proved and not any(
         re.search(r"\bprivate[\s\-\u2010-\u2015]+equity\b", _normalized_span(quote))
         for quote in (control_quote, classification_quote)
     ):
@@ -2799,6 +2801,11 @@ def _validated_findings(
                         finding["evidence_quote"],
                         stage_attribution_names,
                         classification_quote=raw.get("supporting_evidence_quote_1", ""),
+                        literal_ownership_proved=(
+                            linked_pe_ownership or _stage_quote_supports_observation(
+                                normalized_stage, finding["evidence_quote"],
+                            )
+                        ),
                         same_page_identity_quotes=tuple(
                             item["quote"] for item in linked_pe_support
                             if item["url"] == evidence_url

@@ -412,13 +412,53 @@ def test_pe_anchor_cannot_come_from_extra_context_or_uncited_text(location):
     assert project(claim) == COMPANY_FIT_UNAVAILABLE
 
 
-def test_null_ownership_keeps_legacy_private_markets_literal_route():
+@pytest.mark.parametrize("ownership", [None, OWNERSHIP])
+def test_nullable_ownership_preserves_direct_private_markets_literal_route(ownership):
     quote = "Clear Capital is controlled by Pinecrest Capital, a private-markets firm."
     assert lead_scorer._stage_quote_supports_observation("private equity", quote)
-    raw = finding(evidence_quote=quote, supporting_evidence_url_1="", supporting_evidence_quote_1="")
-    assert validate(raw)["status"] == "UNPROVEN"
-    raw["ownership"] = None
+    raw = finding(evidence_quote=quote, ownership=ownership, supporting_evidence_url_1="", supporting_evidence_quote_1="")
     assert validate(raw)["status"] == "VERIFIED"
+
+
+def test_ownership_contract_preserves_existing_linked_private_markets_firm_proof():
+    control = "Clear Capital is controlled by Pinecrest Capital."
+    classification = "Pinecrest Capital is a private-markets firm."
+    raw = finding(evidence_quote=control, supporting_evidence_quote_1=classification)
+    claim = validate(raw, pages={CONTROL_URL: control, CLASSIFICATION_URL: classification})
+    assert claim["status"] == "VERIFIED"
+    assert claim["ownership"] == OWNERSHIP
+    assert claim["supporting_evidence"] == [{"url": CLASSIFICATION_URL, "quote": classification}]
+    assert project(claim) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("classification", [
+    "Pinecrest Capital is a private-markets firm adviser.",
+    "Pinecrest Capital follows a private-markets allocation strategy.",
+    "Pinecrest Capital is not a private-markets firm.",
+])
+def test_literal_private_markets_preservation_does_not_admit_role_activity_or_negation(classification):
+    control = "Clear Capital is controlled by Pinecrest Capital."
+    raw = finding(evidence_quote=control, supporting_evidence_quote_1=classification)
+    claim = validate(raw, pages={CONTROL_URL: control, CLASSIFICATION_URL: classification})
+    assert claim["status"] == "UNPROVEN"
+    assert "ownership" not in claim
+    assert project(claim) == COMPANY_FIT_UNAVAILABLE
+
+
+@pytest.mark.parametrize("defect", ["former_control", "wrong_owner_type", "invalid_support"])
+def test_existing_literal_ownership_proof_does_not_bypass_nonnull_contract(defect):
+    quote = "Clear Capital is controlled by Pinecrest Capital, a private-markets firm."
+    raw = finding(evidence_quote=quote, supporting_evidence_url_1="", supporting_evidence_quote_1="")
+    if defect == "former_control":
+        raw["ownership"]["control_status"] = "former"
+    elif defect == "wrong_owner_type":
+        raw["ownership"]["owner_type"] = "other"
+    else:
+        raw.update(supporting_evidence_url_1=CLASSIFICATION_URL, supporting_evidence_quote_1="A fabricated quote.")
+    claim = validate(raw)
+    assert claim["status"] == "UNPROVEN"
+    assert "ownership" not in claim
+    assert project(claim) == COMPANY_FIT_UNAVAILABLE
 
 
 @pytest.mark.parametrize("case", ["m01", "m02"])

@@ -1,5 +1,6 @@
 """Fresh authorization resolves one ambiguous claim through its original ID."""
 from datetime import timedelta
+from dataclasses import replace
 from types import SimpleNamespace
 import threading
 
@@ -16,6 +17,7 @@ from tests.lab_arena.stage_cutoff_drain420_postgres_test import (
     base_database, current_database, database, _seed, _claim, _complete,
     ROUND as SQL_ROUND,
 )
+from tests.lab_arena.validator_logging_test import logger, queued
 
 
 class ClaimStore:
@@ -188,6 +190,85 @@ def test_recovery_allocates_once_when_original_never_committed(tmp_path, elapsed
         assert store.arguments[0]["request_id"] == original["request_id"]
         assert store.arguments[0]["request_hash"] == contracts.request_bytes_hash(original)
         assert runner._pending_claims == {}
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize("idle_status", ("no_pending", "no_free_slot"))
+def test_unresolved_recovery_keeps_original_until_work_is_available(tmp_path, idle_status):
+    current = [make_config(tmp_path, FakeApi([]), BridgingRuntime(calls=0)).clock()]
+    service, store = claim_service(lambda: current[0])
+    original_allocator = store.claim_assignment
+    first_recovery = [True]
+
+    def temporary_idle(**kwargs):
+        if first_recovery[0]:
+            first_recovery[0] = False
+            return {"status": idle_status}
+        return original_allocator(**kwargs)
+
+    store.claim_assignment = temporary_idle
+
+    class Api(FakeApi):
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            if len(self.claims) <= 3:
+                raise rn.RunnerError("request never reached server", http_status=503)
+            return service.handle_claim(envelope)
+
+    api = Api([])
+    config = make_config(tmp_path, api, BridgingRuntime(output={"companies": []}, calls=0))
+    config.clock = lambda: current[0]
+    runner = rn.Runner(config)
+    try:
+        assert runner.run_once(max_claims=1) == 0
+        original = runner._pending_claims[ROUND]
+        current[0] += timedelta(seconds=301)
+        assert runner.run_once(max_claims=100) == 0
+        assert runner._pending_claims[ROUND] is original
+        assert store.allocations == 0
+        assert len(api.claims) == 4  # no immediate rescan loop
+        assert runner.run_once(max_claims=1) == 1
+        assert store.allocations == 1
+        assert store.arguments[0]["request_id"] == original["request_id"]
+        assert runner._pending_claims == {}
+    finally:
+        runner.close()
+
+
+def test_stale_recovery_no_work_is_idle_without_claim_denial(tmp_path):
+    current = [make_config(tmp_path, FakeApi([]), BridgingRuntime(calls=0)).clock()]
+    service, store = claim_service(lambda: current[0])
+
+    class Api(FakeApi):
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            response = service.handle_claim(envelope)
+            if len(self.claims) <= 3:
+                raise rn.RunnerError("response lost", http_status=503)
+            return response
+
+    api = Api([])
+    operations = logger()
+    config = replace(
+        make_config(tmp_path, api, BridgingRuntime(calls=0)),
+        operational_logger=operations,
+    )
+    config.clock = lambda: current[0]
+    runner = rn.Runner(config)
+    try:
+        assert runner.run_once(max_claims=1) == 0
+        assert runner._pending_claims[ROUND]
+        store.run["status"] = "accepted"
+        current[0] += timedelta(seconds=301)
+        assert runner.run_once(max_claims=100) == 0
+        assert runner._pending_claims == {}
+        assert len(api.claims) == 4  # no immediate rescan loop
+        assert operations.snapshot()["scoring_state"] == "idle"
+        assert all(
+            event.get("content", {}).get("reason") != "claim_denied"
+            for event in queued(operations)
+        )
     finally:
         runner.close()
 

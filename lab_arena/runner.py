@@ -189,9 +189,10 @@ _PICKUP_PHASES = frozenset({"round_discovery", "claim"})
 _PICKUP_FAILURE_REASONS = frozenset({"request_failed", "claim_denied"})
 _IDLE_CLAIM_STATUSES = frozenset({
     "no_pending", "no_open_round", "stage_closed", "paused", "no_free_slot", "cache_busy",
+    "no_work",
 })
 _DEFINITE_CLAIM_STATUSES = _IDLE_CLAIM_STATUSES | frozenset({
-    "leased", "rejected", "request_id_reused", "no_work",
+    "leased", "rejected", "request_id_reused",
 })
 _ACTIVE_RESCAN_CLAIM_STATUSES = frozenset({"no_pending", "no_free_slot", "paused"})
 _CLAIM_AVAILABILITY_CODES = frozenset(

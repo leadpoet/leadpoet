@@ -596,6 +596,10 @@ def _calls(rows, run_ids, objects, run_order):
 def _reported_phase_coverage(payload):
     """Check the declared baseline phase contract, not arbitrary local memory."""
     states = [row["data"] for row in payload.get("agent_observations", []) if row["kind"] == "state_snapshot"]
+    # The runner adds its recorder status after the agent counts its own states.
+    if sum(row["name"] == "automatic_capture_summary" for row in states) > 1:
+        return False
+    states = [row for row in states if row["name"] != "automatic_capture_summary"]
     summaries = [row["value"] for row in states if row["name"] == "training_capture_summary"]
     required = {"after_discovery", "after_verification", "after_admission", "final"}
     if len(summaries) != 1 or any(sum(row["name"] == name for row in states) != 1 for name in required):

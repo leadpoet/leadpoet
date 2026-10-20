@@ -46,9 +46,11 @@ the Responses cap 32,768.
 
 The policy never rewrites an agent's sampling settings. Optional Anthropic
 thinking refuses a temperature other than 1, `top_k`, `top_p` below 0.95 and
-forced tool choice, so such calls are sent unchanged and recorded as
-`anthropic_sampling_conflict`. Models whose catalog lists no reasoning
-support, such as Perplexity Sonar, are also sent unchanged.
+forced tool choice. A tool-loop continuation also needs the earlier thinking
+blocks, which the chat schema cannot carry back. Such calls are sent
+unchanged and recorded as `anthropic_thinking_conflict`. Models whose catalog
+lists no reasoning support, such as Perplexity Sonar, are also sent
+unchanged.
 
 If the operation schema would refuse the policy form, for example because it
 pushes a request over the size cap, the agent's own valid request is sent. The

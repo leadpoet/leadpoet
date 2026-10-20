@@ -94,7 +94,7 @@ def _cases(model):
             "model": model, "input": PROMPT, "max_output_tokens": 600, "reasoning": {"effort": "minimal"}}
 
 
-def probe(models, key):
+def probe(models, key, *, dry_run=False):
     from lab_arena import broker, operations, reasoning_capture
 
     profiles = reasoning_capture.profiles_from_models_response(_catalog())
@@ -104,6 +104,12 @@ def probe(models, key):
             normalized = broker.normalized_request(operation_id, parameters)
             sent, annotation = broker.agent_reasoning_parameters(
                 operation_id, normalized, policy=reasoning_capture.POLICY, profiles=profiles)
+            if dry_run:
+                rows.append({"model": model, "case": case, "treatment": annotation["treatment"],
+                             "requested": annotation["requested"], "changes": annotation["changes"],
+                             "sent_reasoning": sent.get("reasoning"),
+                             "sent_output_cap": sent.get("max_output_tokens", sent.get("max_tokens"))})
+                continue
             fixed = json.loads(json.dumps(dict(operations.OPERATIONS[operation_id].fixed_params)))
             path = "/responses" if operation_id == "openrouter.responses" else "/chat/completions"
             status, document = _post(path, {**sent, **fixed}, key)
@@ -124,21 +130,25 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", action="append", dest="models",
                         help="OpenRouter model id; repeat for several (default: current agent models)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the rewritten requests from the public catalog; send nothing")
     args = parser.parse_args(argv)
     models = tuple(args.models or MODELS)
     if len(models) > MAX_MODELS:
         parser.error("at most %d models per probe" % MAX_MODELS)
     key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not key:
+    if not key and not args.dry_run:
         print("OPENROUTER_API_KEY is required", file=sys.stderr)
         return 1
     try:
-        rows = probe(models, key)
+        rows = probe(models, key, dry_run=args.dry_run)
     except Exception as exc:
         print("reasoning probe failed: " + type(exc).__name__, file=sys.stderr)
         return 1
     for row in rows:
         print(json.dumps(row, sort_keys=True))
+    if args.dry_run:
+        return 0
     # A failure the agent's own form shares is pre-existing, not the policy's.
     passed = all(not row["policy_caused_failure"]
                  and (not 200 <= row["http_status"] < 300 or row["readable_reasoning"] or not row["requested"])

@@ -124,16 +124,26 @@ def test_headroom_never_exceeds_the_chat_output_cap():
     assert annotation["changes"] == ["effort"]
 
 
+TOOL_LOOP = [MESSAGES[0],
+             {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {
+                 "name": "lookup", "arguments": "{}"}}]},
+             {"role": "tool", "tool_call_id": "call_1", "content": "{}"}]
+
+
 @pytest.mark.parametrize("extra", [
     {"temperature": 0}, {"temperature": 0.2}, {"top_k": 5}, {"top_p": 0.5},
     {"tool_choice": "required"}, {"tool_choice": {"type": "function", "function": {"name": "lookup"}}},
+    {"messages": TOOL_LOOP},
 ])
 def test_anthropic_thinking_conflicts_send_the_agent_request(extra):
     parameters = chat("anthropic/claude-sonnet-4.5", **extra)
     updated, annotation = forced("openrouter.chat", parameters)
     assert updated == parameters
-    assert annotation == {"policy": rc.POLICY, "treatment": "anthropic_sampling_conflict",
+    assert annotation == {"policy": rc.POLICY, "treatment": "anthropic_thinking_conflict",
                           "requested": False, "changes": []}
+    # Mandatory thinking already runs; its effort is set as usual.
+    mandatory, note = forced("openrouter.chat", chat("anthropic/claude-sonnet-5.5", **extra))
+    assert note["treatment"] == "chat" and mandatory["reasoning"] == {"effort": "high"}
 
 
 def test_models_without_reasoning_support_are_unchanged():

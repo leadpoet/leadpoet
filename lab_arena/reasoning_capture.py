@@ -134,12 +134,20 @@ def _forced_tool_choice(value: Any) -> bool:
     return value not in (None, "auto", "none")
 
 
-def _anthropic_sampling_conflict(parameters: Mapping[str, Any]) -> bool:
-    """Extended thinking refuses these agent settings; never rewrite them."""
+def _anthropic_thinking_conflict(parameters: Mapping[str, Any]) -> bool:
+    """Extended thinking refuses these agent requests; never rewrite them.
+
+    Thinking rejects a temperature other than 1, ``top_k``, low ``top_p`` and
+    forced tool choice. A tool-loop continuation also needs the earlier
+    thinking blocks, which the chat schema cannot carry back.
+    """
     temperature = parameters.get("temperature")
     top_p = parameters.get("top_p")
+    continuation = any(isinstance(message, Mapping) and message.get("role") == "assistant"
+                       and message.get("tool_calls") for message in parameters.get("messages") or ())
     return ((temperature is not None and temperature != 1) or parameters.get("top_k") is not None
-            or (top_p is not None and top_p < 0.95) or _forced_tool_choice(parameters.get("tool_choice")))
+            or (top_p is not None and top_p < 0.95) or _forced_tool_choice(parameters.get("tool_choice"))
+            or continuation)
 
 
 def _default_on(profile: Mapping[str, Any]) -> bool:
@@ -217,10 +225,10 @@ def _chat(parameters: Dict[str, Any], profile: Optional[Mapping[str, Any]]) -> T
     if agent_budget:
         pass  # The agent chose its own thinking budget.
     elif anthropic_optional and not agent_effort and not _default_on(profile):
-        # Anthropic thinking is turned on by budget. It refuses temperature,
-        # top_k, low top_p and forced tools, so a conflicting call is skipped.
-        if _anthropic_sampling_conflict(parameters):
-            return original, _annotation("anthropic_sampling_conflict", False, [])
+        # Anthropic thinking is turned on by budget; a conflicting call is
+        # sent as the agent wrote it.
+        if _anthropic_thinking_conflict(parameters):
+            return original, _annotation("anthropic_thinking_conflict", False, [])
         reasoning.pop("effort", None)
         reasoning["max_tokens"] = ANTHROPIC_BUDGET_TOKENS
         changes.append("budget")

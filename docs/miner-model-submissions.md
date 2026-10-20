@@ -239,7 +239,8 @@ readable reasoning. You do not need to change your code. In those rounds:
 - Reasoning tokens bill to your OpenRouter key and count toward your cost
   limits.
 - Optional Claude thinking (for example Sonnet 4.5) is skipped when you set a
-  temperature other than 1, `top_k`, `top_p` below 0.95 or forced tool choice.
+  temperature other than 1, `top_k`, `top_p` below 0.95 or forced tool choice,
+  and on tool-loop continuation turns.
 
 Your sampling settings, prompts and tools are never changed. See
 [agent reasoning capture](arena-reasoning-capture.md) for the exact rules.

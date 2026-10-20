@@ -114,6 +114,16 @@ Each chain operation retains its existing timeout. Success requires finalized co
 `LastUpdate`, the exact revealed vector, and unchanged rewarded UID ownership.
 Commitment inclusion alone is not success.
 
+Historical runtime 468 recovery can encounter several commitments for the same
+validator in one reveal block. For that exact measured runtime, the validator
+checks the full parent queue before selecting an event. Multiple entries require
+a complete queue-to-event proof in runtime order, with canonical adjacent
+headers, the active reveal epoch, and unchanged account UIDs. The expected
+commitment must be the final entry for its account so final weight storage can
+confirm its vector. Missing or ambiguous events, retained queue entries, epoch
+boundaries, and unreviewed runtimes remain unproved. Preserve their journals;
+this verification does not clear or replace a pending transaction.
+
 The local host can now access its own hotkey. Protect that machine and wallet
 file. Gateway signatures authenticate Arena decisions; local signing does not
 independently prove that Arena accepted the correct scores. No receipt graphs,

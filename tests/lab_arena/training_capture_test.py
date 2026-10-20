@@ -95,6 +95,125 @@ def test_secret_redaction_is_explicit_without_changing_safe_reasoning_config(tmp
     assert restored["admitted_parameters"]["reasoning"] == {"effort": "high", "exclude": True}
 
 
+@pytest.mark.parametrize("encoding_depth", [0, 1, 2])
+@pytest.mark.parametrize("value", [
+    r'{\"url\":\"https://example.com/?api_key=secret,\"next\":\"data\",\"last\":\"more\"}',
+    r'{\"url\":\"https://example.com/?api_key=[REDACTED],\"last\":\"more\"}',
+])
+def test_escaped_json_url_redaction_preserves_fields_and_is_a_fixed_point(value, encoding_depth):
+    for _ in range(encoding_depth):
+        value = json.dumps(value)
+    cleaned, _ = capture.sanitize_training_value(value)
+    assert cleaned == value.replace("=secret", "=%5BREDACTED%5D")
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+def test_escaped_url_boundary_preserves_query_values_and_known_secret_redaction():
+    from urllib.parse import parse_qsl, urlsplit
+
+    ordinary = "https://example.com/?q=one,two;three&keep=visible"
+    assert capture.sanitize_training_value(ordinary) == (ordinary, [])
+    sensitive = ordinary + "&token=private-token"
+    cleaned, reasons = capture.sanitize_training_value(sensitive)
+    assert dict(parse_qsl(urlsplit(cleaned).query)) == {
+        "q": "one,two;three", "keep": "visible", "token": "[REDACTED]"}
+    assert reasons == ["credential"]
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+    value = r'{\"url\":\"https://example.com/?api_key=secret;\"next\":\"known-private-token\"}'
+    cleaned, reasons = capture.sanitize_training_value(value, secrets=("known-private-token",))
+    assert cleaned == value.replace("=secret", "=%5BREDACTED%5D").replace("known-private-token", "[REDACTED]")
+    assert reasons == ["credential"]
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("https://example.com/?api_key=value#;fragment",
+     "https://example.com/?api_key=%5BREDACTED%5D#;fragment"),
+    ("https://example.com/?api_key=value&keep=visible#;fragment",
+     "https://example.com/?api_key=%5BREDACTED%5D&keep=visible#;fragment"),
+    ("https://example.com/?api_key=[REDACTED]actualsecret&keep=visible#fragment",
+     "https://example.com/?api_key=%5BREDACTED%5D&keep=visible#fragment"),
+    ("https://user:password@example.com/?signature=private&keep=visible#fragment",
+     "https://example.com/?signature=%5BREDACTED%5D&keep=visible#fragment"),
+    ("https://example.com/?api_key=[REDACTED]&keep=visible#;fragment",
+     "https://example.com/?api_key=[REDACTED]&keep=visible#;fragment"),
+])
+def test_url_component_redaction_preserves_delimiters_and_is_a_fixed_point(value, expected):
+    assert capture.sanitize_training_value(value)[0] == expected
+    assert capture.sanitize_training_value(expected)[0] == expected
+
+
+@pytest.mark.parametrize("value,secret", [
+    ("See https://example.com/private-path now", "https://example.com/private-path"),
+    (r'\"password\":\"https://example.com/private-path\"', "https://example.com/private-path"),
+    ("https://private-user@example.com/", "private-user@example.com"),
+    ("https://[malformed/?password=private-secret", "private-secret"),
+])
+def test_url_boundaries_do_not_bypass_known_secret_or_malformed_url_redaction(value, secret):
+    cleaned, reasons = capture.sanitize_training_value(value, secrets=(secret,))
+    assert secret not in cleaned and reasons == ["credential"]
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("password=https://example.com/private", "password=[REDACTED]"),
+    ('"password":"https://example.com/private"', '"password":"[REDACTED]"'),
+])
+def test_a_url_as_a_text_password_keeps_existing_redaction(value, expected):
+    assert capture.sanitize_training_value(value)[0] == expected
+
+
+@pytest.mark.parametrize("encoding_depth", [0, 1, 2, 3])
+def test_a_url_password_is_redacted_with_its_complete_surrounding_syntax(encoding_depth):
+    from lab_arena import trajectory
+
+    value = "password=https://example.com/?api_key=value&keep=visible"
+    for _ in range(encoding_depth):
+        value = json.dumps(value)
+    cleaned, _ = capture.sanitize_training_value(value)
+    assert cleaned == trajectory.redact_text(value)
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+@pytest.mark.parametrize("label", ["Basic", "Bearer"])
+def test_public_url_mask_does_not_create_a_false_bearer_credential(label):
+    value = label + " https://example.com/public?keep=visible#fragment"
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
+@pytest.mark.parametrize("prefix", ["sk-01234567890", "sk-or-v1-abc12345", "Bearer abc", "Basic abc"])
+@pytest.mark.parametrize("tail", [
+    "example.com/path", "example.com/path?token=private-value#;fragment",
+    "example.com/path#https://inner.example/?token=private-value",
+    "private-user:private-password@example.com/path?token=private-value#fragment",
+])
+def test_url_mask_does_not_split_existing_credential_tokens(prefix, tail):
+    from lab_arena import trajectory
+
+    value = prefix + "https://" + tail
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert cleaned.startswith("[REDACTED]://example.com")
+    assert prefix not in cleaned and "private-value" not in cleaned
+    assert "private-user" not in cleaned and "private-password" not in cleaned
+    assert reasons == ["credential"]
+    if tail == "example.com/path":
+        assert cleaned == trajectory.redact_text(value)
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+def test_url_mask_avoids_original_text_collisions_and_exact_secret_matching(monkeypatch):
+    from types import SimpleNamespace
+
+    nonces = iter(("collision", "unique", "unique"))
+    monkeypatch.setattr(capture.uuid, "uuid4", lambda: SimpleNamespace(hex=next(nonces)))
+    value = "[arena-url-collision-0] https://example.com/public"
+    assert capture.sanitize_training_value(value) == (value, [])
+    # Exact known secrets were removed before masking. A secret that happens
+    # to be part of an internal token must not delete an unrelated public URL.
+    public = "https://example.com/public"
+    assert capture.sanitize_training_value(public, secrets=("arena-url",)) == (public, [])
+
+
 @pytest.mark.parametrize("value", [None, "", {}, []])
 def test_empty_credential_fields_roundtrip_without_false_redactions(tmp_path, value):
     document = _document()

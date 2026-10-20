@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import re
+import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qsl, quote, quote_plus, urlencode, urlsplit, urlunsplit
@@ -42,7 +43,11 @@ _CONFIG_KEYS = frozenset({
 _PARAMETER_KEYS = frozenset({
     "admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters",
 })
-_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+# Escaped JSON quotes (and their adjacent separators) delimit embedded URLs.
+# Including the comma/backslash in a query value lets URL normalization remove
+# them, so the later credential scan consumes another JSON field on each pass.
+# Check an escape run only at its start, so long backslash runs stay linear.
+_URL_RE = re.compile(r"https?://(?:(?![,;]?(?<!\\)\\+[\"'])[^\s<>\"'])+", re.IGNORECASE)
 _URL_SECRET_KEYS = frozenset({
     "key", "token", "sig", "signature", "auth", "credential", "credentials",
     "x_amz_credential", "x_amz_signature", "x_amz_security_token", "session_token",
@@ -166,6 +171,13 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 variants.update((variant, re.sub(r"%[0-9A-F]{2}", lambda m: m[0].lower(), variant)))
 
     def clean_text(text: str) -> str:
+        # A known secret can span URL component or URL/text boundaries.
+        for secret in sorted(variants, key=len, reverse=True):
+            text = text.replace(secret, "[REDACTED]")
+
+        def redact(value):
+            return trajectory.redact_text(value, tuple(variants), escape_nul=False)
+
         def clean_url(match):
             url = match[0]
             try:
@@ -173,26 +185,56 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 netloc = parts.netloc
                 if parts.username is not None or parts.password is not None:
                     netloc = netloc.rsplit("@", 1)[-1]
-                changed = netloc != parts.netloc
+                netloc, path, fragment = map(redact, (netloc, parts.path, parts.fragment))
                 pairs = []
+                query_changed = False
                 for key, child in parse_qsl(parts.query, keep_blank_values=True):
-                    normalized = key.lower().replace("-", "_")
+                    safe_key = redact(key)
+                    normalized = safe_key.lower().replace("-", "_")
                     if normalized in _URL_SECRET_KEYS or trajectory._SENSITIVE_KEY_RE.fullmatch(normalized):
-                        child = "[REDACTED]"
-                        changed = True
-                    pairs.append((key, child))
+                        safe_child = "[REDACTED]"
+                    else:
+                        safe_child = redact(child)
+                    query_changed |= safe_key != key or safe_child != child
+                    pairs.append((safe_key, safe_child))
+                changed = query_changed or (netloc, path, fragment) != (parts.netloc, parts.path, parts.fragment)
                 if changed:
                     reasons.add("credential")
-                    return urlunsplit((parts.scheme, netloc, parts.path, urlencode(pairs), parts.fragment))
+                    return urlunsplit((parts.scheme, netloc, path,
+                                       urlencode(pairs) if query_changed else parts.query, fragment))
             except ValueError:
                 # The credential patterns and exact-value scan still apply.
-                pass
+                return redact(url)
             return url
 
+        # Clean URL secrets before a credential match can remove its scheme.
+        # These existing token matchers must see text across URL boundaries.
         text = _URL_RE.sub(clean_url, text)
+        text = trajectory._BEARER_RE.sub("[REDACTED]", text)
+        text = trajectory._BARE_API_KEY_RE.sub("[REDACTED]", text)
+        if not _URL_RE.search(text):
+            return redact(text)
+        # Keep URL delimiters out of the generic credential scan, while a URL
+        # used as a credential value still gets removed with its full context.
+        # '[' cannot turn Basic/Bearer plus a public URL into a credential.
+        prefix = "[arena-url-" + uuid.uuid4().hex + "-"
+        while prefix in text:
+            prefix = "[arena-url-" + uuid.uuid4().hex + "-"
+        urls = []
+
+        def mask_url(match):
+            # Removing a credential prefix can expose a nested URL span.
+            urls.append(clean_url(match))
+            return prefix + str(len(urls) - 1) + "]"
+
+        masked = _URL_RE.sub(mask_url, text)
         # JSON escapes NUL losslessly. Diagnostic stream escaping would change
         # private evidence and falsely report a credential redaction.
-        return trajectory.redact_text(text, tuple(variants), escape_nul=False)
+        # Exact secrets were removed before masking; never match them against
+        # temporary tokens. Restore all surviving URLs in one scan.
+        cleaned = trajectory.redact_text(masked, escape_nul=False)
+        return re.sub(re.escape(prefix) + r"([0-9]+)\]",
+                      lambda match: urls[int(match[1])], cleaned)
 
     def request_config_path(path: tuple[str, ...]) -> bool:
         # The same request is sanitized first as a standalone blob and later

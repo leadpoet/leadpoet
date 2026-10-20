@@ -145,6 +145,7 @@ def _evidence_reader(store, objects):
         _company_quality_breakdowns = ArenaService._company_quality_breakdowns
         _validated_company_judgment_lease = ArenaService._validated_company_judgment_lease
         _company_judgment_evidence = ArenaService._company_judgment_evidence
+        _round_from_context = ArenaService._round_from_context
 
         def _round(self, round_id):
             # Offline assembly has one exact frozen round, with no service

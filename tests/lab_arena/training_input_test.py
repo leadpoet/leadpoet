@@ -232,7 +232,7 @@ def test_http_capture_uses_bounded_timeout_and_full_document():
     document = {"input": "whole input" * 100_000}
     assert client.training_input("r1", TOKEN, document)["status"] == "stored"
     assert observed["document"] == document
-    assert set(observed["timeout"].values()) == {2.0}
+    assert set(observed["timeout"].values()) == {runner.TRAINING_CAPTURE_TIMEOUT_SECONDS}
     assert observed["lease"] == TOKEN
 
 

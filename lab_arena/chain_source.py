@@ -22,6 +22,8 @@ from leadpoet_canonical.chain_source_v2 import (
     parse_finalized_header,
     parse_runtime_version,
     decode_subnet_epoch_storage,
+    reveal_period_epochs_storage_key,
+    decode_reveal_period_epochs_storage,
     decode_system_account_nonce,
     decode_last_update_storage,
     decode_weights_storage,
@@ -39,6 +41,8 @@ from leadpoet_canonical.subtensor_events_v2 import (
     RUNTIME_CODE_STORAGE_KEY,
     load_subtensor_events_profile_v2,
     prove_timelocked_weights_reveal_v2,
+    prove_timelocked_weights_queue_reveal_v2,
+    supports_timelocked_queue_reveal_v2,
     validate_subtensor_events_profile_v2,
 )
 from lab_arena.weight_read_diagnostics import chain_read, note_rpc_failure
@@ -330,12 +334,54 @@ class ValidatorChainSourceV2:
                 or not isinstance(event_count_value, str)
                 or not event_count_value.startswith("0x")):
             raise ValidatorChainSourceV2Error("reveal event storage is absent")
-        event_witness = prove_timelocked_weights_reveal_v2(
-            bytes.fromhex(events_value[2:]), profile=event_profile,
-            event_count_raw=bytes.fromhex(event_count_value[2:]),
-            expected_netuid=int(netuid), expected_uid=int(uid),
-            expected_account_id_hex=str(hotkey_public_key_hex),
-        )
+        before_queue = None
+        multiple_account_entries = False
+        if supports_timelocked_queue_reveal_v2(event_profile):
+            before_queue = archive('state_getStorage', [commit_key, '0x' + pre_transition_hash])
+            multiple_account_entries = sum(
+                item["hotkey_public_key"] == str(hotkey_public_key_hex)
+                for item in decode_timelocked_weight_commits(before_queue)
+            ) > 1
+        if not multiple_account_entries:
+            event_witness = prove_timelocked_weights_reveal_v2(
+                bytes.fromhex(events_value[2:]), profile=event_profile,
+                event_count_raw=bytes.fromhex(event_count_value[2:]),
+                expected_netuid=int(netuid), expected_uid=int(uid),
+                expected_account_id_hex=str(hotkey_public_key_hex),
+            )
+        else:
+            # Inspect the queue before selecting an event. A failed target and
+            # another successful commitment can otherwise leave a misleading
+            # unique event pair. Never fall through on multi-entry ambiguity.
+            after_queue = archive('state_getStorage', [commit_key, '0x' + digest])
+            parent_header = archive('chain_getHeader', ['0x' + pre_transition_hash])
+            transition_header = archive('chain_getHeader', ['0x' + digest])
+            parent_metagraph = decode_selective_metagraph_result(archive('state_call', [
+                CHAIN_RPC_METHOD, encode_selective_metagraph_params(netuid=int(netuid)),
+                '0x' + pre_transition_hash]))
+            scheduler = {
+                name: decode_subnet_epoch_storage(archive('state_getStorage', [
+                    subnet_epoch_storage_key(storage_name=name, netuid=int(netuid)),
+                    '0x' + pre_transition_hash]), storage_name=name)
+                for name in ('SubnetEpochIndex', 'LastEpochBlock', 'Tempo',
+                             'PendingEpochAt', 'BlocksSinceLastStep')
+            }
+            period_override = decode_reveal_period_epochs_storage(archive('state_getStorage', [
+                reveal_period_epochs_storage_key(netuid=int(netuid)), '0x' + pre_transition_hash]))
+            event_witness = prove_timelocked_weights_queue_reveal_v2(
+                bytes.fromhex(events_value[2:]), profile=event_profile,
+                event_count_raw=bytes.fromhex(event_count_value[2:]),
+                expected_netuid=int(netuid), expected_uid=int(uid),
+                expected_account_id_hex=str(hotkey_public_key_hex),
+                expected_commitment_hex=str(commitment_hex),
+                expected_reveal_round=int(reveal_round), expected_submitted_at=int(inclusion_block),
+                subnet_epoch_index=int(subnet_epoch_index),
+                queue_before_raw=before_queue, queue_after_raw=after_queue,
+                parent_block_hash='0x' + pre_transition_hash, transition_block_hash='0x' + digest,
+                parent_header=parent_header, transition_header=transition_header,
+                parent_metagraph=parent_metagraph, transition_metagraph=metagraph,
+                scheduler=scheduler, reveal_period_override=period_override,
+            )
         return {
             "reveal_block": transition, "reveal_block_hash": digest,
             "validator_uid": uid, "last_update": int(updates[uid]),

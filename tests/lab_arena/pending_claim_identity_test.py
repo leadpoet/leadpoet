@@ -204,3 +204,90 @@ def test_capacity_change_does_not_change_pending_signed_body(tmp_path):
         assert contracts.request_bytes_hash(pending) == original_hash
     finally:
         runner.close()
+
+
+@pytest.mark.parametrize('code', (
+    'request_invalid:request timestamp outside window',
+    'contract:request timestamp outside window',
+))
+def test_server_timestamp_rejection_cannot_clear_pending_with_client_clock_skew(tmp_path, code):
+    class Api(FakeApi):
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            if len(self.claims) <= 3:
+                raise rn.RunnerError('availability failure', http_status=503)
+            return {'status': 'rejected', 'code': code}
+
+    api = Api([])
+    config = make_config(tmp_path, api, BridgingRuntime(calls=0))
+    runner = rn.Runner(config)
+    try:
+        with pytest.raises(rn.RunnerError):
+            runner.claim_one()
+        pending = runner._pending_claims[ROUND]
+        # The server's window rejection is authoritative even if this clock
+        # still says the original request is fresh. It cannot cause a new ID.
+        with pytest.raises(rn.RunnerError, match='pending claim timestamp expired'):
+            runner.claim_one()
+        assert len(api.claims) == 6
+        assert runner._pending_claims[ROUND] is pending
+        assert all(item is pending for item in api.claims)
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize('fault', (
+    'empty_leased', 'missing_run_id', 'invalid_run_id', 'missing_token',
+    'empty_token', 'invalid_token', 'missing_icp', 'invalid_icp',
+    'foreign_request', 'foreign_round',
+))
+def test_malformed_or_foreign_leased_answer_retains_envelope_until_usable(
+    tmp_path, fault,
+):
+    class Api(FakeApi):
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            if len(self.claims) <= 3:
+                raise rn.RunnerError('availability failure', http_status=503)
+            answer = dict(lease(), request_id=envelope['request_id'], round_id=envelope['round_id'])
+            if len(self.claims) <= 6:
+                if fault == 'empty_leased':
+                    return {'status': 'leased'}
+                if fault == 'missing_run_id':
+                    answer.pop('run_id')
+                elif fault == 'invalid_run_id':
+                    answer['run_id'] = []
+                elif fault == 'missing_token':
+                    answer.pop('lease_token')
+                elif fault == 'empty_token':
+                    answer['lease_token'] = ' '
+                elif fault == 'invalid_token':
+                    answer['lease_token'] = None
+                elif fault == 'missing_icp':
+                    answer.pop('icp')
+                elif fault == 'invalid_icp':
+                    answer['icp'] = []
+                elif fault == 'foreign_request':
+                    answer['request_id'] = 'f' * 32
+                elif fault == 'foreign_round':
+                    answer['round_id'] = 'arena-2026-09-03'
+            return answer
+
+    api = Api([])
+    sandbox = BridgingRuntime(output={'companies': []}, calls=0)
+    config = make_config(tmp_path, api, sandbox)
+    (tmp_path / 'work').mkdir()
+    runner = rn.Runner(config)
+    try:
+        assert runner.run_once(max_claims=1) == 0
+        pending = runner._pending_claims[ROUND]
+        assert runner.run_once(max_claims=1) == 0
+        assert runner._pending_claims[ROUND] is pending
+        assert sandbox.specs == [] and api.completions == []
+        assert runner.abandoned == 0
+        assert runner.run_once(max_claims=1) == 1
+        assert len(api.claims) == 7 and all(x is pending for x in api.claims)
+        assert len(sandbox.specs) == 1 and len(api.completions) == 1
+        assert runner._pending_claims == {}
+    finally:
+        runner.close()

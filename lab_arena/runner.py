@@ -4853,7 +4853,21 @@ class Runner:
                 if not isinstance(response, Mapping):
                     raise RunnerError("Arena claim returned a non-object")
                 status = response.get("status")
-                if status != "leased" and abs(int(config.clock().timestamp()) - envelope["timestamp"]) > contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS:
+                if status == "leased":
+                    if (any(not isinstance(response.get(key), str) or not response[key].strip()
+                            for key in ("run_id", "lease_token"))
+                        or not isinstance(response.get("icp"), Mapping)):
+                        raise RunnerError("Arena claim returned an incomplete lease")
+                    if (response.get("request_id", envelope["request_id"]) != envelope["request_id"]
+                        or response.get("round_id", round_id) != round_id):
+                        raise RunnerError("Arena claim lease does not match its request")
+                if status != "leased" and (
+                    abs(int(config.clock().timestamp()) - envelope["timestamp"]) > contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS
+                    or response.get("code") in (
+                        "request_invalid:request timestamp outside window",
+                        "contract:request timestamp outside window",
+                    )
+                ):
                     raise RunnerError("pending claim timestamp expired; allocation remains unresolved")
                 if isinstance(status, str) and status in _DEFINITE_CLAIM_STATUSES:
                     self._pending_claims.pop(round_id)

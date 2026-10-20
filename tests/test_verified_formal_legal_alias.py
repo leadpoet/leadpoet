@@ -104,7 +104,17 @@ def test_formal_legal_alias_is_reversible_when_the_homepage_verifies_legal_name(
 
 def test_formal_name_grammar_requires_exact_core_and_terminal_legal_suffix():
     assert verified_brand_formal_legal_name("AES", "The AES Corporation")
-    assert verified_brand_formal_legal_name("Acme Inc", "The Acme Corporation")
+    assert not verified_brand_formal_legal_name("Acme Inc", "The Acme Corporation")
     assert not verified_brand_formal_legal_name("AES", "The AES Holdings Corporation")
     assert not verified_brand_formal_legal_name("AES", "The AES Group")
     assert not verified_brand_formal_legal_name("AES", "AES Corporation Customer")
+
+
+def test_two_distinct_formal_legal_names_do_not_use_the_brand_bridge():
+    company = _company(name="AES Inc")
+    receipt = _receipt(
+        "The AES LLC",
+        company=company,
+        homepage=_HOMEPAGE,
+    )
+    assert receipt["decision"] != "match"

@@ -215,18 +215,17 @@ def verified_brand_formal_legal_name(brand: object, legal_name: object) -> bool:
     }
     brand_words = re.findall(r"[a-z0-9]+", str(brand or "").casefold())
     legal_words = re.findall(r"[a-z0-9]+", str(legal_name or "").casefold())
-    if not brand_words or len(legal_words) < 2:
+    if (
+        not brand_words
+        or brand_words[-1] in formal_suffixes
+        or len(legal_words) < 2
+    ):
         return False
     if legal_words[-1] not in formal_suffixes:
         return False
     legal_core = legal_words[:-1]
-    brand_core = (
-        brand_words[:-1]
-        if brand_words[-1] in formal_suffixes else brand_words
-    )
     return bool(
-        brand_core
-        and (legal_core == brand_core or legal_core == ["the", *brand_core])
+        legal_core == brand_words or legal_core == ["the", *brand_words]
     )
 
 

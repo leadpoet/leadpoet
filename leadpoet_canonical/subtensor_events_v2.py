@@ -54,6 +54,18 @@ MAX_DECODE_DEPTH = 96
 MAX_DECODE_NODES = 250_000
 MAX_JSON_DEPTH = 96
 MAX_JSON_NODES = 250_000
+# Reviewed FIFO semantics and ValueQuery default, bound to the exact v468
+# release binary and metadata (not merely its version number). Release source:
+# RaoFoundation/subtensor@30c70d90f8a3708d85cf95ae992b7a3fe30d2c4c,
+# coinbase/reveal_commits.rs, coinbase/run_coinbase.rs and subnets/weights.rs.
+# The released WASM Blake2-256 equals this historical :code storage hash.
+_FIFO_REVEAL_RUNTIME_POLICIES = {
+    ("0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+     468, 1, "80acd157c696ca91b770062ca94572ce32bc9b9a2277b8476b2eb93e10643daa",
+     "0x899a87a4e4610587d81d9237adeb3e420ea524cd39b397c7a9b4c811b0e7af1d"):
+        {"default_reveal_period": 1,
+         "source_commit": "30c70d90f8a3708d85cf95ae992b7a3fe30d2c4c"},
+}
 _RAW_HASH_RE = re.compile(r"^(?:0x)?[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
 _PRIMITIVES = frozenset(
@@ -1073,6 +1085,12 @@ def prove_timelocked_weights_reveal_v2(
     if len(matches) != 1:
         _fail("matching timelocked reveal event pair is absent or ambiguous")
     weights, reveal = matches[0]
+    return _reveal_witness(normalized, records, events_raw, weights, reveal,
+                           netuid=netuid, uid=uid, account_id=account_id)
+
+
+def _reveal_witness(normalized, records, events_raw, weights, reveal, *, netuid, uid, account_id):
+    layout = normalized["event_layout"]
     return {
         "schema_version": PROOF_SCHEMA_VERSION,
         "profile_sha256": _sha256_json(normalized),
@@ -1092,3 +1110,173 @@ def prove_timelocked_weights_reveal_v2(
             "timelocked_weights_revealed_event_index"
         ],
     }
+
+
+def _queue_header(value: Mapping[str, Any], expected_hash: str) -> Dict[str, Any]:
+    """Bind the complete SCALE header, including digest logs, to its hash."""
+    from leadpoet_canonical.chain_source_v2 import parse_finalized_header, _compact_encode
+    parsed = parse_finalized_header(value)
+    _integer(parsed["block"], "queue header block")
+    digest = value.get("digest")
+    if not isinstance(digest, Mapping) or set(digest) != {"logs"}:
+        _fail("reveal queue header digest is invalid")
+    logs = digest["logs"]
+    if not isinstance(logs, list) or len(logs) > 1024:
+        _fail("reveal queue header digest exceeds policy")
+    encoded_logs = []
+    digest_bytes = 0
+    for log in logs:
+        if type(log) is not str or not re.fullmatch(r"0x(?:[0-9a-fA-F]{2})+", log) or len(log) > 2 * 1024 * 1024:
+            _fail("reveal queue header digest item is invalid")
+        encoded_logs.append(bytes.fromhex(log[2:]))
+        digest_bytes += len(encoded_logs[-1])
+        if digest_bytes > 1024 * 1024:
+            _fail("reveal queue header digest exceeds policy")
+    encoded = (bytes.fromhex(parsed["parent_hash"]) + _compact_encode(parsed["block"])
+               + bytes.fromhex(parsed["state_root"]) + bytes.fromhex(parsed["extrinsics_root"])
+               + _compact_encode(len(logs)) + b"".join(encoded_logs))
+    if "0x" + hashlib.blake2b(encoded, digest_size=32).hexdigest() != expected_hash:
+        _fail("reveal queue header differs from its canonical hash")
+    return parsed
+
+
+def supports_timelocked_queue_reveal_v2(profile: Mapping[str, Any]) -> bool:
+    """Only exact measured runtimes with reviewed FIFO semantics opt in."""
+    return isinstance(profile, Mapping) and tuple(profile.get(key) for key in (
+        "genesis_hash", "spec_version", "transaction_version", "metadata_raw_sha256",
+        "runtime_code_storage_hash")) in _FIFO_REVEAL_RUNTIME_POLICIES
+
+
+def prove_timelocked_weights_queue_reveal_v2(
+    events_raw: bytes, *, profile: Mapping[str, Any], event_count_raw: bytes,
+    expected_netuid: int, expected_uid: int, expected_account_id_hex: str,
+    expected_commitment_hex: str, expected_reveal_round: int,
+    expected_submitted_at: int, subnet_epoch_index: int,
+    queue_before_raw: Optional[str], queue_after_raw: Optional[str],
+    parent_block_hash: str, transition_block_hash: str,
+    parent_header: Mapping[str, Any], transition_header: Mapping[str, Any],
+    parent_metagraph: Mapping[str, Any], transition_metagraph: Mapping[str, Any],
+    scheduler: Mapping[str, Any], reveal_period_override: Optional[int],
+) -> Dict[str, Any]:
+    """Resolve duplicate reveals only through a complete FIFO queue bijection.
+
+    Every removed entry must have its own successful adjacent event pair in
+    queue order. Retained, failed, expired-cleanup and unknown-runtime queues
+    stay unproved. Final storage can prove only the last entry for an account.
+    The caller obtains all inputs at the exact canonical adjacent block hashes.
+    """
+    from leadpoet_canonical.chain_source_v2 import (
+        decode_timelocked_weight_commits,
+        ss58_encode_account_id,
+    )
+    normalized = _validate_profile_structure(profile)
+    policy_key = tuple(normalized[key] for key in (
+        "genesis_hash", "spec_version", "transaction_version",
+        "metadata_raw_sha256", "runtime_code_storage_hash"))
+    policy = _FIFO_REVEAL_RUNTIME_POLICIES.get(policy_key)
+    if policy is None:
+        _fail("reveal queue runtime ordering is not reviewed")
+    netuid = _integer(expected_netuid, "expected netuid", maximum=0xFFFF)
+    uid = _integer(expected_uid, "expected UID", maximum=0xFFFF)
+    account_id = _account_id_hex(expected_account_id_hex, "expected account ID")
+    submitted = _integer(expected_submitted_at, "expected submitted block", maximum=(1 << 64) - 1)
+    round_number = _integer(expected_reveal_round, "expected reveal round", maximum=(1 << 64) - 1)
+    epoch = _integer(subnet_epoch_index, "queue epoch", maximum=(1 << 64) - 1)
+    parent_hash = _hash(parent_block_hash, "queue parent hash", prefix="0x")
+    transition_hash = _hash(transition_block_hash, "queue transition hash", prefix="0x")
+    before_header = _queue_header(parent_header, parent_hash)
+    after_header = _queue_header(transition_header, transition_hash)
+    transition = after_header["block"]
+    if (transition != before_header["block"] + 1
+            or "0x" + after_header["parent_hash"] != parent_hash
+            or submitted > before_header["block"] or parent_hash == transition_hash):
+        _fail("reveal queue headers are not the adjacent canonical transition")
+    names = ("SubnetEpochIndex", "LastEpochBlock", "Tempo", "PendingEpochAt", "BlocksSinceLastStep")
+    if not isinstance(scheduler, Mapping) or set(scheduler) != set(names):
+        _fail("reveal queue scheduler fields are invalid")
+    state = {name: _integer(scheduler[name], "queue scheduler " + name,
+                           maximum=(1 << 64) - 1) for name in names}
+    tempo, pending = state["Tempo"], state["PendingEpochAt"]
+    # Exact v468 should_run_epoch branches. This fallback deliberately excludes
+    # every epoch fire/deferral boundary and the disabled (tempo zero) case.
+    if (tempo == 0 or state["LastEpochBlock"] > before_header["block"]
+            or (pending > 0 and transition >= pending)
+            or state["BlocksSinceLastStep"] > tempo
+            or transition - state["LastEpochBlock"] >= tempo):
+        _fail("reveal queue transition is an epoch boundary or disabled")
+    period = (policy["default_reveal_period"] if reveal_period_override is None else
+              _integer(reveal_period_override, "queue reveal period", maximum=(1 << 64) - 1))
+    if period <= 0 or state["SubnetEpochIndex"] < period or state["SubnetEpochIndex"] - period != epoch:
+        _fail("reveal queue is not the active reveal epoch")
+    for graph, block in ((parent_metagraph, before_header["block"]), (transition_metagraph, transition)):
+        if (not isinstance(graph, Mapping) or graph.get("netuid") != netuid
+                or graph.get("block") != block or not isinstance(graph.get("hotkeys"), list)
+                or len(set(graph["hotkeys"])) != len(graph["hotkeys"])):
+            _fail("reveal queue metagraph is not bound to its block and subnet")
+    before = decode_timelocked_weight_commits(queue_before_raw)
+    after = decode_timelocked_weight_commits(queue_after_raw)
+    if not before or after:
+        _fail("complete reveal queue removal is not proved")
+    try:
+        commitment = bytes.fromhex(expected_commitment_hex)
+    except (TypeError, ValueError) as exc:
+        raise SubtensorEventsV2Error("expected queue commitment is invalid") from exc
+    if not commitment or len(commitment) > 1 << 20:
+        _fail("expected queue commitment is invalid")
+    identities = [(x["hotkey_public_key"], x["submitted_at"], x["commitment_hex"], x["reveal_round"]) for x in before]
+    target = (account_id, submitted, commitment.hex(), round_number)
+    if len(set(identities)) != len(identities) or identities.count(target) != 1:
+        _fail("expected reveal queue commitment is absent or ambiguous")
+    selected = identities.index(target)
+    if any(x["hotkey_public_key"] == account_id for x in before[selected + 1:]):
+        _fail("later queue commitment overwrites the expected account readback")
+    records = decode_system_events_v2(events_raw, profile=normalized, event_count_raw=event_count_raw)
+    relevant = [r for r in records if r["phase"] == "Initialization"
+                and r["runtime_event"] == "SubtensorModule"
+                and r["pallet_event"] in ("WeightsSet", "TimelockedWeightsRevealed")
+                and r["fields"] and r["fields"][0] == netuid]
+    if len(relevant) != 2 * len(before):
+        _fail("reveal queue and successful event counts differ")
+    selected_pair = None
+    matching = 0
+    for position, entry in enumerate(before):
+        hotkey = ss58_encode_account_id(bytes.fromhex(entry["hotkey_public_key"]))
+        previous = parent_metagraph["hotkeys"]
+        current = transition_metagraph["hotkeys"]
+        if hotkey not in previous or hotkey not in current or previous.index(hotkey) != current.index(hotkey):
+            _fail("reveal queue account UID changed or is absent")
+        entry_uid = current.index(hotkey)
+        weights, reveal = relevant[2 * position:2 * position + 2]
+        if (weights["pallet_event"] != "WeightsSet" or reveal["pallet_event"] != "TimelockedWeightsRevealed"
+                or reveal["record_index"] != weights["record_index"] + 1
+                or weights["fields"] != [netuid, entry_uid]
+                or reveal["fields"] != [netuid, "0x" + entry["hotkey_public_key"]]):
+            _fail("reveal queue event order or account binding differs")
+        if entry["hotkey_public_key"] == account_id:
+            matching += 1
+        if position == selected:
+            if entry_uid != uid:
+                _fail("expected reveal queue UID differs")
+            selected_pair = (weights, reveal)
+    if matching <= 1:
+        _fail("duplicate reveal queue proof requires multiple matching pairs")
+    weights, reveal = selected_pair
+    witness = _reveal_witness(normalized, records, events_raw, weights, reveal,
+                              netuid=netuid, uid=uid, account_id=account_id)
+    witness["queue_transition"] = {
+        "parent_block_hash": parent_hash, "transition_block_hash": transition_hash,
+        "parent_header": before_header, "transition_header": after_header,
+        "queue_before_sha256": _sha256_bytes(bytes.fromhex(queue_before_raw.removeprefix("0x"))),
+        "queue_after_sha256": (None if queue_after_raw is None else
+                               _sha256_bytes(bytes.fromhex(queue_after_raw.removeprefix("0x")))),
+        "queue_before_storage_present": True,
+        "queue_after_storage_present": queue_after_raw is not None,
+        "parent_metagraph_sha256": _sha256_json(parent_metagraph),
+        "transition_metagraph_sha256": _sha256_json(transition_metagraph),
+        "scheduler": state, "reveal_period": period, "subnet_epoch_index": epoch,
+        "queue_count": len(before), "selected_queue_index": selected,
+        "expected_commitment_sha256": _sha256_bytes(commitment),
+        "expected_submitted_at": submitted, "expected_reveal_round": round_number,
+        "runtime_policy_source_commit": policy["source_commit"],
+    }
+    return witness

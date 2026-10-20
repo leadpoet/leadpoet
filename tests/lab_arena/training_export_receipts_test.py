@@ -62,6 +62,31 @@ def test_receipts_join_to_exact_ledger_bytes_and_agent_report_without_body_dupli
     assert "body" not in exported["worker_observation_artifacts"]["execute:1"]["payload"]["response_receipts"][0]
 
 
+@pytest.mark.parametrize("extra_names,state_valid", [
+    (["automatic_capture_summary"], True),
+    (["automatic_capture_summary", "automatic_capture_summary"], False),
+    (["automatic_capture_summary", "extra_agent_state"], False),
+    (["extra_agent_state"], False),
+])
+def test_runtime_capture_status_does_not_change_baseline_phase_count(extra_names, state_valid):
+    values, payload = values_with_receipts()
+    for name in extra_names:
+        payload["agent_observations"].append({
+            "id": len(payload["agent_observations"]), "kind": "state_snapshot",
+            "observed_at": "2026-10-16T01:00:02Z", "after_action_sequence": 0,
+            "depends_on": [], "privacy": {"redacted": False, "redactions": []},
+            "data": {"name": name, "value": {"source": "runtime_http_v1", "complete": True}},
+        })
+    payload["agent_observation_count"] = len(payload["agent_observations"])
+    snapshot = save(values, payload)
+    exported = assemble_example(**values)
+    assert snapshot["payload"]["complete"]
+    reasons = exported["completeness"]["incomplete_reasons"]
+    assert ("agent_task_state_unverified" not in reasons) is state_valid
+    assert exported["completeness"]["complete"] is state_valid
+    assert exported["worker_observation_artifacts"]["execute:1"] == snapshot
+
+
 def test_socket_write_alone_does_not_prove_agent_received_response():
     values, payload = values_with_receipts(acknowledged=False)
     save(values, payload)

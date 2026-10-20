@@ -39,7 +39,7 @@ def test_runner_http_completion_persists_auth_reason_and_public_progress(databas
         credential_for=lambda _context, provider: HOST_KEYS[provider],
         funding_source_for=lambda _context: "miner_key", price_table=price_table(),
         transport=transport, clock=h.clock)
-    h.service._brokers[h.round_id] = broker
+    h.service._broker_for = lambda _round_id: broker
     h.service._hot_rounds.clear()
     h.clock.now = datetime.now(timezone.utc)
     with TestClient(create_app(h.service)) as http:

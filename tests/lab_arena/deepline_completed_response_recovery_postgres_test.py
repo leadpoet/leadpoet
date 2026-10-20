@@ -34,7 +34,7 @@ def setup(database, tmp_path, label, transport):
         credential_for=lambda _context, provider: HOST_KEYS[provider],
         funding_source_for=lambda _context: h.service.store.provider_funding(lease['run_id'], 'deepline')['funding_source'],
         price_table=price_table(), transport=transport, clock=h.clock)
-    h.service._brokers[h.round_id] = broker
+    h.service._broker_for = lambda _round_id: broker
     return h, lease, token, connect, broker
 
 

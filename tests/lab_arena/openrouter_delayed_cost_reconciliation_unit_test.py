@@ -72,7 +72,7 @@ def _bare_service(store, broker):
     service = object.__new__(svc.ArenaService)
     service._store = store
     service._lock = threading.RLock()
-    service._brokers = {"arena-2026-09-12": broker}
+    service._broker_for = lambda _round_id: broker
     service._openrouter_reconciliation_after = {}
     return service
 

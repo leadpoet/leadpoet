@@ -20,7 +20,7 @@ from typing import Mapping
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from lab_arena import operations, training_input
+from lab_arena import operations, training_input, training_observations
 
 
 router = APIRouter(prefix="/arena", tags=["agent-competition"])
@@ -214,7 +214,7 @@ def _is_public_source_code_path(arena_path: str) -> bool:
     )
 
 
-async def _bounded_body(request: Request, *, limit: int = _MAX_REQUEST_BYTES) -> bytes:
+def _check_declared_body_size(request: Request, limit: int) -> None:
     declared = request.headers.get("content-length")
     if declared is not None:
         try:
@@ -222,6 +222,10 @@ async def _bounded_body(request: Request, *, limit: int = _MAX_REQUEST_BYTES) ->
                 raise HTTPException(status_code=413, detail="body too large")
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="content-length invalid") from exc
+
+
+async def _bounded_body(request: Request, *, limit: int = _MAX_REQUEST_BYTES) -> bytes:
+    _check_declared_body_size(request, limit)
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():
@@ -308,6 +312,10 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         raise HTTPException(status_code=404, detail="arena path invalid")
 
     parts = arena_path.split("/")
+    observation_upload = (
+        request.method == "POST" and len(parts) == 4
+        and parts[:2] == ["v1", "runs"] and parts[3] == "training-observations"
+    )
     request_limit = (
         _MAX_COMPLETION_REQUEST_BYTES
         if request.method == "POST"
@@ -319,15 +327,36 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         and len(parts) == 4
         and parts[:2] == ["v1", "runs"]
         and parts[3] == "trajectory"
+        else training_observations.MAX_OBJECT_BYTES
+        if observation_upload
         else training_input.MAX_INPUT_BYTES
         if request.method == "POST"
         and len(parts) == 4
         and parts[:2] == ["v1", "runs"]
-        and parts[3] in {"training-input", "training-observations"}
+        and parts[3] == "training-input"
         else _MAX_VALIDATOR_EVENTS_REQUEST_BYTES
         if request.method == "POST" and arena_path == "v1/validators/events"
         else _MAX_REQUEST_BYTES
     )
+    if observation_upload:
+        _check_declared_body_size(request, request_limit)
+        lease_token = request.headers.get("x-lab-arena-lease", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", lease_token):
+            raise HTTPException(status_code=401, detail="lease token invalid")
+        # Read-only active-lease/ownership check before buffering private data.
+        # The upload handler rechecks authority after the body arrives.
+        try:
+            authority = await _request_sidecar(
+                "HEAD", arena_path, query="", body=b"",
+                headers={"x-lab-arena-lease": lease_token},
+                **({"testnet": True} if testnet else {}),
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail="agent competition is unavailable") from exc
+        if authority.status_code != 204:
+            if 200 <= authority.status_code < 300:
+                raise HTTPException(status_code=503, detail="agent competition is unavailable")
+            return _upstream_response(authority)
     body = await _bounded_body(request, limit=request_limit)
     request_headers = {
         name: request.headers[name]
@@ -349,6 +378,10 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         raise HTTPException(status_code=503, detail="agent competition is unavailable") from exc
     if not testnet:
         _log_handoff(request, arena_path, body, upstream)
+    return _upstream_response(upstream)
+
+
+def _upstream_response(upstream: httpx.Response) -> Response:
     response_headers = {
         name: upstream.headers[name]
         for name in _FORWARDED_RESPONSE_HEADERS

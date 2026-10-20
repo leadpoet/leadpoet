@@ -120,12 +120,13 @@ def test_recovered_score_writer_uses_the_same_authority(format, monkeypatch):
     instance.evaluation_icps = lambda *_: [{}, {}]
     instance._outputs_by_run = lambda *_: {source["run_id"]: [] for source in sources}
     instance._verified_breakdowns = lambda judge, **_kwargs: verified.append(judge["run_id"]) or []
-    instance._store.record_run_scores = lambda *args: writes.append(args) or {"status": "ok"}
+    instance._store.record_run_scores = lambda *args, **kwargs: writes.append((args, kwargs)) or {"status": "ok"}
     monkeypatch.setattr(service.verify, "scored_row", lambda *args: {"run_id": args[2]})
     monkeypatch.setattr(scoring, "run_scores_for_store", lambda result, _: result["rows"])
     instance._record_recovered_judgment_scores(row)
     assert len(writes) == 1
-    assert writes[0][2] == [{"run_id": sources[0]["run_id"]}]
+    assert writes[0][0][2] == [{"run_id": sources[0]["run_id"]}]
+    assert writes[0][1] == {"scoring_generation_floor": 0}
     assert verified == [judges[0]["run_id"]]
     assert all(source["per_icp_score"] == 0.0 for source in sources[1:])
 
@@ -136,6 +137,6 @@ def test_recovered_score_writer_rejects_missing_integrity_scope():
     judges[0].pop("judgment_scope_doc")
     instance.evaluation_icps = lambda *_: [{}, {}]
     instance._outputs_by_run = lambda *_: {}
-    instance._store.record_run_scores = lambda *_: pytest.fail("unbound score persisted")
+    instance._store.record_run_scores = lambda *_, **_kwargs: pytest.fail("unbound score persisted")
     with pytest.raises(service.ServiceError, match="recovered_judgment_binding_invalid"):
         instance._record_recovered_judgment_scores(row)

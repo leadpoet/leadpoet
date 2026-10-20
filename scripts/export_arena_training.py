@@ -40,6 +40,8 @@ def export_run(store, objects, run_id):
     submission = store.get_submission(execution["submission_id"])
     if not round_row or not submission:
         raise ExportError("context_missing")
+    generation_floor = round_row.get("scoring_generation_floor", 0)
+    policy_history = store.scoring_policy_history(execution["round_id"]) if generation_floor else None
     runs = store.list_runs(execution["round_id"])
     related = [row for row in runs if row.get("assignment_id") == execution["assignment_id"]
                or row.get("kind") == "score" and row.get("scored_run_id") == run_id]
@@ -61,7 +63,7 @@ def export_run(store, objects, run_id):
                 company_rows[identity] = cached
     signal_uses, signal_rows, signal_source_ledger = [], {}, []
     if ((round_row.get("configuration_doc") or {}).get("scorer_policy") or {}).get("signal_judgment_policy") == "signal_judgment_v1":
-        judge = _select_judge(execution, runs)
+        judge = _select_judge(execution, runs, scoring_generation_floor=generation_floor)
         if judge is not None:
             origin_ids = {row["source_score_run_id"] for row in company_rows.values()}
             for score_id in sorted({judge["run_id"]} | origin_ids):
@@ -87,6 +89,7 @@ def export_run(store, objects, run_id):
                             signal_judgment_uses=signal_uses,
                             signal_judgment_rows=[row for row in signal_rows.values() if row is not None],
                             signal_source_ledger_rows=signal_source_ledger,
+                            scoring_policy_history=policy_history,
                             cost_eligibility_reader=cost_eligibility_reader)
 
 

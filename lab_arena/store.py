@@ -59,6 +59,7 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 SCORE_BATCH_SIZE = 500
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
+    "lab_arena_scoring_policy_history_v1": (("p_round_id", "text"),),
     "lab_arena_signal_authority_exclusions_v1": (("p_run_id", "text"),),
     "lab_arena_claim_signal_judgment_v1": (
         ("p_run_id", "text"), ("p_lease_token_hash", "text"),
@@ -1211,6 +1212,11 @@ class ArenaStore:
             raise ArenaStoreError("champion funding schema mismatch")
         return result
 
+    def scoring_policy_history(self, round_id: str) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_scoring_policy_history_v1", {"p_round_id": round_id}
+        ), "scoring_policy_history")
+
     def whoami(self) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_whoami", {}), "whoami")
 
@@ -1612,7 +1618,7 @@ class ArenaStore:
         rows = self._transport.select(
             "lab_arena_rounds", filters={"round_id": round_id}, limit=1,
             columns=(
-                "round_id,status,status_generation,participants,publication_doc,published_at,"
+                "round_id,status,status_generation,scoring_generation_floor,participants,publication_doc,published_at,"
                 "benchmark_ref,evaluation_date,icp_set_date,cancel_reason,"
                 + PUBLIC_CONFIGURATION_COLUMN
                 + ",cfg_scorer_policy:configuration_doc->scorer_policy::text"
@@ -1624,7 +1630,7 @@ class ArenaStore:
         """Read only published result authorities and the configuration they use."""
 
         columns = (
-            "round_id,status,participants,benchmark_ref,evaluation_date,icp_set_date,publication_doc,"
+            "round_id,status,scoring_generation_floor,participants,benchmark_ref,evaluation_date,icp_set_date,publication_doc,"
             + ",".join(
                 "cfg_%s:configuration_doc->%s::text" % (key, key)
                 for key in PUBLIC_RESULTS_CONFIGURATION_FIELDS
@@ -2572,7 +2578,7 @@ class ArenaStore:
     def cancel_round(self, round_id: str, reason: str) -> Dict[str, Any]:
         return _require_mapping(self._transport.rpc("lab_arena_cancel_round", {"p_round_id": round_id, "p_reason": reason}), "cancel_round")
 
-    def record_run_scores(self, round_id: str, stage: int, scores: Sequence[Mapping[str, Any]], *, batch_size: int = SCORE_BATCH_SIZE) -> Dict[str, Any]:
+    def record_run_scores(self, round_id: str, stage: int, scores: Sequence[Mapping[str, Any]], *, batch_size: int = SCORE_BATCH_SIZE, scoring_generation_floor: int = 0) -> Dict[str, Any]:
         """Record per-run scores in bounded batches.
 
         The SQL function is idempotent per run (an equal score counts as
@@ -2581,7 +2587,12 @@ class ArenaStore:
         retry after a partial write completes the remainder.
         """
 
+        if type(scoring_generation_floor) is not int or scoring_generation_floor < 0:
+            raise ArenaStoreError("scoring generation floor must be nonnegative")
         items = [dict(item) for item in scores]
+        if scoring_generation_floor:
+            for item in items:
+                item["scoring_generation_floor"] = scoring_generation_floor
         if batch_size < 1:
             raise ArenaStoreError("score batch size must be positive")
         totals = {"status": "ok", "recorded": 0, "existing": 0, "batches": 0}

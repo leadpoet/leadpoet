@@ -800,7 +800,7 @@ class _PublicationReads:
     def scoring_outputs(self, stage: int) -> Dict[str, Mapping[str, Any]]:
         if stage not in self.judges_by_stage:
             self.judges_by_stage[stage] = self.service._scoring_outputs(
-                str(self.round_row["round_id"]), stage
+                str(self.round_row["round_id"]), stage, round_row=self.round_row
             )
         return self.judges_by_stage[stage]
 
@@ -1885,7 +1885,7 @@ class ArenaService:
             self._store.list_runs(round_row["round_id"], kind="score", submission_id=submission_id)
             if company_judgments.enabled(round_row.get("configuration_doc") or {}) else ()
         )
-        for source in partial_sources:
+        for source in self._current_score_runs(round_row, partial_sources):
             if (source.get("status") != "failed"
                 or source.get("terminal_cause") != "credential_error"
                 or not source.get("output_ref")
@@ -1915,7 +1915,7 @@ class ArenaService:
             except (company_judgments.CompanyJudgmentError, scoring.ScoringError) as exc:
                 raise ServiceError("credit_retry_source_unavailable", 503) from exc
         if not company_judgments.enabled(round_row.get("configuration_doc") or {}):
-            for source in self._store.list_runs(round_row["round_id"], kind="score", submission_id=submission_id):
+            for source in self._current_score_runs(round_row, self._store.list_runs(round_row["round_id"], kind="score", submission_id=submission_id)):
                 if (source.get("status") == "failed" and source.get("terminal_cause") == "credential_error"
                     and source.get("output_ref") and (source.get("result_doc") or {}).get("legacy_partial_checkpoint")):
                     try:
@@ -3084,7 +3084,7 @@ class ArenaService:
         accepted = [r for r in runs if r.get("submission_id") == baseline.get("submission_id") and r.get("stage") == 1 and r.get("status") == "accepted"]
         if len(accepted) != len(positions) or {r.get("icp_position") for r in accepted} != positions:
             return None
-        chosen = self._select_scoring_outputs(judgments)
+        chosen = self._select_scoring_outputs(judgments, round_row=row)
         for run in accepted:
             assignment = "%s:%s:1:%s" % (row["round_id"], baseline["submission_id"], run["icp_position"])
             judge = chosen.get(run["run_id"], {})
@@ -3119,13 +3119,14 @@ class ArenaService:
         round_id = str(row["round_id"])
         runs = self._store.list_runs(round_id, stage=1, kind="execute")
         judges = self._store.list_runs(round_id, stage=1, kind="score")
-        if not any(self._is_baseline_recovery(r, runs + judges, row) for r in runs + judges):
+        if (not self._score_generation_floor(row)
+            and not any(self._is_baseline_recovery(r, runs + judges, row) for r in runs + judges)):
             return
         plan = self._baseline_recovery_plan(row, runs, judges)
         if plan is None:
             return  # Miner scores persist; final authority remains held by the baseline gate.
         outputs = self._outputs_by_run(round_id, 1)
-        chosen = self._select_scoring_outputs(judges)
+        chosen = self._select_scoring_outputs(judges, round_row=row)
         icps = self.evaluation_icps(round_id)
         policy = row["configuration_doc"]["scorer_policy"]
         breakdowns = {item["scored_run_id"]: self._verified_breakdowns(chosen[item["scored_run_id"]],
@@ -3133,18 +3134,19 @@ class ArenaService:
             for item in plan["work_items"]}
         scores = scoring.build_stage_scores(plan=plan, policy=policy, icps_by_position=dict(enumerate(icps)),
             outputs_by_run=outputs, breakdowns_by_item=breakdowns, configuration=row["configuration_doc"])
-        recorded = self._store.record_run_scores(round_id, 1, scoring.run_scores_for_store(scores, runs))
+        recorded = self._record_current_run_scores(row, 1, scoring.run_scores_for_store(scores, runs))
         if recorded.get("status") != "ok":
             raise ServiceError("baseline_recovery_scores_not_recorded", 500)
 
     def _scoring_runs_for_stage(self, round_id: str, stage: int) -> List[Dict[str, Any]]:
+        row = self._round(round_id)
         runs = self._store.list_runs(round_id, stage=stage, kind="score")
         if stage == 2:
-            row = self._round(round_id)
             if (row.get("configuration_doc") or {}).get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY:
                 original = self._store.list_runs(round_id, stage=1)
-                runs += [r for r in original if self._is_baseline_recovery(r, original, row)]
-        return runs
+                runs += [r for r in original if self._is_baseline_recovery(r, original, row)
+                         or (self._score_generation_floor(row) > 0 and r.get("kind") == "score")]
+        return self._current_score_runs(row, runs)
 
     def scoring_is_complete(self, round_id: str, stage: int) -> bool:
         runs = self._scoring_runs_for_stage(round_id, stage)
@@ -3154,10 +3156,32 @@ class ArenaService:
         return self._store.close_scoring(round_id, stage)
 
     @staticmethod
+    def _score_generation_floor(row: Mapping[str, Any]) -> int:
+        floor = row.get("scoring_generation_floor", 0)
+        if type(floor) is not int or floor < 0:
+            raise ServiceError("scoring_generation_floor_invalid", 500)
+        return floor
+
+    @classmethod
+    def _current_score_runs(cls, row, runs):
+        """Keep historical judgments readable without treating them as current."""
+        floor = cls._score_generation_floor(row)
+        return [run for run in runs
+                if int(run.get("scoring_generation_floor") or 0) == floor]
+
+    def _record_current_run_scores(self, row, stage, scores):
+        """Bind score writes to the source round's exact policy revision."""
+        return self._store.record_run_scores(str(row["round_id"]), stage, scores,
+            scoring_generation_floor=self._score_generation_floor(row))
+
+    @staticmethod
     def _select_scoring_outputs(
-        runs: Sequence[Mapping[str, Any]],
+        runs: Sequence[Mapping[str, Any]], *,
+        round_row: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Dict[str, Any]]:
-        """Select the score run that counts for each scored execution run."""
+        """Select current-policy authority, retaining accepted retry precedence."""
+        if round_row is not None:
+            runs = ArenaService._current_score_runs(round_row, runs)
 
         def rank(item: Mapping[str, Any]) -> Tuple[bool, int, int]:
             return (
@@ -3173,11 +3197,12 @@ class ArenaService:
                 chosen[run["scored_run_id"]] = dict(run)
         return chosen
 
-    def _scoring_outputs(self, round_id: str, stage: int) -> Dict[str, Dict[str, Any]]:
+    def _scoring_outputs(self, round_id: str, stage: int, *, round_row=None) -> Dict[str, Dict[str, Any]]:
         """The score run that counts for each scored execution run."""
 
         return self._select_scoring_outputs(
-            self._store.list_runs(round_id, stage=stage, kind="score")
+            self._store.list_runs(round_id, stage=stage, kind="score"),
+            round_row=round_row if round_row is not None else self._round(round_id),
         )
 
     def _company_judgment_evidence(
@@ -3416,7 +3441,7 @@ class ArenaService:
 
     def _prior_legacy_terminal_breakdowns(self, run, round_row):
         sources = self._store.list_runs(str(round_row["round_id"]), kind="score", submission_id=str(run["submission_id"]))
-        sources = [source for source in sources
+        sources = [source for source in self._current_score_runs(round_row, sources)
                    if source.get("scored_run_id") == run.get("scored_run_id")
                    and source.get("assignment_id") == run.get("assignment_id")
                    and int(source.get("attempt") or 0) < int(run.get("attempt") or 0)
@@ -3654,7 +3679,7 @@ class ArenaService:
         plan = self._load_scoring_plan(round_row, stage)
         icps = self.evaluation_icps(round_id)
         outputs = self._outputs_by_run(round_id, stage)
-        chosen = self._scoring_outputs(round_id, stage)
+        chosen = self._scoring_outputs(round_id, stage, round_row=round_row)
         baseline_ids = {
             str(participant["submission_id"])
             for participant in round_row.get("participants") or []
@@ -3763,7 +3788,7 @@ class ArenaService:
             configuration=round_row.get("configuration_doc"),
         )
         runs = self._store.list_runs(round_id, stage=stage, kind="execute")
-        recorded = self._store.record_run_scores(round_id, stage, scoring.run_scores_for_store(stage_scores, runs))
+        recorded = self._record_current_run_scores(round_row, stage, scoring.run_scores_for_store(stage_scores, runs))
         if recorded.get("status") != "ok":
             # The per-run scores are part of the published result; a write the
             # database refused must stop the stage, never pass silently.
@@ -4083,7 +4108,7 @@ class ArenaService:
         for stage in judged_stages:
             judges.update(
                 publication_reads.scoring_outputs(stage)
-                if publication_reads is not None else self._scoring_outputs(round_id, stage)
+                if publication_reads is not None else self._scoring_outputs(round_id, stage, round_row=round_row)
             )
         counts: Dict[int, int] = {}
         for position in sorted(wanted):
@@ -4318,7 +4343,8 @@ class ArenaService:
 
         round_id = str(row["round_id"])
         configuration = row.get("configuration_doc") or {}
-        if (judge.get("status") != "accepted"
+        if (int(judge.get("scoring_generation_floor") or 0) != self._score_generation_floor(row)
+            or judge.get("status") != "accepted"
             or judge.get("terminal_cause") != "accepted"
             or not judge.get("output_ref")
             or not self._same_scoring_membership(judge, source, round_id=round_id)
@@ -4366,7 +4392,7 @@ class ArenaService:
         sources = [run for run in self._store.list_runs(round_id, kind="execute")
                    if run.get("stage") in (1, 2) and run.get("status") == "accepted"]
         score_runs = self._store.list_runs(round_id, kind="score")
-        judges = self._select_scoring_outputs(score_runs)
+        judges = self._select_scoring_outputs(score_runs, round_row=row)
         for source in sources:
             judge = judges.get(str(source["run_id"]))
             if (source.get("per_icp_score") is None
@@ -4388,7 +4414,7 @@ class ArenaService:
         for stage in (1, 2):
             sources = self._store.list_runs(round_id, stage=stage, kind="execute")
             score_runs = self._store.list_runs(round_id, stage=stage, kind="score")
-            judges = self._select_scoring_outputs(score_runs)
+            judges = self._select_scoring_outputs(score_runs, round_row=row)
             ready = [source for source in sources
                 if source.get("status") == "accepted"
                 and source.get("per_icp_score") is None
@@ -4413,7 +4439,7 @@ class ArenaService:
                 **({"integrity_policy": "arena_integrity_v1"}
                     if configuration.get("integrity_policy") == "arena_integrity_v1" else {}),
             }, ready)
-            result = self._store.record_run_scores(round_id, stage, records)
+            result = self._record_current_run_scores(row, stage, records)
             if result.get("status") != "ok":
                 raise ServiceError("recovered_judgment_scores_not_recorded", 500)
 
@@ -4807,7 +4833,7 @@ class ArenaService:
             accepted_executions[key] = run
         if set(accepted_executions) != expected:
             return False
-        judgments = self._store.list_runs(round_id, kind="score")
+        judgments = self._current_score_runs(row, self._store.list_runs(round_id, kind="score"))
         return all(any(
             judge.get("status") == "accepted"
             and judge.get("terminal_cause") == "accepted"
@@ -5025,6 +5051,7 @@ class ArenaService:
         # Its later lease-bound RPCs remain the final authority for that case.
         continued_score = (
             run.get("kind") == "score" and _judge_continuation_enabled(current_round)
+            and int(run.get("scoring_generation_floor") or 0) == self._score_generation_floor(current_round)
             and ((run.get("stage") == 1 and current_round.get("status") in (
                 "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
                 "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
@@ -5041,6 +5068,8 @@ class ArenaService:
             and run.get("lease_generation") == response.get("lease_generation")
             and run.get("stage_generation") == response.get("stage_generation")
             and (generation_current or continued_score)
+            and (run.get("kind") != "score"
+                 or int(run.get("scoring_generation_floor") or 0) == self._score_generation_floor(current_round))
             and current_round.get("status") not in TERMINAL_STATUSES
             and expiry.astimezone(timezone.utc) > self.now()
         )
@@ -6761,6 +6790,7 @@ class ArenaService:
         # guards; no other phase/generation change can reuse verified scores.
         identity = contracts.canonical_json({
             "participants": row.get("participants") or [],
+            "scoring_generation_floor": self._score_generation_floor(row),
             "configuration": {key: configuration[key] for key in PUBLIC_CONFIGURATION_FIELDS
                               if key in configuration},
         })
@@ -6867,7 +6897,7 @@ class ArenaService:
         positions = set(range(contracts.benchmark_icp_count(configuration)))
         execution_runs = self._store.list_runs(round_id, kind="execute")
         judgment_runs = self._store.list_runs(round_id, kind="score")
-        judges = self._select_scoring_outputs(judgment_runs)
+        judges = self._select_scoring_outputs(judgment_runs, round_row=row)
         completed = {}
         icps = None
         participants = []
@@ -7686,12 +7716,12 @@ class ArenaService:
         round_id: str,
         execution_runs: Sequence[Mapping[str, Any]],
         score_runs: Sequence[Mapping[str, Any]],
-        public_run_ids: set[str],
+        public_run_ids: set[str], *, round_context=None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Prefetch only accepted, referenced authorities for this response."""
 
         executions = {str(run["run_id"]): run for run in execution_runs}
-        judgments = self._select_scoring_outputs(score_runs)
+        judgments = self._select_scoring_outputs(score_runs, round_row=self._round_from_context(round_id, round_context))
         selected = [
             judge for run_id, judge in judgments.items()
             if judge.get("status") == "accepted"
@@ -7784,7 +7814,7 @@ class ArenaService:
                 self._store.list_runs(round_id, kind="score", submission_id=submission_id)
                 if execution_runs else []
             )
-        judgments = self._select_scoring_outputs(score_runs)
+        judgments = self._select_scoring_outputs(score_runs, round_row=self._round_from_context(round_id, round_context))
         runs_by_id = _PublicRunLookup(
             {
                 **(source_rows or {}),
@@ -8016,7 +8046,7 @@ class ArenaService:
         )
         cached_rows, source_rows = self._public_result_authority_reads(
             round_id, execution_runs, score_runs,
-            set(outputs) if verification_required else set(),
+            set(outputs) if verification_required else set(), round_context=row,
         )
         evidence_reads: _CompanyEvidenceReads = {}
         result = {
@@ -8055,7 +8085,8 @@ class ArenaService:
                 if int(run.get("icp_position") or 0) in public_positions
             }:
                 judgments.update(self._select_scoring_outputs(
-                    [score_run for score_run in score_runs if score_run.get("stage") == stage]
+                    [score_run for score_run in score_runs if score_run.get("stage") == stage],
+                    round_row=row,
                 ))
             icps = []
             if outputs:

@@ -75,6 +75,7 @@ def test_targeted_verifier_and_its_caller_remain_protected():
     assert {
         "_llm_reverify_company",
         "_run_targeted_company_evidence_investigation",
+        "_settle_completed_company_investigation",
     } <= set(PROTECTED_SYMBOLS["qualification/scoring/lead_scorer.py"])
 
 
@@ -110,4 +111,24 @@ def test_protected_manifest_detects_policy_constant_change(
     )
     policy_path.write_text('POLICY_VERSION = "v2"\n', encoding="utf-8")
     with pytest.raises(ProtectedWorkflowError, match="policy.py:POLICY_VERSION"):
+        verify_manifest(tmp_path, manifest)
+
+
+def test_extracted_investigation_settlement_remains_ast_protected(tmp_path, monkeypatch):
+    relative = "qualification/scoring/lead_scorer.py"
+    source = (ROOT / relative).read_text()
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(source)
+    monkeypatch.setattr(protected_workflows_module, "PROTECTED_SYMBOLS", {
+        relative: ("_settle_completed_company_investigation",),
+    })
+    manifest = build_manifest(
+        tmp_path, baseline_commit="1" * 40, protected_source_commit="2" * 40,
+    )
+    verify_manifest(tmp_path, manifest)
+    guard = 'and receipt.get("completed_submitted_findings") is True'
+    assert source.count(guard) == 1
+    target.write_text(source.replace(guard, 'and True', 1))
+    with pytest.raises(ProtectedWorkflowError, match="_settle_completed_company_investigation"):
         verify_manifest(tmp_path, manifest)

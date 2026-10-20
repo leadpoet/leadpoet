@@ -394,6 +394,7 @@ class StrictLimits:
     max_string_bytes: int = 16_384
     max_total_bytes: int = 1_048_576
     max_abs_int: Optional[int] = 2 ** 53
+    allow_control_characters_in_values: bool = False
 
 
 REQUEST_LIMITS = StrictLimits(
@@ -449,10 +450,10 @@ _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
 
-def _check_string(value: str, limits: StrictLimits, path: str) -> None:
+def _check_string(value: str, limits: StrictLimits, path: str, *, allow_control_characters: bool = False) -> None:
     if len(value.encode("utf-8", errors="surrogatepass")) > limits.max_string_bytes:
         raise ArenaContractError("string too long at %s" % path)
-    if _CONTROL_CHAR_RE.search(value):
+    if not allow_control_characters and _CONTROL_CHAR_RE.search(value):
         raise ArenaContractError("control character at %s" % path)
     if _SURROGATE_RE.search(value):
         raise ArenaContractError("unpaired surrogate at %s" % path)
@@ -472,7 +473,7 @@ def _check_value(value: Any, limits: StrictLimits, depth: int, path: str) -> Non
             raise ArenaContractError("non-finite number at %s" % path)
         return
     if isinstance(value, str):
-        _check_string(value, limits, path)
+        _check_string(value, limits, path, allow_control_characters=limits.allow_control_characters_in_values)
         return
     if isinstance(value, (list, tuple)):
         if len(value) > limits.max_list_items:
@@ -495,8 +496,9 @@ def _check_value(value: Any, limits: StrictLimits, depth: int, path: str) -> Non
 def check_strict_document(value: Any, limits: StrictLimits = REQUEST_LIMITS) -> None:
     """Reject documents that exceed depth, size, list, string, or numeric limits.
 
-    NaN, Infinity, control characters, unpaired surrogates, non-string keys and
-    unsupported Python types all fail. The total canonical byte size is checked
+    NaN, Infinity, unpaired surrogates, non-string keys and unsupported Python
+    types all fail. Control characters fail in keys and, by default, values.
+    The total canonical byte size is checked
     last so a huge document fails on structure before it is re-encoded.
     """
 

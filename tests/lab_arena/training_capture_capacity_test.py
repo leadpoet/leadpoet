@@ -1,6 +1,7 @@
 """Run-wide capture capacity preserves late evidence without widening events."""
 
 import copy
+import json
 import time
 
 import pytest
@@ -86,6 +87,49 @@ def test_full_ordinary_run_over_old_limit_uploads_all_late_evidence(tmp_path):
     assert saved["payload"] == document
     assert saved["payload_sha256"] == result["payload_sha256"]
     print("ordinary capture bytes=%d upload_seconds=%.3f" % (len(raw), elapsed))
+
+
+def test_json_escaped_web_and_state_controls_roundtrip_without_changing_stored_bytes(tmp_path):
+    body = "before\x00between\x0cafter\x7f"
+    buffer = obs.Buffer()
+    assert buffer.append_agent_observation(web_row(0, body)) == 0
+    assert buffer.append_agent_observation(agent_row(1, "state_snapshot", {
+        "name": "selected_sources", "value": {"text": body}})) == 1
+    document = buffer.document()
+    raw = json.dumps(document, ensure_ascii=True).encode()
+    assert b"\\u0000" in raw and b"\\f" in raw and b"\\u007f" in raw
+    service, objects = service_for(tmp_path)
+    response = TestClient(create_app(service)).post("/arena/v1/runs/r1/training-observations",
+        content=raw, headers={"x-lab-arena-lease": TOKEN, "content-type": "application/json"})
+    assert response.status_code == 200 and response.json()["status"] == "stored"
+    saved = obs.read_snapshot(objects, "r1", "execute", 1, CLAIM_HASH)
+    assert saved["payload"] == document
+    assert saved["payload_sha256"] == contracts.document_hash(document) == response.json()["payload_sha256"]
+    stored = saved["payload"]["agent_observations"][0]
+    assert stored["data"]["body"] == body and stored["privacy"]["redacted"] is False
+    assert stored["data"]["stored_body_sha256"] == contracts.sha256_bytes(body.encode())
+    assert stored["data"]["stored_body_bytes"] == len(body.encode())
+
+
+@pytest.mark.parametrize("route", ["provider", "complete", "training-input"])
+@pytest.mark.parametrize("control", ["\x00", "\x0c", "\x7f"])
+def test_other_api_document_routes_still_reject_control_values(tmp_path, route, control):
+    service, _ = service_for(tmp_path)
+    response = TestClient(create_app(service)).post("/arena/v1/runs/r1/" + route,
+        json={"body": {"run_id": "r1", "text": control}}, headers={"x-lab-arena-lease": TOKEN})
+    assert response.status_code == 400 and "control character" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("control", ["\x00", "\x0c", "\x7f"])
+def test_observation_api_still_rejects_control_characters_in_keys(tmp_path, control):
+    service, _ = service_for(tmp_path)
+    document = obs.Buffer().document()
+    document["agent_observations"] = [agent_row(0, "state_snapshot", {
+        "name": "selected_sources", "value": {control: "text"}})]
+    document["agent_observation_count"] = 1
+    response = TestClient(create_app(service)).post("/arena/v1/runs/r1/training-observations",
+        json=document, headers={"x-lab-arena-lease": TOKEN})
+    assert response.status_code == 400 and "control character" in response.json()["detail"]
 
 
 def test_aggregate_boundary_and_overflow_keep_honest_counts(monkeypatch):

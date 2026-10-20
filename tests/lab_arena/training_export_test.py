@@ -233,11 +233,17 @@ def add_call(values, *, status="settlement", pointer=True, provider="openrouter"
     values["ledger_rows"] = [reserve, dict(reserve, entry_id=2, entry_kind="dispatch"), terminal]
 
 
+def assert_legacy_agent_gaps(result):
+    assert result["completeness"]["dimensions"]["input_output_label"]
+    assert set(result["completeness"]["incomplete_reasons"]) == {
+        "agent_response_receipts_unverified", "agent_task_state_unverified"}
+
+
 def test_full_request_not_excerpt_and_plaintext_response_alias_retained():
     values = fixture()
     add_call(values)
     result = assemble_example(**values)
-    assert result["completeness"]["complete"] is True
+    assert_legacy_agent_gaps(result)
     assert len(result["provider_calls"][0]["request"]["admitted_parameters"]["messages"][0]["content"]) == 12000
     assert result["provider_calls"][0]["response"]["choices"][0]["message"]["reasoning_content"] == "PRIVATE THOUGHT"
     assert result["provider_calls"][0]["response_privacy_redactions"] == []
@@ -254,8 +260,9 @@ def test_empty_credential_fields_and_nul_do_not_create_false_export_gaps():
     result = assemble_example(**values)
     assert result["provider_calls"][0]["response"] == body
     assert result["provider_calls"][0]["response_privacy_redactions"] == []
-    assert result["completeness"]["complete"] is True
-    assert result["privacy"]["exact_replay"] is True
+    assert_legacy_agent_gaps(result)
+    assert result["privacy"]["privacy_filtered"] is False
+    assert result["privacy"]["exact_replay"] is False
 
 
 def test_nonempty_auth_url_still_prevents_exact_export():
@@ -535,7 +542,7 @@ def test_provider_retry_receipts_count_one_logical_call_but_keep_every_cost():
                     entry_doc=dict(row["entry_doc"], provider_attempt=2)) for row in first]
     first.extend(retries)
     result = assemble_example(**values)
-    assert result["completeness"]["complete"]
+    assert_legacy_agent_gaps(result)
     assert len(result["provider_calls"]) == 2
     assert result["costs"]["confirmed_actual_microusd"] == 84
 
@@ -560,7 +567,7 @@ def test_tool_html_response_is_complete_and_not_a_diagnostic_excerpt():
     text = "<html>" + "source content " * 1000 + "</html>"
     values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(text.encode()).decode()
     result = assemble_example(**values)
-    assert result["completeness"]["complete"]
+    assert_legacy_agent_gaps(result)
     assert result["provider_calls"][0]["response"]["text"] == text
 
 
@@ -640,7 +647,7 @@ def test_shuffled_ledger_preserves_action_order_lifecycle_and_reconciled_cost_pr
     random.Random(42).shuffle(rows)
     values["ledger_rows"] = rows
     result = assemble_example(**values)
-    assert result["completeness"]["complete"]
+    assert_legacy_agent_gaps(result)
     assert [call["call_identity"] for call in result["provider_calls"]] == identities
     first = result["provider_calls"][0]
     assert first["funding_source"] == "host"

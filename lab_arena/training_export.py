@@ -523,6 +523,9 @@ def _calls(rows, run_ids, objects, run_order):
                        "metadata": {key: copy.deepcopy(value) for key, value in terminal.items() if key != "body_b64"}}
             try:
                 response, redactions = _response_value(terminal, reserve.get("provider"))
+                wire_body = base64.b64decode(terminal["body_b64"], validate=True)
+                receipt["wire_body_sha256"] = contracts.hash_bytes(wire_body)
+                receipt["wire_body_bytes"] = len(wire_body)
                 digest = contracts.document_hash(response)
                 receipt["response_sha256"], receipt["privacy_redactions"] = digest, redactions
                 if digest == latest_digest:
@@ -590,6 +593,71 @@ def _calls(rows, run_ids, objects, run_order):
     return sorted(calls, key=lambda call: _call_order(call, run_order)), reasons
 
 
+def _link_worker_receipts(run, paid, snapshot):
+    """Join host writes and cooperative read acknowledgments without guessing.
+
+    A host write is not consumption. An SDK acknowledgment is an agent report,
+    bound to the exact response bytes and lease; it does not prove use of them.
+    Web text and state stay once in the private artifact, referenced by ID.
+    """
+    payload = snapshot["payload"]
+    errors, linked = set(), {}
+    by_identity = {call["call_identity"]: call for call in paid}
+    for receipt in payload.get("response_receipts", []):
+        call = by_identity.get(receipt["call_identity"])
+        if (call is None or call.get("action_sequence") != receipt["action_sequence"]
+                or call.get("operation_id") != receipt["operation_id"]):
+            errors.add("worker_response_receipt_link_invalid")
+            continue
+        matches = [item for item in call["response_receipts"]
+                   if item.get("wire_body_sha256") == receipt["body_sha256"]
+                   and item.get("wire_body_bytes") == receipt["body_bytes"]
+                   and item.get("metadata", {}).get("status") == receipt["status"]]
+        identity = receipt["call_identity"]
+        if not matches or identity in linked:
+            errors.add("worker_response_receipt_link_invalid")
+            continue
+        linked[identity] = receipt
+        call["response_provenance"].update({
+            "delivery_to_worker": receipt["write_state"],
+            "worker_receipt_ref": {"run_id": run["run_id"], "ordinal": receipt["ordinal"],
+                                   "payload_sha256": snapshot["payload_sha256"]},
+            "agent_receipt": "not_reported",
+        })
+    acknowledged = set()
+    for row in payload.get("agent_observations", []):
+        if row["privacy"]["redacted"]:
+            errors.add("worker_observation_privacy_nonexact")
+        for reference in row["depends_on"]:
+            if reference.startswith("sha256:"):
+                dependency = by_identity.get(reference)
+                if (dependency is None or type(dependency.get("action_sequence")) is not int
+                        or type(row["after_action_sequence"]) is not int
+                        or dependency["action_sequence"] > row["after_action_sequence"]):
+                    errors.add("agent_dependency_link_invalid")
+        if row["kind"] != "response_received":
+            continue
+        data = row["data"]
+        receipt = linked.get(data["call_identity"])
+        if (receipt is None or receipt["write_state"] != "socket_written"
+                or any(receipt[key] != data[key] for key in ("status", "body_sha256", "body_bytes"))):
+            errors.add("agent_response_receipt_link_invalid")
+            continue
+        call = by_identity[data["call_identity"]]
+        ref = {"run_id": run["run_id"], "id": row["id"], "payload_sha256": snapshot["payload_sha256"]}
+        call["response_provenance"].setdefault("agent_receipt_refs", []).append(ref)
+        call["response_provenance"]["agent_receipt"] = "reported_exact_body_received"
+        acknowledged.add(data["call_identity"])
+    if run["kind"] == "execute":
+        expected = {call["call_identity"] for call in paid
+                    if type(call.get("response_status")) is int and 200 <= call["response_status"] < 300}
+        if expected - acknowledged:
+            errors.add("agent_response_receipts_unverified")
+        if paid and not any(row["kind"] == "state_snapshot" for row in payload.get("agent_observations", [])):
+            errors.add("agent_task_state_unverified")
+    return errors
+
+
 def _worker_evidence(related, calls, objects):
     from lab_arena import training_observations
     artifacts, errors, counts = {}, set(), {}
@@ -611,6 +679,8 @@ def _worker_evidence(related, calls, objects):
         except Exception:
             if needed or capture is not None:
                 errors.add("worker_observations_unavailable")
+            if run["kind"] == "execute" and paid:
+                errors.update({"agent_response_receipts_unverified", "agent_task_state_unverified"})
             continue
         payload = snapshot["payload"]
         if capture is not None and (not isinstance(capture, dict)
@@ -625,6 +695,7 @@ def _worker_evidence(related, calls, objects):
         if payload["local_refusal_count"] != local_refusals:
             errors.add("worker_local_refusals_unverified")
         artifacts[run_id] = snapshot
+        errors.update(_link_worker_receipts(run, paid, snapshot))
         for observation in payload["observations"]:
             if observation["privacy"]["redacted"]:
                 errors.add("worker_observation_privacy_nonexact")
@@ -1084,7 +1155,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         elif not isinstance(web, dict) or type(web.get("connection_count")) is not int or web["connection_count"] < 0:
             reasons["research_process"].add("direct_web_usage_unverified")
         elif web["connection_count"]:
-            reasons["research_process"].add("direct_web_content_not_captured")
+            reported_pages = (observations.get(row["run_id"], {}).get("payload", {}).get("agent_observations", []))
+            reasons["research_process"].add("direct_web_coverage_unverified" if any(
+                item["kind"] == "web_fetch" for item in reported_pages) else "direct_web_content_not_captured")
         logical_calls = set()
         for call in calls:
             if call["run_id"] != row["run_id"]:
@@ -1114,7 +1187,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     clean["worker_observation_artifacts"] = observations
-    observation_redactions = {reason for artifact in observations.values() for item in artifact["payload"]["observations"] for reason in item["privacy"]["redactions"]}
+    observation_redactions = {reason for artifact in observations.values()
+                             for item in artifact["payload"]["observations"] + artifact["payload"].get("agent_observations", [])
+                             for reason in item["privacy"]["redactions"]}
     hidden_removed = removed or "hidden_reasoning" in observation_redactions or "hidden_reasoning" in privacy_redactions or any(
         call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", [])
         or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("response_receipts", [])) for call in calls)

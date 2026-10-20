@@ -15,7 +15,7 @@ from lab_arena import contracts, operations, runner, shim, training_observations
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
 from lab_arena.training_export import assemble_example
-from tests.lab_arena.training_export_test import Objects, add_call, fixture
+from tests.lab_arena.training_export_test import Objects, add_call, assert_legacy_agent_gaps, fixture
 from tests.lab_arena.training_input_test import CLAIM_HASH, TOKEN, service_for
 from tests.lab_arena.test_lab_arena_runner import FakeApi, lease
 from tests.lab_arena.test_deepline_catalog import frozen
@@ -271,8 +271,9 @@ def test_only_returned_worker_response_fills_missing_ledger_response(has_worker_
     assert "worker_observation_ref" in call and "response" not in call
     assert call["actual_microusd"] == 42
     assert ("full_response_unavailable" in call["evidence_gaps"]) is not has_worker_response
-    assert result["completeness"]["complete"] is has_worker_response
-    assert result["privacy"]["exact_replay"] is has_worker_response
+    assert not result["completeness"]["complete"]
+    assert not result["privacy"]["exact_replay"]
+    assert "agent_task_state_unverified" in result["completeness"]["incomplete_reasons"]
 
 
 def test_export_transport_before_admission_retains_unknown_accounting():
@@ -311,10 +312,10 @@ def test_export_cannot_fill_gap_with_absent_foreign_or_mislinked_artifact(mutati
     assert "full_response_unavailable" in result["completeness"]["incomplete_reasons"]
 
 
-def test_export_old_paid_only_fixture_remains_complete_and_old_local_refusals_fail_closed():
+def test_export_old_paid_only_fixture_keeps_labels_and_reports_missing_agent_receipts():
     values = fixture()
     add_call(values)
-    assert assemble_example(**values)["completeness"]["complete"]
+    assert_legacy_agent_gaps(assemble_example(**values))
     values["runs"][0]["result_doc"]["resource_summary"]["provider_local_refusal_count"] = 1
     assert "worker_observations_unavailable" in assemble_example(**values)["completeness"]["incomplete_reasons"]
 

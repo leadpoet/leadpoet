@@ -165,10 +165,14 @@ Privacy filtering and exact replay are separate properties from label validity.
 
 ## Remaining boundaries
 
-- Direct HTTPS egress records connection/byte totals, not page contents. Historical
-  TLS traffic cannot be reconstructed. Runs using it are excluded from complete
-  process training unless their relevant observations are independently retained.
-  This change does not introduce a TLS interception proxy.
+- Direct HTTPS egress itself records connection/byte totals, not page contents.
+  The optional worker SDK now accepts the exact text returned at an agent's fetch
+  boundary, URL, final URL, retrieval time and dependencies. It stores these once
+  in the existing private worker artifact and references repeated bodies by hash.
+  These are cooperative reports, not independently observed HTTPS contents. The
+  exporter retains a web-coverage gap even when some pages are captured. Historical
+  TLS traffic and unreported miner fetches cannot be reconstructed. No TLS
+  interception proxy is introduced.
 - Historical local frozen-catalog discovery has no paid ledger reservation. Its
   diagnostic events can be abbreviated. New worker observations retain the full
   returned catalog, while the exporter continues to reject an unexplained count
@@ -182,12 +186,34 @@ Privacy filtering and exact replay are separate properties from label validity.
   bounded and potentially incomplete. They are not authoritative demonstrations.
 - A matching hash proves linkage and integrity, not factual truth or a good label.
   Training selection still needs company-level review and evaluation.
-- Ledger receipts preserve provider payloads and original lifecycle times. They
-  do not prove that the worker received or used a particular network response.
-  The export states this boundary and does not infer concurrency from array order.
+- Ledger receipts preserve provider payloads and original lifecycle times. New
+  worker artifacts separately record completed socket writes and optional agent
+  acknowledgments after reading a response. Export joins exact call identity,
+  operation, action, status, body hash and byte count. An acknowledgment means
+  the agent reported receiving those bytes; it does not prove use or truth.
+  Explicit state snapshots and dependency references preserve reported phase
+  boundaries. Array order and timestamps do not imply parallel-step dataflow.
 - An accepted result can contain an upstream error, a recovered billing result,
   zero qualified companies, or an incomplete judgment. Keep the explicit proof
   dimensions; do not collapse these cases into a success flag.
+
+### Optional agent capture API
+
+The existing mounted `lab_arena_checkpoint` module provides `record_web_fetch`,
+`record_response_received` and `record_state_snapshot`. They are best-effort calls:
+capture failure must not change the agent result or accounting. Agents must call
+them at the fetch/read/state boundary. The shipped baseline adapter records its
+direct web results, fully read successful worker responses, completed phase
+barriers and a final coverage summary. Other submissions need the same explicit
+instrumentation before their full local process can be selected for training.
+
+The v2 worker artifact remains bound to one run, lease generation and claim hash.
+It contains `response_receipts` and `agent_observations` alongside the original
+exception observations. Old v1 artifacts remain readable. The existing 8 MiB
+uncompressed per-lease artifact limit remains; overflow, invalid frames, failed
+uploads and unfinished writes are explicit gaps. This bounds storage and avoids
+duplicate paid-response bodies. It does not promise every execution will fit.
+No database migration, new service, package or provider call is required.
 
 ## Historical reconstruction
 

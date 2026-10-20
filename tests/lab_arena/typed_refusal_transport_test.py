@@ -111,8 +111,24 @@ def test_exact_envelope_without_provider_route_remains_opaque(monkeypatch):
         ))
 
 
-def test_homepage_does_not_turn_refusal_into_source_absence(monkeypatch):
-    response = _response(403, REFUSAL, attested=True)
+@pytest.mark.parametrize("status,body,attested,forged_marker,trusted_url,expected", [
+    (403, REFUSAL, True, False, "", "source_blocked"),
+    (403, REFUSAL, False, False, "", "provider_error"),
+    (403, REFUSAL, False, True, "", "provider_error"),
+    (403, REFUSAL + b" ", True, False, "", "provider_error"),
+    (403, b'{"error":{"code":"unauthorized"}}', True, False, "", "provider_error"),
+    (401, REFUSAL, True, False, "", "provider_error"),
+    (402, REFUSAL, True, False, "", "provider_error"),
+    (502, REFUSAL, True, False, "", "provider_error"),
+    (403, REFUSAL, False, False, "https://thecudaily.com/", None),
+])
+def test_homepage_only_attested_request_refusal_is_source_blocked(
+    monkeypatch, status, body, attested, forged_marker, trusted_url, expected,
+):
+    response = _response(
+        status, body, attested=attested, forged_marker=forged_marker,
+        trusted_url=trusted_url,
+    )
 
     class _ClientSession(_Session):
         def __init__(self, **_kwargs):
@@ -126,10 +142,11 @@ def test_homepage_does_not_turn_refusal_into_source_absence(monkeypatch):
 
     monkeypatch.setattr(verification.aiohttp, "ClientSession", _ClientSession)
     result = asyncio.run(verification.verify_company_exists(
-        "Acme", "https://acme.example/",
+        "Crux Analytics", "https://thecudaily.com/",
     ))
     assert result.decision == "unavailable"
-    assert result.details["failure_reason_code"] == "provider_error"
+    assert result.details.get("failure_reason_code") == expected
+    assert not result.details.get("observed_homepage_organization_identity")
 
 
 def test_trusted_target_url_path_is_unchanged(monkeypatch):

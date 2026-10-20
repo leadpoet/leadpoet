@@ -150,7 +150,7 @@ class EcrScorerImageAccess:
             raise ScorerImageAccessError("ecr_manifest_invalid")
         returned = response.get("images")
         failures = response.get("failures") or []
-        if not isinstance(returned, list) or len(returned) != 1 or failures:
+        if not isinstance(returned, list) or not returned or failures:
             raise ScorerImageAccessError("ecr_manifest_unavailable")
         image = returned[0]
         if not isinstance(image, Mapping):
@@ -168,6 +168,20 @@ class EcrScorerImageAccess:
             or media_type not in images.MANIFEST_MEDIA_TYPES
         ):
             raise ScorerImageAccessError("ecr_manifest_invalid")
+        # ECR can repeat a requested digest. Every entry must name the same
+        # trusted image and exact manifest before issuing any URLs.
+        for duplicate in returned[1:]:
+            if (
+                not isinstance(duplicate, Mapping)
+                or duplicate.get("registryId") != self.registry_id
+                or duplicate.get("repositoryName") != self.repository
+                or not isinstance(duplicate.get("imageId"), Mapping)
+                or duplicate["imageId"].get("imageDigest") != image_digest
+                or not isinstance(duplicate.get("imageManifest"), str)
+                or duplicate["imageManifest"] != manifest_text
+                or duplicate.get("imageManifestMediaType") != media_type
+            ):
+                raise ScorerImageAccessError("ecr_manifest_invalid")
         try:
             manifest = manifest_text.encode("utf-8")
         except UnicodeEncodeError:

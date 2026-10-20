@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
 import pytest
 
-from lab_arena import images
+from lab_arena import images, leased_images
 from lab_arena.scorer_image_access import (
     EcrScorerImageAccess,
     MAX_SIGNED_URL_TTL_SECONDS,
@@ -149,6 +150,130 @@ def test_ecr_provider_returns_only_the_exact_manifest_descriptor_set():
     assert {call["layerDigest"] for call in client.blob_calls} == {
         item["digest"] for item in document["blobs"]
     }
+
+
+def _duplicate_response(client, monkeypatch, *, copies=2, mutate=None):
+    original = client.batch_get_image
+
+    def repeated(**kwargs):
+        response = original(**kwargs)
+        response["images"] = [deepcopy(response["images"][0]) for _ in range(copies)]
+        for index, image in enumerate(response["images"]):
+            image["imageId"]["imageTag"] = "reviewer-tag-%d" % index
+        if mutate is not None:
+            mutate(response)
+        return response
+
+    monkeypatch.setattr(client, "batch_get_image", repeated)
+
+
+@pytest.mark.parametrize("copies", [2, 3])
+def test_ecr_accepts_identical_digest_entries_with_different_tags(monkeypatch, copies):
+    # Retained production metadata: repeated Docker V2 entries, each 4,935 bytes.
+    # Use a synthetic manifest; no production manifest or capability is retained.
+    manifest, config, layers = _manifest(layer_count=30)
+    manifest += b" " * (4935 - len(manifest))
+    assert len(manifest) == 4935
+    client = _Ecr(manifest)
+    _duplicate_response(client, monkeypatch, copies=copies)
+    digest = _digest(manifest)
+
+    document = _provider(client)("%s/%s@%s" % (REGISTRY, REPOSITORY, digest), digest)
+
+    assert document["image_digest"] == digest
+    assert document["manifest_media_type"] == images.MANIFEST_DOCKER
+    assert len(client.manifest_calls) == 1
+    assert len(client.blob_calls) == len(layers) + 1
+    assert [blob["digest"] for blob in document["blobs"]] == [
+        config["digest"], *(layer["digest"] for layer in layers)
+    ]
+    assert len({call["layerDigest"] for call in client.blob_calls}) == len(client.blob_calls)
+
+
+@pytest.mark.parametrize("entry_index", [0, 1])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda image: None,
+        lambda image: [],
+        lambda image: {**image, "registryId": "000000000000"},
+        lambda image: {**image, "repositoryName": "other/repository"},
+        lambda image: {**image, "imageId": None},
+        lambda image: {**image, "imageId": {}},
+        lambda image: {**image, "imageId": {"imageDigest": "sha256:" + "f" * 64}},
+        lambda image: {**image, "imageManifestMediaType": images.MANIFEST_OCI},
+        lambda image: {**image, "imageManifestMediaType": "invalid"},
+        lambda image: {**image, "imageManifestMediaType": None},
+        lambda image: {**image, "imageManifest": None},
+        lambda image: {**image, "imageManifest": 4935},
+        lambda image: {**image, "imageManifest": "\ud800"},
+        lambda image: {**image, "imageManifest": image["imageManifest"] + " "},
+    ],
+)
+def test_duplicate_entries_fail_closed_on_any_conflicting_identity_or_manifest(
+    monkeypatch, entry_index, mutation
+):
+    manifest = _manifest()[0]
+    client = _Ecr(manifest)
+
+    def mutate(response):
+        response["images"][entry_index] = mutation(response["images"][entry_index])
+
+    _duplicate_response(client, monkeypatch, mutate=mutate)
+    digest = _digest(manifest)
+    with pytest.raises(ScorerImageAccessError) as caught:
+        _provider(client)("%s/%s@%s" % (REGISTRY, REPOSITORY, digest), digest)
+    assert caught.value.code in {"ecr_manifest_invalid", "ecr_manifest_digest_mismatch"}
+    assert len(client.manifest_calls) == 1
+    assert client.blob_calls == []
+    assert "https://" not in str(caught.value)
+    assert caught.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        None,
+        [],
+        {"images": []},
+        {"images": None},
+        {"images": {}},
+        {"images": "invalid"},
+    ],
+)
+def test_empty_or_malformed_manifest_response_still_fails_closed(monkeypatch, response):
+    manifest = _manifest()[0]
+    client = _Ecr(manifest)
+    monkeypatch.setattr(client, "batch_get_image", lambda **_kwargs: response)
+    digest = _digest(manifest)
+    with pytest.raises(ScorerImageAccessError):
+        _provider(client)("%s/%s@%s" % (REGISTRY, REPOSITORY, digest), digest)
+    assert client.blob_calls == []
+
+
+def test_duplicate_response_with_ecr_failure_is_not_partially_accepted(monkeypatch):
+    manifest = _manifest()[0]
+    client = _Ecr(manifest)
+    _duplicate_response(
+        client, monkeypatch,
+        mutate=lambda response: response.update(failures=[{"failureCode": "ImageNotFound"}]),
+    )
+    digest = _digest(manifest)
+    with pytest.raises(ScorerImageAccessError) as caught:
+        _provider(client)("%s/%s@%s" % (REGISTRY, REPOSITORY, digest), digest)
+    assert caught.value.code == "ecr_manifest_unavailable"
+    assert client.blob_calls == []
+
+
+def test_identical_duplicates_still_enforce_image_rules_before_url_calls(monkeypatch):
+    manifest = _manifest(layer_count=1, layer_size=100)[0]
+    client = _Ecr(manifest)
+    _duplicate_response(client, monkeypatch)
+    digest = _digest(manifest)
+    with pytest.raises(ScorerImageAccessError) as caught:
+        _provider(client, max_bytes=99)("%s/%s@%s" % (REGISTRY, REPOSITORY, digest), digest)
+    assert caught.value.code == "ecr_manifest_invalid"
+    assert client.blob_calls == []
 
 
 @pytest.mark.parametrize(
@@ -329,6 +454,46 @@ def test_service_derives_image_only_from_the_frozen_round_after_live_lease_auth(
     service, _run, calls = _service()
     result = service.handle_scorer_image_access("run-1", "a" * 64)
     assert calls == [(result["image_reference"], result["image_digest"])]
+
+
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_duplicate_ecr_response_through_service_and_shared_lease_consumer(monkeypatch, conflicting):
+    manifest = _manifest()[0]
+    client = _Ecr(manifest)
+    current = datetime.now(timezone.utc)
+    client.url = _signed_url(issued=current)
+
+    def mutate(response):
+        if conflicting:
+            response["images"][1]["imageManifest"] += " "
+
+    _duplicate_response(client, monkeypatch, mutate=mutate)
+    digest = _digest(manifest)
+    reference = "%s/%s@%s" % (REGISTRY, REPOSITORY, digest)
+    service, _run, _calls = _service()
+    service._test_round["configuration_doc"].update(
+        scorer_image_digest=digest, scorer_image_reference=reference
+    )
+    rules = images.ImageRules()
+    service._config.scorer_image_access = EcrScorerImageAccess(
+        client, REGISTRY, REPOSITORY, "493765492819", rules, clock=lambda: current
+    )
+
+    if conflicting:
+        with pytest.raises(ServiceError) as caught:
+            service.handle_scorer_image_access("run-1", "a" * 64)
+        assert caught.value.code == "scorer_image_access_unavailable"
+        assert caught.value.__context__ is None
+        assert client.blob_calls == []
+    else:
+        document = service.handle_scorer_image_access("run-1", "a" * 64)
+        access = leased_images.validate_image_access(
+            document, image_reference=reference, image_digest=digest, rules=rules
+        )
+        assert access.manifest == manifest
+        assert access.image_digest == digest
+        assert len(access.blobs) == len(client.blob_calls) == 20
+    assert len(client.manifest_calls) == 1
 
 
 @pytest.mark.parametrize(

@@ -262,6 +262,48 @@ raw run count does not establish a universal sample threshold.
 Deduplication is also supported by primary research showing that duplicate data
 can increase memorization and contaminate evaluation: [Lee et al., ACL 2022](https://aclanthology.org/2022.acl-long.577/).
 
+## Dataset preparation
+
+`scripts/prepare_arena_training_dataset.py --examples <exports> --output <new dir>`
+turns exported executions into company-qualification records. It reads the
+exports only and writes a new private directory: `train.jsonl`, `eval.jsonl`,
+`analysis.jsonl` and `manifest.json`.
+
+Each record pairs what the agent had with the judge's verdict on one company:
+
+- `input`: the ICP the agent received (its stored input snapshot, or the same
+  agent-visible projection when no snapshot exists), the evaluation date and
+  the agent's own company claim. Private generator fields and every judge-side
+  field stay out.
+- `label`: the class and sub-reason, plus the fit decision and dimensions,
+  primary-intent result, per-signal verdicts and the failure reason.
+- `label_provenance`: fresh, company-cache or run-cache judgment, with its
+  source judge run.
+- `group_keys`: label-free company handles, the ICP requirement fingerprint,
+  the source family and the claim key.
+
+Label classes come only from the stored judgment, in this order: outside the
+scored slice, size-bucket skipped, unjudged, duplicate, qualified, provider
+error or unverifiable company, invalid submission, wrong fit, insufficient
+evidence (fit, primary intent or intent details), contact failed. Only
+`qualified`, `wrong_fit` and `insufficient_evidence` go to train and eval.
+Everything else goes to `analysis`, and a zero score alone is never a
+negative.
+
+By default the step uses only published daily production rounds, integrity
+scorer adapters, and examples whose context and labels verified with known
+scorer identity, no input conflict and no credential redaction. Identical
+claims for the same ICP requirements count once. A claim judged both ways is
+left out. Train and eval never share a company cluster (domain, name and
+LinkedIn handles merged), so evaluation companies are unseen. The manifest
+records the rules, every source example and why any was excluded, counts by
+split and label, and a deterministic dataset version.
+
+🔹 Training permission is not yet confirmed. Submission consent records only
+public rerun permission; confirm the terms before training on these records.
+The manifest says so explicitly. Label accuracy still needs a manual sample
+check before the first training run.
+
 ## Verification record
 
 The integrated candidate includes remote main through `e724c9240`. The combined

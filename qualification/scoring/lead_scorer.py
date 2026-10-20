@@ -4405,6 +4405,35 @@ def _web_identity_receipt(
     )
 
 
+def _unresolved_homepage_web_identity_conflict(
+    homepage: CompanyFitDecisionResult, web_receipt: Mapping[str, Any]
+) -> bool:
+    """Keep a distinct first-party entity ahead of an unbound web claim."""
+
+    if (homepage.decision != COMPANY_FIT_UNAVAILABLE
+        or web_receipt.get("decision") != COMPANY_FIT_MATCH
+        or web_receipt.get("reason_code") != "verifier_accepted"):
+        return False
+    details = homepage.details if isinstance(homepage.details, Mapping) else {}
+    organization = details.get("observed_homepage_organization_identity")
+    observed = details.get("identity")
+    if not isinstance(organization, Mapping) or not isinstance(observed, Mapping):
+        return False
+    name = str(organization.get("normalized_name") or "")
+    domain = str(organization.get("registrable_dns_domain") or "")
+    slug = str(organization.get("linkedin_company_slug") or "")
+    return bool(
+        name and domain and slug
+        and name == observed.get("observed_name")
+        and domain == observed.get("observed_domain")
+        and slug == observed.get("observed_linkedin_slug")
+        and domain == web_receipt.get("submitted_domain")
+        == web_receipt.get("observed_domain")
+        and name != web_receipt.get("observed_name")
+        and slug != web_receipt.get("observed_linkedin_slug")
+    )
+
+
 def _schema_repair_changes_grounded_identity(
     prior_result: CompanyFitDecisionResult,
     repaired_identity: Mapping[str, Any],
@@ -10420,6 +10449,12 @@ async def _verify_company_fit(
         )
     ):
         web_identity_decision = COMPANY_FIT_UNAVAILABLE
+    if _unresolved_homepage_web_identity_conflict(identity, web_identity_mapping):
+        web_identity_decision = COMPANY_FIT_UNAVAILABLE
+        web_identity_mapping.update(
+            decision=COMPANY_FIT_UNAVAILABLE,
+            reason_code="homepage_web_identity_conflict_unresolved",
+        )
     dimensions["identity"] = web_identity_decision
     evidence["identity"] = {
         **dict(evidence.get("identity") or {}),

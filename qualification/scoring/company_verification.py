@@ -1028,6 +1028,46 @@ def _homepage_company_names(
     ))[:10]
 
 
+def _bound_homepage_organization_identity(
+    page_text: str, observed_domain: str, observed_linkedins: list[str]
+) -> dict[str, str]:
+    """Keep one first-party Organization identity for later conflict checks."""
+
+    if len(observed_linkedins) != 1:
+        return {}
+    parser = _HomepageIdentityParser()
+    try:
+        parser.feed(str(page_text or "")[:_MAX_BYTES])
+        parser.close()
+    except Exception:
+        return {}
+    metadata_names = {_company_name(name) for name in parser.metadata_names}
+    if len(metadata_names) != 1:
+        return {}
+    bound_names = set()
+    for record in parser.organization_records:
+        name, url = record.get("name"), record.get("url")
+        if not isinstance(name, str) or not isinstance(url, str):
+            continue
+        try:
+            if _registrable_domain(public_http_url(url)) != observed_domain:
+                continue
+        except (NormalizationError, TypeError, ValueError):
+            continue
+        linkedins = record.get("linkedin_urls")
+        if linkedins and linkedins != observed_linkedins:
+            return {}
+        bound_names.add(_company_name(name))
+    if len(bound_names) != 1 or bound_names != metadata_names:
+        return {}
+    slug = urlsplit(observed_linkedins[0]).path.rstrip("/").rsplit("/", 1)[-1]
+    return {
+        "normalized_name": next(iter(bound_names)),
+        "registrable_dns_domain": observed_domain,
+        "linkedin_company_slug": slug,
+    }
+
+
 def _verified_organization_legal_name_aliases(
     page_text: str,
     *,
@@ -1094,6 +1134,7 @@ def _identity_result(
     failure_reason_code: str = "",
     verified_homepage_transport_domain: str = "",
     verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
+    observed_homepage_organization_identity: Optional[Mapping[str, str]] = None,
 ) -> CompanyFitDecisionResult:
     details = {
         "identity": dict(receipt),
@@ -1115,6 +1156,11 @@ def _identity_result(
         **(
             {VERIFIED_REBRAND_REDIRECT_KEY: dict(verified_rebrand_redirect)}
             if verified_rebrand_redirect
+            else {}
+        ),
+        **(
+            {"observed_homepage_organization_identity": dict(observed_homepage_organization_identity)}
+            if observed_homepage_organization_identity
             else {}
         ),
     }
@@ -1550,6 +1596,9 @@ async def verify_company_exists(
             actual_final_url=observed_url,
             verified_homepage_transport_domain=domain,
         )
+    bound_organization = _bound_homepage_organization_identity(
+        text, observed_domain, observed_linkedins
+    )
     identity_receipts = [
         evaluate_company_identity(
             submitted_name=company_name,
@@ -1724,6 +1773,7 @@ async def verify_company_exists(
             "do not prove the submitted identity",
             actual_final_url=observed_url,
             verified_homepage_transport_domain=domain,
+            observed_homepage_organization_identity=bound_organization,
         )
     unavailable = next(
         (receipt for receipt in identity_receipts if receipt["decision"] == "unavailable"),
@@ -1735,10 +1785,12 @@ async def verify_company_exists(
             "homepage identity evidence unavailable: complete identity not proven",
             actual_final_url=observed_url,
             verified_homepage_transport_domain=domain,
+            observed_homepage_organization_identity=bound_organization,
         )
     return _identity_result(
         submitted_identity,
         "homepage identity evidence unavailable: complete identity not proven",
         actual_final_url=observed_url,
         verified_homepage_transport_domain=domain,
+        observed_homepage_organization_identity=bound_organization,
     )

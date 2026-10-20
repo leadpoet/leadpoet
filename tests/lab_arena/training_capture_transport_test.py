@@ -22,9 +22,10 @@ def test_capture_accepts_slow_transport_with_separate_bounded_timeout():
     def respond(request):
         timeout = request.extensions["timeout"]
         observed.append((request.url.path, timeout))
-        # Model a three-second response using httpx's actual request timeout
-        # extension. The previous two-second capture timeout must fail here.
-        if min(timeout.values()) < 3.0:
+        # Model a three-second input and a fifteen-second aggregate validation
+        # using httpx's actual timeout extension. Both old budgets fail here.
+        required_seconds = 15.0 if request.url.path.endswith("/training-observations") else 3.0
+        if min(timeout.values()) < required_seconds:
             raise httpx.ReadTimeout("private response text", request=request)
         return httpx.Response(200, json={"status": "stored", "payload_sha256": "sha256:" + "a" * 64})
 
@@ -39,7 +40,8 @@ def test_capture_accepts_slow_transport_with_separate_bounded_timeout():
     assert len(observed) == 4
     for path, timeout in observed[:2]:
         assert path.endswith(("/training-input", "/training-observations"))
-        assert set(timeout.values()) == {10.0}
+        expected = 60.0 if path.endswith("/training-observations") else 10.0
+        assert set(timeout.values()) == {expected}
     assert all(set(timeout.values()) == {runner.API_TIMEOUT_SECONDS}
                for _, timeout in observed[2:])
 

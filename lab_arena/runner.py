@@ -98,6 +98,7 @@ REQUIREMENT_RE = re.compile(
 MAX_SOCKET_PATH_BYTES = 100
 API_TIMEOUT_SECONDS = 30.0
 TRAINING_CAPTURE_TIMEOUT_SECONDS = 10.0
+TRAINING_OBSERVATIONS_TIMEOUT_SECONDS = 60.0
 COMPLETION_RECOVERY_RETRY_SECONDS = (
     2.0, 5.0, 10.0, 20.0, 30.0, 45.0,
     60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 60.0, 80.0,
@@ -866,7 +867,7 @@ class HttpArenaApiClient:
         return self._post(
             "/arena/v1/runs/%s/training-observations" % run_id, document,
             headers={"x-lab-arena-lease": lease_token},
-            timeout_seconds=TRAINING_CAPTURE_TIMEOUT_SECONDS,
+            timeout_seconds=TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
             preserve_http_status=True,
         )
 

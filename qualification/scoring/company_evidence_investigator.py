@@ -225,7 +225,7 @@ public listing. For Public, prefer a relevant supplied recent issuer
 announcement or filing that names the investigated company with an exchange
 ticker, and fetch it before a stock-quote or chart page. This source order does
 not establish current stage: still require a fetched company-bound quote and
-compare later completed take-private, acquisition, or delisting evidence.
+compare later completed take-private or delisting evidence.
 Allocate this shared tool budget across unresolved requested targets. After
 current-stage discovery, when fetched evidence already directly proves the
 requested stage and discovery exposes no concrete material stage conflict, do
@@ -467,8 +467,11 @@ extension of that round. Return observed_value="Series C+" for such evidence;
 an extension does not require a new stage label. Debt, grants, planned rounds,
 and unresolved ownership or chronology do not establish that value.
 
-Public stage needs current company-attributed exchange/ticker or current
-listed/traded-share proof. A current issuer announcement naming the exact
+A currently listed company stays Public despite PE control until a later
+completed take-private or delisting. For requested PE, cite listing proof as
+primary and return Public, CONTRADICTED.
+Public needs current company-attributed exchange/ticker or listed/traded-share
+proof. A current issuer announcement naming the exact
 company with an exchange/ticker parenthetical is this proof; it does not also
 need a separate sentence saying the shares are listed or traded. Formatting
 whitespace and a quoted company alias do not change that attribution. A 'Public Company' label, planned IPO, old listing,
@@ -477,10 +480,9 @@ Section 12(b) table can establish registered common/ordinary shares, their
 ticker, and exchange. Quote one continuous span that includes the registrant
 name and the complete row. Check the filing date and later ownership/listing
 events; an old table does not establish current status or override newer
-private-company evidence. Compare dated rounds,
-acquisitions, and IPO/listing events; use the latest completed event rather
-than the highest label found. For a Series stage, compare completed
-priced-equity rounds and use the latest completed priced-equity round. A later
+private-company evidence. For venture stages, compare dated rounds, acquisitions
+and IPO/listing events; use the latest completed event.
+For a Series stage, use the latest completed priced-equity round. A later
 loan, debt facility, or grant does not by itself supersede that equity stage.
 A later completed priced-equity round, controlling acquisition, or IPO/listing
 event involving ownership of the investigated company can supersede it and
@@ -494,7 +496,7 @@ For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
 old round or listing source is not enough by itself. Before returning VERIFIED
 for that matching stage, complete the server-required current-stage search for
 the exact company. For Public, review current listing and later completed
-take-private, acquisition, and delisting results before retaining an older
+take-private and delisting results before retaining an older
 ticker quote. Search results remain discovery only, so fetch a useful result
 when one is relevant. Current company or exchange proof may also come from a
 submitted URL or site navigation. Cite fetched company-bound text. An old
@@ -505,14 +507,14 @@ Public listing is a continuing state, not a fact that needs same-day
 reaffirmation. After the required current-status search and review of later
 events, a dated issuer, exchange, or current SEC statement that the exact
 company's shares are listed or traded can still establish current Public when
-no later completed delisting, take-private, or controlling acquisition is
+no later completed delisting or take-private is
 found. A failed optional fetch of a newer page does not erase that valid
 listing evidence by itself. It does require UNPROVEN when its available
 locator exposes a concrete material conflict that cannot be resolved. A later
 filing date, generic SEC filing reference, or unfetched filing locator is not
 by itself a material listing conflict and does not require valid listing
 evidence to postdate it. Only concrete source context indicating a completed
-delisting, take-private, controlling acquisition, or current private status
+delisting, take-private, or current private status
 creates that conflict. A historical IPO-completion announcement alone remains
 insufficient.
 On a current first-party company or investor-relations profile, a separate
@@ -520,8 +522,8 @@ current trading-information row that names the exact company and a literal
 exchange plus ticker is current company-attributed exchange/ticker evidence.
 Do not treat that trading row as historical merely because the same profile
 also lists the company's historical IPO date. This does not make an archived
-IPO profile current, and a later completed delisting, take-private, or
-controlling acquisition still overrides the ticker row.
+IPO profile current; a later completed delisting or take-private overrides the
+ticker row.
 When prior observations contain exact structured `Privately Held` company-type
 evidence, first seek current first-party take-private, delisting, or listing
 evidence. An archived SEC filing cover page is a historical snapshot and cannot
@@ -5131,8 +5133,9 @@ async def investigate_company_evidence(
                                 "locator is not by itself a material listing conflict and does "
                                 "not require valid listing evidence to postdate it. Only concrete "
                                 "source context indicating a completed delisting, take-private, "
-                                "controlling acquisition, or current private status creates that "
+                                "or current private status creates that "
                                 "conflict and must remain UNPROVEN or support the different stage. "
+                                "PE control alone does not end Public listing. "
                                 "Do not infer Public from this correction. "
                                 "Do not search or fetch. VERIFIED or CONTRADICTED still needs "
                                 "one exact continuous quote from its fetched URL and must pass "

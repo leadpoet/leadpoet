@@ -307,7 +307,7 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
     assert "fetch it before a stock-quote or chart page" in prompt
     assert "This source order does not establish current stage" in prompt
     assert "still require a fetched company-bound quote" in prompt
-    assert "later completed take-private, acquisition, or delisting evidence" in prompt
+    assert "later completed take-private or delisting evidence" in prompt
     assert "Series C+, or Public stage" in prompt
     assert "server-required current-stage search" in prompt
     assert "absence of a contradicting search result" in prompt
@@ -323,7 +323,7 @@ def test_public_source_selection_prefers_supplied_issuer_evidence_within_limits(
     assert "does not require valid listing evidence to postdate it" in prompt
     assert (
         "Only concrete source context indicating a completed delisting, "
-        "take-private, controlling acquisition, or current private status "
+        "take-private, or current private status "
         "creates that conflict"
     ) in prompt
     assert (

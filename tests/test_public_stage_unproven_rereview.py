@@ -234,6 +234,8 @@ def test_solarwinds_material_delisting_conflict_stays_unproven(monkeypatch):
     assert "current private status creates that conflict" in (
         correction["instruction"]
     )
+    assert "PE control alone does not end Public listing" in correction["instruction"]
+    assert "controlling acquisition" not in correction["instruction"]
 
 
 @pytest.mark.parametrize("quote", [

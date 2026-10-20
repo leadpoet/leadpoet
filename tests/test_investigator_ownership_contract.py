@@ -345,6 +345,19 @@ def test_prompt_assigns_same_owner_classification_to_slot_one_and_existing_model
     assert "company alias explicitly bound in same-page cited support" in prompt
 
 
+def test_public_listing_survives_pe_control_until_completed_listing_transition():
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+    assert "A currently listed company stays Public despite PE control" in prompt
+    assert "until a later completed take-private or delisting" in prompt
+    assert "For requested PE, cite listing proof as primary and return Public, CONTRADICTED" in prompt
+    assert "a later completed delisting or take-private overrides the ticker row" in prompt
+    assert "no later completed delisting, take-private, or controlling acquisition" not in prompt
+    assert "controlling acquisition still overrides the ticker row" not in prompt
+    assert "take-private, controlling acquisition, or current private status" not in prompt
+    assert "For venture stages, compare dated rounds, acquisitions and IPO/listing events" in prompt
+    assert "a later Series C, controlling acquisition, or IPO can contradict an earlier Series B" in prompt
+
+
 def test_primary_can_prove_both_links_while_second_slot_retains_additional_context():
     alias = "Pinecrest Capital is the registered manager of Pinecrest Fund IV."
     raw = finding(

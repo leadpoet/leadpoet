@@ -592,3 +592,102 @@ def test_successful_same_phase_refresh_replaces_prior_value(completed):
     service._completed_scores_cache[row["round_id"]]["refreshed_at"] -= 16
     assert _wait_for_scores(service, row, lambda result: result == fresh) == fresh
     assert service._read_completed_submission_scores.call_count == 1
+
+
+def _add_stored_peer(row, executions, judges):
+    peer = deepcopy(executions)
+    for run in peer:
+        run.update(submission_id="stored-peer", run_id="peer-" + run["run_id"])
+    executions.extend(peer)
+    judges.extend([{**run, "kind": "score", "run_id": "judge-" + run["run_id"],
+                    "scored_run_id": run["run_id"]} for run in peer])
+    row["participants"].append({"submission_id": "stored-peer", "is_king": False})
+    row["stage2_scoring_plan_doc"]["work_items"].extend([
+        {"scored_run_id": run["run_id"], "submission_id": "stored-peer",
+         "icp_position": run["icp_position"]} for run in peer
+    ])
+    return peer
+
+
+def test_persisted_peer_is_released_before_blocked_unpublished_evidence(completed):
+    service, row, executions, judges, _ = completed
+    _add_stored_peer(row, executions, judges)
+    for run in executions[:2]:
+        run.update(per_icp_score=None, output_ref="slow-output")
+    # A failed attempt's stored score must not prioritize an accepted attempt
+    # whose evidence still requires assembly.
+    executions.append({**executions[0], "run_id": "failed-stored", "attempt": 99,
+                       "status": "failed", "per_icp_score": 999})
+    before = deepcopy(executions)
+    started, release, visible = threading.Event(), threading.Event(), threading.Event()
+    results, errors = {}, []
+
+    def read(*_args):
+        started.set()
+        assert release.wait(2)
+        raise OSError("unpublished evidence temporarily unavailable")
+
+    service._objects = SimpleNamespace(get_bounded=Mock(side_effect=read))
+    service.evaluation_icps = Mock(return_value=[{}, {}])
+    service._store.list_runs = Mock(wraps=service._store.list_runs)
+
+    def callback(submission_id, value):
+        if submission_id == "stored-peer" and value is not None:
+            visible.set()
+
+    def refresh():
+        try:
+            results.update(service._read_completed_submission_scores(row, on_completed=callback))
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=refresh)
+    thread.start()
+    try:
+        assert started.wait(2)
+        assert visible.is_set()  # No timing threshold: evidence is still blocked.
+    finally:
+        release.set()
+        thread.join(2)
+    assert not thread.is_alive() and not errors
+    assert results["stored-peer"]["final_score"] == 60.0
+    assert set(results) == {"stored-peer"}
+    assert executions == before
+    assert service._submission_cost_eligibility.call_count == 1
+    assert service._store.list_runs.call_count == 2
+    assert service._objects.get_bounded.call_count == 1
+
+
+@pytest.mark.parametrize("fault", ["missing", "unpriced", "unfinished", "membership"])
+def test_persisted_priority_does_not_bypass_completion_guards(completed, fault):
+    service, row, executions, judges, eligibility = completed
+    _add_stored_peer(row, executions, judges)
+    if fault == "missing":
+        executions.pop()
+    elif fault == "unpriced":
+        service._submission_cost_eligibility.side_effect = lambda _row, sid, *_args, **_kw: (
+            {**eligibility, "eligible": False} if sid == "stored-peer" else eligibility
+        )
+    elif fault == "unfinished":
+        judges[-1]["status"] = "leased"
+    else:
+        judges[-1]["submission_id"] = "changed-membership"
+    assert set(service._read_completed_submission_scores(row)) == {"miner"}
+
+
+def test_priority_uses_selected_accepted_attempt_and_is_stable(completed):
+    service, row, executions, judges, _ = completed
+    _add_stored_peer(row, executions, judges)
+    # A later failed attempt with a persisted value cannot replace the accepted
+    # attempt. Zero is persisted, and participants with the same priority keep order.
+    executions.append({**executions[0], "run_id": "failed-later", "attempt": 99,
+                       "status": "failed", "per_icp_score": 999})
+    executions[0]["per_icp_score"] = 0
+    callbacks = []
+    result = service._read_completed_submission_scores(
+        row, on_completed=lambda sid, value: callbacks.append(sid) if value else None,
+    )
+    assert callbacks == ["miner", "stored-peer"]
+    assert result["miner"]["final_score"] == 40.0
+    assert result["stored-peer"]["final_score"] == 60.0
+    assert service._submission_cost_eligibility.call_count == 2

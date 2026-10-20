@@ -13,7 +13,7 @@ from qualification.scoring.company_fit_decision import company_fit_match
 from tests.test_current_linkedin_company_size import _company, _icp, _install_exa_bodies, _verdict
 
 
-def _install(monkeypatch, guard="complete"):
+def _install(monkeypatch, guard="complete", *, positive_unproven=False):
     company = _company(linkedin="")
     company.company_name = "ACM.US"
     company.company_website = "https://acm.us"
@@ -33,6 +33,9 @@ def _install(monkeypatch, guard="complete"):
                          "observed_industry": "Software", "observed_subindustry": "SaaS",
                          "evidence_url": "https://acm.us/product",
                          "evidence_quote": "ACM provides workflow software for customers."}
+    if positive_unproven:
+        claims["industry"] = {"target": "industry", "status": "UNPROVEN",
+                              "evidence_url": "", "evidence_quote": ""}
     outcome = {"ok": True, "loaded_text_length": 100,
                "url_sha256": hashlib.sha256(b"https://acm.us/product").hexdigest()}
     review = {"claims": claims, "_completed_submit": True, "failure_reason": "",
@@ -42,6 +45,12 @@ def _install(monkeypatch, guard="complete"):
     profile = {"status": "completed", "result": {"data": {"error": None, "status": 200, "element": None}}}
     if guard in {"403", "429", "502", "503"}:
         profile["result"]["data"]["status"] = int(guard)
+    if guard == "source_blocked":
+        profile["result"]["data"]["element"] = {
+            "name": "Other company", "website": "https://other.example",
+            "linkedinUrl": "https://www.linkedin.com/company/other",
+            "employeeCountRange": {"start": 11, "end": 50},
+        }
     _install_exa_bodies(monkeypatch, not_found, not_found, profile)
     for key in ("DEEPLINE_API_KEY", "EXA_API_KEY", "OPENROUTER_API_KEY"):
         monkeypatch.setenv(key, "offline-key")
@@ -70,7 +79,10 @@ def _install(monkeypatch, guard="complete"):
 
     async def grounding(*args, **kwargs): return 200, "https://acm.us/product", "ACM provides workflow software."
     async def broad(**kwargs): return copy.deepcopy(verdict), ""
-    async def investigate(**kwargs): return copy.deepcopy(review)
+    async def investigate(**kwargs):
+        if positive_unproven:
+            assert kwargs["positive_semantic_review"] is True
+        return copy.deepcopy(review)
     actual_refresh = s._refresh_linkedin_employee_size_observation
 
     async def refresh(*args, **kwargs):
@@ -99,6 +111,36 @@ def _install(monkeypatch, guard="complete"):
         return value
     monkeypatch.setattr(s, "_run_targeted_company_evidence_investigation", targeted)
     return company, icp
+
+
+@pytest.mark.parametrize("guard", [
+    "complete", "source_blocked", "timeout", "provider_fault", "transport",
+    "unbound_transport", "incomplete", "failure", "missing_claim",
+    "positive_missing_proof", "cited_unproven", "attribute_grounding",
+])
+def test_unproven_semantic_review_uses_existing_optional_profile_finality(monkeypatch, guard):
+    """October 20: completed negatives must reach the existing malformed rule."""
+    from qualification.scoring import competition
+
+    company, icp = _install(monkeypatch, guard, positive_unproven=True)
+    result = asyncio.run(s._verify_company_fit(company, icp, 0, 0, set(),
+        require_https_transport=True, evidence_investigator=True))
+    assert result.decision == "unavailable"
+    terminal = guard == "complete"
+    assert (result.details.get("failure_class") == "insufficient_fit_evidence") is terminal
+    row = {"final_score": 0.0, "failure_reason": "Company fit unavailable",
+           "verifier_gate_receipts": [result.receipt("company_fit")]}
+    assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row) is not terminal
+    if terminal:
+        receipt = next(r for r in result.details["supporting_receipts"]
+                       if r.get("gate") == "company_evidence_investigation")
+        assert receipt["prior_linkedin_refresh_failure_reason"] == "malformed_response"
+    else:
+        # Keep the existing semantic guard: a separate unfinished obligation
+        # cannot become a source-local exhausted zero.
+        assert not competition.scorer_breakdown_has_company_local_verification_failure(row)
+        with pytest.raises(competition.CompetitionScorerInputError):
+            competition.terminal_company_verification_breakdown(row)
 
 
 @pytest.mark.parametrize("guard", ["complete", "403", "429", "502", "503", "timeout", "provider_fault",

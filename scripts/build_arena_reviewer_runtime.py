@@ -5,7 +5,8 @@ The original image layers, dependencies and process configuration stay intact.
 Only the dedicated runtime package and reviewed operational-interface
 extractions can be added by default. An explicit option applies only the
 approved terminal-negative, exact-source-access, pending-final-correction and
-shared failed attribute-source review repairs to frozen source.
+shared failed attribute-source review and completed optional-profile finality
+repairs to frozen source.
 Neither path imports today's grading code.
 """
 from __future__ import annotations
@@ -131,12 +132,13 @@ def extract_frozen_sources(
     source_access_denied: bool = False,
     failed_attribute_source_recovery: bool = False,
     authenticated_page_refusal: bool = False,
+    completed_malformed_profile: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
         files = {}
         names = (GRADER_FILE, *ENTRYPOINT_FILES)
-        if complete_negative_finality or source_access_denied or failed_attribute_source_recovery:
+        if complete_negative_finality or source_access_denied or failed_attribute_source_recovery or completed_malformed_profile:
             names += (FINALITY_FILE,)
         if authenticated_page_refusal:
             names += (VERIFICATION_FILE,)
@@ -157,12 +159,13 @@ def expected_overlay(
     pending_final_correction: bool = False,
     failed_attribute_source_recovery: bool = False,
     authenticated_page_refusal: bool = False,
+    completed_malformed_profile: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
 
     expected = {GRADER_FILE, *ENTRYPOINT_FILES}
-    if complete_negative_finality or source_access_denied or failed_attribute_source_recovery:
+    if complete_negative_finality or source_access_denied or failed_attribute_source_recovery or completed_malformed_profile:
         expected.add(FINALITY_FILE)
     if authenticated_page_refusal:
         expected.add(VERIFICATION_FILE)
@@ -170,7 +173,7 @@ def expected_overlay(
         raise CompositionError("frozen operational sources are incomplete")
     files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
     files.update({name: convert_checkpoint_seam(original[name]) for name in ENTRYPOINT_FILES})
-    if complete_negative_finality or source_access_denied or failed_attribute_source_recovery:
+    if complete_negative_finality or source_access_denied or failed_attribute_source_recovery or completed_malformed_profile:
         files[FINALITY_FILE] = original[FINALITY_FILE]
     if complete_negative_finality:
         from scripts.arena_reviewer_finality_seam import convert_finality_seam
@@ -193,6 +196,9 @@ def expected_overlay(
         )
         files[GRADER_FILE] = convert_investigator_seam(files[GRADER_FILE])
         files[VERIFICATION_FILE] = convert_verification_seam(original[VERIFICATION_FILE])
+    if completed_malformed_profile:
+        from scripts.arena_reviewer_profile_finality_seam import convert_profile_finality_seam
+        files[FINALITY_FILE] = convert_profile_finality_seam(files[FINALITY_FILE])
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -227,6 +233,10 @@ def main() -> int:
         "--authenticated-page-refusal", action="store_true",
         help="classify only a host-bound exact page refusal; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--completed-malformed-profile", action="store_true",
+        help="reuse existing completed optional-profile finality in semantic review; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
@@ -248,6 +258,8 @@ def main() -> int:
             failed_attribute_source_recovery=args.failed_attribute_source_recovery,
             **({"authenticated_page_refusal": True}
                if args.authenticated_page_refusal else {}),
+            **({"completed_malformed_profile": True}
+               if args.completed_malformed_profile else {}),
         )
         files = expected_overlay(
             original, complete_negative_finality=args.complete_negative_finality,
@@ -255,6 +267,7 @@ def main() -> int:
             pending_final_correction=args.pending_final_correction,
             failed_attribute_source_recovery=args.failed_attribute_source_recovery,
             authenticated_page_refusal=args.authenticated_page_refusal,
+            completed_malformed_profile=args.completed_malformed_profile,
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
@@ -263,6 +276,7 @@ def main() -> int:
             + ("-pending-final-correction" if args.pending_final_correction else "")
             + ("-attribute-source-recovery" if args.failed_attribute_source_recovery else "")
             + ("-refusal" if args.authenticated_page_refusal else "")
+            + ("-profile-finality" if args.completed_malformed_profile else "")
         )
         if not args.verify_image:
             for name, data in files.items():
@@ -300,6 +314,9 @@ def main() -> int:
         if args.authenticated_page_refusal:
             from scripts.arena_reviewer_typed_refusal_seam import CORRECTION_ID as PAGE_REFUSAL_CORRECTION_ID
             corrections.append(PAGE_REFUSAL_CORRECTION_ID)
+        if args.completed_malformed_profile:
+            from scripts.arena_reviewer_profile_finality_seam import CORRECTION_ID as PROFILE_FINALITY_CORRECTION_ID
+            corrections.append(PROFILE_FINALITY_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,

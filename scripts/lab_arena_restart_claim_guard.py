@@ -24,6 +24,21 @@ class GuardError(RuntimeError):
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _INVOCATION = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
+_ERROR_CODE = re.compile(r"(?:[0-9A-Z]{5}|PGRST[0-9]{3})\Z")
+_SQLSTATE_CLASSES = frozenset(
+    "00 01 02 03 08 09 0A 0B 0F 0L 0P 0Z 20 21 22 23 24 25 26 27 28 "
+    "2B 2D 2F 34 38 39 3B 3D 3F 40 42 44 53 54 55 57 58 F0 HV P0 XX".split()
+)
+_DIAGNOSTIC_RPCS = frozenset({
+    "lab_arena_restart_guard_state_v1",
+    "lab_arena_acquire_restart_guard_v1",
+    "lab_arena_retarget_restart_guard_v1",
+    "lab_arena_restart_quiescence_v1",
+    "lab_arena_abort_restart_guard_v1",
+    "lab_arena_authorize_restart_phase_v1",
+    "lab_arena_mark_restart_ready_v1",
+    "lab_arena_release_restart_guard_v1",
+})
 _MAX_ENVIRONMENT_BYTES = 1024 * 1024
 _SAFE_FIELDS = frozenset(
     {
@@ -179,9 +194,25 @@ def _request(function: str, payload: Mapping[str, Any]) -> Any:
     try:
         value = json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise GuardError("Arena restart guard response is invalid") from exc
+        if response.status == 200:
+            raise GuardError("Arena restart guard response is invalid") from exc
+        value = None
     if response.status != 200:
-        raise GuardError("Arena restart guard authority rejected the request")
+        rpc = function if function in _DIAGNOSTIC_RPCS else "unlisted"
+        status = (
+            response.status
+            if type(response.status) is int and 100 <= response.status <= 599
+            else "unknown"
+        )
+        raw_code = value.get("code") if isinstance(value, Mapping) else None
+        code = "unknown"
+        if isinstance(raw_code, str) and _ERROR_CODE.fullmatch(raw_code):
+            if raw_code.startswith("PGRST") or raw_code[:2] in _SQLSTATE_CLASSES:
+                code = raw_code
+        raise GuardError(
+            "Arena restart guard authority rejected the request "
+            f"(rpc={rpc}, http_status={status}, code={code})"
+        )
     if not isinstance(value, Mapping):
         raise GuardError("Arena restart guard response is invalid")
     return dict(value)

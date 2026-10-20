@@ -350,6 +350,7 @@ def create_app(service: ArenaService) -> FastAPI:
             max_depth=64, max_list_items=250_000, max_object_keys=250_000,
             max_string_bytes=training_observations.MAX_EVENT_BYTES,
             max_total_bytes=training_observations.MAX_OBJECT_BYTES, max_abs_int=None,
+            allow_control_characters_in_values=True,
         ))
         return await no_store_public_call(
             service.handle_training_observations, run_id, lease_token, document,

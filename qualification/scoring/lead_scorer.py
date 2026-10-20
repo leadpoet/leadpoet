@@ -784,7 +784,7 @@ _ACTIVE_MAJORITY_INVESTMENT_RE = re.compile(
 )
 _PUBLIC_SEMANTIC_LISTING_RE = re.compile(
     r"\b(?:is|are|remains)\s+(?:currently\s+)?listed\s+on\b"
-    r"[^.!?;\n]{0,100}\b(?:exchange|stock\s+code|ticker)\b",
+    r"[^.!?;\n]{0,100}\b(?:exchanges?|stock\s+code|ticker)\b",
     re.I,
 )
 _PUBLIC_HISTORICAL_IPO_EVENT_RE = re.compile(
@@ -894,6 +894,24 @@ def _public_quote_has_bound_market_locator(
                         candidate = subject.group(1)
                     if re.search(r"\b(?:bonds?|debt|notes?|funds?|etfs?)\b", candidate, re.I):
                         continue
+                    if (
+                        pattern is _PUBLIC_SEMANTIC_LISTING_RE
+                        and re.search(r"\bstock\s+exchanges\b", match.group(0), re.I)
+                    ):
+                        # This new plural form must name the investigated issuer
+                        # as its own subject, not contain its name in a child's
+                        # or client's longer name or in a relative clause.
+                        if re.search(r"\bwhich\s*$", clause, re.I):
+                            continue
+                        parts = re.findall(r"[a-z0-9]+", candidate.casefold())
+                        subjects = {_compact_company_name(candidate)}
+                        if len(parts) > 1 and parts[-1] in {
+                            "co", "company", "corp", "corporation", "inc",
+                            "incorporated", "limited", "llc", "ltd", "plc",
+                        }:
+                            subjects.add("".join(parts[:-1]))
+                        if not names.intersection(subjects):
+                            continue
                 if re.search(
                     r"\b(?:parent(?:\s+company)?|investor|owner|sponsor)\b",
                     candidate,

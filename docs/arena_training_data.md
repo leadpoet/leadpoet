@@ -272,15 +272,19 @@ exports only and writes a new private directory: `train.jsonl`, `eval.jsonl`,
 Each record pairs what the agent had with the judge's verdict on one company:
 
 - `input`: the ICP the agent received (its stored input snapshot, or the same
-  agent-visible projection when no snapshot exists), the evaluation date and
-  the agent's own company claim. Private generator fields and every judge-side
-  field stay out.
+  agent-visible projection when no snapshot exists), the evaluation date,
+  the agent's own company claim, and up to three retained fetched-page excerpts
+  from verified source contexts. Each excerpt has its source URL, text, publication
+  date and retrieval time when stored; missing times are explicit nulls. The
+  source text was available to the verifier, but this projection does not prove
+  the agent itself fetched or saw the same page. Judge verdicts and reasoning
+  stay out of the input.
 - `label`: the class and sub-reason, plus the fit decision and dimensions,
   primary-intent result, per-signal verdicts and the failure reason.
 - `label_provenance`: fresh, company-cache or run-cache judgment, with its
-  source judge run.
-- `group_keys`: label-free company handles, the ICP requirement fingerprint,
-  the source family and the claim key.
+  source judge run, plus the authority run for each retained signal judgment.
+- `group_keys`: submitted and verified company identity handles, the ICP
+  requirement fingerprint, the source family and the claim key.
 
 Label classes come only from the stored judgment, in this order: outside the
 scored slice, size-bucket skipped, unjudged, duplicate, qualified, provider
@@ -295,15 +299,19 @@ scorer adapters, and examples whose context and labels verified with known
 scorer identity and no input conflict. An example whose content no longer
 matches its exported hash is excluded. A record is left out when its own
 input (the ICP or the company claim) carries a redaction marker. Credential
-redactions elsewhere in the run, mostly URL tokens in fetched pages, never
-reach those fields, so they do not exclude the example. Identical
+redactions elsewhere in the run do not exclude a clean record; redactions in
+the selected page excerpts do. A trainable verdict without retained source
+text stays in `analysis` with `missing_retained_source_evidence`; it is not
+relabeled. Identical
 claims for the same ICP requirements and evaluation date count once; another
 date is a separate input because intent recency depends on it. A claim judged
 both ways on the same date is left out. A failed run removes the partial
 output directory it created. Train and eval never share a company cluster (domain, name and
 LinkedIn handles merged), so evaluation companies are unseen. The manifest
 records the rules, every source example and why any was excluded, counts by
-split and label, and a deterministic dataset version.
+split and label, the missing-source yield, and a deterministic dataset version.
+Mixed scorer image or policy cohorts fail dataset preparation, so a caller must
+prepare each cohort separately.
 
 🔹 Training permission is not yet confirmed. Submission consent records only
 public rerun permission; confirm the terms before training on these records.

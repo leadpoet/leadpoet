@@ -18,6 +18,10 @@ ICP = {"icp_id": "icp_20261017_001", "prompt": "B2B software companies hiring sa
        "intent_signals": ["Hiring a VP of Sales"], "verified_example_company": "generator-secret.com"}
 VERIFIED = [{"matched_icp_signal": 0, "after_decay": 40.0, "judge_verdict": {"decision": "verified"},
              "date_verdict": "in_window", "evidence_urls": ["https://acme-robotics.com/careers"]}]
+VERIFIED[0]["judge_verdict"]["verification_trace"] = {
+    "verified_source_context": [{"url": "https://acme-robotics.com/careers",
+                                 "text": "Acme Robotics is hiring a VP of Sales.",
+                                 "source_publication_date": "2026-10-10"}]}
 
 
 def claim(name="Acme Robotics", domain="acme-robotics.com", slug="acme-robotics"):
@@ -58,8 +62,14 @@ JUDGMENTS = {
 
 
 def row(index, company, kind=None, status="scored"):
+    judgment = copy.deepcopy(JUDGMENTS[kind]) if kind else None
+    if kind in {"wrong_fit", "fit_unproven"}:
+        judgment["intent_signals_detail"] = copy.deepcopy(VERIFIED)
+    if kind == "intent_unverified":
+        judgment["intent_signals_detail"][0]["judge_verdict"]["verification_trace"] = copy.deepcopy(
+            VERIFIED[0]["judge_verdict"]["verification_trace"])
     return {"company_index": index, "company": company, "label_status": status,
-            "judgment": copy.deepcopy(JUDGMENTS[kind]) if kind else None}
+            "judgment": judgment}
 
 
 def seal(document):
@@ -110,12 +120,16 @@ def test_non_verdict_rows_are_never_negatives():
 def test_input_is_what_the_agent_had_and_never_the_label():
     records = dataset.records_from_example(example(rows=[row(0, claim(), "qualified")]))
     record = records[0]
-    assert set(record["input"]) == {"icp", "icp_source", "evaluation_date", "company"}
+    assert set(record["input"]) == {"icp", "icp_source", "evaluation_date", "company", "source_evidence"}
     assert record["input"]["icp_source"] == "agent_visible_projection"
     rendered = json.dumps(record["input"])
     for leaked in ("generator-secret", "company_qualified", "verifier_gate_receipts", "judge_verdict", "label_status"):
         assert leaked not in rendered
     assert record["label"]["class"] == "qualified" and record["label"]["primary_intent_verified"] is True
+    assert record["input"]["source_evidence"] == [{
+        "url": "https://acme-robotics.com/careers", "text": "Acme Robotics is hiring a VP of Sales.",
+        "source_publication_date": "2026-10-10", "retrieved_at": None,
+        "provenance": "verified_source_context"}]
     snapshot = {"input": {"icp": {"industry": "Software", "output_schema_version": "v6"}}, "privacy": {"redacted": False}}
     with_snapshot = example(rows=[row(0, claim(), "qualified")])
     with_snapshot["input_snapshots"] = {with_snapshot["run_id"]: snapshot}
@@ -155,9 +169,8 @@ def test_unusable_examples_are_excluded_and_counted(changes, reason):
 
 
 def test_redaction_drops_only_records_whose_own_input_carries_it():
-    # A credential redaction in fetched pages or responses marks the whole
-    # run. A record trains only on its ICP and company claim, so only a
-    # redaction inside those fields removes it.
+    # A credential redaction elsewhere in a run does not exclude a clean row.
+    # A redaction in the selected page excerpt does exclude that row.
     in_url = claim("Beta Labs", "beta-labs.com", "beta-labs")
     in_url["intent_signals"][0]["url"] = "https://beta-labs.com/careers?token=%5BREDACTED%5D"
     in_text = claim("Gamma Inc", "gamma.com", "gamma")
@@ -173,6 +186,11 @@ def test_redaction_drops_only_records_whose_own_input_carries_it():
     in_icp = example("run-icp", [row(0, claim("Delta", "delta.com", "delta"), "qualified")],
                      icp={**ICP, "prompt": "Companies hiring [REDACTED] leaders."})
     splits, manifest = dataset.build([in_icp])
+    assert not any(splits.values()) and manifest["counts"]["records_privacy_filtered"] == 1
+    in_source = example("run-source", [row(0, claim(), "qualified")])
+    in_source["companies"][0]["judgment"]["intent_signals_detail"][0]["judge_verdict"]["verification_trace"][
+        "verified_source_context"][0]["text"] = "Acme [REDACTED]"
+    splits, manifest = dataset.build([seal(in_source)])
     assert not any(splits.values()) and manifest["counts"]["records_privacy_filtered"] == 1
 
 
@@ -213,6 +231,57 @@ def test_the_same_claim_on_another_date_is_a_separate_input():
     assert manifest["counts"]["duplicate_records_merged"] == 0
     # Both dates describe one company, so they still share a split.
     assert len({record["group_keys"]["company_cluster"] for name in ("train", "eval") for record in splits[name]}) == 1
+
+
+def test_missing_retained_page_text_keeps_label_in_analysis():
+    document = example(rows=[row(0, claim(), "qualified")])
+    document["companies"][0]["judgment"]["intent_signals_detail"][0]["judge_verdict"].pop("verification_trace")
+    splits, manifest = dataset.build([seal(document)])
+    assert not splits["train"] and not splits["eval"]
+    assert splits["analysis"][0]["label"]["class"] == "qualified"
+    assert splits["analysis"][0]["selection_exclusion"] == "missing_retained_source_evidence"
+    assert manifest["counts"]["trainable_records_missing_source_evidence"] == 1
+
+
+def test_verified_identity_aliases_keep_distinct_submitted_claims_together():
+    first = example("run-one", [row(0, claim("One", "one.example", "one"), "qualified")])
+    second = example("run-two", [row(0, claim("Two", "two.example", "two"), "qualified")])
+    for document in (first, second):
+        document["companies"][0]["judgment"]["company_identity_alias_keys"] = ["verified:shared.example"]
+        seal(document)
+    splits, _ = dataset.build([first, second], dataset.Rules(eval_percent=50))
+    records = splits["train"] + splits["eval"]
+    assert len(records) == 2
+    assert len({record["group_keys"]["company_cluster"] for record in records}) == 1
+    assert not (splits["train"] and splits["eval"])
+
+
+def test_same_example_id_with_two_valid_export_hashes_is_order_independent():
+    first = example(rows=[row(0, claim(), "qualified")])
+    second = copy.deepcopy(first)
+    second["companies"][0]["judgment"]["failure_reason"] = "same result with revised metadata"
+    seal(second)
+    assert first["example_id"] == second["example_id"] and first["example_hash"] != second["example_hash"]
+    assert dataset.build([first, second]) == dataset.build([second, first])
+
+
+def test_signal_cache_source_is_kept_per_signal():
+    document = example(rows=[row(0, claim(), "qualified")])
+    document["judgment"]["signal_authority_evidence"] = [{
+        "company_index": 0, "signal_index": 0,
+        "authority": {"source_score_run_id": "older-score-run"}}]
+    record = dataset.records_from_example(seal(document))[0]
+    assert record["label_provenance"]["judgment_source"] == "fresh"
+    assert record["label_provenance"]["signal_sources"] == [{
+        "signal_index": 0, "source_score_run_id": "older-score-run", "source": "cached"}]
+
+
+def test_mixed_scorer_policy_cohorts_fail_closed():
+    first = example("run-one", [row(0, claim(), "qualified")])
+    second = example("run-two", [row(0, claim("Beta", "beta.com", "beta"), "qualified")])
+    second["configuration"]["scorer_policy"]["policy_revision"] = "next"
+    with pytest.raises(ValueError, match="mixed_scorer_cohorts"):
+        dataset.build([first, seal(second)])
 
 
 def test_splits_never_share_a_company_cluster():

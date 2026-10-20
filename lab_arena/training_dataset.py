@@ -1,11 +1,11 @@
 """Company-qualification training records from Arena training exports.
 
 Each exported execution becomes one record per submitted company. The input
-is what the agent had: the ICP it received, the evaluation date and its own
-company claim. The label is the accepted judgment's verdict for that company.
+pairs the ICP and submitted claim with bounded, retained source-page excerpts.
+The label is the accepted judgment's verdict for that company.
 
 Labels come only from the stored judgment. A zero score alone is never a
-negative label, and judge-side evidence never enters the input. Identical
+negative label, and judge decisions never enter the input. Identical
 claims judged more than once count once; a claim judged both ways is left
 out. Train and evaluation splits never share a company cluster, so the
 evaluation set holds companies the model has not seen.
@@ -38,6 +38,8 @@ _INPUT_CONFLICTS = frozenset({
 _REDACTION_RE = re.compile(r"\[REDACTED\]|%5[Bb]REDACTED%5[Dd]")
 _CLAIM_CODES = ("company_linkedin_required_or_invalid", "us_headquarters_state_required_or_invalid",
                 "state_must_be_text")
+_MAX_SOURCE_CONTEXTS = 3
+_MAX_SOURCE_TEXT_CHARS = 1600
 TRAINING_PERMISSION = {
     "status": "unconfirmed",
     "reason": "Submission consent records public rerun only; confirm training use before training.",
@@ -220,11 +222,70 @@ def company_keys(company: Mapping[str, Any]) -> List[str]:
     return keys
 
 
+def _source_evidence(judgment: Any) -> List[Dict[str, Any]]:
+    """Project fetched page text from verified signal traces, never judge prose."""
+
+    if not isinstance(judgment, Mapping):
+        return []
+    candidates = []
+    for detail in judgment.get("intent_signals_detail") or ():
+        if not isinstance(detail, Mapping):
+            continue
+        verdict = detail.get("judge_verdict")
+        trace = verdict.get("verification_trace") if isinstance(verdict, Mapping) else None
+        contexts = trace.get("verified_source_context") if isinstance(trace, Mapping) else None
+        if not isinstance(contexts, list):
+            continue
+        for context in contexts:
+            if not isinstance(context, Mapping):
+                continue
+            url, source_text = context.get("url"), context.get("text")
+            if (not isinstance(url, str) or not url.startswith("https://")
+                    or len(url) > 2048 or not isinstance(source_text, str) or not source_text.strip()):
+                continue
+            candidates.append({
+                "url": url,
+                "text": source_text[:_MAX_SOURCE_TEXT_CHARS],
+                "source_publication_date": context.get("source_publication_date") or None
+                if isinstance(context.get("source_publication_date"), str) else None,
+                "retrieved_at": context.get("retrieved_at") or None
+                if isinstance(context.get("retrieved_at"), str) else None,
+                "provenance": "verified_source_context",
+            })
+    # A stable bound also makes reordered signal details produce the same input.
+    unique = {contracts.canonical_json(item): item for item in candidates}
+    return [unique[key] for key in sorted(unique)[:_MAX_SOURCE_CONTEXTS]]
+
+
+def _company_keys(company: Mapping[str, Any], judgment: Any) -> List[str]:
+    keys = company_keys(company)
+    if isinstance(judgment, Mapping):
+        for alias in judgment.get("company_identity_alias_keys") or ():
+            if isinstance(alias, str) and alias:
+                keys.append(alias)
+        identity = judgment.get("company_identity_key")
+        if isinstance(identity, str) and identity:
+            keys.append(identity)
+    return sorted(set(keys))
+
+
 def _provenance(example: Mapping[str, Any], index: int) -> Dict[str, Any]:
     judgment = example.get("judgment") or {}
     score_run = example.get("score_run_id")
+    signal_sources = []
+    for item in judgment.get("signal_authority_evidence") or ():
+        if not isinstance(item, Mapping) or item.get("company_index") != index:
+            continue
+        source = (item.get("authority") or {}).get("source_score_run_id")
+        if isinstance(source, str) and source:
+            signal_sources.append({"signal_index": item.get("signal_index"),
+                                   "source_score_run_id": source,
+                                   "source": "cached" if source != score_run else "fresh"})
+    signal_sources.sort(key=lambda item: (str(item["signal_index"]), item["source_score_run_id"]))
     if judgment.get("judgment_cache_source_run_id"):
-        return {"judgment_source": "run_cache", "source_score_run_id": judgment["judgment_cache_source_run_id"]}
+        result = {"judgment_source": "run_cache", "source_score_run_id": judgment["judgment_cache_source_run_id"]}
+        result["signal_sources"] = signal_sources
+        return result
     refs = {ref.get("company_index"): ref for ref in judgment.get("company_judgment_refs") or ()
             if isinstance(ref, Mapping)}
     evidence = {item.get("cache_key"): item for item in judgment.get("company_authority_evidence") or ()
@@ -232,8 +293,10 @@ def _provenance(example: Mapping[str, Any], index: int) -> Dict[str, Any]:
     ref = refs.get(index) or {}
     source = ((evidence.get(ref.get("cache_key")) or {}).get("evidence_doc") or {}).get("source_score_run_id")
     if source and source != score_run:
-        return {"judgment_source": "company_cache", "source_score_run_id": source}
-    return {"judgment_source": "fresh", "source_score_run_id": score_run}
+        return {"judgment_source": "company_cache", "source_score_run_id": source,
+                "signal_sources": signal_sources}
+    return {"judgment_source": "fresh", "source_score_run_id": score_run,
+            "signal_sources": signal_sources}
 
 
 def records_from_example(example: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -253,9 +316,11 @@ def records_from_example(example: Mapping[str, Any]) -> List[Dict[str, Any]]:
         index = row.get("company_index")
         label_class, sub_reason = classify(row)
         judgment = row.get("judgment")
+        source_evidence = _source_evidence(judgment)
         records.append({
             "schema_version": RECORD_SCHEMA_VERSION,
-            "record_id": _hash({"example_id": example.get("example_id"), "company_index": index}),
+            "record_id": _hash({"example_id": example.get("example_id"),
+                                "example_hash": example.get("example_hash"), "company_index": index}),
             "meta": {
                 "example_id": example.get("example_id"), "example_hash": example.get("example_hash"),
                 "run_id": example.get("run_id"), "score_run_id": example.get("score_run_id"),
@@ -267,11 +332,12 @@ def records_from_example(example: Mapping[str, Any]) -> List[Dict[str, Any]]:
                 "scorer_policy_hash": _hash(configuration.get("scorer_policy") or {}),
             },
             "input": {"icp": icp, "icp_source": icp_source,
-                      "evaluation_date": example.get("evaluation_date"), "company": company},
+                      "evaluation_date": example.get("evaluation_date"), "company": company,
+                      "source_evidence": source_evidence},
             "label": (_label(judgment, label_class, sub_reason) if isinstance(judgment, Mapping)
                       else {"class": label_class, "sub_reason": sub_reason}),
             "label_provenance": _provenance(example, index),
-            "group_keys": {"company_keys": company_keys(company), "icp_fingerprint": fingerprint,
+            "group_keys": {"company_keys": _company_keys(company, judgment), "icp_fingerprint": fingerprint,
                            "source_family": (example.get("source") or {}).get("normalized_sha256")
                            or (example.get("source") or {}).get("sha256")},
         })
@@ -317,12 +383,16 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
                     privacy_filtered += 1
                     continue
                 records.append(record)
+    cohorts = {(record["meta"]["scorer_policy_hash"], record["meta"]["scorer_image_digest"])
+               for record in records if record["label"]["class"] in TRAINABLE}
+    if len(cohorts) > 1:
+        raise ValueError("mixed_scorer_cohorts")
     # Identical ICP requirements, evaluation date and claim: replays, retries
     # and cached judgments count once. The date is part of the input because
     # intent recency depends on it. Only verdicts can conflict; a claim judged
     # both ways is left out. Non-verdict outcomes group by their own class.
     groups: Dict[str, List[dict]] = {}
-    for record in sorted(records, key=lambda item: item["record_id"]):
+    for record in sorted(records, key=lambda item: (item["record_id"], item["meta"]["example_hash"])):
         claim = _hash({"icp": record["group_keys"]["icp_fingerprint"],
                        "evaluation_date": record["input"]["evaluation_date"],
                        "company": record["input"]["company"]})
@@ -334,17 +404,21 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
         if len({item["label"]["class"] for item in group}) > 1:
             conflicts += 1
             continue
-        kept.append(group[0])
+        kept.append(min(group, key=lambda item: (item["record_id"], _hash(item))))
         duplicates += len(group) - 1
     clusters = _Clusters()
     for record in kept:
         clusters.union(record["group_keys"]["company_keys"] or [record["record_id"]])
     splits: Dict[str, List[dict]] = {"train": [], "eval": [], "analysis": []}
+    missing_source_evidence = 0
     for record in kept:
         handles = record["group_keys"]["company_keys"] or [record["record_id"]]
         cluster = clusters.find(handles[0])
         record["group_keys"]["company_cluster"] = cluster
-        if record["label"]["class"] not in TRAINABLE:
+        if record["label"]["class"] not in TRAINABLE or not record["input"]["source_evidence"]:
+            if record["label"]["class"] in TRAINABLE:
+                record["selection_exclusion"] = "missing_retained_source_evidence"
+                missing_source_evidence += 1
             splits["analysis"].append(record)
             continue
         bucket = int(hashlib.sha256((rules.seed + "\x00" + cluster).encode("utf-8")).hexdigest(), 16) % 100
@@ -363,10 +437,13 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
     manifest = {
         "schema_version": SCHEMA_VERSION, "record_schema_version": RECORD_SCHEMA_VERSION,
         "rules": asdict(rules), "training_permission": dict(TRAINING_PERMISSION),
-        "sources": sorted(sources, key=lambda item: str(item["example_id"])),
+        "sources": sorted(sources, key=lambda item: (str(item["example_id"]),
+                                                    str(item["example_hash"]),
+                                                    str(item["run_id"]), str(item["round_id"]))),
         "counts": {"examples_used": sum(source["used"] for source in sources),
                    "examples_excluded": exclusions, "records_by_split_and_label": counts,
                    "records_privacy_filtered": privacy_filtered,
+                   "trainable_records_missing_source_evidence": missing_source_evidence,
                    "duplicate_records_merged": duplicates, "conflicting_label_groups_excluded": conflicts},
         "record_hashes": {name: [_hash(record) for record in items] for name, items in splits.items()},
     }

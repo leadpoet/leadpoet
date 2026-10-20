@@ -60,6 +60,16 @@ class ClaimStore:
     def get_round(self, _round_id):
         return self.round_row
 
+    def recover_claim_response(self, *, round_id, runner_hotkey, request_id, request_hash):
+        if self.run is None:
+            return None
+        if (self.run["round_id"] != round_id
+            or self.run["runner_hotkey"] != runner_hotkey
+            or self.run["claim_request_id"] != request_id
+            or self.run["claim_request_hash"] != request_hash):
+            return None
+        return dict(self.run["claim_response"])
+
     def get_submission_credential(self, *_args):
         return None
 
@@ -271,6 +281,26 @@ def test_stale_recovery_no_work_is_idle_without_claim_denial(tmp_path):
         )
     finally:
         runner.close()
+
+
+@pytest.mark.parametrize("stale", (False, True))
+def test_stake_fall_lookup_still_checks_current_lease(stale):
+    from datetime import datetime, timezone
+    current = [datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)]
+    service, store = claim_service(lambda: current[0])
+    old = original_claim(current[0])
+    first = service.handle_claim(old)
+    assert first["status"] == "leased"
+    service._benchmark_validator_uid = lambda *_args: (_ for _ in ()).throw(
+        ServiceError("runner_stake_below_minimum", 403)
+    )
+    current[0] += timedelta(seconds=301)
+    if stale:
+        store.run["status"] = "accepted"
+    result = service.handle_claim(recovery_claim(old, current[0]))
+    assert result["status"] == ("no_work" if stale else "leased")
+    assert result["claim_recovery"] == "resolved"
+    assert store.allocations == 1
 
 
 def test_late_original_rpc_and_fresh_recovery_use_one_claim_identity():

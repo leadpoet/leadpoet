@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from arena_reviewer_runtime import checkpoint_io
-from lab_arena import scoring
+from lab_arena import contracts, scoring
 from scripts.arena_reviewer_checkpoint_seam import (
     CheckpointSeamError, _DELEGATING_MAIN, _ORIGINAL_MAIN,
     convert_checkpoint_seam,
@@ -83,6 +83,60 @@ def test_interrupted_partial_checkpoint_is_available_to_explicit_continuation(tm
         score_input=continuation, scoring=scoring, quality_policy=policy,
     ) == 0
     assert json.loads(output.read_text()) == final
+
+
+@pytest.mark.parametrize("quality", [False, True])
+def test_evidence_quote_controls_are_normalized_in_checkpoints_and_final_output(
+    tmp_path, monkeypatch, quality,
+):
+    _, output = _paths(tmp_path, monkeypatch)
+    quote = "Café 東京 — quoted ‘evidence’\nnext\tline\r\nwith\x03control"
+    safe_quote = quote.replace("\x03", " ")
+    receipt = {"dimension_evidence": {"industry": {"web_evidence": {"quote": quote}}},
+               "supporting_receipts": [{"claims": {"industry": {
+                   "evidence_quote": quote,
+                   "supporting_evidence": [{"quote": quote}],
+               }}}]}
+    rows = [{"company_qualified": True, "duplicate_company": False,
+             "company_identity_key": "domain:example.com", "final_score": 40.0,
+             "verifier_gate_receipts": [receipt]}]
+    callback_name = "on_company_judgments" if quality else "on_terminal_breakdowns"
+
+    def frozen_scorer(_document, **callbacks):
+        callbacks[callback_name](rows)
+        checkpoint = json.loads(output.read_text())
+        contracts.check_strict_document(checkpoint, contracts.PUBLICATION_LIMITS)
+        return scoring.build_scoring_output("original-run", rows)
+
+    checkpoint_io.run_scorer(
+        score_input=frozen_scorer, scoring=scoring,
+        quality_policy=SimpleNamespace(scorer_enabled=lambda _: quality),
+    )
+    saved = json.loads(output.read_text())
+    contracts.check_strict_document(saved, contracts.PUBLICATION_LIMITS)
+    actual = saved["breakdowns"][0]
+    assert actual["company_qualified"] is True and actual["final_score"] == 40.0
+    assert actual["company_identity_key"] == "domain:example.com"
+    assert actual["verifier_gate_receipts"][0]["dimension_evidence"]["industry"]["web_evidence"]["quote"] == safe_quote
+    assert rows[0]["verifier_gate_receipts"][0]["dimension_evidence"]["industry"]["web_evidence"]["quote"] == quote
+
+
+@pytest.mark.parametrize("field", ["url", "evidence_url", "company_identity_key", "decision", "reason", "detail"])
+def test_protected_values_and_keys_still_fail_strict_document_checks(field):
+    raw = {field: "unchanged\x03value", "bad\x03key": "ordinary"}
+    normalized = checkpoint_io.normalize_evidence_quotes(raw)
+    assert normalized == raw
+    with pytest.raises(contracts.ArenaContractError):
+        contracts.check_strict_document(normalized, contracts.PUBLICATION_LIMITS)
+
+
+def test_all_forbidden_quote_controls_are_replaced_but_legal_text_is_exact():
+    forbidden = "".join(chr(code) for code in (*range(9), 11, 12, *range(14, 32), 127))
+    legal = "Unicode café 東京 — ‘quote’\t\n\r"
+    assert checkpoint_io.normalize_evidence_quotes({"quote": legal}) == {"quote": legal}
+    normalized = checkpoint_io.normalize_evidence_quotes({"industry_evidence_quote": forbidden})
+    assert normalized == {"industry_evidence_quote": " " * len(forbidden)}
+    contracts.check_strict_document(normalized, contracts.PUBLICATION_LIMITS)
 
 
 @pytest.mark.parametrize("failure_stage", ["write", "replace"])

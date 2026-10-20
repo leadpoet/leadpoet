@@ -1029,3 +1029,22 @@ def test_successful_call_unknown_fee_keeps_successful_sourcing_decision_unavaila
     assert decision["status"] == "unavailable"
     assert decision["reason"] == "provider_cost_uncertain"
     assert "eligible" not in decision
+
+
+def test_evidence_reader_defines_every_service_helper_its_borrowed_methods_call():
+    # The exporter borrows ArenaService's judgment readers without building a
+    # service. A helper those readers start calling must be borrowed too, or
+    # every export silently loses its company judgments.
+    import inspect
+    import re
+
+    from lab_arena import training_export
+    from lab_arena.service import ArenaService
+
+    reader = training_export._evidence_reader(object(), object())
+    borrowed = [name for name, value in vars(type(reader)).items()
+                if callable(value) and getattr(ArenaService, name, None) is value]
+    assert borrowed
+    called = {name for method in borrowed
+              for name in re.findall(r"self\.(_\w+)\(", inspect.getsource(getattr(ArenaService, method)))}
+    assert sorted(name for name in called if not hasattr(reader, name)) == []

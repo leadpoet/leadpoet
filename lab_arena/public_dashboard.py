@@ -742,7 +742,8 @@ _EVALUATION_COLUMNS = (
     "lease_generation,lease_expires_at,scoring_generation_floor,"
     "source_commit:result_doc->resource_summary->>validator_source_commit,"
     "source_dirty:result_doc->resource_summary->>validator_source_dirty,"
-    "failure_reason:result_doc->failure_diagnostic->>reason"
+    "failure_reason:result_doc->failure_diagnostic->>reason,"
+    "closure_failure_reason:terminal_doc->>failure_reason"
 )
 
 _EVALUATION_FAILURE_REASONS = {
@@ -763,6 +764,8 @@ def _evaluation_failure_reason(run: Mapping[str, Any]) -> str:
     if not isinstance(cause, str):
         return "unknown"
     if cause == "stage_closed" and run.get("kind") == "score":
+        if run.get("closure_failure_reason") == "provider_credit_exhausted":
+            return "provider_credit_exhausted"
         return "scoring_window"
     if (
         cause == "credential_error"

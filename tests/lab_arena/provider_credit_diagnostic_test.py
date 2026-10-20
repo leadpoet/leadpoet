@@ -346,3 +346,25 @@ def test_unclaimed_stage_closed_kind_keeps_completed_execution_and_scores(kind, 
     assert result["failure_reasons"] == [expected]
     assert result["counts"]["completed"] == result["counts"]["failed"] == 1
     assert result["validators"] == []
+
+
+@pytest.mark.parametrize('kind,cause,closure_reason,expected',[
+    ('score','stage_closed','provider_credit_exhausted','provider_credit_exhausted'),
+    ('score','stage_closed',None,'scoring_window'),
+    ('score','stage_closed','provider_authentication_failed','scoring_window'),
+    ('score','stage_closed','private-detail','scoring_window'),
+    ('execute','stage_closed','provider_credit_exhausted','execution_window'),
+    ('score','credential_error','provider_credit_exhausted','provider_credentials'),
+    ('score','judge_error','provider_credit_exhausted','review'),
+])
+def test_public_projection_uses_only_fixed_proven_credit_closure_reason(kind,cause,closure_reason,expected):
+    failed=run(kind=kind,status='failed',terminal_cause=cause,closure_failure_reason=closure_reason)
+    result=public_dashboard.evaluation_progress([failed],NOW)
+    assert result['failure_reasons']==[expected]
+    assert result['counts']['failed']==1 and result['counts']['completed']==0
+    assert 'private-detail' not in json.dumps(result)
+
+
+def test_proven_closure_projection_preserves_invalid_key_diagnostic():
+    failed=run(status='failed',terminal_cause='credential_error',failure_reason='provider_authentication_failed')
+    assert public_dashboard.evaluation_progress([failed],NOW)['failure_reasons']==['provider_authentication_failed']

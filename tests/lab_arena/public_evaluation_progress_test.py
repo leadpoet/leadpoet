@@ -199,7 +199,10 @@ def test_compact_runtime_projection_has_matching_postgrest_and_bound_sql():
     ArenaStore(transport).list_runs('round', columns=public_dashboard._EVALUATION_COLUMNS, submission_ids=['miner'])
     ArenaStore(transport).list_runtime_starts('round', run_ids=['run:1'])
     assert "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit" in queries[0][0]
-    assert 'terminal_cause' in queries[0][0] and 'terminal_doc' not in queries[0][0]
+    assert 'terminal_cause' in queries[0][0]
+    assert "terminal_doc ->> 'failure_reason' AS closure_failure_reason" in queries[0][0]
+    assert "result_doc #>> '{failure_diagnostic,reason}' AS failure_reason" in queries[0][0]
+    assert ', terminal_doc,' not in queries[0][0]
     assert "content ->> 'lease_generation' AS start_lease_generation" in queries[1][0]
     assert 'submission_id = ANY(%s)' in queries[0][0]
     assert queries[0][1] == ['round', ['miner']]

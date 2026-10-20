@@ -19,7 +19,6 @@ from lab_arena import company_judgments, contracts, contact_policy, integrity, r
 from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
-HIDDEN_KEYS = frozenset({"reasoning_content", "hidden_reasoning", "encrypted_content", "reasoning_details"})
 MAX_RECEIPT_BYTES = 16 * 1024 * 1024
 # An example joins independently bounded inputs, requests and receipts. Its
 # final privacy pass needs a separate finite budget from a single request.
@@ -39,23 +38,33 @@ def _json_object(objects: Any, ref: str, limit: int) -> dict:
 
 
 def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
-    """Copy a JSON value, removing hidden-reasoning fields at every depth."""
+    """Copy a JSON value, omitting opaque reasoning while keeping readable text."""
+    from lab_arena.training_capture import empty_value, opaque_reasoning_field, readable_reasoning_item, reasoning_kind
     removed = False
 
-    def walk(item):
+    def walk(item, name=None):
         nonlocal removed
         if isinstance(item, dict):
             result = {}
+            kind = reasoning_kind(item)
             for key, child in item.items():
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
-                if normalized in HIDDEN_KEYS or normalized == "reasoning" and not safe_config or item.get("type") == "reasoning" and normalized in {"content", "summary", "text"}:
-                    removed = True
+                if opaque_reasoning_field(normalized, child, kind, safe_config):
+                    removed = removed or not empty_value(child)
                 else:
-                    result[key] = walk(child)
+                    result[key] = walk(child, normalized)
             return result
         if isinstance(item, list):
-            return [walk(child) for child in item]
+            kept = []
+            for child in item:
+                opaque = (not readable_reasoning_item(child) if name == "reasoning_details"
+                          else isinstance(child, dict) and reasoning_kind(child) == "opaque")
+                if opaque:
+                    removed = removed or not empty_value(child)
+                else:
+                    kept.append(walk(child))
+            return kept
         return item
 
     return walk(value), removed

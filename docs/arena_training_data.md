@@ -152,8 +152,14 @@ execution or score rules.
 
 The full payload limit is explicit. Oversized or unavailable evidence is rejected
 as a training source; it is never silently clipped and called complete. Credentials
-and hidden provider reasoning are excluded. Privacy filtering and exact replay
-are separate properties from label validity.
+and opaque provider reasoning (encrypted state, signatures, and redacted thinking)
+are excluded. Readable reasoning already returned by a provider is kept in
+the private response evidence and export. This includes chat `message.reasoning`,
+readable `reasoning_details` entries, and typed response summaries or text.
+Ledger responses are read again at export, so historical receipts can also yield
+readable text. Earlier stored worker observations that were already redacted
+remain redacted. This change does not ask providers for additional reasoning.
+Privacy filtering and exact replay are separate properties from label validity.
 
 ## Remaining boundaries
 
@@ -167,7 +173,9 @@ are separate properties from label validity.
   mismatch. Use a broker-only subset for a first complete call-trajectory experiment.
 - Hidden provider chain of thought is not a collection target. Unlogged internal
   variables or private provider search steps are not recoverable. Explicit model
-  messages and returned tool outputs are the available training state.
+  messages, returned tool outputs, and provider-returned readable reasoning are
+  the available training state. Some providers return summaries; some open-weight
+  models return full reasoning text.
 - Optional model-reported decision files and stdout/stderr remain diagnostic,
   bounded and potentially incomplete. They are not authoritative demonstrations.
 - A matching hash proves linkage and integrity, not factual truth or a good label.

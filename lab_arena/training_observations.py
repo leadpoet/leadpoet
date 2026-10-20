@@ -86,22 +86,6 @@ def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> 
             except ValueError:
                 body = text
             cleaned, body_changes = training_capture.sanitize_training_value(body, secrets)
-            # Typed provider reasoning summaries/text are hidden content too.
-            def hide_typed(value):
-                changed = False
-                if isinstance(value, dict):
-                    for key, child in value.items():
-                        if value.get("type") == "reasoning" and key.lower() in {"content", "summary", "text"}:
-                            value[key] = "[REDACTED]"
-                            changed = True
-                        else:
-                            changed = hide_typed(child) or changed
-                elif isinstance(value, list):
-                    for child in value:
-                        changed = hide_typed(child) or changed
-                return changed
-            if hide_typed(cleaned):
-                body_changes = sorted(set(body_changes) | {"hidden_reasoning"})
             headers, changes = training_capture.sanitize_training_value(response["headers"], secrets)
             changes = set(changes) | set(body_changes)
             # Preserve literal response bytes when privacy did not change them.

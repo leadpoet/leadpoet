@@ -143,14 +143,48 @@ def test_private_nul_preservation_does_not_weaken_real_credential_redaction():
         assert private not in cleaned["content"]
 
 
-def test_hidden_reasoning_items_are_redacted_but_model_visible_summary_remains():
+def test_provider_returned_reasoning_text_and_summary_are_kept():
     cleaned, reasons = capture.sanitize_training_value({"input": [{
-        "type": "reasoning", "content": [{"type": "reasoning_text", "text": "hidden"}],
+        "type": "reasoning", "content": [{"type": "reasoning_text", "text": "visible text"}],
         "summary": [{"type": "summary_text", "text": "visible summary"}],
         "encrypted_content": "encrypted-secret",
     }]})
-    assert cleaned["input"][0]["content"] == "[REDACTED]"
+    assert cleaned["input"][0]["content"][0]["text"] == "visible text"
     assert cleaned["input"][0]["summary"][0]["text"] == "visible summary"
+    assert cleaned["input"][0]["encrypted_content"] == "[REDACTED]"
+    assert reasons == ["hidden_reasoning"]
+
+
+def test_chat_reasoning_details_keep_text_and_redact_opaque_items():
+    cleaned, reasons = capture.sanitize_training_value({"message": {
+        "reasoning": "visible", "reasoning_details": [
+            {"type": "reasoning.summary", "summary": "visible", "index": 0},
+            {"type": "reasoning.text", "text": "also visible", "signature": "sig-secret"},
+            {"type": "reasoning.text", "signature": "gemini-secret", "format": "google"},
+            {"type": "reasoning.encrypted", "data": "sealed-secret"},
+        ]}})
+    assert "secret" not in json.dumps(cleaned)
+    assert cleaned["message"]["reasoning"] == "visible"
+    assert cleaned["message"]["reasoning_details"] == [
+        {"type": "reasoning.summary", "summary": "visible", "index": 0},
+        {"type": "reasoning.text", "text": "also visible", "signature": "[REDACTED]"},
+        "[REDACTED]", "[REDACTED]"]
+    assert reasons == ["hidden_reasoning"]
+    # Stored placeholders remain valid when the same artifact is read later.
+    assert capture.sanitize_training_value(cleaned) == (cleaned, ["hidden_reasoning"])
+
+
+def test_reasoning_items_do_not_expose_unrecognized_or_nontext_payloads():
+    cleaned, reasons = capture.sanitize_training_value({"output": [{
+        "type": "reasoning", "summary": [{"type": "summary_text", "text": "visible",
+                                           "vendor_state": "sealed nested state"}],
+        "content": [{"type": "encrypted_part", "data": "sealed content"}],
+        "vendor_state": "sealed vendor state",
+    }]})
+    item = cleaned["output"][0]
+    assert item["summary"][0]["text"] == "visible"
+    assert item["summary"][0]["vendor_state"] == "[REDACTED]"
+    assert item["content"] == item["vendor_state"] == "[REDACTED]"
     assert reasons == ["hidden_reasoning"]
 
 

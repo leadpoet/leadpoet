@@ -1381,7 +1381,12 @@ async def verify_company_exists(
         return _identity_result(
             submitted_identity,
             str(e),
-            failure_reason_code="provider_error",
+            failure_reason_code=(
+                "source_blocked"
+                if e.broker_status == 403
+                and e.broker_error_code == "provider_request_refused"
+                else "provider_error"
+            ),
         )
     except aiohttp.ClientError as e:
         return _identity_result(

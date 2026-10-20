@@ -1,8 +1,7 @@
-"""The frozen grader overlay changes only the two reviewed fetch helpers."""
+"""The frozen grader overlay changes only reviewed page-refusal blocks."""
 
 import ast
 import copy
-import hashlib
 import json
 from pathlib import Path
 
@@ -23,6 +22,7 @@ def _sources():
     for old, new in (
         (seam._VERIFIER_CLASS_OLD, seam._VERIFIER_CLASS_NEW),
         (seam._VERIFIER_FETCH_OLD, seam._VERIFIER_FETCH_NEW),
+        (seam._VERIFIER_CATCH_OLD, seam._VERIFIER_CATCH_NEW),
     ):
         assert old_verifier.count(new.encode()) == 1
         old_verifier = old_verifier.replace(new.encode(), old.encode(), 1)
@@ -37,16 +37,16 @@ def _sources():
 
 def test_exact_helper_bytes_only_and_idempotent():
     (old_v, new_v), (old_i, new_i) = _sources()
-    assert hashlib.sha256(old_v).hexdigest() == (
-        "586a25dfde18b83ed9c6b208450fc02541a5fb212b7042a7905568af1ea750af"
-    )
+    # The current source may change outside these reviewed helper blocks.
+    # Exact frozen-image source is checked separately during image composition.
     assert seam.convert_verification_seam(old_v) == new_v
     assert seam.convert_verification_seam(new_v) == new_v
     assert seam.convert_investigator_seam(old_i) == new_i
     assert seam.convert_investigator_seam(new_i) == new_i
     for before, after, deltas in (
         (old_v, new_v, ((seam._VERIFIER_CLASS_OLD, seam._VERIFIER_CLASS_NEW),
-                        (seam._VERIFIER_FETCH_OLD, seam._VERIFIER_FETCH_NEW))),
+                        (seam._VERIFIER_FETCH_OLD, seam._VERIFIER_FETCH_NEW),
+                        (seam._VERIFIER_CATCH_OLD, seam._VERIFIER_CATCH_NEW))),
         (old_i, new_i, ((seam._INVESTIGATOR_PREFIX_OLD, seam._INVESTIGATOR_PREFIX_NEW),
                         (seam._INVESTIGATOR_CATCH_OLD, seam._INVESTIGATOR_CATCH_NEW))),
     ):
@@ -91,6 +91,25 @@ def test_matching_text_moved_to_another_function_fails_closed():
     assert original.count(old) == 1
     moved = original.replace(old, b"        pass\n", 1)
     moved += b"\nasync def _unrelated_fetch(resp):\n" + old
+    with pytest.raises(seam.TypedRefusalSeamError, match="outside helper"):
+        seam.convert_verification_seam(moved)
+
+
+def test_homepage_catch_must_match_frozen_helper_and_full_correction():
+    (original, corrected), _ = _sources()
+    old_catch = seam._VERIFIER_CATCH_OLD.encode()
+    new_catch = seam._VERIFIER_CATCH_NEW.encode()
+    assert original.count(old_catch) == corrected.count(new_catch) == 1
+    with pytest.raises(seam.TypedRefusalSeamError, match="partial"):
+        seam.convert_verification_seam(original.replace(old_catch, new_catch, 1))
+    with pytest.raises(seam.TypedRefusalSeamError, match="unrecognized"):
+        seam.convert_verification_seam(original.replace(
+            old_catch, old_catch.replace(b'"provider_error"', b'"other_error"'), 1,
+        ))
+    moved = original.replace(
+        old_catch, b"    except _ArenaProviderFetchError:\n        raise\n", 1,
+    )
+    moved += b"\nasync def _foreign_helper():\n    try:\n        pass\n" + old_catch
     with pytest.raises(seam.TypedRefusalSeamError, match="outside helper"):
         seam.convert_verification_seam(moved)
 

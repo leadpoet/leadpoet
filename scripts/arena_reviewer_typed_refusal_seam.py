@@ -96,6 +96,25 @@ _VERIFIER_FETCH_NEW = '''        if (
                 broker_error_code=broker_error_code,
             )
 '''
+_VERIFIER_CATCH_OLD = '''    except _ArenaProviderFetchError as e:
+        return _identity_result(
+            submitted_identity,
+            str(e),
+            failure_reason_code="provider_error",
+        )
+'''
+_VERIFIER_CATCH_NEW = '''    except _ArenaProviderFetchError as e:
+        return _identity_result(
+            submitted_identity,
+            str(e),
+            failure_reason_code=(
+                "source_blocked"
+                if e.broker_status == 403
+                and e.broker_error_code == "provider_request_refused"
+                else "provider_error"
+            ),
+        )
+'''
 _INVESTIGATOR_PREFIX_OLD = '''    safe_url = _safe_https_url(url)
     if not safe_url:
         return {"ok": False, "error": "invalid_url"}
@@ -166,6 +185,7 @@ def convert_verification_seam(source: bytes) -> bytes:
     return _convert(source, deltas=(
         ("_ArenaProviderFetchError", _VERIFIER_CLASS_OLD, _VERIFIER_CLASS_NEW),
         ("_fetch_bounded_html", _VERIFIER_FETCH_OLD, _VERIFIER_FETCH_NEW),
+        ("verify_company_exists", _VERIFIER_CATCH_OLD, _VERIFIER_CATCH_NEW),
     ))
 
 

@@ -158,7 +158,9 @@ def _verdict():
 
 
 @pytest.mark.parametrize("semantic", [False, True])
-@pytest.mark.parametrize("homepage_fault", [None, "provider_error", "malformed_response"])
+@pytest.mark.parametrize("homepage_fault", [
+    None, "provider_error", "malformed_response", "source_blocked",
+])
 @pytest.mark.parametrize("investigation_fault", ["", "provider_error", "malformed_response", "unbound_fault", "incomplete"])
 @pytest.mark.parametrize("preserve_marker", [True, False])
 def test_negative_completion_through_fit_and_arena(
@@ -229,13 +231,18 @@ def test_negative_completion_through_fit_and_arena(
             {"scored_run_id": "test"}, icp={"employee_count": ["51-200"], "max_companies": 1},
             companies=[{"company_name": company.company_name, "employee_count": "51-200"}], scorer=judge,
         )
-    if retryable:
+    source_local_exhaustion = (
+        homepage_fault == "source_blocked"
+        and not preserve_marker
+        and not investigation_fault
+    )
+    if retryable and not source_local_exhaustion:
         with pytest.raises(scoring.ScoringError):
             run()
         assert len(calls) == 3
     else:
         assert run()[0]["final_score"] == 0.0
-        assert len(calls) == 1
+        assert len(calls) == (3 if source_local_exhaustion else 1)
 
 
 def test_model_fields_cannot_inject_internal_settlement_proof():

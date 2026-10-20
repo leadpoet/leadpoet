@@ -62,11 +62,16 @@ def row(index, company, kind=None, status="scored"):
             "judgment": copy.deepcopy(JUDGMENTS[kind]) if kind else None}
 
 
+def seal(document):
+    """Hash an example the way the exporter does, after a test edits it."""
+    document["example_hash"] = dataset._hash({key: value for key, value in document.items() if key != "example_hash"})
+    return document
+
+
 def example(run="arena-2026-10-18:sub-1:1:0:1", rows=(), *, round_id="arena-2026-10-18", **changes):
     document = {
         "schema_version": dataset.EXAMPLE_SCHEMA_VERSION,
         "example_id": "sha256:" + hashlib.sha256(run.encode()).hexdigest(),
-        "example_hash": "sha256:" + hashlib.sha256(("hash" + run).encode()).hexdigest(),
         "run_id": run, "score_run_id": run + ":score:1", "round_id": round_id, "round_status": "published",
         "submission_id": "sub-1", "role": "miner", "stage": 1, "icp_position": 0,
         "evaluation_date": "2026-10-18",
@@ -80,7 +85,7 @@ def example(run="arena-2026-10-18:sub-1:1:0:1", rows=(), *, round_id="arena-2026
                          "dimensions": {"context": True, "input_output_label": True, "exact_inputs": True}},
     }
     document.update(changes)
-    return document
+    return seal(document)
 
 
 @pytest.mark.parametrize("kind,label,sub_reason", [
@@ -121,7 +126,7 @@ def test_input_is_what_the_agent_had_and_never_the_label():
 def test_unjudged_execution_keeps_its_companies_for_analysis_only():
     document = example(rows=[row(0, claim(), "qualified")])
     document["companies"] = []
-    splits, manifest = dataset.build([document])
+    splits, manifest = dataset.build([seal(document)])
     assert [record["label"]["class"] for record in splits["analysis"]] == ["unjudged"]
     assert splits["train"] == splits["eval"] == []
 
@@ -150,6 +155,16 @@ def test_unusable_examples_are_excluded_and_counted(changes, reason):
     assert dataset.example_exclusion(example(rows=[row(0, claim(), "qualified")]), cohort) == "outside_scorer_cohort"
 
 
+def test_an_edited_example_no_longer_matches_its_hash():
+    document = example(rows=[row(0, claim(), "wrong_fit")])
+    document["companies"][0]["judgment"] = copy.deepcopy(JUDGMENTS["qualified"])
+    assert dataset.example_exclusion(document, dataset.Rules()) == "example_hash_mismatch"
+    splits, manifest = dataset.build([document])
+    assert not any(splits.values())
+    assert manifest["counts"]["examples_excluded"] == {"example_hash_mismatch": 1}
+    assert dataset.example_exclusion(seal(document), dataset.Rules()) is None
+
+
 def test_repeated_claims_count_once_and_conflicting_verdicts_are_left_out():
     same = [example("run-a", [row(0, claim(), "qualified")]), example("run-b", [row(0, claim(), "qualified")])]
     splits, manifest = dataset.build(same)
@@ -163,6 +178,20 @@ def test_repeated_claims_count_once_and_conflicting_verdicts_are_left_out():
              example("run-b", [row(0, claim(), status="outside_evaluated_slice")])]
     splits, _ = dataset.build(mixed)
     assert len(splits["train"] + splits["eval"]) == 1 and len(splits["analysis"]) == 1
+
+
+def test_the_same_claim_on_another_date_is_a_separate_input():
+    # Intent recency depends on the date, so a later verdict is not a conflict.
+    dated = [example("run-a", [row(0, claim(), "qualified")]),
+             example("run-b", [row(0, claim(), "intent_unverified")], round_id="arena-2026-10-19",
+                     evaluation_date="2026-10-19")]
+    splits, manifest = dataset.build(dated)
+    labels = sorted(record["label"]["class"] for name in ("train", "eval") for record in splits[name])
+    assert labels == ["insufficient_evidence", "qualified"]
+    assert manifest["counts"]["conflicting_label_groups_excluded"] == 0
+    assert manifest["counts"]["duplicate_records_merged"] == 0
+    # Both dates describe one company, so they still share a split.
+    assert len({record["group_keys"]["company_cluster"] for name in ("train", "eval") for record in splits[name]}) == 1
 
 
 def test_splits_never_share_a_company_cluster():
@@ -216,7 +245,8 @@ def test_real_exporter_output_produces_checked_labels():
     assert dataset.example_exclusion(exported, dataset.Rules()) == "input_conflict"
     consistent = copy.deepcopy(exported)
     consistent["completeness"]["incomplete_reasons"].remove("judge_input_context_mismatch")
-    assert dataset.example_exclusion(consistent, dataset.Rules()) is None
+    assert dataset.example_exclusion(consistent, dataset.Rules()) == "example_hash_mismatch"
+    assert dataset.example_exclusion(seal(consistent), dataset.Rules()) is None
 
 
 def test_cli_writes_a_new_private_dataset(tmp_path, capsys):
@@ -235,4 +265,26 @@ def test_cli_writes_a_new_private_dataset(tmp_path, capsys):
         assert stat.S_IMODE((output / name).stat().st_mode) == 0o600
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["dataset_version"] == summary["dataset_version"]
+    # An existing dataset is never replaced or removed.
     assert cli.main(["--examples", str(source), "--output", str(output)]) == 1
+    assert json.loads((output / "manifest.json").read_text()) == manifest
+
+
+def test_cli_removes_its_partial_output_after_a_failed_write(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "exports"
+    source.mkdir()
+    (source / "example.json").write_text(json.dumps(example(rows=[row(0, claim(), "qualified")])))
+    output = tmp_path / "dataset"
+    write = cli._write_private
+
+    def fail_on_manifest(path, text):
+        if path.name == "manifest.json":
+            raise OSError("disk full")
+        write(path, text)
+
+    monkeypatch.setattr(cli, "_write_private", fail_on_manifest)
+    assert cli.main(["--examples", str(source), "--output", str(output)]) == 1
+    assert capsys.readouterr().err.strip() == "Arena training dataset failed: OSError"
+    assert not output.exists()
+    monkeypatch.setattr(cli, "_write_private", write)
+    assert cli.main(["--examples", str(source), "--output", str(output)]) == 0

@@ -15,6 +15,7 @@ Exit 0 when at least one trainable record was written, 2 when none was, and
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -60,7 +61,7 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--examples", type=Path, nargs="+", required=True,
-                        help="exported example files or directories of them")
+                        help="exported example files, or directories whose top-level *.json files are exports")
     parser.add_argument("--output", type=Path, required=True, help="new directory for the dataset")
     parser.add_argument("--eval-percent", type=int, default=training_dataset.Rules.eval_percent)
     parser.add_argument("--seed", default=training_dataset.Rules.seed)
@@ -76,14 +77,22 @@ def main(argv=None):
         )
     except ValueError as exc:
         parser.error(str(exc))
+    created = False
     try:
         splits, manifest = training_dataset.build(_examples(args.examples), rules)
         args.output.mkdir(mode=0o700)
+        created = True
         for name, records in splits.items():
             _write_private(args.output / (name + ".jsonl"),
                            "".join(canonical_json(record) + "\n" for record in records))
         _write_private(args.output / "manifest.json", canonical_json(manifest) + "\n")
     except Exception as exc:
+        if created:
+            # Remove only what this run wrote, so a retry can use the path.
+            with contextlib.suppress(OSError):
+                for name in ("train.jsonl", "eval.jsonl", "analysis.jsonl", "manifest.json"):
+                    (args.output / name).unlink(missing_ok=True)
+                args.output.rmdir()
         # Inputs hold private evidence; report the failure class only.
         print("Arena training dataset failed: " + type(exc).__name__, file=sys.stderr)
         return 1

@@ -292,9 +292,12 @@ negative.
 
 By default the step uses only published daily production rounds, integrity
 scorer adapters, and examples whose context and labels verified with known
-scorer identity, no input conflict and no credential redaction. Identical
-claims for the same ICP requirements count once. A claim judged both ways is
-left out. Train and eval never share a company cluster (domain, name and
+scorer identity, no input conflict and no credential redaction. An example
+whose content no longer matches its exported hash is excluded. Identical
+claims for the same ICP requirements and evaluation date count once; another
+date is a separate input because intent recency depends on it. A claim judged
+both ways on the same date is left out. A failed run removes the partial
+output directory it created. Train and eval never share a company cluster (domain, name and
 LinkedIn handles merged), so evaluation companies are unseen. The manifest
 records the rules, every source example and why any was excluded, counts by
 split and label, and a deterministic dataset version.

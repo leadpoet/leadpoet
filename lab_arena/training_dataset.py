@@ -67,6 +67,9 @@ def example_exclusion(example: Mapping[str, Any], rules: Rules) -> Optional[str]
 
     if example.get("schema_version") != EXAMPLE_SCHEMA_VERSION:
         return "example_schema_unsupported"
+    # The exporter hashes every other field; an edited file no longer matches.
+    if example.get("example_hash") != _hash({key: value for key, value in example.items() if key != "example_hash"}):
+        return "example_hash_mismatch"
     configuration = example.get("configuration") or {}
     if rules.production_rounds_only and (
         not _PRODUCTION_ROUND_RE.fullmatch(str(example.get("round_id") or ""))
@@ -307,12 +310,15 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
                         "used": reason is None, "exclusion": reason})
         if reason is None:
             records.extend(records_from_example(example))
-    # Identical ICP requirements and claim: replays, retries and cached
-    # judgments count once. Only verdicts can conflict; a claim judged both
-    # ways is left out. Non-verdict outcomes group by their own class.
+    # Identical ICP requirements, evaluation date and claim: replays, retries
+    # and cached judgments count once. The date is part of the input because
+    # intent recency depends on it. Only verdicts can conflict; a claim judged
+    # both ways is left out. Non-verdict outcomes group by their own class.
     groups: Dict[str, List[dict]] = {}
     for record in sorted(records, key=lambda item: item["record_id"]):
-        claim = _hash({"icp": record["group_keys"]["icp_fingerprint"], "company": record["input"]["company"]})
+        claim = _hash({"icp": record["group_keys"]["icp_fingerprint"],
+                       "evaluation_date": record["input"]["evaluation_date"],
+                       "company": record["input"]["company"]})
         record["group_keys"]["claim_key"] = claim
         label = record["label"]["class"]
         groups.setdefault(claim + "|" + ("verdict" if label in TRAINABLE else label), []).append(record)

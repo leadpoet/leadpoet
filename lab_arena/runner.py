@@ -4842,17 +4842,38 @@ class Runner:
             )
             self._pending_claims[round_id] = envelope
         retry_delays = iter(tuple(config.claim_retry_seconds))
+        recovery_envelope = None
         while True:
-            if abs(int(config.clock().timestamp()) - envelope["timestamp"]) > contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS:
-                # Re-signing changes the request hash and lease token. An old
-                # ambiguous allocation must stay blocked, not become a new ID.
-                self._report_claim_status("request_failed", round_id)
-                raise RunnerError("pending claim timestamp expired; allocation remains unresolved")
+            now = int(config.clock().timestamp())
+            recovering = abs(now - envelope["timestamp"]) > contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS
+            request = envelope
+            if recovering:
+                # The fresh signature authorizes resolution. The original
+                # signed envelope remains the only allocator identity and token.
+                if (recovery_envelope is None or abs(now - recovery_envelope["timestamp"])
+                    > contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS):
+                    recovery_envelope = contracts.build_signed_request(
+                        scope=contracts.SCOPE_CLAIM, round_id=round_id,
+                        hotkey=config.identity.hotkey,
+                        body={"recover_claim": envelope}, timestamp=now,
+                        sign_message=config.identity.sign,
+                    )
+                request = recovery_envelope
             try:
-                response = config.api.claim(envelope)
+                response = config.api.claim(request)
                 if not isinstance(response, Mapping):
                     raise RunnerError("Arena claim returned a non-object")
                 status = response.get("status")
+                if recovering:
+                    recovery_status = response.get("claim_recovery")
+                    if (response.get("claim_recovery_request_id") != envelope["request_id"]
+                        or recovery_status not in ("resolved", "unresolved")
+                        or (recovery_status == "resolved" and status not in ("leased", "no_work"))
+                        or (recovery_status == "unresolved" and status in ("leased", "no_work"))):
+                        # An older gateway rejects this recovery form before
+                        # allocation. Its response cannot resolve the old ID.
+                        raise RunnerError("Arena claim recovery unavailable",
+                            http_status=getattr(response, "http_status", None))
                 if status == "leased":
                     if (any(not isinstance(response.get(key), str) or not response[key].strip()
                             for key in ("run_id", "lease_token"))
@@ -4861,7 +4882,7 @@ class Runner:
                     if (response.get("request_id", envelope["request_id"]) != envelope["request_id"]
                         or response.get("round_id", round_id) != round_id):
                         raise RunnerError("Arena claim lease does not match its request")
-                if status != "leased" and (
+                if not recovering and status != "leased" and (
                     abs(int(config.clock().timestamp()) - envelope["timestamp"]) > contracts.REQUEST_TIMESTAMP_WINDOW_SECONDS
                     or response.get("code") in (
                         "request_invalid:request timestamp outside window",
@@ -4869,7 +4890,8 @@ class Runner:
                     )
                 ):
                     raise RunnerError("pending claim timestamp expired; allocation remains unresolved")
-                if isinstance(status, str) and status in _DEFINITE_CLAIM_STATUSES:
+                if ((not recovering and isinstance(status, str) and status in _DEFINITE_CLAIM_STATUSES)
+                    or (recovering and response.get("claim_recovery") == "resolved")):
                     self._pending_claims.pop(round_id)
                 self._report_claim_status(response.get("status"), round_id)
                 if (config.operational_logger is not None and isinstance(response.get("status"), str)

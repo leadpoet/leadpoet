@@ -46,7 +46,10 @@ def _verdict(mismatch=False):
 
 
 @pytest.mark.parametrize("phase", ["initial", "post_repair"])
-@pytest.mark.parametrize("fault", [None, "profile", "provider", "malformed", "source", "incomplete"])
+@pytest.mark.parametrize("fault", [
+    None, "profile", "profile_provider", "provider", "malformed", "source",
+    "incomplete", "identity",
+])
 def test_semantic_review_preserves_unfinished_obligations_through_arena(
     monkeypatch, phase, fault,
 ):
@@ -58,7 +61,24 @@ def test_independently_proved_mismatch_remains_a_valid_negative(monkeypatch, pha
     _check_case(monkeypatch, phase, "profile", mismatch=True)
 
 
-def _check_case(monkeypatch, phase, fault, mismatch=False):
+@pytest.mark.parametrize("phase", ["initial", "post_repair"])
+def test_completed_profile_failure_matches_later_settlement(monkeypatch, phase):
+    """The semantic exit uses the same bounded local exhaustion as the later path."""
+    outcomes = []
+    for semantic_enabled in (False, True):
+        with monkeypatch.context() as context:
+            outcomes.append(_check_case(
+                context, phase, "profile", semantic_enabled=semantic_enabled,
+            ))
+    assert outcomes[0] == outcomes[1] == {
+        "failure_class": "employee_size_verification_failed",
+        "failure_reason_code": "source_blocked",
+        "attempts": 3,
+        "terminal_class": "company_verification_exhausted",
+    }
+
+
+def _check_case(monkeypatch, phase, fault, mismatch=False, semantic_enabled=True):
     company = _company()
     icp = ICPPrompt(
         icp_id="target", prompt="target", industry="Software", sub_industry="SaaS",
@@ -72,16 +92,21 @@ def _check_case(monkeypatch, phase, fault, mismatch=False):
 
     async def request(**kwargs):
         requests.append(kwargs["telemetry_purpose"])
-        return _verdict(mismatch and (phase == "initial" or len(requests) > 1)), ""
+        verdict = _verdict(mismatch and (phase == "initial" or len(requests) > 1))
+        if fault == "identity":
+            for field in ("observed_company_name", "observed_company_website", "observed_company_linkedin"):
+                verdict[field] = ""
+        return verdict, ""
 
     async def refresh(verdict, _company, _icp, *, invocation_cache, **_kwargs):
-        if fault == "profile":
+        if fault in {"profile", "profile_provider"}:
+            reason = "provider_error" if fault == "profile_provider" else "source_blocked"
             invocation_cache.update(
                 refresh_outcome="retryable_failure", structured_failure=True,
-                structured_failure_reason="source_blocked",
+                structured_failure_reason=reason,
                 evidence={"outcome": "insufficient_evidence"},
             )
-            invocation_cache[lead_scorer.VERIFIER_FAILURE_DETAIL_KEY] = "source_blocked"
+            invocation_cache[lead_scorer.VERIFIER_FAILURE_DETAIL_KEY] = reason
         else:
             invocation_cache["refresh_outcome"] = "verified"
         return dict(verdict)
@@ -94,7 +119,7 @@ def _check_case(monkeypatch, phase, fault, mismatch=False):
 
     def semantic(*_args):
         semantic_calls.append(True)
-        return phase == "initial" or len(semantic_calls) > 1
+        return semantic_enabled and (phase == "initial" or len(semantic_calls) > 1)
 
     async def investigate(**kwargs):
         investigations.append(kwargs)
@@ -124,7 +149,7 @@ def _check_case(monkeypatch, phase, fault, mismatch=False):
         company, icp, require_company_fit_dimensions=True, evidence_investigator=True,
     ))
     assert len(investigations) == 1
-    assert investigations[0]["positive_semantic_review"] is True
+    assert investigations[0]["positive_semantic_review"] is semantic_enabled
     assert len(requests) == (1 if phase == "initial" else 2)
     if mismatch:
         assert result.decision == COMPANY_FIT_MISMATCH
@@ -132,8 +157,9 @@ def _check_case(monkeypatch, phase, fault, mismatch=False):
         assert result.decision == "unavailable"
         assert (result.details.get("failure_class") == "insufficient_fit_evidence") is (fault is None)
 
-    # Use the real fit receipt producer and Arena terminal classifiers. The
-    # original result must not retain any class that silently admits a zero.
+    # Use the real fit receipt producer and Arena terminal classifiers.
+    # A completed source-local failure retains the frozen bounded retry rule;
+    # provider faults and unfinished research remain systemic and retryable.
     fit = lead_scorer._complete_company_fit_result(
         result.decision, result.reason,
         dimensions=result.details["dimension_decisions"],
@@ -148,7 +174,12 @@ def _check_case(monkeypatch, phase, fault, mismatch=False):
     }
     retryable = fault is not None and not mismatch
     assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row) is retryable
-    if retryable:
+    local_exhaustion = fault == "profile" and not mismatch
+    if local_exhaustion:
+        assert result.details["failure_class"] == "employee_size_verification_failed"
+        assert result.details[lead_scorer.VERIFIER_FAILURE_DETAIL_KEY] == "source_blocked"
+        assert competition.scorer_breakdown_has_company_local_verification_failure(row)
+    elif retryable:
         assert not competition.scorer_breakdown_has_company_local_verification_failure(row)
         with pytest.raises(competition.CompetitionScorerInputError):
             competition.terminal_company_verification_breakdown(row)
@@ -162,10 +193,23 @@ def _check_case(monkeypatch, phase, fault, mismatch=False):
         {"scored_run_id": "test"}, icp={"employee_count": ["51-200"], "max_companies": 1},
         companies=[{"company_name": "Acme", "employee_count": "51-200"}], scorer=scorer,
     )
-    if retryable:
+    terminal_class = None
+    if local_exhaustion:
+        terminal = run()[0]
+        assert len(calls) == 3
+        assert terminal["final_score"] == 0.0
+        terminal_class = terminal["verifier_gate_receipts"][0]["failure_class"]
+        assert terminal_class == "company_verification_exhausted"
+        assert not competition.scorer_breakdown_has_retryable_infrastructure_failure(terminal)
+    elif retryable:
         with pytest.raises(scoring.ScoringError):
             run()
         assert len(calls) == 3
     else:
         assert run()[0]["final_score"] == 0.0
         assert len(calls) == 1
+    return {
+        "failure_class": result.details.get("failure_class"),
+        "failure_reason_code": result.details.get(lead_scorer.VERIFIER_FAILURE_DETAIL_KEY),
+        "attempts": len(calls), "terminal_class": terminal_class,
+    }

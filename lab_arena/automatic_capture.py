@@ -20,6 +20,7 @@ import re
 import sys
 import threading
 import time
+import weakref
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
@@ -54,6 +55,7 @@ class _Body:
         self.done = False
         self.complete = False
         self.provider_wire = False
+        self.stream_key = None
         self.lock = threading.RLock()
 
     def add(self, value):
@@ -84,6 +86,14 @@ class _Body:
             self.complete = bool(complete and not self.truncated)
             with self.owner.lock:
                 self.owner.bodies.pop(id(self), None)
+                association = self.owner.stream_bodies.get(self.stream_key)
+                if association is not None and association[2] is self:
+                    self.owner.stream_bodies.pop(self.stream_key, None)
+                    reference, via_owner, _ = association
+                    holder = reference() if via_owner else None
+                    anchor = getattr(holder, "_arena_http_capture_stream", None)
+                    if anchor is not None and anchor[0] is self:
+                        del holder._arena_http_capture_stream
                 self.owner.counts["responses_complete" if self.complete else "responses_partial"] += 1
             self.owner._enqueue(self)
 
@@ -97,6 +107,10 @@ class Recorder:
         self.lock = threading.RLock()
         self.counts = collections.Counter()
         self.bodies = {}
+        # StreamReader may prohibit both attributes and weak references. Use
+        # its weak-referenceable ClientResponse owner in that case. Neither
+        # association retains the reader or its prefetched response buffers.
+        self.stream_bodies = {}
         self.retained = 0
         self.inflight = 0
         self.adapters = set()
@@ -142,6 +156,17 @@ class Recorder:
     def _body(self, response, client, metadata):
         key = "_arena_http_capture_body"
         body = getattr(response, key, None)
+        if body is None:
+            with self.lock:
+                association = self.stream_bodies.get(id(response))
+                if association is not None:
+                    reference, via_owner, candidate = association
+                    target = reference()
+                    if via_owner:
+                        anchor = getattr(target, "_arena_http_capture_stream", None)
+                        target = anchor[1] if anchor is not None and anchor[0] is candidate else None
+                    if target is response:
+                        body = candidate
         if body is not None and body.owner is self:
             return body
         values = metadata(response)
@@ -151,6 +176,35 @@ class Recorder:
         if body is not None:
             setattr(response, key, body)
         return body
+
+    def _register_stream(self, stream, client, values, *, owner=None):
+        with self.lock:
+            # A stream is registered only once, after response headers exist.
+            # Lookups compare object identity, not just a recyclable integer id.
+            existing = self._body(stream, client, lambda _: None)
+            if existing is not None:
+                return existing
+            body = self._new(client, *values)
+            if body is None:
+                return None
+            try:
+                reference = weakref.ref(stream, lambda _: self._safe(body.finish, False))
+                via_owner = False
+            except TypeError:
+                try:
+                    reference = weakref.ref(owner, lambda _: self._safe(body.finish, False))
+                    # The owner already owns this reader. Anchor its exact
+                    # identity there, not in the recorder, until finish. This
+                    # also prevents id reuse if caller code replaces content.
+                    owner._arena_http_capture_stream = (body, stream)
+                    via_owner = True
+                except (TypeError, AttributeError):
+                    self._count("stream_association_unsupported")
+                    self._safe(body.finish, False)
+                    return None
+            body.stream_key = id(stream)
+            self.stream_bodies[body.stream_key] = (reference, via_owner, body)
+            return body
 
     def _release(self, body):
         with body.lock:
@@ -235,7 +289,7 @@ class Recorder:
                 "body_buffer_overflow", "response_limit", "queue_overflow", "checkpoint_failure",
                 "binary_body_unsupported", "text_encoding_unsupported", "text_size_limit",
                 "provider_encoded_body_unsupported", "responses_partial", "adapter_failure",
-                "close_flush_timeout", "metadata_unsupported"}}
+                "close_flush_timeout", "metadata_unsupported", "stream_association_unsupported"}}
             return {"source": _SOURCE, "complete": not failures and self.queue.empty() and self.inflight == 0,
                     "pending_queue": self.queue.qsize(), "inflight": self.inflight,
                     "counts": dict(self.counts), "adapters": sorted(self.adapters),
@@ -284,7 +338,8 @@ class Recorder:
         def factory(original):
             @functools.wraps(original)
             def wrapped(response, *args, **kwargs):
-                if _ACTIVE.get() is not None or self.closed:
+                if (_ACTIVE.get() is not None or self.closed
+                        or (client == "stdlib" and getattr(response, "_arena_capture_delegated", False))):
                     return original(response, *args, **kwargs)
                 try:
                     body = self._body(response, client, metadata)
@@ -591,8 +646,8 @@ class Recorder:
             async def wrapped(response, *args, **kwargs):
                 value = await original(response, *args, **kwargs)
                 try:
-                    response.content._arena_capture_meta = (str(response.url), response.status, response.headers)
-                    self._body(response.content, "aiohttp", lambda stream: stream._arena_capture_meta)
+                    self._register_stream(response.content, "aiohttp",
+                                          (str(response.url), response.status, response.headers), owner=response)
                 except Exception:
                     self._count("adapter_failure")
                 return value
@@ -602,7 +657,7 @@ class Recorder:
         reader = getattr(streams, "StreamReader", None)
         if reader is None:
             return
-        metadata = lambda response: getattr(response, "_arena_capture_meta", None)
+        metadata = lambda response: None  # Registered after ClientResponse.start.
         def read_factory(original):
             @functools.wraps(original)
             async def wrapped(response, *args, **kwargs):

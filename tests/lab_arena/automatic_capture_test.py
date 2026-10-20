@@ -831,3 +831,206 @@ def test_async_iterator_close_does_not_replace_error_or_cancellation(outcome):
         asyncio.run(run())
     finally:
         finish(recorder, checkpoint)
+
+
+def test_slot_only_stream_uses_weak_owner_and_releases_association():
+    import gc
+    import weakref
+
+    class Reader:
+        __slots__ = ()
+
+    class Owner:
+        pass
+
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    reader = Reader()
+    owner = Owner()
+    owner.content = reader
+    owner_ref = weakref.ref(owner)
+    try:
+        body = recorder._register_stream(reader, "aiohttp", (
+            "https://example.com/slot-reader", 200, {"content-type": "text/plain"}), owner=owner)
+        body.add(BODY[:3])
+        assert recorder._body(reader, "aiohttp", lambda _: None) is body
+        assert len(recorder.stream_bodies) == len(recorder.bodies) == 1
+        assert recorder.stream_bodies[id(reader)][0]() is owner
+        with pytest.raises(AttributeError):
+            reader._arena_http_capture_body = body
+        # The recorder does not keep the owner or its response buffers alive.
+        del owner
+        gc.collect()
+        assert owner_ref() is None
+        assert body.done and not body.complete
+        assert recorder.stream_bodies == recorder.bodies == {}
+        # An orphaned reader or cached re-read cannot create a second event.
+        assert recorder._body(reader, "aiohttp", lambda _: None) is None
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.web) == 1, summary
+    assert_web(checkpoint.web[0], BODY[:3], False)
+
+
+def test_stream_associations_are_bounded_and_removed_on_finish(monkeypatch):
+    import lab_arena.automatic_capture as capture
+    monkeypatch.setattr(capture, "_STATE_LIMIT", 2)
+
+    class Reader:
+        __slots__ = ()
+
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint, memory_limit=8)
+    class Owner:
+        pass
+    holders = [Owner() for _ in range(3)]
+    for holder in holders:
+        holder.content = Reader()
+    values = ("https://example.com/bounded-stream", 200, {"content-type": "text/plain"})
+    try:
+        bodies = [recorder._register_stream(holder.content, "aiohttp", values, owner=holder) for holder in holders]
+        assert bodies[0] is not None and bodies[1] is not None and bodies[2] is None
+        assert len(recorder.stream_bodies) == len(recorder.bodies) == 2
+        bodies[0].add(b"one")
+        bodies[0].finish(True)
+        assert not hasattr(holders[0], "_arena_http_capture_stream")
+        assert id(holders[0].content) not in recorder.stream_bodies
+        bodies[2] = recorder._register_stream(holders[2].content, "aiohttp", values, owner=holders[2])
+        assert bodies[2] is not None
+        assert len(recorder.stream_bodies) == len(recorder.bodies) == 2
+        for body in bodies[1:]:
+            body.finish(True)
+        assert recorder.stream_bodies == recorder.bodies == {}
+        assert recorder.retained <= 8
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert summary["counts"]["response_limit"] == 1
+
+
+def test_slot_stream_identity_survives_owner_content_replacement():
+    class Reader:
+        __slots__ = ()
+
+    class Owner:
+        pass
+
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    owner = Owner()
+    original = owner.content = Reader()
+    try:
+        body = recorder._register_stream(original, "aiohttp", (
+            "https://example.com/exact-stream", 200, {"content-type": "text/plain"}), owner=owner)
+        owner.content = Reader()
+        assert recorder._body(original, "aiohttp", lambda _: None) is body
+        assert recorder._body(owner.content, "aiohttp", lambda _: None) is None
+        assert owner._arena_http_capture_stream[1] is original
+        body.finish(True)
+        assert not hasattr(owner, "_arena_http_capture_stream")
+        assert recorder.stream_bodies == {}
+    finally:
+        finish(recorder, checkpoint)
+
+
+def test_aiohttp_cached_read_and_eof_do_not_duplicate_capture(endpoint):
+    aiohttp = pytest.importorskip("aiohttp")
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+
+    async def run():
+        async with aiohttp.ClientSession() as client:
+            async with client.get(endpoint[0] + "/text") as response:
+                assert await response.read() == BODY
+                assert await response.read() == BODY
+                assert await response.content.read() == b""
+                assert await response.content.read(0) == b""
+                assert recorder.stream_bodies == {}
+    try:
+        asyncio.run(run())
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.web) == 1, summary
+    assert_web(checkpoint.web[0], BODY)
+
+
+def test_delegated_urllib3_drain_uses_original_reads_without_duplicate_capture(endpoint):
+    urllib3 = pytest.importorskip("urllib3")
+    import io
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    response = None
+    try:
+        response = urllib3.PoolManager().request("GET", endpoint[0] + "/redirect", redirect=False)
+        assert response.status == 302 and response.data == b""
+        underlying = response._original_response
+        assert underlying._arena_capture_delegated is True
+        # New urllib3 drains with _raw_read instead of read. The lower-level
+        # read must remain unchanged and must not create a second observation.
+        assert underlying.read() == b""
+        response.drain_conn()
+        assert response.data == b""
+        sentinel = OSError("original delegated read failure")
+
+        class Broken(io.BytesIO):
+            def read(self, *args, **kwargs):
+                raise sentinel
+
+        underlying.fp = Broken()
+        underlying.length = 1
+        with pytest.raises(OSError) as caught:
+            underlying.read()
+        assert caught.value is sentinel
+    finally:
+        if response is not None:
+            response.close()
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.web) == 1, (checkpoint.web, summary)
+    assert_web(checkpoint.web[0], b"")
+    assert summary["counts"].get("client_stdlib", 0) == 0
+    assert endpoint[1].paths == ["/redirect"]
+
+
+def test_weak_stream_association_does_not_retain_reader():
+    import gc
+    import weakref
+
+    class Reader:
+        pass
+
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    reader = Reader()
+    reference = weakref.ref(reader)
+    try:
+        body = recorder._register_stream(reader, "aiohttp", (
+            "https://example.com/weak-reader", 200, {"content-type": "text/plain"}))
+        body.add(BODY[:3])
+        assert recorder.stream_bodies[id(reader)][0]() is reader
+        assert recorder.stream_bodies[id(reader)][1] is False
+        del reader
+        gc.collect()
+        assert reference() is None
+        assert body.done and not body.complete
+        assert recorder.stream_bodies == recorder.bodies == {}
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.web) == 1, summary
+    assert_web(checkpoint.web[0], BODY[:3], False)
+
+
+def test_slot_stream_without_weak_owner_reports_unsupported():
+    class Reader:
+        __slots__ = ()
+
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    reader = Reader()
+    try:
+        assert recorder._register_stream(reader, "aiohttp", (
+            "https://example.com/no-owner", 200, {"content-type": "text/plain"})) is None
+        assert recorder.stream_bodies == recorder.bodies == {}
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert summary["complete"] is False
+    assert summary["counts"]["stream_association_unsupported"] == 1
+    assert checkpoint.web == []

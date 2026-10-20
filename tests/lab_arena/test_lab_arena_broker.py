@@ -782,10 +782,14 @@ def test_ordinary_deepline_account_failure_retains_bound_evidence_only(
             "base_call_identity": call["call_doc"]["base_call_identity"],
             "provider_attempt": call["call_doc"]["provider_attempt"],
             "action_sequence": call["call_doc"]["action_sequence"],
+            **({"submitted_account_authentication": True} if provider_status == 401 else {}),
         }
     else:
         assert evidence is None
-    assert "account_failure_evidence" not in result.to_document()["call"]
+    if funding_source == "miner_key" and provider_status == 401:
+        assert result.to_document()["call"]["account_failure_evidence"] == evidence
+    else:
+        assert "account_failure_evidence" not in result.to_document()["call"]
     assert call["uncertain_doc"]["call_succeeded"] is False
 
 

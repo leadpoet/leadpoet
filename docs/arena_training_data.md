@@ -152,8 +152,15 @@ execution or score rules.
 
 The full payload limit is explicit. Oversized or unavailable evidence is rejected
 as a training source; it is never silently clipped and called complete. Credentials
-and hidden provider reasoning are excluded. Privacy filtering and exact replay
-are separate properties from label validity.
+and opaque provider reasoning (encrypted content, signatures, redacted thinking)
+are excluded. Readable reasoning that a provider returns as text is kept: chat
+`message.reasoning`, readable `reasoning_details` items and Responses reasoning
+summaries/content. Each exported call also lists that text in `readable_reasoning`
+and carries the round policy's `reasoning_capture` record when one applied (see
+[agent reasoning capture](arena-reasoning-capture.md)). Responses are re-read from
+the ledger at export time, so this also restores readable text in historical
+receipts; objects redacted at capture time stay redacted. Privacy filtering and
+exact replay are separate properties from label validity.
 
 ## Remaining boundaries
 
@@ -167,7 +174,10 @@ are separate properties from label validity.
   mismatch. Use a broker-only subset for a first complete call-trajectory experiment.
 - Hidden provider chain of thought is not a collection target. Unlogged internal
   variables or private provider search steps are not recoverable. Explicit model
-  messages and returned tool outputs are the available training state.
+  messages, returned tool outputs and provider-returned readable reasoning are
+  the available training state. Rounds with `agent_reasoning_v1` ask every agent
+  call for that readable reasoning; it is a provider summary or thinking text,
+  not the full internal reasoning.
 - Optional model-reported decision files and stdout/stderr remain diagnostic,
   bounded and potentially incomplete. They are not authoritative demonstrations.
 - A matching hash proves linkage and integrity, not factual truth or a good label.

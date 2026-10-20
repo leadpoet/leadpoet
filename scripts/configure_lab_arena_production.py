@@ -455,7 +455,7 @@ if request["role"] == "benchmark_disclosure_only":
     updates["LAB_ARENA_BENCHMARK_DISCLOSURE_FROM"] = value
 if request["role"] in (
     "contacts_from_only", "company_quality_from_only", "intent_details_from_only",
-    "company_judgment_from_only", "signal_judgment_from_only",
+    "company_judgment_from_only", "signal_judgment_from_only", "reasoning_capture_from_only",
 ):
     activation_key = {
         "contacts_from_only": "LAB_ARENA_CONTACTS_FROM",
@@ -463,6 +463,7 @@ if request["role"] in (
         "company_judgment_from_only": "LAB_ARENA_COMPANY_JUDGMENT_FROM",
         "signal_judgment_from_only": "LAB_ARENA_SIGNAL_JUDGMENT_FROM",
         "intent_details_from_only": "LAB_ARENA_INTENT_DETAILS_FROM",
+        "reasoning_capture_from_only": "LAB_ARENA_REASONING_CAPTURE_FROM",
     }[request["role"]]
     activation_error = request["role"][:-5]
     if (
@@ -721,6 +722,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--company-judgment-from", default=None, metavar="TIMESTAMP", help="set or clear company judgment reuse activation for future rounds without changing grading")
     scope.add_argument("--signal-judgment-from", default=None, metavar="TIMESTAMP", help="set or clear signal judgment reuse for future rounds without changing grading")
     scope.add_argument("--intent-details-from", default=None, metavar="TIMESTAMP", help="set or clear intent details activation for future submission periods")
+    scope.add_argument("--reasoning-capture-from", default=None, metavar="TIMESTAMP", help="set or clear agent reasoning capture for rounds whose intake opens at or after this time")
     scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", type=int, help="inherited descriptor containing only the scoped service key")
@@ -761,6 +763,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         _validate_contacts_from(args.signal_judgment_from, label="signal judgment")
     if getattr(args, "intent_details_from", None) is not None:
         _validate_contacts_from(args.intent_details_from, label="intent details")
+    if getattr(args, "reasoning_capture_from", None) is not None:
+        _validate_contacts_from(args.reasoning_capture_from, label="reasoning capture")
     if not args.validator_credential_kms_guard and not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
     narrow_scope = (
@@ -776,6 +780,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         or getattr(args, "company_judgment_from", None) is not None
         or getattr(args, "signal_judgment_from", None) is not None
         or getattr(args, "intent_details_from", None) is not None
+        or getattr(args, "reasoning_capture_from", None) is not None
         or getattr(args, "contacts_generation", None) is not None
     )
     if args.validator_credential_kms_guard and accounts != {IAM_ACCOUNT}:
@@ -852,10 +857,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             or args.company_judgment_from is not None
             or args.signal_judgment_from is not None
             or args.intent_details_from is not None
+            or args.reasoning_capture_from is not None
         ):
             quality_activation = args.company_quality_from is not None
             intent_details_activation = args.intent_details_from is not None
-            if args.signal_judgment_from is not None:
+            if args.reasoning_capture_from is not None:
+                role = "reasoning_capture_from_only"
+                key = "LAB_ARENA_REASONING_CAPTURE_FROM"
+                value = args.reasoning_capture_from
+                label = "reasoning capture"
+            elif args.signal_judgment_from is not None:
                 role = "signal_judgment_from_only"
                 key = "LAB_ARENA_SIGNAL_JUDGMENT_FROM"
                 value = args.signal_judgment_from

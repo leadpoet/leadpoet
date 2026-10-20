@@ -569,9 +569,11 @@ def test_missing_execute_proxy_web_count_is_unknown():
     assert "direct_web_usage_unverified" in assemble_example(**values)["completeness"]["incomplete_reasons"]
 
 
-def test_typed_hidden_response_summary_is_filtered_and_hash_stays_valid():
+def test_typed_response_reasoning_keeps_text_and_hash_stays_valid():
     row = observation()
-    row["outcome"]["response"]["body_b64"] = base64.b64encode(json.dumps({"output": [{"type": "reasoning", "summary": ["private summary"], "text": "hidden text"}]}).encode()).decode()
+    body = {"output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "visible summary"}],
+                        "encrypted_content": "sealed state"}]}
+    row["outcome"]["response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
     values = fixture()
     values["runs"][0]["result_doc"]["resource_summary"]["provider_call_count"] = 1
     snapshot = save(values, payload(row))
@@ -581,8 +583,21 @@ def test_typed_hidden_response_summary_is_filtered_and_hash_stays_valid():
     exported = result["worker_observation_artifacts"]["execute:1"]
     assert contracts.document_hash(exported["payload"]) == exported["payload_sha256"]
     body = base64.b64decode(exported["payload"]["observations"][0]["outcome"]["response"]["body_b64"])
-    assert b"private summary" not in body and b"hidden text" not in body
+    assert b"visible summary" in body and b"sealed state" not in body
     assert result["privacy"]["hidden_reasoning_removed"] and result["privacy"]["privacy_filtered"]
+
+
+def test_observation_stored_under_the_earlier_rule_is_a_fixed_point():
+    # read_snapshot requires a stored payload to re-clean to itself. The
+    # earlier rule wrote these placeholders; today's rule must keep them.
+    row = observation()
+    body = {"output": [{"type": "reasoning", "summary": "[REDACTED]", "text": "[REDACTED]",
+                        "content": "[REDACTED]", "encrypted_content": "[REDACTED]"}],
+            "choices": [{"message": {"reasoning": "[REDACTED]", "reasoning_details": "[REDACTED]"}}]}
+    row["outcome"]["response"]["body_b64"] = base64.b64encode(
+        contracts.canonical_json(body).encode("utf-8")).decode()
+    row["privacy"] = {"redacted": True, "redactions": ["hidden_reasoning"]}
+    assert obs.clean_observation(row) == row
 
 
 def test_api_and_client_observation_limits_and_timeout(tmp_path):

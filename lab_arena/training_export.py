@@ -15,11 +15,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
-from lab_arena import company_judgments, contracts, contact_policy, integrity, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
+from lab_arena import company_judgments, contracts, contact_policy, integrity, reasoning_capture, reviewer_runtime, scoring, signal_judgments, source_bundle, verify
 from lab_arena.output import MAX_OUTPUT_BYTES, validate_output_document
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
-HIDDEN_KEYS = frozenset({"reasoning_content", "hidden_reasoning", "encrypted_content", "reasoning_details"})
 MAX_RECEIPT_BYTES = 16 * 1024 * 1024
 # An example joins independently bounded inputs, requests and receipts. Its
 # final privacy pass needs a separate finite budget from a single request.
@@ -39,23 +38,38 @@ def _json_object(objects: Any, ref: str, limit: int) -> dict:
 
 
 def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
-    """Copy a JSON value, removing hidden-reasoning fields at every depth."""
+    """Copy a JSON value without opaque provider reasoning at any depth.
+
+    Readable reasoning a provider returns as text (``message.reasoning``,
+    readable ``reasoning_details`` and Responses summaries/content) is kept.
+    Encrypted state, signatures and redacted thinking are removed.
+    """
+    from lab_arena.training_capture import empty_value, opaque_reasoning_field, readable_reasoning_item, reasoning_kind
     removed = False
 
-    def walk(item):
+    def walk(item, name=None):
         nonlocal removed
         if isinstance(item, dict):
             result = {}
+            kind = reasoning_kind(item)
             for key, child in item.items():
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
-                if normalized in HIDDEN_KEYS or normalized == "reasoning" and not safe_config or item.get("type") == "reasoning" and normalized in {"content", "summary", "text"}:
-                    removed = True
+                if opaque_reasoning_field(normalized, child, kind, safe_config):
+                    removed = removed or not empty_value(child)
                 else:
-                    result[key] = walk(child)
+                    result[key] = walk(child, normalized)
             return result
         if isinstance(item, list):
-            return [walk(child) for child in item]
+            kept = []
+            for child in item:
+                opaque = (readable_reasoning_item(child) is False if name == "reasoning_details"
+                          else isinstance(child, dict) and reasoning_kind(child) == "opaque")
+                if opaque:
+                    removed = removed or not empty_value(child)
+                else:
+                    kept.append(walk(child))
+            return kept
         return item
 
     return walk(value), removed
@@ -477,7 +491,8 @@ def _calls(rows, run_ids, objects, run_order):
         call = {"call_identity": identity, "run_id": reserve["run_id"],
                 "provider": reserve.get("provider"), "operation_id": reserve.get("operation_id"),
                 "funding_source": reserve.get("funding_source"), "reservation_entry_id": reserve["entry_id"],
-                **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
+                # The round policy's record of what it asked of this call.
+                **{key: copy.deepcopy(entry[key]) for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash", "reasoning_capture") if key in entry}}
         call_reasons = set()
         accounting_fields = {"reserved_microusd", "released_microusd", "variance_microusd", "late_reconciliation",
                              "openrouter_delayed_reconciliation", "deepline_delayed_reconciliation",
@@ -566,6 +581,8 @@ def _calls(rows, run_ids, objects, run_order):
             if latest_digest is not None:
                 call["response"] = latest_response
                 call["response_sha256"] = latest_digest
+                # The same retained text, provider-neutral, for training use.
+                call["readable_reasoning"] = reasoning_capture.readable_reasoning(latest_response)
                 call["response_hidden_reasoning_removed"] = "hidden_reasoning" in latest_redactions
                 call["response_privacy_redactions"] = latest_redactions
                 call["response_status"] = terminal.get("status")
@@ -1109,6 +1126,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", [])
         or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("response_receipts", [])) for call in calls)
     clean["privacy"] = {"hidden_reasoning_removed": hidden_removed, "hidden_reasoning_excluded": True,
+                        "readable_reasoning_retained": True,
                         "context_redactions": sorted(privacy_redactions)}
     privacy_filtered = bool(privacy_redactions | observation_redactions) or hidden_removed or any(
         (snapshot.get("privacy") or {}).get("redacted") for snapshot in snapshots.values()) or any(

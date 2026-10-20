@@ -281,11 +281,46 @@ def test_call_gaps_are_not_complete(change, reason):
     assert reason in result["completeness"]["incomplete_reasons"]
 
 
-def test_typed_reasoning_and_nested_hidden_details_are_removed():
-    result, removed = without_hidden_reasoning({"output": [{"type": "reasoning", "summary": ["private"]}],
-                                              "reasoning_details": ["private"], "reasoning": {"effort": "high"}})
-    assert removed and "private" not in json.dumps(result)
+def test_readable_reasoning_is_kept_and_opaque_reasoning_is_removed():
+    summary = [{"type": "summary_text", "text": "Checked the careers page."}]
+    result, removed = without_hidden_reasoning({
+        "output": [{"type": "reasoning", "summary": summary, "encrypted_content": "SEALED"}],
+        "reasoning_details": ["SEALED", {"type": "reasoning.encrypted", "data": "SEALED"},
+                              {"type": "reasoning.text", "signature": "SEALED", "format": "google"},
+                              {"type": "reasoning.text", "text": "Then the press release.", "signature": "SEALED"}],
+        "reasoning": {"effort": "high"},
+        "choices": [{"message": {"reasoning": "Visible reasoning.", "reasoning_content": "SEALED"}}],
+    })
+    assert removed and "SEALED" not in json.dumps(result)
+    assert result["output"] == [{"type": "reasoning", "summary": summary}]
+    assert result["reasoning_details"] == [{"type": "reasoning.text", "text": "Then the press release."}]
     assert result["reasoning"] == {"effort": "high"}
+    assert result["choices"][0]["message"] == {"reasoning": "Visible reasoning."}
+    kept, removed = without_hidden_reasoning({"message": {"reasoning": None, "encrypted_content": "",
+                                                          "reasoning_details": []}})
+    assert removed is False and kept == {"message": {"reasoning": None, "reasoning_details": []}}
+
+
+def test_export_keeps_readable_reasoning_and_the_policy_record_per_call():
+    values = fixture()
+    add_call(values)
+    annotation = {"policy": "agent_reasoning_v1", "treatment": "chat", "requested": True,
+                  "changes": ["effort", "summary"], "effort": "medium"}
+    values["ledger_rows"][0]["entry_doc"]["reasoning_capture"] = annotation
+    body = {"choices": [{"message": {
+        "content": "result", "reasoning": "Hiring signals first.",
+        "reasoning_details": [{"type": "reasoning.summary", "summary": "Hiring signals first.", "index": 0},
+                              {"type": "reasoning.encrypted", "data": "SEALED", "index": 1}]}}]}
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
+    result = assemble_example(**values)
+    call = result["provider_calls"][0]
+    assert call["readable_reasoning"] == ["Hiring signals first."]
+    assert call["reasoning_capture"] == annotation
+    assert call["response"]["choices"][0]["message"]["reasoning_details"] == [
+        {"type": "reasoning.summary", "summary": "Hiring signals first.", "index": 0}]
+    assert "SEALED" not in json.dumps(result)
+    assert result["privacy"]["readable_reasoning_retained"] is True
+    assert result["privacy"]["hidden_reasoning_removed"] is True
 
 
 def test_private_artifact_does_not_overwrite(tmp_path):

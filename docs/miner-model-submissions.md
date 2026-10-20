@@ -223,6 +223,27 @@ rewritten or assigned explanations they did not supply.
 See [the decision capture contract](arena-decision-logging.md) for exact limits,
 privacy, failure behavior and examples.
 
+## Model reasoning
+
+When a round's public view lists `reasoning_capture_policy: agent_reasoning_v1`,
+the gateway asks each of your OpenRouter model calls to reason and to return
+readable reasoning. You do not need to change your code. In those rounds:
+
+- Calls to a model that reasons by default keep its default effort.
+- Calls to a model that does not, or that set effort `none` or `minimal`, run
+  at effort `low`, with 1,024 extra output tokens so your visible answer keeps
+  its room.
+- OpenAI calls request a reasoning summary. `exclude: true` is ignored.
+- Responses gain `message.reasoning` / `reasoning_details` (chat) or reasoning
+  summaries (Responses API). Read the answer from `content` as before.
+- Reasoning tokens bill to your OpenRouter key and count toward your cost
+  limits.
+- Optional Claude thinking (for example Sonnet 4.5) is skipped when you set a
+  temperature other than 1, `top_k`, `top_p` below 0.95 or forced tool choice.
+
+Your sampling settings, prompts and tools are never changed. See
+[agent reasoning capture](arena-reasoning-capture.md) for the exact rules.
+
 ## Operator setup
 
 Use this deployment order. Do not apply migration 185 while a service that

@@ -160,6 +160,7 @@ def expected_overlay(
     failed_attribute_source_recovery: bool = False,
     authenticated_page_refusal: bool = False,
     completed_investigation_finality: bool = False,
+    single_tool_protocol_repair: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
@@ -203,6 +204,9 @@ def expected_overlay(
             convert_investigation_finality_seam,
         )
         files[FINALITY_FILE] = convert_investigation_finality_seam(files[FINALITY_FILE])
+    if single_tool_protocol_repair:
+        from scripts.arena_reviewer_protocol_repair_seam import convert_protocol_repair_seam
+        files[GRADER_FILE] = convert_protocol_repair_seam(files[GRADER_FILE])
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -241,6 +245,10 @@ def main() -> int:
         "--authenticated-page-refusal", action="store_true",
         help="classify only a host-bound exact page refusal; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--single-tool-protocol-repair", action="store_true",
+        help="repair one valid research batch within existing limits; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
@@ -272,6 +280,7 @@ def main() -> int:
             failed_attribute_source_recovery=args.failed_attribute_source_recovery,
             authenticated_page_refusal=args.authenticated_page_refusal,
             completed_investigation_finality=args.completed_investigation_finality,
+            single_tool_protocol_repair=args.single_tool_protocol_repair,
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
@@ -281,6 +290,7 @@ def main() -> int:
             + ("-attribute-source-recovery" if args.failed_attribute_source_recovery else "")
             + ("-refusal" if args.authenticated_page_refusal else "")
             + ("-investigation-finality" if args.completed_investigation_finality else "")
+            + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
         )
         if not args.verify_image:
             for name, data in files.items():
@@ -321,6 +331,9 @@ def main() -> int:
         if args.completed_investigation_finality:
             from scripts.arena_reviewer_investigation_finality_seam import CORRECTION_ID as INVESTIGATION_FINALITY_CORRECTION_ID
             corrections.append(INVESTIGATION_FINALITY_CORRECTION_ID)
+        if args.single_tool_protocol_repair:
+            from scripts.arena_reviewer_protocol_repair_seam import CORRECTION_ID as PROTOCOL_CORRECTION_ID
+            corrections.append(PROTOCOL_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,

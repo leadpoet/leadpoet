@@ -143,7 +143,6 @@ def test_unjudged_execution_keeps_its_companies_for_analysis_only():
                        "incomplete_reasons": ["scorer_image_identity_missing"]}}, "label_authority_unverified"),
     ({"completeness": {"dimensions": {"context": True, "input_output_label": True},
                        "incomplete_reasons": ["runtime_input_context_mismatch"]}}, "input_conflict"),
-    ({"privacy": {"context_redactions": ["credential"]}}, "claim_privacy_filtered"),
 ])
 def test_unusable_examples_are_excluded_and_counted(changes, reason):
     document = example(rows=[row(0, claim(), "qualified")], **changes)
@@ -153,6 +152,28 @@ def test_unusable_examples_are_excluded_and_counted(changes, reason):
     assert manifest["counts"]["examples_excluded"] == {reason: 1}
     cohort = dataset.Rules(scorer_image_digest="sha256:" + "c" * 64)
     assert dataset.example_exclusion(example(rows=[row(0, claim(), "qualified")]), cohort) == "outside_scorer_cohort"
+
+
+def test_redaction_drops_only_records_whose_own_input_carries_it():
+    # A credential redaction in fetched pages or responses marks the whole
+    # run. A record trains only on its ICP and company claim, so only a
+    # redaction inside those fields removes it.
+    in_url = claim("Beta Labs", "beta-labs.com", "beta-labs")
+    in_url["intent_signals"][0]["url"] = "https://beta-labs.com/careers?token=%5BREDACTED%5D"
+    in_text = claim("Gamma Inc", "gamma.com", "gamma")
+    in_text["company_name"] = "Gamma [REDACTED]"
+    document = example(rows=[row(0, claim(), "qualified"), row(1, in_url, "wrong_fit"),
+                             row(2, in_text, "wrong_fit")],
+                       privacy={"context_redactions": ["credential"]})
+    assert dataset.example_exclusion(document, dataset.Rules()) is None
+    splits, manifest = dataset.build([document])
+    kept = [record["input"]["company"]["company_name"] for name in ("train", "eval") for record in splits[name]]
+    assert kept == ["Acme Robotics"]
+    assert manifest["counts"]["examples_used"] == 1 and manifest["counts"]["records_privacy_filtered"] == 2
+    in_icp = example("run-icp", [row(0, claim("Delta", "delta.com", "delta"), "qualified")],
+                     icp={**ICP, "prompt": "Companies hiring [REDACTED] leaders."})
+    splits, manifest = dataset.build([in_icp])
+    assert not any(splits.values()) and manifest["counts"]["records_privacy_filtered"] == 1
 
 
 def test_an_edited_example_no_longer_matches_its_hash():

@@ -292,8 +292,11 @@ negative.
 
 By default the step uses only published daily production rounds, integrity
 scorer adapters, and examples whose context and labels verified with known
-scorer identity, no input conflict and no credential redaction. An example
-whose content no longer matches its exported hash is excluded. Identical
+scorer identity and no input conflict. An example whose content no longer
+matches its exported hash is excluded. A record is left out when its own
+input (the ICP or the company claim) carries a redaction marker. Credential
+redactions elsewhere in the run, mostly URL tokens in fetched pages, never
+reach those fields, so they do not exclude the example. Identical
 claims for the same ICP requirements and evaluation date count once; another
 date is a separate input because intent recency depends on it. A claim judged
 both ways on the same date is left out. A failed run removes the partial

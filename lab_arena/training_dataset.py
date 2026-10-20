@@ -34,6 +34,8 @@ _LABEL_AUTHORITY_GAPS = frozenset({"scorer_image_identity_missing", "reviewer_ru
 _INPUT_CONFLICTS = frozenset({
     "runtime_input_context_mismatch", "judge_input_context_mismatch", "runtime_input_snapshot_invalid",
 })
+# The exporter's redaction marker, literal or percent-encoded inside a URL.
+_REDACTION_RE = re.compile(r"\[REDACTED\]|%5[Bb]REDACTED%5[Dd]")
 _CLAIM_CODES = ("company_linkedin_required_or_invalid", "us_headquarters_state_required_or_invalid",
                 "state_must_be_text")
 TRAINING_PERMISSION = {
@@ -90,8 +92,6 @@ def example_exclusion(example: Mapping[str, Any], rules: Rules) -> Optional[str]
         return "label_authority_unverified"
     if reasons & _INPUT_CONFLICTS:
         return "input_conflict"
-    if "credential" in ((example.get("privacy") or {}).get("context_redactions") or ()):
-        return "claim_privacy_filtered"
     return None
 
 
@@ -302,14 +302,21 @@ class _Clusters:
 def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tuple[Dict[str, List[dict]], Dict[str, Any]]:
     """Return ({train, eval, analysis}: records) and the dataset manifest."""
 
-    sources, records = [], []
+    sources, records, privacy_filtered = [], [], 0
     for example in examples:
         reason = example_exclusion(example, rules)
         sources.append({"example_id": example.get("example_id"), "example_hash": example.get("example_hash"),
                         "run_id": example.get("run_id"), "round_id": example.get("round_id"),
                         "used": reason is None, "exclusion": reason})
         if reason is None:
-            records.extend(records_from_example(example))
+            for record in records_from_example(example):
+                # Redaction elsewhere in the run, mostly URL tokens in fetched
+                # pages, never reaches these fields. One inside the record's
+                # own input would train on a placeholder, so that record goes.
+                if _REDACTION_RE.search(contracts.canonical_json(record["input"])):
+                    privacy_filtered += 1
+                    continue
+                records.append(record)
     # Identical ICP requirements, evaluation date and claim: replays, retries
     # and cached judgments count once. The date is part of the input because
     # intent recency depends on it. Only verdicts can conflict; a claim judged
@@ -359,6 +366,7 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
         "sources": sorted(sources, key=lambda item: str(item["example_id"])),
         "counts": {"examples_used": sum(source["used"] for source in sources),
                    "examples_excluded": exclusions, "records_by_split_and_label": counts,
+                   "records_privacy_filtered": privacy_filtered,
                    "duplicate_records_merged": duplicates, "conflicting_label_groups_excluded": conflicts},
         "record_hashes": {name: [_hash(record) for record in items] for name, items in splits.items()},
     }

@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## Scoped production authorization: October 20 Arena cycle
+
+On 2026-10-19 the user authorized full October 20 Arena cycle monitoring and
+production-safe root-cause fixes through final weights, including protected
+read-only evidence, narrow code/config changes, exact committed migrations,
+focused tests, safe push/merge, canonical gateway/normal-validator deployment
+and recovery. Preserve frozen grading, ICPs, models, accepted results,
+accounting, budgets, provider credentials, chain authority and concurrent work.
+Do not manufacture scores, replay accepted work, force promotion or bypass
+release/security gates. This scope ends after the October 20 cycle and its
+live verification complete.
+
 ## Scoped production authorization: bounded ownership evidence interpretation
 
 On 2026-10-19 the user authorized a narrow ownership-evidence improvement inside

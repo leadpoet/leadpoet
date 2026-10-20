@@ -784,7 +784,7 @@ _ACTIVE_MAJORITY_INVESTMENT_RE = re.compile(
 )
 _PUBLIC_SEMANTIC_LISTING_RE = re.compile(
     r"\b(?:is|are|remains)\s+(?:currently\s+)?listed\s+on\b"
-    r"[^.!?;\n]{0,100}\b(?:exchange|stock\s+code|ticker)\b",
+    r"[^.!?;\n]{0,100}\b(?:exchanges?|stock\s+code|ticker)\b",
     re.I,
 )
 _PUBLIC_HISTORICAL_IPO_EVENT_RE = re.compile(
@@ -879,7 +879,7 @@ def _public_quote_has_bound_market_locator(
                     clause = re.split(r"[;!?\n]|\.(?=\s+[A-Z])", prefix)[-1]
                     if re.search(
                         r"\b(?:(?:subsidiary|parent(?:\s+company)?|owner)\s+of|"
-                        r"partner(?:ing)?\s+(?:of|with)|conditionally)\b",
+                        r"partner(?:ing)?\s+(?:of|with)|customer\s+of|conditionally)\b",
                         clause, re.I,
                     ) and not re.search(r"\band\s+(?:is|are|remains)\s*$", clause, re.I):
                         continue

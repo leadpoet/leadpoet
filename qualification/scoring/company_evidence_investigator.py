@@ -1909,6 +1909,14 @@ def _quote_supports_semantic_public_listing(quote: str) -> bool:
     """Allow explicit exchange listings while rejecting profile labels and plans."""
 
     normalized = _normalized_span(quote)
+    if re.search(r"\bstock\s+exchanges\b", normalized) and not re.fullmatch(
+        r"[^.!?;\n]{1,180}\b(?:is|are|remains)\s+(?:currently\s+)?"
+        r"listed\s+on\b[^.!?;\n]{0,100}\bstock\s+exchanges[.]?",
+        normalized,
+    ):
+        # A direct plural-exchange sentence can prove the issuer's present
+        # listing. Do not use it to rescue a quote with another stage event.
+        return False
     if re.search(
         r"\b(?:plan(?:s|ned)?|intend(?:s|ed)?|propos(?:e|ed)|may|might|"
         r"could|will|would|subject\s+to|expected)\b",
@@ -1921,7 +1929,7 @@ def _quote_supports_semantic_public_listing(quote: str) -> bool:
         return False
     return bool(
         re.search(r"\b(?:is|are|remains)\s+(?:currently\s+)?listed\s+on\b", normalized)
-        and re.search(r"\b(?:exchange|stock\s+code|ticker)\b", normalized)
+        and re.search(r"\b(?:exchanges?|stock\s+code|ticker)\b", normalized)
     )
 
 

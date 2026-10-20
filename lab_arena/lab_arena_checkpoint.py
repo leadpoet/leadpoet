@@ -7,10 +7,12 @@ output bytes that it can validate before the signed execution deadline.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -41,10 +43,149 @@ MAX_DECISION_TEXT_CHARS = 500
 MAX_DECISION_EVIDENCE_ITEMS = 5
 MAX_DECISION_FRAME_BYTES = 4096
 DECISION_SOCKET_TIMEOUT_SECONDS = 2.0
+TRAINING_SCHEMA_VERSION = "leadpoet.lab_arena.agent_observation.v1"
+TRAINING_CONTROL = "training_observation"
+MAX_TRAINING_FRAME_BYTES = 8 * 1024 * 1024
+MAX_TRAINING_WEB_BODY_BYTES = 6 * 1024 * 1024
+MAX_TRAINING_STATE_BYTES = 65_536
+TRAINING_SOCKET_TIMEOUT_SECONDS = 1.0
 
 
 class QuotaUnavailable(RuntimeError):
     """The passive quota snapshot could not be read safely."""
+
+
+def validate_training_frame(value: Any) -> dict[str, Any]:
+    """Validate the opt-in capture control; run identity comes from the host."""
+    if (not isinstance(value, Mapping) or set(value) != {
+            "schema_version", "control", "kind", "depends_on", "data"}
+            or value.get("schema_version") != TRAINING_SCHEMA_VERSION
+            or value.get("control") != TRAINING_CONTROL
+            or value.get("kind") not in {"web_fetch", "response_received", "state_snapshot", "capture_failure"}
+            or not isinstance(value.get("depends_on"), list)
+            or len(value["depends_on"]) > 32
+            or any(not isinstance(item, str) or len(item) > 96 for item in value["depends_on"])
+            or len(set(value["depends_on"])) != len(value["depends_on"])
+            or not isinstance(value.get("data"), dict)):
+        raise ValueError("training frame is invalid")
+    data = value["data"]
+    kind = value["kind"]
+    if kind == "web_fetch":
+        if (set(data) != {"url", "final_url", "retrieved_at", "status", "content_type", "body"}
+                or any(not isinstance(data[key], str) for key in ("url", "final_url", "retrieved_at", "content_type", "body"))
+                or type(data["status"]) is not int or not 100 <= data["status"] <= 599
+                or len(data["body"].encode("utf-8")) > MAX_TRAINING_WEB_BODY_BYTES):
+            raise ValueError("training frame is invalid")
+    elif kind == "response_received":
+        if (set(data) != {"call_identity", "status", "body_sha256", "body_bytes"}
+                or not isinstance(data["call_identity"], str) or not isinstance(data["body_sha256"], str)
+                or type(data["status"]) is not int or not 100 <= data["status"] <= 599
+                or type(data["body_bytes"]) is not int or data["body_bytes"] < 0):
+            raise ValueError("training frame is invalid")
+    elif kind == "state_snapshot" and (set(data) != {"name", "value"} or not isinstance(data["name"], str)
+          or not 1 <= len(data["name"]) <= 80
+          or len(json.dumps(data["value"], ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_STATE_BYTES):
+        raise ValueError("training frame is invalid")
+    elif kind == "capture_failure" and (set(data) != {"category", "reason"}
+          or data["category"] not in {"web_fetch", "response_received", "state_snapshot"}
+          or data["reason"] not in {"size_limit", "invalid_value"}):
+        raise ValueError("training frame is invalid")
+    if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_FRAME_BYTES:
+        raise ValueError("training frame is invalid")
+    return dict(value)
+
+
+def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | None) -> int | None:
+    frame = {"schema_version": TRAINING_SCHEMA_VERSION, "control": TRAINING_CONTROL,
+             "kind": kind, "depends_on": depends_on, "data": data}
+    try:
+        frame["depends_on"] = list(depends_on or [])
+        normalized = validate_training_frame(frame)
+        encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        if kind != "capture_failure":
+            reason = "invalid_value"
+            try:
+                if len(json.dumps(frame, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_FRAME_BYTES:
+                    reason = "size_limit"
+            except Exception:
+                pass
+            # Invalid dependencies must not make the failure report fail too.
+            _record_training("capture_failure", {"category": kind, "reason": reason}, None)
+        return None
+    try:
+        path = str(os.environ.get(WORKER_SOCKET_ENV) or "").strip()
+        if not path.startswith("/"):
+            return None
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            deadline = time.monotonic() + TRAINING_SOCKET_TIMEOUT_SECONDS
+            connection.settimeout(TRAINING_SOCKET_TIMEOUT_SECONDS)
+            connection.connect(path)
+            # The high bit reserves an extended frame for private capture.
+            # Ordinary operation frames keep their existing 1 MiB early cap.
+            connection.sendall((len(encoded) | 0x80000000).to_bytes(4, "big") + encoded)
+            size = int.from_bytes(_recv_decision_response(connection, 4, deadline), "big")
+            if size < 2 or size > MAX_QUOTA_RESPONSE_BYTES:
+                return None
+            response = json.loads(_recv_decision_response(connection, size, deadline))
+            result = response.get("observation_id") if isinstance(response, dict) and response.get("recorded") is True else None
+            return result if type(result) is int and result >= 0 else None
+        finally:
+            connection.close()
+    except Exception:
+        return None
+
+
+def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str,
+                     body: str, retrieved_at: str | None = None,
+                     depends_on: list[str] | None = None) -> int | None:
+    """Report exact text returned by a cooperative direct-web fetch."""
+    try:
+        body_size = len(body.encode("utf-8")) if isinstance(body, str) else -1
+    except UnicodeError:
+        body_size = -1
+    if body_size < 0 or body_size > MAX_TRAINING_WEB_BODY_BYTES:
+        reason = "size_limit" if body_size > MAX_TRAINING_WEB_BODY_BYTES else "invalid_value"
+        _record_training("capture_failure", {"category": "web_fetch", "reason": reason}, depends_on)
+        return None
+    return _record_training("web_fetch", {"url": url, "final_url": final_url, "status": status,
+        "content_type": content_type, "body": body,
+        "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat()}, depends_on)
+
+
+def record_response_received(*, call_identity: str, status: int, body: bytes | None = None,
+                             body_sha256: str | None = None, body_bytes: int | None = None,
+                             depends_on: list[str] | None = None) -> int | None:
+    """Report that agent code obtained a broker response; the host checks its digest."""
+    if body is not None:
+        if body_sha256 is not None or body_bytes is not None:
+            _record_training("capture_failure", {"category": "response_received", "reason": "invalid_value"}, depends_on)
+            return None
+        try:
+            raw = bytes(body)
+        except (TypeError, ValueError, RecursionError):
+            _record_training("capture_failure", {"category": "response_received", "reason": "invalid_value"}, depends_on)
+            return None
+        body_sha256 = "sha256:" + hashlib.sha256(raw).hexdigest()
+        body_bytes = len(raw)
+    elif body_sha256 is None or body_bytes is None:
+        _record_training("capture_failure", {"category": "response_received", "reason": "invalid_value"}, depends_on)
+        return None
+    return _record_training("response_received", {"call_identity": call_identity, "status": status,
+        "body_sha256": body_sha256, "body_bytes": body_bytes}, depends_on)
+
+
+def record_state_snapshot(name: str, value: Any, *, depends_on: list[str] | None = None) -> int | None:
+    """Report only state the agent explicitly selected for training capture."""
+    try:
+        if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_STATE_BYTES:
+            _record_training("capture_failure", {"category": "state_snapshot", "reason": "size_limit"}, depends_on)
+            return None
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        _record_training("capture_failure", {"category": "state_snapshot", "reason": "invalid_value"}, depends_on)
+        return None
+    return _record_training("state_snapshot", {"name": name, "value": value}, depends_on)
 
 
 def validate_decision_frame(value: Any) -> dict[str, Any]:

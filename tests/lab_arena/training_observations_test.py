@@ -15,7 +15,7 @@ from lab_arena import contracts, operations, runner, shim, training_observations
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
 from lab_arena.training_export import assemble_example
-from tests.lab_arena.training_export_test import Objects, add_call, fixture
+from tests.lab_arena.training_export_test import Objects, add_call, assert_legacy_agent_gaps, fixture
 from tests.lab_arena.training_input_test import CLAIM_HASH, TOKEN, service_for
 from tests.lab_arena.test_lab_arena_runner import FakeApi, lease
 from tests.lab_arena.test_deepline_catalog import frozen
@@ -133,6 +133,22 @@ def test_encoded_response_secrets_and_hidden_reasoning_are_filtered_losslessly()
     assert TOKEN.encode() not in returned and b"private reasoning" not in returned
     assert json.loads(returned)["null"] == "\x00" and json.loads(returned)["api_key"] is None
     assert saved["privacy"] == {"redacted": True, "redactions": ["credential", "hidden_reasoning"]}
+
+
+def test_worker_observation_keeps_plaintext_response_alias_but_redacts_request_alias():
+    row = observation()
+    row["request"]["admitted_parameters"]["messages"].append(
+        {"role": "assistant", "reasoning_content": "prior request state"})
+    response = {"choices": [{"message": {"role": "assistant",
+                                        "reasoning_content": "provider returned text"}}]}
+    row["outcome"]["response"]["body_b64"] = base64.b64encode(json.dumps(response).encode()).decode()
+    buffer = obs.Buffer()
+    buffer.append(row)
+    saved = buffer.observations[0]
+    assert saved["request"]["admitted_parameters"]["messages"][1]["reasoning_content"] == "[REDACTED]"
+    body = json.loads(base64.b64decode(saved["outcome"]["response"]["body_b64"]))
+    assert body["choices"][0]["message"]["reasoning_content"] == "provider returned text"
+    assert saved["privacy"] == {"redacted": True, "redactions": ["hidden_reasoning"]}
 
 
 def test_buffer_overflow_is_explicit_incomplete_and_never_clipped():
@@ -255,8 +271,9 @@ def test_only_returned_worker_response_fills_missing_ledger_response(has_worker_
     assert "worker_observation_ref" in call and "response" not in call
     assert call["actual_microusd"] == 42
     assert ("full_response_unavailable" in call["evidence_gaps"]) is not has_worker_response
-    assert result["completeness"]["complete"] is has_worker_response
-    assert result["privacy"]["exact_replay"] is has_worker_response
+    assert not result["completeness"]["complete"]
+    assert not result["privacy"]["exact_replay"]
+    assert "agent_task_state_unverified" in result["completeness"]["incomplete_reasons"]
 
 
 def test_export_transport_before_admission_retains_unknown_accounting():
@@ -295,10 +312,10 @@ def test_export_cannot_fill_gap_with_absent_foreign_or_mislinked_artifact(mutati
     assert "full_response_unavailable" in result["completeness"]["incomplete_reasons"]
 
 
-def test_export_old_paid_only_fixture_remains_complete_and_old_local_refusals_fail_closed():
+def test_export_old_paid_only_fixture_keeps_labels_and_reports_missing_agent_receipts():
     values = fixture()
     add_call(values)
-    assert assemble_example(**values)["completeness"]["complete"]
+    assert_legacy_agent_gaps(assemble_example(**values))
     values["runs"][0]["result_doc"]["resource_summary"]["provider_local_refusal_count"] = 1
     assert "worker_observations_unavailable" in assemble_example(**values)["completeness"]["incomplete_reasons"]
 
@@ -569,9 +586,12 @@ def test_missing_execute_proxy_web_count_is_unknown():
     assert "direct_web_usage_unverified" in assemble_example(**values)["completeness"]["incomplete_reasons"]
 
 
-def test_typed_hidden_response_summary_is_filtered_and_hash_stays_valid():
+def test_typed_response_reasoning_keeps_text_and_hash_stays_valid():
     row = observation()
-    row["outcome"]["response"]["body_b64"] = base64.b64encode(json.dumps({"output": [{"type": "reasoning", "summary": ["private summary"], "text": "hidden text"}]}).encode()).decode()
+    body = {"output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "visible summary"}],
+                        "content": [{"type": "reasoning_text", "text": "visible text"}],
+                        "encrypted_content": "sealed state"}]}
+    row["outcome"]["response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
     values = fixture()
     values["runs"][0]["result_doc"]["resource_summary"]["provider_call_count"] = 1
     snapshot = save(values, payload(row))
@@ -581,8 +601,19 @@ def test_typed_hidden_response_summary_is_filtered_and_hash_stays_valid():
     exported = result["worker_observation_artifacts"]["execute:1"]
     assert contracts.document_hash(exported["payload"]) == exported["payload_sha256"]
     body = base64.b64decode(exported["payload"]["observations"][0]["outcome"]["response"]["body_b64"])
-    assert b"private summary" not in body and b"hidden text" not in body
+    assert b"visible summary" in body and b"visible text" in body and b"sealed state" not in body
     assert result["privacy"]["hidden_reasoning_removed"] and result["privacy"]["privacy_filtered"]
+
+
+def test_old_observation_redaction_is_still_a_fixed_point():
+    row = observation()
+    body = {"output": [{"type": "reasoning", "summary": "[REDACTED]", "text": "[REDACTED]",
+                        "content": "[REDACTED]", "encrypted_content": "[REDACTED]"}],
+            "choices": [{"message": {"reasoning": "[REDACTED]", "reasoning_details": "[REDACTED]"}}]}
+    row["outcome"]["response"]["body_b64"] = base64.b64encode(
+        contracts.canonical_json(body).encode("utf-8")).decode()
+    row["privacy"] = {"redacted": True, "redactions": ["hidden_reasoning"]}
+    assert obs.clean_observation(row) == row
 
 
 def test_api_and_client_observation_limits_and_timeout(tmp_path):

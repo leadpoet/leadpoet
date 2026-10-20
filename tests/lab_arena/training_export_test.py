@@ -233,15 +233,21 @@ def add_call(values, *, status="settlement", pointer=True, provider="openrouter"
     values["ledger_rows"] = [reserve, dict(reserve, entry_id=2, entry_kind="dispatch"), terminal]
 
 
-def test_full_request_not_excerpt_and_hidden_response_reasoning_removed():
+def assert_legacy_agent_gaps(result):
+    assert result["completeness"]["dimensions"]["input_output_label"]
+    assert set(result["completeness"]["incomplete_reasons"]) == {
+        "agent_response_receipts_unverified", "agent_task_state_unverified"}
+
+
+def test_full_request_not_excerpt_and_plaintext_response_alias_retained():
     values = fixture()
     add_call(values)
     result = assemble_example(**values)
-    assert result["completeness"]["complete"] is True
+    assert_legacy_agent_gaps(result)
     assert len(result["provider_calls"][0]["request"]["admitted_parameters"]["messages"][0]["content"]) == 12000
-    assert "PRIVATE THOUGHT" not in json.dumps(result)
-    assert "hidden_reasoning" in result["provider_calls"][0]["response_privacy_redactions"]
-    assert result["privacy"]["hidden_reasoning_removed"] is True
+    assert result["provider_calls"][0]["response"]["choices"][0]["message"]["reasoning_content"] == "PRIVATE THOUGHT"
+    assert result["provider_calls"][0]["response_privacy_redactions"] == []
+    assert result["privacy"]["hidden_reasoning_removed"] is False
     assert result["costs"]["confirmed_actual_microusd"] == 42
 
 
@@ -254,8 +260,9 @@ def test_empty_credential_fields_and_nul_do_not_create_false_export_gaps():
     result = assemble_example(**values)
     assert result["provider_calls"][0]["response"] == body
     assert result["provider_calls"][0]["response_privacy_redactions"] == []
-    assert result["completeness"]["complete"] is True
-    assert result["privacy"]["exact_replay"] is True
+    assert_legacy_agent_gaps(result)
+    assert result["privacy"]["privacy_filtered"] is False
+    assert result["privacy"]["exact_replay"] is False
 
 
 def test_nonempty_auth_url_still_prevents_exact_export():
@@ -281,11 +288,56 @@ def test_call_gaps_are_not_complete(change, reason):
     assert reason in result["completeness"]["incomplete_reasons"]
 
 
-def test_typed_reasoning_and_nested_hidden_details_are_removed():
-    result, removed = without_hidden_reasoning({"output": [{"type": "reasoning", "summary": ["private"]}],
-                                              "reasoning_details": ["private"], "reasoning": {"effort": "high"}})
-    assert removed and "private" not in json.dumps(result)
+def test_export_filter_keeps_readable_reasoning_and_removes_opaque_state():
+    summary = [{"type": "summary_text", "text": "Checked the careers page."}]
+    result, removed = without_hidden_reasoning({
+        "output": [{"type": "reasoning", "summary": summary, "encrypted_content": "SEALED"}],
+        "reasoning_details": ["SEALED", {"type": "reasoning.encrypted", "data": "SEALED"},
+                              {"type": "reasoning.text", "signature": "SEALED", "format": "google"},
+                              {"type": "reasoning.text", "text": "Then the press release.", "signature": "SEALED"}],
+        "reasoning": {"effort": "high"},
+        "choices": [{"message": {"reasoning": "Visible reasoning.",
+                                 "reasoning_content": "Visible alias text."}}],
+    })
+    assert removed and "SEALED" not in json.dumps(result)
+    assert result["output"] == [{"type": "reasoning", "summary": summary}]
+    assert result["reasoning_details"] == [{"type": "reasoning.text", "text": "Then the press release."}]
     assert result["reasoning"] == {"effort": "high"}
+    assert result["choices"][0]["message"] == {"reasoning": "Visible reasoning.",
+                                                "reasoning_content": "Visible alias text."}
+
+
+def test_export_filter_keeps_alias_only_in_provider_response_path():
+    result, removed = without_hidden_reasoning({"provider_calls": [{
+        "request": {"choices": [{"message": {"reasoning_content": "request state"}}]},
+        "response": {"choices": [{"message": {"reasoning_content": "returned text"}},
+                                 {"message": {"reasoning_content": {"sealed": "opaque"}}}]},
+    }]})
+    call = result["provider_calls"][0]
+    assert removed is True
+    assert call["request"]["choices"][0]["message"] == {}
+    assert call["response"]["choices"][0]["message"] == {"reasoning_content": "returned text"}
+    assert call["response"]["choices"][1]["message"] == {}
+
+
+def test_assembled_example_keeps_only_readable_reasoning_from_ledger():
+    values = fixture()
+    add_call(values)
+    body = {"choices": [{"message": {
+        "content": "result", "reasoning": "Hiring signals first.",
+        "reasoning_content": "First inspect the careers page.",
+        "reasoning_details": [{"type": "reasoning.summary", "summary": "Hiring signals first.", "index": 0},
+                              {"type": "reasoning.encrypted", "data": "SEALED", "index": 1}]}}]}
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
+    result = assemble_example(**values)
+    call = result["provider_calls"][0]
+    assert call["response"]["choices"][0]["message"] == {
+        "content": "result", "reasoning": "Hiring signals first.",
+        "reasoning_content": "First inspect the careers page.",
+        "reasoning_details": [{"type": "reasoning.summary", "summary": "Hiring signals first.", "index": 0}],
+    }
+    assert "SEALED" not in json.dumps(result)
+    assert result["privacy"]["hidden_reasoning_removed"] is True
 
 
 def test_private_artifact_does_not_overwrite(tmp_path):
@@ -490,7 +542,7 @@ def test_provider_retry_receipts_count_one_logical_call_but_keep_every_cost():
                     entry_doc=dict(row["entry_doc"], provider_attempt=2)) for row in first]
     first.extend(retries)
     result = assemble_example(**values)
-    assert result["completeness"]["complete"]
+    assert_legacy_agent_gaps(result)
     assert len(result["provider_calls"]) == 2
     assert result["costs"]["confirmed_actual_microusd"] == 84
 
@@ -515,7 +567,7 @@ def test_tool_html_response_is_complete_and_not_a_diagnostic_excerpt():
     text = "<html>" + "source content " * 1000 + "</html>"
     values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(text.encode()).decode()
     result = assemble_example(**values)
-    assert result["completeness"]["complete"]
+    assert_legacy_agent_gaps(result)
     assert result["provider_calls"][0]["response"]["text"] == text
 
 
@@ -595,7 +647,7 @@ def test_shuffled_ledger_preserves_action_order_lifecycle_and_reconciled_cost_pr
     random.Random(42).shuffle(rows)
     values["ledger_rows"] = rows
     result = assemble_example(**values)
-    assert result["completeness"]["complete"]
+    assert_legacy_agent_gaps(result)
     assert [call["call_identity"] for call in result["provider_calls"]] == identities
     first = result["provider_calls"][0]
     assert first["funding_source"] == "host"

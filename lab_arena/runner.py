@@ -70,6 +70,8 @@ MAX_REFUSED_FRAMES = 25  # bound repeated refusals for the same operation/tool
 REFUSAL_PROBE_COOLDOWN_SECONDS = 30.0
 MAX_BUFFERED_PROVIDER_ERROR_EVENTS = 32
 MAX_BUFFERED_DECISION_EVENTS = 64
+MAX_TRAINING_CONTROL_FRAMES = 4096
+MAX_TRAINING_CONTROL_BYTES = 192 * 1024 * 1024
 QUOTA_SNAPSHOT_SCHEMA_VARIANTS = 2
 QUOTA_SNAPSHOT_STARTUP_REQUESTS = 2
 QUOTA_SNAPSHOT_CACHE_MILLISECONDS = 1000
@@ -1820,6 +1822,8 @@ class RunState:
     worker_observations_pending: set[int] = field(default_factory=set)
     worker_observations_frozen: bool = False
     worker_handlers_inflight: int = 0
+    training_control_frames: int = 0
+    training_control_bytes: int = 0
     action_sequence: int = 0
     refusals: int = 0  # refused calls answered by the Arena for this run
     local_refusals: int = 0  # refused locally during an operation cooldown
@@ -2277,6 +2281,86 @@ class WorkerSocketServer:
                 pass
             return contracts.canonical_json({"recorded": False}).encode("utf-8")
         return contracts.canonical_json({"recorded": True}).encode("utf-8")
+
+    def _handle_training_control(self, raw: bytes) -> Optional[bytes]:
+        """Store only explicit sandbox reports under this worker's active lease."""
+        if len(raw) > lab_arena_checkpoint.MAX_TRAINING_FRAME_BYTES:
+            self._mark_observations_incomplete()
+            return contracts.canonical_json({"recorded": False}).encode("utf-8")
+        try:
+            frame = json.loads(raw)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            return None
+        if not isinstance(frame, Mapping) or frame.get("schema_version") != lab_arena_checkpoint.TRAINING_SCHEMA_VERSION:
+            return None
+        unavailable = contracts.canonical_json({"recorded": False}).encode("utf-8")
+        try:
+            frame = lab_arena_checkpoint.validate_training_frame(frame)
+            if str(self._state.lease.get("kind") or "execute") != "execute":
+                return unavailable
+            data = dict(frame["data"])
+            if frame["kind"] == "web_fetch":
+                body = data["body"].encode("utf-8")
+                data.update(body_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
+                            body_bytes=len(body), stored_body_sha256=None,
+                            stored_body_bytes=None, body_ref=None)
+            with self._state.lock:
+                buffer = self._state.worker_observations
+                if self._state.worker_observations_frozen:
+                    return unavailable
+                if frame["kind"] == "response_received":
+                    matched = [row for row in buffer.response_receipts if row["call_identity"] == data["call_identity"]
+                               and row["status"] == data["status"] and row["body_sha256"] == data["body_sha256"]
+                               and row["body_bytes"] == data["body_bytes"]]
+                    if len(matched) != 1:
+                        buffer.failures.add("capture_incomplete")
+                        return unavailable
+                references = frame["depends_on"]
+                known_calls = {row.get("call_identity") for row in self._state.calls}
+                for reference in references:
+                    if reference.startswith("agent:"):
+                        if (not reference[6:].isdigit() or int(reference[6:]) >= len(buffer.agent_observations)):
+                            buffer.failures.add("capture_incomplete")
+                            return unavailable
+                    elif reference not in known_calls:
+                        buffer.failures.add("capture_incomplete")
+                        return unavailable
+                value = {"id": len(buffer.agent_observations), "kind": frame["kind"],
+                         "observed_at": _timestamp(lambda: datetime.now(timezone.utc)),
+                         "after_action_sequence": self._state.action_sequence - 1 if self._state.action_sequence else None,
+                         "depends_on": references, "data": data,
+                         "privacy": {"redacted": False, "redactions": []}}
+                identity = buffer.append_agent_observation(value, secrets=(self._state.lease_token,))
+            if identity is None:
+                return unavailable
+            return contracts.canonical_json({"recorded": True, "observation_id": identity}).encode("utf-8")
+        except Exception:
+            self._mark_observations_incomplete()
+            return unavailable
+
+    def _mark_socket_delivery(self, report: Mapping[str, Any], *, written: bool) -> None:
+        ordinal = report.get("receipt_ordinal")
+        if type(ordinal) is not int:
+            return
+        try:
+            with self._state.lock:
+                if not self._state.worker_observations_frozen:
+                    self._state.worker_observations.mark_socket_write(
+                        ordinal, written_at=_timestamp(lambda: datetime.now(timezone.utc)) if written else None,
+                    )
+        except Exception:
+            self._mark_observations_incomplete()
+
+    def _allow_training_frame(self, size: int) -> bool:
+        """Cap optional capture traffic before reading its large body."""
+        with self._state.lock:
+            if (self._state.training_control_frames >= MAX_TRAINING_CONTROL_FRAMES
+                    or self._state.training_control_bytes + size > MAX_TRAINING_CONTROL_BYTES):
+                self._state.worker_observations.failures.add("capture_incomplete")
+                return False
+            self._state.training_control_frames += 1
+            self._state.training_control_bytes += size
+            return True
 
     @staticmethod
     def _temporary_hold(
@@ -2912,6 +2996,22 @@ class WorkerSocketServer:
                 body = b""
             if body == b'{"error":{"code":"provider_request_refused"}}':
                 headers[CALL_IDENTITY_HEADER] = call["call_identity"]
+        # A successful response needs a host-issued identity so cooperative
+        # clients can acknowledge its bytes after their HTTP adapter reads it.
+        # Provider-supplied copies were removed above.
+        if (
+            isinstance(call, Mapping)
+            and call.get("operation_id") == operation_id
+            and type(call.get("action_sequence")) is int
+            and call["action_sequence"] == action_sequence
+            and call.get("outcome") == "settled"
+            and not call.get("error_code")
+            and type(document.get("status")) is int
+            and 200 <= document["status"] < 300
+            and isinstance(call.get("call_identity"), str)
+            and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
+        ):
+            headers[CALL_IDENTITY_HEADER] = call["call_identity"]
         if operation_id != "deepline.execute":
             return headers
         call = document.get("call")
@@ -3022,7 +3122,18 @@ class WorkerSocketServer:
             with state.lock:
                 if state.worker_observations_frozen:
                     return
-                if not normal_paid_success:
+                if normal_paid_success:
+                    raw_body = base64.b64decode(response["body_b64"], validate=True)
+                    recorded = state.worker_observations.append_response_receipt({
+                        "ordinal": observation["ordinal"], "action_sequence": observation["action_sequence"],
+                        "operation_id": observation["operation_id"], "call_identity": call["call_identity"],
+                        "protocol": observation["protocol"], "status": response["status"],
+                        "body_sha256": "sha256:" + hashlib.sha256(raw_body).hexdigest(),
+                        "body_bytes": len(raw_body), "write_state": "prepared", "socket_written_at": None,
+                    })
+                    if recorded:
+                        observation["response_receipt_ordinal"] = observation["ordinal"]
+                else:
                     outcome = {"protocol": observation["protocol"]}
                     if response is not None:
                         outcome["response"] = response
@@ -3072,6 +3183,7 @@ class WorkerSocketServer:
         raw: bytes,
         *,
         cancel_requested: Optional[Callable[[], bool]] = None,
+        delivery_report: Optional[Dict[str, Any]] = None,
     ) -> bytes:
         """The judge shim's transport: one length-prefixed operation frame."""
 
@@ -3084,7 +3196,6 @@ class WorkerSocketServer:
         control_response = self._handle_decision_control(raw)
         if control_response is not None:
             return control_response
-
         try:
             operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw, deepline_catalog=self._state.lease.get("deepline_catalog"))
         except shim.OperationFrameError as exc:
@@ -3113,6 +3224,8 @@ class WorkerSocketServer:
             "body_b64": document["body_b64"],
         }
         self._finish_observation(observation, response, document=document)
+        if delivery_report is not None and observation is not None and "response_receipt_ordinal" in observation:
+            delivery_report["receipt_ordinal"] = observation["response_receipt_ordinal"]
         return contracts.canonical_json(response).encode("utf-8")
 
     def handle_http(
@@ -3123,6 +3236,7 @@ class WorkerSocketServer:
         headers: Mapping[str, str],
         *,
         cancel_requested: Optional[Callable[[], bool]] = None,
+        delivery_report: Optional[Dict[str, Any]] = None,
     ) -> Tuple[int, Dict[str, str], bytes]:
         """The miner contract: a provider's own HTTP request, sent over the socket without a credential."""
 
@@ -3163,6 +3277,8 @@ class WorkerSocketServer:
             self._finish_observation(observation, {"status": 503, "headers": {}, "body_b64": base64.b64encode(payload).decode("ascii")}, error="worker_unavailable", document=document)
             return 503, {}, payload
         self._finish_observation(observation, {"status": int(document["status"]), "headers": response_headers, "body_b64": base64.b64encode(payload).decode("ascii")}, document=document)
+        if delivery_report is not None and observation is not None and "response_receipt_ordinal" in observation:
+            delivery_report["receipt_ordinal"] = observation["response_receipt_ordinal"]
         return int(document["status"]), response_headers, payload
 
     def start(self) -> None:
@@ -3233,14 +3349,21 @@ class WorkerSocketServer:
                     self._reject(400, "invalid_request")
                     return
                 headers = {name: value for name, value in self.headers.items()}
+                delivery_report: Dict[str, Any] = {}
                 status, response_headers, payload = server_self.handle_http(
                     self.command,
                     "https://" + host + self.path,
                     body,
                     headers,
                     cancel_requested=lambda: connection_closed(self.connection),
+                    delivery_report=delivery_report,
                 )
-                self._answer(status, response_headers, payload)
+                try:
+                    self._answer(status, response_headers, payload)
+                except BaseException:
+                    server_self._mark_socket_delivery(delivery_report, written=False)
+                    raise
+                server_self._mark_socket_delivery(delivery_report, written=True)
 
             def _reject(self, status: int, code: str) -> None:
                 payload = _http_error_body(code)
@@ -3268,6 +3391,7 @@ class WorkerSocketServer:
                 self.end_headers()
                 if self.command != "HEAD":
                     self.wfile.write(payload)
+                self.wfile.flush()
 
             do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do_OPTIONS = _bridge
 
@@ -3287,17 +3411,36 @@ class WorkerSocketServer:
                     return
                 try:
                     header = _recv_exact(connection, 4)
-                    size = int.from_bytes(header, "big")
-                    if size < 2 or size > shim.MAX_FRAME_BYTES:
+                    declared = int.from_bytes(header, "big")
+                    training_frame = bool(declared & 0x80000000)
+                    size = declared & 0x7fffffff if training_frame else declared
+                    delivery_report: Dict[str, Any] = {}
+                    frame_limit = lab_arena_checkpoint.MAX_TRAINING_FRAME_BYTES if training_frame else shim.MAX_FRAME_BYTES
+                    if size < 2 or size > frame_limit:
                         server_self._mark_observations_incomplete()
                         server_self._record_parse_observation({"declared_frame_size": size}, {"error": "frame_too_large"}, "frame", "frame_too_large")
                         payload = shim.encode_worker_error("frame_too_large")
+                    elif training_frame and not server_self._allow_training_frame(size):
+                        payload = contracts.canonical_json({"recorded": False}).encode("utf-8")
+                    elif training_frame:
+                        # The extended prefix is reserved for optional capture;
+                        # it cannot dispatch provider or other control work.
+                        payload = server_self._handle_training_control(_recv_exact(connection, size))
+                        if payload is None:
+                            server_self._mark_observations_incomplete()
+                            payload = contracts.canonical_json({"recorded": False}).encode("utf-8")
                     else:
                         payload = server_self.handle_frame(
                             _recv_exact(connection, size),
                             cancel_requested=lambda: connection_closed(connection),
+                            delivery_report=delivery_report,
                         )
-                    connection.sendall(len(payload).to_bytes(4, "big") + payload)
+                    try:
+                        connection.sendall(len(payload).to_bytes(4, "big") + payload)
+                    except OSError:
+                        server_self._mark_socket_delivery(delivery_report, written=False)
+                        raise
+                    server_self._mark_socket_delivery(delivery_report, written=True)
                 except OSError:
                     return
 

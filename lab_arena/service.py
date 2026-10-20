@@ -5603,7 +5603,7 @@ class ArenaService:
             raise ServiceError("training_observations_conflict", 409) from None
         except Exception:
             raise ServiceError("training_observations_unavailable", 503) from None
-        return {"status": "stored", "schema_version": training_observations.SCHEMA_VERSION,
+        return {"status": "stored", "schema_version": snapshot["schema_version"],
                 "ref": ref, "lease_generation": snapshot["lease_generation"],
                 "claim_request_hash": snapshot["claim_request_hash"],
                 "payload_sha256": snapshot["payload_sha256"]}

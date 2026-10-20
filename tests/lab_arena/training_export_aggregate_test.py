@@ -7,7 +7,7 @@ import json
 import pytest
 
 from lab_arena import training_capture, training_export, training_input
-from tests.lab_arena.training_export_test import add_call, fixture, save_input
+from tests.lab_arena.training_export_test import add_call, assert_legacy_agent_gaps, fixture, save_input
 
 
 def large_example(total_calls=221):
@@ -50,7 +50,7 @@ def large_example(total_calls=221):
 def test_valid_large_aggregate_exports_without_relaxing_request_limit(total_calls):
     values = large_example(total_calls)
     result = training_export.assemble_example(**values)
-    assert result["completeness"]["complete"]
+    assert_legacy_agent_gaps(result)
     assert len(result["provider_calls"]) == total_calls
     assert len(result["configuration"]["tool_catalog"]) == 20_800
     # The original final pass rejects this exact valid assembled structure.

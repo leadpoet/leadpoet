@@ -6,6 +6,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from gateway.api import arena_proxy
 
@@ -153,6 +154,8 @@ def test_proxy_uses_the_shared_larger_limit_only_for_completions(monkeypatch):
 def test_proxy_allows_full_training_input_only_on_exact_route(monkeypatch, route):
     observed = {}
     async def forward(method, path, *, query, body, headers):
+        if method == "HEAD":
+            return httpx.Response(204)
         observed.update(path=path, body=body, headers=dict(headers))
         return httpx.Response(200, json={"status": "stored"})
     monkeypatch.setenv("LAB_ARENA_MODE", "live")
@@ -163,7 +166,105 @@ def test_proxy_allows_full_training_input_only_on_exact_route(monkeypatch, route
     assert response.status_code == 200
     assert observed == {"path": f"v1/runs/r1/{route}", "body": body, "headers": {"x-lab-arena-lease": "a" * 64}}
     assert client.post(f"/arena/v1/runs/r1/{route}/extra", content=body).status_code == 413
-    assert client.post(f"/arena/v1/runs/r1/{route}", content=b"{}", headers={"content-length": str(arena_proxy.training_input.MAX_INPUT_BYTES + 1)}).status_code == 413
+    limit = (arena_proxy.training_observations.MAX_OBJECT_BYTES if route == "training-observations"
+             else arena_proxy.training_input.MAX_INPUT_BYTES)
+    assert client.post(f"/arena/v1/runs/r1/{route}", content=b"{}", headers={"content-length": str(limit + 1)}).status_code == 413
+
+
+def _observation_request(headers, receive):
+    return Request({
+        "type": "http", "method": "POST", "scheme": "http",
+        "path": "/arena/v1/runs/r1/training-observations", "query_string": b"private=not-preflight",
+        "server": ("testserver", 80), "headers": [(key.encode(), value.encode()) for key, value in headers.items()],
+    }, receive)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("testnet", [False, True])
+async def test_observation_upload_authorizes_before_reading_more_than_eight_mib(monkeypatch, testnet):
+    events = []
+    body = b"x" * (arena_proxy.training_input.MAX_INPUT_BYTES + 1)
+
+    async def receive():
+        events.append("body")
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def forward(method, path, *, query, body, headers, **routing):
+        events.append(method)
+        assert routing == ({"testnet": True} if testnet else {})
+        if method == "HEAD":
+            assert path == "v1/runs/r1/training-observations" and query == "" and body == b""
+            assert headers == {"x-lab-arena-lease": "a" * 64}
+            return httpx.Response(204)
+        assert path == "v1/runs/r1/training-observations"
+        assert query == "private=not-preflight" and len(body) > 8 * 1024 * 1024
+        assert headers == {"x-lab-arena-lease": "a" * 64, "content-type": "application/json"}
+        return httpx.Response(200, json={"status": "stored"})
+
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    request = _observation_request({"x-lab-arena-lease": "a" * 64,
+        "content-type": "application/json", "authorization": "never-forward"}, receive)
+    response = await arena_proxy._proxy_request("v1/runs/r1/training-observations", request, testnet=testnet)
+    assert response.status_code == 200 and events == ["HEAD", "body", "POST"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headers,status", [
+    ({}, 401), ({"x-lab-arena-lease": "wrong"}, 401),
+    ({"x-lab-arena-lease": "A" * 64}, 401),
+    ({"content-length": str(256 * 1024 * 1024 + 1)}, 413),
+    ({"content-length": "invalid"}, 400),
+])
+async def test_observation_upload_rejects_local_failures_before_preflight_or_body(monkeypatch, headers, status):
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("local rejection must not read the body or contact the sidecar")
+
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forbidden)
+    with pytest.raises(arena_proxy.HTTPException) as error:
+        await arena_proxy._proxy_request("v1/runs/r1/training-observations",
+            _observation_request(headers, forbidden))
+    assert error.value.status_code == status
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 409, 429, 503, 302])
+async def test_observation_upload_preserves_preflight_denials_without_reading_body(monkeypatch, status):
+    calls = []
+
+    async def unread():
+        pytest.fail("denied or expired leases must not consume the upload")
+
+    async def forward(method, path, **kwargs):
+        calls.append((method, path))
+        return httpx.Response(status, json={"code": "quota_unavailable"}, headers={
+            "cache-control": "no-store", "retry-after": "5", "x-private": "hidden", "location": "https://invalid.test"})
+
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    response = await arena_proxy._proxy_request("v1/runs/r1/training-observations",
+        _observation_request({"x-lab-arena-lease": "a" * 64}, unread))
+    assert response.status_code == status
+    assert response.body == b'{"code":"quota_unavailable"}'
+    assert response.headers["cache-control"] == "no-store" and response.headers["retry-after"] == "5"
+    assert "x-private" not in response.headers and "location" not in response.headers
+    assert calls == [("HEAD", "v1/runs/r1/training-observations")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["transport", "unexpected_success"])
+async def test_observation_upload_authority_check_fails_closed(monkeypatch, failure):
+    async def unread():
+        pytest.fail("unproved authority must not consume the upload")
+
+    async def forward(*_args, **_kwargs):
+        if failure == "transport":
+            raise httpx.ConnectError("private exception must not reach response")
+        return httpx.Response(200)
+
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    with pytest.raises(arena_proxy.HTTPException) as error:
+        await arena_proxy._proxy_request("v1/runs/r1/training-observations",
+            _observation_request({"x-lab-arena-lease": "a" * 64}, unread))
+    assert error.value.status_code == 503 and error.value.detail == "agent competition is unavailable"
 
 
 def test_proxy_applies_compact_trajectory_limit(monkeypatch):

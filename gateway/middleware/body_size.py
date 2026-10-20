@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from typing import Awaitable, Callable
 
+from lab_arena import training_observations
+
 
 class BodySizeLimitMiddleware:
     def __init__(
@@ -28,10 +30,20 @@ class BodySizeLimitMiddleware:
             await self._reject(send, status=415, detail="Unsupported request content encoding")
             return
 
+        path = scope.get("path", "")
+        if path.startswith("/testnet/"):
+            path = path[len("/testnet"):]
+        parts = path.split("/")
+        observation_upload = (
+            scope.get("method") == "POST" and len(parts) == 6
+            and parts[:4] == ["", "arena", "v1", "runs"]
+            and parts[4] not in {"", ".", ".."} and parts[5] == "training-observations"
+        )
+        body_limit = training_observations.MAX_OBJECT_BYTES if observation_upload else self.max_body_bytes
         content_length = headers.get(b"content-length")
         if content_length:
             try:
-                if int(content_length) > self.max_body_bytes:
+                if int(content_length) > body_limit:
                     await self._reject(send)
                     return
             except ValueError:
@@ -53,7 +65,7 @@ class BodySizeLimitMiddleware:
             message = await receive()
             if message.get("type") == "http.request":
                 consumed += len(message.get("body") or b"")
-                if consumed > self.max_body_bytes:
+                if consumed > body_limit:
                     if not rejected:
                         await self._reject(send)
                         rejected = True

@@ -176,3 +176,55 @@ def test_upload_authority_is_rechecked_after_body_read(tmp_path, monkeypatch):
         "/arena/v1/runs/r1/training-observations", json=obs.Buffer().document(),
         headers={"x-lab-arena-lease": TOKEN})
     assert response.status_code == 409 and response.json()["code"] == "lease_inactive"
+
+
+def test_head_preflight_uses_exact_capture_authority_without_body_quota_or_storage(tmp_path, monkeypatch):
+    service, objects = service_for(tmp_path, stage_generation=1, stage=1)
+    # Capture remains valid if the round has moved beyond the provider stage.
+    service._store.get_round = lambda _run: {"stage_generation": 2, "status": "stage2"}
+    before = copy.deepcopy(service._store.get_run("r1"))
+    capture = service._training_capture_run
+    calls = []
+    def authorize(run_id, token):
+        calls.append((run_id, token))
+        return capture(run_id, token)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("HEAD must not parse a body, query quota, or write an object")
+    monkeypatch.setattr(service, "_training_capture_run", authorize)
+    monkeypatch.setattr(service, "handle_quota_snapshot", forbidden)
+    monkeypatch.setattr(objects, "put", forbidden)
+    monkeypatch.setattr(api_module, "_read_json", forbidden)
+    response = TestClient(create_app(service)).head(
+        "/arena/v1/runs/r1/training-observations", headers={"x-lab-arena-lease": TOKEN})
+    assert response.status_code == 204 and response.content == b""
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert calls == [("r1", TOKEN)] and service._store.get_run("r1") == before
+
+
+@pytest.mark.parametrize("changes,token,status", [
+    ({}, None, 401), ({}, "malformed", 401), ({}, "b" * 64, 401),
+    ({"status": "accepted"}, TOKEN, 409),
+    ({"lease_expires_at": "2020-01-01T00:00:00Z"}, TOKEN, 409),
+])
+def test_head_preflight_rejects_invalid_inactive_or_expired_capture_lease(tmp_path, monkeypatch, changes, token, status):
+    service, objects = service_for(tmp_path, **changes)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("HEAD must not parse or store an observation body")
+    monkeypatch.setattr(api_module, "_read_json", forbidden)
+    monkeypatch.setattr(objects, "put", forbidden)
+    response = TestClient(create_app(service)).head("/arena/v1/runs/r1/training-observations",
+        headers={"x-lab-arena-lease": token} if token is not None else {})
+    assert response.status_code == status and response.content == b""
+
+
+def test_head_preflight_requires_the_same_round_ownership(tmp_path):
+    from lab_arena.service import ServiceError
+
+    service, _ = service_for(tmp_path)
+    def unowned(_round_id):
+        raise ServiceError("round_not_owned", 403)
+    service._require_round_ownership = unowned
+    response = TestClient(create_app(service)).head("/arena/v1/runs/r1/training-observations",
+        headers={"x-lab-arena-lease": TOKEN})
+    assert response.status_code == 403 and response.content == b""

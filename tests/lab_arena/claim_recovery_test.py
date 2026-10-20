@@ -502,3 +502,186 @@ def test_exact_sql_replay_after_score_failure_creates_no_second_judgment_or_cost
                 (SQL_ROUND,),
             )
             assert cursor.fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('kind', ('execute', 'score'))
+@pytest.mark.parametrize('change', ('valid', 'expiry', 'lease_generation', 'stage_generation', 'terminal'))
+def test_recovery_rechecks_authority_after_both_enrichment_paths(kind, change):
+    """Score output loading and execute source metadata can outlive a lease."""
+    from datetime import datetime, timezone
+    current = [datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)]
+    service, store = claim_service(lambda: current[0])
+    old = original_claim(current[0])
+    first = service.handle_claim(old)
+    original_token = first['lease_token']
+    frozen_config = dict(store.round_row['configuration_doc'])
+    current[0] += timedelta(seconds=301)
+
+    def during_enrichment():
+        if change == 'expiry':
+            current[0] += timedelta(seconds=4500)
+        elif change == 'lease_generation':
+            store.run['lease_generation'] += 1
+        elif change == 'stage_generation':
+            store.round_row['stage_generation'] += 1
+        elif change == 'terminal':
+            store.run['status'] = 'accepted'
+
+    if kind == 'score':
+        store.round_row['status'] = 'stage1_scoring'
+        store.run['kind'] = store.run['claim_response']['kind'] = 'score'
+        store.run['scored_run_id'] = store.run['claim_response']['scored_run_id'] = 'source'
+        get_run = store.get_run
+        store.get_run = lambda run_id: {'output_ref': 'saved-output'} if run_id == 'source' else get_run(run_id)
+        store.round_row['configuration_doc']['scorer_policy'] = {}
+        frozen_config = dict(store.round_row['configuration_doc'])
+        def saved_output(_):
+            during_enrichment()
+            return b'{"companies":[]}'
+        service._objects = SimpleNamespace(get=saved_output)
+    else:
+        def source_metadata(*_args):
+            during_enrichment()
+            return None
+        store.get_submission_credential = source_metadata
+    result = service.handle_claim(recovery_claim(old, current[0]))
+    assert store.allocations == 1
+    assert all(item['request_id'] == old['request_id'] for item in store.arguments)
+    assert store.round_row['configuration_doc'] == frozen_config
+    if change == 'valid':
+        assert result['status'] == 'leased' and result['lease_token'] == original_token
+        assert result['claim_recovery'] == 'resolved'
+        assert result['request_id'] == old['request_id']
+        assert result['lease_generation'] == first['lease_generation']
+    else:
+        assert result == {'status': 'no_work', 'claim_recovery': 'resolved',
+                          'claim_recovery_request_id': old['request_id']}
+
+
+@pytest.mark.parametrize('expires_in_queue', (False, True))
+def test_recovered_score_waiting_in_real_pool_checks_expiry_before_executor(tmp_path, expires_in_queue):
+    """A warm ECR judge image cannot bypass dispatch-time lease expiry."""
+    from concurrent.futures import ThreadPoolExecutor
+    from tests.lab_arena.test_lab_arena_runner import scoring_lease
+    from lab_arena import scoring
+    current = [make_config(tmp_path, FakeApi([]), BridgingRuntime(calls=0)).clock()]
+    old = original_claim(current[0])
+    current[0] += timedelta(seconds=301)
+    lease = dict(scoring_lease(), request_id=old['request_id'],
+                 lease_expires_at=(current[0]+timedelta(seconds=60)).isoformat(),
+                 claim_recovery='resolved', claim_recovery_request_id=old['request_id'])
+    lease['image_reference'] = '123456789012.dkr.ecr.us-east-1.amazonaws.com/lab-arena/judge@'+lease['image_digest']
+    class Api(FakeApi):
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            assert envelope['body']['recover_claim'] is old
+            return lease
+        def image_access(self, *_args):
+            raise AssertionError('a warm image must not fetch a registry capability')
+    api = Api([])
+    sandbox = BridgingRuntime(output=scoring.build_scoring_output('r1', [
+        {'final_score': 71.0, 'failure_reason': ''}, {'final_score': 44.5, 'failure_reason': ''}]), calls=0)
+    config = make_config(tmp_path, api, sandbox)
+    config.clock = lambda: current[0]
+    config.work_dir.mkdir()
+    config.image_cache.rootfs_for(lease['image_digest'], lease['image_reference'])
+    runner = rn.Runner(config)
+    runner._pending_claims[ROUND] = old
+    runner._pool.shutdown(wait=True)
+    ready, release = threading.Event(), threading.Event()
+    class QueuedPool(ThreadPoolExecutor):
+        def submit(self, fn, *args, **kwargs):
+            future = super().submit(fn, *args, **kwargs)
+            if getattr(fn, '__name__', '') == '_run_lease':
+                ready.set()
+            return future
+    runner._pool = QueuedPool(max_workers=1)
+    blocker = runner._pool.submit(lambda: release.wait(5))
+    try:
+        with ThreadPoolExecutor(max_workers=1) as caller:
+            running = caller.submit(runner.run_once, max_claims=1)
+            assert ready.wait(3)
+            if expires_in_queue:
+                current[0] += timedelta(seconds=60)  # equality is already expired.
+            release.set()
+            assert running.result(timeout=5) == 1
+        blocker.result(timeout=1)
+        assert len(sandbox.specs) == len(api.completions) == (0 if expires_in_queue else 1)
+        assert api.provider_frames == []
+        assert runner.abandoned == int(expires_in_queue)
+        assert runner._pending_claims == {}
+    finally:
+        release.set()
+        runner.close()
+
+
+@pytest.mark.parametrize('expiry', (None, 'bad', '2026-09-02T01:10:00'))
+def test_recovered_dispatch_rejects_missing_malformed_or_naive_expiry(tmp_path, expiry):
+    from tests.lab_arena.test_lab_arena_runner import scoring_lease
+    sandbox = BridgingRuntime(calls=0)
+    config = make_config(tmp_path, FakeApi([]), sandbox)
+    runner = rn.Runner(config)
+    lease = dict(scoring_lease(), claim_recovery='resolved')
+    if expiry is None:
+        lease.pop('lease_expires_at')
+    else:
+        lease['lease_expires_at'] = expiry
+    runner._slots.acquire()
+    try:
+        runner._run_lease(lease)
+        assert sandbox.specs == [] and config.api.completions == []
+        assert runner.abandoned == 1
+    finally:
+        runner.close()
+
+
+@pytest.mark.parametrize('kind', ('execute', 'score'))
+def test_recovery_returns_verified_renewed_expiry_without_renewing_or_changing_identity(kind):
+    from datetime import datetime, timezone
+    from copy import deepcopy
+    current = [datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)]
+    service, store = claim_service(lambda: current[0])
+    old = original_claim(current[0])
+    first = service.handle_claim(old)
+    current[0] += timedelta(seconds=4501)
+    renewed_expiry = (current[0]+timedelta(seconds=60)).isoformat()
+    store.run['lease_expires_at'] = renewed_expiry
+    if kind == 'score':
+        store.round_row['status'] = 'stage1_scoring'
+        store.run['kind'] = store.run['claim_response']['kind'] = 'score'
+        store.run['scored_run_id'] = store.run['claim_response']['scored_run_id'] = 'source'
+        get_run = store.get_run
+        store.get_run = lambda run_id: {'output_ref': 'saved-output'} if run_id == 'source' else get_run(run_id)
+        store.round_row['configuration_doc']['scorer_policy'] = {}
+        service._objects = SimpleNamespace(get=lambda _: b'{"companies":[]}')
+    before = deepcopy(store.run)
+    result = service.handle_claim(recovery_claim(old, current[0]))
+    assert result['status'] == 'leased' and result['lease_expires_at'] == renewed_expiry
+    assert result['lease_token'] == first['lease_token']
+    assert result['request_id'] == old['request_id']
+    assert result['lease_generation'] == first['lease_generation']
+    assert store.run == before
+    assert store.run['claim_response']['lease_expires_at'] == first['lease_expires_at']
+    assert store.allocations == 1
+
+
+@pytest.mark.parametrize('continuation_enabled', (False, True))
+def test_post_enrichment_check_preserves_existing_score_continuation_authority(continuation_enabled):
+    from datetime import datetime, timezone
+    current = [datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)]
+    service, store = claim_service(lambda: current[0])
+    old = original_claim(current[0])
+    service.handle_claim(old)
+    store.run['kind'] = store.run['claim_response']['kind'] = 'score'
+    store.run['scored_run_id'] = store.run['claim_response']['scored_run_id'] = 'source'
+    store.round_row.update(status='stage2_scoring', stage_generation=2,
+                           evaluation_date='2026-10-20' if continuation_enabled else '2026-09-02')
+    store.round_row['configuration_doc']['scorer_policy'] = {}
+    get_run = store.get_run
+    store.get_run = lambda run_id: {'output_ref': 'saved-output'} if run_id == 'source' else get_run(run_id)
+    service._objects = SimpleNamespace(get=lambda _: b'{"companies":[]}')
+    current[0] += timedelta(seconds=301)
+    result = service.handle_claim(recovery_claim(old, current[0]))
+    assert result['status'] == ('leased' if continuation_enabled else 'no_work')
+    assert result['claim_recovery'] == 'resolved'
+    assert store.allocations == 1

@@ -181,6 +181,26 @@ def test_public_url_mask_does_not_create_a_false_bearer_credential(label):
     assert capture.sanitize_training_value(value) == (value, [])
 
 
+@pytest.mark.parametrize("prefix", ["sk-01234567890", "sk-or-v1-abc12345", "Bearer abc", "Basic abc"])
+@pytest.mark.parametrize("tail", [
+    "example.com/path", "example.com/path?token=private-value#;fragment",
+    "example.com/path#https://inner.example/?token=private-value",
+    "private-user:private-password@example.com/path?token=private-value#fragment",
+])
+def test_url_mask_does_not_split_existing_credential_tokens(prefix, tail):
+    from lab_arena import trajectory
+
+    value = prefix + "https://" + tail
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert cleaned.startswith("[REDACTED]://example.com")
+    assert prefix not in cleaned and "private-value" not in cleaned
+    assert "private-user" not in cleaned and "private-password" not in cleaned
+    assert reasons == ["credential"]
+    if tail == "example.com/path":
+        assert cleaned == trajectory.redact_text(value)
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
 def test_url_mask_avoids_original_text_collisions_and_exact_secret_matching(monkeypatch):
     from types import SimpleNamespace
 

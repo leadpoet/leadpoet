@@ -207,6 +207,11 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 return redact(url)
             return url
 
+        # Clean URL secrets before a credential match can remove its scheme.
+        # These existing token matchers must see text across URL boundaries.
+        text = _URL_RE.sub(clean_url, text)
+        text = trajectory._BEARER_RE.sub("[REDACTED]", text)
+        text = trajectory._BARE_API_KEY_RE.sub("[REDACTED]", text)
         if not _URL_RE.search(text):
             return redact(text)
         # Keep URL delimiters out of the generic credential scan, while a URL
@@ -218,6 +223,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         urls = []
 
         def mask_url(match):
+            # Removing a credential prefix can expose a nested URL span.
             urls.append(clean_url(match))
             return prefix + str(len(urls) - 1) + "]"
 

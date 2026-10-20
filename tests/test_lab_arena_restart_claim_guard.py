@@ -132,6 +132,97 @@ class _Connection:
         pass
 
 
+class _ErrorResponse:
+    def __init__(self, status, body):
+        self.status = status
+        self.body = body
+
+    def read(self, _limit):
+        return self.body
+
+
+@pytest.mark.parametrize("code", ["55P03", "PGRST116"])
+def test_transport_reports_only_bounded_guard_rpc_status_and_code(monkeypatch, code):
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://arena.example")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_arena")
+    monkeypatch.setattr(guard_cli.http.client, "HTTPSConnection", _Connection)
+    response = _ErrorResponse(
+        503,
+        json.dumps({
+            "code": code,
+            "message": "private-marker-message",
+            "details": "private-marker-details",
+            "hint": "private-marker-hint",
+        }).encode(),
+    )
+    monkeypatch.setattr(_Connection, "getresponse", lambda _self: response)
+
+    with pytest.raises(guard_cli.GuardError) as error:
+        guard_cli._request("lab_arena_restart_quiescence_v1", {})
+    assert str(error.value) == (
+        "Arena restart guard authority rejected the request "
+        f"(rpc=lab_arena_restart_quiescence_v1, http_status=503, code={code})"
+    )
+
+
+@pytest.mark.parametrize(
+    "code", ["55P03\nprivate-marker", "private-marker", "TOKEN", 55, None]
+)
+def test_transport_redacts_untrusted_error_fields_and_unlisted_rpc(monkeypatch, code):
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://arena.example")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_arena")
+    monkeypatch.setattr(guard_cli.http.client, "HTTPSConnection", _Connection)
+    response = _ErrorResponse(
+        400,
+        json.dumps({
+            "code": code,
+            "message": "private-marker-message",
+            "details": {"key": "private-marker-details"},
+            "hint": "private-marker-hint",
+        }).encode(),
+    )
+    monkeypatch.setattr(_Connection, "getresponse", lambda _self: response)
+
+    with pytest.raises(guard_cli.GuardError) as error:
+        guard_cli._request("safe_rpc", {})
+    assert str(error.value) == (
+        "Arena restart guard authority rejected the request "
+        "(rpc=unlisted, http_status=400, code=unknown)"
+    )
+    assert "private-marker" not in str(error.value)
+
+
+def test_transport_keeps_non200_invalid_json_fail_closed_with_bounded_status(monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://arena.example")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_arena")
+    monkeypatch.setattr(guard_cli.http.client, "HTTPSConnection", _Connection)
+    monkeypatch.setattr(
+        _Connection, "getresponse",
+        lambda _self: _ErrorResponse(502, b"private-marker-not-json"),
+    )
+
+    with pytest.raises(guard_cli.GuardError) as error:
+        guard_cli._request("lab_arena_restart_quiescence_v1", {})
+    assert str(error.value) == (
+        "Arena restart guard authority rejected the request "
+        "(rpc=lab_arena_restart_quiescence_v1, http_status=502, code=unknown)"
+    )
+
+
+def test_transport_keeps_invalid_json_on_success_invalid(monkeypatch):
+    monkeypatch.setenv("LAB_ARENA_SUPABASE_URL", "https://arena.example")
+    monkeypatch.setenv("LAB_ARENA_SERVICE_KEY", "sb_secret_arena")
+    monkeypatch.setattr(guard_cli.http.client, "HTTPSConnection", _Connection)
+    monkeypatch.setattr(
+        _Connection, "getresponse",
+        lambda _self: _ErrorResponse(200, b"private-marker-not-json"),
+    )
+
+    with pytest.raises(guard_cli.GuardError, match="response is invalid") as error:
+        guard_cli._request("lab_arena_restart_quiescence_v1", {})
+    assert "private-marker" not in str(error.value)
+
+
 def test_transport_uses_exact_arena_database_and_scoped_key(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://wrong-primary.example")
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "primary-secret")

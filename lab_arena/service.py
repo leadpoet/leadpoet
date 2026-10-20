@@ -7442,15 +7442,16 @@ class ArenaService:
                 evidence = item.get("evidence_doc")
                 if (ref["scope_doc"].get("company_judgment_policy") == company_judgments.POLICY
                     and evidence is None):
-                    cached = self._store.get_company_judgment(item["cache_key"], item["authority_slot"])
-                    if cached is None or cached.get("source_score_run_id") != score_run_id:
-                        raise scoring.ScoringError("consumed company judgment authority is missing or foreign")
                     evidence = self._company_judgment_evidence(
                         cache_key=item["cache_key"], company_input_hash=item["company_input_hash"],
                         authority_slot=item["authority_slot"],
                         evidence_reads=evidence_reads,
                         round_context=round_context,
                     )
+                    # The proof already binds the stored source. Each consumer
+                    # must still own it, including response-local proof hits.
+                    if evidence["source_score_run_id"] != score_run_id:
+                        raise scoring.ScoringError("consumed company judgment authority is missing or foreign")
                 if evidence is None:
                     hotkey = self._validated_attribution_source(
                         source_score_run_id=score_run_id,

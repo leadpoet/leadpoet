@@ -152,10 +152,36 @@ def test_public_response_keeps_output_and_reduces_authority_reads(reused_failed_
         assert dict(reads) == {'run_rows': 3, 'source-output': 1, 'company_rows': 1,
                              'execution-output': 1, 'current-output': 1}
     else:
-        assert before == {'run_rows': 2, 'company_rows': 3,
+        assert before == {'run_rows': 2, 'company_rows': 2,
                           'execution-output': 1, 'current-output': 3}
-        assert dict(reads) == {'run_rows': 1, 'company_rows': 2,
+        assert dict(reads) == {'run_rows': 1, 'company_rows': 1,
                              'execution-output': 1, 'current-output': 2}
+
+
+@pytest.mark.parametrize('proof_already_read', [False, True])
+def test_consumed_miss_rejects_foreign_source_after_direct_or_cached_proof(proof_already_read):
+    service, ref, _, cached, _, _, reads = _public_company_result()
+    current = service._store.rows['score-current']
+    current['claim_response']['company_judgment_cache'] = {
+        'schema_version': company_judgments.LEASE_SCHEMA_VERSION,
+        'hits': [], 'misses': [_miss(ref)],
+    }
+    memo = {}
+    if proof_already_read:
+        service._company_judgment_evidence(
+            cache_key=ref['cache_key'], company_input_hash=ref['company_input_hash'],
+            authority_slot=0, evidence_reads=memo,
+        )
+    assert cached['source_score_run_id'] != current['run_id']
+    with pytest.raises(scoring.ScoringError, match='consumed company judgment authority is missing or foreign'):
+        service._score_run_attribution(
+            current, service._store.rows['execute-current'], round_id=ROUND_ID,
+            runs_by_id=service._store.rows, evidence_reads=memo,
+        )
+    # A fully valid foreign proof never becomes this consumer's authority.
+    # The cached-proof case must not re-read its company row or source output.
+    assert reads['company_rows'] == reads['source-output'] == 1
+    assert len(memo) == 1
 
 
 def test_later_public_request_rechecks_changed_source():

@@ -348,13 +348,54 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
     return evidence
 
 
-def _select_judge(run, runs):
+def _scoring_policy_versions(round_row, history):
+    """Bind retained attempts to the owner-recorded model revision history."""
+    floor = round_row.get("scoring_generation_floor", 0)
+    if type(floor) is not int or floor < 0:
+        raise ExportError("scoring_generation_floor_invalid")
+    policy = (round_row.get("configuration_doc") or {}).get("scorer_policy")
+    if floor == 0:
+        return {0: policy}
+    if (not isinstance(history, Mapping) or history.get("round_id") != round_row.get("round_id")
+            or not isinstance(history.get("revisions"), list) or not history["revisions"]):
+        raise ExportError("scoring_policy_history_missing")
+    versions, previous = {}, 0
+    for revision in history["revisions"]:
+        if not isinstance(revision, Mapping):
+            raise ExportError("scoring_policy_history_invalid")
+        generation = revision.get("generation_floor")
+        old, new = revision.get("old_scorer_policy"), revision.get("new_scorer_policy")
+        if (type(generation) is not int or not previous < generation <= floor
+                or type(revision.get("previous_generation_floor")) is not int
+                or revision.get("previous_generation_floor") != previous
+                or not isinstance(old, Mapping) or not isinstance(new, Mapping)
+                or old == new or previous in versions and versions[previous] != old):
+            raise ExportError("scoring_policy_history_invalid")
+        versions[previous], versions[generation] = old, new
+        previous = generation
+    if previous != floor or versions[floor] != policy:
+        raise ExportError("scoring_policy_history_invalid")
+    return versions
+
+
+def _scoring_revision(run):
+    revision = run.get("scoring_generation_floor", 0)
+    if type(revision) is not int or revision < 0:
+        raise ExportError("scoring_generation_floor_invalid")
+    return revision
+
+
+def _select_judge(run, runs, *, scoring_generation_floor=0):
+    if type(scoring_generation_floor) is not int or scoring_generation_floor < 0:
+        raise ExportError("scoring_generation_floor_invalid")
     candidates = [row for row in runs if row.get("kind") == "score"
                   and row.get("scored_run_id") == run["run_id"]]
     for row in candidates:
         if any(row.get(key) != run.get(key) for key in
                ("round_id", "submission_id", "miner_hotkey", "stage", "icp_position")):
             raise ExportError("judge_membership_mismatch")
+    candidates = [row for row in candidates
+                  if _scoring_revision(row) == scoring_generation_floor]
     if not candidates:
         return None
     rank = lambda row: (row.get("status") == "accepted", int(row.get("stage_generation") or 0), int(row.get("attempt") or 0))
@@ -882,6 +923,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                      signal_judgment_rows: Sequence[Mapping[str, Any]] = (),
                      signal_source_ledger_rows: Sequence[Mapping[str, Any]] = (),
                      input_snapshots: Mapping[str, Mapping[str, Any]] | None = None,
+                     scoring_policy_history: Mapping[str, Any] | None = None,
                      cost_eligibility_reader: Callable[..., Mapping[str, Any]] | None = None) -> dict:
     """Assemble one exact execution. Missing evidence produces explicit gaps.
 
@@ -901,6 +943,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             or submission_row.get("round_id") != round_row.get("round_id")):
         raise ExportError("context_membership_mismatch")
     config = round_row.get("configuration_doc") or {}
+    policy_versions = _scoring_policy_versions(round_row, scoring_policy_history)
+    generation_floor = round_row.get("scoring_generation_floor", 0)
     reasons = {name: set() for name in ("context", "source_identity", "input_output_label", "exact_inputs", "costs", "research_process")}
     example = {"schema_version": SCHEMA_VERSION,
                "example_id": contracts.document_hash({"schema_version": SCHEMA_VERSION, "run_id": run_id}),
@@ -910,6 +954,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                "configuration": copy.deepcopy(config), "evaluation_date": round_row.get("evaluation_date"),
                "role": "baseline" if submission_row.get("is_king") is True else "miner",
                "runtime": _runtime(run), "companies": []}
+    if generation_floor:
+        example["scoring_generation_floor"] = generation_floor
+        example["scoring_policy_history"] = copy.deepcopy(scoring_policy_history)
     icp = output = None
     try:
         benchmark = _json_object(objects, round_row["benchmark_ref"], 4 * 1024 * 1024)
@@ -962,7 +1009,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         output = None
         reasons["input_output_label"].add("accepted_output_unavailable")
     scored = None
-    judge = _select_judge(run, runs)
+    judge = _select_judge(run, runs, scoring_generation_floor=generation_floor)
     if judge is None or judge.get("status") != "accepted" or judge.get("terminal_cause") != "accepted":
         reasons["input_output_label"].add("final_judge_unavailable")
     elif output is not None and icp is not None:
@@ -1048,7 +1095,19 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     snapshot_ids = selected_ids | launched_ids
     attempt_by_id = {row["run_id"]: row for row in example["attempts"]}
     for selected_id in sorted(snapshot_ids):
+        attempt_policy = config.get("scorer_policy")
         if by_id[selected_id]["kind"] == "score":
+            generation = int(by_id[selected_id].get("stage_generation") or 0)
+            if generation < 0:
+                raise ExportError("scoring_generation_invalid")
+            revision = _scoring_revision(by_id[selected_id])
+            if revision not in policy_versions:
+                raise ExportError("scoring_policy_history_invalid")
+            attempt_policy = policy_versions[revision]
+            if generation_floor:
+                attempt_by_id[selected_id].update(stage_generation=generation,
+                    scoring_generation_floor=revision,
+                    scoring_policy_hash=contracts.document_hash(attempt_policy))
             try:
                 identity = _reviewer_runtime_identity(by_id[selected_id], config)
                 attempt_by_id[selected_id]["runtime_identity"] = identity
@@ -1093,7 +1152,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             elif by_id[selected_id]["kind"] == "score" and (
                     document.get("scored_run_id") != run_id or output is None
                     or document.get("companies") != output["companies"]
-                    or document.get("scorer_policy") != config.get("scorer_policy")
+                    or document.get("scorer_policy") != attempt_policy
                     or document.get("evaluation_date") != round_row.get("evaluation_date")):
                 reasons["exact_inputs"].add("judge_input_context_mismatch")
             if isinstance(document, dict) and icp is not None:

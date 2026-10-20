@@ -23,8 +23,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from lab_arena import contact_policy, contracts, integrity
 
-SCHEMA_VERSION = "leadpoet.lab_arena.training_dataset.v1"
-RECORD_SCHEMA_VERSION = "leadpoet.lab_arena.company_qualification_record.v1"
+SCHEMA_VERSION = "leadpoet.lab_arena.training_dataset.v2"
+RECORD_SCHEMA_VERSION = "leadpoet.lab_arena.company_qualification_record.v2"
 EXAMPLE_SCHEMA_VERSION = "leadpoet.lab_arena.training_example.v1"
 TRAINABLE = ("qualified", "wrong_fit", "insufficient_evidence")
 INTEGRITY_ADAPTERS = frozenset({"qualification_integrity_v2", "qualification_contacts_v3"})

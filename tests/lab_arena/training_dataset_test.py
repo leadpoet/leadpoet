@@ -117,7 +117,7 @@ def test_non_verdict_rows_are_never_negatives():
     assert dataset.classify(row(0, claim())) == ("unjudged", "scored")
 
 
-def test_input_is_what_the_agent_had_and_never_the_label():
+def test_input_keeps_retained_source_text_without_label_leakage():
     records = dataset.records_from_example(example(rows=[row(0, claim(), "qualified")]))
     record = records[0]
     assert set(record["input"]) == {"icp", "icp_source", "evaluation_date", "company", "source_evidence"}
@@ -327,6 +327,11 @@ def test_real_exporter_output_produces_checked_labels():
     records = dataset.records_from_example(exported)
     assert [record["label"]["class"] for record in records] == ["qualified", "wrong_fit"]
     assert records[0]["label"]["primary_intent_verified"] is True
+    assert records[0]["input"]["source_evidence"][0]["text"] == (
+        "Acme announces a new product launch for its customers.")
+    assert records[0]["label_provenance"]["signal_sources"] == [{
+        "signal_index": 0, "source_score_run_id": "judge:source", "source": "cached"}]
+    assert records[1]["input"]["source_evidence"] == []
     assert records[0]["input"]["icp_source"] == "input_snapshot"
     assert "verified_example_company" not in json.dumps(records[0]["input"])
     # The shared fixture's judge input differs from its frozen context. A judge
@@ -337,6 +342,10 @@ def test_real_exporter_output_produces_checked_labels():
     consistent["completeness"]["incomplete_reasons"].remove("judge_input_context_mismatch")
     assert dataset.example_exclusion(consistent, dataset.Rules()) == "example_hash_mismatch"
     assert dataset.example_exclusion(seal(consistent), dataset.Rules()) is None
+    splits, manifest = dataset.build([consistent])
+    assert [record["label"]["class"] for name in ("train", "eval") for record in splits[name]] == ["qualified"]
+    assert splits["analysis"][0]["label"]["class"] == "wrong_fit"
+    assert manifest["counts"]["trainable_records_missing_source_evidence"] == 1
 
 
 def test_cli_writes_a_new_private_dataset(tmp_path, capsys):

@@ -4,8 +4,33 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Callable
+
+
+_NONPRINTING_QUOTE_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_QUOTE_FIELDS = frozenset({"quote", "evidence_quote"})
+
+
+def normalize_evidence_quotes(value: Any, *, field: str = "") -> Any:
+    """Normalize retained evidence quotes for the strict output contract.
+
+    Keys, URLs, entity identifiers and decision fields keep their strict
+    validation. Raw provider evidence is not modified. Apply the same visible
+    quote projection to every copy in final results and partial checkpoints.
+    """
+
+    if isinstance(value, dict):
+        return {key: normalize_evidence_quotes(item, field=key)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_evidence_quotes(item, field=field) for item in value]
+    if isinstance(value, str) and isinstance(field, str) and (
+        field in _QUOTE_FIELDS or field.endswith("_evidence_quote")
+    ):
+        return _NONPRINTING_QUOTE_CONTROLS.sub(" ", value)
+    return value
 
 
 def run_scorer(*, score_input: Callable[..., Any], scoring: Any, quality_policy: Any) -> int:
@@ -16,7 +41,10 @@ def run_scorer(*, score_input: Callable[..., Any], scoring: Any, quality_policy:
         # The runtime reads this same bounded output after a hard timeout.
         # Atomic replacement never exposes a partly written JSON document.
         temporary_path = output_path.with_name(output_path.name + ".tmp")
-        temporary_path.write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
+        temporary_path.write_text(
+            json.dumps(normalize_evidence_quotes(result), sort_keys=True),
+            encoding="utf-8",
+        )
         os.replace(temporary_path, output_path)
 
     def checkpoint(rows):

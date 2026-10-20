@@ -3,6 +3,23 @@
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='60s';
+-- New object ownership requires CREATE for the target owner. Keep this
+-- permission inside the migration and restore the exact prior schema ACL.
+DO $schema_create517$
+DECLARE before_doc JSONB;
+BEGIN
+ SELECT jsonb_build_object('oid',oid,'owner',nspowner,'acl',to_jsonb(nspacl),
+   'owner_had_create',has_schema_privilege('lab_arena_owner',oid,'CREATE'))
+ INTO before_doc FROM pg_namespace WHERE nspname='public';
+ IF before_doc IS NULL THEN
+  RAISE EXCEPTION 'Supersession public schema missing' USING ERRCODE='55000';
+ END IF;
+ PERFORM set_config('leadpoet.arena517_public_schema_before',before_doc::TEXT,TRUE);
+ IF NOT (before_doc->>'owner_had_create')::BOOLEAN THEN
+  GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+ END IF;
+END;
+$schema_create517$;
 DO $security517$
 BEGIN
  IF (SELECT jsonb_build_array(pg_get_userbyid(c.relowner),(SELECT jsonb_agg(jsonb_build_array(pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable,pg_get_userbyid(a.grantor)) ORDER BY pg_get_userbyid(a.grantee),a.privilege_type) FROM aclexplode(coalesce(c.relacl,acldefault('r',c.relowner)))a WHERE a.grantee<>c.relowner),c.relrowsecurity,c.relforcerowsecurity,c.reloptions)
@@ -829,5 +846,22 @@ BEGIN
  END IF;
 END;
 $security517$;
+DO $schema_restore517$
+DECLARE before_doc JSONB:=current_setting('leadpoet.arena517_public_schema_before',TRUE)::JSONB;
+ actual_doc JSONB;
+BEGIN
+ IF before_doc IS NULL THEN
+  RAISE EXCEPTION 'Supersession schema permission snapshot missing' USING ERRCODE='55000';
+ END IF;
+ IF NOT (before_doc->>'owner_had_create')::BOOLEAN THEN
+  REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
+ END IF;
+ SELECT jsonb_build_object('oid',oid,'owner',nspowner,'acl',to_jsonb(nspacl))
+ INTO actual_doc FROM pg_namespace WHERE nspname='public';
+ IF actual_doc IS DISTINCT FROM before_doc-'owner_had_create' THEN
+  RAISE EXCEPTION 'Supersession schema permissions changed' USING ERRCODE='42501';
+ END IF;
+END;
+$schema_restore517$;
 NOTIFY pgrst,'reload schema';
 COMMIT;

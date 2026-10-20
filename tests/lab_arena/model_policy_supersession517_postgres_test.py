@@ -1,6 +1,7 @@
 """Exact operator revision keeps historical work and queues uniform new authority."""
 from copy import deepcopy
 import json
+import re
 from pathlib import Path
 import pytest
 from lab_arena import contracts
@@ -10,8 +11,7 @@ from tests.lab_arena import legacy_company_cache501_postgres_test as company
 
 SQL=Path(__file__).parents[2]/'scripts/517-lab-arena-model-policy-supersession.sql'
 
-@pytest.fixture(scope='module')
-def database():
+def preimage_database():
     gen=base.database.__wrapped__();db=next(gen)
     try:
         with db[0].connect(**db[1]) as conn:
@@ -34,7 +34,16 @@ def database():
                 cur.execute('ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO anon,service_role')
                 cur.execute('ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON TABLES TO leadpoet_parity_reader')
                 cur.execute('ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon,authenticated,service_role')
-                cur.execute(SQL.read_text());cur.execute(SQL.read_text())
+        yield db
+    finally:gen.close()
+
+
+@pytest.fixture(scope='module')
+def database():
+    gen=preimage_database();db=next(gen)
+    try:
+        with db[0].connect(**db[1]) as conn,conn.cursor() as cur:
+            cur.execute(SQL.read_text());cur.execute(SQL.read_text())
         yield db
     finally:gen.close()
 
@@ -625,3 +634,61 @@ def test_private_revision_objects_remove_inherited_public_schema_grants(database
         # existing audited relations; only this new private table loses it.
         cur.execute("SELECT EXISTS(SELECT 1 FROM pg_default_acl d CROSS JOIN LATERAL aclexplode(d.defaclacl)a WHERE d.defaclrole='postgres'::regrole AND d.defaclnamespace='public'::regnamespace AND d.defaclobjtype='r' AND a.grantee='leadpoet_parity_reader'::regrole AND a.privilege_type='SELECT'),has_table_privilege('leadpoet_parity_reader','public.lab_arena_restart_claim_control','SELECT')")
         assert cur.fetchone() == (True,True)
+
+
+@pytest.mark.parametrize('owner_already_has_create',[False,True])
+def test_non_superuser_postgres_restores_exact_schema_permissions(owner_already_has_create):
+    gen=preimage_database();db=next(gen);admin=None
+    try:
+        with db[0].connect(**db[1]) as conn,conn.cursor() as cur:
+            cur.execute('CREATE ROLE schema517_fixture_admin LOGIN SUPERUSER PASSWORD %s',(db[1]['password'],))
+            cur.execute('GRANT lab_arena_owner TO postgres')
+            cur.execute('ALTER SCHEMA public OWNER TO pg_database_owner')
+            cur.execute('REVOKE CREATE ON SCHEMA public FROM PUBLIC,lab_arena_owner')
+            if owner_already_has_create:
+                cur.execute('GRANT CREATE ON SCHEMA public TO lab_arena_owner')
+        admin=db[0].connect(**dict(db[1],user='schema517_fixture_admin'))
+        admin.autocommit=True
+        with admin.cursor() as cur:
+            cur.execute('ALTER ROLE postgres NOSUPERUSER INHERIT CREATEROLE BYPASSRLS')
+        with db[0].connect(**db[1]) as conn,conn.cursor() as cur:
+            cur.execute("SELECT current_user,(SELECT rolsuper FROM pg_roles WHERE rolname=current_user),has_schema_privilege('postgres','public','CREATE'),has_schema_privilege('lab_arena_owner','public','CREATE')")
+            assert cur.fetchone()==('postgres',False,True,owner_already_has_create)
+            cur.execute("SELECT jsonb_build_array(oid,nspowner,nspacl::TEXT) FROM pg_namespace WHERE nspname='public'")
+            before=cur.fetchone()[0]
+            cur.execute("SELECT jsonb_agg(jsonb_build_array(defaclrole,defaclnamespace,defaclobjtype,defaclacl::TEXT) ORDER BY oid) FROM pg_default_acl")
+            defaults=cur.fetchone()[0]
+            conn.commit()
+            sql=SQL.read_text()
+            if not owner_already_has_create:
+                original=re.sub(r'DO \$schema_(?:create|restore)517\$.*?\$schema_(?:create|restore)517\$;','',sql,flags=re.S)
+                assert original!=sql
+                with pytest.raises(db[0].Error,match='permission denied for schema public') as error:
+                    cur.execute(original)
+                assert error.value.pgcode=='42501'
+                conn.rollback()
+            # Fail after the temporary permission/new-object creation. All DDL
+            # and the permission grant must roll back together.
+            broken=sql.replace("'31e88aa868a9caecaffd4571a294e5fb91ce2e29b29748f2157eb98eca05b64b'","'"+'0'*64+"'",1)
+            assert broken!=sql
+            with pytest.raises(db[0].Error,match='Supersession preimage differs'):
+                cur.execute(broken)
+            conn.rollback()
+            cur.execute("SELECT to_regclass('public.lab_arena_scoring_supersessions'),EXISTS(SELECT 1 FROM pg_attribute WHERE attrelid='public.lab_arena_runs'::regclass AND attname='scoring_generation_floor' AND NOT attisdropped)")
+            assert cur.fetchone()==(None,False)
+            cur.execute("SELECT jsonb_build_array(oid,nspowner,nspacl::TEXT) FROM pg_namespace WHERE nspname='public'")
+            assert cur.fetchone()[0]==before
+            cur.execute(sql);cur.execute(sql)
+            cur.execute("SELECT jsonb_build_array(oid,nspowner,nspacl::TEXT) FROM pg_namespace WHERE nspname='public'")
+            assert cur.fetchone()[0]==before
+            cur.execute("SELECT has_schema_privilege('lab_arena_owner','public','CREATE')")
+            assert cur.fetchone()==(owner_already_has_create,)
+            cur.execute("SELECT jsonb_agg(jsonb_build_array(defaclrole,defaclnamespace,defaclobjtype,defaclacl::TEXT) ORDER BY oid) FROM pg_default_acl")
+            assert cur.fetchone()[0]==defaults
+            cur.execute("SELECT has_table_privilege('leadpoet_parity_reader','public.lab_arena_scoring_supersessions','SELECT'),has_table_privilege('lab_arena_service','public.lab_arena_scoring_supersessions','SELECT')")
+            assert cur.fetchone()==(False,True)
+    finally:
+        if admin is not None:
+            with admin.cursor() as cur:cur.execute('ALTER ROLE postgres SUPERUSER')
+            admin.close()
+        gen.close()

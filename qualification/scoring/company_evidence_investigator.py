@@ -743,6 +743,54 @@ def _response_exhausted_output_budget(
     )
 
 
+def _valid_multi_research_reply(
+    tool_calls: list[Any], *, required_tool: str,
+    required_search_locators: Optional[tuple[str, str]] = None,
+) -> bool:
+    """Check a rejected research batch without executing or selecting any call."""
+
+    call_ids: set[str] = set()
+    for call in tool_calls:
+        if not isinstance(call, Mapping):
+            return False
+        call_id = call.get("id")
+        function = call.get("function")
+        if (
+            not isinstance(call_id, str) or not call_id or call_id in call_ids
+            or call.get("type") != "function"
+            or not isinstance(function, Mapping)
+        ):
+            return False
+        call_ids.add(call_id)
+        name = function.get("name")
+        if not isinstance(name, str) or name not in {"search_web", "fetch_page"} or (
+            required_tool and name != required_tool
+        ):
+            return False
+        raw_arguments = function.get("arguments")
+        if not isinstance(raw_arguments, str):
+            return False
+        try:
+            arguments = json.loads(raw_arguments)
+        except (TypeError, ValueError):
+            return False
+        key = "query" if name == "search_web" else "url"
+        if not isinstance(arguments, Mapping) or set(arguments) != {key}:
+            return False
+        value = arguments[key]
+        if not isinstance(value, str) or not value.strip():
+            return False
+        if name == "search_web" and len(value) > 500:
+            return False
+        if name == "search_web" and required_search_locators is not None and not any(
+            locator in _normalized_span(value) for locator in required_search_locators
+        ):
+            return False
+        if name == "fetch_page" and (len(value) < 10 or not _safe_https_url(value)):
+            return False
+    return True
+
+
 def _safe_https_url(value: Any) -> str:
     if not isinstance(value, str) or not value or len(value) > 2000:
         return ""
@@ -4443,6 +4491,41 @@ async def investigate_company_evidence(
                     tool_calls = message["tool_calls"]
                 except (KeyError, IndexError, TypeError):
                     raise ValueError("reasoning_response_malformed") from None
+                if (
+                    isinstance(choices, list)
+                    and len(choices) == 1
+                    and isinstance(message, Mapping)
+                    and isinstance(tool_calls, list)
+                    and len(tool_calls) > 1
+                    and _valid_multi_research_reply(
+                        tool_calls,
+                        required_tool=(
+                            "submit_findings" if submit_only_response else required_tool
+                        ),
+                        required_search_locators=(
+                            (_normalized_span(search_name), search_domain)
+                            if forced_stage_search_call else None
+                        ),
+                    )
+                    and not correction_turn
+                    and _turn + 1 < MAX_REASONING_TURNS
+                    and incomplete_submit_retries < MAX_INCOMPLETE_SUBMIT_RETRIES
+                    and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
+                ):
+                    # No call from an ambiguous batch is executed. Reuse the
+                    # one serialization repair, keeping research/turn limits.
+                    incomplete_submit_retries += 1
+                    forced_next_tool = required_tool
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "The prior response contained multiple tool calls. "
+                            "None was executed. Return exactly one complete tool "
+                            "call using the currently allowed tools and required "
+                            "tool choice. Do not emit multiple calls or prose."
+                        ),
+                    })
+                    continue
                 if (
                     not isinstance(message, Mapping)
                     or not isinstance(tool_calls, list)

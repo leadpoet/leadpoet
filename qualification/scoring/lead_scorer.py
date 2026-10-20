@@ -56,6 +56,7 @@ from qualification.scoring.company_verification import (
     _fetch_bounded_html,
     _registrable_domain,
     current_exchange_profile_names_issuer,
+    verified_brand_formal_legal_name,
     verified_brand_legal_name_initialism,
     verify_company_exists,
 )
@@ -4007,6 +4008,30 @@ def _web_identity_receipt(
         receipt.update(
             decision=COMPANY_FIT_MATCH,
             reason_code="verified_legal_name_initialism",
+        )
+        return receipt
+    if (
+        receipt.get("decision") != COMPANY_FIT_MATCH
+        and verified_brand_receipt.get("decision") == COMPANY_FIT_MATCH
+        and receipt.get("evidence_source") == "company_web_reverification"
+        and same_domain_name_alias
+        and receipt_submitted_domain
+        == receipt_observed_domain
+        == verified_alias_domain
+        and receipt_observed_slug == verified_alias_slug
+        and receipt_submitted_slug in {"", verified_alias_slug}
+        and (
+            verified_brand_formal_legal_name(
+                company.company_name, observed_values["name"]
+            )
+            or verified_brand_formal_legal_name(
+                observed_values["name"], company.company_name
+            )
+        )
+    ):
+        receipt.update(
+            decision=COMPANY_FIT_MATCH,
+            reason_code="verified_formal_legal_name_alias",
         )
         return receipt
     if (

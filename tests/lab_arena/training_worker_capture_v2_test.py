@@ -3,9 +3,11 @@
 import hashlib
 import json
 import shutil
+import socket
 import tempfile
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from lab_arena import lab_arena_checkpoint, runner, shim, training_observations
@@ -163,3 +165,105 @@ def test_v2_upload_is_bound_to_existing_lease_and_private_store(tmp_path):
     assert uploaded.json()["schema_version"] == training_observations.SCHEMA_VERSION
     saved = training_observations.read_snapshot(objects, "r1", "execute", 1, CLAIM_HASH)
     assert saved["payload"] == payload
+
+
+def _exchange_frame(path, raw, *, extended):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(3)
+        connection.connect(str(path))
+        declared = len(raw) | (0x80000000 if extended else 0)
+        connection.sendall(declared.to_bytes(4, "big") + raw)
+
+        def receive(size):
+            result = b""
+            while len(result) < size:
+                part = connection.recv(size - len(result))
+                assert part, "worker closed before returning its response"
+                result += part
+            return result
+
+        return json.loads(receive(int.from_bytes(receive(4), "big")))
+
+
+def test_capture_prefix_cannot_dispatch_other_work_or_bypass_capture_budget(tmp_path, monkeypatch):
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    api = FakeApi([], broker_documents=[response(200, {"answer": "available"}, outcome="settled")])
+    socket_path = Path(tempfile.mkdtemp(prefix="arena-v2-", dir="/tmp")) / "w.sock"
+    server = runner.WorkerSocketServer(socket_path, api, state)
+    server.start()
+    try:
+        operation = shim.build_operation_frame("openrouter.chat", {
+            "model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "test"}],
+            "max_tokens": 20,
+        }, 1000)
+        assert _exchange_frame(socket_path, operation, extended=True) == {"recorded": False}
+        quota = json.dumps(lab_arena_checkpoint.QUOTA_CONTROL_FRAME).encode()
+        assert _exchange_frame(socket_path, quota, extended=True) == {"recorded": False}
+        assert state.action_sequence == len(api.provider_frames) == 0
+        assert _exchange_frame(socket_path, operation, extended=False)["status"] == 200
+        assert state.action_sequence == len(api.provider_frames) == 1
+
+        monkeypatch.setattr(runner, "MAX_TRAINING_CONTROL_FRAMES", 0)
+        capture = json.dumps({
+            "schema_version": lab_arena_checkpoint.TRAINING_SCHEMA_VERSION,
+            "control": lab_arena_checkpoint.TRAINING_CONTROL,
+            "kind": "state_snapshot", "depends_on": [], "data": {"name": "safe", "value": {}},
+        }).encode()
+        assert _exchange_frame(socket_path, capture, extended=False) == {"error": "invalid_frame"}
+        assert _exchange_frame(socket_path, capture, extended=True) == {"recorded": False}
+        assert not state.worker_observations.agent_observations
+        assert state.training_control_frames == 2
+    finally:
+        server.stop()
+        shutil.rmtree(socket_path.parent)
+
+    # Large capture frames do not enlarge the ordinary operation contract.
+    with pytest.raises(shim.OperationFrameError, match="frame_too_large"):
+        shim.decode_operation_frame(b" " * (shim.MAX_FRAME_BYTES + 1))
+
+
+@pytest.mark.parametrize("field", ["body_bytes", "stored_body_bytes"])
+def test_web_body_ref_requires_matching_original_and_stored_sizes(tmp_path, field):
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    server = runner.WorkerSocketServer(tmp_path / "unused.sock", FakeApi([]), state)
+    capture = json.dumps({
+        "schema_version": lab_arena_checkpoint.TRAINING_SCHEMA_VERSION,
+        "control": lab_arena_checkpoint.TRAINING_CONTROL, "kind": "web_fetch", "depends_on": [],
+        "data": {"url": "https://example.com/", "final_url": "https://example.com/",
+                 "retrieved_at": "2026-10-19T00:00:00Z", "status": 200,
+                 "content_type": "text/plain", "body": "same body"},
+    }).encode()
+    assert json.loads(server._handle_training_control(capture))["observation_id"] == 0
+    assert json.loads(server._handle_training_control(capture))["observation_id"] == 1
+    payload = state.worker_observations.document()
+    assert payload["agent_observations"][1]["data"]["body_ref"] == 0
+    payload["agent_observations"][1]["data"][field] += 1
+    with pytest.raises(training_observations.ObservationError, match="web_body_ref_invalid"):
+        training_observations.build_snapshot("execute:1", "execute", payload,
+            lease_generation=1, claim_request_hash=CLAIM_HASH)
+
+
+def test_invalid_sdk_values_and_deep_extended_json_leave_explicit_capture_gaps(tmp_path, monkeypatch):
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    socket_path = Path(tempfile.mkdtemp(prefix="arena-v2-", dir="/tmp")) / "w.sock"
+    server = runner.WorkerSocketServer(socket_path, FakeApi([]), state)
+    server.start()
+    monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
+    try:
+        assert lab_arena_checkpoint.record_state_snapshot("safe", {}, depends_on=1) is None
+        nested = []
+        for _ in range(1100):
+            nested = [nested]
+        assert lab_arena_checkpoint.record_state_snapshot("deep", nested) is None
+        malformed = b"[" * 1100 + b"0" + b"]" * 1100
+        assert _exchange_frame(socket_path, malformed, extended=True) == {"recorded": False}
+    finally:
+        server.stop()
+        shutil.rmtree(socket_path.parent)
+    payload = state.worker_observations.document()
+    assert not payload["complete"]
+    assert [row["data"] for row in payload["agent_observations"]] == [
+        {"category": "state_snapshot", "reason": "invalid_value"},
+        {"category": "state_snapshot", "reason": "invalid_value"},
+    ]
+    assert all(row["depends_on"] == [] for row in payload["agent_observations"])

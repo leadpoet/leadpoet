@@ -2289,7 +2289,7 @@ class WorkerSocketServer:
             return contracts.canonical_json({"recorded": False}).encode("utf-8")
         try:
             frame = json.loads(raw)
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             return None
         if not isinstance(frame, Mapping) or frame.get("schema_version") != lab_arena_checkpoint.TRAINING_SCHEMA_VERSION:
             return None
@@ -3196,10 +3196,6 @@ class WorkerSocketServer:
         control_response = self._handle_decision_control(raw)
         if control_response is not None:
             return control_response
-        control_response = self._handle_training_control(raw)
-        if control_response is not None:
-            return control_response
-
         try:
             operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw, deepline_catalog=self._state.lease.get("deepline_catalog"))
         except shim.OperationFrameError as exc:
@@ -3426,6 +3422,13 @@ class WorkerSocketServer:
                         payload = shim.encode_worker_error("frame_too_large")
                     elif training_frame and not server_self._allow_training_frame(size):
                         payload = contracts.canonical_json({"recorded": False}).encode("utf-8")
+                    elif training_frame:
+                        # The extended prefix is reserved for optional capture;
+                        # it cannot dispatch provider or other control work.
+                        payload = server_self._handle_training_control(_recv_exact(connection, size))
+                        if payload is None:
+                            server_self._mark_observations_incomplete()
+                            payload = contracts.canonical_json({"recorded": False}).encode("utf-8")
                     else:
                         payload = server_self.handle_frame(
                             _recv_exact(connection, size),

@@ -97,8 +97,9 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
 
 def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | None) -> int | None:
     frame = {"schema_version": TRAINING_SCHEMA_VERSION, "control": TRAINING_CONTROL,
-             "kind": kind, "depends_on": list(depends_on or []), "data": data}
+             "kind": kind, "depends_on": depends_on, "data": data}
     try:
+        frame["depends_on"] = list(depends_on or [])
         normalized = validate_training_frame(frame)
         encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     except Exception:
@@ -109,7 +110,8 @@ def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | No
                     reason = "size_limit"
             except Exception:
                 pass
-            _record_training("capture_failure", {"category": kind, "reason": reason}, depends_on)
+            # Invalid dependencies must not make the failure report fail too.
+            _record_training("capture_failure", {"category": kind, "reason": reason}, None)
         return None
     try:
         path = str(os.environ.get(WORKER_SOCKET_ENV) or "").strip()
@@ -162,7 +164,7 @@ def record_response_received(*, call_identity: str, status: int, body: bytes | N
             return None
         try:
             raw = bytes(body)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
             _record_training("capture_failure", {"category": "response_received", "reason": "invalid_value"}, depends_on)
             return None
         body_sha256 = "sha256:" + hashlib.sha256(raw).hexdigest()
@@ -180,7 +182,7 @@ def record_state_snapshot(name: str, value: Any, *, depends_on: list[str] | None
         if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_STATE_BYTES:
             _record_training("capture_failure", {"category": "state_snapshot", "reason": "size_limit"}, depends_on)
             return None
-    except (TypeError, ValueError, UnicodeError):
+    except (TypeError, ValueError, UnicodeError, RecursionError):
         _record_training("capture_failure", {"category": "state_snapshot", "reason": "invalid_value"}, depends_on)
         return None
     return _record_training("state_snapshot", {"name": name, "value": value}, depends_on)

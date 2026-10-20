@@ -373,7 +373,9 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
             if data["body_ref"] is not None:
                 previous = bodies.get(data["body_ref"])
                 if (previous is None or previous["body_sha256"] != data["body_sha256"]
-                        or previous["stored_body_sha256"] != data["stored_body_sha256"]):
+                        or previous["body_bytes"] != data["body_bytes"]
+                        or previous["stored_body_sha256"] != data["stored_body_sha256"]
+                        or previous["stored_body_bytes"] != data["stored_body_bytes"]):
                     raise ObservationError("web_body_ref_invalid")
             else:
                 bodies[row["id"]] = data

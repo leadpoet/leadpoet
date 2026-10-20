@@ -3187,23 +3187,22 @@ def _provider_request_refused(
     return False
 
 
-def _deepline_managed_provider_failure(response: ProviderResponse) -> bool:
-    """Distinguish an explicitly managed upstream account from the miner's key."""
+def _deepline_provider_failure_document(
+    response: ProviderResponse,
+) -> Optional[Mapping[str, Any]]:
+    """Read only a consistent, structured upstream failure envelope."""
 
     if response.internal_provenance is not None or response.status not in (401, 402, 403, 429):
-        return False
+        return None
     try:
         document = json.loads(response.body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
-        return False
+        return None
     if not isinstance(document, Mapping):
-        return False
+        return None
     tool_error = document.get("tool_error")
-    return (
-        document.get("credential_owner") == "deepline_managed"
-        and document.get("failure_origin") in ("provider", "provider_account")
-        and document.get("error_category") in ("provider_auth", "provider_account")
-        and type(document.get("upstream_status")) is int
+    consistent = (
+        type(document.get("upstream_status")) is int
         and document["upstream_status"] in (401, 402, 403, 429)
         and isinstance(document.get("provider"), str)
         and bool(document["provider"].strip())
@@ -3217,6 +3216,40 @@ def _deepline_managed_provider_failure(response: ProviderResponse) -> bool:
         and tool_error.get("operation") == document["operation"]
         and type(tool_error.get("statusCode")) is int
         and tool_error["statusCode"] == response.status
+    )
+    return document if consistent else None
+
+
+def _deepline_managed_provider_failure(response: ProviderResponse) -> bool:
+    """Distinguish an explicitly managed upstream account from the miner's key."""
+
+    document = _deepline_provider_failure_document(response)
+    return bool(
+        document is not None
+        and document.get("credential_owner") == "deepline_managed"
+        and document.get("failure_origin") in ("provider", "provider_account")
+        and document.get("error_category") in ("provider_auth", "provider_account")
+    )
+
+
+def _deepline_credential_free_rate_limit(response: ProviderResponse) -> bool:
+    """A proved upstream throttle cannot invalidate the submitted Deepline key."""
+
+    document = _deepline_provider_failure_document(response)
+    return bool(
+        document is not None
+        and response.status == 429
+        and document.get("code") == "UPSTREAM_RATE_LIMIT"
+        and document.get("credential_owner") == "none"
+        and document.get("credential_source") == "none"
+        and document.get("failure_origin") == "provider"
+        and document.get("error_category") == "upstream"
+        and document.get("upstream_status") == 429
+        and document.get("rate_limit_kind") == "upstream_provider"
+        and document.get("rate_limit_bucket_scope") == "provider_shared"
+        and document.get("rate_limit_credential_source") == "none"
+        and document["tool_error"].get("category") == "rate_limit"
+        and document["tool_error"].get("origin") == "provider"
     )
 
 
@@ -3235,7 +3268,10 @@ def _miner_credential_failure(
     403 and 429 responses remain account failures.
     """
 
-    if provider == "deepline" and _deepline_managed_provider_failure(response):
+    if provider == "deepline" and (
+        _deepline_managed_provider_failure(response)
+        or _deepline_credential_free_rate_limit(response)
+    ):
         return False
     if (
         provider == "openrouter" and original_http_status == 402

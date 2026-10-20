@@ -112,6 +112,23 @@ def test_strict_document_limits_reject_every_hostile_shape():
         c.check_strict_document({"k": "abcd", "j": "abcd"}, c.StrictLimits(max_total_bytes=10))
 
 
+def test_control_value_allowance_keeps_keys_and_other_document_limits_strict():
+    limits = c.StrictLimits(max_depth=2, max_list_items=2, max_object_keys=2,
+        max_string_bytes=4, max_total_bytes=64, allow_control_characters_in_values=True)
+    c.check_strict_document({"a": "\x00\x0c\x7f"}, limits)
+    for bad in (
+        {"\x00": 1}, {"\x0c": 1}, {"\x7f": 1},
+        {"a": "\ud800"}, {"a": float("nan")}, {"a": float("inf")}, {"a": 2 ** 60},
+        {"a": {"b": {"c": 1}}}, {"a": [1, 2, 3]}, {"a": 1, "b": 2, "c": 3},
+        {"a": "abcde"}, {1: "x"}, {"a": object()},
+    ):
+        with pytest.raises(c.ArenaContractError):
+            c.check_strict_document(bad, limits)
+    with pytest.raises(c.ArenaContractError, match="document exceeds"):
+        c.check_strict_document({"a": "\x00\x0c\x7f"},
+            c.StrictLimits(max_total_bytes=10, allow_control_characters_in_values=True))
+
+
 def test_signed_request_roundtrip_and_rejections():
     keypair = Keypair.create_from_uri("//Alice")
     envelope = signed(keypair)

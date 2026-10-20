@@ -23,6 +23,7 @@ from tests.lab_arena.test_lab_arena_broker import FakeTransport, price_table
 ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = "391-lab-arena-verifier-provider-request-cache.sql"
 LEASE_MIGRATION = "392-lab-arena-judgment-cache-extended-lease.sql"
+SINGLE_TOOL_MIGRATION = "518-lab-arena-single-tool-response-cache.sql"
 ROUND = "arena-2099-10-02"
 DATE = "2099-10-02"
 POLICY = scoring.build_scorer_policy(
@@ -53,6 +54,7 @@ def database():
             "354-lab-arena-60m-lease.sql",
             MIGRATION,
             LEASE_MIGRATION,
+            SINGLE_TOOL_MIGRATION,
         )
     )
 
@@ -535,3 +537,120 @@ def test_broker_replays_exact_score_request_through_real_ledger(
         assert terminal["judgment_cache_source_run_id"] == "cache-run-baseline"
     finally:
         transport.close()
+
+
+@pytest.mark.parametrize("single_required,count", [(True, 3), (True, 2), (True, 1), (False, 3)])
+def test_historical_multi_source_respects_explicit_single_tool_and_preserves_paid_identity(
+    seeded, single_required, count,
+):
+    request, action = "historical-tools", "historical-paid"
+    assert _reserve(seeded, "baseline", request, action)["status"] == "reserved"
+    assert _dispatch(seeded, "baseline", action)["status"] == "dispatched"
+    body = {"choices": [{"finish_reason": "tool_calls", "message": {
+        "tool_calls": [{"id": str(i), "type": "function", "function": {
+            "name": "fetch_page", "arguments": '{"url":"https://acme.example"}',
+        }} for i in range(count)],
+    }}]}
+    assert _settle(seeded, "baseline", action, _terminal(body=body))["status"] == "settled"
+    original = _ledger(seeded, action)
+    doc = _call_doc(request)
+    if single_required:
+        doc["judgment_cache_single_tool_required"] = True
+    destination = _reserve(seeded, "miner_a", request, "destination", call_doc=doc)
+    skip = single_required and count > 1
+    assert destination["status"] == ("reserved" if skip else "cache_hit")
+    if skip:
+        # Exactly this new paid identity dispatches; the rejected paid source is retained.
+        assert _dispatch(seeded, "miner_a", "destination")["status"] == "dispatched"
+        body["choices"][0]["message"]["tool_calls"] = body["choices"][0]["message"]["tool_calls"][:1]
+        _settle(seeded, "miner_a", "destination", _terminal(body=body))
+        hit = _reserve(seeded, "miner_b", request, "valid-hit", call_doc=doc)
+        assert hit["status"] == "cache_hit"
+        assert hit["source_call_identity"] == _sha("destination")
+        assert sum(row[0] == "dispatch" for row in _ledger(seeded, "destination")) == 1
+    # Same paid identity never becomes another dispatch, even under the new source gate.
+    replay = _reserve(seeded, "baseline", request, action, call_doc=doc)
+    assert replay["status"] == "settled"
+    assert _ledger(seeded, action) == original
+
+
+def test_single_tool_migration_exact_replay_and_tamper_fail_closed(seeded):
+    psycopg2, dsn = seeded
+    signature = "public.lab_arena_reserve_judgment_call(text,text,text,text,text,text,bigint,jsonb,integer)"
+    sql = (ROOT / "scripts" / SINGLE_TOOL_MIGRATION).read_text()
+    with psycopg2.connect(**dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_get_functiondef(%s::regprocedure)", (signature,))
+            before = cursor.fetchone()[0]
+            cursor.execute(sql)
+            cursor.execute(sql)
+            cursor.execute("SELECT pg_get_functiondef(%s::regprocedure)", (signature,))
+            assert cursor.fetchone()[0] == before
+            cursor.execute("BEGIN")
+            cursor.execute(before.replace("-- A native success is still paid", "-- Tampered native success is still paid"))
+            with pytest.raises(Exception, match="single-tool cache source differs"):
+                cursor.execute(sql)
+            connection.rollback()
+
+
+def test_real_broker_skips_legacy_multi_cache_and_dispatches_once(seeded, monkeypatch):
+    from tests.lab_arena.test_verifier_provider_cache import (
+        _research_tool_answer, _research_tool_request,
+    )
+    psycopg2, dsn = seeded
+    sql_transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
+    provider = FakeTransport([
+        (200, _research_tool_answer(("fetch_page", "fetch_page", "search_web"))),
+        (200, _research_tool_answer(("search_web",))),
+    ])
+    instance = br.Broker(
+        store=ArenaStore(sql_transport), key_for=lambda _: "test-credential",
+        credential_for=lambda _context, _provider: "test-credential",
+        funding_source_for=lambda context: "host" if context.run_id.endswith("baseline") else "miner_key",
+        provider_funding_source_for=lambda context, _: "host" if context.run_id.endswith("baseline") else "miner_key",
+        price_table=price_table(), judge_models=["openai/gpt-4o-mini"], transport=provider,
+    )
+    frozen = {"round_id": ROUND, "evaluation_date": DATE,
+        "scorer_image_digest": "sha256:" + "a" * 64,
+        "scorer_image_reference": "registry.example/lab/scorer@sha256:" + "a" * 64,
+        "scorer_policy": POLICY}
+    def context(label):
+        return br.RunContext(run_id="cache-run-" + label,
+            assignment_id="cache-assignment-" + label, icp_position=0,
+            lease_token_hash=_sha("lease-" + label), miner_hotkey=hotkey("cache-" + label),
+            submission_id=("baseline-" + ROUND.removeprefix("arena-") if label == "baseline"
+                           else "cache-submission-" + label), stage=1, kind="score",
+            attempt=1, round_id=ROUND, judgment_cache_scope=frozen)
+    def call(label):
+        return instance.execute(context(label), operation_id="openrouter.chat",
+            parameters=_research_tool_request(False), action_sequence=1, timeout_ms=5000)
+    try:
+        # Produce historical authority through the real append-only ledger,
+        # with exactly the pre-fix response eligibility behavior.
+        complete = br._complete_declared_tool_calls
+        with monkeypatch.context() as legacy:
+            legacy.setattr(br, "_complete_declared_tool_calls", lambda message, request:
+                complete(message, {k: v for k, v in request.items()
+                                   if k != "parallel_tool_calls"}))
+            old = call("baseline")
+        assert old.status == 200
+        identity = old.call["call_identity"]
+        with psycopg2.connect(**dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT row_to_json(x) FROM public.lab_arena_ledger x "
+                    "WHERE call_identity=%s ORDER BY entry_id", (identity,))
+                before = cursor.fetchall()
+        fresh, hit, own = call("miner_a"), call("miner_b"), call("baseline")
+        assert fresh.status == hit.status == own.status == 200
+        assert fresh.call.get("cached") is None and hit.call["cached"] is True
+        assert len(provider.sent) == 2  # one original paid call, one fresh replacement
+        with psycopg2.connect(**dsn) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT row_to_json(x) FROM public.lab_arena_ledger x "
+                    "WHERE call_identity=%s ORDER BY entry_id", (identity,))
+                assert cursor.fetchall() == before
+                cursor.execute("SELECT count(*) FROM public.lab_arena_ledger WHERE "
+                    "call_identity=%s AND entry_kind='dispatch'", (fresh.call["call_identity"],))
+                assert cursor.fetchone()[0] == 1
+    finally:
+        sql_transport.close()

@@ -1011,8 +1011,8 @@ def test_run_once_checks_later_round_before_waiting_to_rescan(tmp_path):
         def __init__(self):
             super().__init__([])
             self.available = {
-                "old-round": [lease("old", 0)],
-                "new-round": [lease("new", 1)],
+                "old-round": [dict(lease("old", 0), round_id="old-round")],
+                "new-round": [dict(lease("new", 1), round_id="new-round")],
             }
 
         def claim(self, envelope):

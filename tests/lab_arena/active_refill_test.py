@@ -157,14 +157,17 @@ def _check_active_refill(
         assert result.result(1) == (2 if refills else 1)
         assert len(calls) == failures + (2 if refills else 1)
         assert retry_sleeps == ([0.0, 0.0] if http_retry_failure else [])
-        # The existing same-envelope retries recover an uncertain claim. Only
-        # the later bounded scan creates a fresh request for new assignment work.
+        # An ambiguous claim keeps its envelope even after the short retry loop
+        # ends. A definite idle response permits a fresh bounded claim instead.
         if http_retry_failure:
             assert calls[1][1] == calls[2][1] == calls[3][1]
         if failure == "paused":
             assert len({body["request_id"] for _, body in calls}) == len(calls)
         if refills:
-            assert calls[-1][1]["request_id"] != calls[1][1]["request_id"]
+            if http_retry_failure:
+                assert calls[-1][1] == calls[1][1]
+            else:
+                assert calls[-1][1]["request_id"] != calls[1][1]["request_id"]
         assert all(item[1]["body"]["declared_parallelism"] == 2 for item in calls)
         assert worker.abandoned == 0
     finally:

@@ -334,9 +334,13 @@ def create_app(service: ArenaService) -> FastAPI:
         x_lab_arena_lease: Optional[str] = Header(default=None),
     ) -> JSONResponse:
         lease_token = _lease_header(x_lab_arena_lease)
+        _refuse_declared_oversize(request, training_observations.MAX_OBJECT_BYTES)
+        # Reject unowned/inactive leases before buffering a large private body.
+        # The handler rechecks authority after upload to cover expiry/reclaim.
+        await run_in_threadpool(service._training_capture_run, run_id, lease_token)
         document = await _read_json(request, limits=contracts.StrictLimits(
             max_depth=64, max_list_items=250_000, max_object_keys=250_000,
-            max_string_bytes=training_observations.MAX_OBJECT_BYTES,
+            max_string_bytes=training_observations.MAX_EVENT_BYTES,
             max_total_bytes=training_observations.MAX_OBJECT_BYTES, max_abs_int=None,
         ))
         return await no_store_public_call(

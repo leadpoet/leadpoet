@@ -20,8 +20,13 @@ from lab_arena import contracts, operations, training_capture, training_input
 
 LEGACY_SCHEMA_VERSION = "leadpoet.lab_arena.training_observations.v1"
 SCHEMA_VERSION = "leadpoet.lab_arena.training_observations.v2"
-MAX_OBJECT_BYTES = 8 * 1024 * 1024
-MAX_COMPRESSED_BYTES = MAX_OBJECT_BYTES + 64 * 1024
+# One run already admits up to 192 MiB of explicit agent control frames.
+# Retain that evidence plus 64 MiB for host receipts/catalogs and JSON overhead.
+# Single events keep their original bound; this is only an aggregate increase.
+MAX_EVENT_BYTES = 8 * 1024 * 1024
+MAX_OBJECT_BYTES = 256 * 1024 * 1024
+# Deflate framing for incompressible 256 MiB can exceed the old 64 KiB reserve.
+MAX_COMPRESSED_BYTES = MAX_OBJECT_BYTES + 1024 * 1024
 MAX_OBSERVATIONS = 16_384
 MAX_AGENT_OBSERVATIONS = 4096
 MAX_WEB_BODY_BYTES = 6 * 1024 * 1024  # A 2 MiB decoded fetch can expand through U+FFFD.
@@ -47,7 +52,7 @@ def _canonical(value: Any) -> bytes:
 
 def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> dict:
     """Decode response bytes before privacy filtering; never truncate evidence."""
-    if len(_canonical(value)) > MAX_OBJECT_BYTES - 65_536:
+    if len(_canonical(value)) > MAX_EVENT_BYTES - 65_536:
         raise ObservationError("size_limit")
     if set(value) != {"ordinal", "action_sequence", "operation_id", "kind", "request", "outcome", "call_identity", "privacy", "contributes_to_provider_call_count"}:
         raise ObservationError("observation_fields_invalid")
@@ -163,7 +168,7 @@ def clean_response_receipt(value: Mapping[str, Any]) -> dict:
 def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> dict:
     """Keep only explicit, bounded agent reports; never infer hidden state."""
     required = {"id", "kind", "observed_at", "after_action_sequence", "depends_on", "data", "privacy"}
-    if not isinstance(value, Mapping) or set(value) != required or len(_canonical(value)) > MAX_OBJECT_BYTES - 65_536:
+    if not isinstance(value, Mapping) or set(value) != required or len(_canonical(value)) > MAX_EVENT_BYTES - 65_536:
         raise ObservationError("agent_observation_invalid")
     if (type(value["id"]) is not int or value["id"] < 0
             or value["kind"] not in {"web_fetch", "response_received", "state_snapshot", "capture_failure"}

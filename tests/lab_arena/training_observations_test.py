@@ -630,7 +630,7 @@ def test_api_and_client_observation_limits_and_timeout(tmp_path):
         api = runner.HttpArenaApiClient("http://localhost", client=client)
         assert api.training_observations("r1", TOKEN, payload())["status"] == "stored"
     assert requests[0].url.path == route and requests[0].headers["x-lab-arena-lease"] == TOKEN
-    assert requests[0].extensions["timeout"]["read"] == runner.TRAINING_CAPTURE_TIMEOUT_SECONDS
+    assert requests[0].extensions["timeout"]["read"] == runner.TRAINING_OBSERVATIONS_TIMEOUT_SECONDS
 
 
 def test_planned_identity_without_admission_is_not_a_provider_receipt():

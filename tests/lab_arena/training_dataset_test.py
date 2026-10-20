@@ -36,20 +36,56 @@ def fit(decision="match", **extra):
     return {"gate": "company_fit", "decision": decision, **extra}
 
 
+def cited_fit_quote(dimension="industry", quote=None):
+    quote = quote or ("Acme Robotics is headquartered in California, United States."
+                      if dimension == "geography" else
+                      "Acme Robotics provides B2B software for robotics teams.")
+    return {dimension: {"web_evidence": {
+        "url": "https://acme-robotics.com/about",
+        "quote": quote}}}
+
+
+QUALIFIED_FIT_EVIDENCE = {
+    "identity": {"web_identity_receipt": {
+        "decision": "match", "evidence_source": "company_web_reverification",
+        "observed_name": "Acme Robotics", "observed_domain": "acme-robotics.com",
+        "observed_linkedin_slug": "acme-robotics"}},
+    **cited_fit_quote(),
+    **cited_fit_quote("geography"),
+    "employee_size": {"web_evidence": {
+        "employee_count": "51-200", "provider": "harvestapi_get_company",
+        "source_field": "employeeCountRange",
+        "url": "https://www.linkedin.com/company/acme-robotics",
+        "website": "https://acme-robotics.com"}},
+}
+
+
 JUDGMENTS = {
     "qualified": {"company_qualified": True, "final_score": 80, "failure_reason": None,
-                  "verifier_gate_receipts": [fit()], "intent_signals_detail": VERIFIED},
+                  "verifier_gate_receipts": [fit(company_fit_dimensions={
+                      "identity": "match", "employee_size": "match", "industry": "match",
+                      "geography": "match"},
+                      dimension_evidence=QUALIFIED_FIT_EVIDENCE)],
+                  "intent_signals_detail": VERIFIED},
     "wrong_fit": {"company_qualified": False, "final_score": 0, "failure_reason": "Company fit failed: industry",
                   "verifier_gate_receipts": [fit("mismatch", company_fit_dimensions={
-                      "industry": "mismatch", "geography": "match"}, required_attribute_decision="mismatch")],
+                      "industry": "mismatch", "geography": "match"}, required_attribute_decision="mismatch",
+                      dimension_evidence={**cited_fit_quote(
+                          quote="Acme Robotics sells industrial robots, not software."), "required_attribute": {
+                          "web_evidence": {"url": "https://acme-robotics.com/products",
+                                           "quote": "Acme Robotics sells industrial robots."}}})],
                   "intent_signals_detail": None},
     "fit_unproven": {"company_qualified": False, "final_score": 0,
                      "failure_reason": "Company fit unavailable: unproven dimensions industry",
-                     "verifier_gate_receipts": [fit("unavailable", failure_class="insufficient_fit_evidence")],
+                     "verifier_gate_receipts": [fit("unavailable", failure_class="insufficient_fit_evidence",
+                                                    company_fit_dimensions={"industry": "unavailable"},
+                                                    dimension_evidence=cited_fit_quote())],
                      "intent_signals_detail": None},
     "intent_unverified": {"company_qualified": False, "final_score": 0,
                           "failure_reason": "Primary intent evidence unverified: no dated source",
-                          "verifier_gate_receipts": [fit()],
+                          "verifier_gate_receipts": [fit(company_fit_dimensions={
+                              "identity": "match", "employee_size": "match", "industry": "match",
+                              "geography": "match"}, dimension_evidence=QUALIFIED_FIT_EVIDENCE)],
                           "intent_signals_detail": [{"matched_icp_signal": 0, "after_decay": 0.0,
                                                      "judge_verdict": {"decision": "rejected_three_stage"}}]},
     "duplicate": {"company_qualified": False, "duplicate_company": True, "final_score": 0,
@@ -126,10 +162,19 @@ def test_input_keeps_retained_source_text_without_label_leakage():
     for leaked in ("generator-secret", "company_qualified", "verifier_gate_receipts", "judge_verdict", "label_status"):
         assert leaked not in rendered
     assert record["label"]["class"] == "qualified" and record["label"]["primary_intent_verified"] is True
-    assert record["input"]["source_evidence"] == [{
+    by_kind = {item["content_kind"]: item for item in record["input"]["source_evidence"]
+               if item["content_kind"] != "verifier_source_quote"}
+    quoted = {item["dimension"]: item["text"] for item in record["input"]["source_evidence"]
+              if item["content_kind"] == "verifier_source_quote"}
+    assert quoted["industry"] == "Acme Robotics provides B2B software for robotics teams."
+    assert quoted["geography"] == "Acme Robotics is headquartered in California, United States."
+    assert by_kind["company_identity_observation"]["observed_domain"] == "acme-robotics.com"
+    assert by_kind["structured_provider_fact"]["employee_count"] == "51-200"
+    assert by_kind["retained_page_excerpt"] == {
+        "content_kind": "retained_page_excerpt", "matched_icp_signal": 0,
         "url": "https://acme-robotics.com/careers", "text": "Acme Robotics is hiring a VP of Sales.",
         "source_publication_date": "2026-10-10", "retrieved_at": None,
-        "provenance": "verified_source_context"}]
+        "provenance": "verified_source_context"}
     snapshot = {"input": {"icp": {"industry": "Software", "output_schema_version": "v6"}}, "privacy": {"redacted": False}}
     with_snapshot = example(rows=[row(0, claim(), "qualified")])
     with_snapshot["input_snapshots"] = {with_snapshot["run_id"]: snapshot}
@@ -239,8 +284,37 @@ def test_missing_retained_page_text_keeps_label_in_analysis():
     splits, manifest = dataset.build([seal(document)])
     assert not splits["train"] and not splits["eval"]
     assert splits["analysis"][0]["label"]["class"] == "qualified"
-    assert splits["analysis"][0]["selection_exclusion"] == "missing_retained_source_evidence"
-    assert manifest["counts"]["trainable_records_missing_source_evidence"] == 1
+    assert splits["analysis"][0]["selection_exclusion"] == "missing_primary_signal_source_evidence"
+    assert manifest["counts"]["trainable_records_by_evidence_exclusion"] == {
+        "missing_primary_signal_source_evidence": 1}
+
+
+def test_large_retained_page_is_not_silently_clipped():
+    document = example(rows=[row(0, claim(), "qualified")])
+    source = document["companies"][0]["judgment"]["intent_signals_detail"][0]["judge_verdict"][
+        "verification_trace"]["verified_source_context"][0]
+    source["text"] = "A" * (dataset._MAX_SOURCE_BYTES + 1) + " decisive ending"
+    record = dataset.records_from_example(seal(document))[0]
+    assert record["input"]["source_evidence"] == []
+    assert record["source_evidence_error"] == "retained_source_evidence_overflow"
+    splits, manifest = dataset.build([document])
+    assert not splits["train"] and not splits["eval"]
+    assert splits["analysis"][0]["selection_exclusion"] == "retained_source_evidence_overflow"
+    assert manifest["counts"]["trainable_records_by_evidence_exclusion"] == {
+        "retained_source_evidence_overflow": 1}
+
+
+def test_wrong_fit_requires_quotes_for_each_mismatched_dimension():
+    document = example(rows=[row(0, claim(), "wrong_fit")])
+    record = dataset.records_from_example(document)[0]
+    quoted = {item["dimension"] for item in record["input"]["source_evidence"]
+              if item["content_kind"] == "verifier_source_quote"}
+    assert quoted == {"industry", "required_attribute"}
+    document["companies"][0]["judgment"]["verifier_gate_receipts"][0]["dimension_evidence"].pop(
+        "required_attribute")
+    splits, _ = dataset.build([seal(document)])
+    assert not splits["train"] and not splits["eval"]
+    assert splits["analysis"][0]["selection_exclusion"] == "missing_wrong_fit_source_evidence"
 
 
 def test_verified_identity_aliases_keep_distinct_submitted_claims_together():
@@ -265,6 +339,32 @@ def test_same_example_id_with_two_valid_export_hashes_is_order_independent():
     assert dataset.build([first, second]) == dataset.build([second, first])
 
 
+def test_duplicate_prefers_complete_source_evidence():
+    complete = example("run-complete", [row(0, claim(), "qualified")])
+    incomplete = example("run-incomplete", [row(0, claim(), "qualified")])
+    incomplete["companies"][0]["judgment"]["intent_signals_detail"][0]["judge_verdict"].pop(
+        "verification_trace")
+    incomplete = seal(incomplete)
+    for examples in ([complete, incomplete], [incomplete, complete]):
+        splits, manifest = dataset.build(examples)
+        assert len(splits["train"] + splits["eval"]) == 1
+        assert not splits["analysis"]
+        assert (splits["train"] + splits["eval"])[0]["meta"]["run_id"] == complete["run_id"]
+        assert manifest["counts"]["duplicate_records_merged"] == 1
+
+
+def test_same_claim_with_different_fit_dimension_targets_is_excluded():
+    first = example("run-one", [row(0, claim(), "wrong_fit")])
+    second = example("run-two", [row(0, claim(), "wrong_fit")])
+    fit_receipt = second["companies"][0]["judgment"]["verifier_gate_receipts"][0]
+    fit_receipt["company_fit_dimensions"] = {"geography": "mismatch"}
+    fit_receipt["required_attribute_decision"] = "match"
+    fit_receipt["dimension_evidence"] = cited_fit_quote("geography")
+    splits, manifest = dataset.build([first, seal(second)])
+    assert not any(splits.values())
+    assert manifest["counts"]["conflicting_label_groups_excluded"] == 1
+
+
 def test_signal_cache_source_is_kept_per_signal():
     document = example(rows=[row(0, claim(), "qualified")])
     document["judgment"]["signal_authority_evidence"] = [{
@@ -282,6 +382,37 @@ def test_mixed_scorer_policy_cohorts_fail_closed():
     second["configuration"]["scorer_policy"]["policy_revision"] = "next"
     with pytest.raises(ValueError, match="mixed_scorer_cohorts"):
         dataset.build([first, seal(second)])
+
+
+def test_analysis_only_cohort_does_not_block_trainable_cohort():
+    first = example("run-one", [row(0, claim(), "qualified")])
+    second = example("run-two", [row(0, claim("Beta", "beta.com", "beta"), "qualified")])
+    second["configuration"]["scorer_policy"]["policy_revision"] = "next"
+    second["companies"][0]["judgment"]["intent_signals_detail"][0]["judge_verdict"].pop(
+        "verification_trace")
+    splits, manifest = dataset.build([first, seal(second)])
+    assert len(splits["train"] + splits["eval"]) == 1
+    assert len(splits["analysis"]) == 1
+    assert manifest["counts"]["trainable_records_by_evidence_exclusion"] == {
+        "missing_primary_signal_source_evidence": 1}
+
+
+def test_exact_policy_hash_selects_one_cohort(tmp_path, capsys):
+    first = example("run-one", [row(0, claim(), "qualified")])
+    second = example("run-two", [row(0, claim("Beta", "beta.com", "beta"), "qualified")])
+    second["configuration"]["scorer_policy"]["policy_revision"] = "next"
+    selected = dataset._hash(first["configuration"]["scorer_policy"])
+    splits, manifest = dataset.build([first, seal(second)], dataset.Rules(scorer_policy_hash=selected))
+    assert len(splits["train"] + splits["eval"]) == 1
+    assert manifest["counts"]["examples_excluded"] == {"outside_scorer_cohort": 1}
+    source = tmp_path / "exports"
+    source.mkdir()
+    for index, document in enumerate((first, second)):
+        (source / ("example-%d.json" % index)).write_text(json.dumps(document))
+    output = tmp_path / "dataset"
+    assert cli.main(["--examples", str(source), "--output", str(output),
+                     "--scorer-policy-hash", selected]) == 0
+    assert json.loads(capsys.readouterr().out)["examples_excluded"] == {"outside_scorer_cohort": 1}
 
 
 def test_cli_reports_safe_mixed_cohort_code(tmp_path, capsys):
@@ -324,7 +455,8 @@ def test_manifest_is_deterministic_and_records_permission_status():
     manifest = first[1]
     assert manifest["training_permission"]["status"] == "unconfirmed"
     assert manifest["rules"] == {"eval_percent": 20, "seed": "leadpoet-arena-dataset-v1",
-                                 "production_rounds_only": True, "scorer_image_digest": None}
+                                 "production_rounds_only": True, "scorer_image_digest": None,
+                                 "scorer_policy_hash": None}
     other_seed = dataset.build(examples, dataset.Rules(seed="other"))[1]
     assert other_seed["dataset_version"] != manifest["dataset_version"]
 
@@ -341,11 +473,13 @@ def test_real_exporter_output_produces_checked_labels():
     records = dataset.records_from_example(exported)
     assert [record["label"]["class"] for record in records] == ["qualified", "wrong_fit"]
     assert records[0]["label"]["primary_intent_verified"] is True
-    assert records[0]["input"]["source_evidence"][0]["text"] == (
-        "Acme announces a new product launch for its customers.")
+    pages = [item for item in records[0]["input"]["source_evidence"]
+             if item["content_kind"] == "retained_page_excerpt"]
+    assert pages[0]["text"] == "Acme announces a new product launch for its customers."
     assert records[0]["label_provenance"]["signal_sources"] == [{
         "signal_index": 0, "source_score_run_id": "judge:source", "source": "cached"}]
-    assert records[1]["input"]["source_evidence"] == []
+    assert [item["content_kind"] for item in records[1]["input"]["source_evidence"]] == [
+        "company_identity_observation"]
     assert records[0]["input"]["icp_source"] == "input_snapshot"
     assert "verified_example_company" not in json.dumps(records[0]["input"])
     # The shared fixture's judge input differs from its frozen context. A judge
@@ -357,9 +491,10 @@ def test_real_exporter_output_produces_checked_labels():
     assert dataset.example_exclusion(consistent, dataset.Rules()) == "example_hash_mismatch"
     assert dataset.example_exclusion(seal(consistent), dataset.Rules()) is None
     splits, manifest = dataset.build([consistent])
-    assert [record["label"]["class"] for name in ("train", "eval") for record in splits[name]] == ["qualified"]
-    assert splits["analysis"][0]["label"]["class"] == "wrong_fit"
-    assert manifest["counts"]["trainable_records_missing_source_evidence"] == 1
+    assert not splits["train"] and not splits["eval"]
+    assert sorted(record["label"]["class"] for record in splits["analysis"]) == ["qualified", "wrong_fit"]
+    assert manifest["counts"]["trainable_records_by_evidence_exclusion"] == {
+        "missing_company_fit_source_evidence": 1, "missing_wrong_fit_source_evidence": 1}
 
 
 def test_cli_writes_a_new_private_dataset(tmp_path, capsys):

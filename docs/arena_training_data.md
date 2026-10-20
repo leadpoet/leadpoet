@@ -273,12 +273,14 @@ Each record pairs what the agent had with the judge's verdict on one company:
 
 - `input`: the ICP the agent received (its stored input snapshot, or the same
   agent-visible projection when no snapshot exists), the evaluation date,
-  the agent's own company claim, and up to three retained fetched-page excerpts
-  from verified source contexts. Each excerpt has its source URL, text, publication
-  date and retrieval time when stored; missing times are explicit nulls. The
-  source text was available to the verifier, but this projection does not prove
-  the agent itself fetched or saw the same page. Judge verdicts and reasoning
-  stay out of the input.
+  the agent's own company claim, and bounded source evidence. Signal evidence
+  uses retained fetched-page text from verified source contexts. Company-fit
+  evidence uses the receipt's source URL and exact cited quote, or its observed
+  identity and structured employee-provider facts. Each source has its type and
+  provenance; publication and retrieval dates are null when absent. A fit
+  citation is a verifier-selected quote, not a retained full page. The source
+  projection does not prove the agent itself fetched or saw the same page.
+  Judge verdicts and reasoning stay out of the input.
 - `label`: the class and sub-reason, plus the fit decision and dimensions,
   primary-intent result, per-signal verdicts and the failure reason.
 - `label_provenance`: fresh, company-cache or run-cache judgment, with its
@@ -300,18 +302,22 @@ scorer identity and no input conflict. An example whose content no longer
 matches its exported hash is excluded. A record is left out when its own
 input (the ICP or the company claim) carries a redaction marker. Credential
 redactions elsewhere in the run do not exclude a clean record; redactions in
-the selected page excerpts do. A trainable verdict without retained source
-text stays in `analysis` with `missing_retained_source_evidence`; it is not
-relabeled. Identical
+the selected evidence do. A trainable verdict without evidence for its decisive
+fit dimension or primary signal stays in `analysis` with an explicit reason;
+it is not relabeled. The projection keeps complete retained excerpts and cited
+quotes within 12 items and 64 KiB total. An over-bound record moves to analysis
+instead of silently clipping a decisive source. Identical
 claims for the same ICP requirements and evaluation date count once; another
 date is a separate input because intent recency depends on it. A claim judged
-both ways on the same date is left out. A failed run removes the partial
+both ways, or with materially different fit or signal decisions, on the same
+date is left out. A failed run removes the partial
 output directory it created. Train and eval never share a company cluster (domain, name and
 LinkedIn handles merged), so evaluation companies are unseen. The manifest
 records the rules, every source example and why any was excluded, counts by
 split and label, the missing-source yield, and a deterministic dataset version.
-Mixed scorer image or policy cohorts fail dataset preparation, so a caller must
-prepare each cohort separately.
+Mixed eligible scorer image or policy cohorts fail dataset preparation. Use
+`--scorer-image-digest` and `--scorer-policy-hash` to select one exact cohort;
+analysis-only records from other cohorts do not block it.
 
 🔹 Training permission is not yet confirmed. Submission consent records only
 public rerun permission; confirm the terms before training on these records.

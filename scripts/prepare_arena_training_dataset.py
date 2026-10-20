@@ -68,12 +68,14 @@ def main(argv=None):
     parser.add_argument("--include-nonproduction-rounds", action="store_true",
                         help="also use probe, replay and unpublished rounds")
     parser.add_argument("--scorer-image-digest", default=None, help="keep one scorer cohort only")
+    parser.add_argument("--scorer-policy-hash", default=None, help="keep one exact scorer policy cohort only")
     args = parser.parse_args(argv)
     try:
         rules = training_dataset.Rules(
             eval_percent=args.eval_percent, seed=args.seed,
             production_rounds_only=not args.include_nonproduction_rounds,
             scorer_image_digest=args.scorer_image_digest,
+            scorer_policy_hash=args.scorer_policy_hash,
         )
     except ValueError as exc:
         parser.error(str(exc))

@@ -20,6 +20,7 @@ import hashlib
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 from lab_arena import contact_policy, contracts, integrity
 
@@ -38,8 +39,8 @@ _INPUT_CONFLICTS = frozenset({
 _REDACTION_RE = re.compile(r"\[REDACTED\]|%5[Bb]REDACTED%5[Dd]")
 _CLAIM_CODES = ("company_linkedin_required_or_invalid", "us_headquarters_state_required_or_invalid",
                 "state_must_be_text")
-_MAX_SOURCE_CONTEXTS = 3
-_MAX_SOURCE_TEXT_CHARS = 1600
+_MAX_SOURCE_CONTEXTS = 12
+_MAX_SOURCE_BYTES = 64 * 1024
 TRAINING_PERMISSION = {
     "status": "unconfirmed",
     "reason": "Submission consent records public rerun only; confirm training use before training.",
@@ -54,6 +55,7 @@ class Rules:
     seed: str = "leadpoet-arena-dataset-v1"
     production_rounds_only: bool = True
     scorer_image_digest: Optional[str] = None
+    scorer_policy_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if type(self.eval_percent) is not int or not 0 < self.eval_percent < 100:
@@ -84,6 +86,8 @@ def example_exclusion(example: Mapping[str, Any], rules: Rules) -> Optional[str]
     if adapter not in INTEGRITY_ADAPTERS:
         return "scorer_adapter_without_company_labels"
     if rules.scorer_image_digest and configuration.get("scorer_image_digest") != rules.scorer_image_digest:
+        return "outside_scorer_cohort"
+    if rules.scorer_policy_hash and _hash(configuration.get("scorer_policy") or {}) != rules.scorer_policy_hash:
         return "outside_scorer_cohort"
     completeness = example.get("completeness") or {}
     dimensions = completeness.get("dimensions") or {}
@@ -222,12 +226,71 @@ def company_keys(company: Mapping[str, Any]) -> List[str]:
     return keys
 
 
-def _source_evidence(judgment: Any) -> List[Dict[str, Any]]:
-    """Project fetched page text from verified signal traces, never judge prose."""
+def _source_url(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) > 2048 or any(char.isspace() for char in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.hostname) and not parsed.username and not parsed.password
+    except ValueError:
+        return False
+
+
+def _source_evidence(judgment: Any) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Project retained page excerpts and fit citations without clipping proof."""
 
     if not isinstance(judgment, Mapping):
-        return []
+        return [], None
     candidates = []
+    fit = _receipt(judgment, "company_fit")
+    dimensions = fit.get("dimension_evidence")
+    if isinstance(dimensions, Mapping):
+        from qualification.scoring.linkedin_company_size import (
+            STRUCTURED_PROFILE_PROVIDER, STRUCTURED_PROFILE_SOURCE_FIELD,
+        )
+
+        identity_detail = dimensions.get("identity")
+        identity = (identity_detail.get("web_identity_receipt")
+                    if isinstance(identity_detail, Mapping) else None)
+        if (isinstance(identity, Mapping)
+                and identity.get("evidence_source") in {
+                    "company_homepage", "company_web_reverification"}
+                and isinstance(identity.get("observed_name"), str)
+                and identity.get("observed_name")
+                and isinstance(identity.get("observed_domain"), str)
+                and identity.get("observed_domain")):
+            candidates.append({
+                "content_kind": "company_identity_observation", "dimension": "identity",
+                "observed_name": identity.get("observed_name"),
+                "observed_domain": identity.get("observed_domain"),
+                "observed_linkedin_slug": identity.get("observed_linkedin_slug"),
+                "provenance": "company_fit_receipt",
+            })
+        for dimension in ("identity", "employee_size", "industry", "geography", "stage", "required_attribute"):
+            detail = dimensions.get(dimension)
+            web = detail.get("web_evidence") if isinstance(detail, Mapping) else None
+            if not isinstance(web, Mapping):
+                continue
+            if (dimension == "employee_size" and set(web) == {
+                    "employee_count", "provider", "source_field", "url", "website"}
+                    and web.get("provider") == STRUCTURED_PROFILE_PROVIDER
+                    and web.get("source_field") == STRUCTURED_PROFILE_SOURCE_FIELD
+                    and isinstance(web.get("employee_count"), str)
+                    and _source_url(web.get("url")) and _source_url(web.get("website"))):
+                candidates.append({
+                    "content_kind": "structured_provider_fact", "dimension": dimension,
+                    "url": web["url"], "website": web["website"],
+                    "employee_count": web["employee_count"], "provider": web["provider"],
+                    "source_field": web["source_field"], "provenance": "company_fit_receipt",
+                })
+                continue
+            url, quote = web.get("url"), web.get("quote")
+            if _source_url(url) and isinstance(quote, str) and quote.strip():
+                candidates.append({
+                    "url": url, "text": quote, "content_kind": "verifier_source_quote",
+                    "dimension": dimension, "source_publication_date": None,
+                    "retrieved_at": None, "provenance": "company_fit_receipt",
+                })
     for detail in judgment.get("intent_signals_detail") or ():
         if not isinstance(detail, Mapping):
             continue
@@ -240,21 +303,99 @@ def _source_evidence(judgment: Any) -> List[Dict[str, Any]]:
             if not isinstance(context, Mapping):
                 continue
             url, source_text = context.get("url"), context.get("text")
-            if (not isinstance(url, str) or not url.startswith("https://")
-                    or len(url) > 2048 or not isinstance(source_text, str) or not source_text.strip()):
+            if not _source_url(url) or not isinstance(source_text, str) or not source_text.strip():
                 continue
             candidates.append({
                 "url": url,
-                "text": source_text[:_MAX_SOURCE_TEXT_CHARS],
+                "text": source_text,
+                "content_kind": "retained_page_excerpt",
+                "matched_icp_signal": detail.get("matched_icp_signal"),
                 "source_publication_date": context.get("source_publication_date") or None
                 if isinstance(context.get("source_publication_date"), str) else None,
                 "retrieved_at": context.get("retrieved_at") or None
                 if isinstance(context.get("retrieved_at"), str) else None,
                 "provenance": "verified_source_context",
             })
-    # A stable bound also makes reordered signal details produce the same input.
+    # Reject over-bound records rather than silently removing decisive proof.
     unique = {contracts.canonical_json(item): item for item in candidates}
-    return [unique[key] for key in sorted(unique)[:_MAX_SOURCE_CONTEXTS]]
+    evidence = [unique[key] for key in sorted(unique)]
+    if (len(evidence) > _MAX_SOURCE_CONTEXTS
+            or len(contracts.canonical_json(evidence).encode("utf-8")) > _MAX_SOURCE_BYTES):
+        return [], "retained_source_evidence_overflow"
+    return evidence, None
+
+
+def _evidence_gap(record: Mapping[str, Any]) -> Optional[str]:
+    label = record["label"]
+    evidence = record["input"]["source_evidence"]
+    if record.get("source_evidence_error"):
+        return record["source_evidence_error"]
+    if not evidence:
+        return "missing_retained_source_evidence"
+    label_class = label["class"]
+    fit = label.get("fit") or {}
+    quoted = {item.get("dimension") for item in evidence
+              if item.get("content_kind") == "verifier_source_quote"}
+    supported = quoted | {item.get("dimension") for item in evidence
+                          if item.get("content_kind") == "structured_provider_fact"}
+    if label_class == "wrong_fit":
+        mismatches = {key for key, value in (fit.get("company_fit_dimensions") or {}).items()
+                      if value == "mismatch"}
+        if fit.get("required_attribute_decision") == "mismatch":
+            mismatches.add("required_attribute")
+        if not mismatches or not mismatches.issubset(quoted):
+            return "missing_wrong_fit_source_evidence"
+    elif label_class == "qualified" or (label_class == "insufficient_evidence"
+                                        and not str(label.get("sub_reason") or "").startswith("fit_")):
+        dimensions = fit.get("company_fit_dimensions") or {}
+        icp = record["input"]["icp"]
+        required = set()
+        if icp.get("employee_count"):
+            required.add("employee_size")
+        if any(icp.get(key) for key in ("industry", "sub_industry", "product_service")):
+            required.add("industry")
+        if icp.get("geography") or icp.get("country"):
+            required.add("geography")
+        if icp.get("company_stage"):
+            required.add("stage")
+        if icp.get("required_attribute"):
+            required.add("required_attribute")
+        if (dimensions.get("identity") != "match"
+                or not any(item.get("content_kind") == "company_identity_observation" for item in evidence)
+                or not required or any(dimensions.get(key) != "match" for key in required if key != "required_attribute")
+                or ("required_attribute" in required and fit.get("required_attribute_decision") != "match")
+                or not required.issubset(supported)):
+            return "missing_company_fit_source_evidence"
+        if not any(item.get("content_kind") == "retained_page_excerpt"
+                   and item.get("matched_icp_signal") == 0 for item in evidence):
+            return "missing_primary_signal_source_evidence"
+    elif label_class == "insufficient_evidence":
+        unavailable = {key for key, value in (fit.get("company_fit_dimensions") or {}).items()
+                       if value == "unavailable"}
+        if fit.get("required_attribute_decision") == "unavailable":
+            unavailable.add("required_attribute")
+        if not unavailable or not unavailable.issubset(supported):
+            return "missing_fit_gap_source_evidence"
+    return None
+
+
+def _label_signature(label: Mapping[str, Any]) -> str:
+    """Stable decision fields; ignore narrative and score variation."""
+
+    fit = label.get("fit") or {}
+    signals = label.get("signals") or ()
+    return _hash({
+        "class": label.get("class"), "sub_reason": label.get("sub_reason"),
+        "fit": {key: fit.get(key) for key in (
+            "decision", "company_fit_dimensions", "required_attribute_decision", "failure_class")},
+        "primary_intent_verified": label.get("primary_intent_verified"),
+        "signals": sorted(({"matched_icp_signal": item.get("matched_icp_signal"),
+                            "decision": item.get("decision"),
+                            "date_verdict": item.get("date_verdict")}
+                           for item in signals if isinstance(item, Mapping)),
+                          key=contracts.canonical_json),
+        "intent_details_decision": label.get("intent_details_decision"),
+    })
 
 
 def _company_keys(company: Mapping[str, Any], judgment: Any) -> List[str]:
@@ -316,7 +457,7 @@ def records_from_example(example: Mapping[str, Any]) -> List[Dict[str, Any]]:
         index = row.get("company_index")
         label_class, sub_reason = classify(row)
         judgment = row.get("judgment")
-        source_evidence = _source_evidence(judgment)
+        source_evidence, source_error = _source_evidence(judgment)
         records.append({
             "schema_version": RECORD_SCHEMA_VERSION,
             "record_id": _hash({"example_id": example.get("example_id"),
@@ -337,6 +478,7 @@ def records_from_example(example: Mapping[str, Any]) -> List[Dict[str, Any]]:
             "label": (_label(judgment, label_class, sub_reason) if isinstance(judgment, Mapping)
                       else {"class": label_class, "sub_reason": sub_reason}),
             "label_provenance": _provenance(example, index),
+            **({"source_evidence_error": source_error} if source_error else {}),
             "group_keys": {"company_keys": _company_keys(company, judgment), "icp_fingerprint": fingerprint,
                            "source_family": (example.get("source") or {}).get("normalized_sha256")
                            or (example.get("source") or {}).get("sha256")},
@@ -383,10 +525,6 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
                     privacy_filtered += 1
                     continue
                 records.append(record)
-    cohorts = {(record["meta"]["scorer_policy_hash"], record["meta"]["scorer_image_digest"])
-               for record in records if record["label"]["class"] in TRAINABLE}
-    if len(cohorts) > 1:
-        raise ValueError("mixed_scorer_cohorts")
     # Identical ICP requirements, evaluation date and claim: replays, retries
     # and cached judgments count once. The date is part of the input because
     # intent recency depends on it. Only verdicts can conflict; a claim judged
@@ -401,24 +539,31 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
         groups.setdefault(claim + "|" + ("verdict" if label in TRAINABLE else label), []).append(record)
     kept, duplicates, conflicts = [], 0, 0
     for group in groups.values():
-        if len({item["label"]["class"] for item in group}) > 1:
+        if len({_label_signature(item["label"]) for item in group}) > 1:
             conflicts += 1
             continue
-        kept.append(min(group, key=lambda item: (item["record_id"], _hash(item))))
+        kept.append(min(group, key=lambda item: (
+            bool(_evidence_gap(item)) if item["label"]["class"] in TRAINABLE else False,
+            item["record_id"], _hash(item))))
         duplicates += len(group) - 1
+    cohorts = {(record["meta"]["scorer_policy_hash"], record["meta"]["scorer_image_digest"])
+               for record in kept if record["label"]["class"] in TRAINABLE and not _evidence_gap(record)}
+    if len(cohorts) > 1:
+        raise ValueError("mixed_scorer_cohorts")
     clusters = _Clusters()
     for record in kept:
         clusters.union(record["group_keys"]["company_keys"] or [record["record_id"]])
     splits: Dict[str, List[dict]] = {"train": [], "eval": [], "analysis": []}
-    missing_source_evidence = 0
+    evidence_exclusions: Dict[str, int] = {}
     for record in kept:
         handles = record["group_keys"]["company_keys"] or [record["record_id"]]
         cluster = clusters.find(handles[0])
         record["group_keys"]["company_cluster"] = cluster
-        if record["label"]["class"] not in TRAINABLE or not record["input"]["source_evidence"]:
-            if record["label"]["class"] in TRAINABLE:
-                record["selection_exclusion"] = "missing_retained_source_evidence"
-                missing_source_evidence += 1
+        evidence_gap = _evidence_gap(record) if record["label"]["class"] in TRAINABLE else None
+        if record["label"]["class"] not in TRAINABLE or evidence_gap:
+            if evidence_gap:
+                record["selection_exclusion"] = evidence_gap
+                evidence_exclusions[evidence_gap] = evidence_exclusions.get(evidence_gap, 0) + 1
             splits["analysis"].append(record)
             continue
         bucket = int(hashlib.sha256((rules.seed + "\x00" + cluster).encode("utf-8")).hexdigest(), 16) % 100
@@ -443,7 +588,7 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
         "counts": {"examples_used": sum(source["used"] for source in sources),
                    "examples_excluded": exclusions, "records_by_split_and_label": counts,
                    "records_privacy_filtered": privacy_filtered,
-                   "trainable_records_missing_source_evidence": missing_source_evidence,
+                   "trainable_records_by_evidence_exclusion": evidence_exclusions,
                    "duplicate_records_merged": duplicates, "conflicting_label_groups_excluded": conflicts},
         "record_hashes": {name: [_hash(record) for record in items] for name, items in splits.items()},
     }

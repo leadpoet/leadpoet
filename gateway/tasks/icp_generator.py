@@ -12,11 +12,12 @@ CRITICAL DESIGN:
 
 GENERATION PROCESS:
 1. Generate the configured number of ICPs, balanced over 20 industries
-2. Use LLM to create realistic, varied prompts
-3. Compute ICP set hash
-4. Store in database
-5. Persist the validated daily set for Arena consumption
-6. Activate the new set
+2. Use LLM to create structured ICP filters and intent signals
+3. Project the company brief from those structured filters
+4. Compute ICP set hash
+5. Store in database
+6. Persist the validated daily set for Arena consumption
+7. Activate the new set
 
 Each ICP defines company filters and intent requirements. When the Arena
 contact policy is enabled, generation also includes contact role requirements.
@@ -786,6 +787,29 @@ def _normalize_contact_geography(value: Any) -> Dict[str, List[str]]:
     return result
 
 
+def _generated_company_brief(
+    icp: Dict[str, Any], *, industry: str = "", sub_industry: str = "",
+) -> str:
+    """State only the company filters that the structured ICP will grade."""
+
+    fields = (
+        ("Industry", icp.get("industry") or industry),
+        ("Sub-industry", icp.get("sub_industry") or sub_industry),
+        ("Country", icp.get("country")),
+        ("Headquarters geography", icp.get("geography")),
+        ("Company stage", icp.get("company_stage")),
+        ("Allowed employee size", _employee_count_display(icp.get("employee_count"))),
+        ("Product/service requirement", icp.get("product_service")),
+        ("Required attribute", icp.get("required_attribute")),
+    )
+    clauses = [
+        f"{label}: {' '.join(str(value).split())}"
+        for label, value in fields if value and str(value).strip()
+    ]
+    prefix = "Find companies meeting every company requirement."
+    return f"{prefix} {'; '.join(clauses)}" if clauses else prefix
+
+
 def canonicalize_generated_icp(
     icp: Dict[str, Any],
     *,
@@ -808,12 +832,13 @@ def canonicalize_generated_icp(
         radius=_configured_employee_bucket_radius() if employee_bucket_radius is None else employee_bucket_radius,
         all_buckets=_configured_employee_all_buckets() if all_employee_buckets is None else all_employee_buckets,
     )
-    # Replace only our generated intent section when this contract is reapplied.
-    prompt = str(normalized.get("prompt") or "").split("\n\nIntent qualification:\n", 1)[0]
-    if raw_employee_count and isinstance(raw_employee_count, str):
-        prompt = prompt.replace(str(raw_employee_count), _employee_count_display(allowed_employee_counts))
-    elif raw_employee_count and employee_count:
-        prompt = prompt.replace(employee_count, _employee_count_display(allowed_employee_counts))
+    normalized["employee_count"] = allowed_employee_counts
+    normalized["required_attribute"] = _required_attribute_for_icp(
+        normalized, industry=industry, sub_industry=sub_industry,
+    )
+    prompt = _generated_company_brief(
+        normalized, industry=industry, sub_industry=sub_industry,
+    )
 
     intent_signals = _normalize_intent_signals(normalized.get("intent_signals"))
     explicit_required = " ".join(str(normalized.get("intent_signal") or "").strip().split())
@@ -893,11 +918,6 @@ def canonicalize_generated_icp(
             "intent_category": intent_category,
             "intent_max_age_days": intent_max_age_days,
             "bonus_intents": bonus_intents,
-            "required_attribute": _required_attribute_for_icp(
-                normalized,
-                industry=industry,
-                sub_industry=sub_industry,
-            ),
             **contact_fields,
         }
     )
@@ -912,8 +932,8 @@ def canonicalize_generated_icp(
 # =============================================================================
 # OpenRouter LLM-Based ICP Generation
 # =============================================================================
-# This generates VARIED, HUMAN-LIKE ICP prompts using an LLM
-# to prevent miners from overfitting to template patterns
+# The LLM proposes structured ICPs. The stored company brief is projected
+# deterministically from their structured filters and intent signals.
 
 async def generate_icps_with_openrouter(
     set_id: int,
@@ -1625,6 +1645,12 @@ def _widen_employee_count_to_stage(icp: Dict[str, Any]) -> None:
     order = {b: i for i, b in enumerate(LINKEDIN_EMPLOYEE_BUCKETS)}
     merged = list(dict.fromkeys([*existing_list, *bands]))
     icp["employee_count"] = sorted(merged, key=lambda b: order.get(b, 999))
+    # The set-level stage contract runs after canonicalization. Keep its
+    # already-generated user brief in sync with the final allowed buckets.
+    prompt = icp.get("prompt")
+    marker = "\n\nIntent qualification:\n"
+    if isinstance(prompt, str) and marker in prompt:
+        icp["prompt"] = _generated_company_brief(icp) + marker + prompt.split(marker, 1)[1]
 
 
 def apply_generated_icp_contract(icps: List[Dict[str, Any]]) -> None:

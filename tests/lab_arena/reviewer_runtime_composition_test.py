@@ -220,3 +220,34 @@ def test_completed_investigation_correction_fails_closed(fault):
         source = source.replace(b'Coverage only selects', b'Changed only selects', 1)
     with pytest.raises(InvestigationFinalitySeamError):
         convert_investigation_finality_seam(source)
+
+
+@pytest.mark.parametrize('binding', [
+    '_settle_completed_company_investigation = lambda *args, **kwargs: None',
+    '_settle_completed_company_investigation: object = None',
+    'import another_module as _settle_completed_company_investigation',
+    'from another_module import _settle_completed_company_investigation',
+    'class _settle_completed_company_investigation: pass',
+    'async def _settle_completed_company_investigation(*args): return None',
+    'try:\n    pass\nexcept Exception as _settle_completed_company_investigation:\n    pass',
+    'if True:\n    _settle_completed_company_investigation = None',
+])
+@pytest.mark.parametrize('already_corrected', [False, True])
+def test_completed_investigation_correction_rejects_shadowed_helper_binding(
+    binding, already_corrected,
+):
+    from scripts import build_arena_reviewer_runtime as builder
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        DELTAS, HELPER, InvestigationFinalitySeamError,
+        convert_investigation_finality_seam,
+    )
+    source = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+    if not already_corrected:
+        assert source.count(HELPER.encode()) == 1
+        source = source.replace(HELPER.encode(), b'', 1)
+        for old, new in DELTAS:
+            assert source.count(new.encode()) == 1
+            source = source.replace(new.encode(), old.encode(), 1)
+    source += b'\n' + binding.encode() + b'\n'
+    with pytest.raises(InvestigationFinalitySeamError):
+        convert_investigation_finality_seam(source)

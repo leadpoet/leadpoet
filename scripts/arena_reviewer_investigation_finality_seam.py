@@ -209,6 +209,25 @@ def convert_investigation_finality_seam(source: bytes) -> bytes:
              and n.name == "_llm_reverify_company"]
     helpers = [n for n in module.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                and n.name == "_settle_completed_company_investigation"]
+    helper_bindings = [
+        n for n in ast.walk(module)
+        if (
+            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and n.name == "_settle_completed_company_investigation"
+        ) or (
+            isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+            and n.id == "_settle_completed_company_investigation"
+        ) or (
+            isinstance(n, ast.alias)
+            and (n.asname or n.name.split(".")[0])
+            == "_settle_completed_company_investigation"
+        ) or (
+            isinstance(n, ast.ExceptHandler)
+            and n.name == "_settle_completed_company_investigation"
+        )
+    ]
+    if helper_bindings != helpers:
+        raise InvestigationFinalitySeamError("settlement helper binding is ambiguous")
     if len(nodes) != 1 or len(helpers) > 1:
         raise InvestigationFinalitySeamError("correction function is missing or ambiguous")
     lines = text.splitlines(keepends=True)

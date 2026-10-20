@@ -10,6 +10,8 @@ free-text intent still resolves to a valid category, and the prompt no longer
 instructs the barebone shapes.
 """
 
+import pytest
+
 from gateway.tasks import icp_generator as ig
 from gateway.tasks.icp_generator import (
     canonicalize_generated_icp,
@@ -146,7 +148,14 @@ def test_generated_brief_states_structured_required_and_bonus_intents():
         "intent_category": "PARTNERSHIP", "intent_max_age_days": 180,
     }
     out = canonicalize_generated_icp(original, industry="Financial Services", sub_industry="Payments")
-    assert out["prompt"].startswith(original["prompt"])
+    prose = out["prompt"].split("\n\nIntent qualification:\n", 1)[0]
+    assert prose.startswith("Find companies meeting every company requirement.")
+    assert "partnerships or leadership changes" not in prose
+    assert "Country: Australia" in prose
+    assert "Company stage: Public" in prose
+    assert "Allowed employee size: 51-200, 201-500" in prose
+    assert "Product/service requirement: Payments" in prose
+    assert "Required attribute: Provides payments" in prose
     assert f"Required primary intent (180 days): {primary}" in out["prompt"]
     assert f"Optional bonus intent (365 days): {bonus}" in out["prompt"]
     assert "These intent requirements govern qualification." in out["prompt"]
@@ -168,6 +177,81 @@ def test_generated_brief_single_intent_preserves_alternatives_within_the_signal(
     assert f"Required primary intent (365 days): {primary}" in out["prompt"]
     assert "Optional bonus intent (" not in out["prompt"]
     assert out["bonus_intents"] == []
+
+
+def test_generated_brief_drops_conflicting_model_prose_but_keeps_internal_or():
+    primary = "Announced a strategic partnership or acquired a company in the last 12 months."
+    out = canonicalize_generated_icp({
+        "prompt": "US transport firms buying, partnering, or opening new lanes.",
+        "industry": "Transportation", "sub_industry": "Logistics",
+        "country": "United States", "geography": "United States, Northeast",
+        "company_stage": "Private", "employee_count": "201-500",
+        "product_service": "Freight or parcel delivery across multiple states",
+        "required_attribute": "Operates warehouses or cross-dock hubs",
+        "intent_signal": primary, "intent_signals": [primary],
+        "intent_category": "PARTNERSHIP", "intent_max_age_days": 365,
+    }, industry="Transportation", sub_industry="Logistics", employee_bucket_radius=0)
+    prose, appendix = out["prompt"].split("\n\nIntent qualification:\n")
+    assert "buying, partnering, or opening new lanes" not in prose
+    assert "Freight or parcel delivery across multiple states" in prose
+    assert "Industry: Transportation" in prose
+    assert "Sub-industry: Logistics" in prose
+    assert "Headquarters geography: United States, Northeast" in prose
+    assert "Allowed employee size: 201-500" in prose
+    assert f"Required primary intent (365 days): {primary}" in appendix
+    assert canonicalize_generated_icp(out, industry="Transportation", sub_industry="Logistics", employee_bucket_radius=0) == out
+
+
+@pytest.mark.parametrize("freeform_prompt", [
+    "Looking for professional services firms that are expanding, hiring, or making leadership moves — no fluff, just companies with real proof points.",
+    "what IT companies are scaling fast in Singapore — partnerships, funding, or product launches all work if the proof is public.",
+    "Descriptive brief: energy operators in the US with a new facility, acquisition, or major partnership in the last year, and enough scale that they actually show up in the news.",
+    "Transport firms buying, partnering, or opening new lanes.",
+    "Biotech firms with funding, new programs, or regulatory approvals.",
+])
+def test_actual_conflicting_brief_shapes_cannot_override_primary(freeform_prompt):
+    primary = "Opened a new project site or office in the last 12 months."
+    out = canonicalize_generated_icp({
+        "prompt": freeform_prompt, "industry": "Energy",
+        "sub_industry": "Renewable power developer", "country": "United States",
+        "geography": "United States, South", "company_stage": "Public",
+        "employee_count": ["1,001-5,000"],
+        "product_service": "Builds or owns renewable generation assets",
+        "required_attribute": "Operates energy assets with public project growth",
+        "intent_signal": primary,
+        "intent_signals": [primary, "Announced an acquisition in the last 12 months."],
+        "intent_category": "EXPANSION", "intent_max_age_days": 365,
+    }, industry="Energy", sub_industry="Renewable power developer", employee_bucket_radius=0)
+    prose, appendix = out["prompt"].split("\n\nIntent qualification:\n", 1)
+    assert freeform_prompt not in out["prompt"]
+    assert "Industry: Energy" in prose
+    assert "Required primary intent (365 days): " + primary in appendix
+    assert "Optional bonus intent (365 days): Announced an acquisition" in appendix
+
+
+def test_stage_widening_refreshes_brief_size_without_changing_intent():
+    out = canonicalize_generated_icp({
+        "prompt": "Biotech firms after funding, programs, or regulatory approvals.",
+        "industry": "Biotechnology", "sub_industry": "Therapeutics",
+        "country": "United States", "geography": "United States",
+        "company_stage": "Series A", "employee_count": "11-50",
+        "product_service": "Develops therapeutics",
+        "required_attribute": "Runs clinical programs",
+        "intent_signal": "Raised a Series A round in the last 12 months",
+        "intent_signals": ["Raised a Series A round in the last 12 months"],
+        "intent_category": "FUNDING", "intent_max_age_days": 365,
+    }, industry="Biotechnology", sub_industry="Therapeutics", employee_bucket_radius=0)
+    from gateway.tasks.icp_generator import apply_generated_icp_contract
+    before = out["prompt"].split("\n\nIntent qualification:\n", 1)[1]
+    apply_generated_icp_contract([out])
+    prose, appendix = out["prompt"].split("\n\nIntent qualification:\n", 1)
+    assert "funding, programs, or regulatory approvals" not in prose
+    assert f"Allowed employee size: {', '.join(out['employee_count'])}" in prose
+    assert appendix == before
+    assert "Required primary intent (365 days): Raised a Series A round" in appendix
+    prompt = out["prompt"]
+    apply_generated_icp_contract([out])
+    assert out["prompt"] == prompt
 
 
 def test_fallback_briefs_use_the_same_required_bonus_contract(monkeypatch):

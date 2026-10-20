@@ -609,6 +609,13 @@ def _has_affirmed_stage_proof(
                 text[max(0, match.start() - 100):match.start()],
                 flags=re.I,
             )[-1]
+            if (
+                pattern is _PUBLIC_STAGE_PROOF_PATTERNS[2]
+                and re.match(r"[.!?;:\n]", match.group(0))
+            ):
+                # The ticker proof itself starts a new sentence. Negation of
+                # a different issuer in the preceding sentence cannot reach it.
+                prefix = ""
             suffix = text[match.end():match.end() + 60]
             suffix_clause = re.split(r"[.!?;:\n]", suffix, maxsplit=1)[0]
             proof_suffix_clause = (
@@ -822,6 +829,19 @@ def _public_claims_share_clause(
     ))
 
 
+def _public_proof_match_is_negated(quote: str, match: re.Match) -> bool:
+    """Apply the existing stage-negation check to this market proof span."""
+
+    if re.match(r"[.!?;:\n]", match.group(0)):
+        return False
+    prefix = re.split(
+        r"[.!?;:\n]|\bbut\b|\bhowever\b",
+        quote[max(0, match.start() - 100):match.start()],
+        flags=re.I,
+    )[-1]
+    return _has_stage_proof_uncertainty(prefix)
+
+
 def _public_quote_has_bound_market_locator(
     quote: str,
     identity_names: Sequence[str],
@@ -836,6 +856,8 @@ def _public_quote_has_bound_market_locator(
     }
     for pattern in _PUBLIC_STRONG_CURRENT_PATTERNS:
         for match in pattern.finditer(quote):
+            if _public_proof_match_is_negated(quote, match):
+                continue
             if not names:
                 return False
             # Parenthetical exchange forms name the issuer inside the match.
@@ -953,13 +975,18 @@ def _stage_evidence_supports_observation(
         source_domain = ""
     if source_domain and source_domain in set(first_party_domains):
         return bool(
-            re.search(
-                r"\bpublicly\s+(?:traded|listed\s+(?:shares?|stock))\b",
-                quote,
-                re.I,
+            any(
+                not _public_proof_match_is_negated(quote, match)
+                for match in re.finditer(
+                    r"\bpublicly\s+(?:traded|listed\s+(?:shares?|stock))\b",
+                    quote, re.I,
+                )
             )
             or any(
-                (match := pattern.search(quote))
+                (match := next((
+                    item for item in pattern.finditer(quote)
+                    if not _public_proof_match_is_negated(quote, item)
+                ), None))
                 and (
                     pattern not in (
                         _PUBLIC_STAGE_PROOF_PATTERNS[2],
@@ -4402,6 +4429,35 @@ def _web_identity_receipt(
         observed_linkedin=observed_values["linkedin"],
         evidence_source="company_web_reverification",
         company_quality=company_quality,
+    )
+
+
+def _unresolved_homepage_web_identity_conflict(
+    homepage: CompanyFitDecisionResult, web_receipt: Mapping[str, Any]
+) -> bool:
+    """Keep a distinct first-party entity ahead of an unbound web claim."""
+
+    if (homepage.decision != COMPANY_FIT_UNAVAILABLE
+        or web_receipt.get("decision") != COMPANY_FIT_MATCH
+        or web_receipt.get("reason_code") != "verifier_accepted"):
+        return False
+    details = homepage.details if isinstance(homepage.details, Mapping) else {}
+    organization = details.get("observed_homepage_organization_identity")
+    observed = details.get("identity")
+    if not isinstance(organization, Mapping) or not isinstance(observed, Mapping):
+        return False
+    name = str(organization.get("normalized_name") or "")
+    domain = str(organization.get("registrable_dns_domain") or "")
+    slug = str(organization.get("linkedin_company_slug") or "")
+    return bool(
+        name and domain and slug
+        and name == observed.get("observed_name")
+        and domain == observed.get("observed_domain")
+        and slug == observed.get("observed_linkedin_slug")
+        and domain == web_receipt.get("submitted_domain")
+        == web_receipt.get("observed_domain")
+        and name != web_receipt.get("observed_name")
+        and slug != web_receipt.get("observed_linkedin_slug")
     )
 
 
@@ -10420,6 +10476,12 @@ async def _verify_company_fit(
         )
     ):
         web_identity_decision = COMPANY_FIT_UNAVAILABLE
+    if _unresolved_homepage_web_identity_conflict(identity, web_identity_mapping):
+        web_identity_decision = COMPANY_FIT_UNAVAILABLE
+        web_identity_mapping.update(
+            decision=COMPANY_FIT_UNAVAILABLE,
+            reason_code="homepage_web_identity_conflict_unresolved",
+        )
     dimensions["identity"] = web_identity_decision
     evidence["identity"] = {
         **dict(evidence.get("identity") or {}),

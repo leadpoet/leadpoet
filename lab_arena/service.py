@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -47,6 +48,8 @@ from gateway.utils.hotkey_roles import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CompanyEvidenceReads = Dict[Tuple[str, str, int], Dict[str, Any]]
 
 _DEEPLINE_BILLING_BATCH_LIMIT = 96
 _DEEPLINE_BILLING_WORKERS = 8
@@ -559,6 +562,7 @@ class RoundDefaults:
     # Frozen only into newly created integrity rounds. Existing rounds keep
     # their original policy, including after a gateway restart.
     normalize_intent_scale: bool = True
+    fit_fp_receipt_authority: bool = True
     benchmark_disclosure_from: Optional[str] = None
     min_submission_hours: int = 6
     # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
@@ -927,6 +931,15 @@ class ArenaService:
         if row is None:
             raise ServiceError("round_missing", 404)
         return self._require_round_mode(row)
+
+    def _round_from_context(
+        self, round_id: str, round_context: Optional[Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
+        """Reuse only the exact round already validated for this response."""
+
+        if round_context is not None and round_context.get("round_id") == round_id:
+            return round_context
+        return self._round(round_id)
 
     def _public_results_round(self, round_id: str) -> Dict[str, Any]:
         """Keep the published read small; other statuses need the full row."""
@@ -1472,6 +1485,12 @@ class ArenaService:
                 **document["scorer_policy"]["env_bindings"],
                 contracts.SCORE_NORMALIZATION_BINDING:
                     contracts.AVAILABLE_INTENT_CAP_NORMALIZATION,
+            })
+        if defaults.fit_fp_receipt_authority and integrity.enabled(document):
+            document["scorer_policy"] = dict(document["scorer_policy"], env_bindings={
+                **document["scorer_policy"]["env_bindings"],
+                contracts.FIT_FP_CLASSIFICATION_BINDING:
+                    contracts.FIT_RECEIPT_AUTHORITY,
             })
         if (
             defaults.benchmark_disclosure_from is not None
@@ -3167,9 +3186,21 @@ class ArenaService:
         cache_key: str,
         company_input_hash: str,
         authority_slot: int,
+        evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        round_context: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Read and fully bind one immutable company judgment variant."""
 
+        # Only public_results supplies this response-local map. Keep invalid
+        # argument types on the original validation path (bool/float slots
+        # must not alias an already validated integer slot).
+        identity = (
+            (cache_key, company_input_hash, authority_slot)
+            if type(cache_key) is str and type(company_input_hash) is str
+            and type(authority_slot) is int else None
+        )
+        if evidence_reads is not None and identity is not None and identity in evidence_reads:
+            return copy.deepcopy(evidence_reads[identity])
         cached = self._store.get_company_judgment(cache_key, authority_slot)
         if cached is None:
             raise scoring.ScoringError(
@@ -3215,7 +3246,7 @@ class ArenaService:
             != evidence["source_lease_generation"]
             or (
                 self._store.signal_authority_exclusions(str(source["run_id"]))
-                if ((self._round(str(source["round_id"])) or {}).get("configuration_doc") or {}).get("scorer_policy", {}).get("signal_judgment_policy") == signal_judgments.POLICY
+                if ((self._round_from_context(str(source["round_id"]), round_context) or {}).get("configuration_doc") or {}).get("scorer_policy", {}).get("signal_judgment_policy") == signal_judgments.POLICY
                 else (source.get("claim_response") or {}).get("runner_authority_exclusions")
             ) != evidence["runner_authority_exclusions"]
             or cached.get("source_score_run_id")
@@ -3289,6 +3320,10 @@ class ArenaService:
             raise scoring.ScoringError(
                 "accepted company judgment source output is not bound"
             )
+        if evidence_reads is not None and identity is not None:
+            # A consumer cannot alter the successful proof used by a later
+            # consumer. Failures never populate the map.
+            evidence_reads[identity] = copy.deepcopy(evidence)
         return evidence
 
     def _legacy_partial_input(self, run, round_row):
@@ -3397,6 +3432,8 @@ class ArenaService:
         *,
         recipient_miner_hotkey: str,
         baseline: bool,
+        evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        round_context: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         try:
             lease = company_judgments.validate_lease_context(context)
@@ -3409,6 +3446,8 @@ class ArenaService:
                 cache_key=hit["cache_key"],
                 company_input_hash=hit["company_input_hash"],
                 authority_slot=hit["authority_slot"],
+                evidence_reads=evidence_reads,
+                round_context=round_context,
             )
             if evidence != hit["evidence_doc"]:
                 raise scoring.ScoringError(
@@ -3431,6 +3470,8 @@ class ArenaService:
         icp: Mapping[str, Any],
         companies: Sequence[Mapping[str, Any]],
         policy: Mapping[str, Any],
+        evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        round_context: Optional[Mapping[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Rebuild list context from immutable raw company evidence."""
 
@@ -3439,6 +3480,8 @@ class ArenaService:
             (run.get("claim_response") or {}).get("company_judgment_cache") or {},
             recipient_miner_hotkey=str(run.get("miner_hotkey") or ""),
             baseline=bool(submission.get("is_king")),
+            evidence_reads=evidence_reads,
+            round_context=round_context,
         )
         try:
             document = json.loads(
@@ -3482,6 +3525,8 @@ class ArenaService:
                     cache_key=item["cache_key"],
                     company_input_hash=item["company_input_hash"],
                     authority_slot=item["authority_slot"],
+                    evidence_reads=evidence_reads,
+                    round_context=round_context,
                 )
                 if (
                     not bool(submission.get("is_king"))
@@ -3532,10 +3577,14 @@ class ArenaService:
         policy: Mapping[str, Any],
         cached_rows: Optional[Mapping[str, Any]] = None,
         source_rows: Optional[Mapping[str, Any]] = None,
+        evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        round_context: Optional[Mapping[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         if run.get("company_judgment_refs") is not None:
             return self._company_quality_breakdowns(
-                run, icp=icp, companies=companies, policy=policy
+                run, icp=icp, companies=companies, policy=policy,
+                evidence_reads=evidence_reads,
+                round_context=round_context,
             )
         cache_key = str(run.get("judgment_cache_key") or "")
         if cache_key:
@@ -7212,6 +7261,8 @@ class ArenaService:
         round_id: str,
         runs_by_id: Mapping[str, Mapping[str, Any]],
         company_evidence: Optional[Mapping[str, Any]] = None,
+        evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        round_context: Optional[Mapping[str, Any]] = None,
     ) -> str:
         """Return the judge hotkey only for a complete stored source binding."""
 
@@ -7223,6 +7274,8 @@ class ArenaService:
                 cache_key=str(company_evidence["cache_key"]),
                 company_input_hash=str(company_evidence["company_input_hash"]),
                 authority_slot=int(company_evidence["authority_slot"]),
+                evidence_reads=evidence_reads,
+                round_context=round_context,
             )
             if evidence != company_evidence:
                 raise scoring.ScoringError("company scoring attribution evidence differs")
@@ -7323,6 +7376,8 @@ class ArenaService:
         round_id: str,
         runs_by_id: Mapping[str, Mapping[str, Any]],
         source_ids: Optional[set[str]] = None,
+        evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        round_context: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, bool]:
         """Resolve actual judgment authorities for one accepted score row."""
 
@@ -7334,7 +7389,7 @@ class ArenaService:
         attributed: Dict[str, bool] = {}
         signal_policy = (
             hasattr(self._store, "get_signal_judgment_uses")
-            and ((self._round(round_id).get("configuration_doc") or {})
+            and ((self._round_from_context(round_id, round_context).get("configuration_doc") or {})
                  .get("scorer_policy") or {}).get("signal_judgment_policy")
             == signal_judgments.POLICY
         )
@@ -7393,6 +7448,8 @@ class ArenaService:
                     evidence = self._company_judgment_evidence(
                         cache_key=item["cache_key"], company_input_hash=item["company_input_hash"],
                         authority_slot=item["authority_slot"],
+                        evidence_reads=evidence_reads,
+                        round_context=round_context,
                     )
                 if evidence is None:
                     hotkey = self._validated_attribution_source(
@@ -7403,6 +7460,8 @@ class ArenaService:
                         ),
                         round_id=round_id,
                         runs_by_id=runs_by_id,
+                        evidence_reads=evidence_reads,
+                        round_context=round_context,
                     )
                     if source_ids is not None:
                         source_ids.add(score_run_id)
@@ -7423,6 +7482,8 @@ class ArenaService:
                     round_id=round_id,
                     runs_by_id=runs_by_id,
                     company_evidence=evidence,
+                    evidence_reads=evidence_reads,
+                    round_context=round_context,
                 )
                 if source_ids is not None:
                     source_ids.add(str(evidence["source_score_run_id"]))
@@ -7484,6 +7545,8 @@ class ArenaService:
                 source_runner_hotkey=str(source_score.get("runner_hotkey") or ""),
                 round_id=round_id,
                 runs_by_id=runs_by_id,
+                evidence_reads=evidence_reads,
+                round_context=round_context,
             )
             if source_ids is not None:
                 source_ids.add(source_score_run_id)
@@ -7593,6 +7656,8 @@ class ArenaService:
         public_positions: set[int],
         score_runs: Optional[Sequence[Mapping[str, Any]]] = None,
         source_rows: Optional[Mapping[str, Any]] = None,
+        evidence_reads: Optional[_CompanyEvidenceReads] = None,
+        round_context: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build aggregate and disclosed per-ICP judge attribution."""
 
@@ -7630,6 +7695,8 @@ class ArenaService:
                     round_id=round_id,
                     runs_by_id=runs_by_id,
                     source_ids=source_ids,
+                    evidence_reads=evidence_reads,
+                    round_context=round_context,
                 )
                 if not authorities:
                     raise scoring.ScoringError(
@@ -7835,6 +7902,7 @@ class ArenaService:
             round_id, execution_runs, score_runs,
             set(outputs) if verification_required else set(),
         )
+        evidence_reads: _CompanyEvidenceReads = {}
         result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
                 "miner_hotkey": participant.get("miner_hotkey"),
@@ -7858,6 +7926,8 @@ class ArenaService:
                 public_positions,
                 score_runs=score_runs,
                 source_rows=source_rows,
+                evidence_reads=evidence_reads,
+                round_context=row,
             ),
         }
         if verification_required:
@@ -7891,6 +7961,8 @@ class ArenaService:
                         judge, icp=icps[int(run["icp_position"])], companies=outputs[run_id]["companies"],
                         policy=row["configuration_doc"]["scorer_policy"],
                         cached_rows=cached_rows, source_rows=source_rows,
+                        evidence_reads=evidence_reads,
+                        round_context=row,
                     )
                 except scoring.ScoringError as exc:
                     raise ServiceError(

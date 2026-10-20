@@ -1269,6 +1269,8 @@ def validate_submission_finalize_body(body: Any) -> Dict[str, Any]:
 
 SCORE_NORMALIZATION_BINDING = "ARENA_SCORE_NORMALIZATION"
 AVAILABLE_INTENT_CAP_NORMALIZATION = "available_intent_cap_v1"
+FIT_FP_CLASSIFICATION_BINDING = "ARENA_FIT_FP_CLASSIFICATION"
+FIT_RECEIPT_AUTHORITY = "company_fit_receipt_v1"
 PROVIDER_OBSERVATION_HANDOFF_BINDING = "ARENA_PROVIDER_OBSERVATION_HANDOFF"
 AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF = "authenticated_first_observed_v1"
 
@@ -1316,6 +1318,11 @@ def validate_scorer_policy(document: Any) -> Dict[str, Any]:
             raise ArenaContractError("unsupported score normalization")
         if policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):
             raise ArenaContractError("intent score normalization requires integrity scoring")
+    if FIT_FP_CLASSIFICATION_BINDING in policy["env_bindings"]:
+        if policy["env_bindings"][FIT_FP_CLASSIFICATION_BINDING] != FIT_RECEIPT_AUTHORITY:
+            raise ArenaContractError("unsupported fit FP classification")
+        if policy["scoring_adapter_version"] not in ("qualification_integrity_v2", "qualification_contacts_v3"):
+            raise ArenaContractError("fit receipt FP classification requires integrity scoring")
     if PROVIDER_OBSERVATION_HANDOFF_BINDING in policy["env_bindings"]:
         if (
             policy["env_bindings"][PROVIDER_OBSERVATION_HANDOFF_BINDING]

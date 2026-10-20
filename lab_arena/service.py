@@ -6870,18 +6870,10 @@ class ArenaService:
         judges = self._select_scoring_outputs(judgment_runs)
         completed = {}
         icps = None
+        participants = []
         for participant in row.get("participants") or []:
-            if should_continue is not None and not should_continue():
-                break
             submission_id = str(participant["submission_id"])
             stage = 1 if participant.get("is_king") else 2
-            plan = (self._baseline_recovery_plan(row, execution_runs, judgment_runs)
-                    if stage == 1 and configuration.get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY
-                    else row.get("stage%d_scoring_plan_doc" % stage))
-            if not plan:
-                if on_completed is not None:
-                    on_completed(submission_id, None)
-                continue
             selected = {}
             for run in execution_runs:
                 if run["submission_id"] != submission_id or run["stage"] != stage:
@@ -6890,13 +6882,30 @@ class ArenaService:
                 current = selected.get(position)
                 if current is None or (run["status"] == "accepted", run["attempt"]) > (current["status"] == "accepted", current["attempt"]):
                     selected[position] = run
+            stored = set(selected) == positions and all(
+                run.get("per_icp_score") is not None for run in selected.values()
+            )
+            participants.append((participant, stage, selected, stored))
+        # Release persisted scores before assembling unpublished evidence. Sort
+        # stably so peers in each group retain their configured order.
+        participants.sort(key=lambda item: not item[3])
+        for participant, stage, selected, stored in participants:
+            if should_continue is not None and not should_continue():
+                break
+            submission_id = str(participant["submission_id"])
+            plan = (self._baseline_recovery_plan(row, execution_runs, judgment_runs)
+                    if stage == 1 and configuration.get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY
+                    else row.get("stage%d_scoring_plan_doc" % stage))
+            if not plan:
+                if on_completed is not None:
+                    on_completed(submission_id, None)
+                continue
             if set(selected) != positions or any(run["status"] not in {"accepted", "failed"} for run in selected.values()):
                 if on_completed is not None:
                     on_completed(submission_id, None)
                 continue
             items = [item for item in plan["work_items"] if item["submission_id"] == submission_id]
             zeros = [item for item in plan["zero_rows"] if item["submission_id"] == submission_id]
-            stored = all(run.get("per_icp_score") is not None for run in selected.values())
             closed = row["status"] in (
                 {"stage1_judged", "stage1_scored", "stage2", "stage2_closed", "stage2_scoring", "stage2_judged", "scored"}
                 if stage == 1 else {"stage2_judged", "scored"}

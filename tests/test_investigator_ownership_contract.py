@@ -169,7 +169,7 @@ def test_ownership_and_both_exact_support_spans_are_retained_without_mutating_in
 
 
 @pytest.mark.parametrize("ownership", [
-    {}, [], "private_equity", False, 1,
+    {}, [], "", "private_equity", False, 1,
     {**OWNERSHIP, "extra": "unsupported"},
     {key: value for key, value in OWNERSHIP.items() if key != "owner_type"},
     {**OWNERSHIP, "controlling_owner": None},
@@ -429,6 +429,77 @@ def test_ownership_contract_preserves_existing_linked_private_markets_firm_proof
     assert claim["ownership"] == OWNERSHIP
     assert claim["supporting_evidence"] == [{"url": CLASSIFICATION_URL, "quote": classification}]
     assert project(claim) == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("https://press.example/ownership", "UNPROVEN"),
+    ("https://vela.example/investments", "VERIFIED"),
+])
+@pytest.mark.parametrize("classification", ["private-markets", "private-equity"])
+def test_literal_preservation_keeps_existing_active_majority_source_authority(source, expected, classification):
+    quote = (
+        f"Vela Holdings is a {classification} firm. "
+        "Vela Holdings has active majority investments in Harborfield."
+    )
+    assert lead_scorer._stage_quote_supports_observation("private equity", quote)
+    assert lead_scorer._stage_evidence_supports_observation(
+        "private equity", quote, evidence_url=source, identity_names=("harborfield",),
+    ) is (expected == "VERIFIED")
+    assert lead_scorer._stage_evidence_supports_observation(
+        "private equity", quote, evidence_url=source, identity_names=("harborfield",),
+        semantic_private_control=True,
+    ) is (expected == "VERIFIED")
+    raw = finding(
+        evidence_url=source, evidence_quote=quote,
+        ownership={**OWNERSHIP, "controlling_owner": "Vela Holdings"},
+        supporting_evidence_url_1="", supporting_evidence_quote_1="",
+    )
+    claim = validate(raw, pages={source: quote}, company="Harborfield")
+    assert claim["status"] == expected
+    assert project(claim) == (
+        COMPANY_FIT_MATCH if expected == "VERIFIED" else COMPANY_FIT_UNAVAILABLE
+    )
+
+
+@pytest.mark.parametrize("source", ["https://press.example/ownership", "https://vela.example/investments"])
+@pytest.mark.parametrize("active_target", ["Harborfield", "Other Company"])
+def test_semantic_control_cannot_bypass_active_majority_source_or_target(source, active_target):
+    # The investigated company is named elsewhere, but only the actual active
+    # investment target may satisfy the existing source-aware stage guard.
+    quote = (
+        "Harborfield is described in this report. "
+        f"Vela Holdings has active majority investments in {active_target}."
+    )
+    classification = "Vela Holdings is a private equity firm."
+    expected = source == "https://vela.example/investments" and active_target == "Harborfield"
+    assert not lead_scorer._stage_evidence_supports_observation(
+        "private equity", quote, evidence_url=source, identity_names=("harborfield",),
+    )
+    assert lead_scorer._stage_evidence_supports_observation(
+        "private equity", quote, evidence_url=source, identity_names=("harborfield",),
+        semantic_private_control=True,
+    ) is expected
+    raw = finding(
+        evidence_url=source, evidence_quote=quote,
+        ownership={**OWNERSHIP, "controlling_owner": "Vela Holdings"},
+        supporting_evidence_quote_1=classification,
+    )
+    claim = validate(raw, pages={source: quote, CLASSIFICATION_URL: classification}, company="Harborfield")
+    assert claim["status"] == ("VERIFIED" if expected else "UNPROVEN")
+    assert project(claim) == (COMPANY_FIT_MATCH if expected else COMPANY_FIT_UNAVAILABLE)
+
+
+@pytest.mark.parametrize("stage, quote", [
+    ("Public", "Harborfield hired a new manager."),
+    ("Public", "Harborfield common stock is listed on NASDAQ under ticker HARB."),
+    ("Series B", "Harborfield hired a new manager."),
+    ("Series B", "Harborfield raised a Series B funding round."),
+])
+def test_private_control_flag_does_not_change_other_stages(stage, quote):
+    kwargs = {"evidence_url": "https://harborfield.example/news", "identity_names": ("harborfield",)}
+    assert lead_scorer._stage_evidence_supports_observation(
+        stage, quote, semantic_private_control=True, **kwargs,
+    ) == lead_scorer._stage_evidence_supports_observation(stage, quote, **kwargs)
 
 
 @pytest.mark.parametrize("classification", [

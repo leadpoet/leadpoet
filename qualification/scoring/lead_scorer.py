@@ -903,12 +903,14 @@ def _stage_evidence_supports_observation(
     identity_names: Sequence[str] = (),
     semantic_public_listing: bool = False,
     authoritative_public_listing: bool = False,
+    semantic_private_control: bool = False,
 ) -> bool:
     """Apply source and entity guards that require more than quote text."""
 
     normalized_stage = _normalize_company_stage(observed)
     lexical_support = _stage_quote_supports_observation(normalized_stage, quote)
     if normalized_stage == "private equity":
+        candidate_support = lexical_support or semantic_private_control
         if _ACTIVE_MAJORITY_INVESTMENT_RE.search(quote):
             try:
                 source_domain = _registrable_domain(evidence_url)
@@ -917,7 +919,7 @@ def _stage_evidence_supports_observation(
             sponsor = _compact_company_name(source_domain.split(".", 1)[0])
             names = {_compact_company_name(value) for value in identity_names}
             return bool(
-                lexical_support and len(sponsor) >= 4
+                candidate_support and len(sponsor) >= 4
                 and sponsor in _compact_company_name(quote)
                 and any(
                     name and name in _compact_company_name(match.group("targets"))
@@ -925,7 +927,7 @@ def _stage_evidence_supports_observation(
                     for name in names
                 )
             )
-        return lexical_support
+        return candidate_support
     if normalized_stage != "public":
         return lexical_support
     quote = _PUBLIC_COMPANY_ALIAS_RE.sub("", quote)

@@ -2802,8 +2802,12 @@ def _validated_findings(
                         stage_attribution_names,
                         classification_quote=raw.get("supporting_evidence_quote_1", ""),
                         literal_ownership_proved=(
-                            linked_pe_ownership or _stage_quote_supports_observation(
-                                normalized_stage, finding["evidence_quote"],
+                            linked_pe_ownership or _stage_evidence_supports_observation(
+                                normalized_stage,
+                                finding["evidence_quote"],
+                                evidence_url=evidence_url,
+                                first_party_domains=tuple(first_party_domains),
+                                identity_names=tuple(stage_attribution_names),
                             )
                         ),
                         same_page_identity_quotes=tuple(
@@ -2972,9 +2976,10 @@ def _validated_findings(
                             evidence_url=evidence_url,
                             first_party_domains=tuple(first_party_domains),
                             identity_names=tuple(stage_attribution_names),
+                            semantic_private_control=(
+                                linked_pe_ownership or semantic_pe_ownership
+                            ),
                         )
-                        or linked_pe_ownership
-                        or semantic_pe_ownership
                     )
                 ):
                     finding.update(

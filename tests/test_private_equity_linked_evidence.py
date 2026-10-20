@@ -390,8 +390,9 @@ def test_investigator_projection_fit_recalculation_preserves_linked_receipts(
 
 
 def test_private_equity_prompt_keeps_existing_research_and_tool_limits():
-    assert "does not expire merely because its announcement" in investigator._SYSTEM_PROMPT
-    assert "SAME sponsor" in investigator._SYSTEM_PROMPT
+    assert "completed control does not expire by age" in investigator._SYSTEM_PROMPT
+    assert "facts hold for this exact company and same owner" in investigator._SYSTEM_PROMPT
+    assert "Supporting quote 1 must classify the owner if the primary does not" in investigator._SYSTEM_PROMPT
     assert investigator.MAX_SEARCH_CALLS == 2
     assert investigator.MAX_FETCH_CALLS == 4
 
@@ -492,13 +493,14 @@ def test_normal_company_scoring_uses_real_investigator_and_preserves_support(
         if turn <= len(urls):
             tool, arguments = "fetch_page", {"url": urls[turn - 1]}
         else:
-            # Populate the exact existing strict tool fields, including both
-            # support pairs. No new model output field or protocol is needed.
+            # Populate the strict fields and both support pairs. Null ownership
+            # keeps these fixtures on the existing literal proof contract.
             schema = investigator._tools(("stage",))[-1]["parameters"]
             fields = schema["properties"]["findings"]["items"]["properties"]
             raw = dict.fromkeys(fields, "")
             raw.update(
                 target="stage", status=model_status, observed_value="Private Equity",
+                ownership=None,
                 activity_role="unresolved", evidence_url=primary_url,
                 evidence_quote=primary, supporting_evidence_url_1=support_url,
                 supporting_evidence_quote_1=support,

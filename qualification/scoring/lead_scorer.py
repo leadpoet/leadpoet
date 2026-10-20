@@ -8762,6 +8762,8 @@ def _settle_completed_company_investigation(
                 "failure_class": (
                     INSUFFICIENT_COMPANY_FIT_EVIDENCE_FAILURE_CLASS
                 ),
+                # Internal proof only; final receipt assembly does not copy it.
+                "_completed_investigation_settled": True,
                 **({"investigation_receipt": {
                     **receipt,
                     "prior_linkedin_refresh_failure_reason": (
@@ -10665,6 +10667,7 @@ async def _verify_company_fit(
             }
             and web_identity_decision == COMPANY_FIT_UNAVAILABLE
             and _homepage_identity_has_retryable_failure(identity)
+            and web_details.get("_completed_investigation_settled") is not True
         )
     ):
         failure_class = candidate_failure_class

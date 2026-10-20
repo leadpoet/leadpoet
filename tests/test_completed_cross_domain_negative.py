@@ -2,7 +2,8 @@
 
 The identity and final finding shapes reproduce Oct16 Leeward failures:
 719c score9 attempt1, homepage4929902, final4930258; 7466 final4930747.
-2e3 score9 attempt1 is a separate homepage ReadError control, not a valid zero.
+Unresolved source obligations remain retryable. A stale homepage failure can be
+superseded only by the existing complete, strict negative investigation proof.
 No company-specific acceptance rule or provider response is used by these tests.
 """
 
@@ -158,7 +159,11 @@ def _verdict():
 
 @pytest.mark.parametrize("semantic", [False, True])
 @pytest.mark.parametrize("homepage_fault", [None, "provider_error", "malformed_response"])
-def test_negative_completion_through_fit_and_arena(monkeypatch, semantic, homepage_fault):
+@pytest.mark.parametrize("investigation_fault", ["", "provider_error", "malformed_response", "unbound_fault", "incomplete"])
+@pytest.mark.parametrize("preserve_marker", [True, False])
+def test_negative_completion_through_fit_and_arena(
+    monkeypatch, semantic, homepage_fault, investigation_fault, preserve_marker,
+):
     company = _company()
     icp = ICPPrompt(
         icp_id="target", prompt="target", industry="Energy", sub_industry="Renewable power generation",
@@ -184,8 +189,12 @@ def test_negative_completion_through_fit_and_arena(monkeypatch, semantic, homepa
         return dict(verdict)
     async def investigate(**kwargs):
         receipt = _receipt()
-        return {"claims": receipt["claims"], "_completed_submit": True,
-                "failure_reason": "", "usage": receipt["usage"]}
+        if investigation_fault == "unbound_fault":
+            receipt["usage"]["fetch_outcomes"].append({"ok": False, "error_class": "http_error"})
+        return {"claims": receipt["claims"],
+                "_completed_submit": investigation_fault != "incomplete",
+                "failure_reason": (investigation_fault if investigation_fault in {"provider_error", "malformed_response"} else ""),
+                "usage": receipt["usage"]}
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
     monkeypatch.setattr(scorer, "verify_company_exists", identity)
@@ -194,13 +203,23 @@ def test_negative_completion_through_fit_and_arena(monkeypatch, semantic, homepa
     monkeypatch.setattr(scorer, "_targeted_company_investigation_dimensions", lambda *a, **k: ("stage", "rebrand", "industry"))
     monkeypatch.setattr(scorer, "_positive_semantic_review_needed", lambda *a: semantic)
     monkeypatch.setattr(scorer, "investigate_company_evidence", investigate)
+    if not preserve_marker:
+        original = scorer._llm_reverify_company
+        async def without_proof_marker(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            result.details.pop("_completed_investigation_settled", None)
+            return result
+        monkeypatch.setattr(scorer, "_llm_reverify_company", without_proof_marker)
     fit = asyncio.run(scorer._verify_company_fit(
         company, icp, 0.0, 1.0, set(), require_https_transport=True, evidence_investigator=True,
     ))
     assert fit.decision == "unavailable"
     row = {"final_score": 0.0, "failure_reason": "Company fit unavailable",
            "verifier_gate_receipts": [fit.receipt("company_fit")]}
-    assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row) is bool(homepage_fault)
+    retryable = bool(investigation_fault or (homepage_fault and not preserve_marker))
+    assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row) is retryable
+    assert "_completed_investigation_settled" not in fit.details
+    assert row["final_score"] == 0.0
     calls = []
     def judge(*args):
         calls.append(True)
@@ -210,10 +229,20 @@ def test_negative_completion_through_fit_and_arena(monkeypatch, semantic, homepa
             {"scored_run_id": "test"}, icp={"employee_count": ["51-200"], "max_companies": 1},
             companies=[{"company_name": company.company_name, "employee_count": "51-200"}], scorer=judge,
         )
-    if homepage_fault:
+    if retryable:
         with pytest.raises(scoring.ScoringError):
             run()
         assert len(calls) == 3
     else:
         assert run()[0]["final_score"] == 0.0
         assert len(calls) == 1
+
+
+def test_model_fields_cannot_inject_internal_settlement_proof():
+    verdict = {**_verdict(), "_completed_investigation_settled": True,
+               "failure_class": "insufficient_fit_evidence"}
+    result = scorer._reverify_decision(
+        verdict, "", "Private Equity", company=_company(),
+    )
+    assert "_completed_investigation_settled" not in result.details
+    assert result.details.get("failure_class") != "insufficient_fit_evidence"

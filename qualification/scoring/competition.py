@@ -47,6 +47,11 @@ _PENALIZABLE_FAILURE_MARKERS = (
     "missing industry",
     "company verification failed",
 )
+_PENALIZABLE_NON_FIT_FAILURE_MARKERS = (
+    "exclusion list",
+    "duplicate company",
+    "data quality issue",
+)
 _NEVER_PENALIZE_MARKERS = ("error", "timeout", "provider", "429")
 _MODEL_CONTRACT_INCOMPATIBLE_FAILURE_CLASS = "model_contract_incompatible"
 COMPANY_VERIFICATION_EXHAUSTED_FAILURE_CLASS = "company_verification_exhausted"
@@ -1864,8 +1869,21 @@ def _structured_fit_mismatch(breakdown: Mapping[str, Any]) -> bool:
     )
 
 
+def _has_structured_fit_verdict(breakdown: Mapping[str, Any]) -> bool:
+    receipts = breakdown.get("verifier_gate_receipts")
+    return isinstance(receipts, Sequence) and not isinstance(
+        receipts, (str, bytes)
+    ) and any(
+        isinstance(receipt, Mapping)
+        and receipt.get("gate") == "company_fit"
+        and receipt.get("decision") in {"match", "mismatch", "unavailable"}
+        for receipt in receipts
+    )
+
+
 def count_penalizable_false_positives(
-    breakdowns: Sequence[Mapping[str, Any]], *, icp_has_intent_signals: bool
+    breakdowns: Sequence[Mapping[str, Any]], *, icp_has_intent_signals: bool,
+    fit_receipt_authoritative: bool = False,
 ) -> tuple[int, int]:
     gate_failures = 0
     unverified_primary = 0
@@ -1884,8 +1902,13 @@ def count_penalizable_false_positives(
             continue
         reason = str(row.get("failure_reason") or "").strip().lower()
         if reason:
+            markers = (
+                _PENALIZABLE_NON_FIT_FAILURE_MARKERS
+                if fit_receipt_authoritative and _has_structured_fit_verdict(row)
+                else _PENALIZABLE_FAILURE_MARKERS
+            )
             if not any(marker in reason for marker in _NEVER_PENALIZE_MARKERS) and any(
-                marker in reason for marker in _PENALIZABLE_FAILURE_MARKERS
+                marker in reason for marker in markers
             ):
                 gate_failures += 1
                 continue
@@ -1951,6 +1974,7 @@ def competition_score_from_breakdowns(
     fp_penalty_points: float = FP_PENALTY_POINTS,
     fp_unverified_primary_penalty_points: float = FP_PENALTY_POINTS,
     score_floor: float = 0.0,
+    fit_receipt_authoritative: bool = False,
 ) -> dict[str, Any]:
     """Calculate one ICP score for both the baseline and miner bundles."""
 
@@ -1961,6 +1985,7 @@ def competition_score_from_breakdowns(
         icp_has_intent_signals=bool(
             icp.get("intent_signals") or icp.get("intent_signal")
         ),
+        fit_receipt_authoritative=fit_receipt_authoritative,
     )
     company_scores = [float(row.get("final_score") or 0.0) for row in rows]
     normalized = float(

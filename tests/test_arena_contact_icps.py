@@ -196,7 +196,8 @@ def test_generated_contact_seniority_never_rejects_an_explicit_role(
 
     assert generated["target_roles"] == roles
     assert generated["target_seniority"] == expected_seniority
-    assert generated["prompt"].startswith(prompt)
+    assert generated["prompt"].startswith("Find companies meeting every company requirement.")
+    assert "buying process documents VP+ approval" not in generated["prompt"]
     assert "()" not in generated["prompt"]
     assert all(
         _deterministic_role_match(role, roles, generated["target_seniority"])
@@ -218,7 +219,8 @@ def test_company_only_canonicalization_removes_contact_fields() -> None:
     assert "target_roles" not in generated
     assert "target_seniority" not in generated
     prose, requirements = generated["prompt"].split("\n\nIntent qualification:\n")
-    assert prose == source["prompt"]
+    assert prose.startswith("Find companies meeting every company requirement.")
+    assert source["prompt"] not in prose
     assert f"Required primary intent ({generated['intent_max_age_days']} days): {generated['intent_signal']}" in requirements
     assert "an optional bonus cannot replace it" in requirements
 

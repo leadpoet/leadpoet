@@ -73,6 +73,7 @@ def test_chain_and_normal_weight_signing_contracts_remain_protected():
 
 def test_targeted_verifier_and_its_caller_remain_protected():
     assert {
+        "_completed_malformed_profile_review",
         "_llm_reverify_company",
         "_run_targeted_company_evidence_investigation",
     } <= set(PROTECTED_SYMBOLS["qualification/scoring/lead_scorer.py"])

@@ -807,6 +807,11 @@
       "symbol": "__module__"
     },
     {
+      "ast_sha256": "sha256:4eca48c4250432e3aee9b70ef51cd4e4e134d2177433e8905dfe161c292fead8",
+      "path": "qualification/scoring/lead_scorer.py",
+      "symbol": "_completed_malformed_profile_review"
+    },
+    {
       "ast_sha256": "sha256:251099f42e0c21a41bd2f06502d00a88f38c3a7579cfcb301c3454ea356fe419",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_decision_from_observed_employee_size"
@@ -817,7 +822,7 @@
       "symbol": "_has_explicitly_unproven_fit_dimensions"
     },
     {
-      "ast_sha256": "sha256:cc5c30f8a201698fd7a0d9b7b7914f4b88584d8fdca0cd1d59744ff399b6aa3b",
+      "ast_sha256": "sha256:c48242293a64a5a7d4679ad9441a40d0e90875c38c907a546842030482026c72",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
@@ -852,7 +857,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:64533d1f837b17bfd8851155c5e64d825691791697de7e6fbb3eac5d5d05f343",
+  "manifest_hash": "sha256:2e4c8ec87fd6bfdbe974239c3c543065ab3b52dada4286d8a887ac6255cc968d",
   "protected_source_commit": "50e55ed2980dcd1e1f299e80bf6405c59db6ee92",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

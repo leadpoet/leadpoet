@@ -566,3 +566,17 @@ def test_explicit_single_tool_cache_eligibility_preserves_zero_and_single(count,
         body=json.dumps(_research_tool_answer(("search_web",) * count)).encode(),
         call_succeeded=True,
     ) is expected
+
+
+@pytest.mark.parametrize("parallel,count,expected", [
+    (False, 0, True), (False, 1, True), (False, 2, False), (False, 3, False),
+    (True, 2, True), (None, 2, True),
+])
+def test_stop_json_response_also_respects_single_tool_request(parallel, count, expected):
+    answer = _research_tool_answer(("search_web",) * count)
+    answer["choices"][0]["finish_reason"] = "stop"
+    answer["choices"][0]["message"]["content"] = '{"result":"complete"}'
+    assert broker._complete_judgment_response(
+        "openrouter.chat", _research_tool_request(parallel), status=200,
+        body=json.dumps(answer).encode(), call_succeeded=True,
+    ) is expected

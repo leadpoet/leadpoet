@@ -2400,8 +2400,6 @@ def _complete_declared_tool_calls(message: Mapping[str, Any], request: Mapping[s
     tools = request.get("tools")
     if not isinstance(calls, list) or not calls or not isinstance(tools, list):
         return False
-    if request.get("parallel_tool_calls") is False and len(calls) > 1:
-        return False
     declared: Dict[str, Mapping[str, Any]] = {}
     for tool in tools:
         if not isinstance(tool, Mapping) or tool.get("type") != "function":
@@ -2481,6 +2479,12 @@ def _complete_judgment_response(
             return False
         message = choice.get("message")
         if not isinstance(message, Mapping) or message.get("refusal") is not None:
+            return False
+        calls = message.get("tool_calls")
+        if (
+            request.get("parallel_tool_calls") is False
+            and isinstance(calls, list) and len(calls) > 1
+        ):
             return False
         if choice.get("finish_reason") == "tool_calls":
             return _complete_declared_tool_calls(message, request)

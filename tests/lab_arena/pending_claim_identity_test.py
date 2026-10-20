@@ -123,7 +123,7 @@ def test_nonobject_answer_stays_ambiguous_across_invocations(tmp_path, response)
         runner.close()
 
 
-def test_expired_ambiguous_claim_blocks_without_resigning_or_new_request(tmp_path):
+def test_expired_ambiguous_claim_retries_original_identity_with_fresh_auth(tmp_path):
     class Api(FakeApi):
         def claim(self, envelope):
             self.claims.append(envelope)
@@ -140,10 +140,17 @@ def test_expired_ambiguous_claim_blocks_without_resigning_or_new_request(tmp_pat
             runner.claim_one()
         pending = runner._pending_claims[ROUND]
         config.clock = lambda: now + timedelta(seconds=301)
-        with pytest.raises(rn.RunnerError, match='pending claim timestamp expired'):
+        with pytest.raises(rn.RunnerError, match='availability failure'):
             runner.claim_one()
-        assert len(api.claims) == 3
+        assert len(api.claims) == 6
         assert runner._pending_claims[ROUND] is pending
+        assert all(item['body']['recover_claim'] is pending for item in api.claims[3:6])
+        assert all(item['request_id'] != pending['request_id'] for item in api.claims[3:6])
+        config.clock = lambda: now + timedelta(seconds=5401)
+        with pytest.raises(rn.RunnerError, match='availability failure'):
+            runner.claim_one()
+        assert len(api.claims) == 9
+        assert all(item['body']['recover_claim'] is pending for item in api.claims[6:9])
         # One uncertain round does not prevent independent work in another.
         assert runner.claim_one('arena-2026-09-03') == {'status': 'no_pending'}
         assert api.claims[-1]['request_id'] != pending['request_id']
@@ -169,11 +176,12 @@ def test_timestamp_rejection_after_window_does_not_discard_ambiguous_claim(tmp_p
         with pytest.raises(rn.RunnerError):
             runner.claim_one()
         config.clock = lambda: now + timedelta(seconds=299)
-        with pytest.raises(rn.RunnerError, match='pending claim timestamp expired'):
+        with pytest.raises(rn.RunnerError, match='Arena claim recovery unavailable'):
             runner.claim_one()
-        assert len(api.claims) == 4
+        assert len(api.claims) == 6
         assert runner._pending_claims[ROUND] is api.claims[0]
-        assert all(x is api.claims[0] for x in api.claims)
+        assert all(x is api.claims[0] for x in api.claims[:4])
+        assert all(x['body']['recover_claim'] is api.claims[0] for x in api.claims[4:])
     finally:
         runner.close()
 

@@ -4971,6 +4971,80 @@ class ArenaService:
     def _lease_token(self, validated: Mapping[str, Any]) -> str:
         return contracts.document_hash({"lease": validated["request_id"], "signature": validated["signature"]})[7:]
 
+    def _original_claim_for_recovery(self, validated: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+        """Bind fresh claim authority to one older, unchanged signed request."""
+
+        body = validated["body"]
+        if "recover_claim" not in body:
+            return None
+        original = body["recover_claim"]
+        if set(body) != {"recover_claim"} or not isinstance(original, Mapping):
+            raise ServiceError("claim_recovery_invalid", 400)
+        timestamp = original.get("timestamp")
+        if (type(timestamp) is not int or timestamp > validated["timestamp"]
+            or original.get("request_id") == validated["request_id"]
+            or original.get("hotkey") != validated["hotkey"]):
+            raise ServiceError("claim_recovery_invalid", 400)
+        try:
+            claim = contracts.validate_signed_request(
+                original, expected_scope=contracts.SCOPE_CLAIM,
+                expected_round_id=validated["round_id"], now=timestamp,
+                verify_signature=self._config.verify_signature,
+            )
+        except (ArenaContractError, ArenaSignatureError, TypeError, ValueError):
+            raise ServiceError("claim_recovery_invalid", 400) from None
+        if "recover_claim" in claim["body"]:
+            raise ServiceError("claim_recovery_invalid", 400)
+        return claim
+
+    def _recovered_claim_is_live(
+        self, *, response: Mapping[str, Any], claim: Mapping[str, Any],
+        token: str, round_id: str,
+    ) -> bool:
+        """Do not dispatch a stored lease after expiry or a changed owner."""
+
+        run = self._store.get_run(str(response.get("run_id") or ""))
+        current_round = self._store.get_round(round_id)
+        if run is None or current_round is None:
+            raise ServiceError("claim_recovery_unavailable", 503)
+        if (run.get("round_id") != round_id
+            or run.get("claim_request_id") != claim["request_id"]
+            or run.get("claim_request_hash") != contracts.request_bytes_hash(claim)):
+            raise ServiceError("claim_recovery_invalid", 503)
+        try:
+            raw_expiry = run.get("lease_expires_at")
+            expiry = raw_expiry if isinstance(raw_expiry, datetime) else datetime.fromisoformat(
+                str(raw_expiry).replace("Z", "+00:00")
+            )
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            raise ServiceError("claim_recovery_unavailable", 503) from None
+        generation_current = run.get("stage_generation") == current_round.get("stage_generation")
+        # SQL permits a bounded score continuation across a round generation.
+        # Its later lease-bound RPCs remain the final authority for that case.
+        continued_score = (
+            run.get("kind") == "score" and _judge_continuation_enabled(current_round)
+            and ((run.get("stage") == 1 and current_round.get("status") in (
+                "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
+                "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
+            )) or (run.get("stage") == 2 and current_round.get("status") in (
+                "stage2_scoring", "stage2_judged", "scored",
+            )))
+        )
+        return (
+            run.get("status") == "leased"
+            and run.get("runner_hotkey") == claim["hotkey"]
+            and hmac.compare_digest(
+                str(run.get("lease_token_hash") or ""), hash_lease_token(token)
+            )
+            and run.get("lease_generation") == response.get("lease_generation")
+            and run.get("stage_generation") == response.get("stage_generation")
+            and (generation_current or continued_score)
+            and current_round.get("status") not in TERMINAL_STATUSES
+            and expiry.astimezone(timezone.utc) > self.now()
+        )
+
     def _require_validator_authority(self, hotkey: str) -> None:
         """Require validator identity for existing work, without a stake gate."""
 
@@ -5020,9 +5094,14 @@ class ArenaService:
     def handle_claim(self, envelope: Any) -> Dict[str, Any]:
         validated, round_row = self._request_round(envelope, scope=contracts.SCOPE_CLAIM, hot=True)
         round_id = round_row["round_id"]
+        original = self._original_claim_for_recovery(validated)
+        claim = original or validated
         if round_row["status"] in TERMINAL_STATUSES:
+            if original is not None:
+                return {"status": "no_work", "claim_recovery": "resolved",
+                        "claim_recovery_request_id": original["request_id"]}
             raise ServiceError("round_ended", 409)
-        body = validated["body"]
+        body = claim["body"]
         declared = body.get("declared_parallelism")
         if isinstance(declared, bool) or not isinstance(declared, int) or declared < 1:
             raise ServiceError("declared_parallelism_invalid", 400)
@@ -5078,8 +5157,8 @@ class ArenaService:
             # This exact signed-request lookup cannot allocate or extend work.
             response = self._store.recover_claim_response(
                 round_id=round_id, runner_hotkey=validated["hotkey"],
-                request_id=validated["request_id"],
-                request_hash=contracts.request_bytes_hash(validated),
+                request_id=claim["request_id"],
+                request_hash=contracts.request_bytes_hash(claim),
             )
             if response is None:
                 raise
@@ -5098,15 +5177,22 @@ class ArenaService:
                     ):
                         excluded.append(str(submission.get("miner_hotkey") or ""))
                 excluded = sorted(set(excluded) - {""})
-        token = self._lease_token(validated)
+        token = self._lease_token(claim)
         if response is None:
             response = self._store.claim_assignment(
                 round_id=round_id, runner_hotkey=validated["hotkey"], declared_parallelism=declared, slot_ceiling=int(configuration["runner_slot_ceiling"]),
-                excluded_miner_hotkeys=excluded, request_id=validated["request_id"], request_hash=contracts.request_bytes_hash(validated), lease_token_hash=hash_lease_token(token),
+                excluded_miner_hotkeys=excluded, request_id=claim["request_id"], request_hash=contracts.request_bytes_hash(claim), lease_token_hash=hash_lease_token(token),
                 lease_ttl_seconds=int(configuration["lease_ttl_seconds"]),
             )
         if response.get("status") != "leased":
-            return response
+            return (dict(response, claim_recovery="unresolved",
+                         claim_recovery_request_id=original["request_id"])
+                    if original is not None else response)
+        if original is not None and not self._recovered_claim_is_live(
+            response=response, claim=claim, token=token, round_id=round_id,
+        ):
+            return {"status": "no_work", "claim_recovery": "resolved",
+                    "claim_recovery_request_id": original["request_id"]}
         self._require_code_review(str(response["submission_id"]), round_row)
         icps = self.evaluation_icps(round_id) if integrity.enabled(configuration) else self.benchmark_icps(round_id)
         position = int(response["icp_position"])
@@ -5118,6 +5204,9 @@ class ArenaService:
         if not contact_policy.enabled(configuration):
             lease_icp.pop("contact_policy", None)
         lease = dict(response, icp=lease_icp, lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        if original is not None:
+            lease["claim_recovery"] = "resolved"
+            lease["claim_recovery_request_id"] = original["request_id"]
         # Describes the gateway serving this lease, not the frozen scorer image.
         # No admission, accounting or completion decision depends on this value.
         lease["gateway_source_commit"] = runtime_version.SOURCE_METADATA["validator_source_commit"]

@@ -879,7 +879,7 @@ class ArenaService:
             submission_rate_limit.SubmissionRequestLimiter()
         )
         self._scorer_policy = scoring.build_scorer_policy()
-        self._brokers: Dict[str, broker_module.Broker] = {}
+        self._brokers: Dict[Tuple[str, str], broker_module.Broker] = {}
         self._openrouter_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_reconciliation_after: Dict[Tuple[str, str], int] = {}
         self._deepline_priority_reconciliation_after: Dict[Tuple[str, str], int] = {}
@@ -5869,11 +5869,23 @@ class ArenaService:
         return access
 
     def _broker_for(self, round_id: str) -> broker_module.Broker:
+        # Provider handlers already resolved this hot snapshot. Match the
+        # factory's policy/routing inputs, without hashing its large catalogue
+        # or retaining a prior policy's allowlist after an operator revision.
+        row = self._hot_round(round_id)
+        if row is None:
+            raise ServiceError("round_missing", 404)
+        configuration = row.get("configuration_doc") or {}
+        identity = contracts.document_hash({key: configuration.get(key) for key in (
+            "scorer_policy", "lease_ttl_seconds", "baseline_source_url",
+            "mode", "rewards_enabled",
+        )})
+        key = (round_id, identity)
         with self._lock:
-            broker = self._brokers.get(round_id)
+            broker = self._brokers.get(key)
             if broker is None:
-                broker = self._config.broker_factory(self, self._round(round_id))
-                self._brokers[round_id] = broker
+                broker = self._config.broker_factory(self, row)
+                self._brokers[key] = broker
             return broker
 
     def _reconcile_openrouter_cost(

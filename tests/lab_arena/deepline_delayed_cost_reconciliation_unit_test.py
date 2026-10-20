@@ -436,7 +436,7 @@ def _bare_service(store, broker):
     service = object.__new__(svc.ArenaService)
     service._store = store
     service._lock = threading.RLock()
-    service._brokers = {ROUND_ID: broker}
+    service._broker_for = lambda _round_id: broker
     service._deepline_reconciliation_after = {}
     service._deepline_priority_reconciliation_after = {}
     service._deepline_score_reconciliation_after = {}

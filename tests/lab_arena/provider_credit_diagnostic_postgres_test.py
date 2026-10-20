@@ -49,7 +49,7 @@ def test_miner_unknown_fee_credit_reason_survives_sql_replay_and_reconciliation(
         credential_for=lambda _context, provider: HOST_KEYS[provider],
         funding_source_for=lambda _context: "miner_key", price_table=price_table(),
         transport=transport, clock=h.clock)
-    h.service._brokers[h.round_id] = broker
+    h.service._broker_for = lambda _round_id: broker
     h.service._hot_rounds.clear()
 
     with TestClient(create_app(h.service)) as http:

@@ -2480,6 +2480,12 @@ def _complete_judgment_response(
         message = choice.get("message")
         if not isinstance(message, Mapping) or message.get("refusal") is not None:
             return False
+        calls = message.get("tool_calls")
+        if (
+            request.get("parallel_tool_calls") is False
+            and isinstance(calls, list) and len(calls) > 1
+        ):
+            return False
         if choice.get("finish_reason") == "tool_calls":
             return _complete_declared_tool_calls(message, request)
         content = message.get("content") if isinstance(message, Mapping) else None
@@ -4547,6 +4553,16 @@ class Broker:
                     "judgment_cache_canonical": canonical_scope,
                     "judgment_cache_scope": json.loads(canonical_scope),
                 })
+                if (
+                    effective_operation_id == "openrouter.chat"
+                    and effective_normalized.get("parallel_tool_calls") is False
+                ):
+                    # Keep the request/cache identity unchanged. The atomic
+                    # source lookup must skip historical noncompliant replies
+                    # before creating a zero-cost destination settlement.
+                    reservation_arguments["call_doc"][
+                        "judgment_cache_single_tool_required"
+                    ] = True
         operation_timeout_seconds = min(
             max(1, int(timeout_ms)) / 1000.0,
             float(effective_operation.timeout_seconds),

@@ -133,6 +133,7 @@ def test_old_worker_artifact_remains_readable():
 @pytest.mark.parametrize("body", [
     r'{\"url\":\"https://example.com/?api_key=secret,\"next\":\"data\",\"last\":\"more\"}',
     r'{\"url\":\"https://example.com/?api_key=[REDACTED],\"last\":\"more\"}',
+    "https://example.com/?api_key=secret&keep=visible#;fragment",
 ])
 def test_escaped_json_web_body_keeps_worker_hashes_through_upload_and_read(tmp_path, body):
     state = runner.RunState(lease=lease(), lease_token="private-lease-token")
@@ -149,7 +150,7 @@ def test_escaped_json_web_body_keeps_worker_hashes_through_upload_and_read(tmp_p
     payload = state.worker_observations.document()
     assert payload["complete"] and not state.calls
     stored = payload["agent_observations"][0]["data"]
-    assert stored["body"] == body.replace("=secret", "=[REDACTED]")
+    assert stored["body"] == body.replace("=secret", "=%5BREDACTED%5D")
     assert stored["stored_body_sha256"] == "sha256:" + hashlib.sha256(stored["body"].encode()).hexdigest()
     assert payload["agent_observations"][1]["data"]["body_ref"] == 0
 

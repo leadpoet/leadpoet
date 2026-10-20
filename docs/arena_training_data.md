@@ -209,10 +209,14 @@ instrumentation before their full local process can be selected for training.
 
 The v2 worker artifact remains bound to one run, lease generation and claim hash.
 It contains `response_receipts` and `agent_observations` alongside the original
-exception observations. Old v1 artifacts remain readable. The existing 8 MiB
-uncompressed per-lease artifact limit remains; overflow, invalid frames, failed
-uploads and unfinished writes are explicit gaps. This bounds storage and avoids
-duplicate paid-response bodies. It does not promise every execution will fit.
+exception observations. Old v1 artifacts remain readable. The uncompressed
+per-lease artifact limit is 256 MiB; the per-event limit remains 8 MiB. The larger
+aggregate limit covers the existing 192 MiB control-traffic allowance plus host
+records. It is a serialized-data limit, not a process-memory limit. Final artifact
+uploads have a 60-second HTTP I/O timeout; input uploads have 10 seconds. Neither
+is a total elapsed-time guarantee. Overflow, invalid frames, failed uploads and
+unfinished writes remain explicit gaps. Paid-response bodies are not duplicated.
+These bounds do not promise that every execution will fit.
 No database migration, new service, package or provider call is required.
 
 ## Historical reconstruction

@@ -135,6 +135,22 @@ def test_encoded_response_secrets_and_hidden_reasoning_are_filtered_losslessly()
     assert saved["privacy"] == {"redacted": True, "redactions": ["credential", "hidden_reasoning"]}
 
 
+def test_worker_observation_keeps_plaintext_response_alias_but_redacts_request_alias():
+    row = observation()
+    row["request"]["admitted_parameters"]["messages"].append(
+        {"role": "assistant", "reasoning_content": "prior request state"})
+    response = {"choices": [{"message": {"role": "assistant",
+                                        "reasoning_content": "provider returned text"}}]}
+    row["outcome"]["response"]["body_b64"] = base64.b64encode(json.dumps(response).encode()).decode()
+    buffer = obs.Buffer()
+    buffer.append(row)
+    saved = buffer.observations[0]
+    assert saved["request"]["admitted_parameters"]["messages"][1]["reasoning_content"] == "[REDACTED]"
+    body = json.loads(base64.b64decode(saved["outcome"]["response"]["body_b64"]))
+    assert body["choices"][0]["message"]["reasoning_content"] == "provider returned text"
+    assert saved["privacy"] == {"redacted": True, "redactions": ["hidden_reasoning"]}
+
+
 def test_buffer_overflow_is_explicit_incomplete_and_never_clipped():
     buffer = obs.Buffer()
     buffer.append(observation())

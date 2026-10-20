@@ -233,15 +233,15 @@ def add_call(values, *, status="settlement", pointer=True, provider="openrouter"
     values["ledger_rows"] = [reserve, dict(reserve, entry_id=2, entry_kind="dispatch"), terminal]
 
 
-def test_full_request_not_excerpt_and_hidden_response_reasoning_removed():
+def test_full_request_not_excerpt_and_plaintext_response_alias_retained():
     values = fixture()
     add_call(values)
     result = assemble_example(**values)
     assert result["completeness"]["complete"] is True
     assert len(result["provider_calls"][0]["request"]["admitted_parameters"]["messages"][0]["content"]) == 12000
-    assert "PRIVATE THOUGHT" not in json.dumps(result)
-    assert "hidden_reasoning" in result["provider_calls"][0]["response_privacy_redactions"]
-    assert result["privacy"]["hidden_reasoning_removed"] is True
+    assert result["provider_calls"][0]["response"]["choices"][0]["message"]["reasoning_content"] == "PRIVATE THOUGHT"
+    assert result["provider_calls"][0]["response_privacy_redactions"] == []
+    assert result["privacy"]["hidden_reasoning_removed"] is False
     assert result["costs"]["confirmed_actual_microusd"] == 42
 
 
@@ -289,13 +289,28 @@ def test_export_filter_keeps_readable_reasoning_and_removes_opaque_state():
                               {"type": "reasoning.text", "signature": "SEALED", "format": "google"},
                               {"type": "reasoning.text", "text": "Then the press release.", "signature": "SEALED"}],
         "reasoning": {"effort": "high"},
-        "choices": [{"message": {"reasoning": "Visible reasoning.", "reasoning_content": "SEALED"}}],
+        "choices": [{"message": {"reasoning": "Visible reasoning.",
+                                 "reasoning_content": "Visible alias text."}}],
     })
     assert removed and "SEALED" not in json.dumps(result)
     assert result["output"] == [{"type": "reasoning", "summary": summary}]
     assert result["reasoning_details"] == [{"type": "reasoning.text", "text": "Then the press release."}]
     assert result["reasoning"] == {"effort": "high"}
-    assert result["choices"][0]["message"] == {"reasoning": "Visible reasoning."}
+    assert result["choices"][0]["message"] == {"reasoning": "Visible reasoning.",
+                                                "reasoning_content": "Visible alias text."}
+
+
+def test_export_filter_keeps_alias_only_in_provider_response_path():
+    result, removed = without_hidden_reasoning({"provider_calls": [{
+        "request": {"choices": [{"message": {"reasoning_content": "request state"}}]},
+        "response": {"choices": [{"message": {"reasoning_content": "returned text"}},
+                                 {"message": {"reasoning_content": {"sealed": "opaque"}}}]},
+    }]})
+    call = result["provider_calls"][0]
+    assert removed is True
+    assert call["request"]["choices"][0]["message"] == {}
+    assert call["response"]["choices"][0]["message"] == {"reasoning_content": "returned text"}
+    assert call["response"]["choices"][1]["message"] == {}
 
 
 def test_assembled_example_keeps_only_readable_reasoning_from_ledger():
@@ -303,6 +318,7 @@ def test_assembled_example_keeps_only_readable_reasoning_from_ledger():
     add_call(values)
     body = {"choices": [{"message": {
         "content": "result", "reasoning": "Hiring signals first.",
+        "reasoning_content": "First inspect the careers page.",
         "reasoning_details": [{"type": "reasoning.summary", "summary": "Hiring signals first.", "index": 0},
                               {"type": "reasoning.encrypted", "data": "SEALED", "index": 1}]}}]}
     values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(json.dumps(body).encode()).decode()
@@ -310,6 +326,7 @@ def test_assembled_example_keeps_only_readable_reasoning_from_ledger():
     call = result["provider_calls"][0]
     assert call["response"]["choices"][0]["message"] == {
         "content": "result", "reasoning": "Hiring signals first.",
+        "reasoning_content": "First inspect the careers page.",
         "reasoning_details": [{"type": "reasoning.summary", "summary": "Hiring signals first.", "index": 0}],
     }
     assert "SEALED" not in json.dumps(result)

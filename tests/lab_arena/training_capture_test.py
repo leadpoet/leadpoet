@@ -174,6 +174,24 @@ def test_chat_reasoning_details_keep_text_and_redact_opaque_items():
     assert capture.sanitize_training_value(cleaned) == (cleaned, ["hidden_reasoning"])
 
 
+def test_plaintext_reasoning_content_alias_is_response_only():
+    response = {"choices": [{"message": {"role": "assistant",
+                                        "reasoning_content": "Visible DeepSeek text."}},
+                            {"message": {"role": "assistant",
+                                         "reasoning_content": {"sealed": "opaque state"}}}]}
+    cleaned, reasons = capture.sanitize_training_value(response)
+    assert cleaned["choices"][0]["message"]["reasoning_content"] == "Visible DeepSeek text."
+    assert cleaned["choices"][1]["message"]["reasoning_content"] == "[REDACTED]"
+    assert reasons == ["hidden_reasoning"]
+    request = {"admitted_parameters": {"messages": [{"role": "assistant",
+                                                       "reasoning_content": "prior text"}],
+                                       "choices": [{"message": {"reasoning_content": "spoofed"}}]}}
+    cleaned, reasons = capture.sanitize_training_value(request)
+    assert cleaned["admitted_parameters"]["messages"][0]["reasoning_content"] == "[REDACTED]"
+    assert cleaned["admitted_parameters"]["choices"][0]["message"]["reasoning_content"] == "[REDACTED]"
+    assert reasons == ["hidden_reasoning"]
+
+
 def test_reasoning_items_do_not_expose_unrecognized_or_nontext_payloads():
     cleaned, reasons = capture.sanitize_training_value({"output": [{
         "type": "reasoning", "summary": [{"type": "summary_text", "text": "visible",

@@ -42,7 +42,7 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
     from lab_arena.training_capture import empty_value, opaque_reasoning_field, readable_reasoning_item, reasoning_kind
     removed = False
 
-    def walk(item, name=None):
+    def walk(item, path=()):
         nonlocal removed
         if isinstance(item, dict):
             result = {}
@@ -50,20 +50,20 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
             for key, child in item.items():
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
-                if opaque_reasoning_field(normalized, child, kind, safe_config):
+                if opaque_reasoning_field(normalized, child, kind, safe_config, path):
                     removed = removed or not empty_value(child)
                 else:
-                    result[key] = walk(child, normalized)
+                    result[key] = walk(child, (*path, normalized))
             return result
         if isinstance(item, list):
             kept = []
-            for child in item:
-                opaque = (not readable_reasoning_item(child) if name == "reasoning_details"
+            for index, child in enumerate(item):
+                opaque = (not readable_reasoning_item(child) if path and path[-1] == "reasoning_details"
                           else isinstance(child, dict) and reasoning_kind(child) == "opaque")
                 if opaque:
                     removed = removed or not empty_value(child)
                 else:
-                    kept.append(walk(child))
+                    kept.append(walk(child, (*path, str(index))))
             return kept
         return item
 

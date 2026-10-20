@@ -155,7 +155,9 @@ as a training source; it is never silently clipped and called complete. Credenti
 and opaque provider reasoning (encrypted state, signatures, and redacted thinking)
 are excluded. Readable reasoning already returned by a provider is kept in
 the private response evidence and export. This includes chat `message.reasoning`,
-readable `reasoning_details` entries, and typed response summaries or text.
+its plaintext `message.reasoning_content` alias, readable `reasoning_details`
+entries, and typed response summaries or text. The alias is retained only in
+provider responses; request copies and opaque values remain redacted.
 Ledger responses are read again at export, so historical receipts can also yield
 readable text. Earlier stored worker observations that were already redacted
 remain redacted. This change does not ask providers for additional reasoning.

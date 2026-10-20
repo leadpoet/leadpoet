@@ -26,7 +26,7 @@ MAX_VALUE_NODES = 250_000
 _HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Keep readable text returned by a provider. Opaque state and signatures remain
 # redacted, with the existing reason code for stored-object compatibility.
-_OPAQUE_KEYS = frozenset({"reasoning_content", "hidden_reasoning", "encrypted_content"})
+_OPAQUE_KEYS = frozenset({"hidden_reasoning", "encrypted_content"})
 _READABLE_FIELDS = {
     "reasoning.summary": "summary", "reasoning.text": "text", "thinking": "thinking",
     "summary_text": "text", "reasoning_text": "text",
@@ -119,8 +119,22 @@ def readable_reasoning_item(item: Any) -> bool:
     return isinstance(item, Mapping) and reasoning_kind(item) == "readable"
 
 
-def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_config: bool) -> bool:
+def readable_reasoning_content_path(path: tuple[str, ...]) -> bool:
+    """Allow the plaintext chat alias only in a provider response message."""
+    if (len(path) < 3 or path[-3] != "choices" or not path[-2].isdigit()
+            or path[-1] != "message"):
+        return False
+    if len(path) == 3:
+        return True  # A raw provider response, before it enters an example.
+    return (len(path) >= 6 and path[0] == "provider_calls" and path[1].isdigit()
+            and "response" in path[2:-3] and "request" not in path[2:-3])
+
+
+def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_config: bool,
+                           path: tuple[str, ...] = ()) -> bool:
     """Report an opaque reasoning field without dropping returned plain text."""
+    if name == "reasoning_content":
+        return not (isinstance(child, str) and readable_reasoning_content_path(path))
     if name in _OPAQUE_KEYS:
         return True
     if item_kind is not None and name not in _REASONING_ITEM_FIELDS:
@@ -231,7 +245,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 ) and not empty_credential:
                     result[key] = "[REDACTED]"
                     reasons.add("credential")
-                elif opaque_reasoning_field(normalized, child, item_kind, safe_config):
+                elif opaque_reasoning_field(normalized, child, item_kind, safe_config, path):
                     if empty_value(child):
                         result[key] = child
                     else:

@@ -10,6 +10,90 @@ from gateway.api import arena_proxy
 from scripts.run_arena_proxy_edge import create_app, load_edge_environment
 
 
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+def test_edge_observation_upload_crosses_both_old_limits_after_lease_preflight(monkeypatch, prefix):
+    calls = []
+    body = b"x" * (11 * 1024 * 1024)
+
+    async def forward(method, path, *, query, body, headers, **routing):
+        calls.append(method)
+        assert routing == ({"testnet": True} if prefix.startswith("/testnet") else {})
+        assert headers.get("x-lab-arena-lease") == "a" * 64
+        assert "authorization" not in headers
+        if method == "HEAD":
+            assert path == "v1/runs/r1/training-observations" and query == "" and body == b""
+            assert set(headers) == {"x-lab-arena-lease"}
+            return httpx.Response(204)
+        assert path == "v1/runs/r1/training-observations" and len(body) == 11 * 1024 * 1024
+        return httpx.Response(200, json={"status": "stored"})
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = TestClient(create_app())
+    result = client.post(prefix + "/v1/runs/r1/training-observations", content=body,
+        headers={"x-lab-arena-lease": "a" * 64, "authorization": "never-forward"})
+    assert result.status_code == 200 and calls == ["HEAD", "POST"]
+    assert client.post(prefix + "/v1/runs/r1/training-input", content=body).status_code == 413
+    assert client.post(prefix + "/v1/runs/r1/training-observations/extra", content=body).status_code == 413
+    assert client.post(prefix + "/v1/runs/r1/training-observations", content=b"{}",
+        headers={"content-encoding": "gzip"}).status_code == 415
+    assert calls == ["HEAD", "POST"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+@pytest.mark.parametrize("case,status", [("missing", 401), ("malformed", 401),
+    ("oversize", 413), ("expired", 409), ("transport", 503), ("unexpected_success", 503)])
+async def test_edge_observation_auth_and_declared_size_fail_before_body_read(monkeypatch, prefix, case, status):
+    calls = []
+    headers = [] if case == "missing" else [(b"x-lab-arena-lease", b"a" * 64)]
+    if case == "malformed":
+        headers = [(b"x-lab-arena-lease", b"wrong")]
+    if case == "oversize":
+        headers.append((b"content-length", str(256 * 1024 * 1024 + 1).encode()))
+
+    async def unread():
+        pytest.fail("rejection must precede body consumption")
+
+    messages = []
+    async def send(message):
+        messages.append(message)
+
+    async def forward(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        if case == "transport":
+            raise httpx.ConnectError("private error")
+        return httpx.Response(200 if case == "unexpected_success" else 409, json={"code": "lease_expired"})
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    await create_app()({"type": "http", "http_version": "1.1", "method": "POST", "scheme": "http",
+        "path": prefix + "/v1/runs/r1/training-observations", "query_string": b"", "headers": headers,
+        "server": ("testserver", 80), "client": ("127.0.0.1", 1234)}, unread, send)
+    assert next(message["status"] for message in messages if message["type"] == "http.response.start") == status
+    assert len(calls) == (0 if case in {"missing", "malformed", "oversize"} else 1)
+    if calls:
+        assert calls[0][0:2] == ("HEAD", "v1/runs/r1/training-observations")
+        assert calls[0][2].get("testnet", False) == prefix.startswith("/testnet")
+
+
+def test_edge_observation_stream_limit_still_rejects_overflow(monkeypatch):
+    calls = []
+    async def forward(method, path, **kwargs):
+        calls.append(method)
+        return httpx.Response(204)
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    monkeypatch.setattr(arena_proxy.training_observations, "MAX_OBJECT_BYTES", 16)
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    result = client.post("/arena/v1/runs/r1/training-observations", content=iter((b"x" * 8, b"x" * 9)),
+        headers={"x-lab-arena-lease": "a" * 64})
+    assert result.status_code == 413 and calls == ["HEAD"]
+
+
 def test_edge_forwards_arena_with_gateway_header_and_body_rules(monkeypatch):
     observed = {}
 

@@ -105,29 +105,30 @@ def _rank(effort: Any) -> int:
     return EFFORTS.index(effort) if effort in EFFORTS else -1
 
 
-def _at_least_floor(effort: Optional[str], profile: Mapping[str, Any]) -> str:
-    """The agent's or model's effort, raised to the floor the model accepts."""
-    target = max(_rank(effort), _rank(EFFORT_FLOOR))
-    supported = profile.get("supported_efforts") or EFFORTS
-    allowed = [value for value in supported if _rank(value) >= target]
-    return min(allowed, key=_rank) if allowed else max(supported, key=_rank)
+def _floor_supported(profile: Mapping[str, Any]) -> bool:
+    """Whether the model accepts the floor effort itself.
+
+    A model whose lowest reasoning effort is above ``low`` would be forced to
+    an expensive effort on every call, so the policy does not raise it.
+    """
+    supported = profile.get("supported_efforts")
+    return supported is None or EFFORT_FLOOR in supported
 
 
 def _annotation(treatment: str, requested: bool, changes: List[str],
-                effort: Optional[str] = None) -> Dict[str, Any]:
+                effort: Optional[str] = None, skipped: Optional[str] = None) -> Dict[str, Any]:
     annotation = {"policy": POLICY, "treatment": treatment, "requested": requested,
                   "changes": sorted(set(changes))}
     if effort is not None:
         annotation["effort"] = effort
+    if skipped is not None:
+        annotation["skipped"] = skipped
     return annotation
 
 
-def _headroom(parameters: Dict[str, Any], field: str, cap: int, tokens: int) -> bool:
+def _fits(parameters: Mapping[str, Any], field: str, cap: int) -> bool:
     current = parameters.get(field)
-    if type(current) is not int or current >= cap:
-        return False
-    parameters[field] = min(cap, current + tokens)
-    return True
+    return type(current) is int and current + HEADROOM_TOKENS <= cap
 
 
 def _forced_tool_choice(value: Any) -> bool:
@@ -135,116 +136,156 @@ def _forced_tool_choice(value: Any) -> bool:
 
 
 def _anthropic_thinking_conflict(parameters: Mapping[str, Any]) -> bool:
-    """Extended thinking refuses these agent requests; never rewrite them.
+    """Optional Anthropic thinking refuses these chat requests; never rewrite them.
 
-    Thinking rejects a temperature other than 1, ``top_k``, low ``top_p`` and
-    forced tool choice. A tool-loop continuation also needs the earlier
-    thinking blocks, which the chat schema cannot carry back.
+    Thinking rejects a temperature other than 1, ``top_k``, low ``top_p``,
+    forced tool choice and an assistant prefill. A tool-loop continuation
+    also needs the earlier thinking blocks, which the chat schema cannot
+    carry back.
     """
     temperature = parameters.get("temperature")
     top_p = parameters.get("top_p")
-    continuation = any(isinstance(message, Mapping) and message.get("role") == "assistant"
-                       and message.get("tool_calls") for message in parameters.get("messages") or ())
+    messages = [message for message in parameters.get("messages") or () if isinstance(message, Mapping)]
+    continuation = any(message.get("role") == "assistant" and message.get("tool_calls") for message in messages)
+    prefill = bool(messages) and messages[-1].get("role") == "assistant"
     return ((temperature is not None and temperature != 1) or parameters.get("top_k") is not None
             or (top_p is not None and top_p < 0.95) or _forced_tool_choice(parameters.get("tool_choice"))
-            or continuation)
+            or continuation or prefill)
 
 
 def _default_on(profile: Mapping[str, Any]) -> bool:
     return profile.get("mandatory") is True or profile.get("default_enabled") is True
 
 
-def _effort_plan(requested: Any, profile: Mapping[str, Any], *, disabled: bool) -> Tuple[Optional[str], bool]:
-    """Return (effort to send or None to leave unset, whether reasoning rises).
+# Families that need the previous turn's thinking state passed back during
+# tool use. An agent's explicit choice to turn reasoning off is kept for them.
+_SIGNATURE_FAMILIES = ("anthropic/", "google/")
 
-    An agent's explicit effort is kept unless it is below the floor. Without
-    one, a model that reasons by default keeps its catalog default, and one
-    that does not is turned on at the floor.
+
+def _plan(model: str, profile: Mapping[str, Any], effort: Any, *, disabled: bool,
+          agent_on: bool) -> Tuple[str, Optional[str]]:
+    """Return (action, effort) for one agent call.
+
+    ``keep`` leaves the reasoning level alone, ``set`` makes the model's
+    default effort explicit, ``raise`` lifts an effort below the floor and
+    ``on`` turns reasoning on. ``refuse`` keeps an explicit agent opt-out.
     """
-
-    if requested is not None and not disabled:
-        if requested not in EFFORTS or _rank(requested) >= _rank(EFFORT_FLOOR):
-            return None, False  # At or above the floor: the agent's choice stands.
-        effort = _at_least_floor(requested, profile)
-        return effort, True
-    if _default_on(profile) and not disabled:
+    if disabled:
+        return ("refuse", None) if model.startswith(_SIGNATURE_FAMILIES) else ("on", None)
+    if effort is not None:
+        if effort in EFFORTS and _rank(effort) < _rank(EFFORT_FLOOR):
+            return "raise", effort
+        return "keep", None  # At or above the floor, or not ours to interpret.
+    if agent_on:
+        return "keep", None  # The agent asked for the provider's default reasoning.
+    if _default_on(profile):
         default = profile.get("default_effort")
         if default is None:
-            return None, False  # Already reasoning; only ask for readable output.
-        effort = _at_least_floor(default, profile)
-        return effort, _rank(effort) > _rank(default)
-    return _at_least_floor(None, profile), True
+            return "keep", None
+        return ("raise", default) if _rank(default) < _rank(EFFORT_FLOOR) else ("set", default)
+    return "on", None
 
 
 def _responses(parameters: Dict[str, Any], profile: Optional[Mapping[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if profile is None:
         # The round's catalog lists no reasoning support for this model.
         return parameters, _annotation("no_reasoning_support", False, [])
+    model = str(parameters.get("model") or "")
+    original = dict(parameters)
     reasoning = dict(parameters.get("reasoning") or {})
+    effort = reasoning.get("effort")
+    action, current = _plan(model, profile, effort, disabled=effort == "none", agent_on=False)
+    if action == "refuse":
+        return original, _annotation("agent_disabled", False, [])
     changes: List[str] = []
-    effort, raised = _effort_plan(reasoning.get("effort"), profile,
-                                  disabled=reasoning.get("effort") == "none")
-    if effort is not None and reasoning.get("effort") != effort:
-        reasoning["effort"] = effort
+    skipped = None
+    if action == "on" and model.startswith("anthropic/"):
+        # Optional Anthropic thinking is never switched on through Responses:
+        # forced tools, continuations and prefills there all refuse it.
+        return original, _annotation("anthropic_thinking_conflict", False, [])
+    if action in ("on", "raise"):
+        if not _floor_supported(profile):
+            skipped = "no_low_effort"
+        elif not _fits(parameters, "max_output_tokens", operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS):
+            skipped = "headroom_unavailable"
+        if skipped and action == "on":
+            return original, _annotation("responses", False, [], skipped=skipped)
+    if action in ("on", "raise") and not skipped:
+        reasoning["effort"] = EFFORT_FLOOR
+        parameters["max_output_tokens"] += HEADROOM_TOKENS
+        changes += ["effort", "headroom"]
+    elif action in ("set", "raise") and effort is None:
+        reasoning["effort"] = current  # The model's own default, made explicit.
         changes.append("effort")
     if "summary" not in reasoning:
         reasoning["summary"] = SUMMARY
         changes.append("summary")
     parameters["reasoning"] = reasoning
-    if raised and _headroom(parameters, "max_output_tokens",
-                            operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS, HEADROOM_TOKENS):
-        changes.append("headroom")
-    return parameters, _annotation("responses", True, changes, reasoning.get("effort"))
+    return parameters, _annotation("responses", True, changes, reasoning.get("effort"), skipped)
 
 
 def _chat(parameters: Dict[str, Any], profile: Optional[Mapping[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    model = str(parameters.get("model") or "")
     if profile is None:
         # The round's catalog lists no reasoning support for this model.
         return parameters, _annotation("no_reasoning_support", False, [])
+    model = str(parameters.get("model") or "")
     original = dict(parameters)
-    reasoning = parameters.get("reasoning")
-    reasoning = dict(reasoning) if isinstance(reasoning, Mapping) else {}
+    supplied = parameters.get("reasoning")
+    reasoning = dict(supplied) if isinstance(supplied, Mapping) else {}
     changes: List[str] = []
     # Fold the legacy fields into one reasoning object so the provider never
-    # sees two conflicting reasoning settings.
+    # sees two settings. OpenRouter reads include_reasoning:true as
+    # reasoning:{} and include_reasoning:false as reasoning:{exclude:true}.
     legacy_effort = parameters.pop("reasoning_effort", None)
     if legacy_effort is not None:
         changes.append("legacy_effort")
         reasoning.setdefault("effort", legacy_effort)
-    if parameters.pop("include_reasoning", None) is not None:
+    legacy_include = parameters.pop("include_reasoning", None)
+    if legacy_include is not None:
         changes.append("legacy_include")
+        reasoning.setdefault("exclude", legacy_include is False)
     disabled = (reasoning.get("enabled") is False or reasoning.get("effort") == "none"
                 or reasoning.get("max_tokens") == 0)
     budget = reasoning.get("max_tokens")
-    agent_budget = type(budget) is int and budget > 0 and not disabled
-    anthropic_optional = model.startswith("anthropic/") and profile.get("mandatory") is not True
-    raised = False
-    effort: Optional[str] = None
-    agent_effort = reasoning.get("effort") is not None and not disabled
-    if agent_budget:
-        pass  # The agent chose its own thinking budget.
-    elif anthropic_optional and not agent_effort and not _default_on(profile):
-        # Anthropic thinking is turned on by budget; a conflicting call is
-        # sent as the agent wrote it.
-        if _anthropic_thinking_conflict(parameters):
-            return original, _annotation("anthropic_thinking_conflict", False, [])
-        reasoning.pop("effort", None)
-        reasoning["max_tokens"] = ANTHROPIC_BUDGET_TOKENS
-        changes.append("budget")
-        raised = True
-    else:
-        effort, raised = _effort_plan(reasoning.get("effort"), profile, disabled=disabled)
-    if effort is not None and reasoning.get("effort") != effort:
-        reasoning["effort"] = effort
+    agent_on = not disabled and (
+        isinstance(supplied, Mapping) or legacy_effort is not None or legacy_include is not None
+        or (type(budget) is int and budget > 0))
+    action, current = _plan(model, profile, reasoning.get("effort"), disabled=disabled, agent_on=agent_on)
+    if action == "refuse":
+        return original, _annotation("agent_disabled", False, [])
+    skipped = None
+    anthropic_budget = action == "on" and model.startswith("anthropic/") and profile.get("mandatory") is not True
+    if anthropic_budget and _anthropic_thinking_conflict(original):
+        return original, _annotation("anthropic_thinking_conflict", False, [])
+    if action in ("on", "raise"):
+        if not anthropic_budget and not _floor_supported(profile):
+            skipped = "no_low_effort"
+        elif not _fits(parameters, "max_tokens", operations.OPENROUTER_MAX_OUTPUT_TOKENS):
+            skipped = "headroom_unavailable"
+        if skipped and action == "on":
+            # Turning reasoning on here would take room from the visible answer.
+            return original, _annotation("chat", False, [], skipped=skipped)
+    if action in ("on", "raise") and not skipped:
+        if anthropic_budget:
+            reasoning.pop("effort", None)
+            reasoning["max_tokens"] = ANTHROPIC_BUDGET_TOKENS
+            changes.append("budget")
+        else:
+            reasoning["effort"] = EFFORT_FLOOR
+            changes.append("effort")
+            if reasoning.get("max_tokens") == 0:
+                del reasoning["max_tokens"]
+                changes.append("budget_cleared")
+        if reasoning.get("enabled") is False:
+            del reasoning["enabled"]
+            changes.append("enabled")
+        parameters["max_tokens"] += HEADROOM_TOKENS
+        changes.append("headroom")
+    elif action in ("set", "raise") and reasoning.get("effort") is None:
+        reasoning["effort"] = current  # The model's own default, made explicit.
         changes.append("effort")
-    if effort is not None and reasoning.get("max_tokens") == 0:
-        del reasoning["max_tokens"]
-    if reasoning.get("enabled") is False:
-        changes.append("enabled")
-        del reasoning["enabled"]
-    # Returning reasoning text is OpenRouter's default; only an agent's
-    # explicit exclusion needs reversing.
+    # Returning reasoning text is OpenRouter's default; only an explicit
+    # exclusion needs reversing.
     if reasoning.get("exclude") is True:
         reasoning["exclude"] = False
         changes.append("exclude_cleared")
@@ -253,10 +294,7 @@ def _chat(parameters: Dict[str, Any], profile: Optional[Mapping[str, Any]]) -> T
         changes.append("summary")
     if reasoning:
         parameters["reasoning"] = reasoning
-    allowance = ANTHROPIC_BUDGET_TOKENS if "budget" in changes else HEADROOM_TOKENS
-    if raised and _headroom(parameters, "max_tokens", operations.OPENROUTER_MAX_OUTPUT_TOKENS, allowance):
-        changes.append("headroom")
-    return parameters, _annotation("chat", True, changes, reasoning.get("effort"))
+    return parameters, _annotation("chat", True, changes, reasoning.get("effort"), skipped)
 
 
 def apply(
@@ -289,7 +327,9 @@ def unapplied(annotation: Mapping[str, Any], reason: str) -> Dict[str, Any]:
 
 
 def _text(value: Any) -> str:
-    return value.strip() if isinstance(value, str) else ""
+    text = value.strip() if isinstance(value, str) else ""
+    # A privacy placeholder stands for removed content, never for reasoning.
+    return "" if text == "[REDACTED]" else text
 
 
 def _chat_texts(message: Any) -> List[str]:

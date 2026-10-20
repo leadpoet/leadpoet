@@ -89,15 +89,35 @@ def _cases(model):
     ]}
     yield "single_turn_temperature_0", "openrouter.chat", single
     yield "tool_loop_continuation", "openrouter.chat", loop
-    if model.startswith("openai/"):
-        yield "responses_minimal_effort", "openrouter.responses", {
-            "model": model, "input": PROMPT, "max_output_tokens": 600, "reasoning": {"effort": "minimal"}}
+    yield "agent_reasoning_enabled", "openrouter.chat", dict(single, reasoning={"enabled": True})
+    yield "assistant_prefill", "openrouter.chat", dict(single, messages=single["messages"] + [
+        {"role": "assistant", "content": "{"}])
+    yield "agent_disabled_tool_loop", "openrouter.chat", dict(loop, reasoning={"effort": "none"})
+    yield "responses_minimal_effort", "openrouter.responses", {
+        "model": model, "input": PROMPT, "max_output_tokens": 600, "reasoning": {"effort": "minimal"}}
+
+
+def _body(broker, operations, table, operation_id, parameters):
+    """The outbound body the gateway would send, including its host route."""
+    body = {**parameters, **json.loads(json.dumps(dict(operations.OPERATIONS[operation_id].fixed_params)))}
+    pricing = table["models"].get(parameters["model"])
+    route = pricing and broker._openrouter_host_route(
+        kind="execute", operation_id=operation_id, model=parameters["model"],
+        pricing=pricing, parameters=parameters)
+    if route:
+        body["provider"] = json.loads(json.dumps(dict(route.provider_policy)))
+    return body
 
 
 def probe(models, key, *, dry_run=False):
+    from datetime import datetime, timezone
+
     from lab_arena import broker, operations, reasoning_capture
 
-    profiles = reasoning_capture.profiles_from_models_response(_catalog())
+    catalog = _catalog()
+    profiles = reasoning_capture.profiles_from_models_response(catalog)
+    table = broker.price_table_from_models_response(
+        catalog, fetched_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     rows = []
     for model in models:
         for case, operation_id, parameters in _cases(model):
@@ -107,18 +127,17 @@ def probe(models, key, *, dry_run=False):
             if dry_run:
                 rows.append({"model": model, "case": case, "treatment": annotation["treatment"],
                              "requested": annotation["requested"], "changes": annotation["changes"],
-                             "sent_reasoning": sent.get("reasoning"),
+                             "skipped": annotation.get("skipped"), "sent_reasoning": sent.get("reasoning"),
                              "sent_output_cap": sent.get("max_output_tokens", sent.get("max_tokens"))})
                 continue
-            fixed = json.loads(json.dumps(dict(operations.OPERATIONS[operation_id].fixed_params)))
             path = "/responses" if operation_id == "openrouter.responses" else "/chat/completions"
-            status, document = _post(path, {**sent, **fixed}, key)
+            status, document = _post(path, _body(broker, operations, table, operation_id, sent), key)
             row = {"model": model, "case": case, "treatment": annotation["treatment"],
                    "requested": annotation["requested"], "changes": annotation["changes"],
                    **_metrics(status, document)}
             if not 200 <= status < 300 and sent != normalized:
                 # Attribute the failure: does the agent's own form succeed?
-                original_status, _ = _post(path, {**normalized, **fixed}, key)
+                original_status, _ = _post(path, _body(broker, operations, table, operation_id, normalized), key)
                 row["agent_form_http_status"] = original_status
             row["policy_caused_failure"] = (
                 not 200 <= status < 300 and 200 <= row.get("agent_form_http_status", 0) < 300)

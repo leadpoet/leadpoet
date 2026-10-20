@@ -44,6 +44,12 @@ PROFILES = rc.profiles_from_models_response(CATALOG)
 MESSAGES = [{"role": "user", "content": "Find fintech companies hiring revenue leaders."}]
 
 
+TOOL_LOOP = [MESSAGES[0],
+             {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {
+                 "name": "lookup", "arguments": "{}"}}]},
+             {"role": "tool", "tool_call_id": "call_1", "content": "{}"}]
+
+
 def chat(model, **extra):
     return {"model": model, "messages": MESSAGES, "max_tokens": 1500, **extra}
 
@@ -97,12 +103,19 @@ def test_invalid_profiles_are_refused(document):
     ("openai/gpt-6-luna", {"reasoning": {"effort": "none"}}, {"effort": "low", "summary": "auto"}, 2524,
      ["effort", "headroom", "summary"]),
     ("openai/gpt-5-mini", {"reasoning_effort": "minimal", "include_reasoning": False},
-     {"effort": "low", "summary": "auto"}, 2524, ["effort", "headroom", "legacy_effort", "legacy_include", "summary"]),
+     {"effort": "low", "exclude": False, "summary": "auto"}, 2524,
+     ["effort", "exclude_cleared", "headroom", "legacy_effort", "legacy_include", "summary"]),
     ("openai/gpt-6-luna", {"reasoning": {"exclude": True, "effort": "medium"}},
      {"effort": "medium", "exclude": False, "summary": "auto"}, 1500, ["exclude_cleared", "summary"]),
-    ("google/gemini-2.5-flash", {"reasoning": {"enabled": False}}, {"effort": "low"}, 2524,
-     ["effort", "enabled", "headroom"]),
     ("google/gemini-2.5-flash", {"reasoning": {"max_tokens": 2048}}, {"max_tokens": 2048}, 1500, []),
+    # Reasoning the agent already turned on keeps the provider's default level.
+    ("openai/gpt-5.4-mini", {"reasoning": {"enabled": True}}, {"enabled": True, "summary": "auto"}, 1500, ["summary"]),
+    ("openai/gpt-5.4-mini", {"reasoning": {}}, {"summary": "auto"}, 1500, ["summary"]),
+    ("openai/gpt-5.4-mini", {"include_reasoning": True}, {"exclude": False, "summary": "auto"}, 1500,
+     ["legacy_include", "summary"]),
+    ("anthropic/claude-sonnet-4.5", {"reasoning": {"enabled": True}}, {"enabled": True}, 1500, []),
+    ("openai/gpt-6-luna", {"reasoning": {"effort": "low", "max_tokens": 0}}, {"effort": "low", "summary": "auto"}, 2524,
+     ["budget_cleared", "effort", "headroom", "summary"]),
 ])
 def test_chat_policy_matrix(model, extra, reasoning, max_tokens, changes):
     parameters = chat(model, **extra)
@@ -118,22 +131,41 @@ def test_chat_policy_matrix(model, extra, reasoning, max_tokens, changes):
     assert forced("openrouter.chat", parameters) == (updated, annotation)
 
 
-def test_headroom_never_exceeds_the_chat_output_cap():
+def test_reasoning_never_takes_room_from_the_visible_answer():
+    # At the 4,096-token cap (also the default) there is no room to add, so a
+    # model that reasons keeps its own level and one that does not stays off.
     updated, annotation = forced("openrouter.chat", chat("google/gemini-3.5-flash-lite", max_tokens=4096))
-    assert updated["max_tokens"] == operations.OPENROUTER_MAX_OUTPUT_TOKENS
-    assert annotation["changes"] == ["effort"]
+    assert updated["max_tokens"] == 4096 and updated["reasoning"] == {"effort": "minimal"}
+    assert annotation["skipped"] == "headroom_unavailable" and annotation["requested"] is True
+    parameters = chat("openai/gpt-5.4-mini", max_tokens=4096)
+    assert forced("openrouter.chat", parameters) == (parameters, {
+        "policy": rc.POLICY, "treatment": "chat", "requested": False, "changes": [],
+        "skipped": "headroom_unavailable"})
+    parameters = chat("anthropic/claude-sonnet-4.5", max_tokens=3500)
+    assert forced("openrouter.chat", parameters)[0] == parameters
 
 
-TOOL_LOOP = [MESSAGES[0],
-             {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {
-                 "name": "lookup", "arguments": "{}"}}]},
-             {"role": "tool", "tool_call_id": "call_1", "content": "{}"}]
+def test_explicit_opt_outs_stay_off_where_thinking_state_must_round_trip():
+    for model, reasoning in (("google/gemini-3.5-flash-lite", {"effort": "none"}),
+                             ("google/gemini-2.5-flash", {"enabled": False}),
+                             ("anthropic/claude-sonnet-4.5", {"enabled": False})):
+        parameters = chat(model, messages=TOOL_LOOP, reasoning=reasoning)
+        assert forced("openrouter.chat", parameters) == (parameters, {
+            "policy": rc.POLICY, "treatment": "agent_disabled", "requested": False, "changes": []})
+
+
+def test_models_without_a_low_effort_are_not_forced_to_a_higher_one():
+    profiles = {"mistralai/mistral-small": {"mandatory": False, "default_enabled": False,
+                                            "supported_efforts": ["medium", "high"]}}
+    parameters = chat("mistralai/mistral-small")
+    assert forced("openrouter.chat", parameters, profiles) == (parameters, {
+        "policy": rc.POLICY, "treatment": "chat", "requested": False, "changes": [], "skipped": "no_low_effort"})
 
 
 @pytest.mark.parametrize("extra", [
     {"temperature": 0}, {"temperature": 0.2}, {"top_k": 5}, {"top_p": 0.5},
     {"tool_choice": "required"}, {"tool_choice": {"type": "function", "function": {"name": "lookup"}}},
-    {"messages": TOOL_LOOP},
+    {"messages": TOOL_LOOP}, {"messages": MESSAGES + [{"role": "assistant", "content": "{"}]},
 ])
 def test_anthropic_thinking_conflicts_send_the_agent_request(extra):
     parameters = chat("anthropic/claude-sonnet-4.5", **extra)
@@ -178,6 +210,18 @@ def test_responses_policy_requests_summaries(reasoning, effort, max_output_token
     operations.validate_operation_request("openrouter.responses", updated)
 
 
+def test_optional_anthropic_thinking_is_never_switched_on_through_responses():
+    for extra in ({}, {"tool_choice": "required"},
+                  {"input": [{"type": "function_call_output", "call_id": "c1", "output": "{}"}]}):
+        parameters = {"model": "anthropic/claude-sonnet-4.5", "input": "Research.", "max_output_tokens": 2000, **extra}
+        assert forced("openrouter.responses", parameters) == (parameters, {
+            "policy": rc.POLICY, "treatment": "anthropic_thinking_conflict", "requested": False, "changes": []})
+    chosen = {"model": "anthropic/claude-sonnet-4.5", "input": "Research.", "max_output_tokens": 2000,
+              "reasoning": {"effort": "low"}}
+    updated, annotation = forced("openrouter.responses", chosen)
+    assert updated["reasoning"] == {"effort": "low", "summary": "auto"} and annotation["changes"] == ["summary"]
+
+
 def test_readable_reasoning_is_text_the_provider_returned():
     chat_body = {"choices": [{"message": {
         "content": "answer", "reasoning": "Checked the careers page first.",
@@ -197,6 +241,8 @@ def test_readable_reasoning_is_text_the_provider_returned():
     ]}
     assert rc.readable_reasoning(responses_body) == ["Plan.", "Detail."]
     assert rc.readable_reasoning({"choices": [{"message": {"reasoning": None, "content": "x"}}]}) == []
+    # A privacy placeholder is removed content, never reasoning text.
+    assert rc.readable_reasoning({"choices": [{"message": {"reasoning": "[REDACTED]"}}]}) == []
 
 
 # --- Gateway broker -------------------------------------------------------

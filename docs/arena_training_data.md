@@ -175,9 +175,9 @@ exact replay are separate properties from label validity.
 - Hidden provider chain of thought is not a collection target. Unlogged internal
   variables or private provider search steps are not recoverable. Explicit model
   messages, returned tool outputs and provider-returned readable reasoning are
-  the available training state. Rounds with `agent_reasoning_v1` ask every agent
-  call for that readable reasoning; it is a provider summary or thinking text,
-  not the full internal reasoning.
+  the available training state. Rounds with `agent_reasoning_v1` ask agent calls
+  for that readable reasoning. For most hosted models it is a provider summary;
+  some open-weight models return their full reasoning text.
 - Optional model-reported decision files and stdout/stderr remain diagnostic,
   bounded and potentially incomplete. They are not authoritative demonstrations.
 - A matching hash proves linkage and integrity, not factual truth or a good label.

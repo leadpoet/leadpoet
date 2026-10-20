@@ -74,6 +74,7 @@ def test_chain_and_normal_weight_signing_contracts_remain_protected():
 def test_targeted_verifier_and_its_caller_remain_protected():
     assert {
         "_llm_reverify_company",
+        "_is_bound_homepage_name_conflict",
         "_run_targeted_company_evidence_investigation",
         "_settle_completed_company_investigation",
     } <= set(PROTECTED_SYMBOLS["qualification/scoring/lead_scorer.py"])
@@ -131,4 +132,24 @@ def test_extracted_investigation_settlement_remains_ast_protected(tmp_path, monk
     assert source.count(guard) == 1
     target.write_text(source.replace(guard, 'and True', 1))
     with pytest.raises(ProtectedWorkflowError, match="_settle_completed_company_investigation"):
+        verify_manifest(tmp_path, manifest)
+
+
+def test_bound_homepage_identity_conflict_remains_ast_protected(tmp_path, monkeypatch):
+    relative = "qualification/scoring/lead_scorer.py"
+    source = (ROOT / relative).read_text()
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(source)
+    monkeypatch.setattr(protected_workflows_module, "PROTECTED_SYMBOLS", {
+        relative: ("_is_bound_homepage_name_conflict",),
+    })
+    manifest = build_manifest(
+        tmp_path, baseline_commit="1" * 40, protected_source_commit="2" * 40,
+    )
+    verify_manifest(tmp_path, manifest)
+    guard = 'and value["submitted_domain"] == value["observed_domain"]'
+    assert source.count(guard) == 1
+    target.write_text(source.replace(guard, "and True", 1))
+    with pytest.raises(ProtectedWorkflowError, match="_is_bound_homepage_name_conflict"):
         verify_manifest(tmp_path, manifest)

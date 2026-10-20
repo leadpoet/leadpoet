@@ -45,6 +45,11 @@ def _validated_public(company: str, url: str, quote: str) -> str:
         "https://www.hsbc.com/investors/investing-in-hsbc/group-structure",
         "HSBC is listed on the London, Hong Kong, New York and Bermuda stock exchanges.",
     ),
+    (
+        "Acme",
+        "https://acme.example/investors",
+        "Acme PLC is listed on the London and Hong Kong stock exchanges.",
+    ),
 ])
 def test_first_party_issuer_plural_exchange_listing_is_current_public_proof(
     company, url, quote,
@@ -55,7 +60,12 @@ def test_first_party_issuer_plural_exchange_listing_is_current_public_proof(
 @pytest.mark.parametrize("quote", [
     "OtherCo is listed on the London and Hong Kong stock exchanges.",
     "Acme is a customer of OtherCo, which is listed on the London and Hong Kong stock exchanges.",
+    "Acme's customer OtherCo is listed on the London and Hong Kong stock exchanges.",
+    "Acme's client OtherCo is listed on the London and Hong Kong stock exchanges.",
+    "Acme client OtherCo is listed on the London and Hong Kong stock exchanges.",
     "Acme is a subsidiary of OtherCo, which is listed on the London and Hong Kong stock exchanges.",
+    "Acme's subsidiary OtherCo is listed on the London and Hong Kong stock exchanges.",
+    "Acme Holdings PLC is listed on the London and Hong Kong stock exchanges.",
     "Acme plans to be listed on the London and Hong Kong stock exchanges.",
     "Acme is conditionally listed on the London and Hong Kong stock exchanges, subject to approval.",
     "Acme was listed on the London and Hong Kong stock exchanges before it delisted.",

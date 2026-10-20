@@ -93,8 +93,11 @@ def main(argv=None):
                 for name in ("train.jsonl", "eval.jsonl", "analysis.jsonl", "manifest.json"):
                     (args.output / name).unlink(missing_ok=True)
                 args.output.rmdir()
-        # Inputs hold private evidence; report the failure class only.
-        print("Arena training dataset failed: " + type(exc).__name__, file=sys.stderr)
+        # Inputs hold private evidence. The fixed cohort code is safe to show;
+        # other exception messages may contain source text or private paths.
+        reason = ("mixed_scorer_cohorts" if isinstance(exc, ValueError)
+                  and str(exc) == "mixed_scorer_cohorts" else type(exc).__name__)
+        print("Arena training dataset failed: " + reason, file=sys.stderr)
         return 1
     print(json.dumps({
         "dataset_version": manifest["dataset_version"],

@@ -284,6 +284,20 @@ def test_mixed_scorer_policy_cohorts_fail_closed():
         dataset.build([first, seal(second)])
 
 
+def test_cli_reports_safe_mixed_cohort_code(tmp_path, capsys):
+    first = example("run-one", [row(0, claim(), "qualified")])
+    second = example("run-two", [row(0, claim("Beta", "beta.com", "beta"), "qualified")])
+    second["configuration"]["scorer_image_digest"] = "sha256:" + "c" * 64
+    source = tmp_path / "exports"
+    source.mkdir()
+    for index, document in enumerate((first, seal(second))):
+        (source / ("example-%d.json" % index)).write_text(json.dumps(document))
+    output = tmp_path / "dataset"
+    assert cli.main(["--examples", str(source), "--output", str(output)]) == 1
+    assert capsys.readouterr().err.strip() == "Arena training dataset failed: mixed_scorer_cohorts"
+    assert not output.exists()
+
+
 def test_splits_never_share_a_company_cluster():
     companies = [claim("Company %d" % index, "company%d.com" % index, "company-%d" % index) for index in range(40)]
     examples = [example("run-%d" % index, [row(0, company, "qualified" if index % 2 else "wrong_fit")])

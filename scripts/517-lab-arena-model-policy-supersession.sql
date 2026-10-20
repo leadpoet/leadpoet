@@ -117,7 +117,7 @@ CREATE TABLE IF NOT EXISTS public.lab_arena_scoring_supersessions (
 );
 ALTER TABLE public.lab_arena_scoring_supersessions OWNER TO lab_arena_owner;
 ALTER TABLE public.lab_arena_scoring_supersessions ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON public.lab_arena_scoring_supersessions FROM PUBLIC,anon,authenticated,service_role,lab_arena_service;
+REVOKE ALL ON public.lab_arena_scoring_supersessions FROM PUBLIC,anon,authenticated,service_role,lab_arena_service,leadpoet_parity_reader;
 -- Ordinary invoker triggers may test the exception; RLS reveals no history to
 -- the API role. Only the owner-created transaction can see its authorization.
 GRANT SELECT ON public.lab_arena_scoring_supersessions TO lab_arena_service;

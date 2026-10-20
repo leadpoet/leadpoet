@@ -86,6 +86,7 @@ def build_scorer_policy(
     intent_details: bool = False,
     provider_observation_handoff: bool = False,
     normalize_intent_scale: bool = False,
+    fit_fp_receipt_authority: bool = False,
 ) -> Dict[str, Any]:
     """Return the plain scorer settings used for every participant."""
 
@@ -113,6 +114,10 @@ def build_scorer_policy(
                 contracts.PROVIDER_OBSERVATION_HANDOFF_BINDING:
                     contracts.AUTHENTICATED_PROVIDER_OBSERVATION_HANDOFF,
             } if provider_observation_handoff else {}),
+            **({
+                contracts.FIT_FP_CLASSIFICATION_BINDING:
+                    contracts.FIT_RECEIPT_AUTHORITY,
+            } if fit_fp_receipt_authority else {}),
         },
     })
 

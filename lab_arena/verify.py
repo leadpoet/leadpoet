@@ -44,6 +44,8 @@ from lab_arena.contracts import (
     MAX_BENCHMARK_ICP_COUNT,
     SCORE_NORMALIZATION_BINDING,
     AVAILABLE_INTENT_CAP_NORMALIZATION,
+    FIT_FP_CLASSIFICATION_BINDING,
+    FIT_RECEIPT_AUTHORITY,
     FINALIST_COUNT,
     KING_OUTCOMES,
     STAGE_1_ICP_COUNT,
@@ -217,6 +219,11 @@ def per_icp_score(
             "fp_unverified_primary_penalty_points"
         ],
         score_floor=validated_policy["fp_penalty_icp_floor"],
+        fit_receipt_authoritative=(
+            validated_policy["env_bindings"].get(
+                FIT_FP_CLASSIFICATION_BINDING
+            ) == FIT_RECEIPT_AUTHORITY
+        ),
     )
     if validated_policy.get("company_quality_policy") == "company_quality_v1":
         # Reward completing this buyer request. Missing, rejected and duplicate

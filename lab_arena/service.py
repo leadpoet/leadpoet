@@ -562,6 +562,7 @@ class RoundDefaults:
     # Frozen only into newly created integrity rounds. Existing rounds keep
     # their original policy, including after a gateway restart.
     normalize_intent_scale: bool = True
+    fit_fp_receipt_authority: bool = True
     benchmark_disclosure_from: Optional[str] = None
     min_submission_hours: int = 6
     # The king's pool as a percent of total emissions (LAB_ARENA_POOL_PERCENT).
@@ -1484,6 +1485,12 @@ class ArenaService:
                 **document["scorer_policy"]["env_bindings"],
                 contracts.SCORE_NORMALIZATION_BINDING:
                     contracts.AVAILABLE_INTENT_CAP_NORMALIZATION,
+            })
+        if defaults.fit_fp_receipt_authority and integrity.enabled(document):
+            document["scorer_policy"] = dict(document["scorer_policy"], env_bindings={
+                **document["scorer_policy"]["env_bindings"],
+                contracts.FIT_FP_CLASSIFICATION_BINDING:
+                    contracts.FIT_RECEIPT_AUTHORITY,
             })
         if (
             defaults.benchmark_disclosure_from is not None

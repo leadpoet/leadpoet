@@ -739,7 +739,7 @@ def code_review_summary(
 
 _EVALUATION_COLUMNS = (
     "run_id,assignment_id,submission_id,kind,status,terminal_cause,runner_hotkey,attempt,"
-    "lease_generation,lease_expires_at,"
+    "lease_generation,lease_expires_at,scoring_generation_floor,"
     "source_commit:result_doc->resource_summary->>validator_source_commit,"
     "source_dirty:result_doc->resource_summary->>validator_source_dirty,"
     "failure_reason:result_doc->failure_diagnostic->>reason"
@@ -915,13 +915,16 @@ def evaluation_progress(
     return result
 
 
-def _attach_evaluations(service: Any, round_id: str, entries: Sequence[dict]) -> None:
+def _attach_evaluations(service: Any, round_id: str, entries: Sequence[dict], *, scoring_generation_floor: int = 0) -> None:
     if not entries:
         return
     ids = sorted({entry["submission_id"] for entry in entries})
     runs_by_submission: Dict[str, list] = {sid: [] for sid in ids}
     # Compact reads are limited to public submissions on this returned page.
     for run in service._store.list_runs(round_id, columns=_EVALUATION_COLUMNS, submission_ids=ids):
+        if (run.get("kind") == "score"
+                and int(run.get("scoring_generation_floor") or 0) != scoring_generation_floor):
+            continue
         if run.get("submission_id") in runs_by_submission:
             runs_by_submission[run["submission_id"]].append(run)
     starts_by_submission: Dict[str, list] = {sid: [] for sid in ids}
@@ -1050,7 +1053,8 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
             )
         submissions.append(projected)
     if round_status != "open":
-        _attach_evaluations(service, round_id, submissions)
+        _attach_evaluations(service, round_id, submissions,
+                            scoring_generation_floor=row.get("scoring_generation_floor", 0))
     else:
         for item in submissions:
             item["evaluation"] = evaluation_progress([], service.now())

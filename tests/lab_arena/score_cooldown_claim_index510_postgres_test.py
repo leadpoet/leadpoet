@@ -6,19 +6,31 @@ import re
 import pytest
 
 from lab_arena.store import ArenaStore, PsycopgTransport
-from tests.lab_arena import claim_admission_short_circuit509_postgres_test as prior
+from tests.lab_arena import legacy_company_cache501_postgres_test as company
+from tests.lab_arena import company_judgments_postgres_test as original
+from tests.lab_arena import signal_judgments503_postgres_test as schema
+from tests.lab_arena import claim_eligibility_fast_paths509_postgres_test as admission
 
 ROOT=Path(__file__).parents[2]
 SQL=ROOT/'scripts/510-lab-arena-score-cooldown-claim-index.sql'
 INDEX='public.lab_arena_runs_score_cooldown_claim_idx'
 RID='arena-2099-10-20-index510'
-RUNNER=prior.original.hotkey('index510-runner')
-OTHER=prior.original.hotkey('index510-other')
+RUNNER=original.hotkey('index510-runner')
+OTHER=original.hotkey('index510-other')
 
 
 @pytest.fixture(scope='module')
 def database():
-    yield from prior.database.__wrapped__()
+    gen=schema.database.__wrapped__();db=next(gen)
+    try:
+        with db[0].connect(**db[1]) as conn,conn.cursor() as cur:
+            cur.execute((ROOT/'scripts/504-lab-arena-zero-call-host-attempt-credit.sql').read_text())
+            cur.execute(admission.SQL.read_text())
+            cur.execute('SELECT pg_get_functiondef(%s::regprocedure)',(admission.SIG,))
+            import hashlib
+            assert hashlib.sha256(cur.fetchone()[0].encode()).hexdigest()==admission.POST
+        yield db
+    finally:gen.close()
 
 
 def test_one_concurrent_statement_no_clock_or_function_change():
@@ -29,7 +41,7 @@ def test_one_concurrent_statement_no_clock_or_function_change():
 
 
 def _guard(cur):
-    cur.execute('SELECT pg_get_functiondef(%s::regprocedure)',(prior.SIGNATURE,))
+    cur.execute('SELECT pg_get_functiondef(%s::regprocedure)',(admission.SIG,))
     source=cur.fetchone()[0]
     start='       SELECT 1 FROM public.lab_arena_runs AS expired_score\n'
     end='      ))\n\n    AND ('
@@ -79,7 +91,7 @@ def test_exact_correlated_guard_parity_scope_cost_time_and_index_plan(database):
     store=ArenaStore(PsycopgTransport(lambda:database[0].connect(**database[1])))
     store._test_database=database
     try:
-        prior.company.open_new(store,round_id=RID,markers_by_submission=[['a']])
+        company.open_new(store,round_id=RID,markers_by_submission=[['a']])
         with database[0].connect(**database[1]) as conn,conn.cursor() as cur:
             cur.execute("SELECT to_jsonb(r) FROM public.lab_arena_runs r WHERE round_id=%s AND kind='score'",(RID,));source=cur.fetchone()[0]
         conn=database[0].connect(**database[1]);conn.autocommit=True
@@ -91,10 +103,10 @@ def test_exact_correlated_guard_parity_scope_cost_time_and_index_plan(database):
                 cur.execute('ANALYZE public.lab_arena_runs')
                 query=_guard(cur);args=(RUNNER,RID)
                 cur.execute(query,args);before=cur.fetchall();assert before==[(i,True) for i in range(1,151)]
-                old_catalog=prior.company.latest.catalog(cur);old_rows=prior.company.latest.rows(cur)
+                old_catalog=company.latest.catalog(cur);old_rows=company.latest.rows(cur)
                 cur.execute(SQL.read_text())
-                assert prior.company.latest.catalog(cur)==old_catalog
-                assert prior.company.latest.rows(cur)==old_rows
+                assert company.latest.catalog(cur)==old_catalog
+                assert company.latest.rows(cur)==old_rows
                 cur.execute(query,args);assert cur.fetchall()==before
                 cur.execute('EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) '+query,args)
                 plan=cur.fetchone()[0];nodes=list(_nodes(plan))

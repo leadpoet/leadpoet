@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from lab_arena.store import ArenaStore,PsycopgTransport
-from tests.lab_arena import claim_admission_short_circuit509_postgres_test as prior
+from tests.lab_arena import score_cooldown_claim_index510_postgres_test as prior
 from tests.lab_arena import test_lab_arena_service_round as flows
 
 

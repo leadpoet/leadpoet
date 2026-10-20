@@ -778,6 +778,10 @@ class PostgrestTransport(StoreTransport):
                     headers=self._headers,
                     params=query,
                 )
+                if response.status_code in {429, 502, 503, 504} and not attempt:
+                    # Share the existing two-attempt SELECT budget; never
+                    # replay a mutating RPC for an ambiguous HTTP response.
+                    continue
                 break
             except (httpx.ReadError, httpx.ReadTimeout, httpx.ConnectError,
                     httpx.ConnectTimeout, httpx.WriteError, httpx.WriteTimeout,

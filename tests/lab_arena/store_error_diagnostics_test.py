@@ -36,7 +36,7 @@ def test_http_origin_records_only_machine_diagnostics(operation, resource, statu
             store.rpc(resource, {'p_run_id': CANARY}) if operation == 'rpc' else store.select(resource)
     assert caught.value.store_error == dict(operation=operation, resource=resource, http_status=status, code=code)
     assert CANARY not in json.dumps(caught.value.store_error)
-    assert len(requests) == 1
+    assert len(requests) == (2 if operation == 'select' else 1)
 
 
 @pytest.mark.parametrize('operation,resource,attempts', [

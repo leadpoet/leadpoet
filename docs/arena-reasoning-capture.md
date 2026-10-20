@@ -41,16 +41,43 @@ For each `openrouter.chat` or `openrouter.responses` call in an execute run:
 | `exclude: true` | Changed to `false`, so reasoning text is returned |
 | Legacy `reasoning_effort` / `include_reasoning` | Folded into the one `reasoning` object |
 | OpenAI chat model, or any Responses call that reasons | `summary: "auto"` added when absent |
-| Optional Anthropic thinking (for example Claude Sonnet 4.5) on chat | A 1,024-token thinking budget |
 
-Whenever the policy raises reasoning, it adds 1,024 output tokens, so new
-reasoning never takes room from the visible answer. The caps stay 4,096
-(chat) and 32,768 (Responses). A call already within 1,024 tokens of its cap,
-including a chat call with no `max_tokens` (which defaults to 4,096), is not
-raised: a model that reasons keeps its level, one that does not stays off,
-and the reservation records `skipped: headroom_unavailable`. A model whose
-catalog efforts skip `low` is not raised to a costlier one
+Wherever the table says `low`, optional Anthropic thinking (for example
+Claude Sonnet 4.5) and Gemini models that list no efforts (Gemini 2.5) get a
+1,024-token thinking budget on chat instead.
+
+Whenever the policy raises reasoning, it adds up to 1,024 output tokens of
+room for it, never past the caps of 4,096 (chat) and 32,768 (Responses). The
+reservation records `headroom`, or `headroom_capped` when the cap left less
+room and the new reasoning shares the agent's own limit. A chat call with no
+`max_tokens` defaults to 4,096, the cap. How close to the cap the policy goes
+depends on how the model's reasoning can be bounded:
+
+- **Thinking budget** (optional Claude, Gemini 2.5): the provider applies it
+  to the thinking itself, so near the cap the visible answer keeps about
+  3,072 chat tokens or more.
+- **Effort** (the catalog lists efforts, for example GPT-5 and Gemini 3): `low`
+  has no hard token bound but is usually short. It is also raised near the
+  cap.
+- **Neither** (the catalog lists no efforts, for example DeepSeek V3.2, GLM
+  or Grok): OpenRouter can only switch reasoning on at the model's own
+  length. The policy does so only when the full 1,024 tokens fit; otherwise
+  the call is unchanged (`skipped: headroom_unavailable`).
+
+A model whose catalog efforts skip `low` is not raised to a costlier one
 (`skipped: no_low_effort`).
+
+This trade-off rests on production evidence. Over the October 17–19 rounds,
+3,471 agent calls to Gemini 2.5 Flash with a 4,000-token limit (45% of its
+calls) and 225 Claude Sonnet 4.5 calls at 4,096 never produced a visible
+answer above 2,972 tokens, and none was cut off. Gemini 3.5 Flash Lite, which
+agents already use, returned no reasoning on any of 332 agent calls at its
+default `minimal` effort; 147 of those used a 4,000-token limit, and their
+answers peaked at 1,965 tokens. Skipping calls near the cap would have left
+almost half of the main models' calls without reasoning. Truncation is the
+risk to watch, mainly for effort models: the probe's near-cap case asks for a
+long answer and fails if it is cut off, and the coverage report counts
+cut-off answers on calls where the policy added reasoning.
 
 The policy never rewrites an agent's sampling settings. It leaves these calls
 exactly as the agent wrote them:
@@ -114,10 +141,12 @@ because exports re-read responses from the ledger.
    OPENROUTER_API_KEY=... python3 scripts/probe_reasoning_capture.py
    ```
 
-   Exit 0 means no policy-caused failure, and every successful requested call
-   returned readable reasoning. A failure that the agent's own form shares is
-   reported as pre-existing. The probe uses the production host route for the
-   Luna Responses models.
+   Exit 0 means no policy-caused failure, every successful requested call
+   returned readable reasoning, and no answer was cut off on a call where the
+   policy added reasoning, including a long answer near the 4,096 chat cap. A
+   failure that the agent's own form shares is reported as pre-existing. The
+   probe uses the production host route for the Luna Responses models. The
+   default model list covers current agent models; `--model` replaces it.
 3. Set the activation time. Rounds whose intake opens at or after it freeze
    the policy:
 
@@ -133,9 +162,11 @@ because exports re-read responses from the ledger.
    python3 scripts/arena_reasoning_coverage.py --round-id arena-2026-10-23 --environment-file ...
    ```
 
-   It counts agent calls whose policy requested readable reasoning, reports
-   the share that returned it per model and lists skip reasons. It exits 2
-   below the target (default 80%).
+   It counts agent calls whose policy requested readable reasoning and
+   reports the share that returned it per model. It exits 2 below the target
+   (default 80%). It also reports the capture rate across all calls to models
+   that can reason, why the rest were not requested, and how many answers were
+   cut off on calls where the policy added reasoning.
 
 Rounds created without the policy, including every existing round, are
 unchanged. If the catalog snapshot is unavailable when a round is created, the

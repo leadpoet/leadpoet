@@ -4,15 +4,18 @@
 Activation gate for ``agent_reasoning_v1``. For each model it sends a few tiny
 requests exactly as the gateway broker would rewrite them, and reports whether
 each call succeeded and returned readable reasoning. It covers the request
-shapes most likely to break: a single turn at temperature 0, a tool-loop
-continuation without returned reasoning details, and an OpenAI Responses call.
+shapes most likely to break: a single turn at temperature 0, a long answer
+near the output cap (where new reasoning shares the agent's limit), a
+tool-loop continuation without returned reasoning details, and an OpenAI
+Responses call.
 
-Paid, but bounded: at most three calls per model with small output caps, plus
-one comparison call with the agent's own form when a rewritten call fails.
-Requires OPENROUTER_API_KEY. It prints metrics only, never model text or the
-key. Exit 0 when no failure is caused by the policy and every successful
-requested call returned readable reasoning, 2 otherwise, 1 when the probe
-could not run.
+Paid, but bounded: at most seven calls per model, one with a long answer,
+plus one comparison call with the agent's own form when a rewritten call
+fails. Requires OPENROUTER_API_KEY. It prints metrics only, never model text
+or the key. Exit 0 when no failure is caused by the policy, every successful
+requested call returned readable reasoning, and no answer was cut off on a
+call where the policy added reasoning; 2 otherwise; 1 when the probe could
+not run.
 """
 
 from __future__ import annotations
@@ -37,6 +40,10 @@ MODELS = (
 MAX_MODELS = 12
 BASE = "https://openrouter.ai/api/v1"
 PROMPT = "In two sentences: which signal best shows a SaaS company is expanding its sales team?"
+# About 2,500 tokens of visible answer, like the longest agent answers at a
+# 4,000-token limit, so reasoning added inside the cap must leave room for it.
+LONG_PROMPT = ("List 40 distinct public signals that a B2B SaaS company is expanding its sales team. "
+               "For each, write two full sentences: what the signal is and where to verify it.")
 TOOLS = [{"type": "function", "function": {
     "name": "lookup_company", "description": "Look up public facts about a company.",
     "parameters": {"type": "object", "properties": {"domain": {"type": "string"}}, "required": ["domain"]},
@@ -67,9 +74,11 @@ def _metrics(status, document):
     usage = (document or {}).get("usage") or {}
     details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
     choice = ((document or {}).get("choices") or [{}])[0]
+    incomplete = ((document or {}).get("incomplete_details") or {}).get("reason")
     return {
         "http_status": status,
-        "finish_reason": choice.get("finish_reason"),
+        # Responses reports a cut-off answer as incomplete at max_output_tokens.
+        "finish_reason": choice.get("finish_reason") or ("length" if incomplete == "max_output_tokens" else None),
         "readable_reasoning": bool(texts),
         "readable_chars": sum(len(text) for text in texts),
         "visible_chars": len(str((choice.get("message") or {}).get("content") or "")),
@@ -88,6 +97,10 @@ def _cases(model):
         {"role": "tool", "tool_call_id": "call_1", "content": json.dumps({"hiring": "12 open sales roles"})},
     ]}
     yield "single_turn_temperature_0", "openrouter.chat", single
+    # The most common agent limit: new reasoning fits only inside the 4,096
+    # cap, next to a long answer.
+    yield "near_output_cap_long_answer", "openrouter.chat", {
+        "model": model, "max_tokens": 4000, "messages": [{"role": "user", "content": LONG_PROMPT}]}
     yield "tool_loop_continuation", "openrouter.chat", loop
     yield "agent_reasoning_enabled", "openrouter.chat", dict(single, reasoning={"enabled": True})
     yield "assistant_prefill", "openrouter.chat", dict(single, messages=single["messages"] + [
@@ -95,6 +108,11 @@ def _cases(model):
     yield "agent_disabled_tool_loop", "openrouter.chat", dict(loop, reasoning={"effort": "none"})
     yield "responses_minimal_effort", "openrouter.responses", {
         "model": model, "input": PROMPT, "max_output_tokens": 600, "reasoning": {"effort": "minimal"}}
+
+
+def _raised(changes):
+    """Whether the policy added reasoning, and room for it, to this call."""
+    return bool({"headroom", "headroom_capped"} & set(changes or ()))
 
 
 def _body(broker, operations, table, operation_id, parameters):
@@ -169,8 +187,12 @@ def main(argv=None):
     if args.dry_run:
         return 0
     # A failure the agent's own form shares is pre-existing, not the policy's.
+    # A requested call must return readable reasoning, and where the policy
+    # added reasoning, the answer must not be cut off.
     passed = all(not row["policy_caused_failure"]
-                 and (not 200 <= row["http_status"] < 300 or row["readable_reasoning"] or not row["requested"])
+                 and (not 200 <= row["http_status"] < 300 or not row["requested"]
+                      or (row["readable_reasoning"]
+                          and not (_raised(row["changes"]) and row["finish_reason"] == "length")))
                  for row in rows)
     return 0 if passed else 2
 

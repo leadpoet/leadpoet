@@ -1,9 +1,10 @@
 """Readable model reasoning for Arena agent calls.
 
 A round may freeze ``reasoning_capture_policy``. Under it the gateway broker
-makes every OpenRouter call from an agent (an ``execute`` run) reason at
-least at low effort and return readable reasoning: a provider summary or
-thinking text. Judge (``score``) runs are never changed.
+makes every OpenRouter call from an agent (an ``execute`` run) reason, at
+least at low effort or within a small thinking budget, and return readable
+reasoning: a provider summary or thinking text. Judge (``score``) runs are
+never changed.
 
 Each round also freezes the per-model reasoning profiles from OpenRouter's
 model catalog at creation. The request rules are a pure function of the
@@ -31,8 +32,9 @@ SUMMARY = "auto"
 # Added output allowance when the policy raises reasoning, so new reasoning
 # tokens do not consume the agent's visible answer.
 HEADROOM_TOKENS = 1024
-# Anthropic's minimum extended-thinking budget.
-ANTHROPIC_BUDGET_TOKENS = 1024
+# Hard thinking budget for models that take one: Anthropic's minimum
+# extended-thinking budget, also used for other budget-style models.
+BUDGET_TOKENS = 1024
 MAX_PROFILES = 4096
 _PROFILE_KEYS = frozenset({"mandatory", "default_enabled", "default_effort", "supported_efforts"})
 
@@ -126,9 +128,24 @@ def _annotation(treatment: str, requested: bool, changes: List[str],
     return annotation
 
 
-def _fits(parameters: Mapping[str, Any], field: str, cap: int) -> bool:
+def _output_limit(parameters: Mapping[str, Any], field: str) -> int:
     current = parameters.get(field)
-    return type(current) is int and current + HEADROOM_TOKENS <= cap
+    return current if type(current) is int else operations.OPENROUTER_MAX_OUTPUT_TOKENS
+
+
+def _fits(parameters: Mapping[str, Any], field: str, cap: int) -> bool:
+    return _output_limit(parameters, field) + HEADROOM_TOKENS <= cap
+
+
+def _allowance(parameters: Dict[str, Any], field: str, cap: int) -> str:
+    """Add output room for new reasoning, never above the operation's cap.
+
+    Returns ``headroom`` when the full allowance fit, else ``headroom_capped``:
+    near the cap, new reasoning shares the agent's own output limit.
+    """
+    fits = _fits(parameters, field, cap)
+    parameters[field] = min(_output_limit(parameters, field) + HEADROOM_TOKENS, cap)
+    return "headroom" if fits else "headroom_capped"
 
 
 def _forced_tool_choice(value: Any) -> bool:
@@ -155,6 +172,23 @@ def _anthropic_thinking_conflict(parameters: Mapping[str, Any]) -> bool:
 
 def _default_on(profile: Mapping[str, Any]) -> bool:
     return profile.get("mandatory") is True or profile.get("default_enabled") is True
+
+
+def _reasoning_control(model: str, profile: Mapping[str, Any]) -> str:
+    """How new reasoning can be bounded for this model.
+
+    ``budget``: the provider applies a thinking budget to the thinking itself
+    (optional Anthropic thinking, and Gemini models that list no efforts,
+    such as Gemini 2.5). ``effort``: the catalog lists efforts, so the floor
+    can be requested; it has no hard token bound but is usually short.
+    ``toggle``: neither; OpenRouter can only switch reasoning on at the
+    model's own length.
+    """
+    if profile.get("mandatory") is not True and (
+            model.startswith("anthropic/")
+            or (model.startswith("google/gemini-") and "supported_efforts" not in profile)):
+        return "budget"
+    return "effort" if "supported_efforts" in profile else "toggle"
 
 
 # Families that need the previous turn's thinking state passed back during
@@ -203,17 +237,18 @@ def _responses(parameters: Dict[str, Any], profile: Optional[Mapping[str, Any]])
         # Optional Anthropic thinking is never switched on through Responses:
         # forced tools, continuations and prefills there all refuse it.
         return original, _annotation("anthropic_thinking_conflict", False, [])
+    control = _reasoning_control(model, profile)
+    cap = operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
     if action in ("on", "raise"):
-        if not _floor_supported(profile):
+        if control == "effort" and not _floor_supported(profile):
             skipped = "no_low_effort"
-        elif not _fits(parameters, "max_output_tokens", operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS):
+        elif control == "toggle" and not _fits(parameters, "max_output_tokens", cap):
             skipped = "headroom_unavailable"
         if skipped and action == "on":
             return original, _annotation("responses", False, [], skipped=skipped)
     if action in ("on", "raise") and not skipped:
         reasoning["effort"] = EFFORT_FLOOR
-        parameters["max_output_tokens"] += HEADROOM_TOKENS
-        changes += ["effort", "headroom"]
+        changes += ["effort", _allowance(parameters, "max_output_tokens", cap)]
     elif action in ("set", "raise") and effort is None:
         reasoning["effort"] = current  # The model's own default, made explicit.
         changes.append("effort")
@@ -253,22 +288,26 @@ def _chat(parameters: Dict[str, Any], profile: Optional[Mapping[str, Any]]) -> T
     action, current = _plan(model, profile, reasoning.get("effort"), disabled=disabled, agent_on=agent_on)
     if action == "refuse":
         return original, _annotation("agent_disabled", False, [])
-    skipped = None
-    anthropic_budget = action == "on" and model.startswith("anthropic/") and profile.get("mandatory") is not True
-    if anthropic_budget and _anthropic_thinking_conflict(original):
+    control = _reasoning_control(model, profile)
+    cap = operations.OPENROUTER_MAX_OUTPUT_TOKENS
+    if (action == "on" and control == "budget" and model.startswith("anthropic/")
+            and _anthropic_thinking_conflict(original)):
         return original, _annotation("anthropic_thinking_conflict", False, [])
+    skipped = None
     if action in ("on", "raise"):
-        if not anthropic_budget and not _floor_supported(profile):
+        if control == "effort" and not _floor_supported(profile):
             skipped = "no_low_effort"
-        elif not _fits(parameters, "max_tokens", operations.OPENROUTER_MAX_OUTPUT_TOKENS):
+        elif control == "toggle" and not _fits(parameters, "max_tokens", cap):
+            # Unbounded reasoning is added only with its full allowance.
             skipped = "headroom_unavailable"
         if skipped and action == "on":
-            # Turning reasoning on here would take room from the visible answer.
             return original, _annotation("chat", False, [], skipped=skipped)
     if action in ("on", "raise") and not skipped:
-        if anthropic_budget:
+        if control == "budget":
+            # The provider applies this budget to the thinking, so even at
+            # the output cap the visible answer keeps about cap - budget.
             reasoning.pop("effort", None)
-            reasoning["max_tokens"] = ANTHROPIC_BUDGET_TOKENS
+            reasoning["max_tokens"] = BUDGET_TOKENS
             changes.append("budget")
         else:
             reasoning["effort"] = EFFORT_FLOOR
@@ -279,8 +318,7 @@ def _chat(parameters: Dict[str, Any], profile: Optional[Mapping[str, Any]]) -> T
         if reasoning.get("enabled") is False:
             del reasoning["enabled"]
             changes.append("enabled")
-        parameters["max_tokens"] += HEADROOM_TOKENS
-        changes.append("headroom")
+        changes.append(_allowance(parameters, "max_tokens", cap))
     elif action in ("set", "raise") and reasoning.get("effort") is None:
         reasoning["effort"] = current  # The model's own default, made explicit.
         changes.append("effort")

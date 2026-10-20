@@ -92,8 +92,9 @@ def test_invalid_profiles_are_refused(document):
     ("openai/gpt-5.4-mini", {}, {"effort": "low", "summary": "auto"}, 2524, ["effort", "headroom", "summary"]),
     # Mandatory with a minimal default: raised to the floor.
     ("google/gemini-3.5-flash-lite", {}, {"effort": "low"}, 2524, ["effort", "headroom"]),
-    ("google/gemini-2.5-flash", {"temperature": 0}, {"effort": "low"}, 2524, ["effort", "headroom"]),
-    # Optional Anthropic thinking uses its minimum budget, never an effort.
+    # Budget-style thinking (no listed efforts, or optional Anthropic) gets a
+    # hard 1,024-token budget, never an effort.
+    ("google/gemini-2.5-flash", {"temperature": 0}, {"max_tokens": 1024}, 2524, ["budget", "headroom"]),
     ("anthropic/claude-sonnet-4.5", {}, {"max_tokens": 1024}, 2524, ["budget", "headroom"]),
     # Mandatory adaptive thinking: an explicit floor-level effort is kept.
     ("anthropic/claude-sonnet-5.5", {"reasoning": {"effort": "low"}}, {"effort": "low"}, 1500, []),
@@ -131,18 +132,61 @@ def test_chat_policy_matrix(model, extra, reasoning, max_tokens, changes):
     assert forced("openrouter.chat", parameters) == (updated, annotation)
 
 
-def test_reasoning_never_takes_room_from_the_visible_answer():
-    # At the 4,096-token cap (also the default) there is no room to add, so a
-    # model that reasons keeps its own level and one that does not stays off.
-    updated, annotation = forced("openrouter.chat", chat("google/gemini-3.5-flash-lite", max_tokens=4096))
-    assert updated["max_tokens"] == 4096 and updated["reasoning"] == {"effort": "minimal"}
-    assert annotation["skipped"] == "headroom_unavailable" and annotation["requested"] is True
-    parameters = chat("openai/gpt-5.4-mini", max_tokens=4096)
-    assert forced("openrouter.chat", parameters) == (parameters, {
-        "policy": rc.POLICY, "treatment": "chat", "requested": False, "changes": [],
+@pytest.mark.parametrize("model,max_tokens,reasoning,changes", [
+    # 4,000 is the most common agent limit; 4,096 is the cap and the default.
+    ("google/gemini-2.5-flash", 4000, {"max_tokens": 1024}, ["budget", "headroom_capped"]),
+    ("anthropic/claude-sonnet-4.5", 4096, {"max_tokens": 1024}, ["budget", "headroom_capped"]),
+    ("google/gemini-3.5-flash-lite", 4000, {"effort": "low"}, ["effort", "headroom_capped"]),
+    ("openai/gpt-5.4-mini", 4096, {"effort": "low", "summary": "auto"}, ["effort", "headroom_capped", "summary"]),
+])
+def test_near_the_cap_reasoning_shares_the_limit_up_to_the_cap(model, max_tokens, reasoning, changes):
+    updated, annotation = forced("openrouter.chat", chat(model, max_tokens=max_tokens))
+    assert updated["max_tokens"] == operations.OPENROUTER_MAX_OUTPUT_TOKENS
+    assert updated["reasoning"] == reasoning
+    assert annotation["requested"] is True and annotation["changes"] == changes and "skipped" not in annotation
+    operations.validate_operation_request("openrouter.chat", updated)
+    if "max_tokens" in reasoning:
+        # A hard budget leaves the visible answer at least 3,072 tokens.
+        assert updated["max_tokens"] - reasoning["max_tokens"] == 3072
+
+
+def test_toggle_only_reasoning_is_added_only_with_its_full_allowance():
+    # No listed efforts and no applied budget (for example DeepSeek V3.2):
+    # reasoning runs at the model's own length, so it needs all 1,024 tokens.
+    profiles = {"deepseek/deepseek-v3.2": {"mandatory": False}}
+    updated, annotation = forced("openrouter.chat", chat("deepseek/deepseek-v3.2"), profiles)
+    assert updated["reasoning"] == {"effort": "low"} and updated["max_tokens"] == 2524
+    assert annotation["changes"] == ["effort", "headroom"]
+    for max_tokens in (4000, 4096):
+        parameters = chat("deepseek/deepseek-v3.2", max_tokens=max_tokens)
+        assert forced("openrouter.chat", parameters, profiles) == (parameters, {
+            "policy": rc.POLICY, "treatment": "chat", "requested": False, "changes": [],
+            "skipped": "headroom_unavailable"})
+    near_cap = {"model": "deepseek/deepseek-v3.2", "input": "Research.",
+                "max_output_tokens": operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS - 100}
+    assert forced("openrouter.responses", near_cap, profiles) == (near_cap, {
+        "policy": rc.POLICY, "treatment": "responses", "requested": False, "changes": [],
         "skipped": "headroom_unavailable"})
-    parameters = chat("anthropic/claude-sonnet-4.5", max_tokens=3500)
-    assert forced("openrouter.chat", parameters)[0] == parameters
+
+
+def test_budget_models_take_the_budget_for_a_raised_effort_and_stay_below_their_limit():
+    for model in ("google/gemini-2.5-flash", "anthropic/claude-sonnet-4.5"):
+        updated, annotation = forced("openrouter.chat", chat(model, reasoning={"effort": "minimal"}))
+        assert updated["reasoning"] == {"max_tokens": rc.BUDGET_TOKENS}
+        assert annotation["changes"] == ["budget", "headroom"]
+    # Anthropic requires the output limit to exceed the thinking budget.
+    updated, _ = forced("openrouter.chat", chat("anthropic/claude-sonnet-4.5", max_tokens=1))
+    assert updated["max_tokens"] == 1025 > updated["reasoning"]["max_tokens"]
+    assert rc.HEADROOM_TOKENS >= rc.BUDGET_TOKENS
+
+
+def test_near_the_responses_cap_reasoning_shares_the_limit_up_to_the_cap():
+    parameters = {"model": "openai/gpt-5.4-mini", "input": "Research the company.",
+                  "max_output_tokens": operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS - 100}
+    updated, annotation = forced("openrouter.responses", parameters)
+    assert updated["max_output_tokens"] == operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
+    assert annotation["changes"] == ["effort", "headroom_capped", "summary"]
+    operations.validate_operation_request("openrouter.responses", updated)
 
 
 def test_explicit_opt_outs_stay_off_where_thinking_state_must_round_trip():
@@ -351,39 +395,69 @@ def _ledger_rows(run_id, calls):
     return rows
 
 
+class _CoverageStore:
+    def __init__(self, ledgers):
+        self.ledgers = ledgers
+
+    def get_round(self, round_id):
+        return {"round_id": round_id, "configuration_doc": {"reasoning_capture_policy": rc.POLICY}}
+
+    def list_runs(self, round_id, kind):
+        assert kind == "execute"
+        return [{"run_id": run_id} for run_id in self.ledgers]
+
+    def list_ledger(self, run_id, provider, after_entry_id, limit):
+        assert provider == "openrouter"
+        return [row for row in self.ledgers[run_id] if after_entry_id is None or row["entry_id"] > after_entry_id]
+
+
+ASKED = {"policy": rc.POLICY, "treatment": "chat", "requested": True, "changes": ["effort"]}
+WITH_TEXT = {"choices": [{"message": {"content": "a", "reasoning": "Checked hiring pages."}}]}
+WITHOUT = {"choices": [{"message": {"content": "a", "reasoning": None}}]}
+
+
 def test_coverage_counts_requested_calls_that_returned_text():
     from scripts import arena_reasoning_coverage as coverage
 
-    asked = {"policy": rc.POLICY, "treatment": "chat", "requested": True, "changes": ["effort"]}
-    skipped = {"policy": rc.POLICY, "treatment": "no_reasoning_support", "requested": False, "changes": []}
-    with_text = {"choices": [{"message": {"content": "a", "reasoning": "Checked hiring pages."}}]}
-    without = {"choices": [{"message": {"content": "a", "reasoning": None}}]}
-    ledgers = {
-        "run-1": _ledger_rows("run-1", [("openai/gpt-6-luna", asked, with_text, True),
-                                        ("openai/gpt-6-luna", asked, without, True),
-                                        ("perplexity/sonar", skipped, without, True),
-                                        ("openai/gpt-6-luna", asked, with_text, False)]),
-        "run-2": _ledger_rows("run-2", [("google/gemini-3.5-flash-lite", asked, with_text, True)]),
-    }
-
-    class Store:
-        def get_round(self, round_id):
-            return {"round_id": round_id, "configuration_doc": {"reasoning_capture_policy": rc.POLICY}}
-
-        def list_runs(self, round_id, kind):
-            assert kind == "execute"
-            return [{"run_id": run_id} for run_id in ledgers]
-
-        def list_ledger(self, run_id, provider, after_entry_id, limit):
-            assert provider == "openrouter"
-            return [row for row in ledgers[run_id] if after_entry_id is None or row["entry_id"] > after_entry_id]
-
-    result = coverage.measure(Store(), "arena-2026-10-23", min_call_coverage=0.6)
+    unsupported = {"policy": rc.POLICY, "treatment": "no_reasoning_support", "requested": False, "changes": []}
+    store = _CoverageStore({
+        "run-1": _ledger_rows("run-1", [("openai/gpt-6-luna", ASKED, WITH_TEXT, True),
+                                        ("openai/gpt-6-luna", ASKED, WITHOUT, True),
+                                        ("perplexity/sonar", unsupported, WITHOUT, True),
+                                        ("openai/gpt-6-luna", ASKED, WITH_TEXT, False)]),
+        "run-2": _ledger_rows("run-2", [("google/gemini-3.5-flash-lite", ASKED, WITH_TEXT, True)]),
+    })
+    result = coverage.measure(store, "arena-2026-10-23", min_call_coverage=0.6)
     assert (result["calls"], result["requested_calls"], result["readable_requested_calls"]) == (4, 3, 2)
     assert result["call_coverage"] == round(2 / 3, 4) and result["passed"] is True
     assert result["runs_with_readable_reasoning"] == 2
     assert result["treatments"] == {"chat": 3, "no_reasoning_support": 1}
-    assert coverage.measure(Store(), "arena-2026-10-23", min_call_coverage=0.9)["passed"] is False
+    assert coverage.measure(store, "arena-2026-10-23", min_call_coverage=0.9)["passed"] is False
+
+
+def test_coverage_reports_capture_rate_gaps_and_cut_off_answers():
+    from scripts import arena_reasoning_coverage as coverage
+
+    conflict = {"policy": rc.POLICY, "treatment": "anthropic_thinking_conflict", "requested": False, "changes": []}
+    unapplied = dict(rc.unapplied(ASKED, "operation_schema"))
+    raised = dict(ASKED, changes=["effort", "headroom_capped"])
+    cut_off = {"choices": [{"finish_reason": "length", "message": {"content": "a", "reasoning": "Checked."}}]}
+    responses_cut_off = {"output": [], "incomplete_details": {"reason": "max_output_tokens"}}
+    store = _CoverageStore({"run-1": _ledger_rows("run-1", [
+        ("openai/gpt-6-luna", ASKED, WITH_TEXT, True),
+        ("openai/gpt-6-luna", raised, cut_off, True),
+        ("openai/gpt-6-luna", raised, responses_cut_off, True),
+        # The agent's own limit cut this one off; the policy added no reasoning.
+        ("openai/gpt-6-luna", ASKED, cut_off, True),
+        ("anthropic/claude-sonnet-4.5", conflict, WITHOUT, True),
+        ("openai/gpt-6-luna", unapplied, WITHOUT, True),
+    ])})
+    result = coverage.measure(store, "arena-2026-10-23")
+    assert result["reasoning_capable_calls"] == 6 and result["readable_capable_calls"] == 3
+    assert result["capture_rate"] == 0.5
+    assert result["not_requested"] == {"anthropic_thinking_conflict": 1, "unapplied_operation_schema": 1}
+    assert result["truncated_raised_calls"] == 2
+    assert result["models"]["openai/gpt-6-luna"]["truncated_raised"] == 2
 
 
 # --- Round configuration --------------------------------------------------

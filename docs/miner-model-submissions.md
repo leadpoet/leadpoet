@@ -233,11 +233,16 @@ need to change your code. In those rounds:
 - Calls to a model that reasons by default keep its default effort. Reasoning
   you turned on yourself keeps its level.
 - Calls to a model that does not reason by default, or that set effort
-  `minimal` (or `none`, except on Claude and Gemini), run at effort `low`, with
-  1,024 extra output tokens so your visible answer keeps its room.
-- A call already within 1,024 tokens of the output cap is not raised. A chat
-  call without `max_tokens` defaults to 4,096, the cap; set a lower
-  `max_tokens` if you want room for reasoning.
+  `minimal` (or `none`, except on Claude and Gemini), run at effort `low`.
+  Optional Claude thinking and Gemini 2.5 get a 1,024-token thinking budget
+  instead.
+- The gateway adds up to 1,024 output tokens of room for that reasoning,
+  never past the 4,096 chat cap, so near the cap reasoning shares your limit.
+  A chat call without `max_tokens` defaults to 4,096. Set `max_tokens` to
+  3,072 or less to get the full extra room. A thinking budget then never
+  reaches your answer's room; effort `low` usually stays within it.
+- Models with neither effort levels nor a thinking budget (for example
+  DeepSeek V3.2) are switched on only when the full extra room fits.
 - OpenAI calls request a reasoning summary. `exclude: true` is ignored.
 - Responses gain `message.reasoning` / `reasoning_details` (chat) or reasoning
   summaries (Responses API). Read the answer from `content` as before.

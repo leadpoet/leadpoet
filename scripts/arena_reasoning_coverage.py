@@ -4,9 +4,13 @@
 Read-only. It decodes the OpenRouter response receipts already stored in the
 provider ledger for the round's execution runs. Judge runs are not counted.
 Coverage is the share of calls whose reasoning policy requested readable
-reasoning that actually returned it. It prints counts only, never response
-text. Exit 0 when the round meets the target, 2 when it does not (including a
-round without the policy), 1 when the measurement itself failed.
+reasoning that actually returned it. The report also gives the capture rate
+across every call to a model that can reason, why calls were not requested,
+and how many answers were cut off at their output limit on calls where the
+policy added reasoning. It prints
+counts only, never response text. Exit 0 when the round meets the coverage
+target, 2 when it does not (including a round without the policy), 1 when the
+measurement itself failed.
 """
 
 from __future__ import annotations
@@ -54,6 +58,21 @@ def _response(row):
     return document if isinstance(document, dict) else None
 
 
+def _truncated(document):
+    """Whether the answer stopped at its output limit (chat or Responses)."""
+    choices = document.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        return choices[0].get("finish_reason") == "length"
+    incomplete = document.get("incomplete_details")
+    return isinstance(incomplete, dict) and incomplete.get("reason") == "max_output_tokens"
+
+
+def _not_requested_reason(annotation):
+    if annotation.get("unapplied"):
+        return "unapplied_" + str(annotation["unapplied"])
+    return str(annotation.get("skipped") or annotation.get("treatment") or "no_policy")
+
+
 def measure(store, round_id, *, min_call_coverage=DEFAULT_MIN_CALL_COVERAGE):
     from lab_arena import reasoning_capture
 
@@ -61,12 +80,15 @@ def measure(store, round_id, *, min_call_coverage=DEFAULT_MIN_CALL_COVERAGE):
     if not round_row:
         raise ValueError("round_missing")
     policy = reasoning_capture.round_policy(round_row.get("configuration_doc") or {})
-    models = defaultdict(lambda: {"calls": 0, "readable": 0, "requested": 0, "readable_requested": 0})
+    models = defaultdict(lambda: {"calls": 0, "readable": 0, "requested": 0, "readable_requested": 0,
+                                  "truncated_raised": 0})
     treatments = defaultdict(int)
+    not_requested = defaultdict(int)
     runs = store.list_runs(round_id, kind="execute")
     summary = {"round_id": round_id, "policy_mode": policy["mode"], "execution_runs": len(runs),
                "runs_with_model_calls": 0, "runs_with_readable_reasoning": 0,
-               "calls": 0, "readable_calls": 0, "requested_calls": 0, "readable_requested_calls": 0}
+               "calls": 0, "readable_calls": 0, "requested_calls": 0, "readable_requested_calls": 0,
+               "reasoning_capable_calls": 0, "readable_capable_calls": 0, "truncated_raised_calls": 0}
     for run in runs:
         seen = readable = False
         rows = _ledger(store, run["run_id"])
@@ -84,16 +106,27 @@ def measure(store, round_id, *, min_call_coverage=DEFAULT_MIN_CALL_COVERAGE):
             annotation = annotation if isinstance(annotation, dict) else {}
             requested = annotation.get("requested") is True
             texts = bool(reasoning_capture.readable_reasoning(document))
+            # Only a call where the policy added reasoning can lose its answer to it.
+            raised = bool({"headroom", "headroom_capped"} & set(annotation.get("changes") or ()))
+            truncated = raised and _truncated(document)
+            # The frozen catalog says this model can reason at all.
+            capable = annotation.get("treatment") not in (None, "no_reasoning_support")
             treatments[str(annotation.get("treatment") or "no_policy")] += 1
+            if capable and not requested:
+                not_requested[_not_requested_reason(annotation)] += 1
             entry = models[model]
             entry["calls"] += 1
             entry["readable"] += texts
             entry["requested"] += requested
             entry["readable_requested"] += texts and requested
+            entry["truncated_raised"] += truncated
             summary["calls"] += 1
             summary["readable_calls"] += texts
             summary["requested_calls"] += requested
             summary["readable_requested_calls"] += texts and requested
+            summary["reasoning_capable_calls"] += capable
+            summary["readable_capable_calls"] += texts and capable
+            summary["truncated_raised_calls"] += truncated
             seen = True
             readable = readable or texts
         summary["runs_with_model_calls"] += seen
@@ -102,9 +135,14 @@ def measure(store, round_id, *, min_call_coverage=DEFAULT_MIN_CALL_COVERAGE):
     summary["call_coverage"] = (
         round(summary["readable_requested_calls"] / requested_calls, 4) if requested_calls else None
     )
+    capable_calls = summary["reasoning_capable_calls"]
+    summary["capture_rate"] = (
+        round(summary["readable_capable_calls"] / capable_calls, 4) if capable_calls else None
+    )
     summary["min_call_coverage"] = min_call_coverage
     summary["passed"] = requested_calls > 0 and summary["call_coverage"] >= min_call_coverage
     summary["treatments"] = dict(sorted(treatments.items()))
+    summary["not_requested"] = dict(sorted(not_requested.items()))
     summary["models"] = {name: dict(value) for name, value in sorted(models.items())}
     return summary
 

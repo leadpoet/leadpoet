@@ -64,6 +64,7 @@ MAX_PARALLEL_ENV = "LAB_ARENA_MAX_PARALLEL_RUNS"
 DEFAULT_SOCKET_ROOT = str(DEFAULT_RUNNER_SOCKET_ROOT)
 AGENT_ENTRYPOINT_PATH = Path(__file__).with_name("agent_entrypoint.py").resolve()
 CHECKPOINT_MODULE_PATH = Path(__file__).with_name("lab_arena_checkpoint.py").resolve()
+AUTOMATIC_CAPTURE_PATH = Path(__file__).with_name("automatic_capture.py").resolve()
 CODEX_MODULE_PATH = Path(__file__).with_name("lab_arena_codex.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # bound repeated refusals for the same operation/tool
@@ -659,7 +660,8 @@ def _stage_agent_entrypoint(source_path: Path, run_dir: Path, *, filename: str =
     """Copy the trusted entrypoint without changing its deployed permissions."""
 
     source_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-    if filename not in ("agent-entrypoint.py", "web-egress-bridge.py", "lab_arena_checkpoint.py", "lab_arena_codex.py"):
+    if filename not in ("agent-entrypoint.py", "web-egress-bridge.py", "lab_arena_checkpoint.py",
+                        "lab_arena_codex.py", "automatic_capture.py"):
         raise RunnerError("trusted runtime filename is invalid")
     destination = Path(run_dir) / filename
     source_fd = destination_fd = None
@@ -3520,6 +3522,7 @@ class RunnerConfig:
     socket_root: Path = Path(DEFAULT_SOCKET_ROOT)
     agent_entrypoint_path: Path = AGENT_ENTRYPOINT_PATH
     checkpoint_module_path: Path = CHECKPOINT_MODULE_PATH
+    automatic_capture_path: Path = AUTOMATIC_CAPTURE_PATH
     codex_module_path: Path = CODEX_MODULE_PATH
     web_bridge_path: Path = WEB_BRIDGE_PATH
     # Production always supplies verified slots. Direct test configurations may
@@ -3548,6 +3551,7 @@ class RunnerConfig:
         self.socket_root = Path(self.socket_root)
         self.agent_entrypoint_path = Path(self.agent_entrypoint_path)
         self.checkpoint_module_path = Path(self.checkpoint_module_path)
+        self.automatic_capture_path = Path(self.automatic_capture_path)
         self.codex_module_path = Path(self.codex_module_path)
         self.web_bridge_path = Path(self.web_bridge_path)
         self.socket_root.mkdir(parents=True, exist_ok=True)
@@ -4054,6 +4058,12 @@ class AssignmentExecutor:
                     filename="lab_arena_checkpoint.py",
                 )
             )
+            staged_automatic_capture = (
+                None if scoring_run else _stage_agent_entrypoint(
+                    config.automatic_capture_path, run_dir,
+                    filename="automatic_capture.py",
+                )
+            )
             # Both assignment kinds use the service-selected trusted Python
             # image. Execute assignments add the admitted source bundle under
             # read-only mounts; no miner image metadata is accepted.
@@ -4124,6 +4134,7 @@ class AssignmentExecutor:
                         staged_agent_entrypoint
                     ),
                     checkpoint_module_path=staged_checkpoint_module,
+                    automatic_capture_path=staged_automatic_capture,
                     codex_module_path=staged_codex_module,
                     web_bridge_path=staged_web_bridge,
                     entry_command=runtime.SCORER_ENTRY_COMMAND if scoring_run else runtime.AGENT_ENTRY_COMMAND,
@@ -4144,6 +4155,20 @@ class AssignmentExecutor:
                 runtime_entered = True
                 result = config.sandbox_runtime.run_icp(spec)
                 if not scoring_run:
+                    capture_summary = getattr(result, "automatic_capture_summary", None)
+                    if capture_summary is not None:
+                        # The exit report survives a blocked asynchronous sender.
+                        # It remains reported training evidence, not run authority.
+                        with state.lock:
+                            state.worker_observations.append_agent_observation({
+                                "id": len(state.worker_observations.agent_observations),
+                                "kind": "state_snapshot", "observed_at": _timestamp(config.clock),
+                                "after_action_sequence": state.action_sequence - 1 if state.action_sequence else None,
+                                "depends_on": [], "data": {
+                                    "name": "automatic_capture_summary", "value": capture_summary,
+                                },
+                                "privacy": {"redacted": False, "redactions": []},
+                            }, secrets=(state.lease_token,))
                     execution_diagnostic = _execution_diagnostic_from_stderr(
                         result.stderr
                     )

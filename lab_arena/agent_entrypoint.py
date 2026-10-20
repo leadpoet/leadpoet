@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,61 @@ DEPENDENCY_DIR = Path("/agent/deps")
 INPUT_PATH = Path("/input/icp.json")
 OUTPUT_PATH = Path("/output/companies.json")
 WEB_BRIDGE_PATH = Path("/agent/web_egress_bridge.py")
+AUTOMATIC_CAPTURE_PATH = Path("/agent/automatic_capture.py")
+AUTOMATIC_CAPTURE_SUMMARY = ".arena-automatic-capture.json"
 
 
 class AgentContractError(RuntimeError):
     """The submitted harness does not implement the public boundary."""
+
+
+@contextmanager
+def _automatic_capture(output_dir: Path):
+    """Install host-owned observation before submitted imports; never replace results."""
+    recorder = None
+    try:
+        if AUTOMATIC_CAPTURE_PATH.is_file():
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import lab_arena_checkpoint
+
+            specification = importlib.util.spec_from_file_location(
+                "_arena_automatic_capture", AUTOMATIC_CAPTURE_PATH
+            )
+            if specification is not None and specification.loader is not None:
+                module = importlib.util.module_from_spec(specification)
+                sys.modules[specification.name] = module
+                specification.loader.exec_module(module)
+                recorder = module.install(lab_arena_checkpoint)
+    except Exception:
+        # Missing observation is an evidence gap, not an agent execution error.
+        recorder = None
+    try:
+        yield
+    finally:
+        summary = {"source": "runtime_http_v1", "complete": False, "failure": "recorder_unavailable"}
+        if recorder is not None:
+            try:
+                summary = recorder.close()
+            except Exception:
+                summary["failure"] = "recorder_close_failed"
+        # A tiny atomic sidecar survives interpreter exit even if the daemon
+        # cannot finish its queue. The host folds it into the existing artifact.
+        temporary = None
+        try:
+            encoded = json.dumps(summary, separators=(",", ":"), allow_nan=False).encode()
+            if len(encoded) <= 16_384:
+                descriptor, temporary = tempfile.mkstemp(prefix=".arena-capture-", dir=output_dir)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(encoded)
+                os.replace(temporary, output_dir / AUTOMATIC_CAPTURE_SUMMARY)
+        except Exception:
+            pass
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
 
 
 @contextmanager
@@ -94,6 +146,11 @@ def run(
 ) -> None:
     """Call ``harness.run_icp(icp)`` and write the standard output document."""
 
+    with _automatic_capture(output_path.parent):
+        _run(source_dir=source_dir, input_path=input_path, output_path=output_path)
+
+
+def _run(*, source_dir: Path, input_path: Path, output_path: Path) -> None:
     document = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(document, dict) or not isinstance(document.get("icp"), dict):
         raise AgentContractError("ICP input is invalid")

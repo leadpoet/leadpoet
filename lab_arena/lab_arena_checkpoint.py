@@ -101,6 +101,17 @@ def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | No
     try:
         normalized = validate_training_frame(frame)
         encoded = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    except Exception:
+        if kind != "capture_failure":
+            reason = "invalid_value"
+            try:
+                if len(json.dumps(frame, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_FRAME_BYTES:
+                    reason = "size_limit"
+            except Exception:
+                pass
+            _record_training("capture_failure", {"category": kind, "reason": reason}, depends_on)
+        return None
+    try:
         path = str(os.environ.get(WORKER_SOCKET_ENV) or "").strip()
         if not path.startswith("/"):
             return None

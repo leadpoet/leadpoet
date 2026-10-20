@@ -103,11 +103,15 @@ def test_unwritten_response_and_web_capture_loss_are_explicit(tmp_path, monkeypa
             status=200, content_type="text/plain",
             body="x" * (lab_arena_checkpoint.MAX_TRAINING_WEB_BODY_BYTES + 1),
         ) is None
+        assert lab_arena_checkpoint.record_web_fetch(
+            url="https://example.com/escaped", final_url="https://example.com/escaped",
+            status=200, content_type="text/plain", body="\x00" * 2_000_000,
+        ) is None
     finally:
         server.stop()
         shutil.rmtree(socket_path.parent)
     rows = state.worker_observations.agent_observations
-    assert rows[0]["kind"] == "capture_failure" and rows[0]["data"]["reason"] == "size_limit"
+    assert len(rows) == 2 and all(row["kind"] == "capture_failure" and row["data"]["reason"] == "size_limit" for row in rows)
     assert not state.worker_observations.document()["complete"]
 
 

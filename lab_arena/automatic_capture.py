@@ -108,8 +108,9 @@ class Recorder:
         self.counts = collections.Counter()
         self.bodies = {}
         # StreamReader may prohibit both attributes and weak references. Use
-        # its weak-referenceable ClientResponse owner in that case. Neither
-        # association retains the reader or its prefetched response buffers.
+        # its weak-referenceable ClientResponse owner in that case. The recorder
+        # does not retain that owner. The owner anchors the exact reader until
+        # finish, including if caller code replaces response.content meanwhile.
         self.stream_bodies = {}
         self.retained = 0
         self.inflight = 0

@@ -202,6 +202,34 @@ def verified_brand_legal_name_initialism(
     )
 
 
+def verified_brand_formal_legal_name(brand: object, legal_name: object) -> bool:
+    """Match an exact brand to its formal legal name, with optional ``The``.
+
+    This does not infer an alias from a shared prefix. The caller must verify
+    the same first-party domain and LinkedIn identity independently.
+    """
+
+    formal_suffixes = {
+        "corporation", "corp", "incorporated", "inc", "limited", "ltd",
+        "llc", "plc",
+    }
+    brand_words = re.findall(r"[a-z0-9]+", str(brand or "").casefold())
+    legal_words = re.findall(r"[a-z0-9]+", str(legal_name or "").casefold())
+    if not brand_words or len(legal_words) < 2:
+        return False
+    if legal_words[-1] not in formal_suffixes:
+        return False
+    legal_core = legal_words[:-1]
+    brand_core = (
+        brand_words[:-1]
+        if brand_words[-1] in formal_suffixes else brand_words
+    )
+    return bool(
+        brand_core
+        and (legal_core == brand_core or legal_core == ["the", *brand_core])
+    )
+
+
 def current_exchange_profile_names_issuer(
     quote: str,
     identity_names: list[str] | tuple[str, ...] | set[str],

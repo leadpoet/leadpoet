@@ -1325,12 +1325,20 @@ class _HTMLShellParser(HTMLParser):
         self.article_depth = 0
         self.article_parts: list[str] = []
         self.labels: list[str] = []
+        self.headings: list[str] = []
+        self.canonical_urls: list[str] = []
+        self.head_depth = 0
         self._label_stack: list[tuple[str, list[str]]] = []
         self._title_seen = False
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
-        del attrs
         tag = tag.casefold()
+        if tag == "head":
+            self.head_depth += 1
+        if tag == "link" and self.head_depth and not self.body_seen and not self.hidden_depth:
+            attributes = dict(attrs)
+            if "canonical" in str(attributes.get("rel") or "").casefold().split():
+                self.canonical_urls.append(str(attributes.get("href") or ""))
         if tag == "body":
             self.body_seen = True
             self.body_depth += 1
@@ -1353,6 +1361,8 @@ class _HTMLShellParser(HTMLParser):
                     label = " ".join(" ".join(parts).split())
                     if label:
                         self.labels.append(label)
+                    if tag == "h1" and self.body_depth and not self.hidden_depth:
+                        self.headings.append(label)
                     break
         if tag in self._HIDDEN and self.hidden_depth:
             self.hidden_depth -= 1
@@ -1360,6 +1370,8 @@ class _HTMLShellParser(HTMLParser):
             self.article_depth -= 1
         if tag == "body" and self.body_depth:
             self.body_depth -= 1
+        if tag == "head" and self.head_depth:
+            self.head_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if self.hidden_depth:
@@ -2970,6 +2982,40 @@ def _source_publication_date(value: Any) -> str:
     return parsed.isoformat()
 
 
+def _unaddressed_article_matches_page(
+    node: Mapping[str, Any], document: Optional[_HTMLShellParser], source_url: str,
+) -> bool:
+    """Bind an article without a page ID to this page's canonical URL and H1."""
+
+    if any(field in node for field in ("mainEntityOfPage", "url", "@id")):
+        return False
+    if document is None or len(document.canonical_urls) != 1 or len(document.headings) != 1:
+        return False
+    headline = node.get("headline")
+    if not isinstance(headline, str) or not headline.strip():
+        return False
+    if " ".join(headline.split()).casefold() != document.headings[0].casefold():
+        return False
+    canonical = document.canonical_urls[0]
+    if not canonical:
+        return False
+    try:
+        source = urlsplit(_normalize_url(source_url))
+        target = urlsplit(_normalize_url(urljoin(source_url, canonical)))
+        # A page may declare its www alias canonical. No other host, scheme,
+        # port, path or query change can bind a different article's date.
+        return bool(
+            source.scheme in {"http", "https"}
+            and source.hostname and target.hostname
+            and not source.username and not target.username
+            and not source.password and not target.password
+            and (source.scheme, _strip_www(source.hostname), source.port, source.path, source.query)
+            == (target.scheme, _strip_www(target.hostname), target.port, target.path, target.query)
+        )
+    except ValueError:
+        return False
+
+
 def _published_date_from_html(html: str, source_url: str) -> str:
     """Read first-party publication metadata before body extraction drops it."""
 
@@ -3005,6 +3051,8 @@ def _published_date_from_html(html: str, source_url: str) -> str:
             normalized = _source_publication_date(match.group(1))
             if normalized:
                 candidates.add(normalized)
+    document = None
+    parsed_document = False
     for match in re.finditer(
         r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
         html,
@@ -3027,7 +3075,11 @@ def _published_date_from_html(html: str, source_url: str) -> str:
             main_page = node.get("mainEntityOfPage")
             page_id = main_page.get("@id") if isinstance(main_page, Mapping) else main_page
             if _normalize_url(str(page_id or "")) != _normalize_url(source_url):
-                continue
+                if not parsed_document:
+                    document = _parse_html_shell(html)
+                    parsed_document = True
+                if not _unaddressed_article_matches_page(node, document, source_url):
+                    continue
             normalized = _source_publication_date(node.get("datePublished"))
             if normalized:
                 candidates.add(normalized)

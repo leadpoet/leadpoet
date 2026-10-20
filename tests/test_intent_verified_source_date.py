@@ -1,6 +1,7 @@
 """Exact-source publication metadata survives extraction and judge handoff."""
 
 from datetime import date
+import json
 
 import pytest
 
@@ -12,6 +13,93 @@ from qualification.scoring.arena_integrity import (
 
 
 URL = "https://example.test/blog/reporting-api"
+
+
+def _unaddressed_article(*, canonical=URL, headline="A reporting API launch",
+                         heading="A reporting API launch", **fields):
+    node = {"@type": "NewsArticle", "headline": headline,
+            "datePublished": "2026-08-26T15:00:00+00:00", **fields}
+    return (f'<html><head><link rel="canonical" href="{canonical}">'
+            f'<script type="application/ld+json">{json.dumps(node)}</script>'
+            f'</head><body><h1>{heading}</h1><p>Body without a dateline.</p></body></html>')
+
+
+@pytest.mark.parametrize("canonical", [URL, URL.replace("example.test", "www.example.test"),
+                                         "/blog/reporting-api"])
+def test_unaddressed_jsonld_date_binds_to_exact_canonical_and_body_heading(canonical):
+    html = _unaddressed_article(canonical=canonical,
+                                headline="A reporting API launch",
+                                heading="A <em>reporting</em> API launch")
+    assert intent._published_date_from_html(html, URL) == "2026-08-26"
+
+
+@pytest.mark.parametrize("canonical", [
+    "https://example.test/blog/related", "https://example.test/blog/reporting-api?other=1",
+    "http://example.test/blog/reporting-api", "https://example.test:444/blog/reporting-api",
+    "https://news.example.test/blog/reporting-api", "https://www.www.example.test/blog/reporting-api",
+    "https://unrelated.test/blog/reporting-api", "https://user@example.test/blog/reporting-api", "",
+])
+def test_unaddressed_article_cannot_borrow_another_pages_date(canonical):
+    assert intent._published_date_from_html(_unaddressed_article(canonical=canonical), URL) == ""
+
+
+@pytest.mark.parametrize("field", ["mainEntityOfPage", "url", "@id"])
+def test_canonical_fallback_does_not_override_an_explicit_article_address(field):
+    other = "https://example.test/blog/related"
+    for value in (other, {"@id": other}, {"url": other}, None, {}):
+        assert intent._published_date_from_html(_unaddressed_article(**{field: value}), URL) == ""
+
+
+@pytest.mark.parametrize("edit", [
+    lambda s: s.replace('rel="canonical"', 'rel="alternate"'),
+    lambda s: s.replace('</head>', f'<link rel="canonical" href="{URL}"></head>'),
+    lambda s: s.replace('</body>', '<h1>A reporting API launch</h1></body>'),
+    lambda s: s.replace('</body>', '<h1></h1></body>'),
+    lambda s: s.replace('<h1>A reporting API launch</h1>', '<h2>A reporting API launch</h2>'),
+    lambda s: s.replace('<h1>A reporting API launch</h1>', '<template><h1>A reporting API launch</h1></template>'),
+    lambda s: s.replace('<h1>A reporting API launch</h1>', '<h1>A different story</h1>'),
+    lambda s: s.replace('"datePublished"', '"dateModified"'),
+    lambda s: s.replace('"NewsArticle"', '"Organization"'),
+    lambda s: s.replace('</head>', '<meta property="article:published_time" content="2026-08-25"></head>'),
+])
+def test_unaddressed_article_needs_unambiguous_primary_page_evidence(edit):
+    assert intent._published_date_from_html(edit(_unaddressed_article()), URL) == ""
+
+
+def test_conflicting_primary_article_dates_remain_unknown_and_related_dates_are_ignored():
+    primary = _unaddressed_article()
+    related = json.dumps({"@type": "NewsArticle", "headline": "A different story",
+                          "datePublished": "2026-09-15"})
+    html = primary.replace('</head>', f'<script type="application/ld+json">{related}</script></head>')
+    assert intent._published_date_from_html(html, URL) == "2026-08-26"
+    conflicting = related.replace("A different story", "A reporting API launch")
+    html = primary.replace('</head>', f'<script type="application/ld+json">{conflicting}</script></head>')
+    assert intent._published_date_from_html(html, URL) == ""
+
+
+def test_unclosed_head_cannot_promote_body_canonical_to_page_metadata():
+    html = _unaddressed_article().replace(f'<link rel="canonical" href="{URL}">', "")
+    html = html.replace('</head><body>', f'<body><link rel="canonical" href="{URL}">')
+    assert intent._published_date_from_html(html, URL) == ""
+
+
+def test_unaddressed_article_metadata_reaches_judge_without_becoming_an_event_date():
+    verified_date = intent._published_date_from_html(_unaddressed_article(), URL)
+    projected = intent._project_contents_for_prompt({"results": [{
+        "url": URL, "text": "The article describes a product released last year.",
+        "source_publication_date": verified_date,
+    }]})
+    assert projected["results"][0]["source_publication_date"] == "2026-08-26"
+    event, publications = source_dates_from_verdict(
+        {"risk_notes": ["source_event_date:2025-03-01", "source_publication_date:2026-08-26"]},
+        [verified_date],
+    )
+    verdict = source_grounded_date_verdict(
+        event_date=event, publication_dates=publications,
+        buyer_cap_days=365, evaluated_on=date(2026, 10, 20),
+    )
+    assert verdict.verdict == "out_of_window"
+    assert verdict.authoritative_date == "2025-03-01"
 
 
 @pytest.mark.parametrize("other_date", ["2026-09-18", "2027-01-01"])

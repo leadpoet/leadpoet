@@ -169,3 +169,54 @@ def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
     assert set(repaired) == set(prior)
     for name in set(prior) - {builder.GRADER_FILE}:
         assert repaired[name] == prior[name]
+
+
+def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
+    from scripts import build_arena_reviewer_runtime as builder
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        DELTAS, HELPER, convert_investigation_finality_seam,
+    )
+    corrected = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+    original = corrected.replace(HELPER.encode(), b'', 1)
+    for old, new in DELTAS:
+        assert original.count(new.encode()) == 1
+        original = original.replace(new.encode(), old.encode(), 1)
+    assert convert_investigation_finality_seam(original) == corrected
+    assert convert_investigation_finality_seam(corrected) == corrected
+    sources = {
+        name: (builder.ROOT / ('lab_arena/scorer_entrypoint.py'
+                              if name == 'scorer_entrypoint.py' else name)).read_bytes()
+        for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
+    }
+    sources[builder.FINALITY_FILE] = original
+    prior = builder.expected_overlay(sources, complete_negative_finality=True)
+    repaired = builder.expected_overlay(
+        sources, complete_negative_finality=True,
+        completed_investigation_finality=True,
+    )
+    assert repaired[builder.FINALITY_FILE] == corrected
+    for name in set(prior) - {builder.FINALITY_FILE}:
+        assert repaired[name] == prior[name]
+    # Without explicit correction selection the frozen grader stays byte exact.
+    assert prior[builder.FINALITY_FILE] == original
+
+
+@pytest.mark.parametrize('fault', ['partial', 'unknown', 'missing_helper', 'changed_helper'])
+def test_completed_investigation_correction_fails_closed(fault):
+    from scripts import build_arena_reviewer_runtime as builder
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        DELTAS, HELPER, InvestigationFinalitySeamError,
+        convert_investigation_finality_seam,
+    )
+    source = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+    if fault == 'partial':
+        old, new = DELTAS[-1]
+        source = source.replace(new.encode(), old.encode(), 1)
+    elif fault == 'unknown':
+        source = source.replace(b'async def _llm_reverify_company(', b'async def _other_verifier(', 1)
+    elif fault == 'missing_helper':
+        source = source.replace(HELPER.encode(), b'', 1)
+    else:
+        source = source.replace(b'Coverage only selects', b'Changed only selects', 1)
+    with pytest.raises(InvestigationFinalitySeamError):
+        convert_investigation_finality_seam(source)

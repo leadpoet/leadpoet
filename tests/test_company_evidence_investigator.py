@@ -18033,3 +18033,165 @@ def test_criterion_scope_change_keeps_linkedin_headcount_identity_gate(bound_com
     assert 'exact entity-bound LinkedIn Company size/employeeCountRange is primary' in prompt
     assert 'current company-wide headcount' in prompt
     assert 'Other conflicts are UNPROVEN' in prompt
+
+
+@pytest.fixture(params=['current', 'frozen'])
+def finality_scorer(request, monkeypatch):
+    if request.param == 'current':
+        return lead_scorer
+    import os
+    import sys
+    from pathlib import Path
+    from types import ModuleType
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        convert_investigation_finality_seam,
+    )
+    path = os.environ.get('ARENA_FROZEN_FINALITY_SOURCE')
+    if not path:
+        pytest.skip('exact frozen source is supplied only for frozen release validation')
+    source = Path(path).read_bytes()
+    assert hashlib.sha256(source).hexdigest() == (
+        'b573bd3fb3984cd065e48b37e19c8fdd59545319bef0f1801cdc94f1f502d3b2'
+    )
+    corrected = convert_investigation_finality_seam(source)
+    assert convert_investigation_finality_seam(corrected) == corrected
+    module = ModuleType('_arena_frozen_finality_test')
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(compile(corrected, path, 'exec'), module.__dict__)
+    return module
+
+
+@pytest.mark.parametrize('phase', ['initial', 'post_repair'])
+@pytest.mark.parametrize('profile_reason', ['source_blocked', 'malformed_response'])
+@pytest.mark.parametrize('fault', ['', 'provider_error', 'incomplete', 'unbound_fetch', 'positive_claim', 'identity', 'research_provider_error', 'missing_fetch', 'unresolved_transport', 'other_source_recovery', 'same_source_recovery'])
+def test_oct20_completed_semantic_review_keeps_existing_source_finality(
+    monkeypatch, finality_scorer, phase, profile_reason, fault,
+):
+    """Actual failure shapes, through the async verifier's two semantic exits.
+
+    Source content and ICP wording are synthetic. The three UNPROVEN claims,
+    completed receipt, fetched-page lengths and profile diagnostics reproduce
+    the recorded Qsic/Vanguard failures; no stored judgment is regraded.
+    """
+    company = _company(name='Acme', website='https://acme.example/', linkedin='')
+    icp = _icp(required_attribute='Supplies software.')
+    calls = {'broad': 0, 'investigation': 0, 'semantic': 0}
+    targets = ('headcount', 'industry', 'required_attribute')
+    claims = _validated_findings({'findings': [
+        _finding(t, status='UNPROVEN', observed_value=None,
+                 evidence_url='', evidence_quote='') for t in targets
+    ]}, targets=targets, fetched_pages={}, first_party_domains=set())
+    fetches = [{
+        'url_sha256': hashlib.sha256(str(i).encode()).hexdigest(),
+        'ok': True, 'loaded_text_length': length, 'error_class': '',
+    } for i, length in enumerate((8394, 24000, 7121))]
+    if fault == 'unbound_fetch':
+        fetches[0]['url_sha256'] = ''
+    if fault in {'unresolved_transport', 'other_source_recovery', 'same_source_recovery'}:
+        failure = {'url_sha256': fetches[0]['url_sha256'], 'ok': False,
+                   'error_class': 'http_error', 'loaded_text_length': 0}
+        if fault == 'same_source_recovery':
+            fetches.insert(0, failure)
+        else:
+            fetches[0] = failure
+    if fault == 'missing_fetch':
+        fetches.clear()
+    if fault == 'positive_claim':
+        claims['headcount']['status'] = 'VERIFIED'
+    receipt = {
+        'gate': 'company_evidence_investigation',
+        'completed_submitted_findings': fault not in {'incomplete', 'research_provider_error'},
+        'failure_reason': 'provider_error' if fault in {'provider_error', 'research_provider_error'} else '',
+        'targets': list(targets), 'claims': claims,
+        'usage': {'fetch_outcomes': fetches},
+    }
+    dimensions = {key: COMPANY_FIT_UNAVAILABLE for key in
+                  ('employee_size', 'industry')}
+    if fault == 'identity':
+        dimensions['identity'] = COMPANY_FIT_UNAVAILABLE
+    unavailable = company_fit_unavailable('bounded evidence unavailable', details={
+        'dimension_decisions': dimensions,
+        'identity_decision': COMPANY_FIT_UNAVAILABLE if fault == 'identity' else COMPANY_FIT_MATCH,
+        'required_attribute_decision': COMPANY_FIT_UNAVAILABLE,
+        'investigation_receipt': receipt,
+        **({'failure_reason_code': 'provider_error'} if fault == 'research_provider_error' else {}),
+    })
+    observed = _complete_verdict(
+        observed_employee_count=None, employee_size_matches=None,
+        employee_size_evidence_url='', employee_size_evidence_quote='',
+        observed_company_linkedin='',
+    )
+
+    async def provider(**_kwargs):
+        calls['broad'] += 1
+        return dict(observed), ''
+
+    async def refresh(verdict, *_args, invocation_cache, **_kwargs):
+        reason = 'provider_error' if fault == 'provider_error' else profile_reason
+        invocation_cache.update({
+            'refresh_outcome': 'retryable_failure', 'structured_failure': True,
+            'structured_failure_reason': reason, 'failure_reason_code': reason,
+            'evidence': {'outcome': 'insufficient_evidence'},
+        })
+        return verdict
+
+    async def investigate(*, verdict, **kwargs):
+        calls['investigation'] += 1
+        assert set(kwargs['investigation_targets']) == set(targets)
+        verdict[finality_scorer._REQUIRED_ATTRIBUTE_GROUNDING] = {'status': 'unproven'}
+        return verdict, unavailable, claims, {}, {}
+
+    def semantic(*_args, **_kwargs):
+        calls['semantic'] += 1
+        return not (phase == 'post_repair' and calls['semantic'] == 1)
+
+    def select(*_args, **_kwargs):
+        if phase == 'post_repair' and calls['semantic'] == 0:
+            return ()
+        return targets
+
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'test-key')
+    monkeypatch.setattr(finality_scorer, '_request_company_reverify_json', provider)
+    monkeypatch.setattr(finality_scorer, '_refresh_linkedin_employee_size_observation', refresh)
+    monkeypatch.setattr(finality_scorer, '_reverify_decision', lambda *_a, **_k: unavailable)
+    monkeypatch.setattr(finality_scorer, '_targeted_company_investigation_dimensions', select)
+    monkeypatch.setattr(finality_scorer, '_positive_semantic_review_needed', semantic)
+    monkeypatch.setattr(finality_scorer, '_run_targeted_company_evidence_investigation', investigate)
+    result = asyncio.run(finality_scorer._llm_reverify_company(
+        company, icp, require_company_fit_dimensions=True,
+        company_quality=True, evidence_investigator=True,
+    ))
+    assert calls['broad'] == (2 if phase == 'post_repair' else 1)
+    assert calls['investigation'] == 1
+    assert result.decision == COMPANY_FIT_UNAVAILABLE
+    if fault == 'identity':
+        assert result.details.get('failure_class') != 'insufficient_fit_evidence'
+        assert result.details['identity_decision'] == COMPANY_FIT_UNAVAILABLE
+    elif profile_reason == 'malformed_response' and fault in {'', 'same_source_recovery'}:
+        assert result.details['failure_class'] == 'insufficient_fit_evidence'
+        assert result.details['investigation_receipt']['prior_linkedin_refresh_failure_reason'] == 'malformed_response'
+    elif fault not in {'incomplete', 'research_provider_error'}:
+        assert result.details.get('failure_class') == 'employee_size_verification_failed'
+        assert result.details['failure_reason_code'] == ('provider_error' if fault == 'provider_error' else profile_reason)
+    else:
+        assert result.details.get('failure_class') != 'insufficient_fit_evidence'
+
+    from qualification.scoring.competition import (
+        scorer_breakdown_has_company_local_verification_failure,
+        scorer_breakdown_has_retryable_infrastructure_failure,
+        terminal_company_verification_breakdown,
+    )
+    breakdown = {'verifier_gate_receipts': [
+        {'gate': 'company_fit', 'decision': result.decision, **result.details}
+    ]}
+    if not fault and profile_reason == 'source_blocked':
+        assert scorer_breakdown_has_company_local_verification_failure(breakdown)
+        terminal = terminal_company_verification_breakdown(breakdown)
+        assert terminal['verifier_gate_receipts'][0]['failure_class'] == 'company_verification_exhausted'
+        assert not scorer_breakdown_has_retryable_infrastructure_failure(terminal)
+    elif profile_reason == 'malformed_response' and fault in {'', 'same_source_recovery'}:
+        assert not scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+    elif (fault in {'provider_error', 'research_provider_error', 'identity'}
+          or (profile_reason == 'malformed_response' and fault in {'unresolved_transport', 'other_source_recovery'})):
+        assert scorer_breakdown_has_retryable_infrastructure_failure(breakdown)
+        assert not scorer_breakdown_has_company_local_verification_failure(breakdown)

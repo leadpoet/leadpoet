@@ -5698,3 +5698,30 @@ def test_complete_sonar_identity_can_bind_profile_without_homepage_anchor(monkey
 
     assert result.decision == COMPANY_FIT_MATCH
     assert fetches == ["https://www.linkedin.com/company/acme"]
+
+
+@pytest.mark.parametrize(('body', 'expected_reason'), [
+    ({'job_id': 'test', 'status': 'completed', 'result': {'data': {
+        'error': None, 'status': 200, 'element': None,
+    }}}, 'malformed_response'),
+    (_structured_company_payload(
+        name='QSIC', website='https://www.getqsic.com',
+        linkedinUrl='https://www.linkedin.com/company/qsic/',
+        employeeCount=103, employeeCountRange={'start': 51, 'end': 200},
+    ), 'source_blocked'),
+])
+def test_oct20_recorded_structured_reply_shapes_preserve_classification(
+    monkeypatch, body, expected_reason,
+):
+    _install_exa_bodies(monkeypatch, body)
+    monkeypatch.setenv('DEEPLINE_API_KEY', 'test-deepline-key')
+    diagnostic = {}
+    result = asyncio.run(linkedin_company_size.fetch_structured_linkedin_company_size(
+        'qsic.com' if expected_reason == 'source_blocked' else 'vanguarddefense.us',
+        'https://www.linkedin.com/company/qsic' if expected_reason == 'source_blocked'
+        else 'https://www.linkedin.com/company/vanguard-defense-industries',
+        expected_company_name='Qsic' if expected_reason == 'source_blocked' else 'Vanguard Defense',
+        diagnostic=diagnostic,
+    ))
+    assert result is None
+    assert diagnostic == {'failure_reason': expected_reason}

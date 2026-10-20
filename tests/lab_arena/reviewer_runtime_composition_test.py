@@ -16,6 +16,23 @@ from scripts.build_arena_reviewer_runtime import (
 ROOT = composer.ROOT
 
 
+def test_build_tag_retains_distinct_repairs_within_docker_limit():
+    repository = "registry.example:5000/leadpoet/sourcing-model"
+    prefix = "reviewer-c098ccc7189b-63d9a452c21c"
+    repairs = ("-pending-final-correction-attribute-source-recovery-refusal"
+               "-investigation-finality-single-tool-repair")
+    original = repository + ":" + prefix + repairs
+    result = composer.bounded_build_tag(original)
+    assert len(original.rpartition(":")[2]) > 128
+    assert len(result.rpartition(":")[2]) == 128
+    assert result.startswith(repository + ":" + prefix)
+    assert composer.bounded_build_tag(result) == result
+    assert composer.bounded_build_tag(original + "-other") != result
+    for size in (1, 127, 128):
+        short = repository + ":" + "a" * size
+        assert composer.bounded_build_tag(short) == short
+
+
 def layer(files, *, mode=0o644, kind=tarfile.REGTYPE):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w") as archive:

@@ -6572,6 +6572,28 @@ def _is_verified_homepage_web_identity_conflict(
     )
 
 
+def _is_bound_homepage_name_conflict(
+    receipt: Optional[Mapping[str, Any]],
+) -> bool:
+    """Recognize the first-party name conflict retained by web verification."""
+
+    value = receipt or {}
+    return bool(
+        value.get("decision") == COMPANY_FIT_UNAVAILABLE
+        and value.get("reason_code") == "homepage_web_identity_conflict_unresolved"
+        and value.get("evidence_source") == "company_web_reverification"
+        and all(
+            isinstance(value.get(field), str) and bool(value[field].strip())
+            for field in (
+                "submitted_name", "submitted_domain", "observed_name",
+                "observed_domain", "observed_linkedin_slug",
+            )
+        )
+        and value.get("submitted_linkedin_slug") == ""
+        and value["submitted_domain"] == value["observed_domain"]
+    )
+
+
 def _has_explicitly_unproven_fit_dimensions(
     verdict: Mapping[str, Any],
     incomplete: tuple[str, ...],
@@ -6727,6 +6749,17 @@ def _has_explicitly_unproven_fit_dimensions(
             if not (
                 _is_same_domain_unproven_web_identity(identity_receipt)
                 or _is_verified_homepage_web_identity_conflict(identity_receipt)
+                or (
+                    completed_investigation
+                    and _is_bound_homepage_name_conflict(identity_receipt)
+                    and "rebrand" in (investigation_receipt.get("targets") or ())
+                    and isinstance(investigation_claims, Mapping)
+                    and isinstance(investigation_claims.get("rebrand"), Mapping)
+                    and investigation_claims["rebrand"].get("target") == "rebrand"
+                    and investigation_claims["rebrand"].get("status") == "UNPROVEN"
+                    and investigation_claims["rebrand"].get("evidence_url") == ""
+                    and investigation_claims["rebrand"].get("evidence_quote") == ""
+                )
                 or (
                     isinstance(identity_receipt, Mapping)
                     and identity_receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
@@ -7094,6 +7127,7 @@ def _targeted_company_investigation_dimensions(
                         ),
                     })
                 )
+                or _is_bound_homepage_name_conflict(identity)
             )
         )
     ):

@@ -147,10 +147,22 @@ _HELPER_HEADER = '''def _settle_completed_company_investigation(
         return None
 '''
 # Move the exact frozen settlement block; never substitute current grader code.
-HELPER = _HELPER_HEADER + "".join(
+LEGACY_HELPER = _HELPER_HEADER + "".join(
     line[4:] if line.startswith("    ") else line
     for line in SETTLEMENT_BLOCK.splitlines(keepends=True)
 ) + "\n\n"
+HELPER = LEGACY_HELPER.replace(
+    '                **({"investigation_receipt": {',
+    '                # Internal proof only; final receipt assembly does not copy it.\n'
+    '                "_completed_investigation_settled": True,\n'
+    '                **({"investigation_receipt": {', 1,
+)
+
+WRAPPER_GUARD_OLD = '''            and web_identity_decision == COMPANY_FIT_UNAVAILABLE
+            and _homepage_identity_has_retryable_failure(identity)
+'''
+WRAPPER_GUARD_NEW = WRAPPER_GUARD_OLD + '''            and web_details.get("_completed_investigation_settled") is not True
+'''
 
 _SETTLEMENT_CALL = '''        return _settle_completed_company_investigation(
             result, verdict, investigation_targets=investigation_targets,
@@ -197,6 +209,26 @@ DELTAS = (
 )
 
 
+def _named_bindings(module: ast.Module, name: str) -> list[ast.AST]:
+    return [
+        n for n in ast.walk(module)
+        if (
+            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and n.name == name
+        ) or (
+            isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+            and n.id == name
+        ) or (
+            isinstance(n, ast.alias)
+            and (n.asname or n.name.split(".")[0])
+            == name
+        ) or (
+            isinstance(n, ast.ExceptHandler)
+            and n.name == name
+        )
+    ]
+
+
 def convert_investigation_finality_seam(source: bytes) -> bytes:
     try:
         text = source.decode("utf-8")
@@ -207,32 +239,28 @@ def convert_investigation_finality_seam(source: bytes) -> bytes:
         raise InvestigationFinalitySeamError("grading source must use LF newlines")
     nodes = [n for n in module.body if isinstance(n, ast.AsyncFunctionDef)
              and n.name == "_llm_reverify_company"]
+    wrappers = [n for n in module.body if isinstance(n, ast.AsyncFunctionDef)
+                and n.name == "_verify_company_fit"]
     helpers = [n for n in module.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
                and n.name == "_settle_completed_company_investigation"]
-    helper_bindings = [
-        n for n in ast.walk(module)
-        if (
-            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and n.name == "_settle_completed_company_investigation"
-        ) or (
-            isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
-            and n.id == "_settle_completed_company_investigation"
-        ) or (
-            isinstance(n, ast.alias)
-            and (n.asname or n.name.split(".")[0])
-            == "_settle_completed_company_investigation"
-        ) or (
-            isinstance(n, ast.ExceptHandler)
-            and n.name == "_settle_completed_company_investigation"
-        )
-    ]
+    helper_bindings = _named_bindings(module, '_settle_completed_company_investigation')
+    if _named_bindings(module, '_verify_company_fit') != wrappers:
+        raise InvestigationFinalitySeamError("final result wrapper binding is ambiguous")
     if helper_bindings != helpers:
         raise InvestigationFinalitySeamError("settlement helper binding is ambiguous")
-    if len(nodes) != 1 or len(helpers) > 1:
+    if len(nodes) != 1 or len(wrappers) != 1 or len(helpers) > 1:
         raise InvestigationFinalitySeamError("correction function is missing or ambiguous")
     lines = text.splitlines(keepends=True)
     node = nodes[0]
     original = "".join(lines[node.lineno - 1:node.end_lineno])
+    wrapper = wrappers[0]
+    wrapper_source = "".join(lines[wrapper.lineno - 1:wrapper.end_lineno])
+    wrapper_counts = (
+        wrapper_source.replace(WRAPPER_GUARD_NEW, '').count(WRAPPER_GUARD_OLD),
+        wrapper_source.count(WRAPPER_GUARD_NEW),
+    )
+    if wrapper_counts not in {(1, 0), (0, 1)}:
+        raise InvestigationFinalitySeamError("unrecognized final result guard")
     states = set()
     corrected = original
     for old, new in DELTAS:
@@ -251,12 +279,23 @@ def convert_investigation_finality_seam(source: bytes) -> bytes:
         if len(helpers) != 1:
             raise InvestigationFinalitySeamError("corrected source is missing its exact helper")
         actual = "".join(lines[helpers[0].lineno - 1:helpers[0].end_lineno])
-        if actual.rstrip("\n") != HELPER.rstrip("\n"):
+        if actual.rstrip("\n") == HELPER.rstrip("\n"):
+            if wrapper_counts != (0, 1):
+                raise InvestigationFinalitySeamError("partial final result correction")
+            return source
+        if (actual.rstrip("\n") != LEGACY_HELPER.rstrip("\n")
+                or wrapper_counts != (1, 0)):
             raise InvestigationFinalitySeamError("unrecognized settlement helper")
-        return source
-    if helpers:
-        raise InvestigationFinalitySeamError("partial settlement helper")
-    lines[node.lineno - 1:node.end_lineno] = [HELPER + corrected]
+        changes = [(helpers[0].lineno - 1, helpers[0].end_lineno,
+                    HELPER.rstrip("\n") + "\n")]
+    else:
+        if helpers or wrapper_counts != (1, 0):
+            raise InvestigationFinalitySeamError("partial settlement helper")
+        changes = [(node.lineno - 1, node.end_lineno, HELPER + corrected)]
+    changes.append((wrapper.lineno - 1, wrapper.end_lineno,
+                    wrapper_source.replace(WRAPPER_GUARD_OLD, WRAPPER_GUARD_NEW, 1)))
+    for start, end, replacement in sorted(changes, reverse=True):
+        lines[start:end] = [replacement]
     result = "".join(lines)
     compile(result, "frozen_investigation_finality.py", "exec")
     return result.encode("utf-8")

@@ -431,6 +431,11 @@ This exact-source correction moves the grader's existing settlement block
 before the initial and post-repair semantic exits. It retains the strict
 malformed-profile exhaustion proof, source-local failure classification,
 identity requirements and provider retries. It imports no current grader.
+The same correction preserves a proved terminal insufficient-evidence result
+through final receipt assembly. Its internal proof marker is set only after
+the existing settlement checks pass and is not copied to public or cached
+judgments. A stale homepage failure cannot discard that completed negative
+proof; incomplete investigations and unresolved source failures still retry.
 Unknown or partially corrected source fails closed. Independently verify the
 composed image and its affected paths before registering its runtime mapping.
 Only new lease generations select the registered runtime; existing leases and

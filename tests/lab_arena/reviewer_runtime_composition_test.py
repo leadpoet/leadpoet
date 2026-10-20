@@ -1,13 +1,19 @@
 """The deployment tool cannot replace grading bytes or change process imports."""
+import ast
+import hashlib
 import io
+import os
 import tarfile
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
+from scripts import build_arena_reviewer_runtime as composer
 
 from scripts.build_arena_reviewer_runtime import (
     CompositionError, verify_image_configuration, verify_overlay,
 )
+ROOT = composer.ROOT
 
 
 def layer(files, *, mode=0o644, kind=tarfile.REGTYPE):
@@ -174,10 +180,13 @@ def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
 def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
     from scripts import build_arena_reviewer_runtime as builder
     from scripts.arena_reviewer_investigation_finality_seam import (
-        DELTAS, HELPER, convert_investigation_finality_seam,
+        DELTAS, HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        convert_investigation_finality_seam,
     )
     corrected = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
-    original = corrected.replace(HELPER.encode(), b'', 1)
+    original = corrected.replace(HELPER.encode(), b'', 1).replace(
+        WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
+    )
     for old, new in DELTAS:
         assert original.count(new.encode()) == 1
         original = original.replace(new.encode(), old.encode(), 1)
@@ -201,11 +210,64 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
     assert prior[builder.FINALITY_FILE] == original
 
 
+def test_completed_investigation_upgrades_existing_runtime_finality_only():
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        HELPER, LEGACY_HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        convert_investigation_finality_seam,
+    )
+    corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
+    legacy = corrected.replace(HELPER.encode(), LEGACY_HELPER.encode(), 1).replace(
+        WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
+    )
+    assert convert_investigation_finality_seam(legacy) == corrected
+    before, after = ast.parse(legacy), ast.parse(corrected)
+    for tree in (before, after):
+        tree.body = [node for node in tree.body if getattr(node, 'name', '') not in {
+            '_settle_completed_company_investigation', '_verify_company_fit',
+        }]
+    assert ast.dump(before) == ast.dump(after)
+
+
+def test_actual_frozen_base_and_existing_runtime_compose_to_identical_bytes():
+    from scripts.arena_reviewer_investigation_finality_seam import convert_investigation_finality_seam
+    base_path = os.environ.get('ARENA_FROZEN_FINALITY_SOURCE')
+    runtime_path = os.environ.get('ARENA_FROZEN_FINALITY_RUNTIME_SOURCE')
+    if not base_path or not runtime_path:
+        pytest.skip('actual frozen release sources are supplied by the release gate')
+    base, runtime = Path(base_path).read_bytes(), Path(runtime_path).read_bytes()
+    assert hashlib.sha256(base).hexdigest() == 'b573bd3fb3984cd065e48b37e19c8fdd59545319bef0f1801cdc94f1f502d3b2'
+    assert hashlib.sha256(runtime).hexdigest() == 'b09dcafd2f4a83b2fcc31ed44c57a901f9e7f1a5b693d09c914def52bab0128b'
+    corrected = convert_investigation_finality_seam(base)
+    assert corrected == convert_investigation_finality_seam(runtime)
+    assert convert_investigation_finality_seam(corrected) == corrected
+
+
+@pytest.mark.parametrize('fault', ['legacy_helper_new_guard', 'new_helper_old_guard',
+                                  'unknown_guard', 'shadowed_wrapper'])
+def test_completed_investigation_wrapper_correction_fails_closed(fault):
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        HELPER, LEGACY_HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        InvestigationFinalitySeamError, convert_investigation_finality_seam,
+    )
+    source = (ROOT / composer.FINALITY_FILE).read_bytes()
+    if fault == 'legacy_helper_new_guard':
+        source = source.replace(HELPER.encode(), LEGACY_HELPER.encode(), 1)
+    elif fault == 'new_helper_old_guard':
+        source = source.replace(WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1)
+    elif fault == 'unknown_guard':
+        source = source.replace(WRAPPER_GUARD_NEW.encode(), b'            and False\n', 1)
+    else:
+        source += b'\n_verify_company_fit = lambda *args: None\n'
+    with pytest.raises(InvestigationFinalitySeamError):
+        convert_investigation_finality_seam(source)
+
+
 @pytest.mark.parametrize('fault', ['partial', 'unknown', 'missing_helper', 'changed_helper'])
 def test_completed_investigation_correction_fails_closed(fault):
     from scripts import build_arena_reviewer_runtime as builder
     from scripts.arena_reviewer_investigation_finality_seam import (
-        DELTAS, HELPER, InvestigationFinalitySeamError,
+        DELTAS, HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        InvestigationFinalitySeamError,
         convert_investigation_finality_seam,
     )
     source = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
@@ -238,13 +300,15 @@ def test_completed_investigation_correction_rejects_shadowed_helper_binding(
 ):
     from scripts import build_arena_reviewer_runtime as builder
     from scripts.arena_reviewer_investigation_finality_seam import (
-        DELTAS, HELPER, InvestigationFinalitySeamError,
+        DELTAS, HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        InvestigationFinalitySeamError,
         convert_investigation_finality_seam,
     )
     source = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
     if not already_corrected:
         assert source.count(HELPER.encode()) == 1
         source = source.replace(HELPER.encode(), b'', 1)
+        source = source.replace(WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1)
         for old, new in DELTAS:
             assert source.count(new.encode()) == 1
             source = source.replace(new.encode(), old.encode(), 1)

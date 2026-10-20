@@ -77,6 +77,7 @@ def test_targeted_verifier_and_its_caller_remain_protected():
         "_is_bound_homepage_name_conflict",
         "_run_targeted_company_evidence_investigation",
         "_settle_completed_company_investigation",
+        "_verify_company_fit",
     } <= set(PROTECTED_SYMBOLS["qualification/scoring/lead_scorer.py"])
 
 
@@ -132,6 +133,26 @@ def test_extracted_investigation_settlement_remains_ast_protected(tmp_path, monk
     assert source.count(guard) == 1
     target.write_text(source.replace(guard, 'and True', 1))
     with pytest.raises(ProtectedWorkflowError, match="_settle_completed_company_investigation"):
+        verify_manifest(tmp_path, manifest)
+
+
+def test_final_company_fit_wrapper_remains_ast_protected(tmp_path, monkeypatch):
+    relative = "qualification/scoring/lead_scorer.py"
+    source = (ROOT / relative).read_text()
+    target = tmp_path / relative
+    target.parent.mkdir(parents=True)
+    target.write_text(source)
+    monkeypatch.setattr(protected_workflows_module, "PROTECTED_SYMBOLS", {
+        relative: ("_verify_company_fit",),
+    })
+    manifest = build_manifest(
+        tmp_path, baseline_commit="1" * 40, protected_source_commit="2" * 40,
+    )
+    verify_manifest(tmp_path, manifest)
+    guard = 'and web_details.get("_completed_investigation_settled") is not True'
+    assert source.count(guard) == 1
+    target.write_text(source.replace(guard, 'and True', 1))
+    with pytest.raises(ProtectedWorkflowError, match="_verify_company_fit"):
         verify_manifest(tmp_path, manifest)
 
 

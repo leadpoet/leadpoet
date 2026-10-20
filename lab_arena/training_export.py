@@ -593,6 +593,22 @@ def _calls(rows, run_ids, objects, run_order):
     return sorted(calls, key=lambda call: _call_order(call, run_order)), reasons
 
 
+def _reported_phase_coverage(payload):
+    """Check the declared baseline phase contract, not arbitrary local memory."""
+    states = [row["data"] for row in payload.get("agent_observations", []) if row["kind"] == "state_snapshot"]
+    summaries = [row["value"] for row in states if row["name"] == "training_capture_summary"]
+    required = {"after_discovery", "after_verification", "after_admission", "final"}
+    if len(summaries) != 1 or any(sum(row["name"] == name for row in states) != 1 for name in required):
+        return False
+    summary = summaries[0]
+    return (isinstance(summary, dict) and summary.get("contract_version") == 1
+            and summary.get("scope") == "agent_direct_egress_and_worker_socket"
+            and summary.get("sdk_available") is True
+            and summary.get("state_recorded") == len(states) - 1
+            and all(summary.get(key, 0) == 0 for key in (
+                "state_record_errors", "state_local_errors", "state_overflow_rows", "state_overflow_manifests")))
+
+
 def _link_worker_receipts(run, paid, snapshot):
     """Join host writes and cooperative read acknowledgments without guessing.
 
@@ -623,6 +639,7 @@ def _link_worker_receipts(run, paid, snapshot):
             "worker_receipt_ref": {"run_id": run["run_id"], "ordinal": receipt["ordinal"],
                                    "payload_sha256": snapshot["payload_sha256"]},
             "agent_receipt": "not_reported",
+            "worker_received_receipt_entry_ids": sorted(item["entry_id"] for item in matches),
         })
     acknowledged = set()
     for row in payload.get("agent_observations", []):
@@ -647,13 +664,17 @@ def _link_worker_receipts(run, paid, snapshot):
         ref = {"run_id": run["run_id"], "id": row["id"], "payload_sha256": snapshot["payload_sha256"]}
         call["response_provenance"].setdefault("agent_receipt_refs", []).append(ref)
         call["response_provenance"]["agent_receipt"] = "reported_exact_body_received"
+        latest_acknowledged = call.get("terminal_entry_id") in call["response_provenance"]["worker_received_receipt_entry_ids"]
+        call["response_provenance"]["selected_response_acknowledged"] = latest_acknowledged
+        if not latest_acknowledged:
+            errors.add("agent_selected_response_unacknowledged")
         acknowledged.add(data["call_identity"])
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid
                     if type(call.get("response_status")) is int and 200 <= call["response_status"] < 300}
         if expected - acknowledged:
             errors.add("agent_response_receipts_unverified")
-        if paid and not any(row["kind"] == "state_snapshot" for row in payload.get("agent_observations", [])):
+        if paid and not _reported_phase_coverage(payload):
             errors.add("agent_task_state_unverified")
     return errors
 

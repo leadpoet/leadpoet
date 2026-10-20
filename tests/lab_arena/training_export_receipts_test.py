@@ -2,6 +2,7 @@
 
 import base64
 import copy
+import json
 
 import pytest
 
@@ -27,7 +28,11 @@ def values_with_receipts(*, acknowledged=True):
     if acknowledged:
         rows.append({"kind": "response_received", "data": {
             key: receipt[key] for key in ("call_identity", "status", "body_sha256", "body_bytes")}})
-    rows.append({"kind": "state_snapshot", "data": {"name": "final_selection", "value": {"selected": [0]}}})
+    for name in ("after_discovery", "after_verification", "after_admission", "final"):
+        rows.append({"kind": "state_snapshot", "data": {"name": name, "value": {"rows": [{"selected": 0}]}}})
+    rows.append({"kind": "state_snapshot", "data": {"name": "training_capture_summary", "value": {
+        "contract_version": 1, "scope": "agent_direct_egress_and_worker_socket",
+        "sdk_available": True, "state_recorded": 4}}})
     for row in rows:
         buffer.append_agent_observation({
             **row, "id": len(buffer.agent_observations), "after_action_sequence": 0,
@@ -65,6 +70,38 @@ def test_socket_write_alone_does_not_prove_agent_received_response():
     assert call["response_provenance"]["delivery_to_worker"] == "socket_written"
     assert call["response_provenance"]["agent_receipt"] == "not_reported"
     assert "agent_response_receipts_unverified" in exported["completeness"]["incomplete_reasons"]
+
+
+@pytest.mark.parametrize("changed_body", [False, True])
+def test_later_billing_recovery_cannot_replace_acknowledged_response_silently(changed_body):
+    values, payload = values_with_receipts()
+    recovered = copy.deepcopy(values["ledger_rows"][-1])
+    recovered.update(entry_id=4, entry_kind="recovery")
+    if changed_body:
+        recovered["terminal_response"]["body_b64"] = base64.b64encode(json.dumps({"result": "later body"}).encode()).decode()
+    values["ledger_rows"].append(recovered)
+    save(values, payload)
+    exported = assemble_example(**values)
+    provenance = exported["provider_calls"][0]["response_provenance"]
+    assert provenance["selected_response_acknowledged"] is not changed_body
+    assert ("agent_selected_response_unacknowledged" in exported["completeness"]["incomplete_reasons"]) is changed_body
+    assert provenance["worker_received_receipt_entry_ids"] == ([3] if changed_body else [3, 4])
+    if changed_body:
+        assert exported["provider_calls"][0]["response_receipts"][0]["response"]["choices"][0]["message"]["content"] == "result"
+
+
+@pytest.mark.parametrize("change", ["missing_phase", "overflow", "wrong_count", "only_summary"])
+def test_arbitrary_snapshot_or_incomplete_phase_report_cannot_clear_state_gap(change):
+    values, payload = values_with_receipts()
+    if change == "missing_phase": payload["agent_observations"].pop(2)
+    elif change == "only_summary": payload["agent_observations"] = payload["agent_observations"][:1] + payload["agent_observations"][-1:]
+    else:
+        summary = payload["agent_observations"][-1]["data"]["value"]
+        summary["state_overflow_rows" if change == "overflow" else "state_recorded"] = 1
+    for index, row in enumerate(payload["agent_observations"]): row["id"] = index
+    payload["agent_observation_count"] = len(payload["agent_observations"])
+    save(values, payload)
+    assert "agent_task_state_unverified" in assemble_example(**values)["completeness"]["incomplete_reasons"]
 
 
 @pytest.mark.parametrize("mutation", ["status", "bytes", "hash", "action", "identity", "unwritten", "ack"])

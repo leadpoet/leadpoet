@@ -165,7 +165,7 @@ def test_industry_pass_does_not_override_semantic_negative_or_retry_it(
     assert sent["requested_product_service"] == PRODUCT
     assert extra_text in sent["prefetched_sources"][0]["text"] or not extra_text
     prompt = " ".join(requests[0]["messages"][0]["content"].split())
-    assert "every mandatory condition still needs proof there" in prompt
+    assert "prove every actual condition for the same company and product" in prompt
     assert len(requests[0]["messages"][0]["content"]) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
     assert "Do not add conditions absent from the criterion" in prompt
     assert "unresolved conflicting facts mean UNPROVEN" in prompt

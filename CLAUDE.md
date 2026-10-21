@@ -2,9 +2,10 @@
 
 ## Scoped production authorization: investigator evidence use
 
-On 2026-10-21 the user authorized repairing the existing investigator's complete
-ICP context, bounded quote handling and use of multiple supported passages,
-with rigorous repeated positive/negative tests before deployment. This covers
+On 2026-10-21 the user authorized repairing the existing investigator's evidence
+interpretation, criterion handling and targeted source selection, and verifying
+completed negative reviews, with rigorous actual-model positive/negative tests
+before deployment and at most $5 OpenRouter test spend in this task. This covers
 protected read-only inspection, bounded provider and reward-disabled production
 tests, narrow source changes, safe push/merge, exact scorer-image publication,
 and canonical gateway/normal-validator deployment with live verification.

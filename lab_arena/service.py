@@ -51,6 +51,68 @@ logger = logging.getLogger(__name__)
 
 _CompanyEvidenceReads = Dict[Tuple[str, str, int], Dict[str, Any]]
 
+
+class _PublicResultEvidenceReads(dict):
+    """One response's evidence and bounded raw reads; never shared by requests."""
+
+    MAX_IDENTITIES = 128
+    MAX_BYTES = 8 * 1024 * 1024
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.runs: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.submissions: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.signal_uses: Dict[str, List[Dict[str, Any]]] = {}
+        self.signals: Dict[Tuple[str, int], Optional[Dict[str, Any]]] = {}
+        self.exclusions: Dict[str, List[str]] = {}
+        self.objects: Dict[Tuple[str, int], bytes] = {}
+        self._bytes = 0
+
+    def _read(self, rows: Dict, identity: Any, load: Callable[[], Any]) -> Any:
+        if identity in rows:
+            return copy.deepcopy(rows[identity])
+        value = load()
+        if len(rows) < self.MAX_IDENTITIES and self._bytes < self.MAX_BYTES:
+            try:
+                size = len(json.dumps(value, separators=(",", ":")).encode("utf-8"))
+            except (TypeError, ValueError, OverflowError):
+                return value  # Leave malformed values on their original validation path.
+            if self._bytes + size <= self.MAX_BYTES:
+                rows[identity] = copy.deepcopy(value)
+                self._bytes += size
+        return value
+
+    def run(self, store: ArenaStore, run_id: str) -> Optional[Dict[str, Any]]:
+        return self._read(self.runs, run_id, lambda: store.get_run(run_id))
+
+    def submission(self, store: ArenaStore, submission_id: str) -> Optional[Dict[str, Any]]:
+        return self._read(self.submissions, submission_id, lambda: store.get_submission(submission_id))
+
+    def uses(self, store: ArenaStore, run_id: str) -> List[Dict[str, Any]]:
+        return self._read(self.signal_uses, run_id, lambda: store.get_signal_judgment_uses(run_id))
+
+    def signal(self, store: ArenaStore, cache_key: str, authority_slot: int) -> Optional[Dict[str, Any]]:
+        if type(cache_key) is not str or type(authority_slot) is not int:
+            return store.get_signal_judgment(cache_key, authority_slot)
+        return self._read(self.signals, (cache_key, authority_slot),
+                          lambda: store.get_signal_judgment(cache_key, authority_slot))
+
+    def authority_exclusions(self, store: ArenaStore, run_id: str) -> List[str]:
+        return self._read(self.exclusions, run_id, lambda: store.signal_authority_exclusions(run_id))
+
+    def object(self, objects: ObjectStore, ref: str, max_bytes: int) -> bytes:
+        if type(ref) is not str or type(max_bytes) is not int:
+            return objects.get_bounded(ref, max_bytes)
+        identity = (ref, max_bytes)
+        if identity in self.objects:
+            return self.objects[identity]
+        value = objects.get_bounded(ref, max_bytes)
+        if (len(self.objects) < self.MAX_IDENTITIES
+                and self._bytes + len(value) <= self.MAX_BYTES):
+            self.objects[identity] = value
+            self._bytes += len(value)
+        return value
+
 _DEEPLINE_BILLING_BATCH_LIMIT = 96
 _DEEPLINE_BILLING_WORKERS = 8
 _DEEPLINE_BILLING_PAGE_LIMIT = 20  # Candidate RPC contract.
@@ -3216,6 +3278,7 @@ class ArenaService:
     ) -> Dict[str, Any]:
         """Read and fully bind one immutable company judgment variant."""
 
+        reads = evidence_reads if isinstance(evidence_reads, _PublicResultEvidenceReads) else None
         # Only public_results supplies this response-local map. Keep invalid
         # argument types on the original validation path (bool/float slots
         # must not alias an already validated integer slot).
@@ -3255,7 +3318,8 @@ class ArenaService:
             raise scoring.ScoringError(
                 "accepted company judgment evidence is invalid"
             ) from exc
-        source = self._store.get_run(str(evidence["source_score_run_id"]))
+        source_id = str(evidence["source_score_run_id"])
+        source = reads.run(self._store, source_id) if reads is not None else self._store.get_run(source_id)
         if (
             source is None
             or source.get("kind") != "score"
@@ -3270,7 +3334,8 @@ class ArenaService:
             or int(source.get("lease_generation") or 0)
             != evidence["source_lease_generation"]
             or (
-                self._store.signal_authority_exclusions(str(source["run_id"]))
+                (reads.authority_exclusions(self._store, str(source["run_id"]))
+                 if reads is not None else self._store.signal_authority_exclusions(str(source["run_id"])))
                 if ((self._round_from_context(str(source["round_id"]), round_context) or {}).get("configuration_doc") or {}).get("scorer_policy", {}).get("signal_judgment_policy") == signal_judgments.POLICY
                 else (source.get("claim_response") or {}).get("runner_authority_exclusions")
             ) != evidence["runner_authority_exclusions"]
@@ -3285,8 +3350,9 @@ class ArenaService:
                 "accepted company judgment authority is invalid"
             )
         try:
+            get_object = (lambda ref, limit: reads.object(self._objects, ref, limit)) if reads is not None else self._objects.get_bounded
             source_output = json.loads(
-                self._objects.get_bounded(
+                get_object(
                     str(evidence["source_output_ref"]),
                     scoring.MAX_SCORING_OUTPUT_BYTES,
                 ).decode("utf-8")
@@ -3500,7 +3566,10 @@ class ArenaService:
     ) -> List[Dict[str, Any]]:
         """Rebuild list context from immutable raw company evidence."""
 
-        submission = self._store.get_submission(str(run["submission_id"])) or {}
+        reads = evidence_reads if isinstance(evidence_reads, _PublicResultEvidenceReads) else None
+        submission_id = str(run["submission_id"])
+        submission = (reads.submission(self._store, submission_id)
+                      if reads is not None else self._store.get_submission(submission_id)) or {}
         context = self._validated_company_judgment_lease(
             (run.get("claim_response") or {}).get("company_judgment_cache") or {},
             recipient_miner_hotkey=str(run.get("miner_hotkey") or ""),
@@ -3509,8 +3578,9 @@ class ArenaService:
             round_context=round_context,
         )
         try:
+            get_object = (lambda ref, limit: reads.object(self._objects, ref, limit)) if reads is not None else self._objects.get_bounded
             document = json.loads(
-                self._objects.get_bounded(
+                get_object(
                     str(run["output_ref"]), scoring.MAX_SCORING_OUTPUT_BYTES
                 ).decode("utf-8")
             )
@@ -7465,10 +7535,13 @@ class ArenaService:
         current_score_run_id: str,
         round_id: str,
         runs_by_id: Mapping[str, Mapping[str, Any]],
+        evidence_reads: Optional[_CompanyEvidenceReads] = None,
     ) -> None:
         """Credit immutable original signal sources used by this company."""
 
-        uses = self._store.get_signal_judgment_uses(company_source_run_id)
+        reads = evidence_reads if isinstance(evidence_reads, _PublicResultEvidenceReads) else None
+        uses = (reads.uses(self._store, company_source_run_id) if reads is not None
+                else self._store.get_signal_judgment_uses(company_source_run_id))
         seen: set[tuple[int, int]] = set()
         for use in uses:
             if use.get("company_index") not in company_indexes:
@@ -7483,7 +7556,8 @@ class ArenaService:
             authority_slot = use.get("authority_slot")
             if type(authority_slot) is not int or authority_slot < 0:
                 raise scoring.ScoringError("signal attribution slot is invalid")
-            row = self._store.get_signal_judgment(cache_key, authority_slot)
+            row = (reads.signal(self._store, cache_key, authority_slot) if reads is not None
+                   else self._store.get_signal_judgment(cache_key, authority_slot))
             if row is None or any(row.get(field) != use.get(field) for field in (
                 "cache_key", "authority_slot", "signal_input_hash",
                 "source_score_run_id", "judgment_hash",
@@ -7631,6 +7705,7 @@ class ArenaService:
                             company_indexes={int(item["company_index"])},
                             current_score_run_id=score_run_id, round_id=round_id,
                             runs_by_id=runs_by_id,
+                            evidence_reads=evidence_reads,
                         )
                     continue
                 hotkey = self._validated_attribution_source(
@@ -7665,6 +7740,7 @@ class ArenaService:
                         company_indexes=source_indexes,
                         current_score_run_id=score_run_id, round_id=round_id,
                         runs_by_id=runs_by_id,
+                        evidence_reads=evidence_reads,
                     )
             return attributed
 
@@ -8060,7 +8136,7 @@ class ArenaService:
             round_id, execution_runs, score_runs,
             set(outputs) if verification_required else set(), round_context=row,
         )
-        evidence_reads: _CompanyEvidenceReads = {}
+        evidence_reads: _CompanyEvidenceReads = _PublicResultEvidenceReads()
         result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
                 "miner_hotkey": participant.get("miner_hotkey"),

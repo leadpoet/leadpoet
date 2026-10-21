@@ -565,18 +565,32 @@ class Recorder:
                 return None
         # iter_bytes delegates to iter_raw; the inner raw boundary supplies exact
         # provider hashes while only the outer decoded boundary stores web text.
+        def register_response(response):
+            body = self._body(response, "httpx", metadata)
+            if body is None:
+                return
+            # A transport may return a response whose decoded bytes were already
+            # buffered before our iterator hooks ran. Never read or drain it here.
+            content = vars(response).get("_content")
+            with body.lock:
+                if (not body.done and not body.identity and body.size == 0
+                        and response.is_stream_consumed is True
+                        and isinstance(content, bytes)):
+                    body.add(content)
+                    body.finish(True)
+
         def send_factory(original):
             @functools.wraps(original)
             def wrapped(*args, **kwargs):
                 response = original(*args, **kwargs)
-                self._safe(self._body, response, "httpx", metadata)
+                self._safe(register_response, response)
                 return response
             return wrapped
         def async_send_factory(original):
             @functools.wraps(original)
             async def wrapped(*args, **kwargs):
                 response = await original(*args, **kwargs)
-                self._safe(self._body, response, "httpx", metadata)
+                self._safe(register_response, response)
                 return response
             return wrapped
         client = getattr(module, "Client", None)

@@ -268,3 +268,42 @@ def test_malformed_call_does_not_abort_valid_sibling():
     rows, manifest = records(seal(e))
     assert len(rows) == 1
     assert manifest['counts']['exclusion_reasons']['malformed_call'] == 1
+
+
+def test_unrelated_page_privacy_gap_does_not_reject_exact_step():
+    e = fixture()
+    e['completeness']['incomplete_reasons'].append('worker_observation_privacy_nonexact')
+    assert len(records(seal(e))[0]) == 1
+
+
+@pytest.mark.parametrize('field,value', [('reasoning', None), ('reasoning', ''), ('reasoning_content', None), ('reasoning_content', ''), ('reasoning_details', None), ('reasoning_details', [])])
+def test_empty_optional_reasoning_is_not_a_target(field, value):
+    e = fixture()
+    call = e['provider_calls'][0]
+    call['response']['choices'][0]['message'][field] = value
+    call['response_receipts'][0]['response_sha256'] = c.document_hash(call['response'])
+    row = records(seal(e))[0][0]
+    assert row['target'] == {'role': 'assistant', 'content': 'Observed answer'}
+
+
+def test_typed_readable_chat_reasoning_is_metadata_only():
+    e = fixture()
+    call = e['provider_calls'][0]
+    details = [{'type': 'reasoning.summary', 'summary': 'A readable summary', 'index': 0, 'format': 'unknown'}]
+    call['response']['choices'][0]['message']['reasoning_details'] = details
+    call['response_receipts'][0]['response_sha256'] = c.document_hash(call['response'])
+    row = records(seal(e))[0][0]
+    assert details[0] in row['source_refs'][0]['teacher_reasoning_metadata']
+    assert 'reasoning' not in json.dumps(row['target'])
+
+
+def test_own_ack_redaction_rejected_despite_unrelated_gap_allowance():
+    e = fixture()
+    e['completeness']['incomplete_reasons'].append('worker_observation_privacy_nonexact')
+    artifact = e['worker_observation_artifacts']['run']
+    artifact['payload']['agent_observations'][0]['privacy']['redacted'] = True
+    artifact['payload_sha256'] = c.document_hash(artifact['payload'])
+    call = e['provider_calls'][0]
+    for ref in call['response_provenance']['agent_receipt_refs'] + [call['response_provenance']['worker_receipt_ref']]:
+        ref['payload_sha256'] = artifact['payload_sha256']
+    assert not records(seal(e))[0]

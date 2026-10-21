@@ -35,7 +35,15 @@ def _require(condition, reason):
         raise ValueError(reason)
 
 
-def _exact(value):
+def _exact(value, *, response=False):
+    if response and isinstance(value, dict):
+        value = copy.deepcopy(value)
+        for choice in value.get('choices', []) if isinstance(value.get('choices'), list) else []:
+            msg = choice.get('message') if isinstance(choice, dict) else None
+            if isinstance(msg, dict):
+                for field in ('reasoning', 'reasoning_content', 'reasoning_details'):
+                    if field in msg and (msg[field] is None or msg[field] == '' or field == 'reasoning_details' and msg[field] == []):
+                        msg.pop(field)
     clean, removed = training_export.without_hidden_reasoning(value)
     sanitized, redactions = training_capture.sanitize_training_value(value)
     return (not removed and not redactions and clean == value and sanitized == value
@@ -132,8 +140,14 @@ def _target(body, response, operation):
                  and choice.get('finish_reason') in {'stop', 'tool_calls'}, 'response_not_complete')
         for key in ('reasoning', 'reasoning_content'):
             if key in msg:
-                _require(isinstance(msg[key], str), 'reasoning_shape_unsupported')
-                reasoning.append({'field': key, 'text': msg.pop(key)})
+                value = msg.pop(key)
+                _require(value is None or isinstance(value, str), 'reasoning_shape_unsupported')
+                if value:
+                    reasoning.append({'field': key, 'text': value})
+        details = msg.pop('reasoning_details', None)
+        if details is not None:
+            _require(isinstance(details, list) and all(training_capture.readable_reasoning_item(item) for item in details), 'reasoning_shape_unsupported')
+            reasoning.extend(copy.deepcopy(details))
         _require(set(msg) <= {'role', 'content', 'tool_calls', 'refusal'}
                  and not msg.get('refusal') and (isinstance(msg.get('content'), str) or msg.get('content') is None), 'assistant_shape_unsupported')
         msg.pop('refusal', None)
@@ -187,12 +201,12 @@ def _candidate(example, call):
     op = call.get('operation_id')
     _require(call.get('provider') == 'openrouter' and op in {'openrouter.chat', 'openrouter.responses'}, 'operation_unsupported')
     request = call.get('request') or {}
+    _require(not (call.get('request_capture') or {}).get('redacted') and _exact(request), 'request_privacy_nonexact')
     _require(request.get('operation_id') == op and request.get('request_hash') == call.get('request_hash')
              and isinstance(request.get('hashed_parameters'), dict)
              and contracts.document_hash(request['hashed_parameters']) == call.get('request_hash'), 'request_identity_mismatch')
-    _require(not (call.get('request_capture') or {}).get('redacted') and _exact(request), 'request_privacy_nonexact')
     _require(not set(call.get('evidence_gaps') or []) & {'full_request_unavailable', 'request_privacy_nonexact', 'worker_observation_request_mismatch', 'worker_observation_link_invalid'}, 'call_context_gap')
-    _require(not set((example.get('completeness') or {}).get('incomplete_reasons') or []) & {'worker_response_receipt_link_invalid', 'agent_response_receipt_link_invalid', 'worker_observation_privacy_nonexact', 'agent_dependency_link_invalid', 'runtime_input_context_mismatch'}, 'worker_link_gap')
+    _require(not set((example.get('completeness') or {}).get('incomplete_reasons') or []) & {'worker_response_receipt_link_invalid', 'agent_response_receipt_link_invalid', 'agent_dependency_link_invalid', 'runtime_input_context_mismatch'}, 'worker_link_gap')
     outbound = request.get('outbound') or {}
     body = outbound.get('body')
     _require(isinstance(body, dict) and contracts.document_hash(body) == outbound.get('body_sha256'), 'outbound_body_hash_mismatch')
@@ -248,7 +262,7 @@ def _candidate(example, call):
                 _require(len(linked) == 1, 'response_reference_unresolved')
                 value = linked[0]['response']
         _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
-        _require(_exact(value), 'response_privacy_nonexact')
+        _require(_exact(value, response=True), 'response_privacy_nonexact')
         responses.append(value)
     _require(len({contracts.document_hash(value) for value in responses}) == 1, 'delivered_response_ambiguous')
     target, reasoning = _target(body, responses[0], op)

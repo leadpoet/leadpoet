@@ -183,6 +183,7 @@ def route_for(
     allow_host_shadow_score: bool = False,
     source_content_fallback: bool = False,
     source_content_response_url: Optional[str] = None,
+    frozen_catalog: Optional[Mapping[str, Any]] = None,
 ) -> Optional[MinerScoreRoute]:
     """Return one exact Deepline route for an eligible scoring request."""
 
@@ -200,7 +201,10 @@ def route_for(
     requested = dict(parameters)
     if operation_id == "scrapingdog.scrape":
         activity_id = _linkedin_post_activity_id(requested.get("url"))
-        if activity_id:
+        if activity_id and (
+            frozen_catalog is None
+            or HARVEST_POST_TOOL in deepline_catalog.allowed_tool_ids(frozen_catalog)
+        ):
             return MinerScoreRoute(
                 requested_operation_id=operation_id,
                 effective_operation_id=EFFECTIVE_OPERATION_ID,

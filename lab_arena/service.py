@@ -2887,13 +2887,14 @@ class ArenaService:
     def commit_scoring_plan(self, round_id: str, stage: int) -> Dict[str, Any]:
         round_row = self._round(round_id)
         self.benchmark_icps(round_id)
+        admitted = {p["submission_id"] for p in round_row.get("participants") or []}
         plan = scoring.build_scoring_plan(
             round_id=round_id,
             stage=stage,
-            runs=self._store.list_runs(
+            runs=[run for run in self._store.list_runs(
                 round_id, stage=stage, kind="execute",
                 columns="*,execution_attempt:lab_arena_execution_attempt_count",
-            ),
+            ) if run["submission_id"] in admitted],
             execution_sequence_policy=(round_row.get("configuration_doc") or {}).get(
                 "execution_sequence_policy"
             ),
@@ -4467,8 +4468,10 @@ class ArenaService:
         """Unmeasured work waits unless its miner funding is proved terminal."""
 
         round_id = str(row["round_id"])
+        admitted = {p["submission_id"] for p in row.get("participants") or []}
         sources = [run for run in self._store.list_runs(round_id, kind="execute")
-                   if run.get("stage") in (1, 2) and run.get("status") == "accepted"]
+                   if run.get("stage") in (1, 2) and run.get("status") == "accepted"
+                   and run.get("submission_id") in admitted]
         score_runs = self._store.list_runs(round_id, kind="score")
         judges = self._select_scoring_outputs(score_runs, round_row=row)
         for source in sources:
@@ -6864,6 +6867,16 @@ class ArenaService:
                 stage = int(status[-1])
                 with telemetry.stage("advance_expire_leases"):
                     self._store.expire_leases(round_id)
+                if (stage == 2 and self._score_generation_floor(round_row) > 0
+                    and round_row["configuration_doc"].get("execution_sequence_policy")
+                        == contracts.BASELINE_SCORED_FIRST_POLICY
+                    and self._baseline_recovery_plan(round_row,
+                        self._store.list_runs(round_id, stage=1, kind="execute"),
+                        self._store.list_runs(round_id, stage=1, kind="score")) is None):
+                    if now >= _parse_iso(schedule["publication_deadline"]):
+                        return self._hold_incomplete_evaluation(round_row, reason="baseline_incomplete")
+                    return {"status": "waiting", "round_status": status,
+                            "reason": "baseline_current_judgments"}
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
                     with telemetry.stage("advance_close_stage"):
                         return self.close_stage(round_id, stage)

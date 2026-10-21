@@ -5218,6 +5218,9 @@ class Broker:
                                provider_status=404,
                                response_hash=contracts.hash_bytes(operations.GENERIC_UNAVAILABLE_BODY))
                 return _error_result("provider_unavailable", summary)
+            if (terminal_status == operations.GENERIC_UNAVAILABLE_STATUS
+                and terminal_body == operations.GENERIC_UNAVAILABLE_BODY):
+                summary["error_code"] = "provider_unavailable"
             return BrokerResult(terminal_status, terminal_headers, terminal_body, summary)
         if status in ("dispatched", "uncertain") and not deepline_response_recovery:
             summary["outcome"] = "uncertain"

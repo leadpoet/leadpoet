@@ -1,3 +1,4 @@
+import base64
 import copy
 import json
 import os
@@ -45,6 +46,26 @@ def test_observed_not_correct_and_no_future_labels():
     assert 'FUTURE JUDGE' not in json.dumps(row)
     assert row['quality']['status'] == 'unreviewed'
     assert manifest['training_permission']['status'] == 'unconfirmed'
+
+
+def test_private_binary_bytes_never_enter_agent_dataset_splits_or_manifest():
+    source = fixture()
+    marker = b'UNREVIEWED_BINARY_PAYLOAD\x00\xff'
+    encoded = base64.b64encode(marker).decode()
+    artifact = source['worker_observation_artifacts']['run']
+    artifact['payload']['agent_observations'].append({
+        'id': 'binary', 'kind': 'web_fetch_binary',
+        'privacy': {'redacted': False},
+        'data': {'body_b64': encoded, 'privacy_review': 'unreviewed_binary'}})
+    artifact['payload_sha256'] = c.document_hash(artifact['payload'])
+    provenance = source['provider_calls'][0]['response_provenance']
+    for ref in provenance['agent_receipt_refs'] + [provenance['worker_receipt_ref']]:
+        ref['payload_sha256'] = artifact['payload_sha256']
+    splits, manifest = steps.build([seal(source)])
+    assert len(splits['train']) + len(splits['eval']) == 1
+    output = json.dumps([splits, manifest])
+    assert encoded not in output and 'UNREVIEWED_BINARY_PAYLOAD' not in output
+    assert 'body_b64' not in output
 
 
 @pytest.mark.parametrize('mutate', [

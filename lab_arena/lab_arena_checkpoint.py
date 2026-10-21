@@ -7,8 +7,10 @@ output bytes that it can validate before the signed execution deadline.
 from __future__ import annotations
 
 import json
+import base64
 import hashlib
 import codecs
+import re
 import os
 import socket
 import tempfile
@@ -49,6 +51,7 @@ TRAINING_SCHEMA_VERSION = "leadpoet.lab_arena.agent_observation.v1"
 TRAINING_CONTROL = "training_observation"
 MAX_TRAINING_FRAME_BYTES = 8 * 1024 * 1024
 MAX_TRAINING_WEB_BODY_BYTES = 6 * 1024 * 1024
+MAX_TRAINING_BINARY_BODY_BYTES = 5 * 1024 * 1024
 MAX_TRAINING_STATE_BYTES = 65_536
 TRAINING_SOCKET_TIMEOUT_SECONDS = 1.0
 _TRAINING_FAILURE = threading.local()
@@ -89,13 +92,30 @@ def validate_web_capture_metadata(value: Any, body: str | None = None) -> dict[s
     return dict(value)
 
 
+def validate_binary_capture_metadata(value: Any, body: bytes | None = None) -> dict[str, Any]:
+    """Validate consumed binary bytes without treating them as trainable text."""
+    if (not isinstance(value, dict) or set(value) != {
+            "source", "complete", "received_body_sha256", "received_body_bytes"}
+            or value["source"] != "runtime_http_v1"
+            or type(value["complete"]) is not bool
+            or not isinstance(value["received_body_sha256"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", value["received_body_sha256"])
+            or type(value["received_body_bytes"]) is not int
+            or not 0 <= value["received_body_bytes"] <= MAX_TRAINING_BINARY_BODY_BYTES):
+        raise ValueError("binary capture metadata is invalid")
+    if body is not None and (len(body) != value["received_body_bytes"]
+            or "sha256:" + hashlib.sha256(body).hexdigest() != value["received_body_sha256"]):
+        raise ValueError("binary capture bytes do not match")
+    return dict(value)
+
+
 def validate_training_frame(value: Any) -> dict[str, Any]:
     """Validate capture reports; run identity comes from the host."""
     if (not isinstance(value, Mapping) or set(value) != {
             "schema_version", "control", "kind", "depends_on", "data"}
             or value.get("schema_version") != TRAINING_SCHEMA_VERSION
             or value.get("control") != TRAINING_CONTROL
-            or value.get("kind") not in {"web_fetch", "response_received", "state_snapshot", "capture_failure"}
+            or value.get("kind") not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot", "capture_failure"}
             or not isinstance(value.get("depends_on"), list)
             or len(value["depends_on"]) > 32
             or any(not isinstance(item, str) or len(item) > 96 for item in value["depends_on"])
@@ -113,6 +133,20 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
             raise ValueError("training frame is invalid")
         if "capture" in data:
             validate_web_capture_metadata(data["capture"], data["body"])
+    elif kind == "web_fetch_binary":
+        fields = {"url", "final_url", "retrieved_at", "status", "content_type", "body_b64", "capture"}
+        if (set(data) != fields or any(not isinstance(data[key], str)
+                for key in ("url", "final_url", "retrieved_at", "content_type", "body_b64"))
+                or type(data["status"]) is not int or not 100 <= data["status"] <= 599
+                or len(data["body_b64"]) > 4 * ((MAX_TRAINING_BINARY_BODY_BYTES + 2) // 3)):
+            raise ValueError("training frame is invalid")
+        try:
+            binary = base64.b64decode(data["body_b64"], validate=True)
+            if base64.b64encode(binary).decode("ascii") != data["body_b64"]:
+                raise ValueError("noncanonical base64")
+            validate_binary_capture_metadata(data["capture"], binary)
+        except (ValueError, UnicodeError, TypeError):
+            raise ValueError("training frame is invalid") from None
     elif kind == "response_received":
         if (set(data) != {"call_identity", "status", "body_sha256", "body_bytes"}
                 or not isinstance(data["call_identity"], str) or not isinstance(data["body_sha256"], str)
@@ -124,7 +158,7 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
           or len(json.dumps(data["value"], ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_STATE_BYTES):
         raise ValueError("training frame is invalid")
     elif kind == "capture_failure" and (set(data) != {"category", "reason"}
-          or data["category"] not in {"web_fetch", "response_received", "state_snapshot"}
+          or data["category"] not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot"}
           or data["reason"] not in {"size_limit", "invalid_value"}):
         raise ValueError("training frame is invalid")
     if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_FRAME_BYTES:
@@ -212,6 +246,21 @@ def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str
     if capture is not None:
         data["capture"] = capture
     return _record_training("web_fetch", data, depends_on)
+
+
+def record_web_fetch_binary(*, url: str, final_url: str, status: int, content_type: str,
+                            body: bytes, retrieved_at: str | None = None,
+                            capture: dict[str, Any], depends_on: list[str] | None = None) -> int | None:
+    """Report already consumed bytes to the private run artifact."""
+    if not isinstance(body, bytes) or len(body) > MAX_TRAINING_BINARY_BODY_BYTES:
+        _record_training("capture_failure", {"category": "web_fetch_binary", "reason": "size_limit"}, depends_on)
+        _TRAINING_FAILURE.reason = "invalid_frame"
+        return None
+    return _record_training("web_fetch_binary", {
+        "url": url, "final_url": final_url, "status": status, "content_type": content_type,
+        "body_b64": base64.b64encode(body).decode("ascii"),
+        "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat(),
+        "capture": capture}, depends_on)
 
 
 def record_response_received(*, call_identity: str, status: int, body: bytes | None = None,

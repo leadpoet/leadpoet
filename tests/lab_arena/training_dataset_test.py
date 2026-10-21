@@ -134,6 +134,19 @@ def example(run="arena-2026-10-18:sub-1:1:0:1", rows=(), *, round_id="arena-2026
     return seal(document)
 
 
+def test_unreviewed_binary_audit_bytes_do_not_enter_company_dataset():
+    marker = "UNREVIEWED_BINARY_PAYLOAD"
+    row = {"company_index": 0, "company": claim(), "label_status": "scored",
+           "judgment": copy.deepcopy(JUDGMENTS["qualified"])}
+    source = example(rows=[row], worker_observation_artifacts={
+        "execute:1": {"payload": {"agent_observations": [{"kind": "web_fetch_binary",
+            "data": {"body_b64": marker, "privacy_review": "unreviewed_binary"}}]}}})
+    records = dataset.records_from_example(source)
+    assert len(records) == 1
+    assert marker not in json.dumps(records)
+    assert "body_b64" not in json.dumps(records)
+
+
 @pytest.mark.parametrize("kind,label,sub_reason", [
     ("qualified", "qualified", None),
     ("wrong_fit", "wrong_fit", "industry,required_attribute"),

@@ -22,6 +22,7 @@ BODY = b'hello world\n{"value": 42}\n'
 class Checkpoint:
     def __init__(self, delay=0):
         self.web = []
+        self.binary = []
         self.acks = []
         self.states = []
         self.delay = delay
@@ -30,6 +31,10 @@ class Checkpoint:
         time.sleep(self.delay)
         self.web.append(kwargs)
         return len(self.web)
+
+    def record_web_fetch_binary(self, **kwargs):
+        self.binary.append(kwargs)
+        return len(self.binary)
 
     def record_response_received(self, **kwargs):
         self.acks.append(kwargs)
@@ -270,8 +275,8 @@ def test_non_utf8_and_http_error_body(endpoint, path, expected):
     assert checkpoint.web[0]["status"] == (503 if path == "/error" else 200)
 
 
-@pytest.mark.parametrize("path,counter", [("/binary", "binary_body_unsupported"), ("/invalid", "text_encoding_unsupported")])
-def test_binary_invalid_utf8_is_explicit(endpoint, path, counter):
+@pytest.mark.parametrize("path,expected", [("/binary", b"\x00\xff\x10"), ("/invalid", b"abc\xff")])
+def test_binary_invalid_utf8_is_captured_without_extra_read(endpoint, path, expected):
     httpx = pytest.importorskip("httpx")
     checkpoint = Checkpoint()
     recorder = install(checkpoint)
@@ -280,8 +285,10 @@ def test_binary_invalid_utf8_is_explicit(endpoint, path, counter):
     finally:
         summary = finish(recorder, checkpoint)
     assert checkpoint.web == []
-    assert summary["counts"][counter] == 1
-    assert summary["complete"] is False
+    assert checkpoint.binary[0]["body"] == expected
+    assert checkpoint.binary[0]["capture"]["received_body_sha256"] == "sha256:" + hashlib.sha256(expected).hexdigest()
+    assert summary["counts"]["web_written"] == 1
+    assert summary["complete"] is True
 
 
 def test_partial_split_unicode_is_explicit(endpoint):
@@ -293,7 +300,8 @@ def test_partial_split_unicode_is_explicit(endpoint):
     finally:
         summary = finish(recorder, checkpoint)
     assert checkpoint.web == []
-    assert summary["counts"]["text_encoding_unsupported"] == 1
+    assert checkpoint.binary[0]["body"] == b"\xe2"
+    assert checkpoint.binary[0]["capture"]["complete"] is False
 
 
 @pytest.mark.parametrize("client", ["httpx", "requests", "stdlib"])
@@ -523,8 +531,9 @@ def test_provider_partial_error_invalid_header_and_compressed_raw(endpoint, monk
             wire_body = endpoint[1].last_data
     finally:
         summary = finish(recorder, checkpoint)
-    assert len(checkpoint.acks) == 1, (checkpoint.acks, summary)
-    assert checkpoint.acks[0]["body_sha256"] == "sha256:" + hashlib.sha256(wire_body).hexdigest()
+    assert len(checkpoint.acks) == 2, (checkpoint.acks, summary)
+    assert {ack["status"] for ack in checkpoint.acks} == {200, 503}
+    assert next(ack for ack in checkpoint.acks if ack["status"] == 200)["body_sha256"] == "sha256:" + hashlib.sha256(wire_body).hexdigest()
     assert len(checkpoint.web) == 1
     assert_web(checkpoint.web[0], BODY)
 

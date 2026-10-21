@@ -52,10 +52,12 @@ from qualification.scoring.linkedin_company_size import (
     VERIFIER_FAILURE_REASON_KEY,
     _ABOUT_SECTION_HEADING,
     _ABOUT_SECTION_END_HEADING,
+    _canonical_linkedin_company_size,
     _is_linkedin_access_wall,
     _profile_body_matches_company_identity,
     _strict_linkedin_company_profile_url,
     fetch_current_linkedin_company_size,
+    extract_linkedin_company_size,
     linkedin_company_page_slug,
 )
 from qualification.scoring.pre_checks import _resolve_country
@@ -112,6 +114,7 @@ MISSING_CITATION_REASON = (
     "submitted finding requires a valid fetched URL and a nonempty exact quote; "
     "citation fields are missing or invalid, so no quote was checked"
 )
+OVERSIZED_QUOTE_REASON = "submitted quote exceeds the 2000-character limit"
 PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON = (
     "supporting private-equity classification quote was not present in fetched source"
 )
@@ -2556,6 +2559,93 @@ def _bound_linkedin_headquarters_source(
     )
 
 
+def _compact_linkedin_headcount_quote(
+    quote: str,
+    observed_value: Any,
+    *,
+    url: str,
+    final_url: str,
+    text: str,
+    identity_anchor: Mapping[str, Any],
+    identity_names: set[str],
+) -> str:
+    """Select a shorter literal span; never repair facts or acquire evidence."""
+
+    if (
+        not 2000 < len(quote) <= MAX_PAGE_CHARACTERS
+        or not 0 < len(text) <= MAX_PAGE_CHARACTERS
+        or not identity_names
+        or _is_linkedin_access_wall(text)
+    ):
+        return ""
+    source = _surface_span(_visible_quote_surface(text))
+    original = _surface_span(quote)
+    if _normalized_span(original) not in _normalized_span(source):
+        return ""
+    # Mixed profiles and repeated fields are ambiguous even if one span agrees.
+    # These literal labels also survive a transport that flattens whitespace.
+    if any(
+        len(re.findall(pattern, source, flags=re.I)) != 1
+        for pattern in (r"\|\s*LinkedIn\b", r"\bCompany size\b")
+    ):
+        return ""
+    if len(re.findall(r"\bAbout(?: us)?\b", original, flags=re.I)) != 1:
+        return ""
+    # Do not omit a loaded profile's stronger Website identity field.
+    websites = len(re.findall(r"\bWebsite\b", source, flags=re.I))
+    if websites > 1 or websites != len(re.findall(r"\bWebsite\b", original, flags=re.I)):
+        return ""
+    # Restore only field boundaries for the existing typed profile parser and
+    # identity binder. The final evidence is selected from the original span,
+    # never from this presentation or from facts outside the submitted quote.
+    presentation = re.sub(r"(\|\s*LinkedIn)\b", r"\1\n", quote, flags=re.I)
+    presentation = re.sub(
+        r"\b(About(?: us)?|Website|Company size)\b", r"\n\1\n",
+        presentation, flags=re.I,
+    )
+    presentation = re.sub(r"(https?://[^\s<>\[\]()]+)", r"\1\n", presentation)
+    band_pattern = r"(\d[\d,.]*(?:\s*[-\u2013]\s*\d[\d,.]*|\+)?\s+employees?)\b"
+    presentation = re.sub(band_pattern, r"\1\n", presentation, flags=re.I)
+    profile = _strict_linkedin_company_profile_url(url)
+    expected = {
+        "normalized_name": identity_anchor.get("submitted_name"),
+        "registrable_dns_domain": identity_anchor.get("submitted_domain"),
+    }
+    if (
+        not profile
+        or _strict_linkedin_company_profile_url(final_url) != profile
+        or not identity_anchor.get("submitted_linkedin_slug")
+        or linkedin_company_page_slug(profile) != identity_anchor["submitted_linkedin_slug"]
+        or len(presentation) > PROFILE_MAX_CHARACTERS
+        or not _profile_body_matches_company_identity(presentation, expected)
+        or not _profile_body_matches_company_identity(presentation.lstrip().splitlines()[0], expected)
+    ):
+        return ""
+    size = extract_linkedin_company_size(presentation)
+    if not size or size["employee_count"] != _canonical_linkedin_company_size(str(observed_value)):
+        return ""
+    bands = {
+        _canonical_linkedin_company_size(match.group(1))
+        for match in re.finditer(band_pattern, source, flags=re.I)
+    } - {None}
+    if bands != {size["employee_count"]}:
+        return ""
+    field = re.search(re.escape(_surface_span(size["quote"])), original, flags=re.I)
+    if field is None:
+        return ""
+    for word in reversed(list(re.finditer(r"\S+", original[:field.start()]))):
+        if field.end() - word.start() > 2000:
+            break
+        candidate = original[word.start():field.end()]
+        if (
+            _quote_occurs(candidate, text)
+            and _quote_names_company(candidate, identity_names)
+            and _quote_supports_headcount(candidate, observed_value)
+        ):
+            return candidate
+    return ""
+
+
 def _bound_linkedin_headquarters_finding(
     finding: Mapping[str, Any],
     text: str,
@@ -2763,7 +2853,7 @@ def _validated_findings(
             )[:300],
             "activity_role": str(raw.get("activity_role") or "")[:40],
             "evidence_url": str(raw.get("evidence_url") or "")[:2000],
-            "evidence_quote": str(raw.get("evidence_quote") or "")[:2000],
+            "evidence_quote": str(raw.get("evidence_quote") or ""),
             "supporting_evidence": [],
             "old_name": str(raw.get("old_name") or "")[:200],
             "new_name": str(raw.get("new_name") or "")[:200],
@@ -2874,7 +2964,24 @@ def _validated_findings(
                         ),
                     )
                 )
-            if not evidence_url or not finding["evidence_quote"].strip():
+            if target == "headcount" and len(finding["evidence_quote"]) > 2000:
+                compact_quote = _compact_linkedin_headcount_quote(
+                    finding["evidence_quote"], finding["observed_value"],
+                    url=evidence_url,
+                    final_url=str((fetched_final_urls or {}).get(evidence_url) or ""),
+                    text=fetched_text, identity_anchor=identity_anchor or {},
+                    identity_names=attribution_names,
+                )
+                if compact_quote:
+                    finding["evidence_quote"] = compact_quote
+            if len(finding["evidence_quote"]) > 2000:
+                finding.update(
+                    status="UNPROVEN",
+                    evidence_url="",
+                    evidence_quote="",
+                    reason=OVERSIZED_QUOTE_REASON,
+                )
+            elif not evidence_url or not finding["evidence_quote"].strip():
                 finding.update(
                     status="UNPROVEN",
                     evidence_url="",
@@ -5070,6 +5177,20 @@ async def investigate_company_evidence(
                                             else ""
                                         )
                                     )
+                                )
+                                + (
+                                    "The submitted quote exceeds 2000 characters; no "
+                                    "prefix was accepted or checked as a substitute. "
+                                    "Use the already loaded source and supplied source "
+                                    "context to select a shorter continuous exact span "
+                                    "that retains both the decisive fact and the company "
+                                    "identity required for this target. Do not remove the "
+                                    "fact to shorten the quote or join separate spans. "
+                                    if any(
+                                        item.get("reason") == OVERSIZED_QUOTE_REASON
+                                        for item in rejected
+                                    )
+                                    else ""
                                 )
                                 + (
                                     "For findings with missing or invalid citation fields, "

@@ -1,5 +1,19 @@
 # Agent Instructions
 
+## Scoped production authorization: investigator evidence use
+
+On 2026-10-21 the user authorized repairing the existing investigator's complete
+ICP context, bounded quote handling and use of multiple supported passages,
+with rigorous repeated positive/negative tests before deployment. This covers
+protected read-only inspection, bounded provider and reward-disabled production
+tests, narrow source changes, safe push/merge, exact scorer-image publication,
+and canonical gateway/normal-validator deployment with live verification.
+Preserve ICP generation, qualification standards, scoring and cost rules,
+existing investigation/recovery bounds, frozen rounds, accepted work, caches,
+credentials, rewards and concurrent changes. Do not add another reviewer or
+recovery path. Deploy only a measured accuracy improvement with no regression
+on negative controls. This authority ends after deployment and verification.
+
 ## Scoped production authorization: October 22 reward shares
 
 On 2026-10-21 the user authorized changing Arena reward slots to 20% for +10,

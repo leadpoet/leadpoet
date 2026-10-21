@@ -467,3 +467,21 @@ def test_actual_primary_identity_program_rejects_wrong_process_or_source(tmp_pat
         with pytest.raises(AssertionError):pair.Pair.primary_identity(p,17)
     else:
         assert pair.Pair.primary_identity(p,17)==dict(pid=123,created_at=STARTED,cwd=str(root),commit=SHA)
+
+
+@pytest.mark.parametrize('version', [(3, 9, 6), (3, 10, 15)])
+def test_unsupported_controller_python_fails_before_any_action(monkeypatch, version):
+    monkeypatch.setattr(pair.sys, 'version_info', version)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('unsupported controller performed an action')
+    monkeypatch.setattr(pair.argparse.ArgumentParser, 'parse_args', forbidden)
+    monkeypatch.setattr(pair.subprocess, 'run', forbidden)
+    monkeypatch.setattr(pair.fcntl, 'flock', forbidden)
+    with pytest.raises(SystemExit, match='requires Python 3.11 or newer; no production action started'):
+        pair.main()
+
+
+def test_supported_python_accepts_real_five_digit_postgres_readiness():
+    rows = readiness_rows(timestamp='2026-10-21T05:46:42.59279+00:00')
+    assert pair.ready_session(rows, candidate=SHA,
+                              started_at='2026-10-21T05:46:42.592790+00:00') == SESSION

@@ -17,6 +17,7 @@ import re
 import secrets
 import shlex
 import subprocess
+import sys
 import threading
 import time
 
@@ -265,6 +266,8 @@ print(json.dumps(response.json()))
 
 
 def main():
+    if sys.version_info < (3, 11):
+        raise SystemExit("ERROR: paired restart requires Python 3.11 or newer; no production action started")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--gateway", required=True)

@@ -220,6 +220,21 @@ class Recorder:
             self._count("queue_overflow")
             self._release(body)
 
+    def _checkpoint_result(self, kind, result):
+        if result is not None:
+            self._count("provider_ack_written" if kind == "response_received" else "web_written")
+            return
+        self._count("checkpoint_failure")
+        getter = getattr(self.checkpoint, "_training_failure_reason", None)
+        try:
+            reason = getter() if callable(getter) else None
+        except Exception:
+            reason = None
+        if type(reason) is not str or reason not in {"timeout", "host_rejected", "transport_error", "invalid_response",
+                          "invalid_frame", "socket_unavailable"}:
+            reason = "unknown"
+        self._count("checkpoint_failure_" + kind + "_" + reason)
+
     def _emit(self, body):
         if body.identity:
             if body.complete and 200 <= body.status <= 299:
@@ -229,7 +244,7 @@ class Recorder:
                 result = self.checkpoint.record_response_received(
                     call_identity=body.identity, status=body.status,
                     body_sha256="sha256:" + body.digest.hexdigest(), body_bytes=body.size)
-                self._count("provider_ack_written" if result is not None else "checkpoint_failure")
+                self._checkpoint_result("response_received", result)
             else:
                 self._count("provider_ack_ineligible")
             return
@@ -264,7 +279,7 @@ class Recorder:
             capture={"source": _SOURCE, "complete": body.complete, "encoding": body.encoding,
                      "received_body_sha256": "sha256:" + body.digest.hexdigest(),
                      "received_body_bytes": body.size})
-        self._count("web_written" if result is not None else "checkpoint_failure")
+        self._checkpoint_result("web_fetch", result)
 
     def _work(self):
         while not self.stopping.is_set() or not self.queue.empty():

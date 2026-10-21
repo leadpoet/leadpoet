@@ -369,8 +369,8 @@ UNPROVEN because it does not prove absence of another activity.
 For a requested required_attribute finding, judge that criterion separately
 from industry. For an explicit OR, prove one allowed alternative and all shared
 qualifiers; for AND, prove every conjunct for the same company and product.
-An object only in one alternative is not shared.
-Keep independent product/service requirements in their own check.
+Keep independent product/service requirements in their own check; every
+mandatory condition still needs proof there.
 Judge the whole attribute from all loaded company-bound facts. Rejecting a
 citation does not reject independent evidence of the company's own offering.
 Subsidiary facts require explicit parent binding.

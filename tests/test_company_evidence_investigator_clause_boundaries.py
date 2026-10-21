@@ -46,7 +46,7 @@ def _stage_finding():
     }
 
 
-def test_bucket_and_clause_guidance_preserves_conflict_and_qualifier_limits():
+def test_stage_bucket_guidance_preserves_conflict_and_qualifier_limits():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
     assert "Uncertainty is material only if it can change the canonical stage" in prompt
@@ -55,7 +55,6 @@ def test_bucket_and_clause_guidance_preserves_conflict_and_qualifier_limits():
     assert "Debt, grants, planned rounds" in prompt
     assert "review every one before preserving the older matching stage" in prompt
     assert "complete the server-required current-stage search" in prompt
-    assert "An object only in one alternative is not shared" in prompt
     assert "prove one allowed alternative and all shared qualifiers" in prompt
     assert "for AND, prove every conjunct for the same company and product" in prompt
     assert "a supplier does not satisfy a criterion that explicitly requires" in prompt

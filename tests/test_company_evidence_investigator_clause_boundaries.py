@@ -8,7 +8,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
+from lab_arena.operations import (
+    OPENROUTER_MAX_CONTENT_CHARS,
+    validate_operation_request,
+)
 from qualification.scoring import company_evidence_investigator as investigator
 
 
@@ -46,12 +49,10 @@ def _stage_finding():
     }
 
 
-def test_stage_bucket_guidance_preserves_conflict_and_qualifier_limits():
+def test_original_prompt_preserves_conflict_and_qualifier_limits():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
 
-    assert "Uncertainty is material only if it can change the canonical stage" in prompt
-    assert "Completed Series D plus pending Series E still proves Series C+" in prompt
-    assert "Resolve acquisitions, IPOs, or other stage changes" in prompt
+    assert "pending Series E still proves Series C+" not in prompt
     assert "Debt, grants, planned rounds" in prompt
     assert "review every one before preserving the older matching stage" in prompt
     assert "complete the server-required current-stage search" in prompt
@@ -89,19 +90,39 @@ def test_saved_stage_quote_keeps_exact_source_identity_and_stage_guards(
     assert result["stage"]["status"] == expected
 
 
-def test_completed_stage_with_pending_later_same_bucket_keeps_required_discovery(
-    monkeypatch,
+@pytest.mark.parametrize(
+    ("requested_stage", "target", "expected_status"),
+    [
+        ("Series C+", "stage", "VERIFIED"),
+        ("Series B", "stage", "CONTRADICTED"),
+        ("Seed", "stage", "CONTRADICTED"),
+        ("Public", "stage", "CONTRADICTED"),
+        ("Series C+", "required_attribute", "VERIFIED"),
+    ],
+)
+def test_stage_clarification_is_scoped_and_keeps_existing_discovery(
+    monkeypatch, requested_stage, target, expected_status,
 ):
     requests = []
+    finding = _stage_finding()
+    page_text = ELEMENT_QUOTE
+    if target == "required_attribute":
+        quote = "Element Biosciences supplies genomic life sciences platforms."
+        page_text += " " + quote
+        finding.update(
+            target=target, observed_value="Genomic life sciences platforms",
+            activity_role="supplier_operator", evidence_quote=quote,
+        )
 
     async def fake_post(_session, _url, *, headers, payload):
         del headers
+        validate_operation_request("openrouter.chat", payload)
         requests.append(payload)
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": "stage-submit", "type": "function",
             "function": {
                 "name": "submit_findings",
-                "arguments": json.dumps({"findings": [_stage_finding()]}),
+                "arguments": json.dumps({"findings": [finding]}),
             },
         }]}}]}
 
@@ -118,23 +139,53 @@ def test_completed_stage_with_pending_later_same_bucket_keeps_required_discovery
             "name": "Element Biosciences",
             "website": "https://www.elementbiosciences.com",
         },
-        targets=("stage",),
-        requested_stage="Series C+",
+        targets=(target,),
+        requested_stage=requested_stage,
+        requested_attribute="Supplies genomic life sciences platforms.",
         prior_observations={
             "submitted_source_urls": [ELEMENT_URL],
             "stage_dispute_urls": [ELEMENT_URL],
             "observed_company_website": "https://www.elementbiosciences.com",
         },
         prefetched_pages={
-            ELEMENT_URL: {"final_url": ELEMENT_URL, "text": ELEMENT_QUOTE},
+            ELEMENT_URL: {"final_url": ELEMENT_URL, "text": page_text},
         },
     ))
 
-    assert result["claims"]["stage"]["status"] == "VERIFIED"
-    assert result["_validated_stage_finding"] == result["claims"]["stage"]
-    assert result["usage"]["search_calls"] == 1
+    assert result["claims"][target]["status"] == expected_status
+    assert result["_validated_stage_finding"] == (
+        result["claims"]["stage"] if target == "stage" else {}
+    )
+    assert result["usage"]["search_calls"] == int(target == "stage")
     assert result["usage"]["fetch_calls"] == 0
-    search.assert_awaited_once()
+    if target == "stage":
+        search.assert_awaited_once()
+        if requested_stage != "Public":
+            assert "latest funding round acquisition IPO" in search.call_args.args[1]
+    else:
+        search.assert_not_awaited()
     fetch.assert_not_awaited()
-    assert "latest funding round acquisition IPO" in search.call_args.args[1]
-    assert requests[0]["messages"][0]["content"] == investigator._SYSTEM_PROMPT
+    assert len(requests) == 1
+    messages = requests[0]["messages"]
+    base_system = {"role": "system", "content": investigator._SYSTEM_PROMPT}
+    assert messages[0] == base_system
+    systems = [message for message in messages if message["role"] == "system"]
+    if target == "stage" and requested_stage == "Series C+":
+        assert len(systems) == 2
+        assert len(messages) == 3
+        assert messages[1] == systems[1]
+        guidance = systems[1]["content"]
+        assert "proven completed Series D plus a pending Series E" in guidance
+        assert "Uncertainty is material only if the canonical stage can change" in guidance
+        assert "acquisitions, IPOs, and other stage changes" in guidance
+        assert len(guidance) < 300
+    else:
+        assert systems == [base_system]
+        assert len(messages) == 2
+        assert messages[1]["role"] == "user"
+    user_message = next(message for message in messages if message["role"] == "user")
+    document = json.loads(user_message["content"].split("\n", 1)[1])
+    assert document["requested_stage"] == requested_stage
+    assert document["requested_targets"] == [target]
+    assert document["investigation_limits"]["search_calls"] == 2
+    assert document["investigation_limits"]["fetch_calls"] == 4

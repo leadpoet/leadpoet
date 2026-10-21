@@ -467,11 +467,8 @@ Series A, Series B, Series C+, Private Equity, Public, or Acquired. Use the valu
 the evidence proves, not the requested value by default. Series C+ represents
 completed Series C and later priced-equity rounds, including a completed
 extension of that round. Return observed_value="Series C+" for such evidence;
-an extension needs no new stage label. Debt, grants, planned rounds,
+an extension does not require a new stage label. Debt, grants, planned rounds,
 and unresolved ownership or chronology do not establish that value.
-Uncertainty is material only if it can change the canonical stage. Completed Series D plus
-pending Series E still proves Series C+. Resolve acquisitions, IPOs, or other
-stage changes.
 
 A currently listed company stays Public despite PE control until a later
 completed take-private or delisting. For requested PE, cite listing proof as
@@ -486,14 +483,16 @@ Section 12(b) table can establish registered common/ordinary shares, their
 ticker, and exchange. Quote one continuous span that includes the registrant
 name and the complete row. Check the filing date and later ownership/listing
 events; an old table does not establish current status or override newer
-private-company evidence.
+private-company evidence. For venture stages, compare dated rounds, acquisitions
+and IPO/listing events; use the latest completed event.
 For a Series stage, use the latest completed priced-equity round. A later
 loan, debt facility, or grant does not by itself supersede that equity stage.
 A later completed priced-equity round, controlling acquisition, or IPO/listing
 event involving ownership of the investigated company can supersede it and
 must be evaluated chronologically. Identify the buyer and target explicitly:
 the investigated company buying another business does not make the buyer
-Acquired and does not supersede the buyer's funding stage. Thus a later
+Acquired and does not supersede the buyer's funding stage. Only an acquisition
+OF the investigated company can do that. Thus a later
 Series C, controlling acquisition, or IPO can contradict an earlier Series B;
 later debt alone cannot. Conflicting labels without chronology are UNPROVEN.
 For a requested Seed, Series A, Series B, Series C+, or Public stage, a matching
@@ -4478,6 +4477,21 @@ async def investigate_company_evidence(
                         ),
                         "messages": [
                             {"role": "system", "content": _SYSTEM_PROMPT},
+                            *([
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "For Series C+, a proven completed Series D "
+                                        "plus a pending Series E still proves Series C+. "
+                                        "Uncertainty is material only if the canonical "
+                                        "stage can change; still check acquisitions, "
+                                        "IPOs, and other stage changes."
+                                    ),
+                                },
+                            ] if (
+                                "stage" in requested_targets
+                                and normalized_requested_stage == "series c+"
+                            ) else []),
                             *messages,
                         ],
                         "tools": [

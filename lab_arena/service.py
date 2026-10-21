@@ -4519,6 +4519,58 @@ class ArenaService:
 
     # -- publication and downstream reward activation -------------------------
 
+    def _empty_execution_infrastructure_failure(self, reads: _PublicationReads) -> bool:
+        """Recognize saved empty outputs whose last model call could not run.
+
+        Only publication uses this derived check. Original accepted runs, native
+        receipts, costs, and judgments stay unchanged; other work can continue.
+        """
+        for participant in reads.round_row.get("participants") or []:
+            selected = self._selected_accepted_execution_runs(
+                reads.runs, str(participant["submission_id"]),
+            )
+            for run in selected.values():
+                if reads.output(str(run["output_ref"]))["companies"]:
+                    continue
+                issued = self._store.latest_execution_model_reservation(str(run["run_id"]))
+                if issued is None:
+                    continue
+                document = issued.get("entry_doc") or {}
+                sequence = document.get("action_sequence")
+                operation = issued.get("operation_id")
+                if (type(sequence) is not int or sequence < 0
+                    or operation not in ("openrouter.chat", "openrouter.responses")
+                    or not isinstance(document.get("request_hash"), str)
+                    or not issued.get("call_identity")):
+                    raise ArenaStoreError("execution model reservation is invalid")
+                ledger = self._store.list_ledger(
+                    run_id=str(run["run_id"]), call_identity=issued["call_identity"], limit=20,
+                )
+                reservations = [row for row in ledger if row["entry_kind"] == "reservation"]
+                dispatches = [row for row in ledger if row["entry_kind"] == "dispatch"]
+                settlements = [row for row in ledger if row["entry_kind"] == "settlement"]
+                if len(ledger) >= 20 or any(len(rows) != 1 for rows in (reservations, dispatches, settlements)):
+                    raise ArenaStoreError("execution model call lifecycle is incomplete")
+                reservation, dispatch, terminal = reservations[0], dispatches[0], settlements[0]
+                expected = {"run_id": run["run_id"], "call_identity": issued["call_identity"],
+                            "operation_id": operation, "provider": "openrouter",
+                            "funding_source": issued.get("funding_source")}
+                if (any(row.get(key) != value for row in ledger for key, value in expected.items())
+                    or not reservation["entry_id"] < dispatch["entry_id"] < terminal["entry_id"]
+                    or max(row["entry_id"] for row in ledger) != terminal["entry_id"]
+                    or reservation["entry_id"] != issued["entry_id"]
+                    or reservation.get("entry_doc") != document):
+                    raise ArenaStoreError("execution model call binding is invalid")
+                native = terminal.get("terminal_response")
+                if not isinstance(native, Mapping):
+                    raise ArenaStoreError("execution model call receipt is missing")
+                status, _headers, body = broker_module._decode_terminal(native)
+                if broker_module._openrouter_data_policy_route_unavailable(status, body):
+                    if native.get("call_succeeded") is not False:
+                        raise ArenaStoreError("execution model call receipt contradicts its outcome")
+                    return True
+        return False
+
     def publish(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
@@ -4544,6 +4596,17 @@ class ArenaService:
         publication_reads = _PublicationReads(
             self, round_row, self._store.list_runs(round_id, kind="execute")
         )
+        try:
+            infrastructure_failure = self._empty_execution_infrastructure_failure(publication_reads)
+        except (ArenaStoreError, broker_module.BrokerError, OutputInvalid, KeyError,
+                TypeError, ValueError, UnicodeDecodeError):
+            return self._hold_incomplete_evaluation(
+                round_row, reason="execution_evidence_unavailable",
+            )
+        if infrastructure_failure:
+            return self._hold_incomplete_evaluation(
+                round_row, reason="execution_infrastructure_incomplete",
+            )
         stage1_ranking = verify.stage1_ranking(
             self._score_entries_from_runs(
                 round_row,

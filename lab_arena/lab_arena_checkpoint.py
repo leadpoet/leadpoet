@@ -13,6 +13,7 @@ import os
 import socket
 import tempfile
 import time
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -50,6 +51,12 @@ MAX_TRAINING_FRAME_BYTES = 8 * 1024 * 1024
 MAX_TRAINING_WEB_BODY_BYTES = 6 * 1024 * 1024
 MAX_TRAINING_STATE_BYTES = 65_536
 TRAINING_SOCKET_TIMEOUT_SECONDS = 1.0
+_TRAINING_FAILURE = threading.local()
+
+
+def _training_failure_reason() -> str | None:
+    """Return only the bounded reason for this thread's latest capture call."""
+    return getattr(_TRAINING_FAILURE, "reason", None)
 
 
 class QuotaUnavailable(RuntimeError):
@@ -126,6 +133,7 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
 
 
 def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | None) -> int | None:
+    _TRAINING_FAILURE.reason = None
     frame = {"schema_version": TRAINING_SCHEMA_VERSION, "control": TRAINING_CONTROL,
              "kind": kind, "depends_on": depends_on, "data": data}
     try:
@@ -142,10 +150,12 @@ def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | No
                 pass
             # Invalid dependencies must not make the failure report fail too.
             _record_training("capture_failure", {"category": kind, "reason": reason}, None)
+        _TRAINING_FAILURE.reason = "invalid_frame"
         return None
     try:
         path = str(os.environ.get(WORKER_SOCKET_ENV) or "").strip()
         if not path.startswith("/"):
+            _TRAINING_FAILURE.reason = "socket_unavailable"
             return None
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
@@ -157,13 +167,28 @@ def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | No
             connection.sendall((len(encoded) | 0x80000000).to_bytes(4, "big") + encoded)
             size = int.from_bytes(_recv_decision_response(connection, 4, deadline), "big")
             if size < 2 or size > MAX_QUOTA_RESPONSE_BYTES:
+                _TRAINING_FAILURE.reason = "invalid_response"
                 return None
-            response = json.loads(_recv_decision_response(connection, size, deadline))
+            try:
+                response = json.loads(_recv_decision_response(connection, size, deadline))
+            except (ValueError, UnicodeError):
+                _TRAINING_FAILURE.reason = "invalid_response"
+                return None
+            if isinstance(response, dict) and response.get("recorded") is False:
+                _TRAINING_FAILURE.reason = "host_rejected"
+                return None
             result = response.get("observation_id") if isinstance(response, dict) and response.get("recorded") is True else None
-            return result if type(result) is int and result >= 0 else None
+            if type(result) is int and result >= 0:
+                return result
+            _TRAINING_FAILURE.reason = "invalid_response"
+            return None
         finally:
             connection.close()
+    except TimeoutError:
+        _TRAINING_FAILURE.reason = "timeout"
+        return None
     except Exception:
+        _TRAINING_FAILURE.reason = "transport_error"
         return None
 
 
@@ -179,6 +204,7 @@ def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str
     if body_size < 0 or body_size > MAX_TRAINING_WEB_BODY_BYTES:
         reason = "size_limit" if body_size > MAX_TRAINING_WEB_BODY_BYTES else "invalid_value"
         _record_training("capture_failure", {"category": "web_fetch", "reason": reason}, depends_on)
+        _TRAINING_FAILURE.reason = "invalid_frame"
         return None
     data = {"url": url, "final_url": final_url, "status": status,
         "content_type": content_type, "body": body,
@@ -195,16 +221,19 @@ def record_response_received(*, call_identity: str, status: int, body: bytes | N
     if body is not None:
         if body_sha256 is not None or body_bytes is not None:
             _record_training("capture_failure", {"category": "response_received", "reason": "invalid_value"}, depends_on)
+            _TRAINING_FAILURE.reason = "invalid_frame"
             return None
         try:
             raw = bytes(body)
         except (TypeError, ValueError, RecursionError):
             _record_training("capture_failure", {"category": "response_received", "reason": "invalid_value"}, depends_on)
+            _TRAINING_FAILURE.reason = "invalid_frame"
             return None
         body_sha256 = "sha256:" + hashlib.sha256(raw).hexdigest()
         body_bytes = len(raw)
     elif body_sha256 is None or body_bytes is None:
         _record_training("capture_failure", {"category": "response_received", "reason": "invalid_value"}, depends_on)
+        _TRAINING_FAILURE.reason = "invalid_frame"
         return None
     return _record_training("response_received", {"call_identity": call_identity, "status": status,
         "body_sha256": body_sha256, "body_bytes": body_bytes}, depends_on)
@@ -215,9 +244,11 @@ def record_state_snapshot(name: str, value: Any, *, depends_on: list[str] | None
     try:
         if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_STATE_BYTES:
             _record_training("capture_failure", {"category": "state_snapshot", "reason": "size_limit"}, depends_on)
+            _TRAINING_FAILURE.reason = "invalid_frame"
             return None
     except (TypeError, ValueError, UnicodeError, RecursionError):
         _record_training("capture_failure", {"category": "state_snapshot", "reason": "invalid_value"}, depends_on)
+        _TRAINING_FAILURE.reason = "invalid_frame"
         return None
     return _record_training("state_snapshot", {"name": name, "value": value}, depends_on)
 

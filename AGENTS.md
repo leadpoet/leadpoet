@@ -1,3 +1,20 @@
+## Scoped production authorization: restore recorded October 21 results
+
+On 2026-10-21 the user replaced the uniform rejudge outcome with immediate
+restoration of the original saved results and ordinary promotion of the highest
+eligible recorded score. Stop new recovery work. At a locked, settled provider
+boundary, terminate only excluded recovery work through audited stage closure;
+preserve its leases, receipts and charges. Restore the archived original scorer
+configuration and scoring floor, keep status and stage generations increasing,
+and retain all old and corrected judgments with their actual provenance.
+Keep every originally complete legitimate contender; preserve genuine recorded
+failure zeros. Show the three provider-blocked entrants and other incomplete
+entrants as not evaluated, without fabricated zeros. Use the ordinary score,
+publication, promotion and reward paths. Record this historical competition
+override explicitly; it does not change future competition rules. This scope
+includes focused tests, independent review, safe merge and canonical deployment.
+The coordinating agent owns production application and live verification.
+
 ## Scoped production authorization: fair cancelled evaluation recovery
 
 On 2026-10-21 the user authorized finishing the other miners and excluding

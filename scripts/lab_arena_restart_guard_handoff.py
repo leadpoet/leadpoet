@@ -211,6 +211,7 @@ def _validate_permit(args: argparse.Namespace) -> dict[str, Any]:
         or isinstance(generation, bool)
         or not isinstance(generation, int)
         or generation <= 0
+        or (args.expected_generation and generation != args.expected_generation)
         or value.get("guard_commitment") != expected_guard
         or value.get("owner_commitment") != expected_owner
     ):
@@ -258,7 +259,7 @@ def _safe_summary(value: Mapping[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("write-request", "validate-request", "write-permit", "validate-permit"))
+    parser.add_argument("action", choices=("write-request", "validate-request", "write-permit", "validate-permit", "consume-permit"))
     parser.add_argument("--path", type=Path, required=True)
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--invocation", required=True)
@@ -278,6 +279,12 @@ def main() -> int:
             _write_document(args.path, value)
         else:
             value = _validate_permit(args)
+            if args.action == "consume-permit":
+                if args.expected_generation <= 0:
+                    raise GuardError("Arena guard permit generation is required")
+                # The canonical controller holds its restart lock. A permit is
+                # local, private and single-use; a second invocation cannot reuse it.
+                args.path.unlink()
         print(json.dumps(_safe_summary(value), sort_keys=True, separators=(",", ":")))
         return 0
     except (GuardError, OSError) as exc:

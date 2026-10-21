@@ -155,6 +155,19 @@ ROLLBACK="$(mktemp -d "$RELEASE_ROOT/.rollback.XXXXXX")"
 if sudo test -f "$SERVICE_ENV"; then sudo install -m 0600 "$SERVICE_ENV" "$ROLLBACK/service.env"; fi
 if sudo test -f "$UNIT_PATH"; then sudo install -m 0644 "$UNIT_PATH" "$ROLLBACK/service.unit"; fi
 sudo systemctl is-active --quiet "$SERVICE" && OLD_ACTIVE=1
+# The paired coordinator supplies only a private nonce-bound permit, never
+# gateway service credentials. Validate/consume after all normal preflight and
+# immediately before the destructive step. The default standalone path is unchanged.
+if [ -n "${VALIDATOR_PAIR_PERMIT:-}" ]; then
+  [ "${VALIDATOR_PAIR_AUTHORITY_COMMIT:-}" = "$TARGET_SHA" ] || fail "paired restart authority differs"
+  [[ "${VALIDATOR_PAIR_GENERATION:-}" =~ ^[1-9][0-9]*$ ]] || fail "paired restart generation is invalid"
+  PYTHONPATH="$RELEASE" "$PYTHON" -B \
+    "$RELEASE/scripts/lab_arena_restart_guard_handoff.py" consume-permit \
+    --path "$VALIDATOR_PAIR_PERMIT" --candidate "$TARGET_SHA" \
+    --invocation "${VALIDATOR_PAIR_INVOCATION:-}" --scope all \
+    --nonce "${VALIDATOR_PAIR_NONCE:-}" --authority-commit "$TARGET_SHA" \
+    --expected-generation "$VALIDATOR_PAIR_GENERATION" >/dev/null
+fi
 # Only now drain existing scoring work and stop the old weight process.
 DRAINED=1
 if [ "$(sudo systemctl show -p LoadState --value "$SERVICE")" != not-found ]; then

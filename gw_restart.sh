@@ -46,6 +46,14 @@ LAB_ARENA_PROCESS_HELPER="$GATEWAY_CONTROLLER_PROCESS_HELPER"
 GATEWAY_CONTROLLER_PROCESS_STATE_FILE="$LAB_ARENA_SERVICE_STATE_FILE"
 GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID:-}"
 GATEWAY_ACTIVE_RELEASE_COMPONENT="${GATEWAY_ACTIVE_RELEASE_COMPONENT:-gateway}"
+# Opt-in paired deployment retains the existing all-component guard after gateway readiness.
+GATEWAY_PAIRED_RESTART="${GATEWAY_PAIRED_RESTART:-0}"
+case "$GATEWAY_PAIRED_RESTART" in 0|1) ;; *) echo "ERROR: invalid paired restart mode" >&2; exit 2 ;; esac
+GATEWAY_RESTART_GUARD_SCOPE="$GATEWAY_ACTIVE_RELEASE_COMPONENT"
+if [ "$GATEWAY_PAIRED_RESTART" = 1 ]; then
+  [ "$GATEWAY_ACTIVE_RELEASE_COMPONENT" = gateway ] || exit 2
+  GATEWAY_RESTART_GUARD_SCOPE=all
+fi
 GATEWAY_GIT_HELPER_DEFAULT="$LEADPOET_REPO_ROOT/scripts/gateway_git_deploy.py"
 GATEWAY_HOST_MEMORY_GUARD_DEFAULT="$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"
 if [ -n "$GATEWAY_RESTART_AUTHORITY_ROOT" ] \
@@ -259,7 +267,7 @@ PY
     "$GATEWAY_PREFLIGHT_TREE/scripts/lab_arena_restart_claim_guard.py" owned \
     --candidate "$ARENA_PREVIOUS_SHA" --invocation "$owner" \
     --environment-file "$GATEWAY_ENV_FILE")" || return 1
-  "$GATEWAY_PYTHON_BIN" - "$ARENA_PREVIOUS_SHA" "$GATEWAY_ACTIVE_RELEASE_COMPONENT" "$state" "$required_phase" <<'PY' || return 1
+  "$GATEWAY_PYTHON_BIN" - "$ARENA_PREVIOUS_SHA" "$GATEWAY_RESTART_GUARD_SCOPE" "$state" "$required_phase" <<'PY' || return 1
 import json
 import sys
 state = json.loads(sys.argv[3])
@@ -288,7 +296,7 @@ restore_arena_recovery_guard_before_destructive() {
     PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" "$helper" drain \
     --candidate "$ARENA_PREVIOUS_SHA" \
     --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
-    --scope "$GATEWAY_ACTIVE_RELEASE_COMPONENT" --timeout-seconds 30 \
+    --scope "$GATEWAY_RESTART_GUARD_SCOPE" --timeout-seconds 30 \
     --environment-file "$GATEWAY_ENV_FILE" >/dev/null || return 1
   state="$(env -u LAB_ARENA_SUPABASE_URL -u LAB_ARENA_SERVICE_KEY \
     PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" "$helper" owned \
@@ -962,7 +970,7 @@ drain_lab_arena_for_restart() {
   LAB_ARENA_RESTART_DRAIN_REPORT="$(mktemp "${GATEWAY_RESTART_TIMING_FILE%.jsonl}.drain.XXXXXX")" || return 1
   (
     run_lab_arena_restart_guard --exec-drain "$source_root" drain \
-      --scope "$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
+      --scope "$GATEWAY_RESTART_GUARD_SCOPE" \
       --timeout-seconds 6600
   ) >"$LAB_ARENA_RESTART_DRAIN_REPORT" &
   LAB_ARENA_RESTART_DRAIN_PID=$!
@@ -1037,6 +1045,8 @@ GATEWAY_RESTART_PATH_AUTHORITY_KEYS=(
   GATEWAY_CONTROLLER_PROCESS_STATE_FILE
   LAB_ARENA_PROCESS_HELPER
   LAB_ARENA_SERVICE_STATE_FILE
+  GATEWAY_PAIRED_RESTART
+  GATEWAY_RESTART_GUARD_SCOPE
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID
   GATEWAY_RESTART_RECOVERY_LOCK_FILE
   LEADPOET_DOCKER_OPERATION_LOCK_FILE
@@ -1311,6 +1321,8 @@ start_gateway_offline_artifact_prepare() {
     -u GATEWAY_RESTART_AUTHORITY_COMMIT \
     -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
     -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
+    -u GATEWAY_PAIRED_RESTART \
+    -u GATEWAY_RESTART_GUARD_SCOPE \
     python3 -c '
 import os
 import sys
@@ -1441,6 +1453,7 @@ follow_superseding_gateway_release() {
     GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
     GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
     GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
+    GATEWAY_PAIRED_RESTART="$GATEWAY_PAIRED_RESTART" \
     GATEWAY_GIT_HELPER="$superseding_tree/scripts/gateway_git_deploy.py" \
     GATEWAY_HOST_MEMORY_GUARD_PATH="$superseding_tree/gateway/tee/host_memory_guard_v2.py" \
     GATEWAY_RESTART_PHASE=prepare \
@@ -2416,6 +2429,8 @@ restart_only_keys = {
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "GATEWAY_PAIRED_RESTART",
+    "GATEWAY_RESTART_GUARD_SCOPE",
     "PREPARED_GATEWAY_SHA",
     "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
@@ -2542,6 +2557,8 @@ skip_keys = {
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "GATEWAY_PAIRED_RESTART",
+    "GATEWAY_RESTART_GUARD_SCOPE",
     "PREPARED_GATEWAY_SHA",
     "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
@@ -2695,6 +2712,8 @@ skip_keys = {
     "GATEWAY_RESTART_AUTHORITY_COMMIT",
     "GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID",
     "GATEWAY_ACTIVE_RELEASE_COMPONENT",
+    "GATEWAY_PAIRED_RESTART",
+    "GATEWAY_RESTART_GUARD_SCOPE",
     "PREPARED_GATEWAY_SHA",
     "LAB_ARENA_RESTART_GUARD_GENERATION",
     "GATEWAY_RESTART_RECOVERY_LOCK_FILE",
@@ -3341,6 +3360,7 @@ exec env \
   GATEWAY_RESTART_AUTHORITY_COMMIT="$GATEWAY_RESTART_AUTHORITY_COMMIT" \
   GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID="$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
   GATEWAY_ACTIVE_RELEASE_COMPONENT="$GATEWAY_ACTIVE_RELEASE_COMPONENT" \
+  GATEWAY_PAIRED_RESTART="$GATEWAY_PAIRED_RESTART" \
   GATEWAY_DEPLOY_PLAN_FILE="$GATEWAY_DEPLOY_PLAN_FILE" \
   GATEWAY_DEPLOYMENT_DIR="$GATEWAY_DEPLOYMENT_DIR" \
   GATEWAY_DEPLOYMENT_MANIFEST="$GATEWAY_DEPLOYMENT_MANIFEST" \
@@ -3644,6 +3664,8 @@ env -u LEADPOET_DOCKER_OPERATION_LOCK_HELD \
   -u GATEWAY_RESTART_AUTHORITY_COMMIT \
   -u GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID \
   -u GATEWAY_ACTIVE_RELEASE_COMPONENT \
+  -u GATEWAY_PAIRED_RESTART \
+  -u GATEWAY_RESTART_GUARD_SCOPE \
   -u PREPARED_GATEWAY_SHA \
   -u LAB_ARENA_RESTART_GUARD_GENERATION \
   setsid "$GATEWAY_PYTHON_BIN" -u -m gateway.main \
@@ -3753,12 +3775,34 @@ if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
 fi
 GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"
 export GATEWAY_DEPLOY_STAGE
-if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" release \
-    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" >/dev/null; then
-  echo "ERROR: Lab Arena restart guard release failed after gateway readiness" >&2
-  exit 1
+if [ "$GATEWAY_PAIRED_RESTART" = 1 ]; then
+  # Only the paired coordinator may advance the same owner/generation through
+  # validator readiness. Never refill between the two canonical restarts.
+  paired_state="$(run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" owned \
+    --generation "$LAB_ARENA_RESTART_GUARD_GENERATION")"
+  "$GATEWAY_PYTHON_BIN" - "$PREPARED_GATEWAY_SHA" \
+      "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" "$paired_state" \
+      "$LAB_ARENA_RESTART_GUARD_GENERATION" <<'PAIRED_GUARD'
+import json, sys
+state = json.loads(sys.argv[3])
+if (state.get("candidate_commit") != sys.argv[1]
+        or state.get("guard_generation") != int(sys.argv[4])
+        or state.get("restart_scope") != "all"
+        or state.get("restart_phase") != "gateway_ready"
+        or state.get("guard_active") is not True
+        or state.get("paused") is not True
+        or state.get("drain", {}).get("preserved") is not True):
+    raise SystemExit("paired gateway guard is not ready")
+print("ARENA_PAIRED_GUARD=" + json.dumps({"invocation": sys.argv[2], "state": state}, separators=(",", ":")))
+PAIRED_GUARD
+else
+  if ! run_lab_arena_restart_guard "$LEADPOET_REPO_ROOT" release \
+      --generation "$LAB_ARENA_RESTART_GUARD_GENERATION" >/dev/null; then
+    echo "ERROR: Lab Arena restart guard release failed after gateway readiness" >&2
+    exit 1
+  fi
+  LAB_ARENA_RESTART_GUARD_GENERATION=""
 fi
-LAB_ARENA_RESTART_GUARD_GENERATION=""
 GATEWAY_DEPLOY_STAGE="completed"
 export GATEWAY_DEPLOY_STAGE
 finalize_deployment_record succeeded "$GATEWAY_DEPLOY_STAGE" >/dev/null

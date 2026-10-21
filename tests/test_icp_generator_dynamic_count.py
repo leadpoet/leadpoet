@@ -97,7 +97,57 @@ def test_provider_bank_count_and_diversity(monkeypatch, count):
     assert len(distribution) == min(count, 20)
     assert generator.generated_bank_error(icps, count, distribution) is None
     assert digest == generator.compute_icp_set_hash(icps)
-    assert captured["max_tokens"] >= count * 400
+    assert captured["max_tokens"] >= count * 1200
+
+
+def test_generation_uses_bounded_sonnet_search_without_unsupported_sampling(monkeypatch):
+    captured = _stub_provider(monkeypatch)
+    assert asyncio.run(generator.generate_icps_with_openrouter(
+        20260920, total_icps=10, api_key="test-only",
+    )) is not None
+    assert captured["model"] == "anthropic/claude-sonnet-5.5"
+    assert captured["reasoning"] == {"effort": "medium"}
+    assert captured["tools"] == [{"type": "openrouter:web_search", "parameters": {
+        "engine": "native", "max_uses": 10,
+    }}]
+    assert captured["max_tool_calls"] == 10
+    assert not {"temperature", "top_p", "top_k"}.intersection(captured)
+
+
+@pytest.mark.parametrize("failure", [429, 502, "timeout", "malformed", "empty"])
+def test_generation_failure_does_not_return_a_bank_or_loop(monkeypatch, failure):
+    calls = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            assert kwargs["timeout"] == 180.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, *_args, **_kwargs):
+            calls.append(1)
+            if failure == "timeout":
+                raise generator.httpx.ReadTimeout("test timeout")
+
+            class Response:
+                status_code = failure if isinstance(failure, int) else 200
+
+                def json(self):
+                    return {"choices": [{"finish_reason": "stop", "message": {
+                        "content": "invalid JSON" if failure == "malformed" else "",
+                    }}]}
+
+            return Response()
+
+    monkeypatch.setattr(generator.httpx, "AsyncClient", Client)
+    assert asyncio.run(generator.generate_icps_with_openrouter(
+        20260920, total_icps=10, api_key="test-only",
+    )) is None
+    assert calls == [1]
 
 
 @pytest.mark.parametrize("count", [10, 15, 20, 30])

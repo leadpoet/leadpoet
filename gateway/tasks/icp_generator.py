@@ -80,11 +80,12 @@ def _rebenchmark_now() -> datetime:
 # =============================================================================
 # OpenRouter Configuration for LLM-Based ICP Generation
 # =============================================================================
-# We use OpenRouter with Sonar Pro to generate varied, human-like ICP prompts
+# We use OpenRouter with Sonnet and bounded web search to generate ICP prompts.
 # This prevents miners from overfitting to hardcoded templates
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = "perplexity/sonar-pro"  # Real-time web search → realism-grounded ICPs
+OPENROUTER_MODEL = "anthropic/claude-sonnet-5.5"
+OPENROUTER_EXCLUSION_MODEL = "perplexity/sonar-pro"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MAX_COMPLETION_TOKENS = 8000
 
@@ -1190,12 +1191,15 @@ Each ICP must also return these structured fields for the people to find at ever
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    # Sonar drifts from JSON format at higher temperatures;
-                    # 0.7 keeps it grounded while still varying voice across the 20.
-                    "temperature": 0.7,
-                    "max_tokens": max(OPENROUTER_MAX_COMPLETION_TOKENS, total_icps * 400),
-                    # Perplexity Sonar does NOT accept `response_format: json_object`;
-                    # the prompt explicitly demands JSON-only output instead.
+                    # Sonnet 5.5 does not support sampling parameters. Medium
+                    # reasoning gave better factual examples in the paired audit.
+                    "reasoning": {"effort": "medium"},
+                    "tools": [{"type": "openrouter:web_search", "parameters": {
+                        "engine": "native", "max_uses": 10,
+                    }}],
+                    "max_tool_calls": 10,
+                    # The completion allowance includes reasoning and bank JSON.
+                    "max_tokens": max(OPENROUTER_MAX_COMPLETION_TOKENS, total_icps * 1200),
                 }
             )
         
@@ -1585,7 +1589,7 @@ def generate_exclusions_for_icp(icp: Dict[str, Any], count: Optional[int] = None
             f"{OPENROUTER_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}",
                      "Content-Type": "application/json"},
-            json={"model": OPENROUTER_MODEL,
+            json={"model": OPENROUTER_EXCLUSION_MODEL,
                   "messages": [{"role": "user", "content": prompt}],
                   "temperature": 0.0},
             timeout=timeout_s,

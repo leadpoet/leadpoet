@@ -7156,7 +7156,9 @@ class ArenaService:
                             companies=output["companies"], policy=configuration["scorer_policy"],
                         )
                     scores = scoring.build_stage_scores(
-                        plan={**plan, "work_items": items, "zero_rows": zeros},
+                        plan={**plan, "work_items": items, "zero_rows": zeros,
+                              "incomplete_rows": [item for item in plan.get("incomplete_rows") or []
+                                                  if item["submission_id"] == submission_id]},
                         policy=configuration["scorer_policy"],
                         icps_by_position=dict(enumerate(icps)), outputs_by_run=outputs,
                         breakdowns_by_item=breakdowns, configuration=configuration,

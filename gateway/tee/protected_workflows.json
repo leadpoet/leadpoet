@@ -527,12 +527,22 @@
       "symbol": "REWARD_SLOT_POLICY"
     },
     {
+      "ast_sha256": "sha256:1a68623b8e4c97756c2664272ef8ed4e8ab0803885c75cc3628216879eb60fd1",
+      "path": "lab_arena/rewards.py",
+      "symbol": "REWARD_SLOT_POLICY_50_PERCENT"
+    },
+    {
+      "ast_sha256": "sha256:da6bad436f1e8bcd05329c9b74a838adc3b959510ee475cb1732c3fd2a447164",
+      "path": "lab_arena/rewards.py",
+      "symbol": "REWARD_SLOT_POLICY_50_PERCENT_START"
+    },
+    {
       "ast_sha256": "sha256:c54118dcf175e12df1e85dce2c1844bb203476ea4f38b163e8e00964cf0b16d7",
       "path": "lab_arena/rewards.py",
       "symbol": "reward_basis_document"
     },
     {
-      "ast_sha256": "sha256:5dcf4e67deada25e0b8a740d3c676fbd0f5aa01f767e04e9a47bb02025f57b77",
+      "ast_sha256": "sha256:3708089ec7700b715864b1ef1fe87e27a5bf0ea00d136750219228dd6474d984",
       "path": "lab_arena/rewards.py",
       "symbol": "reward_slot_policy_document"
     },
@@ -867,7 +877,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:680b09cad574f9030e313f5130013fea42b1e7a22723e69b7e480bd3279882fe",
-  "protected_source_commit": "0aa146838fb76784b48dfd122eeb4b9b3da2159e",
+  "manifest_hash": "sha256:245aea8fec2533880b009af8c0a6e2c71d93b7de0af55fbfe9a45d930bbfe65f",
+  "protected_source_commit": "809f261e1bb0b9315d2e1678783e6fe25e365c8b",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

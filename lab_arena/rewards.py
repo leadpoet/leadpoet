@@ -16,6 +16,7 @@ through the next round's signed basis and never rewrites an old one.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 from lab_arena.contracts import (
@@ -44,9 +45,9 @@ from leadpoet_canonical.lab_arena_rewards import (  # noqa: F401  (re-exported: 
 
 MAX_REWARD_WEEK_INDEX = len(KING_POOL_SHARE_PERCENT_BY_WEEK) - 1
 
-# The complete slot payout policy. The 30% miner pot is a share of total
-# emissions; tier percentages divide that pot. Each activated basis signs a
-# copy, so changes never alter an existing signed basis.
+# Slot policies are selected by evaluation day, not activation time. Tier
+# percentages divide the miner pot. Each activated basis signs a copy, so
+# changes never alter an existing signed basis.
 REWARD_SLOT_POLICY = {
     "assignment_mode": "all_qualifying",
     "pool_percent": 30,
@@ -59,8 +60,26 @@ REWARD_SLOT_POLICY = {
 }
 
 
-def reward_slot_policy_document() -> Dict[str, Any]:
-    return _kernel.validate_slot_policy(REWARD_SLOT_POLICY)
+REWARD_SLOT_POLICY_50_PERCENT = {
+    **REWARD_SLOT_POLICY,
+    "pool_percent": 50,
+    "tiers": [
+        {"minimum_improvement": 10, "allocation_percent": 40},
+        {"minimum_improvement": 5, "allocation_percent": 30},
+        {"minimum_improvement": 1, "allocation_percent": 30},
+    ],
+}
+REWARD_SLOT_POLICY_50_PERCENT_START = date(2026, 10, 22)
+
+
+def reward_slot_policy_document(evaluation_date: Optional[date] = None) -> Dict[str, Any]:
+    """Copy the round's policy; undated legacy callers retain their old policy."""
+    policy = (
+        REWARD_SLOT_POLICY_50_PERCENT
+        if evaluation_date is not None and evaluation_date >= REWARD_SLOT_POLICY_50_PERCENT_START
+        else REWARD_SLOT_POLICY
+    )
+    return _kernel.validate_slot_policy(policy)
 
 
 def _require_epoch(value: Any, name: str) -> int:

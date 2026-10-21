@@ -9411,6 +9411,7 @@ async def _llm_reverify_company(
         # replace source-bound identity or any independent fit proof.
         investigation_targets = ()
     claims: Mapping[str, Any] = {}
+    repair_missing_identity = False
     if investigation_targets:
         (
             verdict,
@@ -9478,14 +9479,35 @@ async def _llm_reverify_company(
             # Preserve valid partial findings, but retry an unresolved fact
             # after its required research failed or was refused for time.
             return result
-        if (
+        unresolved_positive_semantics = (
             positive_semantic_review
             and not _positive_semantic_finding_resolved(
                 claims.get("industry")
                 if isinstance(claims.get("industry"), Mapping)
                 else None
             )
-        ):
+        )
+        missing_dimensions = _incomplete_company_reverify_dimensions(
+            result, icp_attribute=icp_attribute, icp_stage=icp_stage,
+        )
+        identity_fields = ("observed_company_name", "observed_company_website")
+        if company.company_linkedin:
+            identity_fields += ("observed_company_linkedin",)
+        receipt = result.details.get("investigation_receipt")
+        receipt = receipt if isinstance(receipt, Mapping) else {}
+        repair_missing_identity = (
+            unresolved_positive_semantics
+            and receipt.get("completed_submitted_findings") is True
+            and receipt.get("failure_reason") == ""
+            and "identity" in missing_dimensions
+            and "rebrand" not in investigation_targets
+            and any(
+                not isinstance(verdict.get(field), str) or not verdict[field].strip()
+                for field in identity_fields
+            )
+        )
+        # Keep semantic finality, but do not skip an independent schema gap.
+        if unresolved_positive_semantics and not repair_missing_identity:
             settled = _settle_completed_company_investigation(
                 result, verdict, investigation_targets=investigation_targets,
                 icp=icp, icp_attribute=icp_attribute, icp_stage=icp_stage,
@@ -9813,6 +9835,11 @@ async def _llm_reverify_company(
                 and isinstance(claims.get("industry"), Mapping)
                 else None
             ),
+        )
+    if repair_missing_identity:
+        # Filling identity must not reopen the already unproven semantic claim.
+        repaired_verdict = _clear_reopened_positive_semantics(
+            repaired_verdict, active_attribute=False,
         )
     repaired_result = _reverify_decision(
         repaired_verdict,

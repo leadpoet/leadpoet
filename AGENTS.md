@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: October 21 unfinished judge repair
+
+On 2026-10-21 the user authorized fixing, testing, restarting and deploying the
+confirmed unfinished-judgment failures. This includes protected inspection,
+a narrow exact-source reviewer-runtime correction for the missing identity
+schema repair, focused failure and scoring controls, clean image build and
+publication, safe push/merge, verified runtime registration, canonical gateway
+and normal-validator deployment, and live retry/result verification. Investigate
+the related web-provider failures and change only a proved collection or recovery
+bug. Preserve frozen grading pins and policies, qualification standards, accepted
+results, caches, provider accounting, budgets, deadlines, rewards, credentials
+and concurrent work. Do not manually requeue leases, fabricate scores, change
+frozen rounds, or bypass release gates. This authority ends after deployment
+and live verification of the requested repair.
+
 ## Scoped production authorization: continuous champion slot rewards
 
 On 2026-10-21 the user authorized fixing the reward-basis freshness timeout so

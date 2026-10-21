@@ -266,13 +266,28 @@ class Buffer:
     local_refusals: int = 0
     failures: set[str] = field(default_factory=set)
 
-    def append(self, value: Mapping[str, Any], secrets: Sequence[str] = ()) -> None:
-        """Caller holds the run lock; every capture failure stays observational."""
-        self.attempted += 1
-        self.local_refusals += value.get("kind") == "local_refusal"
+    @staticmethod
+    def prepare_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> tuple[dict, int] | None:
+        """Validate detached evidence before acquiring the shared run lock."""
         try:
             cleaned = clean_observation(value, secrets)
-            size = len(_canonical(cleaned)) + 1
+            return cleaned, len(_canonical(cleaned)) + 1
+        except Exception:
+            return None
+
+    def append(self, value: Mapping[str, Any], secrets: Sequence[str] = ()) -> None:
+        """Caller holds the run lock; every capture failure stays observational."""
+        self.append_prepared(self.prepare_observation(value, secrets),
+                             local_refusal=value.get("kind") == "local_refusal")
+
+    def append_prepared(self, prepared: tuple[dict, int] | None, *, local_refusal: bool) -> None:
+        """Commit against current counters and limits while the caller holds the lock."""
+        self.attempted += 1
+        self.local_refusals += local_refusal
+        try:
+            if prepared is None:
+                raise ObservationError("observation_invalid")
+            cleaned, size = prepared
             if len(self.observations) >= MAX_OBSERVATIONS or self.size_bytes + size > MAX_OBJECT_BYTES - 65_536:
                 raise ObservationError("size_limit")
             self.observations.append(cleaned)

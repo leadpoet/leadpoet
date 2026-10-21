@@ -1,3 +1,4 @@
+import ast
 from pathlib import Path
 
 import pytest
@@ -130,8 +131,14 @@ def test_extracted_investigation_settlement_remains_ast_protected(tmp_path, monk
     )
     verify_manifest(tmp_path, manifest)
     guard = 'and receipt.get("completed_submitted_findings") is True'
-    assert source.count(guard) == 1
-    target.write_text(source.replace(guard, 'and True', 1))
+    settlement = next(
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_settle_completed_company_investigation"
+    )
+    segment = ast.get_source_segment(source, settlement)
+    assert segment.count(guard) == 1
+    target.write_text(source.replace(segment, segment.replace(guard, 'and True', 1), 1))
     with pytest.raises(ProtectedWorkflowError, match="_settle_completed_company_investigation"):
         verify_manifest(tmp_path, manifest)
 

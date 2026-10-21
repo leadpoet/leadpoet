@@ -100,7 +100,7 @@ def test_saved_stage_quote_keeps_exact_source_identity_and_stage_guards(
         ("Series C+", "required_attribute", "VERIFIED"),
     ],
 )
-def test_stage_clarification_is_scoped_and_keeps_existing_discovery(
+def test_original_message_path_keeps_existing_discovery(
     monkeypatch, requested_stage, target, expected_status,
 ):
     requests = []
@@ -170,19 +170,9 @@ def test_stage_clarification_is_scoped_and_keeps_existing_discovery(
     base_system = {"role": "system", "content": investigator._SYSTEM_PROMPT}
     assert messages[0] == base_system
     systems = [message for message in messages if message["role"] == "system"]
-    if target == "stage" and requested_stage == "Series C+":
-        assert len(systems) == 2
-        assert len(messages) == 3
-        assert messages[1] == systems[1]
-        guidance = systems[1]["content"]
-        assert "proven completed Series D plus a pending Series E" in guidance
-        assert "Uncertainty is material only if the canonical stage can change" in guidance
-        assert "acquisitions, IPOs, and other stage changes" in guidance
-        assert len(guidance) < 300
-    else:
-        assert systems == [base_system]
-        assert len(messages) == 2
-        assert messages[1]["role"] == "user"
+    assert systems == [base_system]
+    assert len(messages) == 2
+    assert messages[1]["role"] == "user"
     user_message = next(message for message in messages if message["role"] == "user")
     document = json.loads(user_message["content"].split("\n", 1)[1])
     assert document["requested_stage"] == requested_stage

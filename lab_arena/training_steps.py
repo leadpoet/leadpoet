@@ -2,6 +2,8 @@
 
 Only self-contained text/function chat and Responses calls are supported. A
 positive run result or HTTP status never makes an observed action correct.
+Explicit retrieval markers are excluded. Provider-internal retrieval without
+visible markers cannot be proved absent from the retained response.
 """
 from __future__ import annotations
 
@@ -129,6 +131,8 @@ def _responses_input(value):
 
 def _target(body, response, operation):
     _require(isinstance(response, dict), 'response_shape_unsupported')
+    _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
+             'retrieval_context_unsupported')
     reasoning = []
     if operation == 'openrouter.chat':
         _chat_messages(body.get('messages'))
@@ -216,7 +220,8 @@ def _candidate(example, call):
              and body['model'] == (request.get('effective_parameters') or {}).get('model'), 'model_identity_mismatch')
     _require(not body.get('stream') and not body.get('previous_response_id')
              and not body.get('conversation') and not body.get('prompt')
-             and not body.get('plugins') and not body.get('transforms') and body.get('n', 1) == 1, 'request_continuation_or_stream_unsupported')
+             and not body.get('plugins') and not body.get('transforms')
+             and body.get('web_search_options') is None and body.get('n', 1) == 1, 'request_continuation_or_stream_unsupported')
     _require('instructions' not in body or isinstance(body['instructions'], str), 'input_shape_unsupported')
     tools = body.get('tools', [])
     _require(isinstance(tools, list) and all(isinstance(tool, dict) and tool.get('type') == 'function' for tool in tools), 'hosted_tool_unsupported')

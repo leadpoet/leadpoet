@@ -307,3 +307,28 @@ def test_own_ack_redaction_rejected_despite_unrelated_gap_allowance():
     for ref in call['response_provenance']['agent_receipt_refs'] + [call['response_provenance']['worker_receipt_ref']]:
         ref['payload_sha256'] = artifact['payload_sha256']
     assert not records(seal(e))[0]
+
+
+@pytest.mark.parametrize('make_example', [fixture, response_fixture])
+@pytest.mark.parametrize('field', ['citations', 'search_results', 'annotations'])
+@pytest.mark.parametrize('value', [[{'url': 'https://example.org/source'}], [], None])
+def test_top_level_retrieval_markers_excluded(make_example, field, value):
+    e = make_example()
+    call = e['provider_calls'][0]
+    call['response'][field] = value
+    call['response_receipts'][0]['response_sha256'] = c.document_hash(call['response'])
+    rows, manifest = records(seal(e))
+    assert len(rows) == (0 if value else 1)
+    if value:
+        assert manifest['counts']['exclusion_reasons'] == {'retrieval_context_unsupported': 1}
+
+
+@pytest.mark.parametrize('value', [{'search_context_size': 'low'}, {}, None])
+def test_request_web_search_options_excluded(value):
+    e = fixture()
+    call = e['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    body['web_search_options'] = value
+    call['request']['outbound']['body_sha256'] = c.document_hash(body)
+    # An empty options object can enable search with provider defaults.
+    assert len(records(seal(e))[0]) == (1 if value is None else 0)

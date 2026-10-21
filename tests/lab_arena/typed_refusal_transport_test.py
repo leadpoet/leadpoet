@@ -6,7 +6,7 @@ import copy
 
 import pytest
 
-from lab_arena import broker, operations, runner, shim
+from lab_arena import broker, operations, runner, scoring_provider_compat, shim
 from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import company_verification as verification
 from qualification.scoring import lead_scorer
@@ -19,6 +19,20 @@ REFUSAL = b'{"error":{"code":"provider_request_refused"}}'
 IDENTITY = "sha256:" + "a" * 64
 
 
+def _compatibility_call():
+    return {
+        "operation_id": shim.PAGE_FETCH_OPERATION,
+        "provider": "deepline",
+        "action_sequence": 0,
+        "error_code": "provider_request_refused",
+        "call_identity": IDENTITY,
+        "effective_operation_id": scoring_provider_compat.EFFECTIVE_OPERATION_ID,
+        "compatibility_version": scoring_provider_compat.COMPATIBILITY_VERSION,
+        "adapter": "generic_http_raw_html",
+        "tool": scoring_provider_compat.GENERIC_HTTP_TOOL,
+    }
+
+
 def _response(status, body, *, trusted_url="", attested=False,
               forged_marker=False, call_changes=None):
     headers = {"content-type": "application/json", "content-length": str(len(body))}
@@ -26,13 +40,7 @@ def _response(status, body, *, trusted_url="", attested=False,
         headers[operations.TRUSTED_RESPONSE_URL_HEADER] = trusted_url
     if forged_marker:
         headers[shim.CALL_IDENTITY_HEADER] = IDENTITY
-    call = ({
-        "operation_id": shim.PAGE_FETCH_OPERATION,
-        "provider": "deepline",
-        "action_sequence": 0,
-        "error_code": "provider_request_refused",
-        "call_identity": IDENTITY,
-    } if attested else {})
+    call = _compatibility_call() if attested else {}
     if call_changes:
         call.update(call_changes)
     document = {
@@ -170,9 +178,12 @@ def test_provider_cannot_forge_host_marker(monkeypatch):
     (403, b'{"error":{"code":"provider_request_refused","extra":1}}'),
     (401, REFUSAL),
 ])
-def test_host_does_not_mark_wrong_status_or_body(status, body):
+def test_valid_call_identity_does_not_turn_other_errors_into_refusals(status, body):
     response = _response(status, body, attested=True)
-    assert shim.CALL_IDENTITY_HEADER not in response.headers
+    assert response.headers[shim.CALL_IDENTITY_HEADER] == IDENTITY
+    with pytest.raises(verification._ArenaProviderFetchError) as caught:
+        asyncio.run(verification._fetch_bounded_html(_Session(response), SOURCE))
+    assert caught.value.broker_error_code == ""
 
 
 @pytest.mark.parametrize("changes", [
@@ -180,8 +191,15 @@ def test_host_does_not_mark_wrong_status_or_body(status, body):
     {"provider": "openrouter"},
     {"action_sequence": 1},
     {"action_sequence": True},
-    {"error_code": "provider_unavailable"},
     {"call_identity": "sha256:bad"},
+    {"effective_operation_id": "openrouter.chat"},
+    {"compatibility_version": "unknown"},
+    {"adapter": "unknown"},
+    {"tool": "unknown"},
+    {"adapter": []},
+    {"tool": {}},
+    {"adapter": None},
+    {"tool": None},
 ])
 def test_host_does_not_mark_mismatched_call(changes):
     response = _response(403, REFUSAL, attested=True, call_changes=changes)
@@ -203,13 +221,7 @@ def test_shim_rejects_invalid_call_identity(marker):
 def test_complete_refusal_review_can_be_unproven_but_incomplete_claim_cannot(
     monkeypatch,
 ):
-    call = {
-        "operation_id": shim.PAGE_FETCH_OPERATION,
-        "provider": "deepline",
-        "action_sequence": 0,
-        "error_code": "provider_request_refused",
-        "call_identity": IDENTITY,
-    }
+    call = _compatibility_call()
     document = {
         "status": 403,
         "headers": {"content-type": "application/json"},
@@ -256,3 +268,69 @@ def test_complete_refusal_review_can_be_unproven_but_incomplete_claim_cannot(
     assert not lead_scorer._has_explicitly_unproven_fit_dimensions(
         {}, ("stage",), investigation_receipt=unsupported,
     )
+
+
+@pytest.mark.parametrize("operation_id,parameters,fallback", [
+    ("scrapingdog.scrape", {"url": SOURCE}, False),
+    ("scrapingdog.scrape", {"url": SOURCE}, True),
+    ("scrapingdog.scrape", {"url": "https://www.linkedin.com/feed/update/urn:li:activity:1234567890123456789/"}, False),
+    ("scrapingdog.scrape", {"url": "https://api.ashbyhq.com/posting-api/job-board/example"}, False),
+    ("scrapingdog.scrape", {"url": "https://boards-api.greenhouse.io/v1/boards/example/jobs/123456?content=true"}, False),
+    ("scrapingdog.scrape", {"url": "https://boards-api.greenhouse.io/v1/boards/example/jobs"}, False),
+    ("scrapingdog.scrape", {"url": "https://example.myworkdayjobs.com/wday/cxs/example/jobs/job/Example123"}, False),
+    ("scrapingdog.scrape", {"url": "https://api.lever.co/v0/postings/example"}, False),
+    ("scrapingdog.x_post", {"tweetId": "1234567890123456789"}, False),
+    ("scrapingdog.linkedinjobs", {"job_id": "1234567890"}, False),
+    ("scrapingdog.profile_post", {"id": "1234567890123456789"}, False),
+])
+def test_reviewed_compatibility_routes_keep_exact_success_receipts(
+    operation_id, parameters, fallback,
+):
+    route = scoring_provider_compat.route_for(
+        kind="score", funding_source="miner_key", round_id="arena-2026-10-21",
+        operation_id=operation_id, parameters=parameters,
+        source_content_fallback=fallback,
+    )
+    assert route is not None
+    call = {
+        **route.summary(), "operation_id": operation_id, "provider": "deepline",
+        "tool": route.effective_parameters["tool"], "action_sequence": 0,
+        "call_identity": IDENTITY, "outcome": "settled",
+    }
+    document = {
+        "status": 200, "headers": {}, "body_b64": base64.b64encode(b"source").decode(),
+        "call": call,
+    }
+    headers = runner.WorkerSocketServer._socket_response_headers(document, operation_id, 0)
+    assert headers[shim.CALL_IDENTITY_HEADER] == IDENTITY
+    state = runner.RunState(lease={"run_id": "r1", "kind": "score"}, lease_token="test-token")
+    server = object.__new__(runner.WorkerSocketServer)
+    server._state = state
+    observation = {
+        "ordinal": 0, "action_sequence": 0, "operation_id": operation_id,
+        "request": {"admitted_parameters": parameters, "timeout_ms": 30_000},
+        "protocol": "http", "contributes_to_provider_call_count": True,
+    }
+    response = {key: value for key, value in document.items() if key != "call"}
+    server._finish_observation_unchecked(observation, response, document=document)
+    snapshot = state.worker_observations.document()
+    assert snapshot["response_receipt_count"] == 1
+    receipt = snapshot["response_receipts"][0]
+    assert receipt["operation_id"] == operation_id
+    assert receipt["call_identity"] == IDENTITY and receipt["status"] == 200
+    # A different provider or a route summary without its exact tool cannot
+    # claim the same host response, even when it copies a valid identity.
+    for changes in ({"provider": "openrouter"}, {"tool": "unknown"},
+                    {"compatibility_version": "unknown"}, {"adapter": "unknown"},
+                    {"effective_operation_id": "openrouter.chat"},
+                    {"adapter": []}, {"tool": {}},
+                    {"adapter": None}, {"tool": None},
+                    {"action_sequence": True}, {"action_sequence": 1}):
+        invalid = {**document, "call": {**call, **changes}}
+        assert shim.CALL_IDENTITY_HEADER not in runner.WorkerSocketServer._socket_response_headers(
+            invalid, operation_id, 0,
+        )
+        invalid_state = runner.RunState(lease={"run_id": "r1", "kind": "score"}, lease_token="test-token")
+        server._state = invalid_state
+        server._finish_observation_unchecked(dict(observation), response, document=invalid)
+        assert invalid_state.worker_observations.document()["response_receipt_count"] == 0

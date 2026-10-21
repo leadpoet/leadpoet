@@ -4477,6 +4477,21 @@ async def investigate_company_evidence(
                         ),
                         "messages": [
                             {"role": "system", "content": _SYSTEM_PROMPT},
+                            *([
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "For Series C+, a proven completed Series D "
+                                        "plus a pending Series E still proves Series C+. "
+                                        "Uncertainty is material only if the canonical "
+                                        "stage can change; still check acquisitions, "
+                                        "IPOs, and other stage changes."
+                                    ),
+                                },
+                            ] if (
+                                "stage" in requested_targets
+                                and normalized_requested_stage == "series c+"
+                            ) else []),
                             *messages,
                         ],
                         "tools": [

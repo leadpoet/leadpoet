@@ -26,8 +26,27 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+def _cause_http_status(exc):
+    """Read only native HTTP status fields; never messages, headers or bodies."""
+    if type(exc) is urllib.error.HTTPError:
+        status = vars(exc).get("code")
+    else:
+        try:
+            from websockets.exceptions import InvalidStatus
+            from websockets.http11 import Response
+        except ImportError:
+            return None
+        if type(exc) is not InvalidStatus:
+            return None
+        response = vars(exc).get("response")
+        if type(response) is not Response:
+            return None
+        status = vars(response).get("status_code")
+    return status if type(status) is int and 100 <= status <= 599 else None
+
+
 def _cause_reason(exc):
-    """Keep only a bounded exception type; never inspect its message or args."""
+    """Keep the bounded cause type and native status, never messages or args."""
     seen = {id(exc)}
     cause = None
     for _ in range(8):
@@ -38,7 +57,14 @@ def _cause_reason(exc):
             break
         seen.add(id(nested))
         cause = exc = nested
-    return "caused_by:" + type(cause).__name__[:128] if cause is not None else None
+    if cause is None:
+        return None
+    reason = "caused_by:" + type(cause).__name__[:128]
+    try:
+        status = _cause_http_status(cause)
+    except Exception:
+        status = None  # Optional diagnostics cannot replace the original error.
+    return reason + ":http_" + str(status) if status is not None else reason
 
 
 class ValidatorOperationalLogger:

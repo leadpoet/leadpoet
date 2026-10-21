@@ -68,6 +68,109 @@ def test_wrapped_errors_keep_underlying_type_without_private_messages(cause_type
     assert 'DO-NOT-LOG' not in str(queued(log))
 
 
+def _http_cause(kind, status):
+    from urllib.error import HTTPError
+    from websockets.datastructures import Headers
+    from websockets.exceptions import InvalidStatus
+    from websockets.http11 import Response
+
+    private = 'https://user:password@private.invalid/?api_key=DO-NOT-LOG'
+    headers = Headers({'Authorization': 'Bearer DO-NOT-LOG'})
+    if kind == 'HTTPError':
+        return HTTPError(private, status, 'DO-NOT-LOG', headers, None)
+    return InvalidStatus(Response(status, private, headers, body=b'DO-NOT-LOG'))
+
+
+@pytest.mark.parametrize('cause_kind', ('InvalidStatus', 'HTTPError'))
+@pytest.mark.parametrize('status', (401, 403, 429, 500, 502, 503, 504, 599))
+def test_startup_error_retains_only_typed_http_status(cause_kind, status):
+    from lab_arena.chain import ArenaChainError
+    from lab_arena.chain_source import ValidatorChainSourceV2Error
+
+    error_class = ArenaChainError if cause_kind == 'InvalidStatus' else ValidatorChainSourceV2Error
+    cause = _http_cause(cause_kind, status)
+    error = error_class('password=DO-NOT-LOG')
+    error.__cause__ = cause
+    log = logger()
+    log.error('startup', error)
+    content = queued(log)[0]['content']
+    assert content['phase'] == 'startup'
+    assert content['error_class'] == error_class.__name__
+    assert content['reason'] == 'caused_by:%s:http_%d' % (cause_kind, status)
+    assert 'http_status' not in content
+    rendered = str(queued(log))
+    for private in ('private.invalid', 'user:password', 'DO-NOT-LOG', 'Authorization', 'Bearer'):
+        assert private not in rendered
+    assert error.__cause__ is cause
+
+
+@pytest.mark.parametrize('cause_kind', ('InvalidStatus', 'HTTPError'))
+@pytest.mark.parametrize('status', (None, True, False, '429', 429.0, 99, 600, -1))
+def test_startup_http_status_rejects_missing_or_malformed_values(cause_kind, status):
+    error = RuntimeError('DO-NOT-LOG')
+    error.__cause__ = _http_cause(cause_kind, status)
+    log = logger()
+    log.error('startup', error)
+    assert queued(log)[0]['content']['reason'] == 'caused_by:' + cause_kind
+    assert 'DO-NOT-LOG' not in str(queued(log))
+
+
+@pytest.mark.parametrize('cause_kind', ('InvalidStatus', 'HTTPError'))
+def test_startup_http_status_rejects_absent_status_attribute(cause_kind):
+    cause = _http_cause(cause_kind, 429)
+    if cause_kind == 'InvalidStatus':
+        del cause.response.status_code
+    else:
+        del cause.code
+    error = RuntimeError('DO-NOT-LOG')
+    error.__cause__ = cause
+    log = logger()
+    log.error('startup', error)
+    assert queued(log)[0]['content']['reason'] == 'caused_by:' + cause_kind
+
+
+def test_startup_status_does_not_trust_lookalike_exceptions_or_responses():
+    from websockets.exceptions import InvalidStatus
+
+    class LookalikeError(RuntimeError):
+        code = 429
+        response = SimpleNamespace(status_code=429)
+
+    for cause in (LookalikeError('HTTP 429 DO-NOT-LOG'),
+                  InvalidStatus(SimpleNamespace(status_code=429)),
+                  InvalidStatus(None)):
+        error = RuntimeError('DO-NOT-LOG')
+        error.__cause__ = cause
+        log = logger()
+        log.error('startup', error)
+        assert queued(log)[0]['content']['reason'] == 'caused_by:' + type(cause).__name__
+        assert 'DO-NOT-LOG' not in str(queued(log))
+
+
+@pytest.mark.parametrize('cause_kind', ('InvalidStatus', 'HTTPError'))
+def test_http_status_does_not_replace_explicit_failure_classification(cause_kind):
+    error = RuntimeError('DO-NOT-LOG')
+    error.__cause__ = _http_cause(cause_kind, 403)
+    log = logger()
+    log.error('startup', error, reason='configuration_invalid')
+    assert queued(log)[0]['content']['reason'] == 'configuration_invalid'
+
+
+def test_optional_status_diagnostic_failure_keeps_original_cause(monkeypatch):
+    import lab_arena.validator_logging as module
+
+    def fail_status(_cause):
+        raise RuntimeError('DO-NOT-LOG')
+
+    monkeypatch.setattr(module, '_cause_http_status', fail_status)
+    error = RuntimeError('DO-NOT-LOG')
+    error.__cause__ = _http_cause('InvalidStatus', 429)
+    log = logger()
+    log.error('startup', error)
+    assert queued(log)[0]['content']['reason'] == 'caused_by:InvalidStatus'
+    assert 'DO-NOT-LOG' not in str(queued(log))
+
+
 def test_cause_logging_preserves_explicit_reason_and_suppressed_context():
     error = RuntimeError('private message')
     error.__context__ = TimeoutError('private URL')
@@ -295,6 +398,41 @@ def test_startup_failure_after_identity_before_chain_is_delivered(monkeypatch):
     assert any(e['kind'] == 'validator.startup' for e in delivered)
     assert any(e['kind'] == 'validator.error' and e['content']['phase'] == 'startup' for e in delivered)
     assert 'NEVER-LOG-THIS' not in str(delivered)
+
+
+@pytest.mark.parametrize('status', (401, 403, 429, 503))
+def test_startup_connection_http_status_is_delivered_without_retry(monkeypatch, status):
+    import sys
+    from lab_arena import chain, validator_startup
+    import lab_arena.validator_logging as module
+
+    delivered = []
+    connects = []
+    cause = _http_cause('InvalidStatus', status)
+
+    def fail_connect(**kwargs):
+        connects.append(1)
+        raise cause
+
+    monkeypatch.setitem(sys.modules, 'async_substrate_interface',
+                        SimpleNamespace(SubstrateInterface=fail_connect))
+    monkeypatch.setattr(validator_startup, 'maybe_reexec_rootful', lambda *args: None)
+    monkeypatch.setattr(validator, 'load_local_hotkey', lambda args: Keypair())
+    real_logger = ValidatorOperationalLogger
+    monkeypatch.setattr(module, 'ValidatorOperationalLogger', lambda *a, **kw:
+                        real_logger(*a, **kw, transport=lambda envelope: delivered.extend(envelope['body']['events'])))
+    with pytest.raises(chain.ArenaChainError) as caught:
+        validator.main([])
+    assert caught.value.__cause__ is cause
+    assert connects == [1]
+    assert not any(e['kind'] == 'validator.ready' for e in delivered)
+    errors = [e['content'] for e in delivered if e['kind'] == 'validator.error']
+    assert len(errors) == 1
+    assert errors[0]['error_class'] == 'ArenaChainError'
+    assert errors[0]['phase'] == 'startup'
+    assert errors[0]['reason'] == 'caused_by:InvalidStatus:http_%d' % status
+    for private in ('private.invalid', 'user:password', 'DO-NOT-LOG', 'Authorization', 'Bearer'):
+        assert private not in str(delivered)
 
 
 def test_claim_and_completion_errors_have_run_correlation_and_recover(tmp_path):

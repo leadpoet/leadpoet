@@ -122,7 +122,14 @@ def test_mapped_worker_error_export_keeps_native_receipt_and_cost_separate(tmp_p
     assert observation['outcome']['response'] == returned
     assert returned['status'] == 502
     assert base64.b64decode(returned['body_b64']) == operations.GENERIC_UNAVAILABLE_BODY
-    assert not state.worker_observations.response_receipts
+    receipt, = state.worker_observations.response_receipts
+    assert receipt['call_identity'] == result.call['call_identity']
+    assert receipt['status'] == 502
+    assert receipt['body_sha256'] == contracts.hash_bytes(operations.GENERIC_UNAVAILABLE_BODY)
+    assert receipt['body_bytes'] == len(operations.GENERIC_UNAVAILABLE_BODY)
+    # handle_frame prepares the reply; this fixture does not write to a socket.
+    assert receipt['write_state'] == 'prepared'
+    assert receipt['socket_written_at'] is None
 
     values = capture.fixture()
     capture.add_call(values, pointer=False)
@@ -137,7 +144,9 @@ def test_mapped_worker_error_export_keeps_native_receipt_and_cost_separate(tmp_p
     assert call['worker_observation_ref']['ordinal'] == observation['ordinal']
     assert call['response'] == {**ERROR, 'usage': {'cost': '0.0000091'}}
     assert call['response_receipts'][0]['metadata']['status'] == 404
-    assert call['response_provenance']['delivery_to_worker'] == 'not_proved'
+    assert call['response_provenance']['delivery_to_worker'] == 'prepared'
+    assert call['response_provenance']['worker_body_source'] == 'worker_error_observation'
+    assert 'worker_provider_response_mismatch' in exported['completeness']['incomplete_reasons']
     assert call['actual_microusd'] == exported['costs']['confirmed_actual_microusd'] == 10
     assert not exported['privacy']['exact_replay']
 

@@ -728,6 +728,8 @@ def _link_worker_receipts(run, paid, snapshot):
     payload = snapshot["payload"]
     errors, linked = set(), {}
     by_identity = {call["call_identity"]: call for call in paid}
+    error_observations = {row["ordinal"]: row for row in payload.get("observations", [])
+                          if row.get("call_identity") is not None}
     for receipt in payload.get("response_receipts", []):
         call = by_identity.get(receipt["call_identity"])
         if (call is None or call.get("action_sequence") != receipt["action_sequence"]
@@ -738,10 +740,27 @@ def _link_worker_receipts(run, paid, snapshot):
                    if item.get("wire_body_sha256") == receipt["body_sha256"]
                    and item.get("wire_body_bytes") == receipt["body_bytes"]
                    and item.get("metadata", {}).get("status") == receipt["status"]]
+        observed = error_observations.get(receipt["ordinal"])
+        worker_error_body = False
+        if observed is not None:
+            response = observed["outcome"].get("response") or {}
+            worker_error_body = (observed["call_identity"] == receipt["call_identity"]
+                                 and observed["action_sequence"] == receipt["action_sequence"]
+                                 and observed["operation_id"] == receipt["operation_id"]
+                                 and response.get("status") == receipt["status"]
+                                 and isinstance(response.get("body_b64"), str)
+                                 and (observed["privacy"]["redacted"]
+                                      or len(base64.b64decode(response["body_b64"], validate=True)) == receipt["body_bytes"])
+                                 and (observed["privacy"]["redacted"]
+                                      or contracts.hash_bytes(base64.b64decode(response["body_b64"], validate=True))
+                                      == receipt["body_sha256"]))
         identity = receipt["call_identity"]
-        if not matches or identity in linked:
+        if (not matches and not worker_error_body) or identity in linked:
             errors.add("worker_response_receipt_link_invalid")
             continue
+        if worker_error_body and not matches and any(
+                item.get("wire_body_sha256") for item in call["response_receipts"]):
+            errors.add("worker_provider_response_mismatch")
         linked[identity] = receipt
         call["response_provenance"].update({
             "delivery_to_worker": receipt["write_state"],
@@ -749,11 +768,19 @@ def _link_worker_receipts(run, paid, snapshot):
                                    "payload_sha256": snapshot["payload_sha256"]},
             "agent_receipt": "not_reported",
             "worker_received_receipt_entry_ids": sorted(item["entry_id"] for item in matches),
+            "worker_body_source": "ledger_terminal" if matches else "worker_error_observation",
+            "worker_body_exact_in_artifact": bool(matches or worker_error_body and not observed["privacy"]["redacted"]),
         })
+        if worker_error_body:
+            call["response_provenance"]["worker_error_observation_ref"] = {
+                "run_id": run["run_id"], "ordinal": observed["ordinal"],
+                "payload_sha256": snapshot["payload_sha256"]}
     acknowledged = set()
     for row in payload.get("agent_observations", []):
         if row["privacy"]["redacted"]:
             errors.add("worker_observation_privacy_nonexact")
+        if row["kind"] == "web_fetch_binary":
+            errors.add("binary_privacy_review_required")
         for reference in row["depends_on"]:
             if reference.startswith("sha256:"):
                 dependency = by_identity.get(reference)
@@ -775,12 +802,15 @@ def _link_worker_receipts(run, paid, snapshot):
         call["response_provenance"]["agent_receipt"] = "reported_exact_body_received"
         latest_acknowledged = call.get("terminal_entry_id") in call["response_provenance"]["worker_received_receipt_entry_ids"]
         call["response_provenance"]["selected_response_acknowledged"] = latest_acknowledged
-        if not latest_acknowledged:
+        if not latest_acknowledged and call["response_provenance"].get("worker_body_source") == "worker_error_observation":
+            call["response_provenance"]["worker_error_body_acknowledged"] = True
+        elif not latest_acknowledged:
             errors.add("agent_selected_response_unacknowledged")
         acknowledged.add(data["call_identity"])
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid
-                    if type(call.get("response_status")) is int and 200 <= call["response_status"] < 300}
+                    if type(call.get("response_status")) is int and
+                    (200 <= call["response_status"] < 300 or call["call_identity"] in linked)}
         if expected - acknowledged:
             errors.add("agent_response_receipts_unverified")
         if paid and not _reported_phase_coverage(payload):
@@ -1305,7 +1335,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         elif web["connection_count"]:
             reported_pages = (observations.get(row["run_id"], {}).get("payload", {}).get("agent_observations", []))
             reasons["research_process"].add("direct_web_coverage_unverified" if any(
-                item["kind"] == "web_fetch" for item in reported_pages) else "direct_web_content_not_captured")
+                item["kind"] in {"web_fetch", "web_fetch_binary"}
+                for item in reported_pages) else "direct_web_content_not_captured")
         logical_calls = set()
         for call in calls:
             if call["run_id"] != row["run_id"]:

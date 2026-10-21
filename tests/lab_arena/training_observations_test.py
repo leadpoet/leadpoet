@@ -367,8 +367,11 @@ def test_capture_helper_failure_preserves_exact_returned_bytes_and_runtime_count
     monkeypatch.setattr(server, "_begin_observation_unchecked" if phase == "begin" else "_finish_observation_unchecked", fail)
     frame = shim.build_operation_frame("openrouter.chat", {"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "research"}]}, 1000)
     result = server.handle_frame(frame)
-    expected = {key: document[key] for key in ("status", "headers", "body_b64")}
-    assert result == contracts.canonical_json(expected).encode()
+    returned = json.loads(result)
+    assert returned["status"] == document["status"]
+    assert returned["body_b64"] == document["body_b64"]
+    assert returned["headers"] == {**document["headers"],
+                                    shim.CALL_IDENTITY_HEADER: document["call"]["call_identity"]}
     assert state.action_sequence == len(state.calls) == 1 and state.local_refusals == 0
     assert not state.worker_observations.document()["complete"]
 

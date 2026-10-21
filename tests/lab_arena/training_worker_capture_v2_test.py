@@ -1,6 +1,7 @@
 """Focused proof of cooperative training capture and worker socket receipts."""
 
 import copy
+import base64
 import hashlib
 import json
 import shutil
@@ -84,6 +85,66 @@ def test_worker_socket_receipt_web_text_state_and_lease_bound_snapshot(tmp_path,
     assert training_observations.read_snapshot(objects, "execute:1", "execute", 1, CLAIM_HASH) == snapshot
 
 
+def test_uncertain_provider_error_keeps_observation_and_exact_read_receipt(tmp_path, monkeypatch):
+    document = response(503, {"error": {"code": "provider_unavailable"}}, outcome="uncertain")
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    socket_path = Path(tempfile.mkdtemp(prefix="arena-error-", dir="/tmp")) / "w.sock"
+    server = runner.WorkerSocketServer(socket_path, FakeApi([], broker_documents=[document]), state)
+    server.start()
+    monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
+    try:
+        status, headers, body = shim.dispatch(
+            "openrouter.chat", {"model": "openai/gpt-4o-mini",
+                                "messages": [{"role": "user", "content": "check"}], "max_tokens": 20}, 1000)
+        assert status == 503
+        receipt = state.worker_observations.response_receipts[0]
+        assert headers[shim.CALL_IDENTITY_HEADER] == receipt["call_identity"]
+        assert receipt["write_state"] == "socket_written"
+        assert receipt["body_sha256"] == "sha256:" + hashlib.sha256(body).hexdigest()
+        assert lab_arena_checkpoint.record_response_received(
+            call_identity=receipt["call_identity"], status=status, body=body) == 0
+    finally:
+        server.stop()
+        shutil.rmtree(socket_path.parent)
+    payload = state.worker_observations.document()
+    assert payload["response_receipt_count"] == payload["observation_count"] == 1
+    assert payload["observations"][0]["ordinal"] == payload["response_receipts"][0]["ordinal"]
+    assert payload["observations"][0]["outcome"]["response"]["status"] == 503
+    assert payload["agent_observations"][0]["data"]["body_sha256"] == receipt["body_sha256"]
+    training_observations.build_snapshot("execute:1", "execute", payload,
+        lease_generation=1, claim_request_hash=CLAIM_HASH)
+    bad = copy.deepcopy(payload)
+    bad["response_receipts"][0]["body_sha256"] = "sha256:" + "f" * 64
+    with pytest.raises(training_observations.ObservationError, match="response_receipt_observation_invalid"):
+        training_observations.build_snapshot("execute:1", "execute", bad,
+            lease_generation=1, claim_request_hash=CLAIM_HASH)
+
+
+def test_redacted_error_body_does_not_change_original_socket_hash(tmp_path, monkeypatch):
+    document = response(503, {"error": {"detail": "private-lease-token"}}, outcome="uncertain")
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    socket_path = Path(tempfile.mkdtemp(prefix="arena-error-", dir="/tmp")) / "w.sock"
+    server = runner.WorkerSocketServer(socket_path, FakeApi([], broker_documents=[document]), state)
+    server.start()
+    monkeypatch.setenv(shim.WORKER_SOCKET_ENV, str(socket_path))
+    try:
+        status, _, body = shim.dispatch(
+            "openrouter.chat", {"model": "openai/gpt-4o-mini",
+                                "messages": [{"role": "user", "content": "check"}], "max_tokens": 20}, 1000)
+    finally:
+        server.stop()
+        shutil.rmtree(socket_path.parent)
+    payload = state.worker_observations.document()
+    saved = payload["observations"][0]
+    receipt = payload["response_receipts"][0]
+    assert status == 503 and receipt["body_sha256"] == "sha256:" + hashlib.sha256(body).hexdigest()
+    assert saved["privacy"]["redacted"]
+    assert b"private-lease-token" not in base64.b64decode(saved["outcome"]["response"]["body_b64"])
+    assert receipt["body_bytes"] != len(base64.b64decode(saved["outcome"]["response"]["body_b64"]))
+    training_observations.build_snapshot("execute:1", "execute", payload,
+        lease_generation=1, claim_request_hash=CLAIM_HASH)
+
+
 def test_unwritten_response_and_web_capture_loss_are_explicit(tmp_path, monkeypatch):
     state = runner.RunState(lease=lease(), lease_token="private-lease-token")
     socket_path = Path(tempfile.mkdtemp(prefix="arena-v2-", dir="/tmp")) / "w.sock"
@@ -128,6 +189,77 @@ def test_old_worker_artifact_remains_readable():
     objects = Objects()
     objects.put(training_observations.object_ref("execute:1", 1, CLAIM_HASH), compressed)
     assert training_observations.read_snapshot(objects, "execute:1", "execute", 1, CLAIM_HASH) == snapshot
+
+
+def test_binary_capture_private_roundtrip_dedup_secret_and_hashes(tmp_path):
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    server = runner.WorkerSocketServer(tmp_path / "unused.sock", FakeApi([]), state)
+    raw = b"%PDF-1.7\x00\xffBearer private-lease-token tail"
+    capture = {"source": "runtime_http_v1", "complete": True,
+               "received_body_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+               "received_body_bytes": len(raw)}
+    frame = {"schema_version": lab_arena_checkpoint.TRAINING_SCHEMA_VERSION,
+             "control": lab_arena_checkpoint.TRAINING_CONTROL,
+             "kind": "web_fetch_binary", "depends_on": [],
+             "data": {"url": "https://example.com/a.pdf", "final_url": "https://example.com/a.pdf",
+                      "retrieved_at": "2026-10-20T00:00:00Z", "status": 200,
+                      "content_type": "application/pdf", "body_b64": base64.b64encode(raw).decode(),
+                      "capture": capture}}
+    assert json.loads(server._handle_training_control(json.dumps(frame).encode()))["observation_id"] == 0
+    assert json.loads(server._handle_training_control(json.dumps(frame).encode()))["observation_id"] == 1
+    payload = state.worker_observations.document()
+    first, second = [row["data"] for row in payload["agent_observations"]]
+    assert first["privacy_review"] == "unreviewed_binary"
+    assert first["body_sha256"] == capture["received_body_sha256"]
+    stored = base64.b64decode(first["body_b64"], validate=True)
+    assert b"private-lease-token" not in stored
+    assert first["stored_body_sha256"] == "sha256:" + hashlib.sha256(stored).hexdigest()
+    assert first["stored_body_sha256"] != first["body_sha256"]
+    assert second["body_b64"] is None and second["body_ref"] == 0
+    assert payload["agent_observations"][0]["privacy"]["redacted"]
+    snapshot, compressed = training_observations.build_snapshot(
+        "execute:1", "execute", payload, lease_generation=1,
+        claim_request_hash=CLAIM_HASH, secrets=(state.lease_token,))
+    objects = Objects()
+    objects.put(training_observations.object_ref("execute:1", 1, CLAIM_HASH), compressed)
+    assert training_observations.read_snapshot(objects, "execute:1", "execute", 1, CLAIM_HASH) == snapshot
+    for index in (0, 1):  # Redacted inline body and the deduplicated reference.
+        for field, bad_value in (("received_body_sha256", "sha256:" + "0" * 64),
+                                 ("received_body_bytes", len(raw) + 1)):
+            tampered = copy.deepcopy(payload)
+            tampered["agent_observations"][index]["data"]["capture"][field] = bad_value
+            with pytest.raises(training_observations.ObservationError, match="binary_capture_bytes_invalid"):
+                training_observations.build_snapshot("execute:1", "execute", tampered,
+                    lease_generation=1, claim_request_hash=CLAIM_HASH)
+    tampered = copy.deepcopy(payload)
+    tampered["agent_observations"][0]["data"]["body_b64"] = "YR=="  # same bytes, noncanonical bits
+    with pytest.raises(training_observations.ObservationError, match="binary_body_invalid"):
+        training_observations.build_snapshot("execute:1", "execute", tampered,
+            lease_generation=1, claim_request_hash=CLAIM_HASH)
+
+
+def test_binary_capture_rejects_redaction_expansion_beyond_stored_limit(monkeypatch):
+    monkeypatch.setattr(lab_arena_checkpoint, "MAX_TRAINING_BINARY_BODY_BYTES", 64)
+    raw = b"abcd" * 15
+    frame = {"schema_version": lab_arena_checkpoint.TRAINING_SCHEMA_VERSION,
+             "control": lab_arena_checkpoint.TRAINING_CONTROL,
+             "kind": "web_fetch_binary", "depends_on": [],
+             "data": {"url": "https://example.com/a", "final_url": "https://example.com/a",
+                      "retrieved_at": "2026-10-20T00:00:00Z", "status": 200,
+                      "content_type": "application/octet-stream",
+                      "body_b64": base64.b64encode(raw).decode(),
+                      "capture": {"source": "runtime_http_v1", "complete": True,
+                                  "received_body_sha256": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                                  "received_body_bytes": len(raw)}}}
+    lab_arena_checkpoint.validate_training_frame(frame)
+    data = dict(frame["data"], body_sha256=frame["data"]["capture"]["received_body_sha256"],
+                body_bytes=len(raw), stored_body_sha256=None, stored_body_bytes=None,
+                body_ref=None, privacy_review="unreviewed_binary")
+    row = {"id": 0, "kind": "web_fetch_binary", "observed_at": "2026-10-20T00:00:00Z",
+           "after_action_sequence": None, "depends_on": [], "data": data,
+           "privacy": {"redacted": False, "redactions": []}}
+    with pytest.raises(training_observations.ObservationError, match="binary_fetch_size_limit"):
+        training_observations.clean_agent_observation(row, secrets=("abcd",))
 
 
 @pytest.mark.parametrize("body", [

@@ -171,7 +171,7 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
     if not isinstance(value, Mapping) or set(value) != required or len(_canonical(value)) > MAX_EVENT_BYTES - 65_536:
         raise ObservationError("agent_observation_invalid")
     if (type(value["id"]) is not int or value["id"] < 0
-            or value["kind"] not in {"web_fetch", "response_received", "state_snapshot", "capture_failure"}
+            or value["kind"] not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot", "capture_failure"}
             or not _timestamp(value["observed_at"])
             or value["after_action_sequence"] is not None and
             (type(value["after_action_sequence"]) is not int or value["after_action_sequence"] < 0)
@@ -207,6 +207,33 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
                 lab_arena_checkpoint.validate_web_capture_metadata(data["capture"])
             except (ValueError, LookupError):
                 raise ObservationError("web_capture_invalid") from None
+    elif value["kind"] == "web_fetch_binary":
+        required_binary = {"url", "final_url", "retrieved_at", "status", "content_type",
+                           "body_sha256", "body_bytes", "stored_body_sha256", "stored_body_bytes",
+                           "body_b64", "body_ref", "capture", "privacy_review"}
+        if (set(data) != required_binary
+                or not _url(data["url"]) or not _url(data["final_url"])
+                or not _timestamp(data["retrieved_at"])
+                or type(data["status"]) is not int or not 100 <= data["status"] <= 599
+                or not isinstance(data["content_type"], str) or len(data["content_type"]) > 256
+                or not isinstance(data["body_sha256"], str) or not contracts.SHA256_RE.fullmatch(data["body_sha256"])
+                or type(data["body_bytes"]) is not int or not 0 <= data["body_bytes"] <= lab_arena_checkpoint.MAX_TRAINING_BINARY_BODY_BYTES
+                or data["stored_body_sha256"] is not None and
+                (not isinstance(data["stored_body_sha256"], str) or not contracts.SHA256_RE.fullmatch(data["stored_body_sha256"]))
+                or data["stored_body_bytes"] is not None and
+                (type(data["stored_body_bytes"]) is not int or data["stored_body_bytes"] < 0)
+                or (data["body_b64"] is None) == (data["body_ref"] is None)
+                or data["body_b64"] is not None and not isinstance(data["body_b64"], str)
+                or data["body_ref"] is not None and (type(data["body_ref"]) is not int or data["body_ref"] < 0)
+                or data["privacy_review"] != "unreviewed_binary"):
+            raise ObservationError("binary_fetch_invalid")
+        try:
+            lab_arena_checkpoint.validate_binary_capture_metadata(data["capture"])
+        except ValueError:
+            raise ObservationError("binary_capture_invalid") from None
+        if (data["capture"]["received_body_sha256"] != data["body_sha256"]
+                or data["capture"]["received_body_bytes"] != data["body_bytes"]):
+            raise ObservationError("binary_capture_bytes_invalid")
     elif value["kind"] == "response_received":
         if (set(data) != {"call_identity", "status", "body_sha256", "body_bytes"}
                 or not isinstance(data["call_identity"], str) or not contracts.SHA256_RE.fullmatch(data["call_identity"])
@@ -218,7 +245,7 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
           or not 1 <= len(data["name"]) <= 80 or len(_canonical(data["value"])) > 65_536):
         raise ObservationError("state_snapshot_invalid")
     elif value["kind"] == "capture_failure" and (set(data) != {"category", "reason"}
-          or data["category"] not in {"web_fetch", "response_received", "state_snapshot"}
+          or data["category"] not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot"}
           or data["reason"] not in {"size_limit", "invalid_value"}):
         raise ObservationError("agent_failure_invalid")
     cleaned, redactions = training_capture.sanitize_training_value(dict(data), secrets)
@@ -249,6 +276,39 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
             raise ObservationError("stored_web_fetch_hash_invalid")
         cleaned["stored_body_sha256"] = stored_hash
         cleaned["stored_body_bytes"] = len(stored)
+    if value["kind"] == "web_fetch_binary" and data["body_b64"] is not None:
+        try:
+            raw = base64.b64decode(data["body_b64"], validate=True)
+        except (ValueError, TypeError):
+            raise ObservationError("binary_body_invalid") from None
+        if base64.b64encode(raw).decode("ascii") != data["body_b64"]:
+            raise ObservationError("binary_body_invalid")
+        if len(raw) > lab_arena_checkpoint.MAX_TRAINING_BINARY_BODY_BYTES:
+            raise ObservationError("binary_fetch_size_limit")
+        if not privacy["redacted"] and (len(raw) != data["body_bytes"]
+                or "sha256:" + hashlib.sha256(raw).hexdigest() != data["body_sha256"]):
+            raise ObservationError("binary_fetch_hash_invalid")
+        if not privacy["redacted"]:
+            try:
+                lab_arena_checkpoint.validate_binary_capture_metadata(data["capture"], raw)
+            except ValueError:
+                raise ObservationError("binary_capture_bytes_invalid") from None
+        # Latin-1 is a reversible byte mapping. The existing credential
+        # sanitizer sees literal tokens before they can be hidden in base64.
+        binary_text, binary_changes = training_capture.sanitize_training_value(raw.decode("latin-1"), secrets)
+        stored = binary_text.encode("latin-1")
+        if len(stored) > lab_arena_checkpoint.MAX_TRAINING_BINARY_BODY_BYTES:
+            raise ObservationError("binary_fetch_size_limit")
+        stored_hash = "sha256:" + hashlib.sha256(stored).hexdigest()
+        if (data["stored_body_sha256"] not in {None, stored_hash}
+                or data["stored_body_bytes"] not in {None, len(stored)}):
+            raise ObservationError("stored_binary_fetch_hash_invalid")
+        cleaned["body_b64"] = base64.b64encode(stored).decode("ascii")
+        cleaned["stored_body_sha256"] = stored_hash
+        cleaned["stored_body_bytes"] = len(stored)
+        redactions = sorted(set(redactions) | set(binary_changes))
+        if len(_canonical(cleaned)) > MAX_EVENT_BYTES - 65_536:
+            raise ObservationError("binary_fetch_size_limit")
     return {**value, "data": cleaned,
             "privacy": {"redacted": bool(redactions), "redactions": redactions}}
 
@@ -333,11 +393,14 @@ class Buffer:
                         self.agent_observation_count -= 1
                         return previous["id"]
             web_key = None
-            if cleaned["kind"] == "web_fetch" and cleaned["data"]["body"] is not None:
-                web_key = (cleaned["data"]["body_sha256"], cleaned["data"]["stored_body_sha256"])
+            body_field = ("body" if cleaned["kind"] == "web_fetch" else "body_b64"
+                          if cleaned["kind"] == "web_fetch_binary" else None)
+            if body_field is not None and cleaned["data"][body_field] is not None:
+                web_key = (cleaned["kind"], cleaned["data"]["body_sha256"],
+                           cleaned["data"]["stored_body_sha256"])
                 previous = self.web_body_by_hash.get(web_key)
                 if previous is not None:
-                    cleaned["data"]["body"] = None
+                    cleaned["data"][body_field] = None
                     cleaned["data"]["body_ref"] = previous
             size = len(_canonical(cleaned)) + 1
             if (len(self.agent_observations) >= MAX_AGENT_OBSERVATIONS
@@ -345,10 +408,10 @@ class Buffer:
                 raise ObservationError("size_limit")
             self.agent_observations.append(cleaned)
             self.size_bytes += size
-            if web_key is not None and cleaned["data"]["body"] is not None:
+            if web_key is not None and cleaned["data"][body_field] is not None:
                 self.web_body_by_hash[web_key] = cleaned["id"]
             if (cleaned["kind"] == "capture_failure"
-                    or cleaned["kind"] == "web_fetch"
+                    or cleaned["kind"] in {"web_fetch", "web_fetch_binary"}
                     and cleaned["data"].get("capture", {}).get("complete") is False
                     or cleaned["kind"] == "state_snapshot"
                     and cleaned["data"]["name"] == "automatic_capture_summary"
@@ -401,8 +464,30 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
         raise ObservationError("extra_counts_invalid")
     cleaned_receipts = [clean_response_receipt(row) for row in receipts]
     receipt_ordinals = [row["ordinal"] for row in cleaned_receipts]
-    if receipt_ordinals != sorted(set(receipt_ordinals)) or set(receipt_ordinals) & set(ordinals):
+    if receipt_ordinals != sorted(set(receipt_ordinals)):
         raise ObservationError("response_receipt_order_invalid")
+    observations_by_ordinal = {row["ordinal"]: row for row in cleaned}
+    for receipt in cleaned_receipts:
+        observation = observations_by_ordinal.get(receipt["ordinal"])
+        if observation is None:
+            continue
+        response = observation["outcome"].get("response")
+        if (observation["kind"] in {"local_catalog", "local_refusal", "local_parse_error"}
+                or observation["call_identity"] != receipt["call_identity"]
+                or observation["action_sequence"] != receipt["action_sequence"]
+                or observation["operation_id"] != receipt["operation_id"]
+                or observation["outcome"]["protocol"] != receipt["protocol"]
+                or not isinstance(response, dict)
+                or response.get("status") != receipt["status"]):
+            raise ObservationError("response_receipt_observation_invalid")
+        try:
+            raw = base64.b64decode(response["body_b64"], validate=True)
+        except (KeyError, TypeError, ValueError):
+            raise ObservationError("response_receipt_observation_invalid") from None
+        if (not observation["privacy"]["redacted"]
+                and (len(raw) != receipt["body_bytes"]
+                     or "sha256:" + hashlib.sha256(raw).hexdigest() != receipt["body_sha256"])):
+            raise ObservationError("response_receipt_observation_invalid")
     cleaned_agent = [clean_agent_observation(row, secrets) for row in agent_rows]
     ids = [row["id"] for row in cleaned_agent]
     if ids != list(range(len(ids))):
@@ -412,11 +497,12 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
         if any(_AGENT_REF_RE.fullmatch(reference) and int(reference[6:]) >= row["id"]
                for reference in row["depends_on"]):
             raise ObservationError("agent_dependency_invalid")
-        if row["kind"] == "web_fetch":
+        if row["kind"] in {"web_fetch", "web_fetch_binary"}:
             data = row["data"]
             if data["body_ref"] is not None:
                 previous = bodies.get(data["body_ref"])
-                if (previous is None or previous["body_sha256"] != data["body_sha256"]
+                if (previous is None or previous.get("privacy_review") != data.get("privacy_review")
+                        or previous["body_sha256"] != data["body_sha256"]
                         or previous["body_bytes"] != data["body_bytes"]
                         or previous["stored_body_sha256"] != data["stored_body_sha256"]
                         or previous["stored_body_bytes"] != data["stored_body_bytes"]):
@@ -426,7 +512,7 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
     if document["complete"] and (document["response_receipt_count"] != len(receipts)
             or document["agent_observation_count"] != len(agent_rows)
             or any(row["write_state"] != "socket_written" for row in receipts)
-            or any(row["kind"] == "web_fetch" and row["data"].get("capture", {}).get("complete") is False
+            or any(row["kind"] in {"web_fetch", "web_fetch_binary"} and row["data"].get("capture", {}).get("complete") is False
                    or row["kind"] == "state_snapshot"
                    and row["data"]["name"] == "automatic_capture_summary"
                    and isinstance(row["data"]["value"], dict)

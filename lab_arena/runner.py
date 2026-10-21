@@ -2316,6 +2316,12 @@ class WorkerSocketServer:
                 data.update(body_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
                             body_bytes=len(body), stored_body_sha256=None,
                             stored_body_bytes=None, body_ref=None)
+            elif frame["kind"] == "web_fetch_binary":
+                body = base64.b64decode(data["body_b64"], validate=True)
+                data.update(body_sha256="sha256:" + hashlib.sha256(body).hexdigest(),
+                            body_bytes=len(body), stored_body_sha256=None,
+                            stored_body_bytes=None, body_ref=None,
+                            privacy_review="unreviewed_binary")
             with self._state.lock:
                 buffer = self._state.worker_observations
                 if self._state.worker_observations_frozen:
@@ -2342,7 +2348,11 @@ class WorkerSocketServer:
                          "after_action_sequence": self._state.action_sequence - 1 if self._state.action_sequence else None,
                          "depends_on": references, "data": data,
                          "privacy": {"redacted": False, "redactions": []}}
-                identity = buffer.append_agent_observation(value, secrets=(self._state.lease_token,))
+                identity = buffer.append_agent_observation(value, secrets=(
+                    self._state.lease_token,
+                    *(os.environ.get(name, "") for name in (
+                        "OPENROUTER_API_KEY", "DEEPLINE_API_KEY", "SCRAPINGDOG_API_KEY")),
+                ))
             if identity is None:
                 return unavailable
             return contracts.canonical_json({"recorded": True, "observation_id": identity}).encode("utf-8")
@@ -2989,37 +2999,19 @@ class WorkerSocketServer:
             )
         }
         call = document.get("call")
-        if (
-            operation_id == shim.PAGE_FETCH_OPERATION
-            and type(document.get("status")) is int
-            and document["status"] == 403
-            and isinstance(call, Mapping)
-            and call.get("operation_id") == operation_id
-            and call.get("provider") == "deepline"
-            and type(call.get("action_sequence")) is int
-            and call.get("action_sequence") == action_sequence
-            and call.get("error_code") == "provider_request_refused"
-            and isinstance(call.get("call_identity"), str)
-            and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
-        ):
-            try:
-                body = base64.b64decode(str(document["body_b64"]), validate=True)
-            except (TypeError, ValueError):
-                body = b""
-            if body == b'{"error":{"code":"provider_request_refused"}}':
-                headers[CALL_IDENTITY_HEADER] = call["call_identity"]
-        # A successful response needs a host-issued identity so cooperative
-        # clients can acknowledge its bytes after their HTTP adapter reads it.
-        # Provider-supplied copies were removed above.
+        operation = operations.get_operation(operation_id)
+        # A valid managed call has a host-issued identity even when its result
+        # is an error or its provider cost has not settled. Local refusals have
+        # no call identity and never gain one here.
         if (
             isinstance(call, Mapping)
             and call.get("operation_id") == operation_id
             and type(call.get("action_sequence")) is int
             and call["action_sequence"] == action_sequence
-            and call.get("outcome") == "settled"
-            and not call.get("error_code")
+            and operation is not None and call.get("provider") == operation.provider
+            and operation_id not in operations.CATALOG_OPERATIONS
             and type(document.get("status")) is int
-            and 200 <= document["status"] < 300
+            and 100 <= document["status"] <= 599
             and isinstance(call.get("call_identity"), str)
             and contracts.SHA256_RE.fullmatch(call["call_identity"]) is not None
         ):
@@ -3113,6 +3105,7 @@ class WorkerSocketServer:
         state = self._state
         try:
             call = (document or {}).get("call") or {}
+            operation = operations.get_operation(observation["operation_id"])
             valid_response = False
             if response is not None and "status" in response:
                 try:
@@ -3120,10 +3113,10 @@ class WorkerSocketServer:
                     valid_response = True
                 except shim.ShimError as exc:
                     observation.update(kind="invalid_response", exception_class=type(exc).__name__)
-            normal_paid_success = (
-                not error and response is not None and valid_response
-                and type(response.get("status")) is int and 200 <= response["status"] < 300
-                and call.get("outcome") == "settled" and not call.get("error_code")
+            receiptable_call = (
+                response is not None and valid_response
+                and type(response.get("status")) is int and 100 <= response["status"] <= 599
+                and operation is not None and call.get("provider") == operation.provider
                 and call.get("operation_id") == observation["operation_id"]
                 and type(call.get("action_sequence")) is int
                 and call["action_sequence"] == observation["action_sequence"]
@@ -3131,6 +3124,9 @@ class WorkerSocketServer:
                 and contracts.SHA256_RE.fullmatch(call["call_identity"])
                 and observation["operation_id"] not in operations.CATALOG_OPERATIONS
             )
+            normal_paid_success = (receiptable_call and not error
+                and 200 <= response["status"] < 300
+                and call.get("outcome") == "settled" and not call.get("error_code"))
             if not normal_paid_success:
                 outcome = {"protocol": observation["protocol"]}
                 if response is not None:
@@ -3148,7 +3144,7 @@ class WorkerSocketServer:
             with state.lock:
                 if state.worker_observations_frozen:
                     return
-                if normal_paid_success:
+                if receiptable_call:
                     raw_body = base64.b64decode(response["body_b64"], validate=True)
                     recorded = state.worker_observations.append_response_receipt({
                         "ordinal": observation["ordinal"], "action_sequence": observation["action_sequence"],
@@ -3159,7 +3155,7 @@ class WorkerSocketServer:
                     })
                     if recorded:
                         observation["response_receipt_ordinal"] = observation["ordinal"]
-                else:
+                if not normal_paid_success:
                     state.worker_observations.append_prepared(prepared, local_refusal=kind == "local_refusal")
                 state.worker_observations_pending.discard(observation["ordinal"])
         except Exception:

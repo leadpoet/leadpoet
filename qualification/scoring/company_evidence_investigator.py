@@ -52,10 +52,12 @@ from qualification.scoring.linkedin_company_size import (
     VERIFIER_FAILURE_REASON_KEY,
     _ABOUT_SECTION_HEADING,
     _ABOUT_SECTION_END_HEADING,
+    _canonical_linkedin_company_size,
     _is_linkedin_access_wall,
     _profile_body_matches_company_identity,
     _strict_linkedin_company_profile_url,
     fetch_current_linkedin_company_size,
+    extract_linkedin_company_size,
     linkedin_company_page_slug,
 )
 from qualification.scoring.pre_checks import _resolve_country
@@ -342,15 +344,17 @@ subscriptions, free-account/demo/free-trial signups, a generic SaaS or product
 label, another vendor's subscription, and a pay-once license alone do not prove
 paid product subscriptions. This proves only the subscription clause; every
 other mandatory clause still requires source evidence.
-A vendor-owned product offering plus current commercial
-customers or deployments of that same product supports that the vendor sells
-it; do not require a public price or invoice. Bind the commercial fact to the
-exact investigated company and product. A free plan, research study,
-prototype, pilot, demonstration, funding announcement, or investor's general
-commercialization claim does not by itself prove a current commercial sale.
+For current commercial customers or deployments, require source evidence of the
+commercial relationship or clearly commercial production deployment of that
+same company/product. No public price or invoice is required.
+A featured study, named collaboration,
+usage metric, trial or capability page alone does not establish a commercial
+customer or deployment. A free plan, research study, prototype, pilot,
+demonstration, funding or investor's general commercialization claim alone is
+insufficient.
 When positive_semantic_review is true, treat prior positive labels as untrusted
-hypotheses. The supplier_operator role establishes relationship, not criterion
-satisfaction. Separate attributes need independent required-attribute judgment
+hypotheses. The supplier_operator role establishes relationship, not fit.
+Separate attributes need required-attribute judgment
 and source proof.
 Apply the complete requested activity and role context above.
 Apply the industry precedence above and prove every independent mandatory
@@ -2558,6 +2562,93 @@ def _bound_linkedin_headquarters_source(
     )
 
 
+def _compact_linkedin_headcount_quote(
+    quote: str,
+    observed_value: Any,
+    *,
+    url: str,
+    final_url: str,
+    text: str,
+    identity_anchor: Mapping[str, Any],
+    identity_names: set[str],
+) -> str:
+    """Select a shorter literal span; never repair facts or acquire evidence."""
+
+    if (
+        not 2000 < len(quote) <= MAX_PAGE_CHARACTERS
+        or not 0 < len(text) <= MAX_PAGE_CHARACTERS
+        or not identity_names
+        or _is_linkedin_access_wall(text)
+    ):
+        return ""
+    source = _surface_span(_visible_quote_surface(text))
+    original = _surface_span(quote)
+    if _normalized_span(original) not in _normalized_span(source):
+        return ""
+    # Mixed profiles and repeated fields are ambiguous even if one span agrees.
+    # These literal labels also survive a transport that flattens whitespace.
+    if any(
+        len(re.findall(pattern, source, flags=re.I)) != 1
+        for pattern in (r"\|\s*LinkedIn\b", r"\bCompany size\b")
+    ):
+        return ""
+    if len(re.findall(r"\bAbout(?: us)?\b", original, flags=re.I)) != 1:
+        return ""
+    # Do not omit a loaded profile's stronger Website identity field.
+    websites = len(re.findall(r"\bWebsite\b", source, flags=re.I))
+    if websites > 1 or websites != len(re.findall(r"\bWebsite\b", original, flags=re.I)):
+        return ""
+    # Restore only field boundaries for the existing typed profile parser and
+    # identity binder. The final evidence is selected from the original span,
+    # never from this presentation or from facts outside the submitted quote.
+    presentation = re.sub(r"(\|\s*LinkedIn)\b", r"\1\n", quote, flags=re.I)
+    presentation = re.sub(
+        r"\b(About(?: us)?|Website|Company size)\b", r"\n\1\n",
+        presentation, flags=re.I,
+    )
+    presentation = re.sub(r"(https?://[^\s<>\[\]()]+)", r"\1\n", presentation)
+    band_pattern = r"(\d[\d,.]*(?:\s*[-\u2013]\s*\d[\d,.]*|\+)?\s+employees?)\b"
+    presentation = re.sub(band_pattern, r"\1\n", presentation, flags=re.I)
+    profile = _strict_linkedin_company_profile_url(url)
+    expected = {
+        "normalized_name": identity_anchor.get("submitted_name"),
+        "registrable_dns_domain": identity_anchor.get("submitted_domain"),
+    }
+    if (
+        not profile
+        or _strict_linkedin_company_profile_url(final_url) != profile
+        or not identity_anchor.get("submitted_linkedin_slug")
+        or linkedin_company_page_slug(profile) != identity_anchor["submitted_linkedin_slug"]
+        or len(presentation) > PROFILE_MAX_CHARACTERS
+        or not _profile_body_matches_company_identity(presentation, expected)
+        or not _profile_body_matches_company_identity(presentation.lstrip().splitlines()[0], expected)
+    ):
+        return ""
+    size = extract_linkedin_company_size(presentation)
+    if not size or size["employee_count"] != _canonical_linkedin_company_size(str(observed_value)):
+        return ""
+    bands = {
+        _canonical_linkedin_company_size(match.group(1))
+        for match in re.finditer(band_pattern, source, flags=re.I)
+    } - {None}
+    if bands != {size["employee_count"]}:
+        return ""
+    field = re.search(re.escape(_surface_span(size["quote"])), original, flags=re.I)
+    if field is None:
+        return ""
+    for word in reversed(list(re.finditer(r"\S+", original[:field.start()]))):
+        if field.end() - word.start() > 2000:
+            break
+        candidate = original[word.start():field.end()]
+        if (
+            _quote_occurs(candidate, text)
+            and _quote_names_company(candidate, identity_names)
+            and _quote_supports_headcount(candidate, observed_value)
+        ):
+            return candidate
+    return ""
+
+
 def _bound_linkedin_headquarters_finding(
     finding: Mapping[str, Any],
     text: str,
@@ -2876,6 +2967,16 @@ def _validated_findings(
                         ),
                     )
                 )
+            if target == "headcount" and len(finding["evidence_quote"]) > 2000:
+                compact_quote = _compact_linkedin_headcount_quote(
+                    finding["evidence_quote"], finding["observed_value"],
+                    url=evidence_url,
+                    final_url=str((fetched_final_urls or {}).get(evidence_url) or ""),
+                    text=fetched_text, identity_anchor=identity_anchor or {},
+                    identity_names=attribution_names,
+                )
+                if compact_quote:
+                    finding["evidence_quote"] = compact_quote
             if len(finding["evidence_quote"]) > 2000:
                 finding.update(
                     status="UNPROVEN",

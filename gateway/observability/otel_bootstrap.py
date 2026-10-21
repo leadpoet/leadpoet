@@ -647,6 +647,20 @@ BILLING_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.cursor_entry_id": (int,),
     "arena.run_scoped": (bool,),
 }
+# Two rounds can be open at once. A round-advance stage says which round it
+# served and when that round's final scoring close falls, so the last-resort
+# cancellation two hours later is a deadline that can be read rather than
+# inferred. Both values are Arena-generated and shape-checked.
+ROUND_TASK_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
+    **TASK_SPAN_ATTRIBUTE_TYPES,
+    "arena.round_id": (str,),
+    "arena.scoring_deadline": (str,),
+}
+_ARENA_ISO_UTC_RE = re.compile(
+    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?"
+    r"(?:Z|\+00:00)$"
+)
+
 ARENA_LIFECYCLE_STAGES = frozenset(
     {"service_startup", "service_shutdown", "service_preflight"}
 )
@@ -1227,6 +1241,13 @@ def _validating_exporter(
             source_sha = attributes["arena.source_sha"]
             if source_sha != "unknown" and not re.fullmatch(r"[0-9a-f]{40}", source_sha):
                 return "source_sha"
+        elif isinstance(stage, str) and stage.startswith("advance_") and _attributes_conform(
+            attributes, ROUND_TASK_SPAN_ATTRIBUTE_TYPES
+        ):
+            if (not _ARENA_ROUND_ID_RE.fullmatch(attributes["arena.round_id"])
+                    or not _ARENA_ISO_UTC_RE.fullmatch(
+                        attributes["arena.scoring_deadline"])):
+                return "round_scope"
         elif stage == "reconcile_deepline_billing_lookup" and _attributes_conform(
             attributes, BILLING_TASK_SPAN_ATTRIBUTE_TYPES
         ):
@@ -1877,6 +1898,7 @@ class ArenaTelemetry:
         source_sha: Optional[str] = None,
         store_error: Optional[Mapping[str, Any]] = None,
         billing_lookup: Optional[Mapping[str, Any]] = None,
+        round_scope: Optional[Mapping[str, Any]] = None,
     ) -> None:
         try:
             self._record(
@@ -1889,6 +1911,7 @@ class ArenaTelemetry:
                 source_sha=source_sha,
                 store_error=store_error,
                 billing_lookup=billing_lookup,
+                round_scope=round_scope,
             )
         except BaseException as exc:
             # Telemetry is observational only — the pipeline must not notice.
@@ -1906,6 +1929,7 @@ class ArenaTelemetry:
         source_sha: Optional[str],
         store_error: Optional[Mapping[str, Any]],
         billing_lookup: Optional[Mapping[str, Any]],
+        round_scope: Optional[Mapping[str, Any]] = None,
     ) -> None:
         from opentelemetry.trace import Status, StatusCode
 
@@ -1917,6 +1941,14 @@ class ArenaTelemetry:
         span.set_attribute("duration_ms", float(duration_ms))
         if source_sha is not None:
             span.set_attribute("arena.source_sha", str(source_sha))
+        if stage.startswith("advance_") and isinstance(round_scope, Mapping):
+            round_id = round_scope.get("round_id")
+            deadline = round_scope.get("scoring_deadline")
+            if (type(round_id) is str and _ARENA_ROUND_ID_RE.fullmatch(round_id)
+                    and type(deadline) is str
+                    and _ARENA_ISO_UTC_RE.fullmatch(deadline)):
+                span.set_attribute("arena.round_id", round_id)
+                span.set_attribute("arena.scoring_deadline", deadline)
         if stage == "reconcile_deepline_billing_lookup" and isinstance(billing_lookup, Mapping):
             round_id = billing_lookup.get("round_id")
             lane = billing_lookup.get("lane")

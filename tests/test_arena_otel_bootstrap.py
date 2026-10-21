@@ -846,6 +846,43 @@ def test_a_failure_diagnostic_outside_the_choice_sets_drops_the_span():
     assert exp.get_finished_spans() == ()
 
 
+def test_round_advance_stage_names_its_round_and_scoring_deadline():
+    """With two rounds open, a stage span must say which one it served."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record(
+        "advance_score_stage", "ok",
+        round_scope={
+            "round_id": "arena-2026-10-21",
+            "scoring_deadline": "2026-10-22T08:30:00Z",
+        },
+    )
+
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.round_id"] == "arena-2026-10-21"
+    assert span.attributes["arena.scoring_deadline"] == "2026-10-22T08:30:00Z"
+
+
+@pytest.mark.parametrize(
+    "round_scope",
+    [
+        {"round_id": "not-a-round", "scoring_deadline": "2026-10-22T08:30:00Z"},
+        {"round_id": "arena-2026-10-21", "scoring_deadline": "tomorrow morning"},
+        {"round_id": "arena-2026-10-21"},
+    ],
+)
+def test_an_unshaped_round_scope_is_dropped_without_losing_the_stage(round_scope):
+    """The liveness signal must survive a diagnostic it cannot vouch for."""
+    exp = InMemorySpanExporter()
+    recorder = configure_arena_otel(None, span_exporter=exp)
+    recorder.record("advance_score_stage", "ok", round_scope=round_scope)
+
+    (span,) = exp.get_finished_spans()
+    assert span.name == "arena.advance_score_stage"
+    assert "arena.round_id" not in span.attributes
+    assert "arena.scoring_deadline" not in span.attributes
+
+
 def test_every_contract_terminal_cause_is_admitted():
     """A cause the contract can produce must be one the validator will admit."""
     from lab_arena import contracts

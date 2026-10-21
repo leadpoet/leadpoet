@@ -75,6 +75,16 @@ tick: `advance_billing_read`, `advance_admission`, `advance_lock_wait`
 `advance_score_stage`, `advance_publish`. They carry the same five attributes
 and the same fail-closed envelope as every other stage.
 
+The steps that run once the round’s schedule is known also carry
+`arena.round_id` and `arena.scoring_deadline` (the round’s
+`final_scoring_close`, ISO-8601 UTC). Two rounds can be open at once, so
+without the round id a stage span cannot say which round it served; and the
+cancellation of last resort falls two hours after that deadline, which is
+otherwise not reported anywhere. Both values are Arena-generated and
+shape-checked — a value the exporter cannot vouch for is dropped on its own,
+leaving the stage span itself intact, because these spans are the Arena’s
+liveness signal and must never be lost to a diagnostic.
+
 **`arena.provider`** — one INTERNAL span per outbound provider call. The
 Arena's cost, latency and failure all originate upstream at OpenRouter,
 Deepline and Scrapingdog, and none of it was visible: a slow round and a

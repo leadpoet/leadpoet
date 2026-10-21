@@ -299,3 +299,36 @@ def test_bound_profile_compaction_settles_in_one_submit_without_research(monkeyp
     assert result["usage"]["search_calls"] == result["usage"]["fetch_calls"] == 0
     search.assert_not_called()
     fetch.assert_not_called()
+
+
+def test_repeated_oversized_quotes_finish_unproven_within_existing_turn_limit(monkeypatch):
+    post = AsyncMock(return_value=(200, {"choices": [{"message": {"tool_calls": [{
+        "id": "unchanged-oversized-quote", "type": "function", "function": {
+            "name": "submit_findings", "arguments": json.dumps(
+                {"findings": [_headcount(PAGE[:2090])]}
+            ),
+        },
+    }]}}]}))
+    search, fetch = AsyncMock(), AsyncMock()
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
+    monkeypatch.setenv("EXA_API_KEY", "offline-test")
+    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_search_web", search)
+    monkeypatch.setattr(investigator, "_fetch_page", fetch)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        # Without the expected profile identity, local compaction must fail
+        # closed. A model ignoring correction feedback must still terminate.
+        company_locator={"name": "Lium", "website": "https://lium.ai/", "linkedin": ""},
+        targets=("headcount",), requested_employee_buckets=("11-50",),
+        positive_semantic_review=True,
+        prior_observations={"submitted_source_urls": [URL]},
+        prefetched_pages={URL: {"final_url": URL, "text": PAGE}},
+    ))
+    assert result["_completed_submit"] is True and result["failure_reason"] == ""
+    assert result["claims"]["headcount"]["status"] == "UNPROVEN"
+    assert result["claims"]["headcount"]["reason"] == investigator.OVERSIZED_QUOTE_REASON
+    assert 1 < post.call_count <= investigator.MAX_REASONING_TURNS + 1
+    assert result["usage"]["reasoning_turns"] == post.call_count
+    assert result["usage"]["search_calls"] == result["usage"]["fetch_calls"] == 0
+    search.assert_not_called()
+    fetch.assert_not_called()

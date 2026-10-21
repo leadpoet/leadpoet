@@ -4489,6 +4489,7 @@ class ArenaService:
         """Record verified decisions that arrived after a stage was scored."""
 
         round_id = str(row["round_id"])
+        admitted = {p["submission_id"] for p in row.get("participants") or []}
         configuration = row["configuration_doc"]
         policy = contracts.validate_scorer_policy(configuration["scorer_policy"])
         icps = self.evaluation_icps(round_id)
@@ -4497,7 +4498,8 @@ class ArenaService:
             score_runs = self._store.list_runs(round_id, stage=stage, kind="score")
             judges = self._select_scoring_outputs(score_runs, round_row=row)
             ready = [source for source in sources
-                if source.get("status") == "accepted"
+                if source.get("submission_id") in admitted
+                and source.get("status") == "accepted"
                 and source.get("per_icp_score") is None
                 and judges.get(str(source["run_id"]), {}).get("status") == "accepted"]
             if not ready:

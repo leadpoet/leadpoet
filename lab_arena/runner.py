@@ -3947,6 +3947,7 @@ class AssignmentExecutor:
                     )
                 except Exception:
                     pass
+            _record_training_observations(config, lease, lease_token, state)
             _record_runtime_failure(
                 config, lease, lease_token, state, exc, failure_stage="setup"
             )
@@ -3981,6 +3982,8 @@ class AssignmentExecutor:
         worker = None
         runtime_entered = False
         primary_exception: Optional[BaseException] = None
+        runtime_failure: Optional[Tuple[BaseException, str]] = None
+        runtime_failure_status = "abandoned"
         evaluation_date = str(lease.get("evaluation_date") or config.evaluation_date)
         try:
             _record_trajectory(config, lease, lease_token, [trajectory.event(
@@ -4270,14 +4273,7 @@ class AssignmentExecutor:
         except DependencyInstallInfrastructureError as exc:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
                 primary_exception = exc
-                _record_runtime_failure(
-                    config,
-                    lease,
-                    lease_token,
-                    state,
-                    exc,
-                    failure_stage="setup",
-                )
+                runtime_failure = (exc, "setup")
                 raise
             terminal = "provider_error"
             output_document = None
@@ -4296,14 +4292,7 @@ class AssignmentExecutor:
         except AgentDependencyError as exc:
             if scoring_run:  # the trusted scorer has no submitted dependency tree
                 primary_exception = exc
-                _record_runtime_failure(
-                    config,
-                    lease,
-                    lease_token,
-                    state,
-                    exc,
-                    failure_stage="setup",
-                )
+                runtime_failure = (exc, "setup")
                 raise
             terminal = "model_error"
             output_document = None
@@ -4321,18 +4310,11 @@ class AssignmentExecutor:
                 and exc.result is not None
             ):
                 result = exc.result
-            _record_runtime_failure(
-                config,
-                lease,
-                lease_token,
-                state,
+            runtime_failure = (
                 exc,
-                failure_stage=(
-                    "cleanup"
-                    if isinstance(exc, runtime.SandboxCleanupError)
-                    else "runtime" if runtime_entered else "setup"
-                ),
-                result=result,
+                "cleanup"
+                if isinstance(exc, runtime.SandboxCleanupError)
+                else "runtime" if runtime_entered else "setup",
             )
             interrupted_partial = None
             if (
@@ -4352,10 +4334,11 @@ class AssignmentExecutor:
                 interrupted_partial = _partial_company_judgment_output(checkpoint, lease)
             if interrupted_partial is None:
                 raise
-            # The host error was recorded above. Report only its failed,
+            # Retain the host error during finalization. Report only its failed,
             # lease-bound terminal company subset through normal completion.
             # A later worker cleanup failure must still raise, never complete.
             primary_exception = None
+            runtime_failure_status = "judge_error"
             terminal = "judge_error"
             output_document = interrupted_partial
             provider_classification_ready = True
@@ -4368,6 +4351,14 @@ class AssignmentExecutor:
             except Exception as exc:
                 stop_exception = exc
             observation_capture = _record_training_observations(config, lease, lease_token, state)
+            if runtime_failure is not None:
+                # Authenticated abandonment can immediately expire this lease.
+                # Drain handlers and store the bounded capture before that signal.
+                _record_runtime_failure(
+                    config, lease, lease_token, state, runtime_failure[0],
+                    failure_stage=runtime_failure[1], result=result,
+                    status=(runtime_failure_status if stop_exception is None else "abandoned"),
+                )
             shutil.rmtree(run_dir, ignore_errors=True)
             shutil.rmtree(socket_dir, ignore_errors=True)
             if stop_exception is not None:

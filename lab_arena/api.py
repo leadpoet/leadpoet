@@ -333,7 +333,10 @@ def create_app(service: ArenaService) -> FastAPI:
         run_id: str, x_lab_arena_lease: Optional[str] = Header(default=None),
     ) -> Response:
         lease_token = _lease_header(x_lab_arena_lease)
-        await run_in_threadpool(service._training_capture_run, run_id, lease_token)
+        await run_in_threadpool(
+            service._training_capture_run, run_id, lease_token,
+            allow_observation_finalization=True,
+        )
         return Response(status_code=204, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
     @app.post("/arena/v1/runs/{run_id}/training-observations")
@@ -343,9 +346,12 @@ def create_app(service: ArenaService) -> FastAPI:
     ) -> JSONResponse:
         lease_token = _lease_header(x_lab_arena_lease)
         _refuse_declared_oversize(request, training_observations.MAX_OBJECT_BYTES)
-        # Reject unowned/inactive leases before buffering a large private body.
-        # The handler rechecks authority after upload to cover expiry/reclaim.
-        await run_in_threadpool(service._training_capture_run, run_id, lease_token)
+        # Only final observations have a bounded lease-expiry grace. Reject
+        # unauthorized bodies before buffering, then recheck after upload.
+        await run_in_threadpool(
+            service._training_capture_run, run_id, lease_token,
+            allow_observation_finalization=True,
+        )
         document = await _read_json(request, limits=contracts.StrictLimits(
             max_depth=64, max_list_items=250_000, max_object_keys=250_000,
             max_string_bytes=training_observations.MAX_EVENT_BYTES,

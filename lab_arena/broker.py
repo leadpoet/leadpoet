@@ -2110,6 +2110,67 @@ def _terminal_response_document(
     return document
 
 
+def _capture_upstream_response(
+    response: ProviderResponse, *, operation_id: str,
+    request_hash: str, call_identity: str, call_succeeded: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """Keep complete private error bytes without storage I/O or replay authority."""
+    if response.internal_provenance is not None:
+        return None
+    try:
+        # The credential-echo guard has already checked this response before
+        # clearing the active key. Filter other credential-shaped fields and
+        # opaque reasoning before base64 encoding, including malformed text.
+        if len(response.body) > 3 * 1024 * 1024:
+            return {"status": "unavailable", "reason": "response_size_limit"}
+        text = response.body.decode("utf-8")
+        try:
+            body, is_json = json.loads(text), True
+        except ValueError:
+            body, is_json = text, False
+        cleaned, body_redactions = training_capture.sanitize_training_value(body)
+        raw = response.body
+        if body_redactions:
+            raw = (contracts.canonical_json(cleaned).encode("utf-8")
+                   if is_json else cleaned.encode("utf-8"))
+        headers, header_redactions = training_capture.sanitize_training_value(
+            {name: value for name, value in response.headers.items()
+             if name.lower() == "content-type"}
+        )
+        redactions = sorted(set(body_redactions) | set(header_redactions))
+        receipt = _terminal_response_document(
+            response.status, headers, raw, call_succeeded=call_succeeded,
+        )
+        receipt.update(
+            capture_kind="upstream_response", operation_id=operation_id,
+            request_hash=request_hash, call_identity=call_identity,
+            wire_body_sha256=contracts.hash_bytes(response.body),
+            wire_body_bytes=len(response.body),
+            body_sha256=contracts.hash_bytes(raw), body_bytes=len(raw),
+            privacy={"redacted": bool(redactions), "redactions": redactions},
+        )
+        return receipt
+    except Exception:
+        # Unsupported encoding or privacy failure stays explicit. Never
+        # retain opaque binary evidence that bypasses credential redaction.
+        return {"status": "unavailable", "reason": "response_capture_failed"}
+
+
+def _retain_upstream_response_receipt(
+    document: Dict[str, Any], receipt: Mapping[str, Any],
+) -> None:
+    """Fit optional evidence after all accounting fields, or keep the original."""
+    try:
+        # Default whitespace and ASCII escaping conservatively bound JSONB text.
+        for candidate_receipt in (receipt, {"status": "unavailable", "reason": "response_size_limit"}):
+            candidate = dict(document, upstream_response_receipt=candidate_receipt)
+            if len(json.dumps(candidate).encode("utf-8")) <= 4 * 1024 * 1024:
+                document["upstream_response_receipt"] = candidate_receipt
+                return
+    except Exception:
+        pass  # Optional evidence must never replace an accounting failure.
+
+
 def _confirmed_credit_failure_proof(
     *, provider: str, funding_source: str, response: ProviderResponse,
     raw_document: Any, raw_actual: Optional[int], actual: int,
@@ -2628,6 +2689,7 @@ def _decode_terminal(
         "deepline_response_missing",
         "deepline_response_missing_reason",
         "compatibility_failure_code",
+        "upstream_response_receipt",  # Private evidence has no replay authority.
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
         raise BrokerError("broker_unavailable")
@@ -5817,6 +5879,22 @@ class Broker:
         )
         failure_stage = "response_adaptation"
         observed_provider_http_status = response.status
+        upstream_response = response  # Freeze the wire status before provider adaptation.
+        upstream_capture = None
+
+        def retain_upstream_response(document):
+            nonlocal upstream_capture
+            if deepline_lost_response or scrapingdog_observed_success_status is not None:
+                return  # No original body survived the transport failure.
+            if upstream_capture is None:
+                upstream_capture = _capture_upstream_response(
+                    upstream_response, operation_id=operation_id,
+                    request_hash=request_hash, call_identity=call_identity,
+                    call_succeeded=call_succeeded,
+                )
+            if upstream_capture is not None:
+                _retain_upstream_response_receipt(document, upstream_capture)
+
         adapted_response_url = ""
         call_succeeded = False
         judgment_cache_eligible = False
@@ -6000,6 +6078,7 @@ class Broker:
                             judgment_cache_eligible=True,
                         )
                     )
+                retain_upstream_response(uncertain_doc)
                 uncertain_state = self._persist_provider_accounting(self._store.mark_uncertain,
                     deadline=accounting_store_deadline,
                     run_id=context.run_id,
@@ -6151,6 +6230,8 @@ class Broker:
                 summary["deepline_response_missing"] = True
             if deepline_async_ids:
                 terminal["deepline_async_job_ids"] = list(deepline_async_ids)
+            if not call_succeeded and not 200 <= sanitized_status < 300:
+                retain_upstream_response(terminal)
             payload = dict(summary, outcome="settled", status=sanitized_status, provider_status=provider_status_for_summary, actual_microusd=actual, response_hash=contracts.hash_bytes(sanitized_body))
             failure_stage = "settlement"
             settlement = dict(
@@ -6268,6 +6349,7 @@ class Broker:
                     provider_cost=cost_record,
                     compatibility_failure_code=compatibility_failure_code,
                 )
+                retain_upstream_response(terminal)
                 try:
                     settled = self._persist_provider_accounting(self._store.settle_call,
                         deadline=accounting_store_deadline,
@@ -6354,6 +6436,7 @@ class Broker:
                     "observed_provider_status": scrapingdog_observed_success_status,
                     "transport_error_class": summary["transport_error_class"],
                 })
+            retain_upstream_response(uncertain_doc)
             try:
                 self._persist_provider_accounting(self._store.mark_uncertain,
                     deadline=accounting_store_deadline,

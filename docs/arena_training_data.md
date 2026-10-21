@@ -235,6 +235,23 @@ unfinished writes remain explicit gaps. Paid-response bodies are not duplicated.
 These bounds do not promise that every execution will fit.
 No database migration, new service, package or provider call is required.
 
+Final observation uploads have a 180-second grace after the current stored
+lease expiry. This covers the existing two upload attempts when finalization
+crosses a deadline. Only the same token, run, lease generation and claim can
+write the existing immutable artifact, while the run is leased or has failed
+with `lease_expired`. Ownership, size limits, privacy filtering and both upload
+authorization checks remain in force. Input capture and all execution, provider,
+completion and billing endpoints keep their normal lease rules. This does not
+recover bytes already lost to process death or uploads outside the grace.
+
+Failed provider responses that are replaced by a generic worker error retain
+their sanitized upstream response in the existing private ledger receipt.
+Readable UTF-8 bodies fit within the existing receipt size limit; unsupported
+or oversized bodies remain explicit gaps. This adds no storage request.
+Training exports keep that upstream evidence separate from the response shown
+to the agent. Retaining an error does not prove delivery or resolve its cost;
+missing provider billing remains unknown.
+
 ## Historical reconstruction
 
 Safely recover frozen ICP/context, accepted final outputs, full retained provider

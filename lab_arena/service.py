@@ -51,6 +51,10 @@ logger = logging.getLogger(__name__)
 
 _CompanyEvidenceReads = Dict[Tuple[str, str, int], Dict[str, Any]]
 
+# Final observation uploads already have two 60-second I/O attempts. Allow
+# their exact lease to finish after expiry without extending execution authority.
+_OBSERVATION_FINALIZATION_GRACE = timedelta(seconds=180)
+
 
 class _PublicResultEvidenceReads(dict):
     """One response's evidence and bounded raw reads; never shared by requests."""
@@ -5734,8 +5738,11 @@ class ArenaService:
                 )
         return result
 
-    def _training_capture_run(self, run_id: str, lease_token: str) -> Dict[str, Any]:
-        """Authorize private capture with the current owned, active lease."""
+    def _training_capture_run(
+        self, run_id: str, lease_token: str, *,
+        allow_observation_finalization: bool = False,
+    ) -> Dict[str, Any]:
+        """Authorize capture; only final observations have a bounded grace."""
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
@@ -5743,8 +5750,20 @@ class ArenaService:
         expected_hash = str(run.get("lease_token_hash") or "")
         if not expected_hash or not hmac.compare_digest(expected_hash, hash_lease_token(lease_token)):
             raise ServiceError("lease_invalid", 401)
-        if run.get("status") != "leased":
+        expired_attempt = (
+            allow_observation_finalization
+            and run.get("status") == "failed"
+            and run.get("terminal_cause") == "lease_expired"
+        )
+        if run.get("status") != "leased" and not expired_attempt:
             raise ServiceError("lease_inactive", 409)
+        if allow_observation_finalization:
+            try:
+                training_observations.object_ref(
+                    run_id, run.get("lease_generation"), run.get("claim_request_hash"),
+                )
+            except (ValueError, TypeError):
+                raise ServiceError("lease_invalid", 401) from None
         try:
             raw_expiry = run.get("lease_expires_at")
             expiry = raw_expiry if isinstance(raw_expiry, datetime) else datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00"))
@@ -5752,8 +5771,14 @@ class ArenaService:
                 expiry = expiry.replace(tzinfo=timezone.utc)
         except (TypeError, ValueError):
             raise ServiceError("lease_invalid", 401) from None
-        if expiry.astimezone(timezone.utc) <= self.now():
-            raise ServiceError("lease_expired", 409)
+        expiry = expiry.astimezone(timezone.utc)
+        now = self.now()
+        if expiry <= now:
+            if (not allow_observation_finalization
+                    or now >= expiry + _OBSERVATION_FINALIZATION_GRACE):
+                raise ServiceError("lease_expired", 409)
+        elif expired_attempt:
+            raise ServiceError("lease_inactive", 409)
         return run
 
     def handle_training_input(
@@ -5789,7 +5814,7 @@ class ArenaService:
         }
 
     def handle_training_observations(self, run_id: str, lease_token: str, document: Any) -> Dict[str, Any]:
-        run = self._training_capture_run(run_id, lease_token)
+        run = self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
         try:
             snapshot, compressed = training_observations.build_snapshot(
                 run_id, str(run.get("kind") or "execute"), document,

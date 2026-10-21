@@ -98,6 +98,13 @@ Reward-basis v2 uses the [improvement reward slots](arena_reward_slots.md).
 The gateway and validator use the same canonical slot allocation code. Keep
 validators updated before a v2 basis becomes effective; historical v1 signed
 states and pending transaction recovery retain their original arithmetic.
+New accepted states using a v2 reward basis sign
+`slot_eligibility: until_replaced`, so occupied slots keep paying past the old
+45-epoch basis limit while their signed decay
+continues. States without the marker keep the old limit, including during a
+rolling upgrade. The public eligibility status uses an existing accepted state
+when one exists, so it reflects the rule that the validator will apply. It
+reports unknown eligibility before a v2 state is accepted for that epoch.
 
 The gateway publishes
 each epoch's state from the governing reward basis, even when no new model has

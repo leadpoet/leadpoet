@@ -1168,7 +1168,7 @@ def test_final_admission_must_finish_before_the_round_freezes():
     }
 
 
-def test_compact_publication_combines_persisted_ten_plus_twenty_scores_without_objects():
+def test_compact_publication_combines_persisted_scores_with_bounded_execution_reads():
     round_id = "arena-2026-09-02"
     king = "5" + "A" * 47
     challenger = "5" + "B" * 47
@@ -1210,16 +1210,24 @@ def test_compact_publication_combines_persisted_ten_plus_twenty_scores_without_o
             writes.append((old, new, patch))
             return {"status": "ok"}
 
-    class NoObjects:
+    object_reads = []
+
+    class ExecutionOutputsOnly:
+        def get_bounded(self, ref, max_bytes):
+            assert ref in {run["output_ref"] for run in runs if run["kind"] == "execute"}
+            assert max_bytes == output.MAX_OUTPUT_BYTES
+            object_reads.append(ref)
+            return json.dumps(_stored_public_output("Published company")).encode("utf-8")
+
         def get(self, _ref):
-            pytest.fail("publication read an object")
+            pytest.fail("publication read an unbounded or judge object")
 
         def put(self, _ref, _data):
             pytest.fail("publication wrote an object")
 
     service = object.__new__(ArenaService)
     service._store = Store()
-    service._objects = NoObjects()
+    service._objects = ExecutionOutputsOnly()
     service._clock = lambda: datetime(2026, 9, 2, 2, 0, tzinfo=timezone.utc)
     service._round = lambda _round_id: {
         "round_id": round_id, "status": "scored", "participants": participants, "finalists": ["challenger"],
@@ -1227,6 +1235,8 @@ def test_compact_publication_combines_persisted_ten_plus_twenty_scores_without_o
     }
     result = service.publish(round_id)
     assert result == {"status": "ok", "king_outcome": "crowned", "king_hotkey": challenger}
+    assert set(object_reads) == {run["output_ref"] for run in runs if run["kind"] == "execute"}
+    assert len(object_reads) == 2 * contracts.BENCHMARK_ICP_COUNT
     publication = writes[0][2]["publication_doc"]
     assert set(writes[0][2]) == {"publication_doc", "published_at"}
     assert set(publication) == {

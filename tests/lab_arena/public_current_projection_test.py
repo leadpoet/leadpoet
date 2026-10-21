@@ -26,6 +26,9 @@ class CurrentTransport:
         self.rows, self.full, self.calls, self.returned = rows, full, [], []
 
     def select(self, table, **query):
+        if table == "lab_arena_accepted_weight_states":
+            assert query["filters"] == {"network": "finney", "netuid": 71, "epoch": 101}
+            return []
         assert table == "lab_arena_rounds"
         self.calls.append(query)
         rows = [row for row in self.rows if all(
@@ -111,6 +114,8 @@ def test_current_response_matches_full_rows_and_preserves_signed_governing_basis
     candidate, transport = _service(rows, epoch=epoch)
     expected = original.public_current()
     assert candidate.public_current() == expected
+    if slots and epoch == 101:
+        assert expected["epoch_eligible"] is None
     assert rows == before
     assert expected["round"]["benchmark_icp_count"] == 10
     assert expected["round"]["output_schema_version"] == intent_details_policy.OUTPUT_SCHEMA

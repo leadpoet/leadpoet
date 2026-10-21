@@ -100,7 +100,7 @@ def test_select_retries_one_read_failure_without_changing_query(error_type, reco
 
 
 @pytest.mark.parametrize("failure", [httpx.PoolTimeout, 429, 502, 503, 504])
-def test_select_temporary_pressure_is_unavailable_without_retry(failure):
+def test_select_temporary_pressure_is_unavailable_after_bounded_retry(failure):
     requests = []
 
     def handler(request):
@@ -119,7 +119,11 @@ def test_select_temporary_pressure_is_unavailable_without_retry(failure):
     assert caught.value.store_error == expected
     assert caught.value.transaction_rolled_back is False
     assert "private" not in str(caught.value)
-    assert len(requests) == 1 and requests[0].method == "GET"
+    assert len(requests) == (1 if isinstance(failure, type) else 2)
+    assert all(request.method == "GET" for request in requests)
+    if len(requests) == 2:
+        assert requests[0].url == requests[1].url
+        assert requests[0].headers == requests[1].headers
 
 
 @pytest.mark.parametrize("error_type", [httpx.LocalProtocolError, httpx.UnsupportedProtocol])

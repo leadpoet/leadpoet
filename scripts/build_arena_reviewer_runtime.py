@@ -5,7 +5,8 @@ The original image layers, dependencies and process configuration stay intact.
 Only the dedicated runtime package and reviewed operational-interface
 extractions can be added by default. An explicit option applies only the
 approved terminal-negative, exact-source-access, pending-final-correction and
-shared failed attribute-source review repairs to frozen source.
+shared failed attribute-source review and identity schema-repair reachability
+repairs to frozen source.
 Neither path imports today's grading code.
 """
 from __future__ import annotations
@@ -140,13 +141,15 @@ def extract_frozen_sources(
     failed_attribute_source_recovery: bool = False,
     authenticated_page_refusal: bool = False,
     completed_investigation_finality: bool = False,
+    identity_schema_repair: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
         files = {}
         names = (GRADER_FILE, *ENTRYPOINT_FILES)
         if (complete_negative_finality or source_access_denied
-                or failed_attribute_source_recovery or completed_investigation_finality):
+                or failed_attribute_source_recovery or completed_investigation_finality
+                or identity_schema_repair):
             names += (FINALITY_FILE,)
         if authenticated_page_refusal:
             names += (VERIFICATION_FILE,)
@@ -168,6 +171,7 @@ def expected_overlay(
     failed_attribute_source_recovery: bool = False,
     authenticated_page_refusal: bool = False,
     completed_investigation_finality: bool = False,
+    identity_schema_repair: bool = False,
     single_tool_protocol_repair: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
@@ -175,7 +179,8 @@ def expected_overlay(
 
     expected = {GRADER_FILE, *ENTRYPOINT_FILES}
     if (complete_negative_finality or source_access_denied
-                or failed_attribute_source_recovery or completed_investigation_finality):
+                or failed_attribute_source_recovery or completed_investigation_finality
+                or identity_schema_repair):
         expected.add(FINALITY_FILE)
     if authenticated_page_refusal:
         expected.add(VERIFICATION_FILE)
@@ -184,7 +189,8 @@ def expected_overlay(
     files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
     files.update({name: convert_checkpoint_seam(original[name]) for name in ENTRYPOINT_FILES})
     if (complete_negative_finality or source_access_denied
-                or failed_attribute_source_recovery or completed_investigation_finality):
+                or failed_attribute_source_recovery or completed_investigation_finality
+                or identity_schema_repair):
         files[FINALITY_FILE] = original[FINALITY_FILE]
     if complete_negative_finality:
         from scripts.arena_reviewer_finality_seam import convert_finality_seam
@@ -212,6 +218,9 @@ def expected_overlay(
             convert_investigation_finality_seam,
         )
         files[FINALITY_FILE] = convert_investigation_finality_seam(files[FINALITY_FILE])
+    if identity_schema_repair:
+        from scripts.arena_reviewer_identity_schema_seam import convert_identity_schema_seam
+        files[FINALITY_FILE] = convert_identity_schema_seam(files[FINALITY_FILE])
     if single_tool_protocol_repair:
         from scripts.arena_reviewer_protocol_repair_seam import convert_protocol_repair_seam
         files[GRADER_FILE] = convert_protocol_repair_seam(files[GRADER_FILE])
@@ -250,6 +259,10 @@ def main() -> int:
         help="reuse exact completed-investigation finality before semantic exits; use the same option for --verify-image",
     )
     parser.add_argument(
+        "--identity-schema-repair", action="store_true",
+        help="reach existing identity schema repair after completed semantic review; use the same option for --verify-image",
+    )
+    parser.add_argument(
         "--authenticated-page-refusal", action="store_true",
         help="classify only a host-bound exact page refusal; use the same option for --verify-image",
     )
@@ -278,6 +291,8 @@ def main() -> int:
             failed_attribute_source_recovery=args.failed_attribute_source_recovery,
             **({"completed_investigation_finality": True}
                if args.completed_investigation_finality else {}),
+            **({"identity_schema_repair": True}
+               if args.identity_schema_repair else {}),
             **({"authenticated_page_refusal": True}
                if args.authenticated_page_refusal else {}),
         )
@@ -288,6 +303,7 @@ def main() -> int:
             failed_attribute_source_recovery=args.failed_attribute_source_recovery,
             authenticated_page_refusal=args.authenticated_page_refusal,
             completed_investigation_finality=args.completed_investigation_finality,
+            identity_schema_repair=args.identity_schema_repair,
             single_tool_protocol_repair=args.single_tool_protocol_repair,
         )
         tag = args.verify_image or (
@@ -298,6 +314,7 @@ def main() -> int:
             + ("-attribute-source-recovery" if args.failed_attribute_source_recovery else "")
             + ("-refusal" if args.authenticated_page_refusal else "")
             + ("-investigation-finality" if args.completed_investigation_finality else "")
+            + ("-identity-schema-repair" if args.identity_schema_repair else "")
             + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
         )
         if not args.verify_image:
@@ -340,6 +357,9 @@ def main() -> int:
         if args.completed_investigation_finality:
             from scripts.arena_reviewer_investigation_finality_seam import CORRECTION_ID as INVESTIGATION_FINALITY_CORRECTION_ID
             corrections.append(INVESTIGATION_FINALITY_CORRECTION_ID)
+        if args.identity_schema_repair:
+            from scripts.arena_reviewer_identity_schema_seam import CORRECTION_ID as IDENTITY_SCHEMA_CORRECTION_ID
+            corrections.append(IDENTITY_SCHEMA_CORRECTION_ID)
         if args.single_tool_protocol_repair:
             from scripts.arena_reviewer_protocol_repair_seam import CORRECTION_ID as PROTOCOL_CORRECTION_ID
             corrections.append(PROTOCOL_CORRECTION_ID)

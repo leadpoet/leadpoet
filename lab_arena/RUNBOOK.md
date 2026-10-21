@@ -451,6 +451,24 @@ composed image and its affected paths before registering its runtime mapping.
 Only new lease generations select the registered runtime; existing leases and
 accepted cache authorities retain their original identity and results.
 
+For a completed semantic review that still has missing model identity fields,
+explicitly add `--identity-schema-repair` during build and `--verify-image`.
+This separate correction (`completed_semantic_identity_schema_repair_v1`)
+applies only the three reviewed control-flow changes from `43a29507f`. It lets
+the existing single schema repair fill identity when the semantic investigation
+completed without failure and did not investigate rebrand. The unproven semantic
+claim remains unproven. Missing or conflicting identity and real provider or
+source failures still retry. Unknown or partially corrected source fails closed.
+The grading pin, prompts, evidence rules, dependencies and prior correction IDs
+stay unchanged. Preserve the prior runtime's explicit correction options when
+building its replacement; select this new option in addition to those options.
+The release gate can run the focused frozen-source tests with
+`ARENA_IDENTITY_FROZEN_SOURCE` and `ARENA_IDENTITY_RUNTIME_SOURCE` set to scorer
+files extracted from the pinned base and prior runtime images.
+Run `tests/test_arena_reviewer_identity_schema_seam.py` with those variables.
+Set `ARENA_IDENTITY_COMPOSED_SOURCE` to the scorer file from the new image to
+run all 14 identity controls against that exact composed verifier as well.
+
 Deploy a verified composition through the trusted reviewer-runtime mapping.
 The mapping is separate from frozen round configuration. A score lease pins
 the selected runtime when its generation starts. A later deployment cannot

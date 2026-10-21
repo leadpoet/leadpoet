@@ -14,15 +14,12 @@ INDUSTRY = "Acme supplies workflow software."
 ATTRIBUTE = "Acme is actively hiring engineers."
 
 
-@pytest.mark.parametrize("guard", ["negative", "positive", "ordinary", "verified_empty", "verified_unfetched",
-    "contradicted_empty", "missing_target", "duplicate_target", "unexpected_target", "wrong_status",
-    "nonstring_url", "nonstring_quote", "missing_submit", "malformed_submit", "deadline",
-    "401", "403", "429", "502", "503", "timeout"])
-def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
+def _run_final_correction(monkeypatch, guard, *, source_fault=""):
     clock = SimpleNamespace(now=0.0)
     clock.monotonic = lambda: clock.now
     calls, submitted = [], []
-    fault = guard in {"401", "403", "429", "502", "503", "timeout"}
+    source_fault = source_fault or (guard if guard in {"401", "403", "429", "502", "503", "timeout"} else "")
+    industry_quote = "Acme uses workflow software supplied by Example Systems." if guard == "contradicted" else INDUSTRY
     turn = 0
     initial = [_finding("industry", observed_value=None, observed_industry="Software", observed_subindustry="SaaS",
         activity_role="supplier_operator", evidence_url=URL, evidence_quote="Acme supplies an unfetched claim."),
@@ -33,7 +30,7 @@ def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
         calls.append(payload)
         if len(calls) <= 2:
             name, args = "search_web", {"query": "Acme software"}
-        elif fault and len(calls) == 3:
+        elif source_fault and len(calls) == 3:
             name, args = "fetch_page", {"url": "https://acme.example/failed-source"}
         else:
             turn += 1
@@ -50,9 +47,10 @@ def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
                 if turn == 3:
                     assert "Correction targets: industry" in payload["messages"][-1]["content"] or "correction_targets" in payload["messages"][-1]["content"]
                 final = _finding("industry", status="UNPROVEN", observed_value=None, observed_industry="Software",
-                    activity_role="supplier_operator", evidence_url=URL, evidence_quote=INDUSTRY,
+                    activity_role="supplier_operator", evidence_url=URL, evidence_quote=industry_quote,
                     reason="The previous quote did not prove the claim; no proof remains.")
                 if guard == "positive": final.update(status="VERIFIED")
+                if guard == "contradicted": final.update(status="CONTRADICTED", activity_role="customer_user")
                 if guard == "verified_empty": final.update(status="VERIFIED", evidence_url="", evidence_quote="")
                 if guard == "verified_unfetched": final.update(status="VERIFIED", evidence_url="https://acme.example/not-loaded")
                 if guard == "contradicted_empty": final.update(status="CONTRADICTED", evidence_url="", evidence_quote="")
@@ -72,8 +70,8 @@ def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
 
     async def search(*args, **kwargs): return {"results": [], "notice": "discovery_only_not_evidence"}
     async def fetch(_session, url, **kwargs):
-        if guard == "timeout": raise asyncio.TimeoutError()
-        return {"ok": False, "error": "http_" + guard}
+        if source_fault == "timeout": raise asyncio.TimeoutError()
+        return {"ok": False, "error": "http_" + source_fault}
     async def fallback(*args, **kwargs): return {"ok": False, "error": "contents_provider_unavailable"}
     for key in ("OPENROUTER_API_KEY", "EXA_API_KEY"):
         monkeypatch.setenv(key, "offline-key")
@@ -85,16 +83,28 @@ def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
     result = asyncio.run(c.investigate_company_evidence(company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("industry", "required_attribute"), requested_industry="Software", requested_attribute="Actively hiring",
         prior_observations={"submitted_source_urls": [URL]},
-        prefetched_pages={URL: {"final_url": URL, "text": INDUSTRY + " " + ATTRIBUTE}},
+        prefetched_pages={URL: {"final_url": URL, "text": industry_quote + " " + ATTRIBUTE}},
         verified_homepage_identity={"normalized_name": "acme", "registrable_dns_domain": "acme.example", "linkedin_company_slug": "acme"},
         positive_semantic_review=True))
-    completed = guard in {"negative", "positive", "ordinary"}
+    return result, turn, submitted
+
+
+@pytest.mark.parametrize("guard", ["negative", "positive", "contradicted", "ordinary", "verified_empty", "verified_unfetched",
+    "contradicted_empty", "missing_target", "duplicate_target", "unexpected_target", "wrong_status",
+    "nonstring_url", "nonstring_quote", "missing_submit", "malformed_submit", "deadline",
+    "401", "403", "429", "502", "503", "timeout"])
+def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
+    result, turn, submitted = _run_final_correction(monkeypatch, guard)
+    fault = guard in {"401", "403", "429", "502", "503", "timeout"}
+    completed = guard in {"negative", "positive", "contradicted", "ordinary"}
     assert (result.get("_completed_submit") is True) is completed, result
     if completed:
         assert result["failure_reason"] == ""
         assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
         assert result["claims"]["required_attribute"]["evidence_quote"] == ATTRIBUTE
-        assert result["claims"]["industry"]["status"] == ("UNPROVEN" if guard == "negative" else "VERIFIED")
+        assert result["claims"]["industry"]["status"] == (
+            "UNPROVEN" if guard == "negative" else "CONTRADICTED" if guard == "contradicted" else "VERIFIED"
+        )
         if guard == "negative":
             assert result["claims"]["industry"]["evidence_url"] == result["claims"]["industry"]["evidence_quote"] == ""
             assert result["claims"]["industry"]["reason"] == submitted[-1]["findings"][0]["reason"]
@@ -102,10 +112,102 @@ def test_existing_final_correction_and_failure_guards(monkeypatch, guard):
         assert result["failure_reason"] == "provider_error"
     else:
         assert result["failure_reason"] in {"malformed_response", "admission_budget_interrupted"}
+    if guard in {"verified_empty", "verified_unfetched", "contradicted_empty", "nonstring_url", "nonstring_quote"}:
+        assert result["failure_reason"] == "malformed_response"
+        assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
+        assert result["claims"]["required_attribute"]["evidence_quote"] == ATTRIBUTE
+        assert URL in result[c.PRIVATE_FETCHED_PAGES_KEY]
     if guard == "ordinary":
         assert turn == 4  # Ordinary cited UNPROVEN still receives repair and can verify.
     elif not fault and guard != "deadline":
-        assert turn == (4 if guard in {"missing_target", "duplicate_target", "unexpected_target", "wrong_status", "malformed_submit"} else 3)
+        # Unchanged baseline also uses four packets for rejected final proof;
+        # its erroneous completion previously hid this incidental assertion.
+        assert turn == (4 if guard in {"missing_target", "duplicate_target", "unexpected_target", "wrong_status", "malformed_submit",
+            "verified_empty", "verified_unfetched", "contradicted_empty", "nonstring_url", "nonstring_quote"} else 3)
+
+
+@pytest.mark.parametrize("fault", ["401", "403", "429", "502", "503"])
+def test_rejected_final_packet_preserves_provider_failure(monkeypatch, fault):
+    result, _, _ = _run_final_correction(monkeypatch, "verified_empty", source_fault=fault)
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == "provider_error"
+    assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
+    assert result["claims"]["required_attribute"]["evidence_quote"] == ATTRIBUTE
+
+
+@pytest.mark.parametrize("guard", ["verified_empty", "verified_unfetched", "contradicted_empty", "nonstring_url", "nonstring_quote"])
+def test_rejected_final_packet_stays_incomplete_through_fit_arena_and_cache(monkeypatch, guard):
+    from gateway.qualification.models import CompanyOutput, ICPPrompt
+    from lab_arena import company_judgments, scoring
+    from qualification.scoring import competition, lead_scorer as scorer
+    from qualification.scoring.company_fit_decision import company_fit_match
+    from tests.test_completed_cross_domain_negative import _verdict
+
+    result, _, _ = _run_final_correction(monkeypatch, guard)
+    company = CompanyOutput(
+        company_name="Acme", company_website="https://acme.example/",
+        company_linkedin="https://www.linkedin.com/company/acme/", industry="Software",
+        employee_count="51-200", country="United States", intent_signals=[{
+            "description": "Acme launched a product", "source": "news",
+            "url": "https://acme.example/news", "date": "2026-09-01",
+            "snippet": "Acme launched a product.",
+        }],
+    )
+    icp = ICPPrompt(
+        icp_id="target", prompt="target", industry="Software", employee_count="51-200",
+        sub_industry="SaaS", company_stage="", product_service="Workflow software",
+        geography="United States", country="United States", required_attribute="Actively hiring",
+    )
+    verdict = {**_verdict(), "observed_company_name": "Acme",
+        "observed_company_website": company.company_website,
+        "observed_company_linkedin": company.company_linkedin,
+        "observed_industry": "Software", "observed_subindustry": "SaaS",
+        "industry_evidence_url": URL, "industry_evidence_quote": INDUSTRY,
+        "employee_size_evidence_url": URL, "employee_size_evidence_quote": "Acme has 51-200 employees.",
+        "geography_evidence_url": URL, "geography_evidence_quote": "Acme is headquartered in the United States.",
+        "observed_company_stage": "", "required_attribute_matches": True,
+        "required_attribute_evidence_url": URL, "required_attribute_evidence_quote": ATTRIBUTE}
+    investigated = []
+    async def prechecks(*args, **kwargs): return company_fit_match("prechecks passed")
+    async def homepage(*args, **kwargs): return company_fit_match("homepage identity bound")
+    async def request(**kwargs): return dict(verdict), ""
+    async def refresh(value, *args, invocation_cache, **kwargs):
+        invocation_cache["refresh_outcome"] = "verified"
+        return dict(value)
+    async def investigate(**kwargs):
+        investigated.append(kwargs)
+        return copy.deepcopy(result)
+    monkeypatch.setattr(scorer, "run_company_zero_checks", prechecks)
+    monkeypatch.setattr(scorer, "verify_company_exists", homepage)
+    monkeypatch.setattr(scorer, "_request_company_reverify_json", request)
+    monkeypatch.setattr(scorer, "_refresh_linkedin_employee_size_observation", refresh)
+    monkeypatch.setattr(scorer, "_targeted_company_investigation_dimensions", lambda *a, **k: ("industry", "required_attribute"))
+    monkeypatch.setattr(scorer, "_positive_semantic_review_needed", lambda *a: True)
+    monkeypatch.setattr(scorer, "investigate_company_evidence", investigate)
+    fit = asyncio.run(scorer._verify_company_fit(
+        company, icp, 0.0, 1.0, set(), require_https_transport=True, evidence_investigator=True,
+    ))
+    assert investigated
+    assert fit.decision == "unavailable"
+    receipt = next(item for item in fit.details["supporting_receipts"]
+                   if item["gate"] == "company_evidence_investigation")
+    assert receipt["completed_submitted_findings"] is False
+    assert receipt["failure_reason"] == "malformed_response"
+    assert receipt["claims"]["required_attribute"]["evidence_quote"] == ATTRIBUTE
+    row = {"final_score": 0.0, "failure_reason": "Company fit unavailable",
+           "verifier_gate_receipts": [fit.receipt("company_fit")]}
+    assert competition.scorer_breakdown_has_retryable_infrastructure_failure(row)
+    assert not company_judgments.raw_judgment_is_cacheable(competition.raw_company_judgment(row))
+    calls = []
+    def judge(*args):
+        calls.append(True)
+        return [copy.deepcopy(row)]
+    with pytest.raises(scoring.ScoringError):
+        scoring.score_work_item(
+            {"scored_run_id": "rejected-final"}, icp={"employee_count": ["51-200"], "max_companies": 1},
+            companies=[{"company_name": company.company_name, "employee_count": "51-200"}], scorer=judge,
+        )
+    assert len(calls) == 3
 
 
 def test_exact_final_packet_and_retained_rows(monkeypatch):

@@ -127,6 +127,7 @@ ARENA_TASK_STAGES = frozenset(
         "activate_rewards",
         "reconcile_provider_costs",
         "reconcile_active_deepline_costs",
+        "reconcile_deepline_cost",
         "reconcile_deepline_billing_lookup",
         "review_submissions",
         "service_startup",

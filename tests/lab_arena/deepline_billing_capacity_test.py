@@ -10,7 +10,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from gateway.observability.otel_bootstrap import configure_arena_otel, STORE_ERROR_SPAN_FIELDS
 from lab_arena import telemetry
 from lab_arena import broker as br
-from lab_arena.store import ArenaStore, ArenaStoreUnavailable
+from lab_arena.store import ArenaStore, ArenaStoreError, ArenaStoreUnavailable
 from tests.lab_arena.deepline_delayed_cost_reconciliation_unit_test import (
     ROUND_ID, _bare_service, _candidate,
 )
@@ -431,6 +431,67 @@ def test_settlement_telemetry_counts_all_completed_bills(monkeypatch):
     assert settlement.count == 8
     assert settlement.idle is False
     assert any(name == 'reconcile_deepline_billing_lookup' for name, _ in observations)
+
+
+@pytest.mark.parametrize("operation,resource,diagnostics", [
+    ("select", "lab_arena_submissions", {"http_status": 502, "code": "PGRST000"}),
+    ("rpc", "lab_arena_get_submission_credential", {"code": "XX000"}),
+    ("rpc", "lab_arena_reconcile_deepline_cost_v2", {"code": "22023"}),
+    ("rpc", "lab_arena_reconcile_deepline_cost_v1", {"transport_error": "ReadTimeout"}),
+])
+def test_candidate_settlement_failure_retains_safe_diagnostics_and_other_progress(
+    monkeypatch, caplog, operation, resource, diagnostics,
+):
+    canary = "secret-prompt-SQL-https://private.invalid/token"
+    error = ArenaStoreError(canary, operation=operation, resource=resource, **diagnostics)
+    store = QueueStore()
+    store.urgent = []
+    store.items = [candidate(7), candidate(8)]
+    before = [dict(item) for item in store.items]
+    broker = RecordingBroker(store, statuses={7: error, 8: "settled"})
+    service, _ = service_for(store, broker)
+    exporter = InMemorySpanExporter()
+    monkeypatch.setattr(telemetry, "_recorder", configure_arena_otel(None, span_exporter=exporter))
+
+    assert service._reconcile_active_deepline_cost(ROUND_ID) == {
+        "status": "settled", "checked": 2, "settled": 1,
+    }
+    assert sorted(broker.seen) == [7, 8]
+    assert store.items == before  # An unavailable check cannot erase the liability.
+    spans = exporter.get_finished_spans()
+    failed = [span for span in spans if span.attributes.get("arena.outcome") == "failed"]
+    assert len(failed) == 1 and failed[0].name == "arena.reconcile_deepline_cost"
+    metadata = {key.removeprefix("arena.store_"): value for key, value in failed[0].attributes.items()
+                if key in STORE_ERROR_SPAN_FIELDS}
+    assert metadata == {"operation": operation, "resource": resource, **diagnostics}
+    completed = [span for span in spans if span.name == "arena.reconcile_deepline_cost"
+                 and span.attributes.get("arena.outcome") == "ok"]
+    assert len(completed) == 1
+    outer = next(span for span in spans if span.name == "arena.reconcile_active_deepline_costs")
+    assert outer.attributes["arena.count"] == 1 and outer.attributes["arena.outcome"] == "ok"
+    assert canary not in "".join(span.to_json() for span in spans) + caplog.text
+
+
+def test_candidate_settlement_plain_error_has_no_untrusted_diagnostics(monkeypatch, caplog):
+    canary = "secret-prompt-SQL-https://private.invalid/token"
+    store = QueueStore()
+    store.urgent = []
+    store.items = [candidate(7)]
+    error = RuntimeError(canary)
+    error.store_error = {"operation": "rpc", "resource": "lab_arena_reconcile_deepline_cost_v2",
+                         "code": "22023", "message": canary}
+    service, _ = service_for(store, RecordingBroker(store, statuses={7: error}))
+    exporter = InMemorySpanExporter()
+    monkeypatch.setattr(telemetry, "_recorder", configure_arena_otel(None, span_exporter=exporter))
+
+    assert service._reconcile_active_deepline_cost(ROUND_ID) == {
+        "status": "unavailable", "checked": 1, "settled": 0,
+    }
+    failed = [span for span in exporter.get_finished_spans()
+              if span.attributes.get("arena.outcome") == "failed"]
+    assert len(failed) == 1
+    assert not STORE_ERROR_SPAN_FIELDS.intersection(failed[0].attributes)
+    assert canary not in "".join(span.to_json() for span in exporter.get_finished_spans()) + caplog.text
 
 
 @pytest.mark.parametrize("fault", ["ReadTimeout", "55P03"])

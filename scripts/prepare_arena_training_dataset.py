@@ -69,10 +69,15 @@ def main(argv=None):
                         help="also use probe, replay and unpublished rounds")
     parser.add_argument("--scorer-image-digest", default=None, help="keep one scorer cohort only")
     parser.add_argument("--scorer-policy-hash", default=None, help="keep one exact scorer policy cohort only")
+    parser.add_argument("--eval-mode", choices=("company", "company_and_icp"), default="company")
+    parser.add_argument("--eval-after", help="strict YYYY-MM-DD cutoff; later records only in eval")
+    parser.add_argument("--review-sample-size", type=int, default=0)
     args = parser.parse_args(argv)
+    if args.review_sample_size < 0:
+        parser.error("review-sample-size must be nonnegative")
     try:
         rules = training_dataset.Rules(
-            eval_percent=args.eval_percent, seed=args.seed,
+            eval_percent=args.eval_percent, seed=args.seed, eval_mode=args.eval_mode, eval_after=args.eval_after,
             production_rounds_only=not args.include_nonproduction_rounds,
             scorer_image_digest=args.scorer_image_digest,
             scorer_policy_hash=args.scorer_policy_hash,
@@ -82,17 +87,22 @@ def main(argv=None):
     created = False
     try:
         splits, manifest = training_dataset.build(_examples(args.examples), rules)
+        review = None
+        if args.review_sample_size:
+            review, manifest["review_sample"] = training_dataset.review_sample(splits, args.review_sample_size)
         args.output.mkdir(mode=0o700)
         created = True
         for name, records in splits.items():
             _write_private(args.output / (name + ".jsonl"),
                            "".join(canonical_json(record) + "\n" for record in records))
+        if review is not None:
+            _write_private(args.output / "review.jsonl", "".join(canonical_json(record) + "\n" for record in review))
         _write_private(args.output / "manifest.json", canonical_json(manifest) + "\n")
     except Exception as exc:
         if created:
             # Remove only what this run wrote, so a retry can use the path.
             with contextlib.suppress(OSError):
-                for name in ("train.jsonl", "eval.jsonl", "analysis.jsonl", "manifest.json"):
+                for name in ("train.jsonl", "eval.jsonl", "analysis.jsonl", "manifest.json", "review.jsonl"):
                     (args.output / name).unlink(missing_ok=True)
                 args.output.rmdir()
         # Inputs hold private evidence. The fixed cohort code is safe to show;

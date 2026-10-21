@@ -397,6 +397,68 @@ public rerun permission; confirm the terms before training on these records.
 The manifest says so explicitly. Label accuracy still needs a manual sample
 check before the first training run.
 
+## Additive readiness, review, and agent-step tools
+
+These tools read existing private exports. They do not change miner code, model
+requests, output schemas, judging, scoring, billing, or capture in a running
+sandbox. No new database objects, services, packages, or provider calls are
+required. They write new owner-only files and never overwrite earlier exports.
+
+```bash
+python3 scripts/report_arena_training.py --examples /private/exports --output /private/readiness.json
+python3 scripts/prepare_arena_agent_dataset.py --examples /private/exports --output /private/agent-candidates
+python3 scripts/prepare_arena_training_dataset.py --examples /private/exports --output /private/company-candidates --eval-mode company_and_icp --eval-after 2026-10-18 --review-sample-size 30
+```
+
+The readiness report covers only the supplied files, not all production runs.
+It verifies export hashes, removes repeated identical exports, and excludes
+conflicting versions of one execution rather than choosing by filename. It
+reports capture gaps, recorder counters, and candidate yields using the actual
+dataset builders. Different scoring-policy/image cohorts remain separate.
+Recorded counter absence is unknown, not zero. The report does not equate a
+complete export, positive score, or successful HTTP response with a reviewed
+good example or permission to train.
+
+The agent-step exporter prepares **observed next-response candidates**, not a
+complete agent imitation dataset. It supports self-contained text and local
+function-call contexts in managed chat and Responses requests. Each candidate
+retains the actual outbound context, the acknowledged assistant reply, and exact
+source references. It verifies the request, worker artifact, host write, agent
+read acknowledgment, and matching stored response. A later billing recovery
+cannot substitute an unreceived reply. Judge calls and future judgments never
+enter the input. A whole run can be incomplete while one independently verified
+model call is usable as a candidate.
+
+Unsupported shapes, hosted tools, unresolved history, streams, truncated replies,
+missing acknowledgments, and privacy-filtered context or targets are excluded
+with reasons. Provider reasoning summaries stay in separate teacher metadata.
+An otherwise exact visible answer can be retained when only opaque reasoning
+was removed from the response; its metadata says exact provider replay is false.
+Encrypted reasoning is never emitted. This does not request extra reasoning.
+Identical observed context/target pairs are deduplicated with their source
+references retained. Related episodes, companies and ICP requirements stay in
+one split. Candidate quality remains explicitly unreviewed.
+
+The company exporter keeps its existing default split and dataset identity.
+Optional `--eval-mode company_and_icp` holds out both company clusters and exact
+ICP requirements. Optional `--eval-after YYYY-MM-DD` puts only later examples in
+evaluation; earlier examples sharing evaluation groups move to analysis instead
+of leaking into training. Missing/invalid dates move to analysis. All manifests
+report actual date ranges, group overlap, source families and empty splits.
+These are evaluation safeguards, not a measurement of model accuracy.
+
+Optional `--review-sample-size` writes `review.jsonl`, a deterministic sample
+across split, label and evidence type. Each row references the original record
+file, ID and hash, preserves the original label and provenance, and leaves the
+reviewer's decision, reason and identity blank. Review never overwrites the
+judge or changes scores. Samples remain unreviewed until a person checks them;
+the tool does not invent corrections or automatically apply edits.
+
+Use `--include-nonproduction-rounds` only for explicit inspection of unfinished
+rounds, probes, or replays. It is not a declaration that those examples are
+production demonstrations. Small samples can yield no valid candidates or no
+usable evaluation split; the tools report that result without weakening gates.
+
 ## Verification record
 
 The integrated candidate includes remote main through `e724c9240`. The combined

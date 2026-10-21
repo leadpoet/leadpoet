@@ -1,5 +1,16 @@
 # Agent Instructions
 
+## Scoped production authorization: October 22 reward shares
+
+On 2026-10-21 the user authorized changing Arena reward slots to 20% for +10,
+15% for +5, and 15% for +1 of total emissions, starting with the October 22
+evaluation cycle. This includes narrow source changes, focused payout and
+compatibility tests, safe push/merge, canonical paired deployment, and live
+verification. Preserve thresholds, slot ownership, decay clocks, funding rules,
+scoring, historical signed rewards, accepted weight states, credentials, and
+concurrent work. Do not broadcast manual weights or rewrite historical payouts.
+This authority ends after deployment and verification.
+
 ## Scoped production authorization: tested ICP generation model
 
 On 2026-10-21 the user authorized comparing Sonnet 5.5 with Sonar for ICP

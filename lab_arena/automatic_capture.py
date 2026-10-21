@@ -27,6 +27,8 @@ from urllib.parse import urlsplit
 _ACTIVE = contextvars.ContextVar("arena_http_capture", default=None)
 _INSTALLED = None
 _BODY_LIMIT = 6 * 1024 * 1024
+# Base64 plus JSON must stay below the existing 8 MiB extended socket frame.
+_BINARY_LIMIT = 5 * 1024 * 1024
 _STATE_LIMIT = 2048
 _SOURCE = "runtime_http_v1"
 _PROVIDER_HOSTS = frozenset({"openrouter.ai", "code.deepline.com", "api.scrapingdog.com"})
@@ -237,7 +239,7 @@ class Recorder:
 
     def _emit(self, body):
         if body.identity:
-            if body.complete and 200 <= body.status <= 299:
+            if body.complete:
                 if body.content_encoding not in {"", "identity"} and not body.provider_wire:
                     self._count("provider_encoded_body_unsupported")
                     return
@@ -260,7 +262,7 @@ class Recorder:
             "application/json", "application/xml", "application/javascript", "application/xhtml+xml",
             "application/x-ndjson", "application/graphql-response+json"} or media.endswith(("+json", "+xml")))
         if not textual:
-            self._count("binary_body_unsupported")
+            self._emit_binary(body)
             return
         try:
             # Strict round trip also rejects split multibyte partial prefixes.
@@ -271,7 +273,7 @@ class Recorder:
                 self._count("text_size_limit")
                 return
         except (UnicodeError, LookupError, ValueError):
-            self._count("text_encoding_unsupported")
+            self._emit_binary(body)
             return
         result = self.checkpoint.record_web_fetch(
             url=body.url, final_url=body.url, status=body.status,
@@ -280,6 +282,21 @@ class Recorder:
                      "received_body_sha256": "sha256:" + body.digest.hexdigest(),
                      "received_body_bytes": body.size})
         self._checkpoint_result("web_fetch", result)
+
+    def _emit_binary(self, body):
+        """Store bounded consumed bytes, with privacy review still required."""
+        if not body.truncated:
+            if len(body.buffer) > _BINARY_LIMIT:
+                self._count("binary_size_limit")
+                return
+            result = self.checkpoint.record_web_fetch_binary(
+                url=body.url, final_url=body.url, status=body.status,
+                content_type=body.content_type, body=bytes(body.buffer),
+                retrieved_at=body.retrieved_at,
+                capture={"source": _SOURCE, "complete": body.complete,
+                         "received_body_sha256": "sha256:" + body.digest.hexdigest(),
+                         "received_body_bytes": body.size})
+            self._checkpoint_result("web_fetch_binary", result)
 
     def _work(self):
         while not self.stopping.is_set() or not self.queue.empty():
@@ -303,7 +320,7 @@ class Recorder:
         with self.lock:
             failures = {key: value for key, value in self.counts.items() if value and key in {
                 "body_buffer_overflow", "response_limit", "queue_overflow", "checkpoint_failure",
-                "binary_body_unsupported", "text_encoding_unsupported", "text_size_limit",
+                "binary_size_limit", "text_encoding_unsupported", "text_size_limit",
                 "provider_encoded_body_unsupported", "responses_partial", "adapter_failure",
                 "close_flush_timeout", "metadata_unsupported", "stream_association_unsupported"}}
             return {"source": _SOURCE, "complete": not failures and self.queue.empty() and self.inflight == 0,

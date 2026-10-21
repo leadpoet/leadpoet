@@ -120,8 +120,9 @@ def test_failed_automatic_summary_marks_existing_artifact_incomplete():
     assert buffer.document()["failures"] == ["capture_incomplete"]
 
 
-def test_unmodified_httpx_provider_client_gets_one_exact_receipt(tmp_path, monkeypatch):
-    document = response(200, {"answer": "unchanged"}, outcome="settled")
+@pytest.mark.parametrize("status,outcome", [(200, "settled"), (402, "uncertain"), (403, "settled"), (503, "uncertain")])
+def test_unmodified_httpx_provider_client_gets_one_exact_receipt(tmp_path, monkeypatch, status, outcome):
+    document = response(status, {"answer": "unchanged"}, outcome=outcome)
     expected = b'{"answer": "unchanged"}'
     state = runner.RunState(lease=lease(), lease_token="private-test-lease")
     api = FakeApi([], broker_documents=[document])
@@ -137,11 +138,16 @@ def test_unmodified_httpx_provider_client_gets_one_exact_receipt(tmp_path, monke
                 "http://openrouter.ai/api/v1/chat/completions",
                 json={"model": "openai/gpt-4o-mini", "messages": [{"role": "user", "content": "check"}], "max_tokens": 20},
             )
-        assert result.status_code == 200 and result.content == expected
+        assert result.status_code == status and result.content == expected
+        recorder.close()
+        automatic = [row for row in state.worker_observations.agent_observations
+                     if row["kind"] == "response_received"]
+        assert len(automatic) == 1
+        assert automatic[0]["data"]["status"] == status
         # Existing agents may still explicitly acknowledge the same consumed
         # response. This must not duplicate the runtime's acknowledgement.
         assert lab_arena_checkpoint.record_response_received(
-            call_identity=IDENTITY, status=200, body=expected,
+            call_identity=IDENTITY, status=status, body=expected,
         ) is not None
         recorder.close()
         acknowledgements = [

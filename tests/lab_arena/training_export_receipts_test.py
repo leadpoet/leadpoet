@@ -7,7 +7,7 @@ import json
 import pytest
 
 from lab_arena import contracts, training_observations
-from lab_arena.training_export import assemble_example
+from lab_arena.training_export import assemble_example, _link_worker_receipts
 from tests.lab_arena.training_export_test import CLAIM_HASH, add_call, fixture
 
 
@@ -60,6 +60,35 @@ def test_receipts_join_to_exact_ledger_bytes_and_agent_report_without_body_dupli
     assert call["response_provenance"]["agent_receipt_refs"] == [{
         "run_id": "execute:1", "id": 0, "payload_sha256": snapshot["payload_sha256"]}]
     assert "body" not in exported["worker_observation_artifacts"]["execute:1"]["payload"]["response_receipts"][0]
+
+
+def test_binary_audit_capture_is_preserved_but_never_claims_privacy_readiness():
+    values, payload = values_with_receipts()
+    values['runs'][0]['result_doc']['resource_summary']['web_egress']['connection_count'] = 1
+    raw = b'%PDF-1.7\x00\xffPRIVATE_BINARY_AUDIT'
+    digest = contracts.hash_bytes(raw)
+    payload['agent_observations'].append({
+        'id': len(payload['agent_observations']), 'kind': 'web_fetch_binary',
+        'observed_at': '2026-10-16T01:00:01Z', 'after_action_sequence': 0, 'depends_on': [],
+        'privacy': {'redacted': False, 'redactions': []},
+        'data': {'url': 'https://example.com/a.pdf', 'final_url': 'https://example.com/a.pdf',
+                 'status': 200, 'retrieved_at': '2026-10-16T01:00:01Z', 'content_type': 'application/pdf',
+                 'body_b64': base64.b64encode(raw).decode(), 'body_ref': None,
+                 'body_sha256': digest, 'body_bytes': len(raw),
+                 'stored_body_sha256': None, 'stored_body_bytes': None,
+                 'privacy_review': 'unreviewed_binary',
+                 'capture': {'source': 'runtime_http_v1', 'complete': True,
+                             'received_body_sha256': digest, 'received_body_bytes': len(raw)}}})
+    payload['agent_observation_count'] += 1
+    save(values, payload)
+    exported = assemble_example(**values)
+    reasons = exported['completeness']['incomplete_reasons']
+    assert 'binary_privacy_review_required' in reasons
+    assert 'direct_web_coverage_unverified' in reasons
+    assert 'direct_web_content_not_captured' not in reasons
+    assert exported['privacy']['exact_replay'] is False
+    captured = exported['worker_observation_artifacts']['execute:1']['payload']['agent_observations'][-1]
+    assert base64.b64decode(captured['data']['body_b64'], validate=True) == raw
 
 
 @pytest.mark.parametrize("extra_names,state_valid", [
@@ -147,3 +176,43 @@ def test_mismatched_or_unwritten_receipt_cannot_prove_agent_delivery(mutation):
     assert exported["completeness"]["dimensions"]["input_output_label"]
     assert "agent_response_receipts_unverified" in exported["completeness"]["incomplete_reasons"]
     assert exported["provider_calls"][0]["response_provenance"].get("agent_receipt") != "reported_exact_body_received"
+
+
+@pytest.mark.parametrize("ledger_body,expected_mismatch", [(None, False), (b'{"error":"different"}', True)])
+def test_error_read_links_worker_body_without_settling_or_replacing_provider_evidence(ledger_body, expected_mismatch):
+    identity = "sha256:" + "1" * 64
+    body = b'{"error":"uncertain worker reply"}'
+    receipt = {"ordinal": 0, "action_sequence": 0, "operation_id": "openrouter.chat",
+               "call_identity": identity, "protocol": "http", "status": 503,
+               "body_sha256": contracts.hash_bytes(body), "body_bytes": len(body),
+               "write_state": "socket_written", "socket_written_at": "2026-10-16T01:00:00Z"}
+    buffer = training_observations.Buffer()
+    buffer.append({"ordinal": 0, "action_sequence": 0, "operation_id": "openrouter.chat",
+                   "kind": "nonstandard_response", "call_identity": identity,
+                   "contributes_to_provider_call_count": True,
+                   "request": {"admitted_parameters": {}, "timeout_ms": 1000},
+                   "outcome": {"protocol": "http", "response": {
+                       "status": 503, "headers": {}, "body_b64": base64.b64encode(body).decode()}},
+                   "privacy": {"redacted": False, "redactions": []}})
+    buffer.append_response_receipt(receipt)
+    buffer.append_agent_observation({"id": 0, "kind": "response_received",
+        "observed_at": "2026-10-16T01:00:01Z", "after_action_sequence": 0,
+        "depends_on": [], "data": {key: receipt[key] for key in
+            ("call_identity", "status", "body_sha256", "body_bytes")},
+        "privacy": {"redacted": False, "redactions": []}})
+    snapshot, _ = training_observations.build_snapshot("execute:1", "execute", buffer.document(),
+        lease_generation=1, claim_request_hash=CLAIM_HASH)
+    ledger_receipts = [] if ledger_body is None else [{"entry_id": 3, "wire_body_sha256": contracts.hash_bytes(ledger_body),
+                                                      "wire_body_bytes": len(ledger_body), "metadata": {"status": 503}}]
+    call = {"call_identity": identity, "action_sequence": 0, "operation_id": "openrouter.chat",
+            "response_status": 503, "response_receipts": ledger_receipts,
+            "accounting_state": "uncertain", "actual_microusd": None,
+            "response_provenance": {"source": "stored_provider_ledger_receipt", "delivery_to_worker": "not_proved"}}
+    errors = _link_worker_receipts({"run_id": "execute:1", "kind": "execute"}, [call], snapshot)
+    provenance = call["response_provenance"]
+    assert provenance["agent_receipt"] == "reported_exact_body_received"
+    assert provenance["worker_body_source"] == "worker_error_observation"
+    assert provenance["worker_error_body_acknowledged"] is True
+    assert ("worker_provider_response_mismatch" in errors) is expected_mismatch
+    assert call["accounting_state"] == "uncertain" and call["actual_microusd"] is None
+    assert call["response_receipts"] == ledger_receipts

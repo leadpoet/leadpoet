@@ -203,10 +203,26 @@ Privacy filtering and exact replay are separate properties from label validity.
 The launcher mounts a read-only recorder before importing the submitted harness.
 It observes existing reads in stdlib/urllib, urllib3/requests, httpx and aiohttp.
 It does not add reads, change model requests, force reasoning, or alter scoring.
-Full successful managed-provider reads receive a hash-only acknowledgment.
-Plaintext web bytes must round-trip through their encoding before storage;
-unsupported binary/encoding/size cases are reported as gaps. Partial reads are
-marked incomplete. Exact duplicate acknowledgments from existing hooks are
+Full managed-provider reads, including error responses and uncertain calls,
+receive a hash-only acknowledgment when a host-issued call identity exists.
+The host separately records the exact sanitized worker body written to its
+socket. An error observation and write receipt may share an ordinal. A socket
+write does not prove client consumption or cost settlement; a matching client
+read acknowledgment adds only receipt evidence. Local refusals without a call
+identity remain unproved. Upstream provider evidence stays separate from the
+worker body, and a concrete mismatch is reported.
+
+Plaintext web bytes must round-trip through their encoding before storage.
+Already consumed binary or undecodable bytes up to 5 MiB use the existing
+private compressed observation artifact as `web_fetch_binary`. It records URL,
+final URL, content type, retrieval time, original received hash, separate stored
+hash, and event/run identity. Repeated bodies share one stored copy. Known
+literal credentials are removed before base64 storage; binary privacy is still
+`unreviewed_binary`. Private audit exports retain this restricted evidence and
+mark `binary_privacy_review_required`. Normal model-step and company dataset
+inputs omit these raw bytes until they are decoded and privacy reviewed. No
+extra network read, fetch, OCR, or model call occurs. Larger bodies remain an
+explicit capture gap. Partial reads are marked incomplete. Exact duplicate acknowledgments from existing hooks are
 collapsed; distinct fetch events retain their own context.
 
 A background queue has 128 slots, a shared 16 MiB body-buffer limit and a 6 MiB

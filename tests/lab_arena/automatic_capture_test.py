@@ -1043,3 +1043,70 @@ def test_slot_stream_without_weak_owner_reports_unsupported():
     assert summary["complete"] is False
     assert summary["counts"]["stream_association_unsupported"] == 1
     assert checkpoint.web == []
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+@pytest.mark.parametrize('case', ['prebuffered', 'gzip', 'streamed', 'unread', 'head', '204', 'provider'])
+def test_httpx_prebuffered_observation_preserves_stream_contract(asynchronous, case):
+    httpx = pytest.importorskip('httpx')
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    expected = b'' if case in {'head', '204'} else BODY
+
+    def handler(request):
+        headers = {'content-type': 'text/plain'}
+        if case == 'provider':
+            headers['x-leadpoet-call-identity'] = IDENTITY
+        if case == 'gzip':
+            headers['content-encoding'] = 'gzip'
+        data = gzip.compress(expected) if case == 'gzip' else expected
+        values = ({'content': data} if case in {'prebuffered', 'gzip', 'provider'}
+                  else {'stream': httpx.ByteStream(data)})
+        return httpx.Response(204 if case == '204' else 200, headers=headers, **values)
+
+    async def async_run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            async with client.stream('HEAD' if case == 'head' else 'GET', 'https://openrouter.ai/local-only') as response:
+                if case != 'unread':
+                    assert await response.aread() == expected
+
+    try:
+        if asynchronous:
+            asyncio.run(async_run())
+        else:
+            with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+                with client.stream('HEAD' if case == 'head' else 'GET', 'https://openrouter.ai/local-only') as response:
+                    if case != 'unread':
+                        assert response.read() == expected
+    finally:
+        summary = finish(recorder, checkpoint)
+    if case in {'unread', 'provider'}:
+        assert not summary['complete']
+        assert checkpoint.web == checkpoint.acks == []
+    else:
+        assert summary['complete']
+        assert len(checkpoint.web) == 1
+        assert_web(checkpoint.web[0], expected)
+        assert checkpoint.acks == []
+
+
+def test_httpx_prebuffered_does_not_replace_partial_observed_body():
+    httpx = pytest.importorskip('httpx')
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+
+    def handler(request):
+        response = httpx.Response(200, content=BODY, headers={'content-type': 'text/plain'})
+        response.request = request
+        body = recorder._body(response, 'httpx', lambda r: (str(r.url), r.status_code, r.headers))
+        body.add(BODY[:2])
+        return response
+
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            assert client.get('https://example.invalid/local-only').content == BODY
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert not summary['complete']
+    assert len(checkpoint.web) == 1
+    assert_web(checkpoint.web[0], BODY[:2], complete=False)

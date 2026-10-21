@@ -1100,7 +1100,7 @@ def test_slot_decay_persists_through_daily_publication_and_normal_validator_reco
             if legacy:
                 old_policy = rewards.reward_slot_policy_document()
                 old_policy.pop("decay")
-                patcher.setattr(rewards, "reward_slot_policy_document", lambda: old_policy)
+                patcher.setattr(rewards, "reward_slot_policy_document", lambda *_: old_policy)
             assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
         return harness.service.store.get_round(harness.round_id)["reward_basis_doc"]
 

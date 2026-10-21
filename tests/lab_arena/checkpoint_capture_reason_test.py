@@ -168,7 +168,7 @@ def test_recursive_failure_report_success_does_not_clear_outer_reason(monkeypatc
             pass
     monkeypatch.setenv(checkpoint.WORKER_SOCKET_ENV, '/nonsecret/socket')
     monkeypatch.setattr(checkpoint.socket, 'socket', lambda *a: Connection())
-    assert checkpoint._record_training('bad', {}, None) is None
+    assert checkpoint._record_training('web_fetch', {}, None) is None
     assert checkpoint._training_failure_reason() == 'invalid_frame'
     assert len(sent) == 1
     assert sent[0]['kind'] == 'capture_failure'

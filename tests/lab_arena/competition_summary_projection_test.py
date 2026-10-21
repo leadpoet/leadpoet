@@ -86,6 +86,7 @@ def _row(day="2026-10-09", **configuration):
     ]
     return {
         "round_id": "arena-" + day, "status": "published", "status_generation": 0,
+        "stage_generation": 0, "scoring_generation_floor": 0,
         "created_at": day + "T00:00:00Z",
         "evaluation_date": day, "icp_set_date": None, "published_at": day + "T15:00:00Z",
         "arena_network_name": "finney", "arena_netuid": 71,
@@ -334,6 +335,8 @@ def test_exact_postgrest_select_and_fixed_psycopg_projection():
 def test_pending_promotion_uses_narrow_latest_day_without_changing_decision():
     older, newer = _row("2026-10-08"), _row("2026-10-09")
     service, transport = _service([older, newer])
+    # This fixture tests the publication-day projection, not baseline execution.
+    service._baseline_final_ready = lambda _row: True
     service._store.pending_promotions = lambda **_kwargs: [{"round_id": older["round_id"]}]
     assert service._pending_promotion_blocks() is False
     assert transport.calls[0]["columns"] == "round_id,evaluation_date"

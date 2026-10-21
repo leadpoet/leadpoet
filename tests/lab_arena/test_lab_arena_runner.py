@@ -1057,6 +1057,76 @@ def test_run_once_checks_later_round_before_waiting_to_rescan(tmp_path):
         runner_.close()
 
 
+@pytest.mark.parametrize("older_eligible", [True, False])
+def test_run_once_rechecks_older_round_at_next_free_slot(tmp_path, older_eligible):
+    class RoundApi(FakeApi):
+        def __init__(self):
+            super().__init__([])
+            self.retry_due = False
+            self.old_taken = False
+            self.new_count = 0
+
+        def claim(self, envelope):
+            self.claims.append(envelope)
+            rid = envelope["round_id"]
+            if rid == "old-round":
+                if older_eligible and self.retry_due and not self.old_taken:
+                    self.old_taken = True
+                    return dict(lease("old-retry", 0), round_id=rid, kind="score")
+                return {"status": "no_pending"}
+            self.new_count += 1
+            return dict(lease("new-" + str(self.new_count), 0), round_id=rid)
+
+    api = RoundApi()
+    (tmp_path / "work").mkdir()
+    worker = rn.Runner(make_config(tmp_path, api, BridgingRuntime(calls=0), parallel=2))
+    worker._round_ids = ["old-round", "new-round"]
+    slow_started = threading.Event()
+    quick_started = threading.Event()
+    quick_release = threading.Event()
+    slow_release = threading.Event()
+    replacement_started = threading.Event()
+    finished = []
+
+    def run_lease(row):
+        try:
+            if row["run_id"] == "new-1":
+                slow_started.set()
+                assert slow_release.wait(timeout=3)
+            elif row["run_id"] == "new-2":
+                quick_started.set()
+                assert quick_release.wait(timeout=3)
+                api.retry_due = True
+            else:
+                replacement_started.set()
+            finished.append(row["run_id"])
+        finally:
+            worker._slots.release()
+
+    worker._run_lease = run_lease
+    caller = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = caller.submit(worker.run_once, max_claims=3)
+        assert slow_started.wait(timeout=2)
+        assert quick_started.wait(timeout=2)
+        quick_release.set()
+        assert replacement_started.wait(timeout=2)
+        assert not slow_release.is_set() and not result.done()
+        assert [row["round_id"] for row in api.claims] == (
+            ["old-round", "new-round", "new-round", "old-round"]
+            + ([] if older_eligible else ["new-round"])
+        )
+        slow_release.set()
+        assert result.result(timeout=2) == 3
+        expected = {"new-1", "new-2", "old-retry" if older_eligible else "new-3"}
+        assert set(finished) == expected and len(finished) == 3
+    finally:
+        quick_release.set()
+        slow_release.set()
+        caller.shutdown(wait=True)
+        worker.close()
+
+
 def test_run_once_stop_prevents_refill_after_idle(tmp_path):
     class RetryApi(FakeApi):
         def __init__(self):

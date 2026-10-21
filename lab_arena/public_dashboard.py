@@ -130,7 +130,7 @@ _SUCCESSFUL_CALL_COST_COUNTER_KEYS = (
 _ROUND_COLUMNS = (
     "round_id,status,created_at,configuration_doc,participants,"
     "publication_doc,published_at,cancel_reason,promotion_required,"
-    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor"
+    "baseline_promoted_at,icp_set_date,evaluation_date,scoring_generation_floor,stage_generation"
 )
 _COMPETITION_ROUND_COLUMNS = _ROUND_COLUMNS.replace(
     "configuration_doc", PUBLIC_CONFIGURATION_COLUMN,
@@ -381,7 +381,8 @@ def _participants(row: Mapping[str, Any]) -> Sequence[Mapping[str, Any]]:
 def _recovery_exclusions(service: Any, row: Mapping[str, Any]) -> Dict[str, dict]:
     """Keep previously admitted entrants visible after an operator recovery."""
     floor = int(row.get("scoring_generation_floor") or 0)
-    if floor == 0:
+    revision_ceiling = max(floor, int(row.get("stage_generation") or 0))
+    if revision_ceiling == 0:
         return {}
     history = service._store.scoring_policy_history(str(row["round_id"]))
     from lab_arena.service import ServiceError
@@ -400,28 +401,37 @@ def _recovery_exclusions(service: Any, row: Mapping[str, Any]) -> Dict[str, dict
             if not isinstance(participants, list):
                 raise ServiceError("recovery_history_invalid", 503)
             excluded.extend(participants)
+        restoration = revision.get("restoration")
+        if (type(generation) is int and 0 < generation <= revision_ceiling
+                and isinstance(restoration, Mapping)
+                and restoration.get("selected_generation_floor") == floor):
+            participants = restoration.get("excluded_participants")
+            if not isinstance(participants, list):
+                raise ServiceError("recovery_history_invalid", 503)
+            excluded.extend(participants)
     admitted = {str(item.get("submission_id")) for item in _participants(row)}
     result = {}
     for item in excluded:
         if (not isinstance(item, Mapping) or not isinstance(item.get("submission_id"), str)
                 or not item["submission_id"] or not isinstance(item.get("miner_hotkey"), str)
-                or not item["miner_hotkey"] or item.get("status") != "provider_blocked"
+                or not item["miner_hotkey"] or item.get("status") not in ("provider_blocked", "evaluation_incomplete")
                 or item.get("evaluation") != "not_evaluated"):
             raise ServiceError("recovery_history_invalid", 503)
         if item["submission_id"] not in admitted:
             result[item["submission_id"]] = {
                 "submission_id": item["submission_id"], "miner_hotkey": item["miner_hotkey"],
+                "status": item["status"],
             }
     return result
 
 
-def _mark_provider_blocked(entry: dict) -> None:
-    entry.update(status="provider_blocked", score_status="not_evaluated",
+def _mark_recovery_excluded(entry: dict, status: str) -> None:
+    entry.update(status=status, score_status="not_evaluated",
                  stage1_score=None, final_score=None, is_champion=False,
-                 eligible=False, eligibility_reason="provider_blocked")
+                 eligible=False, eligibility_reason=status)
     entry.pop("cost_summary", None)
     if "evaluation" in entry:
-        entry["evaluation"]["state"] = "provider_blocked"
+        entry["evaluation"]["state"] = status
 
 
 def _rankings(row: Mapping[str, Any], key: str) -> Dict[str, Mapping[str, Any]]:
@@ -1113,7 +1123,7 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
             item["evaluation"] = evaluation_progress([], service.now())
     for item in submissions:
         if item["submission_id"] in exclusions:
-            _mark_provider_blocked(item)
+            _mark_recovery_excluded(item, exclusions[item["submission_id"]]["status"])
     return {"round_id": round_id, "submissions": submissions}
 
 
@@ -1167,8 +1177,8 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
             _attach_evaluations(service, round_id, items,
                                 scoring_generation_floor=evaluation_floors[round_id])
             for item in items:
-                if item["status"] == "provider_blocked":
-                    _mark_provider_blocked(item)
+                if item["status"] in ("provider_blocked", "evaluation_incomplete"):
+                    _mark_recovery_excluded(item, item["status"])
         return {"rounds": list(summaries.values()), "submissions": entries, "next_cursor": next_cursor}
 
     pinned = getattr(service._config, "pinned_round_id", None)
@@ -1223,7 +1233,7 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
                                                     is_champion=champion, final_score=final_score),
                 })
                 if submission_id in exclusions:
-                    _mark_provider_blocked(entries[-1])
+                    _mark_recovery_excluded(entries[-1], exclusions[submission_id]["status"])
                 last_submission = submission_id
             after_submission = ""
         if fetched < 25 or pinned is not None:

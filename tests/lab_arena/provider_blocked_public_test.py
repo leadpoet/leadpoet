@@ -124,3 +124,69 @@ def test_later_recovery_does_not_hide_previous_excluded_entrants():
     result = public_dashboard.history_snapshot(service)
     blocked = [item for item in result["submissions"] if item["status"] == "provider_blocked"]
     assert {item["submission_id"] for item in blocked} == {"first-blocked", "later-blocked"}
+
+
+def restoration_history(round_id):
+    excluded = [{"submission_id": "blocked", "miner_hotkey": "5Blocked",
+                 "status": "provider_blocked", "evaluation": "not_evaluated"},
+                {"submission_id": "unfinished", "miner_hotkey": "5Unfinished",
+                 "status": "evaluation_incomplete", "evaluation": "not_evaluated"}]
+    return {"round_id": round_id, "revisions": [{"generation_floor": 11,
+        "restoration": {"selected_generation_floor": 0,
+                        "excluded_participants": excluded,
+                        "private_actor": "must-not-leak"}}]}
+
+
+def test_restored_original_scores_keep_excluded_entrants_visible():
+    row = _row("published")
+    row.update(scoring_generation_floor=0, stage_generation=11)
+    service, transport = _service(row)
+    evidence = restoration_history(row["round_id"])
+    service._store.scoring_policy_history = lambda _: evidence
+    for item in evidence["revisions"][0]["restoration"]["excluded_participants"]:
+        transport.submissions.append({**item, "status": "frozen", "source_ref": "private-source"})
+    with patch.object(public_dashboard, "_completed_scores", return_value={}), \
+            patch.object(public_dashboard, "_stage1_scores", return_value={}), \
+            patch.object(public_dashboard.source_disclosure, "disclosure_status", return_value={"available": False}):
+        result = public_dashboard.submissions_snapshot(service, row["round_id"])
+    by_id = {item["submission_id"]: item for item in result["submissions"]}
+    assert_blocked(by_id["blocked"])
+    incomplete = by_id["unfinished"]
+    assert incomplete["status"] == "evaluation_incomplete"
+    assert incomplete["score_status"] == "not_evaluated"
+    assert incomplete["final_score"] is None and incomplete["eligible"] is False
+    assert incomplete["evaluation"]["state"] == "evaluation_incomplete"
+    assert by_id["champion"]["is_champion"] is True
+    assert "must-not-leak" not in json.dumps(result)
+
+
+def test_restored_history_pagination_keeps_incomplete_and_provider_causes_separate():
+    service, _calls, rows = fixture(1)
+    row = rows[0]
+    row.update(scoring_generation_floor=0, stage_generation=11)
+    service._store.scoring_policy_history = lambda _: restoration_history(row["round_id"])
+    entries, cursor = [], None
+    while True:
+        result = public_dashboard.history_snapshot(service, cursor=cursor, limit=2)
+        entries.extend(result["submissions"])
+        cursor = result["next_cursor"]
+        if cursor is None:
+            break
+    assert len(entries) == 5 and len({item["submission_id"] for item in entries}) == 5
+    by_id = {item["submission_id"]: item for item in entries}
+    assert_blocked(by_id["blocked"])
+    assert by_id["unfinished"]["final_score"] is None
+    assert by_id["unfinished"]["evaluation"]["state"] == "evaluation_incomplete"
+    assert by_id["day1-miner0"]["final_score"] == 0
+
+
+@pytest.mark.parametrize("stage,floor", [(10, 0), (11, 7)])
+def test_restoration_exclusions_require_selected_floor_and_committed_revision(stage, floor):
+    service, _calls, rows = fixture(1)
+    row = rows[0]
+    row.update(scoring_generation_floor=floor, stage_generation=stage)
+    service._store.scoring_policy_history = lambda _: restoration_history(row["round_id"])
+    result = public_dashboard.history_snapshot(service)
+    assert len(result["submissions"]) == 3
+    assert all(item["status"] not in ("provider_blocked", "evaluation_incomplete")
+               for item in result["submissions"])

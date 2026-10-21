@@ -1636,7 +1636,7 @@ class ArenaStore:
         rows = self._transport.select(
             "lab_arena_rounds", filters={"round_id": round_id}, limit=1,
             columns=(
-                "round_id,status,status_generation,scoring_generation_floor,participants,publication_doc,published_at,"
+                "round_id,status,status_generation,stage_generation,scoring_generation_floor,participants,publication_doc,published_at,"
                 "benchmark_ref,evaluation_date,icp_set_date,cancel_reason,"
                 + PUBLIC_CONFIGURATION_COLUMN
                 + ",cfg_scorer_policy:configuration_doc->scorer_policy::text"

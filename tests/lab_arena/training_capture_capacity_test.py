@@ -229,9 +229,10 @@ def test_head_preflight_uses_exact_capture_authority_without_body_quota_or_stora
     before = copy.deepcopy(service._store.get_run("r1"))
     capture = service._training_capture_run
     calls = []
-    def authorize(run_id, token):
+    def authorize(run_id, token, *, allow_observation_finalization=False):
+        assert allow_observation_finalization is True
         calls.append((run_id, token))
-        return capture(run_id, token)
+        return capture(run_id, token, allow_observation_finalization=allow_observation_finalization)
     def forbidden(*_args, **_kwargs):
         pytest.fail("HEAD must not parse a body, query quota, or write an object")
     monkeypatch.setattr(service, "_training_capture_run", authorize)

@@ -2999,6 +2999,7 @@ class WorkerSocketServer:
             )
         }
         call = document.get("call")
+        operation = operations.get_operation(operation_id)
         # A valid managed call has a host-issued identity even when its result
         # is an error or its provider cost has not settled. Local refusals have
         # no call identity and never gain one here.
@@ -3007,7 +3008,8 @@ class WorkerSocketServer:
             and call.get("operation_id") == operation_id
             and type(call.get("action_sequence")) is int
             and call["action_sequence"] == action_sequence
-            and call.get("provider") in {"deepline", "openrouter", "scrapingdog"}
+            and operation is not None and call.get("provider") == operation.provider
+            and operation_id not in operations.CATALOG_OPERATIONS
             and type(document.get("status")) is int
             and 100 <= document["status"] <= 599
             and isinstance(call.get("call_identity"), str)
@@ -3103,6 +3105,7 @@ class WorkerSocketServer:
         state = self._state
         try:
             call = (document or {}).get("call") or {}
+            operation = operations.get_operation(observation["operation_id"])
             valid_response = False
             if response is not None and "status" in response:
                 try:
@@ -3113,7 +3116,7 @@ class WorkerSocketServer:
             receiptable_call = (
                 response is not None and valid_response
                 and type(response.get("status")) is int and 100 <= response["status"] <= 599
-                and call.get("provider") in {"deepline", "openrouter", "scrapingdog"}
+                and operation is not None and call.get("provider") == operation.provider
                 and call.get("operation_id") == observation["operation_id"]
                 and type(call.get("action_sequence")) is int
                 and call["action_sequence"] == observation["action_sequence"]

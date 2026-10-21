@@ -438,7 +438,10 @@ def test_v5_stage_evidence_reaches_only_untrusted_investigator_observations(
     )
     asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
         company=company,
-        icp=_icp(company_stage="Series B"),
+        icp=_icp(
+            company_stage="Series B",
+            prompt="Find US health systems that scale digital care operations.",
+        ),
         verdict=_complete_verdict(
             observed_company_stage="",
             stage_matches=None,
@@ -460,6 +463,9 @@ def test_v5_stage_evidence_reaches_only_untrusted_investigator_observations(
         "https://acme.example/news/series-b",
         "https://news.example/acme-financing",
     ]
+    assert captured["requested_icp_prompt"] == (
+        "Find US health systems that scale digital care operations."
+    )
     assert [item.model_dump(mode="json") for item in company.company_stage_evidence] == (
         public["company_stage_evidence"]
     )

@@ -90,6 +90,10 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
         "manage enrollment, learning delivery, student communication, or campus "
         "operations."
     )
+    requested_icp_prompt = (
+        "Find vendors that supply enrollment software to universities. "
+        + "Keep the complete buyer description. " * 20
+    )
     finding = _finding(
         status="VERIFIED",
         role="supplier_operator",
@@ -138,6 +142,7 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
                 "linkedin": "https://www.linkedin.com/company/unibuddy",
             },
             targets=("industry",),
+            requested_icp_prompt=requested_icp_prompt,
             requested_industry=requested_industry,
             requested_subindustry=requested_subindustry,
             requested_product_service=requested_product_service,
@@ -170,6 +175,7 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
     assert request_document["requested_industry"] == requested_industry
+    assert request_document["requested_icp_prompt"] == requested_icp_prompt
     assert request_document["requested_subindustry"] == requested_subindustry
     assert request_document["requested_product_service"] == requested_product_service
     assert request_document["requested_attribute"] == requested_attribute
@@ -316,19 +322,16 @@ def test_prompt_preserves_negative_controls_and_all_required_conjuncts():
     assert "Do not convert an explicit BOTH, ALL" in prompt
     assert "This precedence applies to every industry finding" in prompt
     assert "Still prove every active industry, sub-industry" not in prompt
-    assert (
-        "If a conjunct remains unsupported by concrete company-bound source "
-        "evidence, return UNPROVEN" in prompt
-    )
+    assert "Missing required proof or unresolved conflicting facts mean UNPROVEN" in prompt
     assert (
         "The requested taxonomy or marketing label need not appear verbatim"
         in prompt
     )
     assert (
-        "VERIFIED requires evidence for every conjunct for the same company "
-        "and product" in prompt
+        "prove every actual condition for the same company and product with "
+        "exact loaded company-bound quotes" in prompt
     )
-    assert "Cite the source and exact quote for the conjunct" in prompt
+    assert "When proof spans loaded passages, use up to two additional exact company-bound URL/quote pairs" in prompt
 
 
 def test_attribute_review_binds_annual_terms_and_workflow_across_loaded_pages():
@@ -464,3 +467,42 @@ def test_attribute_review_accepts_company_bound_third_party_and_internal_event()
         identity_anchor=_identity_anchor("Acme", "acme.example"),
     )
     assert rejected["required_attribute"]["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("support_case", [
+    "same_page", "separate_page", "wrong_company", "unavailable", "oversized",
+])
+def test_multiple_passages_keep_exact_source_company_and_quote_bounds(support_case):
+    product_url = "https://acme.example/product"
+    product_quote = "Acme supplies schools with student planning software."
+    support_url = product_url if support_case == "same_page" else "https://acme.example/terms"
+    support_quote = "Acme's student planning software plan renews annually."
+    if support_case == "wrong_company":
+        support_url = "https://other.example/terms"
+        support_quote = "OtherCo's student planning software plan renews annually."
+    elif support_case == "oversized":
+        support_quote += " " * 2000
+    pages = {product_url: product_quote}
+    if support_case != "unavailable":
+        pages[support_url] = pages.get(support_url, "") + "\n" + support_quote
+    attribute = {
+        **_finding(
+            status="VERIFIED", role="supplier_operator", url=product_url,
+            quote=product_quote, reason="The loaded product and terms jointly prove the criterion.",
+        ),
+        "target": "required_attribute",
+        "supporting_evidence_url_1": support_url,
+        "supporting_evidence_quote_1": support_quote,
+    }
+    finding = investigator._validated_findings(
+        {"findings": [attribute]}, targets=("required_attribute",),
+        fetched_pages=pages, fetched_final_urls={url: url for url in pages},
+        first_party_domains={"acme.example"}, identity_names={"acme"},
+        identity_anchor=_identity_anchor("Acme", "acme.example"),
+    )["required_attribute"]
+    if support_case in {"same_page", "separate_page"}:
+        assert finding["status"] == "VERIFIED"
+        assert finding["supporting_evidence"] == [{"url": support_url, "quote": support_quote}]
+    else:
+        assert finding["status"] == "UNPROVEN"
+        assert finding["evidence_url"] == finding["evidence_quote"] == ""

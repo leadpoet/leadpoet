@@ -110,3 +110,17 @@ def test_recovered_history_uses_current_judge_generation():
     result = public_dashboard.history_snapshot(service)
     entry = next(item for item in result["submissions"] if item["submission_id"] == "day1-miner1")
     assert entry["evaluation"]["counts"]["completed"] == 0
+
+
+def test_later_recovery_does_not_hide_previous_excluded_entrants():
+    service, _calls, rows = fixture(1)
+    row = rows[0]
+    row["scoring_generation_floor"] = 9
+    evidence = history(row["round_id"], [{"submission_id": "first-blocked", "miner_hotkey": "5First"}])
+    later = history(row["round_id"], [{"submission_id": "later-blocked", "miner_hotkey": "5Later"}])["revisions"][0]
+    later["generation_floor"] = 9
+    evidence["revisions"].append(later)
+    service._store.scoring_policy_history = lambda _: evidence
+    result = public_dashboard.history_snapshot(service)
+    blocked = [item for item in result["submissions"] if item["status"] == "provider_blocked"]
+    assert {item["submission_id"] for item in blocked} == {"first-blocked", "later-blocked"}

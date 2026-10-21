@@ -388,20 +388,18 @@ def _recovery_exclusions(service: Any, row: Mapping[str, Any]) -> Dict[str, dict
 
     if history.get("round_id") != row["round_id"] or not isinstance(history.get("revisions"), list):
         raise ServiceError("recovery_history_invalid", 503)
-    selected, selected_floor = None, -1
+    excluded = []
     for revision in history["revisions"]:
         if not isinstance(revision, Mapping):
             raise ServiceError("recovery_history_invalid", 503)
         generation = revision.get("generation_floor")
         recovery = revision.get("recovery")
-        if (type(generation) is int and selected_floor < generation <= floor
+        if (type(generation) is int and 0 < generation <= floor
                 and isinstance(recovery, Mapping)):
-            selected, selected_floor = recovery, generation
-    if selected is None:
-        return {}
-    excluded = selected.get("excluded_participants")
-    if not isinstance(excluded, list):
-        raise ServiceError("recovery_history_invalid", 503)
+            participants = recovery.get("excluded_participants")
+            if not isinstance(participants, list):
+                raise ServiceError("recovery_history_invalid", 503)
+            excluded.extend(participants)
     admitted = {str(item.get("submission_id")) for item in _participants(row)}
     result = {}
     for item in excluded:

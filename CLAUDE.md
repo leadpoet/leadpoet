@@ -2071,3 +2071,15 @@ retry, dispatch, settlement, scoring, frozen images, dependencies, data schema,
 and concurrent changes. Authority includes focused checks and a local commit;
 the coordinating agent owns review, push, merge, deployment and verification.
 This authority ends after deployment and verification.
+
+## Scoped production authorization: October 21 scoring recovery
+
+On 2026-10-21 the user authorized recovery of the stopped October 21 Arena
+round. Scope includes the narrow authenticated source-fetch recovery fix,
+focused tests, an exact guarded continuation of the sole unfinished judgment,
+safe push and merge, the committed migration, canonical paired deployment,
+and live scoring, publication, promotion and reward verification. Preserve
+all accepted results, frozen grading, miner execution, provider accounting,
+credentials and concurrent work. Resume judging only; never manufacture a
+score or bypass normal publication and reward checks. Authority ends after
+the affected round completes and the recovered flow is verified.

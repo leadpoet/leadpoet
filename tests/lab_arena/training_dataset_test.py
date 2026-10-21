@@ -536,3 +536,97 @@ def test_cli_removes_its_partial_output_after_a_failed_write(tmp_path, monkeypat
     assert not output.exists()
     monkeypatch.setattr(cli, "_write_private", write)
     assert cli.main(["--examples", str(source), "--output", str(output)]) == 0
+
+
+@pytest.mark.parametrize("cutoff", ["2026-02-30", "2026-1-01", "", "2026-10-18T00:00:00"])
+def test_temporal_cutoff_rejects_invalid_dates(cutoff):
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        dataset.Rules(eval_after=cutoff)
+
+
+def test_temporal_boundary_and_company_purge_and_missing_dates():
+    docs = [example("old-shared", [row(0, claim(), "qualified")], evaluation_date="2026-10-17"),
+            example("future-shared", [row(0, claim(), "qualified")], evaluation_date="2026-10-19"),
+            example("boundary", [row(0, claim("B", "b.com", "b"), "wrong_fit")]),
+            example("missing", [row(0, claim("M", "m.com", "m"), "qualified")], evaluation_date=None),
+            example("invalid", [row(0, claim("I", "i.com", "i"), "qualified")], evaluation_date="2026-02-30")]
+    splits, manifest = dataset.build(docs, dataset.Rules(eval_after="2026-10-18"))
+    assert [r["meta"]["run_id"] for r in splits["train"]] == ["boundary"]
+    assert [r["meta"]["run_id"] for r in splits["eval"]] == ["future-shared"]
+    reasons = {r["meta"]["run_id"]: r["selection_exclusion"] for r in splits["analysis"]}
+    assert reasons == {"old-shared": "temporal_group_purged_from_train",
+                       "missing": "temporal_date_missing_or_invalid", "invalid": "temporal_date_missing_or_invalid"}
+    checks = manifest["evaluation_checks"]
+    assert checks["split_viable"]
+    assert checks["train_eval_group_overlap_counts"]["company_cluster"] == 0
+    assert checks["date_ranges"]["eval"]["min"] == "2026-10-19"
+
+
+def test_combined_icp_groups_merge_transitive_company_aliases():
+    docs = []
+    for index, industry in enumerate(("Software", "Software", "Fintech", "Fintech")):
+        doc = example("group-%d" % index,
+                      [row(0, claim("C%d" % index, "c%d.com" % index, "c%d" % index), "qualified")],
+                      icp={**ICP, "industry": industry})
+        if index in (1, 2):
+            doc["companies"][0]["judgment"]["company_identity_alias_keys"] = ["verified:bridge"]
+        docs.append(seal(doc))
+    splits, manifest = dataset.build(docs, dataset.Rules(eval_mode="company_and_icp", eval_percent=50))
+    assert len(splits["train"] + splits["eval"]) == 4
+    assert not (splits["train"] and splits["eval"])
+    assert manifest["evaluation_checks"]["split_viable"] is False
+    assert manifest["evaluation_checks"]["train_eval_group_overlap_counts"]["icp_fingerprint"] == 0
+    assert dataset.build(docs, dataset.Rules(eval_mode="company_and_icp")) == dataset.build(
+        reversed(docs), dataset.Rules(eval_mode="company_and_icp"))
+
+
+def test_temporal_icp_purge_does_not_move_old_records_into_eval():
+    docs = [example("past", [row(0, claim(), "qualified")]),
+            example("future", [row(0, claim("B", "b.com", "b"), "qualified")], evaluation_date="2026-10-19")]
+    splits, manifest = dataset.build(docs, dataset.Rules(eval_mode="company_and_icp", eval_after="2026-10-18"))
+    assert not splits["train"]
+    assert splits["analysis"][0]["meta"]["run_id"] == "past"
+    assert splits["eval"][0]["meta"]["run_id"] == "future"
+    assert manifest["evaluation_checks"]["insufficient_split_reasons"] == ["empty_train"]
+
+
+def test_review_is_deterministic_stratified_and_does_not_edit_originals():
+    docs = [example("review-%d" % i, [row(0, claim("C%d" % i, "c%d.com" % i, "c%d" % i), kind)])
+            for i, kind in enumerate(("qualified", "wrong_fit", "fit_unproven", "exhausted"))]
+    splits, manifest = dataset.build(docs)
+    before = copy.deepcopy(splits)
+    review, summary = dataset.review_sample(splits, 10)
+    assert (review, summary) == dataset.review_sample(dict(reversed(list(splits.items()))), 10)
+    assert summary["selected"] == summary["covered_strata"] == 4
+    assert {r["original_label"]["class"] for r in review} == {
+        "qualified", "wrong_fit", "insufficient_evidence", "provider_error"}
+    originals = {r["record_id"]: r for records in splits.values() for r in records}
+    for item in review:
+        assert item["record_hash"] == dataset._hash(originals[item["record_id"]])
+        assert item["human_review_status"] == "unreviewed"
+        assert item["reviewed_label"] is item["review_reason"] is item["reviewer"] is None
+        assert "input" not in item
+    review[0]["original_label"]["class"] = "edited"
+    review[0]["input_provenance"]["run_id"] = "edited"
+    assert splits == before
+    assert manifest["rules"] == dataset.build(docs, dataset.Rules(eval_mode="company"))[1]["rules"]
+
+
+def test_review_cli_private_and_cleanup(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "source.json"
+    source.write_text(json.dumps(example(rows=[row(0, claim(), "qualified")])))
+    output = tmp_path / "dataset"
+    args = ["--examples", str(source), "--output", str(output), "--review-sample-size", "2"]
+    write = cli._write_private
+    def fail_review(path, text):
+        if path.name == "review.jsonl":
+            raise OSError("private evidence must not appear")
+        write(path, text)
+    monkeypatch.setattr(cli, "_write_private", fail_review)
+    assert cli.main(args) == 1
+    assert not output.exists()
+    assert "private evidence" not in capsys.readouterr().err
+    monkeypatch.setattr(cli, "_write_private", write)
+    assert cli.main(args) == 0
+    assert stat.S_IMODE((output / "review.jsonl").stat().st_mode) == 0o600
+    assert json.loads((output / "manifest.json").read_text())["review_sample"]["selected"] == 1

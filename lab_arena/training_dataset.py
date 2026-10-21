@@ -16,9 +16,11 @@ records, split and manifest hash.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 from dataclasses import asdict, dataclass
+from datetime import date
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from urllib.parse import urlsplit
 
@@ -57,11 +59,27 @@ class Rules:
     scorer_image_digest: Optional[str] = None
     scorer_policy_hash: Optional[str] = None
 
+    eval_mode: str = "company"
+    eval_after: Optional[str] = None
+
     def __post_init__(self) -> None:
+        if self.eval_mode not in {"company", "company_and_icp"}:
+            raise ValueError("unsupported eval_mode")
+        if self.eval_after is not None and _date(self.eval_after) is None:
+            raise ValueError("eval_after must be YYYY-MM-DD")
         if type(self.eval_percent) is not int or not 0 < self.eval_percent < 100:
             raise ValueError("eval_percent must be between 1 and 99")
         if not isinstance(self.seed, str) or not self.seed:
             raise ValueError("seed is required")
+
+
+def _date(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return None
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError:
+        return None
 
 
 def _hash(value: Any) -> str:
@@ -553,6 +571,19 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
     clusters = _Clusters()
     for record in kept:
         clusters.union(record["group_keys"]["company_keys"] or [record["record_id"]])
+    split_clusters = _Clusters()
+    for record in kept:
+        handles = list(record["group_keys"]["company_keys"]) or [record["record_id"]]
+        if rules.eval_mode == "company_and_icp":
+            handles.append("icp:" + record["group_keys"]["icp_fingerprint"])
+        split_clusters.union(handles)
+    def split_group(record):
+        handles = record["group_keys"]["company_keys"] or [record["record_id"]]
+        return split_clusters.find(handles[0])
+    future_groups = {split_group(record) for record in kept
+                     if rules.eval_after and _date(record["input"]["evaluation_date"])
+                     and record["input"]["evaluation_date"] > rules.eval_after
+                     and record["label"]["class"] in TRAINABLE and not _evidence_gap(record)}
     splits: Dict[str, List[dict]] = {"train": [], "eval": [], "analysis": []}
     evidence_exclusions: Dict[str, int] = {}
     for record in kept:
@@ -566,7 +597,18 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
                 evidence_exclusions[evidence_gap] = evidence_exclusions.get(evidence_gap, 0) + 1
             splits["analysis"].append(record)
             continue
-        bucket = int(hashlib.sha256((rules.seed + "\x00" + cluster).encode("utf-8")).hexdigest(), 16) % 100
+        group = split_group(record)
+        if rules.eval_after:
+            observed = _date(record["input"]["evaluation_date"])
+            reason = ("temporal_date_missing_or_invalid" if observed is None else
+                      "temporal_group_purged_from_train" if observed <= rules.eval_after and group in future_groups else None)
+            if reason:
+                record["selection_exclusion"] = reason
+                splits["analysis"].append(record)
+            else:
+                splits["eval" if observed > rules.eval_after else "train"].append(record)
+            continue
+        bucket = int(hashlib.sha256((rules.seed + "\x00" + group).encode("utf-8")).hexdigest(), 16) % 100
         splits["eval" if bucket < rules.eval_percent else "train"].append(record)
     for name in splits:
         splits[name].sort(key=lambda item: item["record_id"])
@@ -579,9 +621,15 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
     for source in sources:
         if source["exclusion"]:
             exclusions[source["exclusion"]] = exclusions.get(source["exclusion"], 0) + 1
+    rule_document = asdict(rules)
+    # Keep the established default dataset identity and record bytes.
+    if rules.eval_mode == "company":
+        rule_document.pop("eval_mode")
+    if rules.eval_after is None:
+        rule_document.pop("eval_after")
     manifest = {
         "schema_version": SCHEMA_VERSION, "record_schema_version": RECORD_SCHEMA_VERSION,
-        "rules": asdict(rules), "training_permission": dict(TRAINING_PERMISSION),
+        "rules": rule_document, "training_permission": dict(TRAINING_PERMISSION),
         "sources": sorted(sources, key=lambda item: (str(item["example_id"]),
                                                     str(item["example_hash"]),
                                                     str(item["run_id"]), str(item["round_id"]))),
@@ -594,7 +642,62 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules()) -> Tupl
     }
     manifest["dataset_version"] = _hash({key: manifest[key] for key in (
         "schema_version", "record_schema_version", "rules", "sources", "record_hashes")})
+    manifest["evaluation_checks"] = evaluation_checks(splits, rules)
     return splits, manifest
+
+
+def evaluation_checks(splits, rules):
+    """Observed coverage only; this does not approve training or label quality."""
+    def values(name, key):
+        return {record["group_keys"][key] for record in splits[name]
+                if record["group_keys"].get(key)}
+    overlaps = {key: len(values("train", key) & values("eval", key))
+                for key in ("company_cluster", "icp_fingerprint", "source_family")}
+    ranges = {}
+    for name, records in splits.items():
+        dates = sorted(filter(None, (_date(record["input"]["evaluation_date"]) for record in records)))
+        ranges[name] = {"min": dates[0] if dates else None, "max": dates[-1] if dates else None,
+                        "missing_or_invalid": len(records) - len(dates)}
+    reasons = ["empty_" + name for name in ("train", "eval") if not splits[name]]
+    if overlaps["company_cluster"] or (rules.eval_mode == "company_and_icp" and overlaps["icp_fingerprint"]):
+        reasons.append("group_overlap")
+    return {"split_viable": not reasons, "insufficient_split_reasons": reasons,
+            "date_ranges": ranges, "train_eval_group_overlap_counts": overlaps,
+            "source_family_counts": {name: len(values(name, "source_family")) for name in splits}}
+
+
+def review_sample(splits, size, seed="leadpoet-arena-review-v1"):
+    """Deterministic round-robin strata; originals are referenced, never edited."""
+    if type(size) is not int or size < 0:
+        raise ValueError("review sample size must be nonnegative")
+    strata = {}
+    for split, records in splits.items():
+        for record in records:
+            kinds = tuple(sorted({item["content_kind"] for item in record["input"]["source_evidence"]}))
+            key = (split, record["label"]["class"], kinds)
+            strata.setdefault(key, []).append(record)
+    for records in strata.values():
+        records.sort(key=lambda record: _hash([seed, record["record_id"], _hash(record)]))
+    selected = []
+    keys = sorted(strata)
+    while keys and len(selected) < size:
+        remaining = []
+        for key in keys:
+            if len(selected) >= size:
+                break
+            record = strata[key].pop(0)
+            selected.append({"record_id": record["record_id"], "record_hash": _hash(record),
+                             "record_file": key[0] + ".jsonl", "original_label": copy.deepcopy(record["label"]),
+                             "label_provenance": copy.deepcopy(record["label_provenance"]), "input_provenance": copy.deepcopy(record["meta"]),
+                             "evidence_kinds": list(key[2]), "human_review_status": "unreviewed",
+                             "reviewed_label": None, "review_reason": None, "reviewer": None})
+            if strata[key]:
+                remaining.append(key)
+        keys = remaining
+    return selected, {"requested": size, "selected": len(selected), "available_strata": len(strata),
+                      "covered_strata": len({(item["record_file"], item["original_label"]["class"],
+                                               tuple(item["evidence_kinds"])) for item in selected}),
+                      "human_review_status": "unreviewed"}
 
 
 __all__ = [

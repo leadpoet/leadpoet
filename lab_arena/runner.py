@@ -3131,6 +3131,20 @@ class WorkerSocketServer:
                 and contracts.SHA256_RE.fullmatch(call["call_identity"])
                 and observation["operation_id"] not in operations.CATALOG_OPERATIONS
             )
+            if not normal_paid_success:
+                outcome = {"protocol": observation["protocol"]}
+                if response is not None:
+                    outcome["response"] = response
+                for key, value in (("exception_class", observation.get("exception_class")), ("error_code", error)):
+                    if value is not None:
+                        outcome[key] = value
+                kind = observation.get("kind") or ("local_catalog" if observation["operation_id"] in operations.CATALOG_OPERATIONS else "nonstandard_response")
+                prepared = state.worker_observations.prepare_observation({
+                    **{key: observation[key] for key in ("ordinal", "action_sequence", "operation_id", "request", "contributes_to_provider_call_count")},
+                    "kind": kind, "outcome": outcome,
+                    "call_identity": call.get("call_identity"),
+                    "privacy": {"redacted": False, "redactions": []},
+                }, secrets=(state.lease_token,))
             with state.lock:
                 if state.worker_observations_frozen:
                     return
@@ -3146,19 +3160,7 @@ class WorkerSocketServer:
                     if recorded:
                         observation["response_receipt_ordinal"] = observation["ordinal"]
                 else:
-                    outcome = {"protocol": observation["protocol"]}
-                    if response is not None:
-                        outcome["response"] = response
-                    for key, value in (("exception_class", observation.get("exception_class")), ("error_code", error)):
-                        if value is not None:
-                            outcome[key] = value
-                    kind = observation.get("kind") or ("local_catalog" if observation["operation_id"] in operations.CATALOG_OPERATIONS else "nonstandard_response")
-                    state.worker_observations.append({
-                        **{key: observation[key] for key in ("ordinal", "action_sequence", "operation_id", "request", "contributes_to_provider_call_count")},
-                        "kind": kind, "outcome": outcome,
-                        "call_identity": call.get("call_identity"),
-                        "privacy": {"redacted": False, "redactions": []},
-                    }, secrets=(state.lease_token,))
+                    state.worker_observations.append_prepared(prepared, local_refusal=kind == "local_refusal")
                 state.worker_observations_pending.discard(observation["ordinal"])
         except Exception:
             with state.lock:

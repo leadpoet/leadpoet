@@ -377,7 +377,8 @@ def test_recovery_rejudges_saved_outputs_through_aggregate_and_publication(datab
         new_row['configuration_doc']['scorer_image_reference']=flows.SCORER_IMAGE_REFERENCE.rsplit('@',1)[0]+'@'+new_row['configuration_doc']['scorer_image_digest']
         now=datetime.now(timezone.utc)
         for key,hours,seconds in [('stage_2_close',2,0),('final_scoring_close',4,0),('publication_deadline',4,1)]:
-            new_row['configuration_doc']['schedule'][key]=(now+timedelta(hours=hours,seconds=seconds)).strftime('%Y-%m-%dT%H:%M:%SZ')
+            # The protected preparer uses ISO8601 UTC offsets, not only Z.
+            new_row['configuration_doc']['schedule'][key]=(now+timedelta(hours=hours,seconds=seconds)).isoformat()
         items=[]
         for stage in (1,2):
             items.extend(harness.service._scoring_work_items(new_row,stage,row['stage%d_scoring_plan_doc'%stage]))

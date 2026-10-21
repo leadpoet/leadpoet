@@ -1,5 +1,20 @@
 # Agent Instructions
 
+## Scoped production authorization: continuous champion slot rewards
+
+On 2026-10-21 the user authorized fixing the reward-basis freshness timeout so
+approved Arena slot holders keep receiving their existing rewards until a new
+qualifying achievement replaces them. This includes protected read-only
+inspection, narrow source and documentation changes, focused payout, security
+and historical-recovery tests, safe push and merge, canonical normal-validator
+and gateway deployment, and live finalized on-chain verification. Preserve
+historical signed bases, accepted epoch states and payouts; keep slot shares,
+thresholds, decay clocks, funding factors, registration, scoring, promotion,
+credentials and concurrent work unchanged. Apply the policy through new signed
+accepted states, with no hotkey-specific override, manual weights, fabricated
+rounds or rewritten results. This authority ends after deployment and live
+verification.
+
 ## Scoped production authorization: investigator evidence use
 
 On 2026-10-21 the user authorized repairing the existing investigator's complete

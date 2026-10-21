@@ -26,6 +26,7 @@ from lab_arena import code_review, code_review_policy, company_judgments, contac
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
+    SLOT_ELIGIBILITY_UNTIL_REPLACED,
     validate_accepted_weight_state,
     verify_accepted_weight_state_signature,
 )
@@ -7246,7 +7247,28 @@ class ArenaService:
             if governing is None:
                 eligibility = False
             else:
-                eligibility = rewards.epoch_eligible(governing, epoch)
+                # A previously accepted epoch state is immutable. Report its
+                # signed eligibility rule during a rolling upgrade, rather
+                # than the rule that a fresh state would receive.
+                if "slot_policy" in governing:
+                    network_name, netuid = self._chain_scope()
+                    existing = self._store.get_weight_state(network_name, netuid, epoch)
+                    if existing is not None:
+                        # This is the informational projection of trusted
+                        # storage, as for the governing basis above. Signature
+                        # verification remains mandatory in public_weight_state.
+                        state = validate_accepted_weight_state(existing.get("state_doc"))
+                        if state["reward_basis"]["reward_basis_hash"] != governing["reward_basis_hash"]:
+                            raise ServiceError("accepted_weight_state_reward_conflict", 409)
+                        eligibility = rewards.epoch_eligible(
+                            governing, epoch,
+                            until_replaced=state.get("slot_eligibility") == SLOT_ELIGIBILITY_UNTIL_REPLACED,
+                        )
+                    else:
+                        # No accepted state has chosen a rule for this epoch.
+                        eligibility = None
+                else:
+                    eligibility = rewards.epoch_eligible(governing, epoch)
                 if eligibility and "slot_policy" not in governing:
                     week = rewards.reward_week_index(epoch, int(governing["king_start_epoch"]))
         elif self._config.mode == "live":

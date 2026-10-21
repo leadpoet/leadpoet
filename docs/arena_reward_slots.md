@@ -65,8 +65,13 @@ Unused shares are not redistributed to other holders.
 The existing champion-funded baseline behavior is unchanged. If its existing
 funding-fallback rule reduces the current champion's reward factor, that factor
 applies only to slots held by that champion. It never reduces another holder's
-allocation. The existing freshness limit for the governing reward basis also
-remains; this is separate from how long an achievement owns a slot.
+allocation. New accepted weight states using a v2 reward basis include the signed
+`slot_eligibility: until_replaced` rule. Their occupied slots continue to pay
+after the reward basis is more than 45 epochs old. Each slot still follows its
+own signed decay clock and stops paying when a newer qualifying achievement
+replaces it. Missing owners and empty slots still route their shares to burn.
+Accepted states without this field retain the 45-epoch basis freshness limit.
+Version 1 champion rewards keep that limit in every state.
 
 ## Signed-state compatibility
 
@@ -78,9 +83,13 @@ without `decay` retain their original non-decaying payouts. The
 frozen `reward_constants` and weekly schedule do not rescale new slot payouts.
 
 Validators must support the signed decay policy and slot start epochs before
-the new policy becomes effective.
+the new policy becomes effective. They must also support the optional signed
+slot eligibility field before the gateway issues marked states; older validators
+reject the new field.
 Version 1 bases keep their original hashes, signatures and arithmetic. The
-accepted-weight-state envelope and transaction format do not change. Existing
-signed transactions, pending reveals and immutable accepted epoch states stay
-valid across deployment. Activation starts at a future settlement epoch; it
-does not rewrite previous payments or published competition results.
+accepted-weight-state envelope gains one optional, hash-covered field. The
+transaction format does not change. Existing signed transactions, pending
+reveals and immutable accepted epoch states stay
+valid across deployment. Continuity starts with the first newly accepted state
+after deployment; already accepted epochs remain unchanged. It does not rewrite
+previous payments or published competition results.

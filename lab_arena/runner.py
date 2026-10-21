@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from lab_arena import integrity, contact_policy, intent_details_policy, quality_policy
-from lab_arena import trajectory, validator_events
+from lab_arena import scoring_provider_compat, trajectory, validator_events
 from lab_arena import contracts, images, lab_arena_checkpoint, leased_images, operations, reviewer_runtime, runtime, runtime_version, scoring, shim, source_bundle, training_input, training_observations
 from lab_arena.contracts import ArenaContractError
 from lab_arena.broker import (
@@ -1994,6 +1994,38 @@ def _quota_snapshot_upstream_limit(wall_clock_seconds: int) -> int:
     )
 
 
+def _call_provider_matches_operation(call: Mapping[str, Any], operation_id: str) -> bool:
+    """Bind broker receipts to their requested or reviewed effective provider."""
+
+    if not isinstance(call, Mapping):
+        return False
+    operation = operations.get_operation(operation_id)
+    if operation is None or operation_id in operations.CATALOG_OPERATIONS:
+        return False
+    if call.get("provider") == operation.provider:
+        return True
+    # Score reads keep their legacy operation id after the broker routes
+    # them through Deepline. Require the complete reviewed route summary;
+    # an arbitrary different provider cannot gain receipt authority.
+    return bool(
+        call.get("provider") == "deepline"
+        and call.get("effective_operation_id") == scoring_provider_compat.EFFECTIVE_OPERATION_ID
+        and call.get("compatibility_version") == scoring_provider_compat.COMPATIBILITY_VERSION
+        and isinstance(call.get("adapter"), str)
+        and isinstance(call.get("tool"), str)
+        and (operation_id, call.get("adapter"), call.get("tool")) in {
+            ("scrapingdog.scrape", "firecrawl_raw_html", scoring_provider_compat.FIRECRAWL_TOOL),
+            ("scrapingdog.scrape", "generic_http_raw_html", scoring_provider_compat.GENERIC_HTTP_TOOL),
+            ("scrapingdog.scrape", "harvest_linkedin_post_html", scoring_provider_compat.HARVEST_POST_TOOL),
+            *(("scrapingdog.scrape", "generic_ats_json:" + kind, scoring_provider_compat.GENERIC_HTTP_TOOL)
+              for kind in ("ashby", "greenhouse", "greenhouse_board", "workday", "lever")),
+            ("scrapingdog.x_post", "twitter_x_post", scoring_provider_compat.TWITTER_POST_TOOL),
+            ("scrapingdog.linkedinjobs", "harvest_linkedin_job", scoring_provider_compat.HARVEST_JOB_TOOL),
+            ("scrapingdog.profile_post", "harvest_linkedin_post", scoring_provider_compat.HARVEST_POST_TOOL),
+        }
+    )
+
+
 class WorkerSocketServer:
     """Unix-socket bridge: operation frames in, provider responses out.
 
@@ -2999,7 +3031,7 @@ class WorkerSocketServer:
             )
         }
         call = document.get("call")
-        operation = operations.get_operation(operation_id)
+        provider_matches = isinstance(call, Mapping) and _call_provider_matches_operation(call, operation_id)
         # A valid managed call has a host-issued identity even when its result
         # is an error or its provider cost has not settled. Local refusals have
         # no call identity and never gain one here.
@@ -3008,7 +3040,7 @@ class WorkerSocketServer:
             and call.get("operation_id") == operation_id
             and type(call.get("action_sequence")) is int
             and call["action_sequence"] == action_sequence
-            and operation is not None and call.get("provider") == operation.provider
+            and provider_matches
             and operation_id not in operations.CATALOG_OPERATIONS
             and type(document.get("status")) is int
             and 100 <= document["status"] <= 599
@@ -3105,7 +3137,6 @@ class WorkerSocketServer:
         state = self._state
         try:
             call = (document or {}).get("call") or {}
-            operation = operations.get_operation(observation["operation_id"])
             valid_response = False
             if response is not None and "status" in response:
                 try:
@@ -3116,7 +3147,7 @@ class WorkerSocketServer:
             receiptable_call = (
                 response is not None and valid_response
                 and type(response.get("status")) is int and 100 <= response["status"] <= 599
-                and operation is not None and call.get("provider") == operation.provider
+                and _call_provider_matches_operation(call, observation["operation_id"])
                 and call.get("operation_id") == observation["operation_id"]
                 and type(call.get("action_sequence")) is int
                 and call["action_sequence"] == observation["action_sequence"]

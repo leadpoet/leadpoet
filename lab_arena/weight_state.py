@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 from lab_arena import contracts, signing
 from leadpoet_canonical.arena_weights import (
     ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION,
+    SLOT_ELIGIBILITY_UNTIL_REPLACED,
     WEIGHT_STATE_SIGNATURE_PREFIX,
     validate_accepted_weight_state,
 )
-from leadpoet_canonical.lab_arena_rewards import sha256_json
+from leadpoet_canonical.lab_arena_rewards import REWARD_BASIS_V2_SCHEMA_VERSION, sha256_json
 
 CHAIN_OUTCOME_SCHEMA_VERSION = "leadpoet.arena.chain_outcome.v1"
 
@@ -28,6 +29,7 @@ def build_accepted_weight_state(
     reward_basis: Mapping[str, Any],
     burn_hotkey: str,
     issued_at: str,
+    slot_eligibility: Optional[str] = SLOT_ELIGIBILITY_UNTIL_REPLACED,
 ) -> Dict[str, Any]:
     """Build and sign the small immutable state consumed by normal validators."""
 
@@ -43,6 +45,8 @@ def build_accepted_weight_state(
         "burn_hotkey": str(burn_hotkey),
         "issued_at": str(issued_at),
     }
+    if reward_basis.get("schema_version") == REWARD_BASIS_V2_SCHEMA_VERSION and slot_eligibility is not None:
+        body["slot_eligibility"] = slot_eligibility
     state_hash = sha256_json(body)
     signature = signer.sign((WEIGHT_STATE_SIGNATURE_PREFIX + state_hash).encode("utf-8"))
     import base64

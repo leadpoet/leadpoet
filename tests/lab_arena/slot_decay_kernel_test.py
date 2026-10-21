@@ -38,13 +38,14 @@ def _body(basis):
     return {key: value for key, value in basis.items() if key not in ("reward_basis_hash", "signature")}
 
 
-def _state(basis, epoch):
+def _state(basis, epoch, *, slot_eligibility="until_replaced"):
     signer = signing.LocalSigner.generate()
     signed = signing.sign_document(signer, basis, hash_field="reward_basis_hash")
     state = weight_state.build_accepted_weight_state(
         signer, network="finney", genesis_hash="1" * 64, netuid=71,
         epoch=epoch, valid_from_block=1000, valid_until_block=1100,
         reward_basis=signed, burn_hotkey=BURN, issued_at=basis["published_at"],
+        slot_eligibility=slot_eligibility,
     )
     assert arena_weights.verify_accepted_weight_state_signature(
         state, public_key_der=signer.public_key_der,

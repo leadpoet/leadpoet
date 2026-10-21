@@ -502,8 +502,8 @@ def governing_reward_basis(rows: Sequence[Any], epoch_id: int) -> Optional[Dict[
     return governing
 
 
-def epoch_eligible(basis: Any, epoch_id: int) -> bool:
-    """Eligible when the row is at most ``eligibility_max_epochs`` old and pays.
+def epoch_eligible(basis: Any, epoch_id: int, *, until_replaced: bool = False) -> bool:
+    """Eligible under the legacy freshness limit, or continuing v2 slot policy.
 
     Raises when the basis is not yet effective for ``epoch_id``: only the
     governing row may be passed here. An outcome outside the closed vocabulary
@@ -522,7 +522,7 @@ def epoch_eligible(basis: Any, epoch_id: int) -> bool:
     effective = fields["effective_reward_epoch"]
     if epoch_id < effective:
         raise LabArenaRewardError("reward basis is not effective at epoch %d" % epoch_id)
-    if epoch_id - effective > fields["reward_constants"]["eligibility_max_epochs"]:
+    if (not until_replaced or slots is None) and epoch_id - effective > fields["reward_constants"]["eligibility_max_epochs"]:
         return False
     if slots is not None:
         return any(slot is not None for slot in slots)
@@ -618,7 +618,9 @@ def champion_values(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str])
     }
 
 
-def slot_allocations(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str]) -> Dict[str, Fraction]:
+def slot_allocations(
+    basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str], *, until_replaced: bool = False,
+) -> Dict[str, Fraction]:
     """Exact registered slot allocations, with optional signed per-slot decay.
 
     Missing owners leave their allocation for burn. A signed pool_percent
@@ -634,7 +636,7 @@ def slot_allocations(basis: Any, epoch_id: int, metagraph_hotkeys: Sequence[str]
     hotkeys = _require_hotkeys(metagraph_hotkeys)
     if len(set(hotkeys)) != len(hotkeys):
         raise LabArenaRewardError("metagraph contains duplicate hotkeys")
-    if not epoch_eligible(document, epoch_id):
+    if not epoch_eligible(document, epoch_id, until_replaced=until_replaced):
         return {}
     registered = set(hotkeys)
     allocations = {}  # type: Dict[str, Fraction]

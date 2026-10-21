@@ -32,12 +32,14 @@ ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION = "leadpoet.arena.accepted_weight_state.v1"
 WEIGHT_STATE_SIGNATURE_PREFIX = "arena_weight_state_hash:"
 PARTS_PER_BILLION = 1_000_000_000
 U16_MAX = 65_535
+SLOT_ELIGIBILITY_UNTIL_REPLACED = "until_replaced"
 
 _BODY_FIELDS = (
     "schema_version", "network", "genesis_hash", "netuid", "epoch",
     "valid_from_block", "valid_until_block", "reward_basis",
     "burn_hotkey", "issued_at",
 )
+_OPTIONAL_BODY_FIELDS = ("slot_eligibility",)
 _HOTKEY_CHARS = frozenset("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$")
 
@@ -64,7 +66,7 @@ def compare_weights_hash(netuid: int, epoch_id: int, weights: Sequence[tuple[int
 def accepted_weight_state_body(value: Mapping[str, Any]) -> Dict[str, Any]:
     """Return the exact body covered by ``state_hash``."""
 
-    return {field: value[field] for field in _BODY_FIELDS}
+    return {field: value[field] for field in _BODY_FIELDS + _OPTIONAL_BODY_FIELDS if field in value}
 
 
 def classify_arena_signed_request_message(message: bytes, *, validator_hotkey: str) -> str:
@@ -126,7 +128,8 @@ def _hotkey(value: Any, name: str) -> str:
 
 def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
     _require(isinstance(value, Mapping), "accepted weight state must be an object")
-    _require(set(value) == set(_BODY_FIELDS) | {"state_hash", "signature"}, "accepted weight state fields are invalid")
+    required = set(_BODY_FIELDS) | {"state_hash", "signature"}
+    _require(required <= set(value) and not set(value) - required - set(_OPTIONAL_BODY_FIELDS), "accepted weight state fields are invalid")
     _require(value.get("schema_version") == ACCEPTED_WEIGHT_STATE_SCHEMA_VERSION, "accepted weight state schema is invalid")
     network = str(value.get("network") or "")
     _require(network and len(network) <= 64, "network is invalid")
@@ -140,6 +143,13 @@ def validate_accepted_weight_state(value: Any) -> Dict[str, Any]:
     _require(isinstance(value.get("issued_at"), str) and bool(_TIMESTAMP_RE.fullmatch(value["issued_at"])), "issued_at is invalid")
     reward_basis = validate_reward_basis(value.get("reward_basis"))
     _require(int(reward_basis["effective_reward_epoch"]) <= epoch, "reward basis is not effective for epoch")
+    if "slot_eligibility" in value:
+        _require(
+            reward_basis["schema_version"] == REWARD_BASIS_V2_SCHEMA_VERSION
+            and type(value["slot_eligibility"]) is str
+            and value["slot_eligibility"] == SLOT_ELIGIBILITY_UNTIL_REPLACED,
+            "slot_eligibility is invalid",
+        )
     _hotkey(value.get("burn_hotkey"), "burn_hotkey")
     body = accepted_weight_state_body(value)
     expected_hash = sha256_json(body)
@@ -182,7 +192,10 @@ def derive_arena_weights(value: Any, metagraph_hotkeys: Sequence[str]) -> Dict[s
     burn_hotkey = str(state["burn_hotkey"])
     _require(burn_hotkey in registered_hotkeys, "burn_hotkey is not registered at finalized state")
     if state["reward_basis"]["schema_version"] == REWARD_BASIS_V2_SCHEMA_VERSION:
-        by_hotkey = slot_allocations(state["reward_basis"], int(state["epoch"]), hotkeys)
+        by_hotkey = slot_allocations(
+            state["reward_basis"], int(state["epoch"]), hotkeys,
+            until_replaced=state.get("slot_eligibility") == SLOT_ELIGIBILITY_UNTIL_REPLACED,
+        )
         champion_share = sum(by_hotkey.values(), Fraction(0))
     else:
         champion = champion_values(state["reward_basis"], int(state["epoch"]), hotkeys)

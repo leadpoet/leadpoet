@@ -155,7 +155,7 @@ def test_public_response_keeps_output_and_reduces_authority_reads(reused_failed_
         assert before == {'run_rows': 2, 'company_rows': 2,
                           'execution-output': 1, 'current-output': 3}
         assert dict(reads) == {'run_rows': 1, 'company_rows': 1,
-                             'execution-output': 1, 'current-output': 2}
+                              'execution-output': 1, 'current-output': 1}
 
 
 @pytest.mark.parametrize('proof_already_read', [False, True])

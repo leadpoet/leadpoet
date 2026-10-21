@@ -6253,7 +6253,8 @@ class ArenaService:
 
             def reconcile(candidate: Mapping[str, Any]) -> Dict[str, Any]:
                 try:
-                    return broker.reconcile_deepline_cost(candidate)
+                    with telemetry.stage("reconcile_deepline_cost"):
+                        return broker.reconcile_deepline_cost(candidate)
                 except Exception as exc:
                     # A failed read/write leaves the original liability intact.
                     # Independent candidates must still make progress.

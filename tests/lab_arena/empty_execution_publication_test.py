@@ -2,6 +2,7 @@
 import base64
 import copy
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -130,6 +131,46 @@ def test_actual_publish_holds_before_ranking_or_promotion(broken):
     result = service.publish("round")
     assert result["status"] == "retry"
     assert holds == [{"reason": "execution_evidence_unavailable" if broken else "execution_infrastructure_incomplete"}]
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+@pytest.mark.parametrize("active", [None, "leased", "provider"])
+def test_actual_publication_hold_uses_frozen_deadline_and_drains(active, offset):
+    service, reads, _, ledger, output, _ = case()
+    deadline = datetime(2026, 10, 21, 20, 30, 3, tzinfo=timezone.utc)
+    reads.round_row["configuration_doc"]["schedule"] = {"publication_deadline": "2026-10-21T20:30:03Z"}
+    service.now = lambda: deadline + timedelta(microseconds=offset)
+    service._round = lambda _: reads.round_row
+    service._baseline_fully_succeeded = lambda _: True
+    original = copy.deepcopy((reads.runs, ledger, output, reads.round_row))
+    service._store.list_runs = lambda *a, kind=None: copy.deepcopy(reads.runs) + (
+        [{"run_id": "still-running", "status": "leased"}] if kind is None and active == "leased" else [])
+    service._store.submission_costs = lambda _: {"providers": [{"inflight_calls": int(active == "provider")}]}
+    cancellations = []
+    service._store.cancel_round = lambda *args: cancellations.append(args) or {"status": "cancelled"}
+    result = service.publish("round")
+    expected_cancel = offset >= 0 and active is None
+    assert result["status"] == ("cancelled" if expected_cancel else "retry")
+    assert cancellations == ([("round", "scoring_incomplete")] if expected_cancel else [])
+    assert (reads.runs, ledger, output, reads.round_row) == original
+
+
+def test_successful_empty_output_reaches_existing_ranking_even_after_deadline():
+    service, reads, _, ledger, _, _ = case()
+    reads.round_row["configuration_doc"]["schedule"] = {"publication_deadline": "2026-10-21T20:30:03Z"}
+    service.now = lambda: datetime(2026, 10, 21, 21, tzinfo=timezone.utc)
+    ledger[-1]["terminal_response"].update(status=200, call_succeeded=True,
+        body_b64=base64.b64encode(b'{"result":"valid response"}').decode())
+    service._round = lambda _: reads.round_row
+    service._baseline_fully_succeeded = lambda _: True
+    service._hold_incomplete_evaluation = lambda *a, **kw: pytest.fail("valid empty must not be held")
+    class RankingReached(Exception):
+        pass
+    def rank(*a, **kw):
+        raise RankingReached
+    service._score_entries_from_runs = rank
+    with pytest.raises(RankingReached):
+        service.publish("round")
 
 
 def test_reservation_query_is_one_bounded_native_projection():

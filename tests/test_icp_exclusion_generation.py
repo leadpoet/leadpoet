@@ -38,6 +38,17 @@ def test_no_key_skips_without_call():
         assert gen.generate_exclusions_for_icp({}, count=1) == []
 
 
+def test_exclusions_keep_the_existing_sonar_request():
+    with mock.patch.object(gen, "OPENROUTER_API_KEY", "test-only"), \
+         mock.patch.object(gen.httpx, "post", return_value=_sonar_response("[]")) as post:
+        assert gen.generate_exclusions_for_icp({"industry": "Software"}, count=1) == []
+    request = post.call_args.kwargs
+    assert request["json"]["model"] == "perplexity/sonar-pro"
+    assert request["json"]["temperature"] == 0.0
+    assert "tools" not in request["json"]
+    assert request["timeout"] == 45.0
+
+
 def test_icp_set_carries_exclusions_and_hash_covers_them():
     with mock.patch.object(gen, "generate_exclusions_for_icp",
                            side_effect=lambda icp, count=None, timeout_s=45.0: ["excluded.example"]):

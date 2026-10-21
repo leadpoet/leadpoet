@@ -3021,6 +3021,27 @@ def _openrouter_complete_provider_error(
     )
 
 
+def _openrouter_data_policy_route_unavailable(status: int, body: bytes) -> bool:
+    """Distinguish the pinned privacy route's absence from caller/model 404s."""
+    if type(status) is not int or status != 404:
+        return False
+    try:
+        document = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return False
+    error = document.get("error") if isinstance(document, Mapping) else None
+    if not isinstance(error, Mapping) or type(error.get("code")) is not int or error["code"] != 404:
+        return False
+    message = error.get("message")
+    return any(
+        message in (text, text + " Configure: https://openrouter.ai/settings/privacy")
+        for text in (
+            "No endpoints found matching your data policy.",
+            "No endpoints found matching your data policy (Zero data retention).",
+        )
+    )
+
+
 def _openrouter_safe_error_type(document: Mapping[str, Any]) -> str:
     """Expose only OpenRouter's fixed typed vocabulary, never provider text."""
 
@@ -5191,6 +5212,12 @@ class Broker:
                         ):
                             return _error_result("broker_unavailable", summary)
                         summary["provider_status"] = evidence["provider_status"]
+            if (effective_operation.provider == "openrouter"
+                and _openrouter_data_policy_route_unavailable(terminal_status, terminal_body)):
+                summary.update(status=operations.GENERIC_UNAVAILABLE_STATUS,
+                               provider_status=404,
+                               response_hash=contracts.hash_bytes(operations.GENERIC_UNAVAILABLE_BODY))
+                return _error_result("provider_unavailable", summary)
             return BrokerResult(terminal_status, terminal_headers, terminal_body, summary)
         if status in ("dispatched", "uncertain") and not deepline_response_recovery:
             summary["outcome"] = "uncertain"
@@ -6463,6 +6490,15 @@ class Broker:
             ):
                 return _error_result("broker_unavailable", summary)
             summary["credit_failure_proof"] = dict(credit_failure_proof)
+        if (settle_status == "settled" and effective_operation.provider == "openrouter"
+            and _openrouter_data_policy_route_unavailable(response.status, response.body)):
+            # Keep the original bound terminal and billing receipt. Only the
+            # worker-facing error classification changes, including on replay.
+            summary.update(outcome="settled", actual_microusd=actual,
+                           status=operations.GENERIC_UNAVAILABLE_STATUS,
+                           provider_status=provider_status_for_summary,
+                           response_hash=contracts.hash_bytes(operations.GENERIC_UNAVAILABLE_BODY))
+            return _error_result("provider_unavailable", summary)
         if settle_status == "settled" and request_refused:
             summary.update(
                 {

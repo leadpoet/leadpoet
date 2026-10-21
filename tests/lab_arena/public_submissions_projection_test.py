@@ -305,3 +305,34 @@ def test_store_projection_uses_existing_postgrest_and_psycopg_fields():
     assert "public.lab_arena_public_configuration_v1(lab_arena_rounds) AS configuration_doc" in sql
     assert "(configuration_doc -> 'scorer_policy')::text AS cfg_scorer_policy" in sql
     assert "arena-projection" in values
+
+
+def test_cancelled_route_keeps_verified_scores_provisional_and_never_crowns():
+    from lab_arena import public_dashboard
+    row = _row('cancelled')
+    row['cancel_reason'] = 'scoring_incomplete'
+    before = deepcopy(row)
+    service, transport = _service(row)
+    service._round = lambda _: pytest.fail('warm cancelled projection fetched full evidence')
+    service._objects = SimpleNamespace(get_bounded=lambda *a: pytest.fail('warm route read S3'))
+    for _ in range(2):
+        response = _get(service)
+        assert response.status_code == 200
+        entries = {p['submission_id']: p for p in response.json()['submissions']}
+        completed = entries['champion']
+        assert completed['final_score'] == 51
+        assert completed['score_status'] == 'provisional'
+        assert completed['status'] == 'cancelled'
+        assert completed['is_champion'] is False
+        assert completed['stage1_score'] is None
+        assert entries['other-miner']['final_score'] is None
+    summary = public_dashboard.round_summary(row, completed_scores={
+        'baseline': row['publication_doc']['final_ranking'][0],
+    })
+    assert summary['baseline']['final_score'] == 50
+    assert summary['baseline']['score_status'] == 'provisional'
+    assert summary['champion'] is None
+    assert summary['status'] == 'cancelled'
+    assert summary['cancel_reason'] == 'scoring_incomplete'
+    assert row == before
+    assert 'private-frozen-catalog' not in json.dumps(transport.returned)

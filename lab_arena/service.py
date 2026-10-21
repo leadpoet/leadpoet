@@ -2887,13 +2887,14 @@ class ArenaService:
     def commit_scoring_plan(self, round_id: str, stage: int) -> Dict[str, Any]:
         round_row = self._round(round_id)
         self.benchmark_icps(round_id)
+        admitted = {p["submission_id"] for p in round_row.get("participants") or []}
         plan = scoring.build_scoring_plan(
             round_id=round_id,
             stage=stage,
-            runs=self._store.list_runs(
+            runs=[run for run in self._store.list_runs(
                 round_id, stage=stage, kind="execute",
                 columns="*,execution_attempt:lab_arena_execution_attempt_count",
-            ),
+            ) if run["submission_id"] in admitted],
             execution_sequence_policy=(round_row.get("configuration_doc") or {}).get(
                 "execution_sequence_policy"
             ),
@@ -4467,8 +4468,10 @@ class ArenaService:
         """Unmeasured work waits unless its miner funding is proved terminal."""
 
         round_id = str(row["round_id"])
+        admitted = {p["submission_id"] for p in row.get("participants") or []}
         sources = [run for run in self._store.list_runs(round_id, kind="execute")
-                   if run.get("stage") in (1, 2) and run.get("status") == "accepted"]
+                   if run.get("stage") in (1, 2) and run.get("status") == "accepted"
+                   and run.get("submission_id") in admitted]
         score_runs = self._store.list_runs(round_id, kind="score")
         judges = self._select_scoring_outputs(score_runs, round_row=row)
         for source in sources:
@@ -6864,6 +6867,16 @@ class ArenaService:
                 stage = int(status[-1])
                 with telemetry.stage("advance_expire_leases"):
                     self._store.expire_leases(round_id)
+                if (stage == 2 and self._score_generation_floor(round_row) > 0
+                    and round_row["configuration_doc"].get("execution_sequence_policy")
+                        == contracts.BASELINE_SCORED_FIRST_POLICY
+                    and self._baseline_recovery_plan(round_row,
+                        self._store.list_runs(round_id, stage=1, kind="execute"),
+                        self._store.list_runs(round_id, stage=1, kind="score")) is None):
+                    if now >= _parse_iso(schedule["publication_deadline"]):
+                        return self._hold_incomplete_evaluation(round_row, reason="baseline_incomplete")
+                    return {"status": "waiting", "round_status": status,
+                            "reason": "baseline_current_judgments"}
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
                     with telemetry.stage("advance_close_stage"):
                         return self.close_stage(round_id, stage)
@@ -6961,6 +6974,7 @@ class ArenaService:
         A bounded background refresh keeps public reads responsive even when
         many models need object-store and judgment verification. Completed
         models appear as each check finishes; costs are rechecked on refresh.
+        Cancelled-round values stay provisional in the public projection.
         """
         configuration = row.get("configuration_doc") or {}
         round_id = str(row["round_id"])
@@ -6968,7 +6982,8 @@ class ArenaService:
         status = row.get("status")
         # Compact and full reads share these fields. Normal closure preserves
         # the private configuration and scoring plans under the DB write-once
-        # guards; no other phase/generation change can reuse verified scores.
+        # guards. Cancellation may retain the same verified measurements;
+        # a changed scoring floor or configuration never reuses them.
         identity = contracts.canonical_json({
             "participants": row.get("participants") or [],
             "scoring_generation_floor": self._score_generation_floor(row),
@@ -6985,6 +7000,7 @@ class ArenaService:
             if (status not in {
                 "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
                 "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
+                "cancelled",
             } or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
                 or configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
                 self._completed_scores_cache.pop(round_id, None)
@@ -6999,6 +7015,14 @@ class ArenaService:
                         ("stage1_judged", "stage1_scored"),
                         ("stage2_scoring", "stage2_judged"),
                         ("stage2_judged", "scored"),
+                        ("stage1_scoring", "cancelled"),
+                        ("stage1_judged", "cancelled"),
+                        ("stage1_scored", "cancelled"),
+                        ("stage2", "cancelled"),
+                        ("stage2_closed", "cancelled"),
+                        ("stage2_scoring", "cancelled"),
+                        ("stage2_judged", "cancelled"),
+                        ("scored", "cancelled"),
                     }
                 )
                 cached = {"generation": generation, "status": status, "identity": identity,

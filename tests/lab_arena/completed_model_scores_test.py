@@ -120,7 +120,7 @@ def test_evidence_read_failure_does_not_hide_other_completed_models(completed):
     assert set(service._read_completed_submission_scores(row)) == {"other"}
 
 
-@pytest.mark.parametrize("status", ["open", "cancelled", "published"])
+@pytest.mark.parametrize("status", ["open", "published"])
 def test_non_evaluating_rounds_do_not_use_completed_projection(completed, status):
     service, row, _, _, _ = completed
     row["status"] = status
@@ -356,6 +356,10 @@ SAFE_CLOSURES = [
     ("stage1_judged", "stage1_scored"),
     ("stage2_scoring", "stage2_judged"),
     ("stage2_judged", "scored"),
+    *[(status, "cancelled") for status in (
+        "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
+        "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
+    )],
 ]
 
 
@@ -459,7 +463,7 @@ def test_closure_identity_is_a_snapshot_not_mutable_input(completed, change, inc
 @pytest.mark.parametrize("after,increment", [
     ("stage2_judged", 0), ("stage2_judged", 2),  # Same generation or skipped generation.
     ("scored", 1), ("stage2_scoring", 1),       # Skipped phase or unrelated generation.
-    ("stage1_scoring", 1), ("cancelled", 1), ("published", 1),
+    ("stage1_scoring", 1), ("cancelled", 0), ("cancelled", 2), ("published", 1),
 ])
 def test_other_phase_or_generation_changes_invalidate(completed, after, increment):
     service, row, _, _, _ = completed
@@ -773,3 +777,38 @@ def test_other_incomplete_models_do_not_bypass_completed_model_cost_guard(comple
     eligibility.update(eligible=False, eligibility_reason='provider_cost_uncertain')
     assert service._read_completed_submission_scores(row) == {}
     service._submission_cost_eligibility.assert_called_once()
+
+
+def test_cancelled_round_uses_same_cached_verified_scores(completed):
+    service, row, _, _, _ = completed
+    row['status'] = 'cancelled'
+    read = Mock(wraps=service._read_completed_submission_scores)
+    service._read_completed_submission_scores = read
+    result = _wait_for_scores(service, row, lambda scores: 'miner' in scores)
+    assert result['miner']['final_score'] == 60.0
+    for _ in range(3):
+        assert service.completed_submission_scores(row) == result
+    assert read.call_count == 1
+
+
+@pytest.mark.parametrize('invalid', ['unfinished', 'unsettled', 'new_floor'])
+def test_cancelled_round_does_not_expose_invalid_or_stale_results(completed, invalid):
+    service, row, _, judges, eligibility = completed
+    row['status'] = 'cancelled'
+    if invalid == 'unfinished':
+        judges[0].update(status='queued', terminal_cause=None)
+    elif invalid == 'unsettled':
+        eligibility.update(eligible=False, eligibility_reason='provider_cost_uncertain')
+    else:
+        row['scoring_generation_floor'] = 1
+    assert service._read_completed_submission_scores(row) == {}
+
+
+@pytest.mark.parametrize('after', ['cancelled', 'stage2_scoring'])
+def test_cancelled_score_cache_never_crosses_recovery_floor(completed, after):
+    service, row, _, _, _ = completed
+    row['status'] = 'cancelled'
+    _warm_verified_scores(service, row)
+    service._completed_scores_refresh_slots = threading.BoundedSemaphore(0)
+    row.update(status=after, status_generation=2, scoring_generation_floor=1)
+    assert service.completed_submission_scores(row) == {}

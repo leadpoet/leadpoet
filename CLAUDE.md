@@ -1,3 +1,21 @@
+## Scoped production authorization: fair cancelled evaluation recovery
+
+On 2026-10-21 the user authorized finishing the other miners and excluding
+provider-blocked submissions from the cancelled October 21 evaluation. Implement
+a general protected operator recovery for cancelled or drained unpublished
+active evaluations, with bounded new windows and uniform judging
+under the tested corrected frozen image, and ordinary next attempts for never
+dispatched positions. Keep the original submitted sources, models, ICPs, grading
+policies, costs, accepted sourcing, paid receipts and audit history. Exclude only
+explicit submissions with bound native provider privacy-route failure evidence;
+show them as provider-blocked and not evaluated, never as zero-quality results.
+Use existing generations, leases, supersession history and canonical winner,
+promotion and reward paths. No forced winner, manual weights, accepted sourcing
+replay, round-specific bypass or execution supersession framework. This covers
+focused tests, safe merge and canonical deployment after independent review.
+The coordinating agent owns production migration, deployment and verification.
+This authority ends after fair completion and live verification.
+
 # Agent Instructions
 
 ## Scoped production authorization: October 21 unfinished judge repair

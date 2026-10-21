@@ -6524,8 +6524,13 @@ class ArenaService:
         # one run outcome to telemetry.
         expected_status = "accepted" if terminal_status == "accepted" else "failed"
         if result.get("status") == expected_status and result.get("idempotent") is False:
+            # The completion already validated this diagnostic against its own
+            # closed choice sets; only those two bounded fields are reported.
+            diagnostic = body.get("failure_diagnostic") or {}
             telemetry.record_run(
-                kind, terminal_status, run_identity=_telemetry_run_identity(run)
+                kind, terminal_status, run_identity=_telemetry_run_identity(run),
+                failure_stage=str(diagnostic.get("stage") or "-"),
+                failure_class=str(diagnostic.get("error_class") or "-"),
             )
         return result
 

@@ -121,6 +121,14 @@ idempotent completion responses do not count as new completed runs.
 | `arena.run_kind` | `execute` \| `score` |
 | `arena.terminal_cause` | `budget_exhausted` (all thirteen of `contracts.TERMINAL_CAUSES`) |
 | `arena.outcome` | `ok` when the cause is `accepted`, else `failed` |
+| `arena.failure_stage` | `scoring_output` (the completion's `failure_diagnostic.stage`); `-` when the run was accepted |
+| `arena.failure_class` | `scoring_output_invalid` (its `failure_diagnostic.error_class`); `-` when the run was accepted |
+
+The two failure fields say WHERE a run failed and WHAT failed there, which
+`arena.terminal_cause` alone does not: a run that keeps failing as
+`judge_error` is otherwise indistinguishable from any other. Both are closed
+choice sets owned by the completion contract, so no judge or miner text can
+ride along; the contract's free-text `reason` is deliberately not reported.
 
 Span name is `arena.run.<kind>`. There is deliberately no duration: the run
 row carries no start time, so any duration here would be invented rather

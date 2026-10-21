@@ -178,17 +178,27 @@ def record_provider(
 def record_run(
     run_kind: str, terminal_cause: str,
     *, run_identity: Optional[Mapping[str, Any]] = None,
+    failure_stage: str = "-",
+    failure_class: str = "-",
 ) -> None:
     """Record one finished evaluation run. Never raises.
 
     No duration: the run row carries no start time, so the sidecar can only
     honestly report that a run ended and which cause ended it.
+
+    ``failure_stage`` and ``failure_class`` are the completion contract's
+    bounded diagnostic: where the run failed and what failed there. Both are
+    closed choice sets, so a repeated failure is readable without any judge or
+    miner content leaving the host. An accepted run reports neither.
     """
     recorder = _recorder
     if recorder is None:
         return
     try:
-        recorder.record_run(run_kind, terminal_cause, run_identity=run_identity)
+        recorder.record_run(
+            run_kind, terminal_cause, run_identity=run_identity,
+            failure_stage=failure_stage, failure_class=failure_class,
+        )
     except BaseException:
         pass
 

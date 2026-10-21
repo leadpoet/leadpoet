@@ -1,5 +1,14 @@
 # Agent Instructions
 
+## Scoped production authorization: tested ICP generation model
+
+On 2026-10-21 the user authorized comparing Sonnet 5.5 with Sonar for ICP
+generation and deploying Sonnet only if tests show an improvement. This covers
+bounded provider tests, narrow code changes, safe push/merge, canonical paired
+deployment, and live verification. Preserve frozen banks, prompts, grading,
+scoring, rewards, credentials, and concurrent work. This authority ends after
+the selected configuration is deployed and verified.
+
 ## Scoped production authorization: October 20 Arena cycle
 
 On 2026-10-19 the user authorized full October 20 Arena cycle monitoring and

@@ -353,7 +353,9 @@ def test_signaled_scorer_reports_only_strict_failed_company_checkpoint(
     assert host_errors
     if change != "cleanup":
         assert any(event["content"].get("runtime_host_reason") == "sandbox_launcher_signaled"
-                   and event["content"].get("status") == "abandoned" for event in host_errors)
+                   and event["content"].get("status") == (
+                       "judge_error" if change in {"valid", "stale"} else "abandoned"
+                   ) for event in host_errors)
     if change in {"valid", "stale"}:
         assert worker.abandoned == 0
         assert len(api.completions) == 1

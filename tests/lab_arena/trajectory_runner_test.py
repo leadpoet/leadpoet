@@ -672,3 +672,207 @@ def test_installed_probe_reports_private_launch_failure_without_traceback(monkey
     assert "launch_exit_code=128" in logs
     assert "secret-value" not in logs
     assert "private exception text" not in logs
+
+
+class ExpiringCaptureApi(LoggingApi):
+    """An authenticated abandon lets a concurrent recovery expire the lease."""
+
+    def __init__(self, request, *, capture_fails=False):
+        super().__init__()
+        self.leases = [request]
+        self.active = True
+        self.capture_fails = capture_fails
+        self.capture_attempts = []
+        self.capture_documents = []
+        self.expiry_observed = []
+
+    def trajectory(self, run_id, lease_token, events):
+        result = super().trajectory(run_id, lease_token, events)
+        if any(event["kind"] == "runtime.error"
+               and event["content"].get("status") == "abandoned"
+               for event in events):
+            # Wait for the competing recovery before the worker can continue.
+            # This forces the old capture-after-abandon race on every run.
+            from concurrent.futures import ThreadPoolExecutor
+            def expire():
+                self.active = False
+                self.expiry_observed.append(True)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(expire).result(timeout=2)
+        return result
+
+    def training_observations(self, run_id, lease_token, document):
+        self.capture_attempts.append(self.active)
+        self.capture_documents.append(document)
+        self.order.append("observations")
+        if not self.active:
+            raise runner.RunnerError("lease_inactive", http_status=409)
+        if self.capture_fails:
+            raise runner.RunnerError("capture unavailable", http_status=503)
+        return {"status": "stored", "payload_sha256": contracts.document_hash(document)}
+
+
+@pytest.mark.parametrize("job_lease", [lease, scoring_lease])
+@pytest.mark.parametrize("capture_fails", [False, True])
+def test_capture_precedes_authenticated_abandon_even_when_capture_fails(
+    tmp_path, job_lease, capture_fails,
+):
+    failure = runtime.RuntimeHostError(
+        "controlled interruption", reason="sandbox_launcher_signaled",
+        launch_exit_code=-2, launch_timed_out=False,
+    )
+    class Interrupted:
+        def run_icp(self, _spec, **_kwargs):
+            raise failure
+
+    api = ExpiringCaptureApi(job_lease(), capture_fails=capture_fails)
+    worker = run_model(tmp_path, api, Interrupted())
+    assert api.capture_attempts == ([True, True] if capture_fails else [True])
+    assert api.expiry_observed == [True]
+    assert worker.abandoned == 1 and api.completions == []
+    errors = [event for batch in api.batches for event in batch["events"]
+              if event["kind"] == "runtime.error"]
+    assert len(errors) == 1
+    assert errors[0]["content"]["error_class"] == "RuntimeHostError"
+    assert errors[0]["content"]["launch_exit_code"] == -2
+    assert api.order.index("observations") < max(
+        i for i, name in enumerate(api.order) if name == "trajectory"
+    )
+    assert not list((tmp_path / "work").iterdir())
+
+
+def test_initial_setup_failure_captures_before_abandon(tmp_path):
+    request = lease()
+    request["icp_wall_clock_seconds"] = True
+    api = ExpiringCaptureApi(request)
+    worker = run_model(tmp_path, api, BridgingRuntime(calls=0))
+    assert api.capture_attempts == [True]
+    assert api.expiry_observed == [True]
+    assert worker.abandoned == 1 and api.completions == []
+
+
+def test_normal_completion_captures_once_without_abandon(tmp_path):
+    api = ExpiringCaptureApi(lease())
+    worker = run_model(tmp_path, api, BridgingRuntime(calls=0))
+    assert api.capture_attempts == [True]
+    assert api.expiry_observed == []
+    assert worker.abandoned == 0 and len(api.completions) == 1
+    assert api.order.index("observations") < api.order.index("complete")
+
+
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_capture_failure_does_not_replace_original_exception(
+    tmp_path, monkeypatch, stop_fails,
+):
+    original = runtime.RuntimeHostError(
+        "controlled interruption", reason="sandbox_launcher_signaled",
+        launch_exit_code=-2,
+    )
+    class Interrupted:
+        def run_icp(self, _spec, **_kwargs):
+            raise original
+
+    stopped = []
+    stop = runner.WorkerSocketServer.stop
+    def stop_then_fail(server):
+        stop(server)
+        stopped.append(True)
+        if stop_fails:
+            raise OSError("controlled cleanup failure")
+    monkeypatch.setattr(runner.WorkerSocketServer, "stop", stop_then_fail)
+    request = lease()
+    api = ExpiringCaptureApi(request, capture_fails=True)
+    (tmp_path / "work").mkdir()
+    executor = runner.AssignmentExecutor(make_config(tmp_path, api, Interrupted()))
+    with pytest.raises(runtime.RuntimeHostError) as caught:
+        executor.execute(request, request["lease_token"], request["icp"])
+    assert caught.value is original
+    assert stopped == [True]
+    assert api.capture_attempts == [True, True]
+    assert api.expiry_observed == [True] and api.completions == []
+    assert not list((tmp_path / "work").iterdir())
+
+
+def test_cleanup_only_failure_still_captures_before_abandon(tmp_path, monkeypatch):
+    stop = runner.WorkerSocketServer.stop
+    def fail_after_stop(server):
+        stop(server)
+        raise OSError("controlled cleanup failure")
+    monkeypatch.setattr(runner.WorkerSocketServer, "stop", fail_after_stop)
+    api = ExpiringCaptureApi(lease())
+    worker = run_model(tmp_path, api, BridgingRuntime(calls=0))
+    assert api.capture_attempts == [True]
+    assert api.expiry_observed == [True]
+    assert worker.abandoned == 1 and api.completions == []
+
+
+def test_interrupted_provider_work_captures_without_replaying_calls(tmp_path):
+    class Interrupted(BridgingRuntime):
+        def run_icp(self, spec, **kwargs):
+            super().run_icp(spec, **kwargs)
+            raise runtime.RuntimeHostError(
+                "controlled interruption", reason="sandbox_launcher_signaled",
+                launch_exit_code=-2,
+            )
+
+    api = ExpiringCaptureApi(lease())
+    worker = run_model(tmp_path, api, Interrupted(calls=1))
+    assert len(api.provider_frames) == 1
+    assert api.capture_attempts == [True]
+    assert len(api.capture_documents) == 1
+    events = [event for batch in api.batches for event in batch["events"]]
+    assert sum(event["kind"] == "runtime.error" for event in events) == 1
+    assert worker.abandoned == 1 and api.completions == []
+
+
+@pytest.mark.parametrize("complete_mode", ["success", "transport_failure", "rejected"])
+def test_valid_interrupted_judge_subset_completes_before_lease_expiry(
+    tmp_path, complete_mode,
+):
+    from tests.lab_arena.company_judgments_test import _input, _new, _refs
+    from tests.lab_arena.partial_company_judgments_test import _lease
+
+    document = _input()
+    request = scoring_lease()
+    request.update(
+        scorer_policy=document["scorer_policy"], company_quality_policy="company_quality_v1",
+        company_judgment_cache=_lease(document),
+        scored_output={"companies": document["companies"]},
+    )
+    rows = [_new(_refs(document)[0])]
+    checkpoint = scoring.build_scoring_failure(
+        "r1", "judge_error", company_judgments=rows,
+    )
+    class Interrupted:
+        def run_icp(self, _spec, **_kwargs):
+            raise runtime.RuntimeHostError(
+                "controlled interruption", reason="sandbox_launcher_signaled",
+                launch_exit_code=-2, checkpoint_bytes=json.dumps(checkpoint).encode(),
+            )
+    class Api(ExpiringCaptureApi):
+        def complete(self, envelope):
+            self.delivery_attempts.append(envelope)
+            if not self.active:
+                raise runner.RunnerError("lease_inactive", http_status=409)
+            if complete_mode == "transport_failure":
+                raise runner.RunnerError("controlled availability failure", http_status=503)
+            if complete_mode == "rejected":
+                return {"status": "rejected"}
+            return super().complete(envelope)
+    api = Api(request)
+    api.delivery_attempts = []
+    worker = run_model(tmp_path, api, Interrupted())
+    assert api.capture_attempts == [True]
+    assert api.expiry_observed == []
+    for delivered in api.delivery_attempts:
+        assert delivered["body"]["output"]["company_judgments"] == rows
+        assert delivered["body"]["result"]["terminal_status"] == "judge_error"
+    assert worker.abandoned == (complete_mode == "transport_failure")
+    if complete_mode == "success":
+        assert len(api.completions) == 1
+    else:
+        assert api.completions == []
+        retained = list((tmp_path / "work" / "pending-completions").glob("*.json"))
+        assert len(retained) == 1
+        saved = json.loads(retained[0].read_text())
+        assert saved["body"]["output"]["company_judgments"] == rows

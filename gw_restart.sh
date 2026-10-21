@@ -770,6 +770,20 @@ PY
   return 1
 }
 
+wait_for_arena_current_readiness() {
+  local url="$1" attempt
+  # Current-round reads include durable state and can exceed five seconds.
+  # Retry only this read, with a fixed bound; never release on a failed read.
+  for attempt in 1 2 3; do
+    if timeout 15 curl --connect-timeout 5 --max-time 15 -fsS "$url" >/dev/null; then
+      return 0
+    fi
+    if [ "$attempt" -lt 3 ]; then sleep 2; fi
+  done
+  echo "ERROR: Arena current-round readiness failed after three bounded reads" >&2
+  return 1
+}
+
 verify_controller_process_helper() {
   local process_helper="${1:-}"
   if [ "$process_helper" = "/proc/self/fd/195" ]; then
@@ -3729,8 +3743,8 @@ if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
     "$ARENA_CANDIDATE_TREE" "$GATEWAY_DEPLOY_SHA"
   wait_for_arena_driver_startup "$ARENA_DRIVER_LOG_OFFSET"
   arena_slot_ports "$ARENA_CANDIDATE_SLOT"
-  timeout 5 curl -fsS "http://127.0.0.1:$ARENA_API_PORT/arena/v1/current" >/dev/null
-  timeout 5 curl -fsS "http://127.0.0.1:$ARENA_EDGE_PORT/arena/v1/current" >/dev/null
+  wait_for_arena_current_readiness "http://127.0.0.1:$ARENA_API_PORT/arena/v1/current"
+  wait_for_arena_current_readiness "http://127.0.0.1:$ARENA_EDGE_PORT/arena/v1/current"
 else
   start_lab_arena_service
 fi

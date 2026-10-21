@@ -175,6 +175,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         "rollback_arena_candidate_before_destructive",
         "recover_arena_restart_owner", "restore_arena_recovery_guard_before_destructive",
         "wait_for_gateway_v2_authority", "wait_for_arena_driver_startup",
+        "wait_for_arena_current_readiness",
         "abort_lab_arena_restart_guard_before_destructive",
     ))
     functions += _function("stop_arena_component").replace(
@@ -265,6 +266,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
           record "curl:$url"
           if [ "$url" = http://localhost:8000/health/v2-authority ]; then return 1; fi
           if [ "${FAIL:-}" = backend ] && [[ "$url" == *:8001/health ]]; then return 1; fi
+          if [ "${FAIL:-}" = current_read ] && [ "${GATEWAY_DEPLOY_STAGE:-}" = lab_arena_service_start ] && [[ "$url" == */arena/v1/current ]]; then return 1; fi
           if [[ "$url" == */build-info ]]; then printf '{"git_commit":"%s"}\\n' "$GATEWAY_DEPLOY_SHA"; fi
         }
         sleep() { :; }
@@ -280,6 +282,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
           command mv "$@"
         }
         install_successful_restart_script() { record backend:install; }
+        finalize_deployment_record() { record deployment:finalize; }
         """)
         + functions
         + textwrap.dedent("""\
@@ -293,6 +296,8 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         GATEWAY_CONTROLLER_PROCESS_HELPER="$TASK_TMP/helper"
         GATEWAY_CONTROLLER_PROCESS_STATE_FILE="$TASK_TMP/old-worker.json"
         GATEWAY_ACTIVE_RELEASE_COMPONENT=gateway
+        GATEWAY_RESTART_GUARD_SCOPE=gateway
+        GATEWAY_PAIRED_RESTART=0
         GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID=gateway-1792000000-123
         GATEWAY_RESTART_INVOCATION_ID=gateway-1792000000-456
         GATEWAY_LOG_FILE="$TASK_TMP/log"
@@ -769,3 +774,12 @@ def test_occupied_dedicated_edge_rejects_candidate_before_drain(
         assert (tmp_path / "ingress").read_text() == prior_ingress
         assert not (tmp_path / "runtime" / f"slot{candidate_slot}-{'b' * 40}").exists()
         _assert_listener_alive(foreign_listener)
+
+
+def test_failed_current_read_never_releases_guard(tmp_path: Path):
+    result = _run(tmp_path, fail="current_read")
+    assert result.returncode != 0
+    assert (tmp_path / "guard").read_text().strip() == "gateway_destructive"
+    events = (tmp_path / "events").read_text()
+    assert "guard:release" not in events
+    assert "backend:install" not in events

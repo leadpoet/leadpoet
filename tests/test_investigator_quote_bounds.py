@@ -139,12 +139,27 @@ def test_lium_oversized_citation_uses_existing_correction_without_research(
 
 def test_full_context_prompt_keeps_institution_role_and_criterion_logic():
     prompt = " ".join(investigator._SYSTEM_PROMPT.split())
-    assert "requested_icp_prompt contains the original buyer description" in prompt
+    assert "requested_icp_prompt is the stored ICP description" in prompt
     assert "A vendor serving institutions does not prove the company itself is an institution" in prompt
-    assert "Preserve that requirement, the industry precedence below" in prompt
-    assert "separate structured stage, employee-bucket, geography" in prompt
+    assert "Preserve required roles, industry precedence, and structured fit checks" in prompt
     assert "For an explicit OR, prove one allowed alternative and all shared qualifiers" in prompt
     assert "for AND, prove every conjunct for the same company and product" in prompt
     assert "a pay-once license alone do not prove paid product subscriptions" in prompt
     assert "Each quote must be a continuous span of at most 2000 characters" in prompt
     assert len(investigator._SYSTEM_PROMPT) < investigator.OPENROUTER_MAX_CONTENT_CHARS
+
+
+def test_narrative_intent_and_event_timing_cannot_determine_company_fit():
+    """Davies Turner regressed when partnership timing became an attribute gate.
+
+    This checks the prompt contract; repeated provider comparisons must check
+    whether the model follows it on the saved freight/scale evidence.
+    """
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+    assert "use only its company activity and role context" in prompt
+    assert (
+        "Its intent signals, events, dates, and timing belong to separate intent "
+        "checks and must never determine any company-fit finding"
+    ) in prompt
+    assert "Preserve required roles, industry precedence, and structured fit checks" in prompt
+    assert "Keep independent product/service requirements in their own check" in prompt

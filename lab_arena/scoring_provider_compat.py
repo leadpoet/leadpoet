@@ -12,6 +12,7 @@ Deepline envelope back to the response shape the unchanged judge expects.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ SHADOW_REPLAY_ROUTE_PREFIX = (
 
 FIRECRAWL_TOOL = "firecrawl_scrape"
 GENERIC_HTTP_TOOL = "generic_http_request"
-SOURCE_HTML_ADAPTERS = frozenset({"firecrawl_raw_html", "generic_http_raw_html"})
+SOURCE_HTML_ADAPTERS = frozenset({"firecrawl_raw_html", "generic_http_raw_html", "harvest_linkedin_post_html"})
 HARVEST_JOB_TOOL = "harvestapi_get_job"
 HARVEST_POST_TOOL = "harvestapi_get_post"
 TWITTER_POST_TOOL = "twitterapi_tweets_by_ids"
@@ -151,6 +152,26 @@ def _ats_api_kind(value: Any) -> str:
     return ""
 
 
+def _linkedin_post_activity_id(value: Any) -> str:
+    """Recognize only public, unambiguous LinkedIn post/activity URLs."""
+    if not isinstance(value, str) or len(value) > 2000:
+        return ""
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme != "https" or parsed.netloc not in {"www.linkedin.com", "linkedin.com"}
+                or parsed.query or parsed.fragment):
+            return ""
+    except ValueError:
+        return ""
+    match = re.fullmatch(r"/feed/update/urn:li:activity:([0-9]{19})/?", parsed.path)
+    if match:
+        return match.group(1)
+    match = re.fullmatch(r"/posts/[A-Za-z0-9_-]+[-_]activity-([0-9]{19})(?:-[A-Za-z0-9]+)?/?", parsed.path)
+    if match and len(re.findall(r"activity-[0-9]+", parsed.path)) == 1:
+        return match.group(1)
+    return ""
+
+
 def route_for(
     *,
     kind: str,
@@ -178,6 +199,17 @@ def route_for(
     )
     requested = dict(parameters)
     if operation_id == "scrapingdog.scrape":
+        activity_id = _linkedin_post_activity_id(requested.get("url"))
+        if activity_id:
+            return MinerScoreRoute(
+                requested_operation_id=operation_id,
+                effective_operation_id=EFFECTIVE_OPERATION_ID,
+                effective_parameters={"tool": HARVEST_POST_TOOL, "payload": {
+                    "url": _LINKEDIN_ACTIVITY_URL.format(activity_id=activity_id),
+                }},
+                adapter="harvest_linkedin_post_html",
+                requested_parameters=requested,
+            )
         ats_kind = _ats_api_kind(requested["url"])
         if ats_kind:
             return MinerScoreRoute(
@@ -606,6 +638,39 @@ def _harvest_post_response(
     return status, {"content-type": "application/json"}, _json_bytes(response)
 
 
+def _harvest_post_html_response(
+    route: MinerScoreRoute, data: Mapping[str, Any],
+) -> tuple[int, dict[str, str], bytes, str]:
+    status, element = _harvest_data(data)
+    if status != 200:
+        if status >= 400:
+            return status, {"content-type": "text/html; charset=utf-8"}, b"", ""
+        raise CompatibilityResponseError("invalid_harvest_post_status")
+    source_url = route.requested_parameters.get("url")
+    activity_id = _linkedin_post_activity_id(source_url)
+    # Share the established native post ID/nonempty-content validation without
+    # passing its legacy JSON response to a page consumer.
+    post_route = MinerScoreRoute(
+        requested_operation_id=route.requested_operation_id,
+        effective_operation_id=route.effective_operation_id,
+        effective_parameters=route.effective_parameters,
+        adapter="harvest_linkedin_post",
+        requested_parameters={"id": activity_id},
+    )
+    _harvest_post_response(post_route, data)
+    for field in ("url", "linkedinUrl", "postUrl"):
+        if field in element and _linkedin_post_activity_id(element[field]) != activity_id:
+            raise CompatibilityResponseError("harvest_post_url_mismatch")
+    content = element["content"]
+    if (not activity_id or len(content.encode("utf-8")) > 131072
+            or any(ord(c) < 32 and c not in "\t\r\n" for c in content)):
+        raise CompatibilityResponseError("invalid_harvest_post_content")
+    # Only verbatim post text is projected. No author/date/HTML facts are added.
+    body = ("<!doctype html><html><body><pre>" + html.escape(content)
+            + "</pre></body></html>").encode("utf-8")
+    return 200, {"content-type": "text/html; charset=utf-8"}, body, source_url
+
+
 def _twitter_post_response(
     route: MinerScoreRoute, data: Mapping[str, Any]
 ) -> tuple[int, dict[str, str], bytes]:
@@ -744,6 +809,8 @@ def adapt_response_with_trusted_url(
             route, data
         )
         return response_status, response_headers, response_body, ""
+    if route.adapter == "harvest_linkedin_post_html":
+        return _harvest_post_html_response(route, data)
     if route.adapter == "harvest_linkedin_post":
         response_status, response_headers, response_body = _harvest_post_response(
             route, data

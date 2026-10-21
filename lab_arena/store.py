@@ -737,7 +737,15 @@ class PostgrestTransport(StoreTransport):
             if not keys:
                 raise ArenaStoreError("cache-key inclusion filter is empty")
             query.append(("cache_key", "in.(%s)" % ",".join(keys)))
-        if order == "history_round":
+        if order == "model_call_sequence":
+            if (table != "lab_arena_ledger" or not descending
+                    or (filters or {}).get("provider") != "openrouter"
+                    or (filters or {}).get("entry_kind") != "reservation"
+                    or not (filters or {}).get("run_id")):
+                raise ArenaStoreError("model call ordering requires scoped reservations")
+            query.append(("order", "entry_doc->action_sequence.desc.nullsfirst,"
+                          "entry_doc->provider_attempt.desc.nullslast,entry_id.desc"))
+        elif order == "history_round":
             if table != "lab_arena_rounds" or not descending:
                 raise ArenaStoreError("history cursor requires descending rounds")
             query.append(("order", "created_at.desc,round_id.desc"))
@@ -1020,7 +1028,15 @@ class PsycopgTransport(StoreTransport):
         sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (projected_columns, table)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        if order == "history_round":
+        if order == "model_call_sequence":
+            if (table != "lab_arena_ledger" or not descending
+                    or (filters or {}).get("provider") != "openrouter"
+                    or (filters or {}).get("entry_kind") != "reservation"
+                    or not (filters or {}).get("run_id")):
+                raise ArenaStoreError("model call ordering requires scoped reservations")
+            sql += (" ORDER BY (entry_doc -> 'action_sequence') DESC NULLS FIRST,"
+                    " (entry_doc -> 'provider_attempt') DESC NULLS LAST,entry_id DESC")
+        elif order == "history_round":
             if table != "lab_arena_rounds" or not descending:
                 raise ArenaStoreError("history cursor requires descending rounds")
             sql += " ORDER BY created_at DESC, round_id DESC"
@@ -2651,6 +2667,18 @@ class ArenaStore:
             if len(page) < 500:
                 break
         return rows
+
+    def latest_execution_model_reservation(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Use gateway-authored issuance order, not trajectory completion order."""
+        if not run_id:
+            raise ArenaStoreError("execution run id is required")
+        rows = self._transport.select(
+            "lab_arena_ledger", filters={"run_id": run_id, "provider": "openrouter",
+                                         "entry_kind": "reservation"},
+            order="model_call_sequence", descending=True, limit=1,
+            columns="entry_id,run_id,call_identity,operation_id,provider,funding_source,entry_doc",
+        )
+        return rows[0] if rows else None
 
     def list_abandoned_billing_runs(self, round_id: str) -> List[str]:
         """Prioritize retained bills, without granting lease recovery authority.

@@ -5311,6 +5311,7 @@ class Runner:
         rescan_while_active = False
         while round_index < len(round_ids):
             round_id = round_ids[round_index]
+            rescan_after_completion = False
             # Oldest round first: its deadline is nearer. Each round is claimed
             # until it has nothing to lease or this call reaches its claim cap.
             while taken < max_claims:
@@ -5321,6 +5322,9 @@ class Runner:
                 futures.difference_update(done)
                 for future in done:
                     future.result()
+                if done and round_index > 0:
+                    rescan_after_completion = True
+                    break
                 usable_parallelism = self._report_capacity()
                 if usable_parallelism < 1:
                     self._report_claim_status("no_local_capacity", round_id)
@@ -5328,10 +5332,16 @@ class Runner:
                 if not self._slots.acquire(blocking=False):
                     if not wait_for_completion():
                         break
+                    if round_index > 0:
+                        rescan_after_completion = True
+                        break
                     continue
                 if len(futures) >= usable_parallelism:
                     self._slots.release()
                     if not wait_for_completion():
+                        break
+                    if round_index > 0:
+                        rescan_after_completion = True
                         break
                     continue
                 try:
@@ -5396,6 +5406,11 @@ class Runner:
                         log.activity(-1)
                     raise
                 futures.add(future)
+            if rescan_after_completion:
+                # A retry in an older round may have become eligible while
+                # this round was busy. Keep all other active futures running.
+                round_index = 0
+                continue
             round_index += 1
             if (
                 round_index == len(round_ids)

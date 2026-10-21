@@ -8177,7 +8177,6 @@ async def _run_targeted_company_evidence_investigation(
             "linkedin": investigation_linkedin,
         },
         targets=investigation_targets,
-        requested_icp_prompt=icp.prompt,
         requested_stage=icp_stage,
         requested_employee_buckets=sorted(employee_targets),
         requested_industry=str(icp.industry or ""),

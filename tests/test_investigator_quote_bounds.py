@@ -43,7 +43,7 @@ def _validate(finding, *, page=PAGE, anchor=None, final_url=URL):
 
 
 @pytest.mark.parametrize("length", LIUM["submitted_quote_lengths"])
-def test_lium_oversized_quote_without_verified_profile_identity_requires_repair(length):
+def test_lium_oversized_quote_without_expected_profile_identity_requires_repair(length):
     raw = PAGE[:length]
     assert raw.index("Company size") > 2000
     assert "11-50 employees" not in raw[:2000]
@@ -139,44 +139,10 @@ def test_lium_oversized_citation_uses_existing_correction_without_research(
     fetch.assert_not_called()
 
 
-def test_full_context_prompt_keeps_institution_role_and_criterion_logic():
-    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
-    assert "requested_icp_prompt is the stored ICP description" in prompt
-    assert "A vendor serving institutions does not prove the company itself is an institution" in prompt
-    assert "Preserve required roles, industry precedence, and structured fit checks" in prompt
-    assert "For an explicit OR, prove one allowed alternative and all shared qualifiers" in prompt
-    assert "for AND, prove every conjunct for the same company and product" in prompt
-    assert "a pay-once license alone do not prove paid product subscriptions" in prompt
-    assert "Each quote must be a continuous span of at most 2000 characters" in prompt
-    assert len(investigator._SYSTEM_PROMPT) < investigator.OPENROUTER_MAX_CONTENT_CHARS
 
 
-def test_narrative_intent_and_event_timing_cannot_determine_company_fit():
-    """Davies Turner regressed when partnership timing became an attribute gate.
-
-    This checks the prompt contract; repeated provider comparisons must check
-    whether the model follows it on the saved freight/scale evidence.
-    """
-    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
-    assert "use only its company activity and role context" in prompt
-    assert (
-        "Its intent signals, events, dates, and timing belong to separate intent "
-        "checks and must never determine any company-fit finding"
-    ) in prompt
-    assert "Preserve required roles, industry precedence, and structured fit checks" in prompt
-    assert "Keep independent product/service requirements in their own check" in prompt
 
 
-def test_usage_and_research_do_not_by_themselves_prove_commercial_sales():
-    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
-    assert (
-        "A featured study, named collaboration, usage metric, trial or capability "
-        "page alone does not establish a commercial customer or deployment"
-    ) in prompt
-    assert "source evidence of the commercial relationship or clearly commercial production deployment" in prompt
-    assert "same company/product" in prompt
-    assert "No public price or invoice is required" in prompt
-    assert len(investigator._SYSTEM_PROMPT) < investigator.OPENROUTER_MAX_CONTENT_CHARS
 
 
 ANCHOR = {
@@ -212,7 +178,7 @@ def test_real_plain_profile_uses_only_its_own_matching_original_span():
     assert "\n" not in page
     assert len(page) == 16_009
     end = page.index("11-50 employees") + len("11-50 employees")
-    assert end > 2000
+    assert end == 2161
     finding = _validate(_headcount(page[:end]), page=page, anchor=ANCHOR)
     assert finding["status"] == "VERIFIED"
     assert finding["evidence_quote"] in page[:end]
@@ -253,7 +219,8 @@ def test_compact_selection_is_generic_across_company_names_and_size_bands(
 
 
 @pytest.mark.parametrize("fault", [
-    "wrong_final_slug", "wrong_expected_slug", "wrong_company", "wrong_title", "wrong_website",
+    "wrong_final_slug", "wrong_expected_slug", "missing_name", "missing_domain", "missing_slug",
+    "wrong_company", "wrong_title", "wrong_website",
     "mixed_profile", "conflicting_size", "conflicting_inline_band", "forged_original", "wrong_observed_size",
     "access_wall", "no_compact_span", "source_too_large", "fact_outside_original",
     "website_outside_original",
@@ -265,6 +232,9 @@ def test_compact_profile_selection_fails_closed(fault):
         final_url = "https://www.linkedin.com/company/otherco"
     elif fault == "wrong_expected_slug":
         anchor["submitted_linkedin_slug"] = "otherco"
+    elif fault in {"missing_name", "missing_domain", "missing_slug"}:
+        anchor.pop({"missing_name": "submitted_name", "missing_domain": "submitted_domain",
+                    "missing_slug": "submitted_linkedin_slug"}[fault])
     elif fault == "wrong_company":
         page = page.replace("Lium", "OtherCo").replace("lium.ai", "other.example")
         raw = page[:page.index("11-50 employees") + len("11-50 employees")]

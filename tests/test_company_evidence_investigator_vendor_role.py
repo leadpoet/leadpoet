@@ -90,10 +90,6 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
         "manage enrollment, learning delivery, student communication, or campus "
         "operations."
     )
-    requested_icp_prompt = (
-        "Find vendors that supply enrollment software to universities. "
-        + "Keep the complete buyer description. " * 20
-    )
     finding = _finding(
         status="VERIFIED",
         role="supplier_operator",
@@ -142,7 +138,6 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
                 "linkedin": "https://www.linkedin.com/company/unibuddy",
             },
             targets=("industry",),
-            requested_icp_prompt=requested_icp_prompt,
             requested_industry=requested_industry,
             requested_subindustry=requested_subindustry,
             requested_product_service=requested_product_service,
@@ -175,7 +170,6 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )
     assert request_document["requested_industry"] == requested_industry
-    assert request_document["requested_icp_prompt"] == requested_icp_prompt
     assert request_document["requested_subindustry"] == requested_subindustry
     assert request_document["requested_product_service"] == requested_product_service
     assert request_document["requested_attribute"] == requested_attribute
@@ -331,7 +325,7 @@ def test_prompt_preserves_negative_controls_and_all_required_conjuncts():
         "prove every actual condition for the same company and product with "
         "exact loaded company-bound quotes" in prompt
     )
-    assert "When proof spans loaded passages, use up to two additional exact company-bound URL/quote pairs" in prompt
+    assert "put up to two additional exact company-bound loaded-source URL/quote pairs" in prompt
 
 
 def test_attribute_review_binds_annual_terms_and_workflow_across_loaded_pages():

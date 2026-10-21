@@ -422,13 +422,17 @@ def _firecrawl_response(
     status = metadata.get("statusCode")
     if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
         raise CompatibilityResponseError("missing_firecrawl_target_status")
-    if 200 <= status < 300 and (
-        not raw_html.strip()
-        or re.sub(r"\s+", " ", raw_html).strip().casefold()
-        in ("provider account capacity details redacted.", "[redacted]")
+    if operations.provider_status_is_infrastructure(status) or (
+        200 <= status < 300 and (
+            not raw_html.strip()
+            or re.sub(r"\s+", " ", raw_html).strip().casefold()
+            in ("provider account capacity details redacted.", "[redacted]")
+        )
     ):
-        # A completed provider job can still return a diagnostic or placeholder
-        # instead of the requested page. Never turn that text into evidence.
+        # A completed provider job can still fail to fetch the target or return
+        # a diagnostic instead of its page. Retain the validated source proof
+        # so the broker can use its one bounded alternate transport. An outer
+        # provider account refusal never reaches this metadata-bound branch.
         if not _safe_public_source_https_url(requested_url):
             raise CompatibilityResponseError("invalid_firecrawl_source_url")
         public_final_url = _safe_public_source_https_url(final_url)

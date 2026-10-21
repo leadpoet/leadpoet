@@ -54,6 +54,19 @@ def test_successful_firecrawl_requires_source_content(raw_html):
         )
 
 
+@pytest.mark.parametrize("target_status", [401, 402, 403, 407, 429, 500, 502, 503, 504, 599])
+def test_failed_target_retains_validated_source_proof_for_alternate_transport(target_status):
+    payload = _envelope("<p>Target fetch failed.</p>", status=target_status)
+    final_url = "https://example.com/about/team"
+    payload["result"]["data"]["metadata"]["url"] = final_url
+    with pytest.raises(compat.CompatibilityResponseError,
+                       match="firecrawl_source_content_unavailable") as captured:
+        compat.adapt_response_with_trusted_url(
+            _route(), status=200, headers={}, body=json.dumps(payload).encode(),
+        )
+    assert captured.value.trusted_response_url == final_url
+
+
 @pytest.mark.parametrize("raw_html", [
     "Short but valid page text.",
     "<article>Provider account capacity details redacted. This article explains the issue.</article>",

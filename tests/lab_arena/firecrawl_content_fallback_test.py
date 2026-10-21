@@ -101,6 +101,53 @@ def test_settled_primary_replay_retains_exact_trigger_before_rescue():
     assert ledger.log.count("settle") == 2
 
 
+@pytest.mark.parametrize("target_status", [401, 402, 403, 407, 429, 500, 502, 503, 504, 599])
+def test_authenticated_failed_firecrawl_target_uses_one_source_rescue(target_status):
+    payload = _envelope("<p>Target access failed.</p>", status=target_status)
+    broker, ledger, transport = _broker([(200, payload), (200, _generic())])
+    result = _execute(broker)
+    assert result.status == 200 and result.body == HTML.encode()
+    assert len(transport.sent) == len(ledger.calls) == 2
+    primary, fallback = list(ledger.calls.values())
+    assert primary["terminal"]["call_succeeded"] is False
+    assert primary["terminal"]["compatibility_failure_code"] == "firecrawl_source_content_unavailable"
+    assert primary["terminal"]["headers"][operations.TRUSTED_RESPONSE_URL_HEADER] == URL
+    assert primary["actual"] == 2_000 and fallback["actual"] == 0
+    assert json.loads(transport.sent[1]["body"])["payload"]["url"] == URL
+    replay = _execute(broker)
+    assert replay.status == 200 and replay.body == result.body
+    assert replay.call["idempotent"] is True
+    assert len(transport.sent) == ledger.log.count("settle") == 2
+
+
+@pytest.mark.parametrize("target_status", [403, 429, 503])
+@pytest.mark.parametrize("invalid", ["source_mismatch", "missing_status", "invalid_final", "missing_html"])
+def test_failed_target_requires_complete_valid_source_proof(target_status, invalid):
+    payload = _envelope("<p>Target access failed.</p>", status=target_status)
+    data = payload["result"]["data"]
+    if invalid == "source_mismatch":
+        data["metadata"]["sourceURL"] = "https://wrong.example/"
+    elif invalid == "missing_status":
+        del data["metadata"]["statusCode"]
+    elif invalid == "invalid_final":
+        data["metadata"]["url"] = "https://127.0.0.1/"
+    else:
+        del data["rawHtml"]
+    broker, ledger, transport = _broker([(200, payload)])
+    result = _execute(broker)
+    assert result.status == 502 and len(transport.sent) == len(ledger.calls) == 1
+    assert result.call.get("compatibility_failure_code") != "firecrawl_source_content_unavailable"
+
+
+@pytest.mark.parametrize("target_status", [404, 410])
+def test_firecrawl_source_absence_never_opens_a_rescue(target_status):
+    broker, ledger, transport = _broker([(200, _envelope("", status=target_status))])
+    result = _execute(broker)
+    assert result.status == target_status
+    assert len(transport.sent) == len(ledger.calls) == 1
+    assert "compatibility_failure_code" not in result.call
+
+
 @pytest.mark.parametrize("mode", ["success", "url_mismatch", "missing_status", "authentication", "uncertain"])
 def test_other_results_do_not_open_a_rescue(mode):
     payload = _envelope("<p>A valid source.</p>")

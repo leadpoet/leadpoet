@@ -530,6 +530,69 @@ def _calls(rows, run_ids, objects, run_order):
                 "funding_source": reserve.get("funding_source"), "reservation_entry_id": reserve["entry_id"],
                 **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
         call_reasons = set()
+        upstream_receipts = []
+        for row in sorted(entries, key=lambda row: int(row["entry_id"])):
+            saved_call = (row.get("entry_doc") or {}).get("call") or {}
+            terminal = row.get("terminal_response") or {}
+            captured = (saved_call.get("upstream_response_receipt")
+                        if isinstance(saved_call, Mapping) else None)
+            captured = captured or terminal.get("upstream_response_receipt")
+            if not captured:
+                continue
+            if isinstance(captured, Mapping) and captured.get("status") == "unavailable":
+                if captured.get("reason") == "response_size_limit":
+                    call_reasons.add("upstream_response_size_limit")
+                call_reasons.add("upstream_response_capture_unavailable")
+                continue
+            try:
+                if (not isinstance(captured, Mapping)
+                        or captured.get("capture_kind") != "upstream_response"
+                        or captured.get("call_identity") != identity
+                        or captured.get("operation_id") != reserve.get("operation_id")
+                        or captured.get("request_hash") != entry.get("request_hash")
+                        or type(captured.get("status")) is not int
+                        or not 100 <= captured["status"] <= 599
+                        or type(captured.get("wire_body_bytes")) is not int
+                        or captured["wire_body_bytes"] < 0
+                        or not isinstance(captured.get("wire_body_sha256"), str)
+                        or not contracts.SHA256_RE.fullmatch(captured["wire_body_sha256"])):
+                    raise ExportError("upstream_response_identity_invalid")
+                raw = base64.b64decode(captured["body_b64"], validate=True)
+                if (len(raw) != captured.get("body_bytes")
+                        or contracts.hash_bytes(raw) != captured.get("body_sha256")):
+                    raise ExportError("upstream_response_hash_invalid")
+                privacy = captured.get("privacy")
+                if (not isinstance(privacy, Mapping)
+                        or type(privacy.get("redacted")) is not bool
+                        or not isinstance(privacy.get("redactions"), list)
+                        or any(reason not in {"credential", "hidden_reasoning"}
+                               for reason in privacy["redactions"])
+                        or privacy["redacted"] != bool(privacy["redactions"])):
+                    raise ExportError("upstream_response_privacy_invalid")
+                if not privacy["redacted"] and (len(raw) != captured["wire_body_bytes"]
+                        or contracts.hash_bytes(raw) != captured["wire_body_sha256"]):
+                    raise ExportError("upstream_response_hash_invalid")
+                # Failed model replies may be malformed JSON. Retain their
+                # privacy-filtered text without treating it as a model answer.
+                response, removed = _response_value(captured, "upstream")
+                redactions = sorted(set(privacy["redactions"]) | set(removed))
+                upstream_receipts.append({
+                    "entry_id": row["entry_id"], "status": captured["status"],
+                    "response": response, "privacy_redactions": redactions,
+                    "body_sha256": captured["body_sha256"], "body_bytes": len(raw),
+                    "wire_body_sha256": captured["wire_body_sha256"],
+                    "wire_body_bytes": captured["wire_body_bytes"],
+                    "provenance": "private_upstream_response_receipt",
+                    "delivery_to_worker": "not_proved",
+                })
+                if redactions:
+                    call_reasons.add("upstream_response_privacy_nonexact")
+            except Exception:
+                call_reasons.add("upstream_response_capture_unavailable")
+        if upstream_receipts:
+            # This is provider evidence. It must never replace the bridge
+            # response or establish what the agent received or paid.
+            call["upstream_response_receipts"] = upstream_receipts
         accounting_fields = {"reserved_microusd", "released_microusd", "variance_microusd", "late_reconciliation",
                              "openrouter_delayed_reconciliation", "deepline_delayed_reconciliation",
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
@@ -561,7 +624,8 @@ def _calls(rows, run_ids, objects, run_order):
             terminal = row.get("terminal_response") or {}
             receipt = {"entry_id": row["entry_id"], "entry_kind": row["entry_kind"],
                        "created_at": row.get("created_at"),
-                       "metadata": {key: copy.deepcopy(value) for key, value in terminal.items() if key != "body_b64"}}
+                       "metadata": {key: copy.deepcopy(value) for key, value in terminal.items()
+                                    if key not in {"body_b64", "upstream_response_receipt"}}}
             try:
                 response, redactions = _response_value(terminal, reserve.get("provider"))
                 wire_body = base64.b64decode(terminal["body_b64"], validate=True)
@@ -1276,12 +1340,14 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                              for reason in item["privacy"]["redactions"]}
     hidden_removed = removed or "hidden_reasoning" in observation_redactions or "hidden_reasoning" in privacy_redactions or any(
         call.get("response_hidden_reasoning_removed") or "hidden_reasoning" in call.get("response_privacy_redactions", [])
-        or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("response_receipts", [])) for call in calls)
+        or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("response_receipts", []))
+        or any("hidden_reasoning" in receipt.get("privacy_redactions", []) for receipt in call.get("upstream_response_receipts", [])) for call in calls)
     clean["privacy"] = {"hidden_reasoning_removed": hidden_removed, "hidden_reasoning_excluded": True,
                         "context_redactions": sorted(privacy_redactions)}
     privacy_filtered = bool(privacy_redactions | observation_redactions) or hidden_removed or any(
         (snapshot.get("privacy") or {}).get("redacted") for snapshot in snapshots.values()) or any(
         (call.get("request_capture") or {}).get("redacted") or call.get("response_privacy_redactions")
+        or any(receipt.get("privacy_redactions") for receipt in call.get("upstream_response_receipts", []))
         or any(receipt.get("privacy_redactions") for receipt in call.get("response_receipts", [])) for call in calls)
     if "credential" in privacy_redactions:
         reasons["research_process"].add("context_privacy_nonexact")

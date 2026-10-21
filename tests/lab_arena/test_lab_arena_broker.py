@@ -4164,6 +4164,24 @@ def test_openrouter_completion_text_that_describes_an_error_is_still_successful(
     assert store.calls[result.call["call_identity"]]["terminal"]["call_succeeded"] is True
 
 
+def _accounting_without_verified_upstream_receipt(call, result, body, *, status=200):
+    """Check new private evidence before comparing all original accounting fields."""
+    receipt = call["uncertain_doc"]["upstream_response_receipt"]
+    assert receipt["capture_kind"] == "upstream_response"
+    assert receipt["call_identity"] == result.call["call_identity"]
+    assert receipt["operation_id"] == result.call["operation_id"]
+    assert receipt["request_hash"] == result.call["request_hash"]
+    assert receipt["status"] == status
+    assert receipt["call_succeeded"] == call["uncertain_doc"]["call_succeeded"]
+    assert base64.b64decode(receipt["body_b64"], validate=True) == body
+    assert receipt["wire_body_sha256"] == receipt["body_sha256"] == contracts.hash_bytes(body)
+    assert receipt["wire_body_bytes"] == receipt["body_bytes"] == len(body)
+    assert receipt["privacy"] == {"redacted": False, "redactions": []}
+    assert "upstream_response_receipt" not in json.dumps(result.to_document())
+    return {key: value for key, value in call["uncertain_doc"].items()
+            if key != "upstream_response_receipt"}
+
+
 @pytest.mark.parametrize(("payload", "expected_status"), [
     ({"choices": []}, 200),
     ({"usage": {"prompt_tokens": "x", "completion_tokens": 1}}, 502),
@@ -4182,7 +4200,9 @@ def test_missing_malformed_or_wrong_model_usage_keeps_execute_result_when_valid(
         assert json.loads(result.body) == payload
     else:
         assert json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
-    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
+    assert _accounting_without_verified_upstream_receipt(
+        store.calls[result.call["call_identity"]], result, json.dumps(payload).encode("utf-8")
+    ) == {
         "reason": "missing_provider_cost",
         "call_succeeded": isinstance(payload.get("choices"), list),
         "provider_status": 200,
@@ -4319,7 +4339,9 @@ def test_successful_deepline_reply_without_billing_returns_sanitized_execute_res
     )
     assert result.status == 200 and result.body == body
     assert_unpriced_uncertain(result, reserved=10_000_000)
-    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
+    assert _accounting_without_verified_upstream_receipt(
+        store.calls[result.call["call_identity"]], result, body
+    ) == {
         "reason": "missing_provider_cost",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
         "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
@@ -4440,7 +4462,7 @@ def test_score_completed_reply_without_bill_returns_sanitized_result_once():
     assert json.loads(replay.body) == {"error": {"code": "call_uncertain"}}
     call = store.calls[result.call["call_identity"]]
     assert call["kind"] == "uncertain"
-    assert call["uncertain_doc"] == {
+    assert _accounting_without_verified_upstream_receipt(call, result, body) == {
         "reason": "missing_provider_cost",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
         "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
@@ -5029,7 +5051,9 @@ def test_real_deepline_free_company_search_malformed_billing_does_not_fall_back(
     )
     assert result.status == 200 and result.body == raw
     assert_unpriced_uncertain(result, reserved=0)
-    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
+    assert _accounting_without_verified_upstream_receipt(
+        store.calls[result.call["call_identity"]], result, raw
+    ) == {
         "reason": "missing_provider_cost",
         "credential_fingerprint": br._credential_fingerprint(DL_KEY),
         "deepline_request_id": "ctx-tool-" + result.call["call_identity"][7:39],
@@ -6603,7 +6627,9 @@ def test_a_reply_the_sanitizer_refuses_after_dispatch_settles_as_uncertain_not_d
     assert result.status == 502 and json.loads(result.body) == {"error": {"code": "provider_unavailable"}}
     assert result.call["outcome"] == "uncertain" and result.call["error_code"] == "provider_unavailable"
     assert store.log[-1] == "uncertain" and "settle" not in store.log[-1:]  # the reservation is consumed, the head is terminal
-    assert store.calls[result.call["call_identity"]]["uncertain_doc"] == {
+    assert _accounting_without_verified_upstream_receipt(
+        store.calls[result.call["call_identity"]], result, b"<html>Cloudflare error</html>"
+    ) == {
         "reason": "missing_provider_cost",
         "call_succeeded": False,
         "failure_stage": "response_adaptation",

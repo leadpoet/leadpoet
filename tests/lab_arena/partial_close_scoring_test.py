@@ -51,7 +51,7 @@ def _score_stage_stub(monkeypatch, *, incomplete_submission="baseline", zero=Fal
         def list_runs(self, *args, **kwargs):
             return [{"run_id": "execution-1", "submission_id": "baseline", "icp_position": 0, "status": "accepted"}]
 
-        def record_run_scores(self, *args):
+        def record_run_scores(self, *args, **kwargs):
             events.append("record")
             return {"status": "ok"}
 
@@ -76,7 +76,8 @@ def _score_stage_stub(monkeypatch, *, incomplete_submission="baseline", zero=Fal
             "integrity_policy": "arena_integrity_v1",
             "sourcing_cost_eligibility_policy": contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
             "schedule": {"stage_1_close": "2026-10-10T03:00:00Z",
-                         "stage_1_scoring_close": "2026-10-10T04:00:00Z"},
+                         "stage_1_scoring_close": "2026-10-10T04:00:00Z",
+                         "publication_deadline": "2026-10-10T20:30:03Z"},
         },
     }
     fake = object.__new__(service.ArenaService)
@@ -85,7 +86,7 @@ def _score_stage_stub(monkeypatch, *, incomplete_submission="baseline", zero=Fal
         _load_scoring_plan=lambda _row, _stage: plan,
         evaluation_icps=lambda _rid: [{}],
         _outputs_by_run=lambda _rid, _stage: {"execution-1": []},
-        _scoring_outputs=lambda _rid, _stage: {"execution-1": {
+        _scoring_outputs=lambda _rid, _stage, **kwargs: {"execution-1": {
             "status": "failed" if judge_incomplete else "accepted",
             "terminal_cause": judge_cause if judge_incomplete else "accepted",
         }},

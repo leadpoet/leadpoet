@@ -3802,9 +3802,12 @@ class ArenaService:
             stage != 1 or
             round_row["configuration_doc"].get("execution_sequence_policy")
                 != contracts.BASELINE_SCORED_FIRST_POLICY
+            or self.now() >= _parse_iso(
+                round_row["configuration_doc"]["schedule"]["publication_deadline"])
         ):
-            return {"status": "retry", "round_status": round_row["status"],
-                    "reason": "judge_incomplete", "remaining": len(incomplete_items)}
+            return {**self._hold_incomplete_evaluation(
+                round_row, reason="judge_incomplete"),
+                "remaining": len(incomplete_items)}
         baseline_judge_incomplete = any(
             item["submission_id"] in baseline_ids
             and incomplete_items.get(item["scored_run_id"]) == "stage_closed"
@@ -4527,10 +4530,10 @@ class ArenaService:
         if _judge_continuation_enabled(round_row):
             self._record_recovered_judgment_scores(round_row)
         if evaluation_date and self._unfinished_judgments(round_row):
-            return {"status": "retry", "round_status": "scored",
-                    "reason": ("baseline_incomplete"
+            return self._hold_incomplete_evaluation(
+                round_row, reason=("baseline_incomplete"
                         if not self._baseline_fully_succeeded(round_row)
-                        else "judge_incomplete")}
+                        else "judge_incomplete"))
         configuration = round_row.get("configuration_doc") or {}
         # An infrastructure zero is not a measured baseline. Keep the round
         # recoverable until its frozen final deadline, without comparing miners
@@ -4935,6 +4938,12 @@ class ArenaService:
         )
 
     def _hold_incomplete_baseline(self, row: Mapping[str, Any]) -> Dict[str, Any]:
+        return self._hold_incomplete_evaluation(row, reason="baseline_incomplete")
+
+    def _hold_incomplete_evaluation(
+        self, row: Mapping[str, Any], *, reason: str
+    ) -> Dict[str, Any]:
+        """Drain unfinished evaluation at its frozen final deadline."""
         deadline = _parse_iso(row["configuration_doc"]["schedule"]["publication_deadline"])
         if self.now() >= deadline:
             runs = self._store.list_runs(str(row["round_id"]))
@@ -4948,7 +4957,7 @@ class ArenaService:
             if not active:
                 return self._store.cancel_round(str(row["round_id"]), CANCEL_REASONS["scoring_incomplete"])
         return {"status": "retry", "round_status": row["status"],
-                "reason": "baseline_incomplete"}
+                "reason": reason}
 
     def activate_reward(self, round_id: str) -> Dict[str, Any]:
         """Sign and atomically activate one already-published live result."""

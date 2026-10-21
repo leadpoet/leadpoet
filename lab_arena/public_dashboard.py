@@ -498,7 +498,8 @@ def round_summary(row: Mapping[str, Any], *, completed_scores: Optional[Mapping[
     if baseline and row.get("status") != "published":
         completed = (completed_scores or {}).get(baseline["submission_id"])
         if completed:
-            baseline = {**baseline, "final_score": completed["final_score"], "score_status": "complete"}
+            baseline = {**baseline, "final_score": completed["final_score"],
+                        "score_status": "provisional" if row.get("status") == "cancelled" else "complete"}
     if champion is None or row.get("promotion_required") is not True:
         promotion_status = "not_required"
     elif row.get("baseline_promoted_at"):
@@ -629,7 +630,7 @@ def competition_snapshot(service: Any, *, limit: int = DEFAULT_RECENT_ROUND_LIMI
 
 def _completed_scores(service: Any, row: Mapping[str, Any]) -> Dict[str, Any]:
     configuration = row.get("configuration_doc") or {}
-    if (row.get("status") in {"open", "committed", "stage1", "stage1_closed", "published", "cancelled"}
+    if (row.get("status") in {"open", "committed", "stage1", "stage1_closed", "published"}
         or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
         or configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
         return {}
@@ -1074,7 +1075,8 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
                 "stage1_score": stage1_scores.get(submission_id),
                 "final_score": final_score,
                 "is_champion": is_champion,
-                **({"score_status": "complete"} if submission_id in completed_scores else {}),
+                **({"score_status": "provisional" if round_status == "cancelled" else "complete"}
+                   if submission_id in completed_scores else {}),
                 "code": source_disclosure.disclosure_status(
                     submission, service.now(), round_row=row
                 ),

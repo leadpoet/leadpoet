@@ -6974,6 +6974,7 @@ class ArenaService:
         A bounded background refresh keeps public reads responsive even when
         many models need object-store and judgment verification. Completed
         models appear as each check finishes; costs are rechecked on refresh.
+        Cancelled-round values stay provisional in the public projection.
         """
         configuration = row.get("configuration_doc") or {}
         round_id = str(row["round_id"])
@@ -6981,7 +6982,8 @@ class ArenaService:
         status = row.get("status")
         # Compact and full reads share these fields. Normal closure preserves
         # the private configuration and scoring plans under the DB write-once
-        # guards; no other phase/generation change can reuse verified scores.
+        # guards. Cancellation may retain the same verified measurements;
+        # a changed scoring floor or configuration never reuses them.
         identity = contracts.canonical_json({
             "participants": row.get("participants") or [],
             "scoring_generation_floor": self._score_generation_floor(row),
@@ -6998,6 +7000,7 @@ class ArenaService:
             if (status not in {
                 "stage1_scoring", "stage1_judged", "stage1_scored", "stage2",
                 "stage2_closed", "stage2_scoring", "stage2_judged", "scored",
+                "cancelled",
             } or configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
                 or configuration.get("sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
                 self._completed_scores_cache.pop(round_id, None)
@@ -7012,6 +7015,14 @@ class ArenaService:
                         ("stage1_judged", "stage1_scored"),
                         ("stage2_scoring", "stage2_judged"),
                         ("stage2_judged", "scored"),
+                        ("stage1_scoring", "cancelled"),
+                        ("stage1_judged", "cancelled"),
+                        ("stage1_scored", "cancelled"),
+                        ("stage2", "cancelled"),
+                        ("stage2_closed", "cancelled"),
+                        ("stage2_scoring", "cancelled"),
+                        ("stage2_judged", "cancelled"),
+                        ("scored", "cancelled"),
                     }
                 )
                 cached = {"generation": generation, "status": status, "identity": identity,

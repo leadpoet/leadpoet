@@ -4343,6 +4343,7 @@ class Broker:
                 allow_host_shadow_score=host_shadow_score_compat,
                 source_content_fallback=source_content_fallback,
                 source_content_response_url=source_content_response_url,
+                frozen_catalog=context.deepline_catalog,
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
@@ -4374,7 +4375,7 @@ class Broker:
             secret = self._credential_for(context, effective_operation.provider) if self._credential_for else self._key_for(effective_operation.provider)
             if not isinstance(secret, str) or not secret:
                 raise BrokerError("miner_credentials_unavailable" if funding_source == "miner_key" else "broker_unavailable")
-        except (BrokerError, KeyError, operations.OperationError) as exc:
+        except (BrokerError, KeyError, operations.OperationError, deepline_catalog.CatalogError) as exc:
             if not isinstance(exc, BrokerError):
                 exc = BrokerError("broker_unavailable")
             return _error_result(

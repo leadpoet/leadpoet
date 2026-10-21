@@ -168,3 +168,109 @@ def test_maximum_multibyte_content_and_escaping_stay_bounded():
     with pytest.raises(compat.CompatibilityResponseError):
         adapt({'id': ID, 'content': content + '😀'})
     assert len(adapt({'id': ID, 'content': '"' * 131072})[2]) < 1048576
+
+
+@pytest.mark.parametrize('funding_source', ['host', 'miner_key'])
+@pytest.mark.parametrize('harvest_available', [False, True])
+def test_preferred_post_transport_respects_frozen_catalog_and_replays_once(
+    funding_source, harvest_available,
+):
+    from lab_arena import deepline_catalog, operations
+    from tests.lab_arena.score_compat_capability_test import (
+        firecrawl_catalog, routed_broker, score_context,
+    )
+    from tests.lab_arena.test_deepline_catalog import frozen, row
+    from tests.lab_arena.test_lab_arena_broker import FakeTransport
+    firecrawl = row('firecrawl_scrape', provider='firecrawl', categories=['research'],
+        inputSchema=firecrawl_catalog()['tools'][0]['input_schema'])
+    tools = [firecrawl]
+    if harvest_available:
+        tools.append(row('harvestapi_get_post', provider='harvestapi', categories=['research'],
+            inputSchema={'type': 'object', 'properties': {'url': {'type': 'string'}},
+                         'required': ['url']}))
+    catalog = frozen(*tools)
+    before_hash = catalog['catalog_hash']
+    data = ({'element': {'id': ID, 'content': TEXT}} if harvest_available else
+            {'rawHtml': '<html>Existing page evidence</html>',
+             'metadata': {'url': URL, 'sourceURL': URL, 'statusCode': 200}})
+    transport = FakeTransport([(200, {'status': 'completed',
+        'billing': {'cost_usd': 0.003, 'credits_charged': 0.03},
+        'result': {'data': data}})])
+    broker, store, _ = routed_broker(funding_source=funding_source, transport=transport)
+    context = score_context(catalog)
+    args = dict(operation_id='scrapingdog.scrape', parameters={'url': URL},
+                action_sequence=1, timeout_ms=30000)
+    first = broker.execute(context, **args)
+    assert first.status == 200
+    assert first.call['actual_microusd'] == 3000
+    assert first.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == URL
+    request = json.loads(transport.sent[0]['body'])
+    assert request['operation'] == ('harvestapi_get_post' if harvest_available else 'firecrawl_scrape')
+    if not harvest_available:
+        assert request['payload']['url'] == URL
+        assert request['payload']['formats'] == ['rawHtml']
+    second = broker.execute(context, **args)
+    assert second.status == first.status and second.body == first.body
+    assert second.call['call_identity'] == first.call['call_identity']
+    assert len(transport.sent) == 1 and len(store.calls) == 1
+    # A fresh broker must replay the same durable reservation, not dispatch
+    # the preferred transport a second time after process replacement.
+    from tests.lab_arena.test_lab_arena_broker import make_broker
+    offline = FakeTransport(fail=True)
+    options = ({'host_shadow_score_compat_round_id': context.round_id,
+                'host_shadow_score_compat_source_round_id': context.round_id}
+               if funding_source == 'host' else {})
+    fresh, _, _ = make_broker(store=store, transport=offline,
+        provider_funding_source_for=lambda *_: funding_source, **options)
+    third = fresh.execute(context, **args)
+    assert third.status == first.status and third.body == first.body
+    assert third.call['call_identity'] == first.call['call_identity']
+    assert not offline.sent and len(store.calls) == 1
+    assert catalog['catalog_hash'] == before_hash
+    assert deepline_catalog.validate_catalog(catalog)['catalog_hash'] == before_hash
+
+
+def test_post_transport_malformed_catalog_cannot_dispatch():
+    catalog = {'tools': []}
+    from tests.lab_arena.score_compat_capability_test import routed_broker, score_context
+    broker, store, transport = routed_broker(funding_source='miner_key')
+    result = broker.execute(score_context(catalog), operation_id='scrapingdog.scrape',
+        parameters={'url': URL}, action_sequence=1, timeout_ms=30000)
+    assert result.status == 503
+    assert json.loads(result.body)['error']['code'] == 'broker_unavailable'
+    assert not transport.sent and not store.calls
+
+
+def test_frozen_catalog_does_not_enable_execution_or_ordinary_host_post_routes():
+    for kind, funding in [('execute', 'miner_key'), ('score', 'host')]:
+        assert compat.route_for(kind=kind, funding_source=funding,
+            round_id='arena-2026-10-21', operation_id='scrapingdog.scrape',
+            parameters={'url': URL}, frozen_catalog={'tools': []}) is None
+
+
+def test_legacy_absent_catalog_keeps_existing_static_harvest_route():
+    from tests.lab_arena.score_compat_capability_test import routed_broker, score_context
+    from tests.lab_arena.test_lab_arena_broker import FakeTransport
+    transport = FakeTransport([(200, {'status': 'completed',
+        'billing': {'cost_usd': 0.003, 'credits_charged': 0.03},
+        'result': {'data': {'element': {'id': ID, 'content': TEXT}}}})])
+    broker, store, _ = routed_broker(funding_source='miner_key', transport=transport)
+    result = broker.execute(score_context(None), operation_id='scrapingdog.scrape',
+        parameters={'url': URL}, action_sequence=1, timeout_ms=30000)
+    assert result.status == 200
+    assert json.loads(transport.sent[0]['body'])['operation'] == 'harvestapi_get_post'
+    assert len(transport.sent) == 1 and len(store.calls) == 1
+
+
+@pytest.mark.parametrize('funding_source', ['host', 'miner_key'])
+def test_post_with_neither_frozen_transport_never_reserves_or_dispatches(funding_source):
+    from tests.lab_arena.score_compat_capability_test import routed_broker, score_context
+    from tests.lab_arena.test_deepline_catalog import frozen, row
+    catalog = frozen(row('exa_contents', provider='exa', categories=['research']))
+    broker, store, transport = routed_broker(funding_source=funding_source)
+    result = broker.execute(score_context(catalog), operation_id='scrapingdog.scrape',
+        parameters={'url': URL}, action_sequence=1, timeout_ms=30000)
+    assert result.status == 400
+    assert json.loads(result.body)['error']['code'] == 'capability_unavailable'
+    assert 'call_identity' not in result.call
+    assert not store.calls and not store.log and not transport.sent

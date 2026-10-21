@@ -5412,6 +5412,11 @@ async def investigate_company_evidence(
                             if unresolved_source
                             else ""
                         )
+                        # Validation can downgrade rejected positive proof to
+                        # UNPROVEN for repair. A rejected final packet is still
+                        # incomplete; that projection is not a valid negative.
+                        if rejected and not failure_reason:
+                            failure_reason = MALFORMED_RESPONSE_FAILURE_REASON
                         # A complete validated judgment may finish UNPROVEN
                         # within bounded research. Missing submissions and
                         # required discovery failures remain incomplete;

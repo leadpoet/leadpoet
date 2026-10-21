@@ -9,8 +9,9 @@ import socketserver
 import subprocess
 import urllib.error
 import urllib.request
+from copy import deepcopy
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -609,10 +610,26 @@ class _NormalWeightHarness(IntegrityHarness):
     ((30, 32000, 32001, False), (31, 32002, 32004, True)),
     ids=("new-scoring-basis", "no-new-miner-or-scoring"),
 )
+@pytest.mark.parametrize(
+    ("policy_day", "share_ppb", "epoch_offset", "expected_weights"),
+    (
+        (date(2026, 10, 21), 300_000_000, 0, [65535, 28086]),
+        (date(2026, 10, 22), 500_000_000, 20, [65535, 65535]),
+    ),
+    ids=("legacy-30-percent", "oct22-50-percent"),
+)
 def test_scoring_reward_normal_validators_restart_and_chain_readback(
     integrated_database, tmp_path, monkeypatch,
     round_day, round_epoch, reward_epoch, uses_prior_basis,
+    policy_day, share_ppb, epoch_offset, expected_weights,
 ):
+    # Exercise both real economic policies without changing genuine fixture
+    # dates or DB clocks. reward_shares_oct22_test proves dated selection.
+    policy = rewards.reward_slot_policy_document(policy_day)
+    monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_: deepcopy(policy))
+    round_day += epoch_offset // 10
+    round_epoch += epoch_offset
+    reward_epoch += epoch_offset
     psycopg2, dsn = integrated_database
     connect = lambda: psycopg2.connect(**dsn)
     with connect() as db, db.cursor() as cursor:
@@ -631,7 +648,8 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
     working_key = Keypair.create_from_uri("//svc-runner-alpha")
     assert working_key.ss58_address == harness.runner_keys[0]
     harness.clock.now = datetime.now(timezone.utc)
-    if not uses_prior_basis:
+    # Only the first case has no prior basis in the module's shared database.
+    if not uses_prior_basis and epoch_offset == 0:
         with TestClient(create_app(harness.service)) as http, monkeypatch.context() as patcher:
             patcher.setattr(urllib.request, "urlopen", _test_client_urlopen(http))
             patcher.setattr(
@@ -656,7 +674,7 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
     activated = harness.service.store.get_round(harness.round_id)
     basis = activated["reward_basis_doc"]
     assert basis["schema_version"] == "leadpoet.lab_arena.reward_basis.v2"
-    assert basis["slot_policy"] == rewards.reward_slot_policy_document()
+    assert basis["slot_policy"] == policy
     achievement = basis["reward_slots"][0]
     assert achievement is not None
     assert basis["reward_slots"] == [achievement] * 3
@@ -865,10 +883,10 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
             if state["reward_basis"]["king_hotkey"]:
                 hotkeys.append(state["reward_basis"]["king_hotkey"])
             derived = arena_weights.derive_arena_weights(state, hotkeys)
-            assert derived["champion_share_ppb"] == 300_000_000
-            assert derived["burned_residual_ppb"] == 700_000_000
+            assert derived["champion_share_ppb"] == share_ppb
+            assert derived["burned_residual_ppb"] == 1_000_000_000 - share_ppb
             assert derived["sparse_uids"] == [0, 1]
-            assert derived["sparse_weights_u16"] == [65535, 28086]
+            assert derived["sparse_weights_u16"] == expected_weights
             source = _ExternalSource(
                 hotkeys,
                 key.public_key.hex(),
@@ -1059,6 +1077,10 @@ def test_slot_decay_persists_through_daily_publication_and_normal_validator_reco
     integrated_database, tmp_path, monkeypatch,
 ):
     """Published source epochs age each slot, including after policy upgrades."""
+    # This legacy 30% history has fixed expected decay totals. Keep it stable
+    # when the real fixture evaluation day crosses a later policy boundary.
+    policy = rewards.reward_slot_policy_document(date(2026, 10, 21))
+    monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_: deepcopy(policy))
     psycopg2, dsn = integrated_database
     connect = lambda: psycopg2.connect(**dsn)
     harness = _NormalWeightHarness(
@@ -1100,7 +1122,7 @@ def test_slot_decay_persists_through_daily_publication_and_normal_validator_reco
             if legacy:
                 old_policy = rewards.reward_slot_policy_document()
                 old_policy.pop("decay")
-                patcher.setattr(rewards, "reward_slot_policy_document", lambda: old_policy)
+                patcher.setattr(rewards, "reward_slot_policy_document", lambda *_: old_policy)
             assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
         return harness.service.store.get_round(harness.round_id)["reward_basis_doc"]
 

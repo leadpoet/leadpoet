@@ -4,22 +4,28 @@ Champion selection is unchanged. After final publication and successful code
 promotion, reward activation assigns slots from the original published winner
 and baseline scores in the same round. Neither scoring nor promotion is rerun.
 
-| Improvement | Share of the existing 30% miner pot |
-| --- | --- |
-| At least +10 | 50% |
-| At least +5 | 30% |
-| At least +1 | 20% |
+For evaluation dates October 22, 2026 and later:
 
-The only slot policy definition is `REWARD_SLOT_POLICY` in
-`lab_arena/rewards.py`. Its `pool_percent: 30` is the miner share of total
-emissions. The `assignment_mode: all_qualifying` assigns a promoted win to
-every tier whose threshold it clears. A +10 win holds all three slots and
-earns the full 30% pot; +5 earns 15% of total emissions through two slots;
-+1 earns 6% through one slot. The next reward activation signs the policy.
-Policy changes never rewrite already accepted epoch states.
-For v2 slots, change the pot only in `REWARD_SLOT_POLICY`. The historical
-`LAB_ARENA_POOL_PERCENT` setting remains legacy signed metadata and does not
-set the v2 slot pot.
+| Improvement | Share of the 50% miner pot | Share of total emissions |
+| --- | --- | --- |
+| At least +10 | 40% | 20% |
+| At least +5 | 30% | 15% |
+| At least +1 | 30% | 15% |
+
+Slot policies are defined in `lab_arena/rewards.py`. The
+`assignment_mode: all_qualifying` assigns a promoted win to every tier whose
+threshold it clears. Before decay or funding reductions, a +10 win holds all
+three slots and earns 50% of total emissions; +5 earns 30% through two slots;
++1 earns 15% through one slot.
+
+Activation selects the policy by the round's validated `evaluation_date`, not
+wall-clock time. October 21 and earlier rounds retain the 30% pot and 50/30/20
+split (15%, 9%, 6% of total emissions), even if activation is delayed. October
+22 and later use `REWARD_SLOT_POLICY_50_PERCENT`: a 50% pot and 40/30/30 split.
+The new rates also apply to retained slot holders without resetting their ages.
+Each activation signs its policy; existing signed bases and accepted epoch
+states stay unchanged. The historical `LAB_ARENA_POOL_PERCENT` setting remains
+legacy signed metadata and does not set the v2 slot pot.
 
 A newer qualifying promoted winner replaces a slot holder, regardless of the
 holder's earlier score. Smaller wins do not remove larger-improvement holders.
@@ -66,7 +72,7 @@ remains; this is separate from how long an achievement owns a slot.
 
 New activations use reward-basis v2 through the existing gateway, accepted
 weight state, normal validator and local signer. The signed `slot_policy`
-contains the 30% miner pot and its tier percentages. Historical v2 policies
+contains the selected miner pot and its tier percentages. Historical v2 policies
 without `pool_percent` keep their original total-emissions arithmetic. Policies
 without `decay` retain their original non-decaying payouts. The
 frozen `reward_constants` and weekly schedule do not rescale new slot payouts.

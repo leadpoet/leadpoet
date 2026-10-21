@@ -5119,7 +5119,7 @@ class ArenaService:
                 champion_reward_factor_ppm = (
                     rewards.FULL_CHAMPION_REWARD_FACTOR_PPM
                 )
-        slot_policy = rewards.reward_slot_policy_document()
+        slot_policy = rewards.reward_slot_policy_document(self._evaluation_day(row))
         reward_slots = self._store.reward_slot_snapshot(round_id, slot_policy)
         basis = self._sign(
             rewards.reward_basis_document(

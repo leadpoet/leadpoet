@@ -691,3 +691,85 @@ def test_priority_uses_selected_accepted_attempt_and_is_stable(completed):
     assert result["miner"]["final_score"] == 40.0
     assert result["stored-peer"]["final_score"] == 60.0
     assert service._submission_cost_eligibility.call_count == 2
+
+
+def _unpublished_complete_with_incomplete_peers(completed, peer_counts):
+    """Real score arithmetic with a complete model and deadline-isolated peers."""
+    import json
+    from lab_arena import scoring
+    from tests.lab_arena.test_lab_arena_scoring import make_icp, scored_company, breakdown
+
+    service, row, executions, judges, eligibility = completed
+    row['configuration_doc'].update(stage_1_icp_count=5, stage_2_icp_count=5,
+                                    scorer_policy=scoring.build_scorer_policy())
+    executions[:] = [{
+        'run_id': 'execute-%d' % p, 'round_id': row['round_id'],
+        'submission_id': 'miner', 'stage': 2, 'kind': 'execute',
+        'icp_position': p, 'attempt': 1, 'status': 'accepted',
+        'terminal_cause': 'accepted', 'per_icp_score': None,
+        'output_ref': 'output-%d' % p,
+    } for p in range(10)]
+    for peer, accepted in peer_counts.items():
+        row['participants'].append({'submission_id': peer, 'is_king': False})
+        for p in range(10):
+            ok = p < accepted
+            executions.append({
+                **executions[0], 'run_id': '%s-%d' % (peer, p),
+                'submission_id': peer, 'icp_position': p,
+                'status': 'accepted' if ok else 'failed',
+                'terminal_cause': 'accepted' if ok else 'stage_closed',
+                'output_ref': '%s-output-%d' % (peer, p) if ok else None,
+                'terminal_doc': {} if ok else {'infrastructure_incomplete': True},
+            })
+    judges[:] = [{**r, 'kind': 'score', 'run_id': 'judge-' + r['run_id'],
+                 'scored_run_id': r['run_id']} for r in executions if r['status'] == 'accepted']
+    row['stage2_scoring_plan_doc'] = scoring.build_scoring_plan(
+        round_id=row['round_id'], stage=2, runs=executions,
+        execution_sequence_policy=contracts.BASELINE_SCORED_FIRST_POLICY,
+        configuration=row['configuration_doc'],
+    )
+    body = json.dumps({'schema_version': contracts.OUTPUT_DOCUMENT_SCHEMA_VERSION,
+                       'companies': [scored_company(0)]}).encode()
+    service._objects = SimpleNamespace(get_bounded=Mock(return_value=body))
+    service.evaluation_icps = Mock(return_value=[{**make_icp(p), 'max_companies': 1} for p in range(10)])
+    service._verified_breakdowns = Mock(return_value=[breakdown(40)])
+    eligibility['cost_summary']['per_icp'] = [{'icp_position': p, 'eligible': True} for p in range(10)]
+    return service, row, executions, eligibility
+
+
+@pytest.mark.parametrize('peer_counts', [
+    {'partial': 2},
+    {'missing-one': 0, 'missing-two': 0, 'missing-three': 0},
+    {'partial': 2, 'missing-one': 0, 'missing-two': 0, 'missing-three': 0},
+])
+def test_completed_unpublished_score_is_not_blocked_by_other_incomplete_models(completed, peer_counts):
+    service, row, executions, _ = _unpublished_complete_with_incomplete_peers(completed, peer_counts)
+    before = deepcopy((row, executions))
+    result = service._read_completed_submission_scores(row)
+    assert set(result) == {'miner'}
+    assert result['miner']['final_score'] == 40.0
+    assert result['miner']['eligible'] is True
+    assert len(result['miner']['execution_runs']) == 10
+    assert (row, executions) == before
+
+
+def test_completed_projection_keeps_current_model_incomplete_and_cost_guard(completed):
+    service, row, executions, eligibility = _unpublished_complete_with_incomplete_peers(completed, {'partial': 2})
+    last = executions[9]
+    last.update(status='failed', terminal_cause='stage_closed', output_ref=None,
+                terminal_doc={'infrastructure_incomplete': True})
+    from lab_arena import scoring
+    row['stage2_scoring_plan_doc'] = scoring.build_scoring_plan(
+        round_id=row['round_id'], stage=2, runs=executions,
+        execution_sequence_policy=contracts.BASELINE_SCORED_FIRST_POLICY,
+        configuration=row['configuration_doc'],
+    )
+    assert service._read_completed_submission_scores(row) == {}
+    service._submission_cost_eligibility.assert_not_called()
+
+
+def test_other_incomplete_models_do_not_bypass_completed_model_cost_guard(completed):
+    service, row, _, eligibility = _unpublished_complete_with_incomplete_peers(completed, {'partial': 2})
+    eligibility.update(eligible=False, eligibility_reason='provider_cost_uncertain')
+    assert service._read_completed_submission_scores(row) == {}
+    service._submission_cost_eligibility.assert_called_once()

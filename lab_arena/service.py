@@ -808,9 +808,9 @@ def _iso(moment: datetime) -> str:
 
 def _parse_iso(value: str) -> datetime:
     timestamp_format = (
-        "%Y-%m-%dT%H:%M:%S.%fZ" if "." in value else "%Y-%m-%dT%H:%M:%SZ"
+        "%Y-%m-%dT%H:%M:%S.%f%z" if "." in value else "%Y-%m-%dT%H:%M:%S%z"
     )
-    return datetime.strptime(value, timestamp_format).replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, timestamp_format).astimezone(timezone.utc)
 
 
 def _partial_baseline_transition_deadline(

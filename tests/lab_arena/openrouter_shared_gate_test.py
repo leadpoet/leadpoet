@@ -469,6 +469,34 @@ def test_cooldown_uses_strict_settled_zero_429_and_stale_success_cannot_reset_it
     invalid.release()
 
 
+def test_cooldown_past_the_deadline_refuses_now_instead_of_burning_the_budget():
+    """A production 429 with no Retry-After cools the credential for the whole
+    admission budget (20s fallback vs BUDGET_ADMISSION_MAX_SECONDS=20), so a
+    caller queued behind it can never be admitted. It must refuse at once and
+    leave the remaining budget to the run's retry."""
+
+    gate = br.OpenRouterSharedGate(max_concurrency=2, fallback_seconds=(0.5, 1.0))
+    key = fingerprint()
+    throttle = gate.acquire(key, deadline=time.monotonic() + 1)
+    assert throttle is not None
+    assert gate.observe_throttle(throttle, br._RETRY_AFTER_ABSENT)
+    throttle.release()
+
+    started = time.monotonic()
+    refused = gate.acquire(key, deadline=time.monotonic() + 0.3)
+    waited = time.monotonic() - started
+    assert refused is None
+    assert waited < 0.1, "waited %.3fs for a cooldown it could never outlast" % waited
+
+    # The waiter left no trace behind it, and a caller whose deadline does
+    # clear the cooldown still waits and is admitted.
+    with gate._condition:
+        assert not gate._states[key].waiters
+    admitted = gate.acquire(key, deadline=time.monotonic() + 2)
+    assert admitted is not None
+    admitted.release()
+
+
 def test_default_gate_cooldown_isolates_credential():
     gate = br.OpenRouterSharedGate(fallback_seconds=(0.05, 0.1))
     throttled_key = fingerprint("sk-or-v1-" + "a" * 40)

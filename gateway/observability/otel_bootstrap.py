@@ -286,7 +286,13 @@ ARENA_REVIEW_ERROR_CODES = frozenset({
 # with no wait at all emits nothing, so gate spans appear only under
 # contention.
 ARENA_GATE_OUTCOMES = frozenset(
-    {"admitted_after_wait", "timed_out", "cancelled", "no_capacity"}
+    {
+        "admitted_after_wait",
+        "timed_out",
+        "cancelled",
+        "no_capacity",
+        "cooldown_exceeds_deadline",
+    }
 )
 
 # Exact operation-to-provider pairs from ``lab_arena.operations.OPERATIONS``.
@@ -1813,7 +1819,11 @@ class ArenaTelemetry:
             span = self._start(self._gate_tracer, "arena.gate", start_ns)
             span.set_attribute("arena.gate_outcome", str(gate_outcome))
             span.set_attribute("duration_ms", float(duration_ms))
-            if gate_outcome in ("timed_out", "no_capacity"):
+            if gate_outcome in (
+                "timed_out",
+                "no_capacity",
+                "cooldown_exceeds_deadline",
+            ):
                 span.set_status(Status(StatusCode.ERROR))
             span.end()
         except BaseException as exc:

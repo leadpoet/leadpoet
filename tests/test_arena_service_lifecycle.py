@@ -9,8 +9,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from urllib.request import urlopen
 
 import pytest
+from fastapi import FastAPI
 
 from lab_arena import telemetry
 from scripts import run_lab_arena_service as entrypoint
@@ -70,8 +72,7 @@ def test_arena_clean_exit_emits_start_and_stop_with_version(
     spans, stages = _capture_lifecycle(monkeypatch)
     flushes = []
     monkeypatch.setattr(telemetry, "flush", lambda: flushes.append(True))
-    shutdown_handlers = []
-    app = SimpleNamespace(add_event_handler=lambda event, handler: shutdown_handlers.append(handler))
+    app = FastAPI()
     service = SimpleNamespace(startup_checks=lambda: {"database_identity": {"current_user": "service_role"}})
     monkeypatch.setattr(
         lab_arena.wiring,
@@ -79,7 +80,7 @@ def test_arena_clean_exit_emits_start_and_stop_with_version(
         lambda mode: (service, app),
     )
     def run(*args, **kwargs):
-        shutdown_handlers[0]()
+        app.router.on_shutdown[0]()
 
     monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(run=run))
     assert entrypoint.main(["--no-driver"]) == 0
@@ -103,7 +104,7 @@ def test_arena_server_error_emits_one_failed_shutdown(
 ) -> None:
     spans, _ = _capture_lifecycle(monkeypatch)
     service = SimpleNamespace(startup_checks=lambda: {"database_identity": {"current_user": "service_role"}})
-    app = SimpleNamespace(add_event_handler=lambda event, handler: None)
+    app = FastAPI()
     monkeypatch.setattr(
         lab_arena.wiring, "build_service_from_environment", lambda mode: (service, app)
     )
@@ -118,16 +119,30 @@ def test_arena_server_error_emits_one_failed_shutdown(
     ]
 
 
-def test_arena_sigterm_emits_shutdown_from_real_uvicorn() -> None:
+@pytest.mark.parametrize("no_driver", [False, True])
+def test_arena_sigterm_emits_shutdown_from_real_uvicorn(no_driver: bool) -> None:
     code = """
 import os
 from fastapi import FastAPI
 from types import SimpleNamespace
 import lab_arena.wiring
 from scripts import run_lab_arena_service as entrypoint
-service = SimpleNamespace(startup_checks=lambda: {"database_identity": {"current_user": "service_role"}})
-lab_arena.wiring.build_service_from_environment = lambda mode: (service, FastAPI())
-raise SystemExit(entrypoint.main(["--no-driver", "--port", os.environ["ARENA_TEST_PORT"]]))
+service = SimpleNamespace(
+    startup_checks=lambda: {"database_identity": {"current_user": "service_role"}},
+    _store=SimpleNamespace(_transport=SimpleNamespace(rpc=lambda *_: {
+        "schema_version": "leadpoet.lab_arena.restart_guard_state.v1", "guard_present": False,
+    })),
+    _config=SimpleNamespace(defaults=SimpleNamespace(daily_cutoff_hour_utc=0)),
+    review_pending_submissions=lambda **_: print("ARENA_TEST_REVIEW", flush=True),
+)
+app = FastAPI()
+app.get("/health")(lambda: {"ok": True})
+lab_arena.wiring.build_service_from_environment = lambda mode: (service, app)
+entrypoint.drive_once = lambda _: print("ARENA_TEST_DRIVE", flush=True) or "idle"
+arguments = ["--port", os.environ["ARENA_TEST_PORT"]]
+if os.environ["ARENA_TEST_NO_DRIVER"] == "1":
+    arguments.append("--no-driver")
+raise SystemExit(entrypoint.main(arguments))
 """
     received = []
 
@@ -150,6 +165,7 @@ raise SystemExit(entrypoint.main(["--no-driver", "--port", os.environ["ARENA_TES
     env = {name: value for name, value in os.environ.items() if not name.startswith("OTEL_")}
     env.update(
         LAB_ARENA_MODE="live", ARENA_TEST_PORT=str(port), PYTHONDONTWRITEBYTECODE="1",
+        ARENA_TEST_NO_DRIVER="1" if no_driver else "0",
         GATEWAY_OTEL_ENABLED="1",
         GATEWAY_OTEL_ENDPOINT=f"http://127.0.0.1:{collector.server_port}/v1/traces",
         GATEWAY_OTEL_TOKEN="fixture-ingest-token",
@@ -162,7 +178,9 @@ raise SystemExit(entrypoint.main(["--no-driver", "--port", os.environ["ARENA_TES
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline and process.poll() is None:
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                with urlopen(f"http://127.0.0.1:{port}/health", timeout=0.2) as response:
+                    assert response.status == 200
+                    assert response.read() == b'{"ok":true}'
                     break
             except OSError:
                 time.sleep(0.05)
@@ -180,6 +198,8 @@ raise SystemExit(entrypoint.main(["--no-driver", "--port", os.environ["ARENA_TES
     assert process.returncode == -signal.SIGTERM
     assert output.count("ARENA_SERVICE_LIFECYCLE event=startup outcome=ok") == 1
     assert output.count("ARENA_SERVICE_LIFECYCLE event=shutdown outcome=ok") == 1
+    assert ("ARENA_TEST_DRIVE" in output) is not no_driver
+    assert ("ARENA_TEST_REVIEW" in output) is not no_driver
     assert any(b"arena.service_shutdown" in body for body in received)
 
 
@@ -196,6 +216,44 @@ def test_arena_check_only_does_not_claim_a_service_start(
     assert entrypoint.main(["--check-only"]) == 0
     assert spans == []
     assert stages == []
+
+
+def test_driver_only_sigterm_stops_worker_without_serving_api() -> None:
+    code = """
+import signal
+import threading
+from fastapi import FastAPI
+from types import SimpleNamespace
+import lab_arena.wiring
+from scripts import run_lab_arena_service as entrypoint
+service = SimpleNamespace(
+    startup_checks=lambda: {"database_identity": {"current_user": "service_role"}},
+    _store=SimpleNamespace(_transport=SimpleNamespace(rpc=lambda *_: {
+        "schema_version": "leadpoet.lab_arena.restart_guard_state.v1", "guard_present": False,
+    })),
+    _config=SimpleNamespace(defaults=SimpleNamespace(daily_cutoff_hour_utc=0)),
+    review_pending_submissions=lambda **_: None,
+)
+lab_arena.wiring.build_service_from_environment = lambda mode: (service, FastAPI())
+entrypoint.drive_once = lambda _: signal.raise_signal(signal.SIGTERM) or "idle"
+import uvicorn
+def refuse_api(*args, **kwargs):
+    raise AssertionError("driver-only process attempted to start an API")
+uvicorn.run = refuse_api
+assert entrypoint.main(["--driver-only"]) == 0
+assert not any(t.name in {"lab-arena-driver", "lab-arena-code-review"} for t in threading.enumerate())
+print("ARENA_TEST_WORKERS_STOPPED")
+"""
+    env = dict(os.environ, LAB_ARENA_MODE="live", GATEWAY_OTEL_ENABLED="0", LEADPOET_SENTRY_ENABLED="0")
+    result = subprocess.run(
+        [sys.executable, "-u", "-c", code], capture_output=True,
+        text=True, env=env, timeout=10,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.count("ARENA_SERVICE_LIFECYCLE event=startup outcome=ok") == 1
+    assert result.stdout.count("ARENA_SERVICE_LIFECYCLE event=shutdown outcome=ok") == 1
+    assert "physical_role=arena-driver" in result.stdout
+    assert "ARENA_TEST_WORKERS_STOPPED" in result.stdout
 
 
 @pytest.mark.parametrize(

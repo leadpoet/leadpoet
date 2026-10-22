@@ -345,7 +345,7 @@ def main(argv=None) -> int:
 
     # Uvicorn restores and re-raises SIGTERM after the ASGI shutdown event.
     # The outer wrapper cannot observe that signal before process exit.
-    app.add_event_handler("shutdown", lambda: record_shutdown("ok"))
+    app.router.add_event_handler("shutdown", lambda: record_shutdown("ok"))
 
     try:
         uvicorn.run(app, host=args.host, port=int(args.port), log_level="info")

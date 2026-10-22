@@ -4,6 +4,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
 
 from lab_arena import wiring
 from scripts import run_lab_arena_service as launcher
@@ -62,7 +63,7 @@ def test_api_starts_while_initial_scoring_cycle_is_pending(monkeypatch, driver_r
     started = threading.Event()
     release = threading.Event()
     calls = []
-    app = SimpleNamespace(add_event_handler=lambda *_args: None)
+    app = FastAPI()
     service = SimpleNamespace(
         startup_checks=lambda: {"database_identity": {"current_user": "test"}},
         review_pending_submissions=lambda: None,
@@ -102,7 +103,7 @@ def test_api_only_and_check_only_do_not_start_scoring(monkeypatch, arguments, se
     calls = []
     service = SimpleNamespace(startup_checks=lambda: {"database_identity": {"current_user": "test"}})
     monkeypatch.setenv("LAB_ARENA_MODE", "live")
-    app = SimpleNamespace(add_event_handler=lambda *_args: None)
+    app = FastAPI()
     monkeypatch.setattr(wiring, "build_service_from_environment", lambda mode: (service, app))
     monkeypatch.setattr(launcher, "drive_once", lambda service: pytest.fail("unexpected scoring"))
     monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append("serve"))

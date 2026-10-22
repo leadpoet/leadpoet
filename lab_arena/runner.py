@@ -137,6 +137,8 @@ MAX_REQUIREMENTS_BYTES = 64 * 1024
 MAX_REQUIREMENTS = 128
 MAX_AGENT_ENTRYPOINT_BYTES = 1024 * 1024
 MAX_DEPENDENCY_BYTES = 512 * 1024 * 1024
+# pip retains wheel archives and temporary files alongside the installed tree.
+MAX_DEPENDENCY_WORKSPACE_BYTES = 1024 * 1024 * 1024
 MAX_DEPENDENCY_FILES = 20_000
 DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 300
 DEPENDENCY_MOUNT_TIMEOUT_SECONDS = 30
@@ -1387,7 +1389,7 @@ def _validated_requirements(path: Path) -> List[str]:
 
 
 def install_binary_requirements(requirements_path: Path, target_dir: Path) -> None:
-    """Install listed wheels in a size-capped temporary filesystem."""
+    """Install wheels in bounded scratch space, then enforce final tree limits."""
 
     requirements = _validated_requirements(requirements_path)
     if not requirements:
@@ -1406,7 +1408,7 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
                 "-t",
                 "tmpfs",
                 "-o",
-                "size=%d,mode=0700,nosuid,nodev,noexec" % MAX_DEPENDENCY_BYTES,
+                "size=%d,mode=0700,nosuid,nodev,noexec" % MAX_DEPENDENCY_WORKSPACE_BYTES,
                 "tmpfs",
                 str(staging),
             ],

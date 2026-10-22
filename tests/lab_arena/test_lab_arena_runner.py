@@ -1509,7 +1509,10 @@ def test_binary_requirement_install_rejects_urls_options_and_source_builds(
     mount_command, mount_kwargs = calls[0]
     command, kwargs = next(call for call in calls if "pip" in call[0])
     assert mount_command[:3] == ["mount", "-t", "tmpfs"]
-    assert "size=%d" % rn.MAX_DEPENDENCY_BYTES in mount_command[4]
+    assert "size=%d" % rn.MAX_DEPENDENCY_WORKSPACE_BYTES in mount_command[4]
+    assert rn.MAX_DEPENDENCY_WORKSPACE_BYTES == 1024 * 1024 * 1024
+    assert rn.MAX_DEPENDENCY_BYTES == 512 * 1024 * 1024
+    assert rn.MAX_DEPENDENCY_FILES == 20_000
     assert mount_kwargs["timeout"] == rn.DEPENDENCY_MOUNT_TIMEOUT_SECONDS
     assert "--only-binary=:all:" in command
     assert "--no-deps" not in command and "--no-compile" in command
@@ -3866,3 +3869,102 @@ def test_warm_image_cache_needs_no_cold_export_reserve(tmp_path, monkeypatch):
     assert cache.rootfs_for(digest) == entry / "rootfs"
     assert exports == []
     assert entry.exists()
+
+
+@pytest.mark.parametrize("tree_kind", ("small", "at_limit", "oversize", "too_many", "symlink"))
+def test_installer_workspace_preserves_final_admission_and_cleanup(
+    tmp_path, monkeypatch, tree_kind,
+):
+    """Extra pip workspace never grants extra installed-tree bytes or types."""
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("fixture-package==1.0.0\n", encoding="utf-8")
+    target = tmp_path / "deps"
+    target.mkdir()
+    # Scale only final admission so the real guard and copy run without large I/O.
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_BYTES", 8192)
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_FILES", 3)
+    stages = []
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[0] == "mount":
+            assert command[4] == "size=1073741824,mode=0700,nosuid,nodev,noexec"
+            stages.append(Path(command[-1]))
+        elif command[0] == "umount":
+            # A real unmount discards the read-only installed tmpfs tree.
+            # The unprivileged fixture retains its files until normal cleanup.
+            for directory, _, _ in os.walk(command[-1]):
+                os.chmod(directory, 0o700)
+        elif "pip" in command:
+            install_target = Path(command[command.index("--target") + 1])
+            # pip may retain archives outside its final target until it exits.
+            (Path(kwargs["env"]["TMPDIR"]) / "wheel.whl").write_bytes(b"x" * 16384)
+            if tree_kind == "symlink":
+                (install_target / "unsafe").symlink_to(requirements)
+            elif tree_kind == "too_many":
+                for index in range(4):
+                    (install_target / str(index)).write_bytes(b"x")
+            else:
+                size = {"small": 16, "at_limit": 8192, "oversize": 8193}[tree_kind]
+                (install_target / "installed.py").write_bytes(b"x" * size)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(rn.subprocess, "run", run)
+    if tree_kind in ("small", "at_limit"):
+        rn.install_binary_requirements(requirements, target)
+        assert (target / "installed.py").stat().st_size == (16 if tree_kind == "small" else 8192)
+        assert (target / "installed.py").stat().st_mode & 0o222 == 0
+    else:
+        expected = "unsafe type" if tree_kind == "symlink" else "cache limit"
+        with pytest.raises(rn.AgentDependencyError, match=expected):
+            rn.install_binary_requirements(requirements, target)
+        assert not any(target.iterdir())
+    assert len(stages) == 1 and not stages[0].exists()
+    assert calls[-1] == ["umount", str(stages[0])]
+
+
+def test_dependency_final_guard_includes_directory_sizes(tmp_path, monkeypatch):
+    target = tmp_path / "deps"
+    target.mkdir()
+    directory = target / "package"
+    directory.mkdir()
+    payload = directory / "module.py"
+    payload.write_bytes(b"x" * 32)
+    exact_size = directory.stat().st_size + payload.stat().st_size
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_BYTES", exact_size - 1)
+    with pytest.raises(rn.AgentDependencyError, match="cache limit"):
+        rn._lock_down_dependency_tree(target)
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_BYTES", exact_size)
+    rn._lock_down_dependency_tree(target)
+    assert directory.stat().st_mode & 0o222 == 0
+
+
+def test_installer_unmount_failure_does_not_remove_the_mounted_tree(tmp_path, monkeypatch):
+    requirements = tmp_path / "requirements.txt"
+    requirements.write_text("fixture-package==1.0.0\n", encoding="utf-8")
+    target = tmp_path / "deps"
+    target.mkdir()
+    stages = []
+    unmounts = []
+
+    def run(command, **_kwargs):
+        if command[0] == "mount":
+            stages.append(Path(command[-1]))
+        elif command[0] == "umount":
+            unmounts.append(command)
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(rn.subprocess, "run", run)
+    try:
+        with pytest.raises(rn.RunnerError, match="filesystem cleanup failed"):
+            rn.install_binary_requirements(requirements, target)
+        assert unmounts == [["umount", str(stages[0])], ["umount", "-l", str(stages[0])]]
+        assert stages[0].is_dir()
+    finally:
+        # The fixture made no real mount. Remove only its own retained scratch.
+        for stage in stages:
+            for directory, _, _ in os.walk(stage):
+                os.chmod(directory, 0o700)
+            shutil.rmtree(stage)

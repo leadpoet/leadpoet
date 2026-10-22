@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -25,6 +26,10 @@ from tests.lab_arena.trajectory_runner_test import LoggingApi
         ("network", "provider_error", "network_error", 2, "NewConnectionError"),
         ("host", "provider_error", "installer_error", 1, "No module named pip"),
         ("timeout", "provider_error", "timeout", 2, "ReadTimeoutError"),
+        ("payload_limit", "model_error", "source_error", 1,
+         "site=install_staging threshold=regular_bytes"),
+        ("entry_limit", "model_error", "source_error", 1,
+         "site=install_staging threshold=entries"),
     ],
 )
 @pytest.mark.parametrize("upload_unavailable", [False, True])
@@ -75,6 +80,9 @@ def test_dependency_failure_private_trajectory_round_trip(
     claimed["source_size_bytes"] = len(api.source_payload)
     api.leases = [claimed]
     pip_calls = []
+    if failure in ("payload_limit", "entry_limit"):
+        monkeypatch.setattr(runner, "MAX_DEPENDENCY_BYTES", 32)
+        monkeypatch.setattr(runner, "MAX_DEPENDENCY_FILES", 1 if failure == "entry_limit" else 2)
     message = {
         "unknown_pip": "No matching distribution",
         "network": "NewConnectionError('connection failed')",
@@ -85,6 +93,11 @@ def test_dependency_failure_private_trajectory_round_trip(
     def fake_install_command(command, **kwargs):
         if "pip" in command:
             pip_calls.append(command)
+            if failure in ("payload_limit", "entry_limit"):
+                target = Path(command[command.index("--target") + 1]) / "package"
+                target.mkdir()
+                (target / "module.py").write_bytes(b"x" * (33 if failure == "payload_limit" else 32))
+                return SimpleNamespace(returncode=0)
             kwargs["stderr"].write((
                 "resolver progress\n" * 1000 + message
                 + " Bearer secret-bearer https://user:pass@private.test/pip?token=query-secret"

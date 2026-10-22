@@ -1506,7 +1506,7 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
                     "network_error", detail=_pip_failure_detail(stderr_path)
                 )
             break
-        _lock_down_dependency_tree(install_target)
+        _lock_down_dependency_tree(install_target, site="install_staging")
         for child in install_target.iterdir():
             destination = target / child.name
             if child.is_dir():
@@ -1557,8 +1557,9 @@ def install_binary_requirements(requirements_path: Path, target_dir: Path) -> No
         raise failure
 
 
-def _lock_down_dependency_tree(path: Path) -> None:
-    total = 0
+def _lock_down_dependency_tree(path: Path, *, site: str = "dependency_tree") -> None:
+    regular_bytes = 0
+    directory_bytes = 0
     count = 0
     directories = []
     for directory, names, files in os.walk(path, topdown=True, followlinks=False):
@@ -1573,9 +1574,24 @@ def _lock_down_dependency_tree(path: Path) -> None:
             if not (stat.S_ISDIR(details.st_mode) or stat.S_ISREG(details.st_mode)):
                 raise AgentDependencyError("installed dependency has an unsafe type")
             count += 1
-            total += int(details.st_size)
-            if count > MAX_DEPENDENCY_FILES or total > MAX_DEPENDENCY_BYTES:
-                raise AgentDependencyError("installed dependencies exceed the cache limit")
+            # Directory metadata varies by filesystem. Bound payload bytes
+            # separately; directories still consume the existing entry limit.
+            if stat.S_ISREG(details.st_mode):
+                regular_bytes += int(details.st_size)
+            else:
+                directory_bytes += int(details.st_size)
+            if count > MAX_DEPENDENCY_FILES or regular_bytes > MAX_DEPENDENCY_BYTES:
+                threshold = "entries" if count > MAX_DEPENDENCY_FILES else "regular_bytes"
+                raise AgentDependencyError(
+                    "installed dependencies exceed the cache limit",
+                    detail=(
+                        f"dependency_limit site={site} threshold={threshold} "
+                        f"entries_seen={count} regular_bytes={regular_bytes} "
+                        f"directory_bytes={directory_bytes} "
+                        f"max_entries={MAX_DEPENDENCY_FILES} "
+                        f"max_regular_bytes={MAX_DEPENDENCY_BYTES}"
+                    ),
+                )
             if stat.S_ISREG(details.st_mode):
                 os.chmod(candidate, 0o444)
     for directory in reversed(directories):
@@ -1718,7 +1734,7 @@ class SourceCache:
             requirements = source_path / "requirements.txt"
             if requirements.is_file():
                 self._dependency_installer(requirements, dependency_path)
-            _lock_down_dependency_tree(dependency_path)
+            _lock_down_dependency_tree(dependency_path, site="source_cache")
             (target / ".ready").touch(mode=0o400)
             size = _cache_path_bytes(target)
             if size > self._max_bytes:

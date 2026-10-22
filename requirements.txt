@@ -31,9 +31,11 @@ opentelemetry-exporter-otlp-proto-http==1.27.0
 python-dotenv>=1.0.0
 
 # Web framework
-starlette>=0.30.0
+# FastAPI 0.141.1 permits Starlette 1.x; Starlette 1.6.0 includes the
+# GHSA-82w8-qh3p-5jfq form-parser fix. Match the tested validator host pair.
+starlette==1.6.0
 pydantic>=2.0.0
-fastapi>=0.110.0
+fastapi==0.141.1
 uvicorn[standard]>=0.38.0
 
 # Testing

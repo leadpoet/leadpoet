@@ -1,3 +1,16 @@
+## Scoped production authorization: October 22 security remediation
+
+On 2026-10-22 the user explicitly requested researched vulnerability fixes,
+rigorous checks that preserve existing behavior, and deployment. The user also
+approved narrow repairs to existing checks. This scope permits protected
+read-only inspection, exact reviewed security patches, safe merges, canonical
+deployment, and pip/certifi preparation only in an unused environment. Preserve
+all application, scoring, reward and customer behavior, credentials, and
+concurrent work. The cofounder owns credential rotation. This records existing
+authority; it adds no OS upgrade, recovery framework or customer-message action.
+The coordinating agent owns production application and verification. This scope
+ends when the security repairs and live verification are complete.
+
 ## Scoped production authorization: October 22 full-cycle dependency repair
 
 On 2026-10-22 the user authorized bounded investigation and the smallest general

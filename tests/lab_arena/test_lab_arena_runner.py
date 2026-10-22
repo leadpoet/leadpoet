@@ -3924,20 +3924,103 @@ def test_installer_workspace_preserves_final_admission_and_cleanup(
     assert calls[-1] == ["umount", str(stages[0])]
 
 
-def test_dependency_final_guard_includes_directory_sizes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("directory_bytes", (0, 4096, 1024 * 1024))
+def test_dependency_payload_boundary_is_independent_of_directory_metadata(
+    tmp_path, monkeypatch, directory_bytes,
+):
     target = tmp_path / "deps"
     target.mkdir()
     directory = target / "package"
     directory.mkdir()
     payload = directory / "module.py"
     payload.write_bytes(b"x" * 32)
-    exact_size = directory.stat().st_size + payload.stat().st_size
-    monkeypatch.setattr(rn, "MAX_DEPENDENCY_BYTES", exact_size - 1)
-    with pytest.raises(rn.AgentDependencyError, match="cache limit"):
-        rn._lock_down_dependency_tree(target)
-    monkeypatch.setattr(rn, "MAX_DEPENDENCY_BYTES", exact_size)
+    original_lstat = Path.lstat
+
+    def filesystem_metadata(path, *args, **kwargs):
+        details = original_lstat(path, *args, **kwargs)
+        if path == directory:
+            fields = list(details)
+            fields[6] = directory_bytes
+            return os.stat_result(fields)
+        return details
+
+    monkeypatch.setattr(Path, "lstat", filesystem_metadata)
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_BYTES", 32)
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_FILES", 2)
     rn._lock_down_dependency_tree(target)
+    assert payload.stat().st_mode & 0o222 == 0
     assert directory.stat().st_mode & 0o222 == 0
+    assert target.stat().st_mode & 0o222 == 0
+
+
+@pytest.mark.parametrize("threshold", ("regular_bytes", "entries"))
+def test_dependency_limit_reports_bounded_counters_without_paths(
+    tmp_path, monkeypatch, threshold,
+):
+    target = tmp_path / "deps"
+    directory = target / "package"
+    directory.mkdir(parents=True)
+    (directory / "module.py").write_bytes(b"x" * 32)
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_BYTES", 31 if threshold == "regular_bytes" else 32)
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_FILES", 1 if threshold == "entries" else 2)
+    with pytest.raises(rn.AgentDependencyError, match="cache limit") as caught:
+        rn._lock_down_dependency_tree(target, site="source_cache")
+    detail = caught.value.diagnostic_detail
+    counters = dict(item.split("=", 1) for item in detail.split()[1:])
+    assert counters == {
+        "site": "source_cache", "threshold": threshold, "entries_seen": "2",
+        "regular_bytes": "32", "directory_bytes": str(directory.stat().st_size),
+        "max_entries": str(rn.MAX_DEPENDENCY_FILES),
+        "max_regular_bytes": str(rn.MAX_DEPENDENCY_BYTES),
+    }
+    assert len(detail) <= rn.MAX_JUDGE_DIAGNOSTIC_CHARS
+    assert str(tmp_path) not in detail
+
+
+@pytest.mark.parametrize("failure", ("payload", "cache_footprint", "at_payload_limit"))
+def test_source_cache_retains_final_payload_and_cache_footprint_limits(
+    tmp_path, monkeypatch, failure,
+):
+    payload = _source_archive_with_requirements("fixture-package==1.0.0\n")
+    monkeypatch.setattr(rn, "MAX_DEPENDENCY_BYTES", 32)
+
+    def install(_requirements, target):
+        package = target / "package"
+        package.mkdir()
+        (package / "module.py").write_bytes(b"x" * (33 if failure == "payload" else 32))
+
+    cache_root = tmp_path / "sources"
+    cache = rn.SourceCache(
+        cache_root, lambda *_args: payload, dependency_installer=install,
+        max_bytes=1 if failure == "cache_footprint" else rn.DEFAULT_SOURCE_CACHE_MAX_BYTES,
+    )
+    remove_cache_path = rn._remove_cache_path
+
+    def remove_as_production_root(path):
+        # Production runs as root. This unprivileged fixture must unlock its
+        # own extracted read-only directories before the same cleanup call.
+        for directory, _, _ in os.walk(path):
+            os.chmod(directory, 0o700)
+        remove_cache_path(path)
+
+    monkeypatch.setattr(rn, "_remove_cache_path", remove_as_production_root)
+    if failure == "at_payload_limit":
+        with cache.acquire("run-1", "a" * 64, SOURCE_REF, "sub-fixture", len(payload)) as (_, dependencies):
+            installed = dependencies / "package" / "module.py"
+            assert installed.stat().st_size == rn.MAX_DEPENDENCY_BYTES
+            assert installed.stat().st_mode & 0o222 == 0
+            assert installed.parent.stat().st_mode & 0o222 == 0
+        return
+    error = rn.AgentDependencyError if failure == "payload" else rn.RunnerError
+    with pytest.raises(error) as caught:
+        with cache.acquire("run-1", "a" * 64, SOURCE_REF, "sub-fixture", len(payload)):
+            pytest.fail("oversized dependency or cache footprint reached execution")
+    if failure == "payload":
+        assert "site=source_cache threshold=regular_bytes" in caught.value.diagnostic_detail
+    else:
+        assert "source exceeds runner cache capacity" in str(caught.value)
+    assert list(cache_root.iterdir()) == []
+    assert rn.DEFAULT_SOURCE_CACHE_MAX_BYTES == 2 * 1024 * 1024 * 1024
 
 
 def test_installer_unmount_failure_does_not_remove_the_mounted_tree(tmp_path, monkeypatch):

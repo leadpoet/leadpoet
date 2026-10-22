@@ -11,14 +11,21 @@ from tests.lab_arena.trajectory_postgres_test import (
 )
 
 
-def test_dependency_details_persist_privately_with_existing_lease_authority(seeded):
+def test_dependency_details_persist_privately_with_existing_lease_authority(seeded, tmp_path, monkeypatch):
     psycopg2, dsn = seeded
     store = _connect_store(psycopg2, dsn)
     gateway = object.__new__(ArenaService)
     gateway._store = store
     gateway._require_round_ownership = lambda _round_id: None
+    dependency_tree = tmp_path / "dependencies"
+    dependency_tree.mkdir()
+    (dependency_tree / "payload.bin").write_bytes(b"x" * 33)
+    monkeypatch.setattr(runner, "MAX_DEPENDENCY_BYTES", 32)
+    with pytest.raises(runner.AgentDependencyError) as limit_failure:
+        runner._lock_down_dependency_tree(dependency_tree, site="source_cache")
     failures = [
         runner.AgentDependencyError("invalid requirements"),
+        limit_failure.value,
         *[runner.DependencyInstallInfrastructureError(kind, detail=(
             "failure " + LEASE + " Bearer secret-bearer api_key=plain-secret "
             "https://user:pass@private.test/pip?token=query-secret " + "x" * 1000
@@ -35,11 +42,13 @@ def test_dependency_details_persist_privately_with_existing_lease_authority(seed
             gateway.handle_trajectory(RUN, "wrong-lease", {"events": events})
         assert store.list_trajectory_events(RUN) == []
         result = gateway.handle_trajectory(RUN, LEASE, {"events": events})
-        assert result["inserted"] == 4
+        assert result["inserted"] == 5
         replay = gateway.handle_trajectory(RUN, LEASE, {"events": events})
-        assert replay["inserted"] == 0 and replay["existing"] == 4
+        assert replay["inserted"] == 0 and replay["existing"] == 5
         rows = store.list_trajectory_events(RUN)
-        assert len(rows) == 4
+        assert len(rows) == 5
+        assert any("site=source_cache threshold=regular_bytes" in row["content"]["diagnostic_detail"]
+                   for row in rows)
         assert {row["content"]["failure_kind"] for row in rows} == {
             "source_error", "network_error", "timeout", "installer_error",
         }

@@ -37,6 +37,7 @@ class Checkpoint:
         return len(self.binary)
 
     def record_response_received(self, **kwargs):
+        kwargs.pop("_retry_ambiguous", None)
         self.acks.append(kwargs)
         return len(self.acks)
 

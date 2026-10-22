@@ -120,6 +120,65 @@ def test_uncertain_provider_error_keeps_observation_and_exact_read_receipt(tmp_p
             lease_generation=1, claim_request_hash=CLAIM_HASH)
 
 
+def _pre_reservation_document(reason):
+    document = response(502, {"error": {"code": "provider_unavailable"}}, outcome="not_dispatched")
+    document["body_b64"] = base64.b64encode(b'{"error":{"code":"provider_unavailable"}}').decode()
+    document["call"].update(reason=reason, error_code="provider_unavailable",
+                            reserved_microusd=5000)
+    return document
+
+
+@pytest.mark.parametrize("reason", sorted(training_observations.BROKER_NOT_DISPATCHED_REASONS))
+def test_pre_reservation_disposition_is_captured_without_changing_worker_response(reason):
+    document = _pre_reservation_document(reason)
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    server = runner.WorkerSocketServer(Path("/tmp/unused-arena-disposition.sock"),
+                                       FakeApi([], broker_documents=[document]), state)
+    raw = server.handle_frame(shim.build_operation_frame(
+        "openrouter.chat", {"model": "openai/gpt-4o-mini",
+                            "messages": [{"role": "user", "content": "check"}], "max_tokens": 20}, 1000))
+    returned = json.loads(raw)
+    assert returned["body_b64"] == document["body_b64"]
+    assert returned["status"] == document["status"]
+    saved = state.worker_observations.document()["observations"][0]
+    assert saved["kind"] == "nonstandard_response"
+    assert saved["outcome"]["broker_disposition"] == {
+        "outcome": "not_dispatched", "reason": reason}
+    assert "reserved_microusd" not in saved["outcome"]
+    training_observations.build_snapshot("execute:1", "execute",
+        state.worker_observations.document(), lease_generation=1, claim_request_hash=CLAIM_HASH)
+
+
+@pytest.mark.parametrize("change", [
+    {"action_sequence": 9}, {"operation_id": "deepline.execute"},
+    {"call_identity": "invalid"}, {"reason": "unreviewed_reason"},
+    {"outcome": "uncertain"}, {"error_code": "call_uncertain"},
+    {"_body_b64": base64.b64encode(b'{"error":{"code":"other"}}').decode()},
+    {"_status": 503},
+])
+def test_unproved_broker_disposition_is_not_claimed(change):
+    document = _pre_reservation_document("provider_admission_deadline")
+    for key, value in change.items():
+        if key == "_body_b64":
+            document["body_b64"] = value
+        elif key == "_status":
+            document["status"] = value
+        else:
+            document["call"][key] = value
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    server = runner.WorkerSocketServer(Path("/tmp/unused-arena-disposition.sock"),
+                                       FakeApi([], broker_documents=[document]), state)
+    server.handle_frame(shim.build_operation_frame(
+        "openrouter.chat", {"model": "openai/gpt-4o-mini",
+                            "messages": [{"role": "user", "content": "check"}], "max_tokens": 20}, 1000))
+    payload = state.worker_observations.document()
+    if change.get("call_identity") == "invalid":
+        assert payload["observations"] == [] and not payload["complete"]
+        return
+    saved = payload["observations"][0]
+    assert "broker_disposition" not in saved["outcome"]
+
+
 def test_redacted_error_body_does_not_change_original_socket_hash(tmp_path, monkeypatch):
     document = response(503, {"error": {"detail": "private-lease-token"}}, outcome="uncertain")
     state = runner.RunState(lease=lease(), lease_token="private-lease-token")
@@ -339,6 +398,131 @@ def test_v2_upload_is_bound_to_existing_lease_and_private_store(tmp_path):
     assert uploaded.json()["schema_version"] == training_observations.SCHEMA_VERSION
     saved = training_observations.read_snapshot(objects, "r1", "execute", 1, CLAIM_HASH)
     assert saved["payload"] == payload
+
+
+def test_automatic_web_retry_after_host_commit_keeps_one_observation(tmp_path, monkeypatch):
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    socket_dir = Path(tempfile.mkdtemp(prefix="ar-", dir="/tmp"))
+    socket_path = socket_dir / "w.sock"
+    server = runner.WorkerSocketServer(socket_path, FakeApi([]), state)
+    server.start()
+    monkeypatch.setenv(lab_arena_checkpoint.WORKER_SOCKET_ENV, str(socket_path))
+    original_receive = lab_arena_checkpoint._recv_decision_response
+    calls = 0
+
+    def lose_first_ack(connection, size, deadline):
+        nonlocal calls
+        result = original_receive(connection, size, deadline)
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("ack lost after host commit")
+        return result
+
+    monkeypatch.setattr(lab_arena_checkpoint, "_recv_decision_response", lose_first_ack)
+    try:
+        first = lab_arena_checkpoint.record_web_fetch(
+            url="https://example.com/", final_url="https://example.com/", status=200,
+            content_type="text/plain", body="same body", _retry_ambiguous=True)
+        second = lab_arena_checkpoint.record_web_fetch(
+            url="https://example.com/", final_url="https://example.com/", status=200,
+            content_type="text/plain", body="same body", _retry_ambiguous=True)
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir)
+    assert (first, second) == (0, 1)
+    assert calls == 5  # one lost length, then two complete length/body replies
+    assert len(state.worker_observations.agent_observations) == 2
+    assert state.worker_observations.document()["complete"]
+    assert all("retry_token" not in row and "retry_token" not in row["data"]
+               for row in state.worker_observations.agent_observations)
+    training_observations.build_snapshot(
+        "execute:1", "execute", state.worker_observations.document(),
+        lease_generation=1, claim_request_hash=CLAIM_HASH)
+
+
+def test_automatic_web_retry_exhaustion_keeps_committed_evidence(tmp_path, monkeypatch):
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    socket_dir = Path(tempfile.mkdtemp(prefix="ar-", dir="/tmp"))
+    socket_path = socket_dir / "w.sock"
+    server = runner.WorkerSocketServer(socket_path, FakeApi([]), state)
+    server.start()
+    monkeypatch.setenv(lab_arena_checkpoint.WORKER_SOCKET_ENV, str(socket_path))
+    original_receive = lab_arena_checkpoint._recv_decision_response
+    calls = 0
+
+    def lose_ack(connection, size, deadline):
+        nonlocal calls
+        original_receive(connection, size, deadline)
+        calls += 1
+        raise TimeoutError("ack lost after host commit")
+
+    monkeypatch.setattr(lab_arena_checkpoint, "_recv_decision_response", lose_ack)
+    try:
+        result = lab_arena_checkpoint.record_web_fetch(
+            url="https://example.com/", final_url="https://example.com/", status=200,
+            content_type="text/plain", body="saved", _retry_ambiguous=True)
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir)
+    assert result is None
+    assert lab_arena_checkpoint._training_failure_reason() == "timeout"
+    assert calls == 2
+    assert len(state.worker_observations.agent_observations) == 1
+
+
+def test_automatic_receipt_retry_after_commit_is_idempotent(monkeypatch):
+    document = response(200, {"answer": "saved"}, outcome="settled")
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    socket_dir = Path(tempfile.mkdtemp(prefix="ar-", dir="/tmp"))
+    socket_path = socket_dir / "w.sock"
+    server = runner.WorkerSocketServer(socket_path, FakeApi([], broker_documents=[document]), state)
+    server.start()
+    monkeypatch.setenv(lab_arena_checkpoint.WORKER_SOCKET_ENV, str(socket_path))
+    try:
+        status, headers, body = shim.dispatch(
+            "openrouter.chat", {"model": "openai/gpt-4o-mini",
+                                "messages": [{"role": "user", "content": "check"}], "max_tokens": 20}, 1000)
+        original_receive = lab_arena_checkpoint._recv_decision_response
+        lost = False
+
+        def lose_first_ack(connection, size, deadline):
+            nonlocal lost
+            result = original_receive(connection, size, deadline)
+            if not lost:
+                lost = True
+                raise TimeoutError("ack lost after host commit")
+            return result
+
+        monkeypatch.setattr(lab_arena_checkpoint, "_recv_decision_response", lose_first_ack)
+        identity = lab_arena_checkpoint.record_response_received(
+            call_identity=headers[shim.CALL_IDENTITY_HEADER], status=status,
+            body=body, _retry_ambiguous=True)
+    finally:
+        server.stop()
+        shutil.rmtree(socket_dir)
+    assert identity == 0 and lost
+    assert len(state.worker_observations.agent_observations) == 1
+    assert state.worker_observations.agent_observations[0]["kind"] == "response_received"
+
+
+def test_retry_token_cannot_alias_different_web_evidence():
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    server = runner.WorkerSocketServer(Path("/tmp/unused-arena-retry.sock"), FakeApi([]), state)
+    frame = {
+        "schema_version": lab_arena_checkpoint.TRAINING_SCHEMA_VERSION,
+        "control": lab_arena_checkpoint.TRAINING_CONTROL,
+        "kind": "web_fetch", "depends_on": [], "retry_token": "a" * 32,
+        "data": {"url": "https://example.com/", "final_url": "https://example.com/",
+                 "status": 200, "content_type": "text/plain", "body": "first",
+                 "retrieved_at": "2026-10-22T00:00:00+00:00"},
+    }
+    first = json.loads(server._handle_training_control(json.dumps(frame).encode()))
+    frame["data"]["body"] = "changed"
+    second = json.loads(server._handle_training_control(json.dumps(frame).encode()))
+    assert first == {"recorded": True, "observation_id": 0}
+    assert second == {"recorded": False}
+    assert len(state.worker_observations.agent_observations) == 1
+    assert not state.worker_observations.document()["complete"]
 
 
 def _exchange_frame(path, raw, *, extended):

@@ -245,7 +245,8 @@ class Recorder:
                     return
                 result = self.checkpoint.record_response_received(
                     call_identity=body.identity, status=body.status,
-                    body_sha256="sha256:" + body.digest.hexdigest(), body_bytes=body.size)
+                    body_sha256="sha256:" + body.digest.hexdigest(), body_bytes=body.size,
+                    _retry_ambiguous=True)
                 self._checkpoint_result("response_received", result)
             else:
                 self._count("provider_ack_ineligible")
@@ -280,7 +281,7 @@ class Recorder:
             content_type=body.content_type, body=text, retrieved_at=body.retrieved_at,
             capture={"source": _SOURCE, "complete": body.complete, "encoding": body.encoding,
                      "received_body_sha256": "sha256:" + body.digest.hexdigest(),
-                     "received_body_bytes": body.size})
+                     "received_body_bytes": body.size}, _retry_ambiguous=True)
         self._checkpoint_result("web_fetch", result)
 
     def _emit_binary(self, body):
@@ -295,7 +296,7 @@ class Recorder:
                 retrieved_at=body.retrieved_at,
                 capture={"source": _SOURCE, "complete": body.complete,
                          "received_body_sha256": "sha256:" + body.digest.hexdigest(),
-                         "received_body_bytes": body.size})
+                         "received_body_bytes": body.size}, _retry_ambiguous=True)
             self._checkpoint_result("web_fetch_binary", result)
 
     def _work(self):

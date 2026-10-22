@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from gateway.api import arena_proxy
+from gateway.middleware.body_size import BodySizeLimitMiddleware
 
 
 def test_gateway_mounts_the_public_arena_proxy() -> None:
@@ -90,6 +91,132 @@ def test_proxy_refuses_oversized_and_invalid_paths(monkeypatch):
     )
     assert oversized.status_code == 413
     assert client.get("/arena/v1//current").status_code == 404
+
+
+@pytest.fixture
+def real_httpx_sidecar(monkeypatch):
+    """Keep HTTPX URL validation and replace only its network transport."""
+    forwarded = []
+    real_client = httpx.AsyncClient
+
+    def handle(request):
+        forwarded.append(request)
+        if request.method == "HEAD":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"status": "ok"})
+
+    def client_factory(*args, **kwargs):
+        return real_client(*args, transport=httpx.MockTransport(handle), **kwargs)
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy.httpx, "AsyncClient", client_factory)
+    return forwarded
+
+
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+@pytest.mark.parametrize("encoded", ["%00", "%09", "%0D", "%1F", "%7F"],
+    ids=["nul", "tab", "cr", "unit_separator", "del"])
+def test_decoded_control_paths_return_404_before_httpx(prefix, encoded, real_httpx_sidecar):
+    response = _app().get(prefix + "/v1/current" + encoded)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "arena path invalid"}
+    assert real_httpx_sidecar == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+async def test_control_path_rejection_precedes_body_and_lease_preflight(prefix, real_httpx_sidecar):
+    app = FastAPI()
+    app.include_router(arena_proxy.router)
+    app.include_router(arena_proxy.testnet_router)
+    messages = []
+
+    async def unread():
+        pytest.fail("invalid path must be rejected before reading the body")
+
+    async def send(message):
+        messages.append(message)
+
+    await app({"type": "http", "http_version": "1.1", "method": "POST", "scheme": "http",
+        "path": prefix + "/v1/runs/r\x00/training-observations", "query_string": b"", "headers": [],
+        "server": ("testserver", 80), "client": ("127.0.0.1", 1234)}, unread, send)
+    assert next(message["status"] for message in messages if message["type"] == "http.response.start") == 404
+    assert real_httpx_sidecar == []
+
+
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+@pytest.mark.parametrize("query", ["", "?value=%00%09%0D%1F%7F"])
+def test_valid_paths_and_encoded_query_controls_still_forward(prefix, query, real_httpx_sidecar):
+    response = _app().get(prefix + "/v1/current" + query)
+    assert response.status_code == 200
+    assert len(real_httpx_sidecar) == 1
+    request = real_httpx_sidecar[0]
+    assert request.url.path == "/arena/v1/current"
+    assert request.url.port == (8793 if prefix == "/testnet/arena" else int(arena_proxy._MAIN_SIDECAR_PORT))
+    assert request.url.query == query.removeprefix("?").encode()
+
+
+async def _asgi_post(app, path, chunks, *, headers=()):
+    incoming = iter(chunks)
+    outgoing = []
+
+    async def receive():
+        return next(incoming)
+
+    async def send(message):
+        outgoing.append(message)
+
+    await app({"type": "http", "http_version": "1.1", "method": "POST", "scheme": "http",
+        "path": path, "query_string": b"", "headers": list(headers),
+        "server": ("testserver", 80), "client": ("127.0.0.1", 1234)}, receive, send)
+    return outgoing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+@pytest.mark.parametrize("partial", [False, True], ids=["before_body", "midbody"])
+@pytest.mark.parametrize("observation", [False, True])
+async def test_disconnected_body_returns_400_without_post_forward(
+    prefix, partial, observation, real_httpx_sidecar,
+):
+    chunks = ([{"type": "http.request", "body": b"partial", "more_body": True}] if partial else [])
+    chunks.append({"type": "http.disconnect"})
+    path = "/v1/runs/r1/training-observations" if observation else "/v1/submissions/presign"
+    outgoing = await _asgi_post(_app().app, prefix + path, chunks,
+        headers=[(b"x-lab-arena-lease", b"a" * 64)] if observation else [])
+    assert [message["status"] for message in outgoing if message["type"] == "http.response.start"] == [400]
+    assert b"".join(message.get("body", b"") for message in outgoing) == b'{"detail":"request body incomplete"}'
+    assert [request.method for request in real_httpx_sidecar] == (["HEAD"] if observation else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+async def test_outer_stream_size_limit_keeps_single_413_without_exception(prefix, real_httpx_sidecar):
+    app = BodySizeLimitMiddleware(_app().app, max_body_bytes=8)
+    outgoing = await _asgi_post(app, prefix + "/v1/submissions/presign", [
+        {"type": "http.request", "body": b"1234", "more_body": True},
+        {"type": "http.request", "body": b"56789", "more_body": False},
+    ])
+    assert [message["status"] for message in outgoing if message["type"] == "http.response.start"] == [413]
+    assert b"".join(message.get("body", b"") for message in outgoing) == b'{"detail":"Request body too large"}'
+    assert real_httpx_sidecar == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+async def test_unexpected_body_error_still_surfaces(prefix, real_httpx_sidecar):
+    async def receive():
+        raise RuntimeError("unexpected receive failure")
+
+    async def send(_message):
+        pass
+
+    with pytest.raises(RuntimeError, match="unexpected receive failure"):
+        await _app().app({"type": "http", "http_version": "1.1", "method": "POST", "scheme": "http",
+            "path": prefix + "/v1/submissions/presign", "query_string": b"", "headers": [],
+            "server": ("testserver", 80), "client": ("127.0.0.1", 1234)}, receive, send)
+    assert real_httpx_sidecar == []
 
 
 def test_lease_image_access_preserves_authorization_and_no_store(monkeypatch):

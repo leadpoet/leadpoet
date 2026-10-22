@@ -1054,7 +1054,16 @@ class ArenaService:
             int(getattr(config, "netuid", 71)),
         )
 
+    @staticmethod
+    def _require_identifier(value: Any, kind: str) -> None:
+        if (
+            not isinstance(value, str) or not value or len(value) > 200
+            or any(char in ",.()\"'" or ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise ServiceError("%s_id_invalid" % kind, 400)
+
     def _require_round_ownership(self, round_id: str) -> None:
+        self._require_identifier(round_id, "round")
         pinned_round_id = self._pinned_round_id()
         if pinned_round_id is not None and round_id != pinned_round_id:
             raise ServiceError("round_scope_mismatch", 409)
@@ -2001,6 +2010,7 @@ class ArenaService:
             raise ServiceError("credit_retry_unavailable", 503) from exc
 
     def submission_status(self, submission_id: str) -> Dict[str, Any]:
+        self._require_identifier(submission_id, "submission")
         row = self._store.get_submission(submission_id)
         if row is None:
             raise ServiceError("submission_missing", 404)
@@ -5650,6 +5660,7 @@ class ArenaService:
         return self._finalize_claim_recovery(lease, original)
 
     def _run_context(self, run_id: str, lease_token: str) -> Tuple[Dict[str, Any], broker_module.RunContext]:
+        self._require_identifier(run_id, "run")
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
@@ -5686,6 +5697,7 @@ class ArenaService:
     ) -> Dict[str, Any]:
         """Resolve one signal under the current score lease and frozen input."""
 
+        self._require_identifier(run_id, "run")
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
@@ -5858,6 +5870,7 @@ class ArenaService:
             raise ServiceError("trajectory_invalid:%s" % str(exc)[:80], 400) from None
         if any(not item["kind"].startswith("runtime.") for item in events):
             raise ServiceError("trajectory_invalid:runtime events required", 400)
+        self._require_identifier(run_id, "run")
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
@@ -5923,6 +5936,7 @@ class ArenaService:
         allow_observation_finalization: bool = False,
     ) -> Dict[str, Any]:
         """Authorize capture; only final observations have a bounded grace."""
+        self._require_identifier(run_id, "run")
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
@@ -6021,6 +6035,7 @@ class ArenaService:
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
         """Return source bytes only to the runner that holds the active lease."""
 
+        self._require_identifier(run_id, "run")
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
@@ -6080,6 +6095,7 @@ class ArenaService:
     ) -> Mapping[str, Any]:
         """Return ECR blob capabilities only to the active lease's validator."""
 
+        self._require_identifier(run_id, "run")
         run = self._store.get_run(run_id)
         if run is None:
             raise ServiceError("run_missing", 404)
@@ -7336,6 +7352,7 @@ class ArenaService:
         return public_dashboard.submissions_snapshot(self, round_id)
 
     def public_submission_code(self, submission_id: str) -> Dict[str, Any]:
+        self._require_identifier(submission_id, "submission")
         submission = self._store.get_submission(submission_id)
         if submission is None:
             raise ServiceError("submission_missing", 404)

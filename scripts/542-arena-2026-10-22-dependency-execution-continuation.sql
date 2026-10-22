@@ -29,7 +29,7 @@ BEGIN
  END IF;
  IF c.operator_paused OR c.guard_commitment<>'' OR c.owner_commitment<>''
   OR c.restart_phase<>'' OR c.guard_expires_at IS NOT NULL OR c.captured_leases<>'[]'::JSONB
-  OR c.guard_generation<>627 THEN RAISE EXCEPTION 'Oct22 control preimage differs'; END IF;
+  OR c.guard_generation<>628 THEN RAISE EXCEPTION 'Oct22 control preimage differs'; END IF;
  IF r.status<>'scored'OR r.status_generation<>11 OR r.stage_generation<>8 OR r.scoring_generation_floor<>0
   OR r.benchmark_ref<>'arena/arena-2026-10-22/benchmark.json'
   OR r.evaluation_date::TEXT<>'2026-10-22'OR r.icp_set_date::TEXT<>'2026-10-21'
@@ -44,7 +44,11 @@ BEGIN
  -- Fresh external operational preflight verifies20 repaired slots, so ten jobs
  -- can use one execution wave. This is capacity evidence, not an assurance that
  -- model calls succeed or that an unpatched validator may claim replacement work.
- IF EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE status IN('pending','leased','submitted'))
+ IF EXISTS(SELECT 1 FROM public.lab_arena_runs a WHERE
+   (a.status IN('leased','submitted')OR(a.status='pending'AND(a.round_id=rid OR EXISTS(
+    SELECT 1 FROM public.lab_arena_rounds pending_round WHERE pending_round.round_id=a.round_id
+     AND pending_round.configuration_doc->>'mode'IS DISTINCT FROM'shadow'
+     AND pending_round.status NOT IN('published','cancelled'))))))
   OR EXISTS(SELECT 1 FROM public.lab_arena_rounds other WHERE other.round_id<>rid
    AND other.configuration_doc->>'mode'='live'AND other.status NOT IN('published','cancelled')
    AND (other.status<>'open'OR (other.configuration_doc#>>'{schedule,submission_cutoff}')::TIMESTAMPTZ<=clock_timestamp()))

@@ -53,7 +53,11 @@ BEGIN
    FROM public.lab_arena_runs a WHERE a.round_id=rid AND a.submission_id=sid AND a.attempt IN(1,2))
    IS DISTINCT FROM h.recovery_doc->>'old_target_rows_sha256'
   THEN RAISE EXCEPTION 'Oct22 historical failures changed';END IF;
- IF EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE status IN('pending','leased','submitted'))
+ IF EXISTS(SELECT 1 FROM public.lab_arena_runs a WHERE
+   (a.status IN('leased','submitted')OR(a.status='pending'AND(a.round_id=rid OR EXISTS(
+    SELECT 1 FROM public.lab_arena_rounds pending_round WHERE pending_round.round_id=a.round_id
+     AND pending_round.configuration_doc->>'mode'IS DISTINCT FROM'shadow'
+     AND pending_round.status NOT IN('published','cancelled'))))))
   OR EXISTS(SELECT 1 FROM public.lab_arena_rounds other WHERE other.round_id<>rid
    AND other.configuration_doc->>'mode'='live'AND other.status NOT IN('published','cancelled')
    AND(other.status<>'open'OR(other.configuration_doc#>>'{schedule,submission_cutoff}')::TIMESTAMPTZ<=clock_timestamp()))

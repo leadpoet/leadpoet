@@ -48,7 +48,11 @@ BEGIN
  IF jsonb_typeof(plan)IS DISTINCT FROM'object'OR jsonb_typeof(items)IS DISTINCT FROM'array'OR jsonb_typeof(zeros)IS DISTINCT FROM'array'
   OR(plan-ARRAY['work_items','zero_rows','incomplete_rows'])IS DISTINCT FROM
      ((h.old_round_doc->'stage2_scoring_plan_doc')-ARRAY['work_items','zero_rows','incomplete_rows'])
-  OR EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE status IN('pending','leased','submitted'))
+  OR EXISTS(SELECT 1 FROM public.lab_arena_runs a WHERE
+   (a.status IN('leased','submitted')OR(a.status='pending'AND(a.round_id=rid OR EXISTS(
+    SELECT 1 FROM public.lab_arena_rounds pending_round WHERE pending_round.round_id=a.round_id
+     AND pending_round.configuration_doc->>'mode'IS DISTINCT FROM'shadow'
+     AND pending_round.status NOT IN('published','cancelled'))))))
   THEN RAISE EXCEPTION 'Oct22 phase2 shape or drain differs';END IF;
  IF(SELECT count(*)FROM public.lab_arena_runs WHERE round_id=rid AND submission_id=sid AND kind='execute'AND attempt=3)<>10
   OR EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE round_id=rid AND submission_id=sid AND kind='execute'AND attempt=3

@@ -251,7 +251,19 @@ def _symbol_index(tree: ast.Module) -> Dict[str, ast.AST]:
 
 def _symbol_hash(node: ast.AST) -> str:
     normalized = _StripDocstrings().visit(ast.fix_missing_locations(node))
-    encoded = ast.dump(normalized, annotate_fields=True, include_attributes=False).encode("utf-8")
+    # Python 3.12 adds an empty type_params field to ordinary definitions.
+    # Omit only that AST field, never matching text inside a protected literal.
+    for descendant in ast.walk(normalized):
+        if (
+            isinstance(descendant, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and getattr(descendant, "type_params", None) == []
+        ):
+            descendant._fields = tuple(
+                field for field in descendant._fields if field != "type_params"
+            )
+    encoded = ast.dump(
+        normalized, annotate_fields=True, include_attributes=False
+    ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 

@@ -30,8 +30,8 @@ SCRUBBING = "leadpoet_observability/sentry_scrubbing.py"
 THIS_GUARD = "tests/test_sentry_boundary_guard.py"
 
 ENCLAVE_REQUIREMENT_FILES = (
-    "gateway/tee/requirements-enclave-py39.in",
-    "gateway/tee/requirements-enclave-py39.lock",
+    "gateway/tee/requirements-enclave-py312.in",
+    "gateway/tee/requirements-enclave-py312.lock",
 )
 
 ENCLAVE_SURFACE_PREFIXES = ("gateway/tee/",)

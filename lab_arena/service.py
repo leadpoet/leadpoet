@@ -5076,6 +5076,12 @@ class ArenaService:
         reasons = {}
         confirmed_model_positions = {(str(run.get("submission_id")), int(run["icp_position"]))
             for run in reads.runs if run.get("terminal_cause") in contracts.MODEL_CAUSED_TERMINAL_CAUSES}
+        def remember(submission_id, reason):
+            # A missing score is the fallback; concrete execution/judge evidence
+            # takes precedence regardless of ICP iteration order.
+            if submission_id not in reasons or reasons[submission_id] == "execution_score_missing":
+                reasons[submission_id] = reason
+
         for participant in row.get("participants") or []:
             submission_id = str(participant["submission_id"])
             if participant.get("is_king"):
@@ -5084,19 +5090,31 @@ class ArenaService:
             for position in range(count):
                 run = selected.get(position)
                 if run is None:
-                    reasons.setdefault(submission_id, "execution_missing")
+                    remember(submission_id, "execution_missing")
                     continue
                 if run.get("status") != "accepted" and scores.get(str(run["run_id"]), {}).get("status") == "accepted":
                     raise ServiceError("accepted_judgment_source_invalid", 500)
                 prior_model_failure = (submission_id, position) in confirmed_model_positions
-                if str(run["run_id"]) in blocked and (run.get("status") == "accepted" or not prior_model_failure):
+                if str(run["run_id"]) in blocked and (run.get("status") == "accepted" or not prior_model_failure or run.get("per_icp_score") is None):
                     reasons[submission_id] = blocked[str(run["run_id"])]
                     continue
-                if (run.get("status") == "failed" and not prior_model_failure
+                if (run.get("status") == "failed" and (not prior_model_failure or run.get("per_icp_score") is None)
                     and run.get("terminal_cause") in (contracts.INFRASTRUCTURE_TERMINAL_CAUSES | {"stage_closed"})):
-                    reasons.setdefault(submission_id, str(run["terminal_cause"]))
+                    remember(submission_id, str(run["terminal_cause"]))
                     continue
                 if run.get("per_icp_score") is not None:
+                    continue
+                if (run.get("status") == "failed"
+                    and run.get("terminal_cause") in contracts.MODEL_CAUSED_TERMINAL_CAUSES):
+                    try:
+                        result = contracts.validate_run_result(run.get("result_doc"))
+                    except ArenaContractError as exc:
+                        raise ServiceError("execution_terminal_evidence_invalid", 500) from exc
+                    if (result["terminal_status"] != run["terminal_cause"]
+                        or run.get("output_ref") is not None
+                        or run.get("qualification_doc") is not None):
+                        raise ServiceError("execution_terminal_evidence_invalid", 500)
+                    remember(submission_id, "execution_score_missing")
                     continue
                 if run.get("status") == "accepted":
                     judge = scores.get(str(run["run_id"]))
@@ -5105,9 +5123,9 @@ class ArenaService:
                         # pass score recovery; they are never omission evidence.
                         raise ServiceError("accepted_judgment_score_missing", 500)
                     cause = str((judge or {}).get("terminal_cause") or ("judge_pending" if judge else "judge_missing"))
-                    reasons.setdefault(submission_id, cause)
+                    remember(submission_id, cause)
                 else:
-                    reasons.setdefault(submission_id, str(run.get("terminal_cause") or "execution_incomplete"))
+                    remember(submission_id, str(run.get("terminal_cause") or "execution_incomplete"))
         return reasons
 
     def _evaluation_draining(self, row: Mapping[str, Any]) -> bool:

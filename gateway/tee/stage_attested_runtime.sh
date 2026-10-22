@@ -17,7 +17,7 @@ BUILD_CONTEXT_TMP="$GATEWAY_ROOT/.enclave_source.tmp"
 WHEELHOUSE_ROOT="$GATEWAY_ROOT/_enclave_wheelhouse"
 WHEELHOUSE_TMP="$GATEWAY_ROOT/.enclave_wheelhouse.tmp"
 OFFLINE_ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
-OFFLINE_WHEELHOUSE_ROOT="$OFFLINE_ARTIFACT_ROOT/enclave-wheelhouse-py39"
+OFFLINE_WHEELHOUSE_ROOT="$OFFLINE_ARTIFACT_ROOT/enclave-wheelhouse-py312"
 PACKAGES=(
   "leadpoet_canonical"
 )
@@ -57,8 +57,8 @@ else
 fi
 
 SOURCE_GATEWAY_ROOT="$SOURCE_ROOT/gateway"
-ENCLAVE_REQUIREMENTS_INPUT="$SOURCE_GATEWAY_ROOT/tee/requirements-enclave-py39.in"
-ENCLAVE_REQUIREMENTS_LOCK="$SOURCE_GATEWAY_ROOT/tee/requirements-enclave-py39.lock"
+ENCLAVE_REQUIREMENTS_INPUT="$SOURCE_GATEWAY_ROOT/tee/requirements-enclave-py312.in"
+ENCLAVE_REQUIREMENTS_LOCK="$SOURCE_GATEWAY_ROOT/tee/requirements-enclave-py312.lock"
 PROTECTED_WORKFLOW_MANIFEST="$SOURCE_GATEWAY_ROOT/tee/protected_workflows.json"
 TOPOLOGY_MANIFEST="$SOURCE_GATEWAY_ROOT/tee/topology.json"
 

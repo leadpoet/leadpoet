@@ -122,7 +122,7 @@
       "symbol": "iter_gateway_code_hash_payloads"
     },
     {
-      "ast_sha256": "sha256:47c925d97c861ca60621d76ad78cb47571e9e57fbb487f349ad07aba9dcbca26",
+      "ast_sha256": "sha256:1c1481c7f052e5eee10b285b4aeb83cddb8825bba587549202f77bc2c0582eec",
       "path": "gateway/tee/code_hash.py",
       "symbol": "materialize_gateway_code_hash_runtime"
     },
@@ -877,7 +877,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:67cbbd329827299912be876960f83dc88146b2d7c3b3b8943d2107eb131e5a71",
+  "manifest_hash": "sha256:f2b6613565e39799c4bdda86a26026e45a5143a662e5c5aa33dd384b8c5719be",
   "protected_source_commit": "15db470b77c8fa795218298375c9d297f9b621dd",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

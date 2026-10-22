@@ -1,4 +1,4 @@
-"""Verify the offline CPython 3.9 enclave wheelhouse and installed runtime."""
+"""Verify the offline CPython 3.12 enclave wheelhouse and installed runtime."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Dict, Iterable, Tuple
 import zipfile
 
 
-EXPECTED_PYTHON = (3, 9, 24)
+EXPECTED_PYTHON = (3, 12, 15)
 CRITICAL_IMPORTS = ("cbor2", "cryptography")
 _PIN_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)")
 _HASH_RE = re.compile(r"--hash=sha256:([0-9a-f]{64})")
@@ -103,9 +103,10 @@ def _tag_is_compatible(tag: str) -> bool:
         return python_tag in {"py2.py3", "py3"} and abi_tag == "none"
     if "x86_64" not in platform_tag or "manylinux" not in platform_tag:
         return False
-    if python_tag == "cp39" and abi_tag in {"cp39", "abi3"}:
+    if python_tag == "cp312" and abi_tag in {"cp312", "abi3"}:
         return True
-    return python_tag.startswith("cp3") and abi_tag == "abi3"
+    match = re.fullmatch(r"cp3(\d+)", python_tag)
+    return bool(match and int(match.group(1)) <= EXPECTED_PYTHON[1] and abi_tag == "abi3")
 
 
 def verify_wheelhouse(*, input_path: Path, lock_path: Path, wheelhouse: Path) -> Dict[str, str]:
@@ -128,7 +129,7 @@ def verify_wheelhouse(*, input_path: Path, lock_path: Path, wheelhouse: Path) ->
         if digest != expected[1]:
             raise EnclaveWheelhouseError("scoring wheel hash differs from lock")
         if not any(_tag_is_compatible(tag) for tag in tags):
-            raise EnclaveWheelhouseError("scoring wheel has no CPython 3.9 x86_64-compatible tag")
+            raise EnclaveWheelhouseError("scoring wheel has no CPython 3.12 x86_64-compatible tag")
         observed[name] = package_version
     if set(observed) != set(locked):
         raise EnclaveWheelhouseError("enclave wheelhouse package set differs from lock")

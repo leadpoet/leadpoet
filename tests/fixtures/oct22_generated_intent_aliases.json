@@ -1,0 +1,321 @@
+{
+  "source": "Oct 22 live benchmark, retrieved 20261022T050209Z; exact intent fields only",
+  "icps": [
+    {
+      "icp_id": "icp_20261021_001",
+      "industry": "Hardware",
+      "sub_industry": "Connected devices and edge hardware",
+      "intent_signal": "Launched a new product or major hardware capability in the last 12 months, per a press release, product page, or changelog.",
+      "intent_signals": [
+        "Launched a new product or major hardware capability in the last 12 months, per a press release, product page, or changelog.",
+        "Launched a new product or major hardware capability in the last 12 months, per a press release, product page, or changelog",
+        "Actively hiring for hardware, firmware, or supply-chain roles, per current job postings or careers page"
+      ],
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "PRODUCT_LAUNCH",
+          "intent_max_age_days": 365,
+          "intent_signal": "Launched a new product or major hardware capability in the last 12 months, per a press release, product page, or changelog"
+        },
+        {
+          "intent_category": "HIRING",
+          "intent_max_age_days": 90,
+          "intent_signal": "Actively hiring for hardware, firmware, or supply-chain roles, per current job postings or careers page"
+        }
+      ],
+      "employee_count": [
+        "2-10",
+        "11-50",
+        "51-200",
+        "201-500",
+        "501-1,000",
+        "1,001-5,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_002",
+      "industry": "Manufacturing",
+      "sub_industry": "Industrial equipment and components",
+      "intent_signal": "Opened a new production facility or manufacturing site in the last 12 months, per a press release or company announcement.",
+      "intent_signals": [
+        "Opened a new production facility or manufacturing site in the last 12 months, per a press release or company announcement.",
+        "Opened a new production facility or manufacturing site in the last 12 months, per a press release or company announcement",
+        "Expanded into a new market or region in the last year, per a press release or company announcement"
+      ],
+      "intent_category": "FACILITY_OPENING",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "FACILITY_OPENING",
+          "intent_max_age_days": 365,
+          "intent_signal": "Opened a new production facility or manufacturing site in the last 12 months, per a press release or company announcement"
+        },
+        {
+          "intent_category": "MARKET_EXPANSION",
+          "intent_max_age_days": 365,
+          "intent_signal": "Expanded into a new market or region in the last year, per a press release or company announcement"
+        }
+      ],
+      "employee_count": [
+        "11-50",
+        "51-200",
+        "201-500",
+        "501-1,000",
+        "1,001-5,000",
+        "5,001-10,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_003",
+      "industry": "Real Estate",
+      "sub_industry": "Commercial real estate investment and development",
+      "intent_signal": "Completed an acquisition or acquired a property portfolio in the last 12 months, per a press release or transaction announcement.",
+      "intent_signals": [
+        "Completed an acquisition or acquired a property portfolio in the last 12 months, per a press release or transaction announcement.",
+        "Completed an acquisition or acquired a property portfolio in the last 12 months, per a press release or transaction announcement",
+        "Expanded into a new city or regional market in the last year, per a company announcement"
+      ],
+      "intent_category": "ACQUISITION",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "ACQUISITION",
+          "intent_max_age_days": 365,
+          "intent_signal": "Completed an acquisition or acquired a property portfolio in the last 12 months, per a press release or transaction announcement"
+        },
+        {
+          "intent_category": "MARKET_EXPANSION",
+          "intent_max_age_days": 365,
+          "intent_signal": "Expanded into a new city or regional market in the last year, per a company announcement"
+        }
+      ],
+      "employee_count": [
+        "11-50",
+        "51-200",
+        "201-500",
+        "501-1,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_004",
+      "industry": "Professional Services",
+      "sub_industry": "Management consulting",
+      "intent_signal": "Announced a leadership change in the last 12 months, per a press release or company announcement.",
+      "intent_signals": [
+        "Announced a leadership change in the last 12 months, per a press release or company announcement.",
+        "Announced a leadership change in the last 12 months, per a press release or company announcement",
+        "Actively hiring for consulting delivery, operations, or client-services roles, per current job postings or careers page"
+      ],
+      "intent_category": "LEADERSHIP_CHANGE",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "LEADERSHIP_CHANGE",
+          "intent_max_age_days": 365,
+          "intent_signal": "Announced a leadership change in the last 12 months, per a press release or company announcement"
+        },
+        {
+          "intent_category": "HIRING",
+          "intent_max_age_days": 90,
+          "intent_signal": "Actively hiring for consulting delivery, operations, or client-services roles, per current job postings or careers page"
+        }
+      ],
+      "employee_count": [
+        "51-200",
+        "201-500",
+        "501-1,000",
+        "1,001-5,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_005",
+      "industry": "Transportation",
+      "sub_industry": "Freight and logistics",
+      "intent_signal": "Announced a strategic partnership or route-network partnership in the last 12 months, per a press release or company announcement.",
+      "intent_signals": [
+        "Announced a strategic partnership or route-network partnership in the last 12 months, per a press release or company announcement.",
+        "Announced a strategic partnership or route-network partnership in the last 12 months, per a press release or company announcement",
+        "Opened a new logistics hub, terminal, or service facility in the last 12 months, per a press release or company announcement"
+      ],
+      "intent_category": "PARTNERSHIP",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "PARTNERSHIP",
+          "intent_max_age_days": 365,
+          "intent_signal": "Announced a strategic partnership or route-network partnership in the last 12 months, per a press release or company announcement"
+        },
+        {
+          "intent_category": "FACILITY_OPENING",
+          "intent_max_age_days": 365,
+          "intent_signal": "Opened a new logistics hub, terminal, or service facility in the last 12 months, per a press release or company announcement"
+        }
+      ],
+      "employee_count": [
+        "201-500",
+        "501-1,000",
+        "1,001-5,000",
+        "5,001-10,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_006",
+      "industry": "Privacy and Security",
+      "sub_industry": "Identity and access security",
+      "intent_signal": "Launched a new security product or major platform capability in the last 12 months, per a press release, product page, or changelog.",
+      "intent_signals": [
+        "Launched a new security product or major platform capability in the last 12 months, per a press release, product page, or changelog.",
+        "Launched a new security product or major platform capability in the last 12 months, per a press release, product page, or changelog",
+        "Received a regulatory certification or compliance validation in the last 12 months, per a press release or trust page"
+      ],
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "PRODUCT_LAUNCH",
+          "intent_max_age_days": 365,
+          "intent_signal": "Launched a new security product or major platform capability in the last 12 months, per a press release, product page, or changelog"
+        },
+        {
+          "intent_category": "REGULATORY_CLEARANCE",
+          "intent_max_age_days": 365,
+          "intent_signal": "Received a regulatory certification or compliance validation in the last 12 months, per a press release or trust page"
+        }
+      ],
+      "employee_count": [
+        "11-50",
+        "51-200",
+        "201-500",
+        "501-1,000",
+        "1,001-5,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_007",
+      "industry": "Data and Analytics",
+      "sub_industry": "Business intelligence and analytics software",
+      "intent_signal": "Announced a funding round in the last 12 months, per a press release, Crunchbase, or news coverage.",
+      "intent_signals": [
+        "Announced a funding round in the last 12 months, per a press release, Crunchbase, or news coverage.",
+        "Announced a funding round in the last 12 months, per a press release, Crunchbase, or news coverage",
+        "Launched a new analytics capability or data workflow in the last 12 months, per a press release, product page, or changelog"
+      ],
+      "intent_category": "FUNDING",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "FUNDING",
+          "intent_max_age_days": 365,
+          "intent_signal": "Announced a funding round in the last 12 months, per a press release, Crunchbase, or news coverage"
+        },
+        {
+          "intent_category": "PRODUCT_LAUNCH",
+          "intent_max_age_days": 365,
+          "intent_signal": "Launched a new analytics capability or data workflow in the last 12 months, per a press release, product page, or changelog"
+        }
+      ],
+      "employee_count": [
+        "2-10",
+        "11-50",
+        "51-200",
+        "201-500",
+        "501-1,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_008",
+      "industry": "Biotechnology",
+      "sub_industry": "Therapeutics",
+      "intent_signal": "Received a regulatory clearance, approval, or clinical-stage authorization in the last 12 months, per a press release or regulator update.",
+      "intent_signals": [
+        "Received a regulatory clearance, approval, or clinical-stage authorization in the last 12 months, per a press release or regulator update.",
+        "Received a regulatory clearance, approval, or clinical-stage authorization in the last 12 months, per a press release or regulator update",
+        "Announced a strategic research or commercialization partnership in the last 12 months, per a press release or company announcement"
+      ],
+      "intent_category": "REGULATORY_CLEARANCE",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "REGULATORY_CLEARANCE",
+          "intent_max_age_days": 365,
+          "intent_signal": "Received a regulatory clearance, approval, or clinical-stage authorization in the last 12 months, per a press release or regulator update"
+        },
+        {
+          "intent_category": "PARTNERSHIP",
+          "intent_max_age_days": 365,
+          "intent_signal": "Announced a strategic research or commercialization partnership in the last 12 months, per a press release or company announcement"
+        }
+      ],
+      "employee_count": [
+        "51-200",
+        "201-500",
+        "501-1,000",
+        "1,001-5,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_009",
+      "industry": "Education",
+      "sub_industry": "K-12 and higher-ed software",
+      "intent_signal": "Expanded into a new region, segment, or institutional market in the last 12 months, per a press release or company announcement.",
+      "intent_signals": [
+        "Expanded into a new region, segment, or institutional market in the last 12 months, per a press release or company announcement.",
+        "Expanded into a new region, segment, or institutional market in the last 12 months, per a press release or company announcement",
+        "Actively hiring for product, implementation, or customer-operations roles, per current job postings or careers page"
+      ],
+      "intent_category": "MARKET_EXPANSION",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "MARKET_EXPANSION",
+          "intent_max_age_days": 365,
+          "intent_signal": "Expanded into a new region, segment, or institutional market in the last 12 months, per a press release or company announcement"
+        },
+        {
+          "intent_category": "HIRING",
+          "intent_max_age_days": 90,
+          "intent_signal": "Actively hiring for product, implementation, or customer-operations roles, per current job postings or careers page"
+        }
+      ],
+      "employee_count": [
+        "51-200",
+        "201-500",
+        "501-1,000",
+        "1,001-5,000"
+      ]
+    },
+    {
+      "icp_id": "icp_20261021_010",
+      "industry": "Sales and Marketing",
+      "sub_industry": "Revenue operations and marketing automation software",
+      "intent_signal": "Launched a new product or major platform capability in the last 12 months, per a press release, product page, or changelog.",
+      "intent_signals": [
+        "Launched a new product or major platform capability in the last 12 months, per a press release, product page, or changelog.",
+        "Launched a new product or major platform capability in the last 12 months, per a press release, product page, or changelog",
+        "Announced a strategic partnership in the last 12 months, per a press release or company announcement"
+      ],
+      "intent_category": "PRODUCT_LAUNCH",
+      "intent_max_age_days": 365,
+      "bonus_intents": [
+        {
+          "intent_category": "PRODUCT_LAUNCH",
+          "intent_max_age_days": 365,
+          "intent_signal": "Launched a new product or major platform capability in the last 12 months, per a press release, product page, or changelog"
+        },
+        {
+          "intent_category": "PARTNERSHIP",
+          "intent_max_age_days": 365,
+          "intent_signal": "Announced a strategic partnership in the last 12 months, per a press release or company announcement"
+        }
+      ],
+      "employee_count": [
+        "51-200",
+        "201-500",
+        "501-1,000",
+        "1,001-5,000"
+      ]
+    }
+  ]
+}

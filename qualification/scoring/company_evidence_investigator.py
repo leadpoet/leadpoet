@@ -3988,6 +3988,7 @@ async def investigate_company_evidence(
                 if (
                     result.get("error") in {
                         "http_502", "http_503", "timeout", "provider_diagnostic_body",
+                        "provider_request_refused",
                     }
                     and not result.get("ok")
                     and os.environ.get("EXA_API_KEY")

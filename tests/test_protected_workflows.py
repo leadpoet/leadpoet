@@ -40,6 +40,9 @@ def digest(source):
 original = digest('def protected(value): return value')
 changed = digest('def protected(value): return value + 1')
 assert original != changed
+literal_with_field_text = digest("def protected(): return 'a, type_params=[]b'")
+literal_without_field_text = digest("def protected(): return 'ab'")
+assert literal_with_field_text != literal_without_field_text
 if sys.version_info >= (3, 12):
     generic_t = digest('def protected[T](value): return value')
     generic_u = digest('def protected[U](value): return value')

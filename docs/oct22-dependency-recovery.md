@@ -20,6 +20,9 @@ or an already-applied response is not proof that a transition occurred.
 
 1. Confirm all live workers contain PR 698, the restart control is clear at the
    expected generation, no unrelated work is active, and every preimage matches.
+   Old pending rows in terminal rounds or shadow-only test rounds are preserved;
+   they are outside live dispatch. Any leased/submitted work still blocks the
+   repair, as does pending work in another nonterminal live or unknown-mode round.
    Apply 542 before its latest-start limit. It appends ten execution attempts and
    preserves all 665 existing runs. It extends only the execution close, leaving
    time for judging before the original final deadline.

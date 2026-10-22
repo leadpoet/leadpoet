@@ -44,7 +44,11 @@ BEGIN
  -- Fresh external operational preflight verifies20 repaired slots, so ten jobs
  -- can use one execution wave. This is capacity evidence, not an assurance that
  -- model calls succeed or that an unpatched validator may claim replacement work.
- IF EXISTS(SELECT 1 FROM public.lab_arena_runs WHERE status IN('pending','leased','submitted'))
+ IF EXISTS(SELECT 1 FROM public.lab_arena_runs a WHERE
+   (a.status IN('leased','submitted')OR(a.status='pending'AND(a.round_id=rid OR EXISTS(
+    SELECT 1 FROM public.lab_arena_rounds pending_round WHERE pending_round.round_id=a.round_id
+     AND pending_round.configuration_doc->>'mode'IS DISTINCT FROM'shadow'
+     AND pending_round.status NOT IN('published','cancelled'))))))
   OR EXISTS(SELECT 1 FROM public.lab_arena_rounds other WHERE other.round_id<>rid
    AND other.configuration_doc->>'mode'='live'AND other.status NOT IN('published','cancelled')
    AND (other.status<>'open'OR (other.configuration_doc#>>'{schedule,submission_cutoff}')::TIMESTAMPTZ<=clock_timestamp()))

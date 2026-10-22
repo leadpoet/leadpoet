@@ -35,7 +35,11 @@ BEGIN
   OR r.stage_generation<>(h.new_round_doc->>'stage_generation')::BIGINT
   OR jobs<>10 OR pending_jobs<>0 OR live_jobs<1 OR invalid_jobs<>0 THEN
   RAISE NOTICE 'OCT22_GATE_MISSED: no hold was acquired'; RETURN; END IF;
- IF EXISTS(SELECT 1 FROM public.lab_arena_runs a WHERE a.status IN('pending','leased','submitted')
+ IF EXISTS(SELECT 1 FROM public.lab_arena_runs a WHERE
+   (a.status IN('leased','submitted')OR(a.status='pending'AND(a.round_id=rid OR EXISTS(
+    SELECT 1 FROM public.lab_arena_rounds pending_round WHERE pending_round.round_id=a.round_id
+     AND pending_round.configuration_doc->>'mode'IS DISTINCT FROM'shadow'
+     AND pending_round.status NOT IN('published','cancelled')))))
    AND NOT(a.round_id=rid AND a.submission_id=sid AND a.kind='execute'AND a.attempt=3))
   OR EXISTS(SELECT 1 FROM public.lab_arena_rounds other WHERE other.round_id<>rid
    AND other.configuration_doc->>'mode'='live'AND other.status NOT IN('published','cancelled')

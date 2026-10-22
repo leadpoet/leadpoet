@@ -368,6 +368,9 @@ ARENA_NO_DENIAL = "-"
 # check alone would admit a caller-controlled identifier such as "private_key".
 ARENA_DENIAL_CODES = frozenset(
     {
+        "accepted_judgment_binding_invalid",
+        "accepted_judgment_score_missing",
+        "accepted_judgment_source_invalid",
         "accepted_weight_epoch_not_current",
         "accepted_weight_epoch_scope_unavailable",
         "accepted_weight_state_conflict",
@@ -402,13 +405,17 @@ ARENA_DENIAL_CODES = frozenset(
         "champion_funding_freeze_failed",
         "champion_funding_schema_unavailable",
         "champion_funding_state_invalid",
+        "claim_recovery_invalid",
+        "claim_recovery_unavailable",
         "closed_provider_cost_candidate_invalid",
         "code_review_pending",
         "code_review_required",
         "code_review_schema_unavailable",
         "code_review_unavailable",
+        "company_judgment_activation_invalid",
         "company_judgment_cache_invalid",
         "company_judgment_output_invalid",
+        "company_judgment_schema_unavailable",
         "company_quality_activation_invalid",
         "company_quality_requires_integrity",
         "company_quality_schema_invalid",
@@ -432,6 +439,7 @@ ARENA_DENIAL_CODES = frozenset(
         "deepline_catalog_schema_unavailable",
         "dynamic_benchmark_schema_unavailable",
         "execution_sequence_activation_invalid",
+        "execution_terminal_evidence_invalid",
         "frame_invalid",
         "function_probe_invalid",
         "function_unavailable",
@@ -515,12 +523,22 @@ ARENA_DENIAL_CODES = frozenset(
         "scorer_image_access_unsupported",
         "scorer_image_invalid",
         "scores_not_recorded",
+        "scoring_generation_floor_invalid",
         "scoring_plan_invalid",
         "scoring_plan_missing",
         "scoring_plan_run_mismatch",
         "signature_invalid",
         "similarity_reference_limit",
         "similarity_reference_unavailable",
+        "signal_judgment_activation_invalid",
+        "signal_judgment_cache_invalid",
+        "signal_judgment_claim_invalid",
+        "signal_judgment_completion_invalid",
+        "signal_judgment_input_invalid",
+        "signal_judgment_lease_invalid",
+        "signal_judgment_policy_unavailable",
+        "signal_judgment_request_invalid",
+        "signal_judgment_result_invalid",
         "source_upload_not_configured",
         "source_upload_unavailable",
         "stage_invalid",
@@ -551,6 +569,9 @@ ARENA_DENIAL_CODES = frozenset(
         "training_input_conflict",
         "training_input_invalid",
         "training_input_unavailable",
+        "training_observation_segment_conflict",
+        "training_observation_segment_invalid",
+        "training_observation_segment_unavailable",
         "training_observations_conflict",
         "training_observations_invalid",
         "training_observations_unavailable",
@@ -821,12 +842,47 @@ def _safe_route_label(scope_or_request: Any) -> str:
     try:
         scope = getattr(scope_or_request, "scope", scope_or_request)
         route = scope.get("route")
+        # FastAPI 0.137+ keeps included routes in an effective context. The
+        # original route's path omits include-time prefixes, but the context's
+        # path is the complete matched template. Only use it for that route.
+        fastapi_scope = scope.get("fastapi")
+        if isinstance(fastapi_scope, Mapping):
+            context = fastapi_scope.get("effective_route_context")
+            if getattr(context, "original_route", None) is route:
+                template = getattr(context, "path", None)
+                if isinstance(template, str) and template:
+                    return template
         template = getattr(route, "path", None)
         if isinstance(template, str) and template:
             return template
     except Exception:
         pass
     return UNMATCHED_ROUTE_LABEL
+
+
+def _registered_route_templates(app: Any) -> set:
+    """Read registered templates, including FastAPI's lazy included routers.
+
+    FastAPI 0.137+ exposes effective route contexts for included routers. Older
+    FastAPI and Starlette keep routes directly in ``app.routes``. Neither path
+    reads a request's concrete URL, and an unavailable route tree fails closed.
+    """
+    try:
+        routes = getattr(app, "routes", [])
+        try:
+            from fastapi.routing import iter_route_contexts
+        except ImportError:
+            contexts = routes
+        else:
+            contexts = iter_route_contexts(routes)
+        return {
+            template
+            for route in contexts
+            if isinstance((template := getattr(route, "path", None)), str)
+            and template
+        }
+    except Exception:
+        return set()
 
 
 def _span_scope(span: Any) -> Any:
@@ -1440,17 +1496,7 @@ def configure_gateway_otel(app: Any, *, span_exporter: Optional[Any] = None) -> 
         resource = Resource(expected_resource)
 
         def _registered_routes() -> set:
-            try:
-                return {
-                    template
-                    for template in (
-                        getattr(route, "path", None)
-                        for route in getattr(app, "routes", [])
-                    )
-                    if isinstance(template, str) and template
-                }
-            except Exception:
-                return set()
+            return _registered_route_templates(app)
 
         delegate = span_exporter
         if delegate is None:
@@ -1960,17 +2006,7 @@ def configure_arena_otel(
         resource = Resource(expected_resource)
 
         def _registered_routes() -> set:
-            try:
-                return {
-                    template
-                    for template in (
-                        getattr(route, "path", None)
-                        for route in getattr(app, "routes", [])
-                    )
-                    if isinstance(template, str) and template
-                }
-            except Exception:
-                return set()
+            return _registered_route_templates(app)
 
         delegate = span_exporter
         if delegate is None:

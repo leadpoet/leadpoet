@@ -9,7 +9,7 @@ source paths, prompts, scores, and model outputs must never reach a span.
 """
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -95,6 +95,31 @@ def test_request_spans_name_the_operation_without_leaking_the_run_id():
     haystack = repr(dict(span.attributes)) + span.name
     assert "run-abc-123" not in haystack
     assert "secret" not in haystack
+
+
+def test_included_arena_route_exports_full_template_and_canonical_round():
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+    child = APIRouter()
+
+    @child.get("/rounds/{round_id}")
+    def _round(round_id: str):
+        return {"round_id": round_id}
+
+    parent = APIRouter()
+    parent.include_router(child, prefix="/v1")
+    app.include_router(parent, prefix="/arena")
+    assert configure_arena_otel(app, span_exporter=exp) is not None
+
+    with TestClient(app) as client:
+        assert client.get("/arena/v1/rounds/arena-2026-10-22?token=private").status_code == 200
+        assert client.get("/arena/v1/rounds/secret-extra/path").status_code == 404
+
+    matched, unmatched = exp.get_finished_spans()
+    assert matched.name == "GET /arena/v1/rounds/{round_id}"
+    assert matched.attributes["arena.round_id"] == "arena-2026-10-22"
+    assert unmatched.attributes["http.route"] == "/_unmatched"
+    assert "private" not in repr((matched.name, dict(matched.attributes), dict(unmatched.attributes)))
 
 
 def test_public_round_spans_identify_only_canonical_matched_rounds():
@@ -930,6 +955,44 @@ def test_a_shape_valid_unknown_denial_code_is_not_exported():
 
     (span,) = exp.get_finished_spans()
     assert span.attributes["arena.denial"] == "-"
+
+
+def test_existing_judgment_denial_codes_export_only_their_literal_prefix():
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+
+    @app.get("/arena/v1/refuse/{code}")
+    def _refuse(code: str):
+        telemetry.note_denial(code + ":private request details")
+        return JSONResponse(status_code=409, content={"status": "rejected"})
+
+    recorder = configure_arena_otel(app, span_exporter=exp)
+    telemetry.install_recorder(recorder)
+    try:
+        with TestClient(app) as client:
+            for code in (
+                "accepted_judgment_binding_invalid",
+                "signal_judgment_result_invalid",
+                "training_observation_segment_conflict",
+                "private_token",
+            ):
+                assert client.get("/arena/v1/refuse/" + code).status_code == 409
+            assert client.get("/arena/v1/refuse/private_token/unknown").status_code == 404
+    finally:
+        telemetry.install_recorder(None)
+
+    spans = exp.get_finished_spans()
+    assert [span.attributes["arena.denial"] for span in spans] == [
+        "accepted_judgment_binding_invalid", "signal_judgment_result_invalid",
+        "training_observation_segment_conflict", "-", "-",
+    ]
+    assert [span.attributes["http.route"] for span in spans] == [
+        "/arena/v1/refuse/{code}", "/arena/v1/refuse/{code}",
+        "/arena/v1/refuse/{code}", "/arena/v1/refuse/{code}",
+        "/_unmatched",
+    ]
+    assert "private request details" not in repr(spans)
+    assert "private_token" not in repr(spans)
 
 
 def test_the_deep_capture_seam_is_a_no_op_until_a_recorder_is_installed():

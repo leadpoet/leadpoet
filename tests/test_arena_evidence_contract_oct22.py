@@ -332,7 +332,7 @@ def test_later_cited_page_survives_long_preceding_sources(
     (URL + "?article=different", False),
     ("https://other.example/article", False), (None, False),
 ])
-def test_exa_title_requires_exact_contents_response_identity(monkeypatch, fetched_url, expected):
+def test_exa_evidence_requires_exact_contents_response_identity(monkeypatch, fetched_url, expected):
     class Client:
         async def __aenter__(self):
             return self
@@ -350,8 +350,13 @@ def test_exa_title_requires_exact_contents_response_identity(monkeypatch, fetche
     monkeypatch.setenv("EXA_API_KEY", "test-only")
     monkeypatch.setattr(verifier.httpx, "AsyncClient", Client)
     result = asyncio.run(verifier._scrape_exa(URL))
-    assert result["ok"]
-    assert result.get("source_title", "") == (TITLE if expected else "")
+    assert result["ok"] is expected
+    if expected:
+        assert result["source_title"] == TITLE
+        assert result["content"] == QUOTE * 4
+    else:
+        assert result["stage"] == "exa_source_mismatch"
+        assert result["content"] == ""
 
 
 def test_sd_dom_title_survives_body_extraction(monkeypatch):

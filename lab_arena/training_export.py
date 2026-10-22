@@ -833,7 +833,7 @@ def _link_worker_receipts(run, paid, snapshot):
 
 def _worker_evidence(related, calls, objects):
     from lab_arena import training_observations
-    artifacts, errors, counts = {}, set(), {}
+    artifacts, partial_artifacts, errors, counts = {}, {}, set(), {}
     for run in related:
         run_id = run["run_id"]
         summary = (run.get("result_doc") or {}).get("resource_summary") or {}
@@ -850,6 +850,27 @@ def _worker_evidence(related, calls, objects):
         try:
             snapshot = training_observations.read_snapshot(objects, run_id, run["kind"], run.get("lease_generation"), run.get("claim_request_hash"))
         except Exception:
+            try:
+                if not callable(getattr(objects, "get_optional_bounded", None)):
+                    raise NotImplementedError("legacy object reader has no journal")
+                segments, partial, journal_error = training_observations.read_journal_prefix(
+                    objects, run_id, run["kind"], run.get("lease_generation"),
+                    run.get("claim_request_hash"))
+                if partial is not None:
+                    partial_artifacts[run_id] = {
+                        "complete": False, "payload": partial,
+                        "segment_refs": [training_observations.segment_ref(
+                            run_id, run["lease_generation"], run["claim_request_hash"],
+                            segment["number"]) for segment in segments],
+                        "segment_sha256": [segment["segment_sha256"] for segment in segments],
+                    }
+                    errors.add("worker_observations_incomplete")
+                if journal_error:
+                    errors.add("worker_observation_journal_unavailable")
+            except NotImplementedError:
+                pass
+            except Exception:
+                errors.add("worker_observation_journal_unavailable")
             if needed or capture is not None:
                 errors.add("worker_observations_unavailable")
             if run["kind"] == "execute" and paid:
@@ -901,7 +922,7 @@ def _worker_evidence(related, calls, objects):
                 counts[run_id].add(sequence)
                 if observation["kind"] != "local_catalog":
                     errors.add("worker_call_accounting_unverified")
-    return artifacts, errors, counts
+    return artifacts, partial_artifacts, errors, counts
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
@@ -1171,7 +1192,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             raise ExportError("ledger_context_mismatch")
     calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
                          {row["run_id"]: index for index, row in enumerate(related)})
-    observations, observation_gaps, observed_actions = _worker_evidence(related, calls, objects)
+    observations, partial_observations, observation_gaps, observed_actions = _worker_evidence(related, calls, objects)
     # Recompute payload gaps after exact worker-side fallback joins. Structural
     # ledger failures and every accounting gap retain their original authority.
     gaps -= {"full_request_unavailable", "full_response_unavailable", "request_privacy_nonexact", "response_privacy_nonexact", "provider_call_inflight", "provider_cost_unresolved"}
@@ -1382,7 +1403,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     privacy_redactions = set(redactions)
     clean, removed = without_hidden_reasoning(example)
     clean["worker_observation_artifacts"] = observations
-    observation_redactions = {reason for artifact in observations.values()
+    if partial_observations:
+        clean["partial_worker_observation_artifacts"] = partial_observations
+    observation_redactions = {reason for artifact in list(observations.values()) + list(partial_observations.values())
                              for item in artifact["payload"]["observations"] + artifact["payload"].get("agent_observations", [])
                              for reason in item["privacy"]["redactions"]}
     hidden_removed = removed or "hidden_reasoning" in observation_redactions or "hidden_reasoning" in privacy_redactions or any(

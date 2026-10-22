@@ -30,6 +30,10 @@ MAX_COMPRESSED_BYTES = MAX_OBJECT_BYTES + 1024 * 1024
 MAX_OBSERVATIONS = 16_384
 MAX_AGENT_OBSERVATIONS = 4096
 MAX_WEB_BODY_BYTES = 6 * 1024 * 1024  # A 2 MiB decoded fetch can expand through U+FFFD.
+JOURNAL_SCHEMA_VERSION = "leadpoet.lab_arena.training_observation_journal.v1"
+MAX_SEGMENT_BYTES = 16 * 1024 * 1024
+MAX_SEGMENTS = 1024
+MAX_JOURNAL_ATTEMPTS = 10_000_000
 _V1_FIELDS = frozenset({"observations", "observation_count", "local_refusal_count", "complete", "failures"})
 _V2_FIELDS = _V1_FIELDS | {"response_receipts", "response_receipt_count", "agent_observations", "agent_observation_count"}
 _AGENT_REF_RE = re.compile(r"agent:(0|[1-9][0-9]*)\Z")
@@ -50,6 +54,14 @@ def object_ref(run_id: str, generation: int, claim_hash: str) -> str:
     training_input.object_ref(run_id, generation)
     training_input._validate_claim_hash(claim_hash)
     return "private/arena-training/runs/%s/leases/%d/observations-%s.json.gz" % (run_id, generation, claim_hash[7:])
+
+
+def segment_ref(run_id: str, generation: int, claim_hash: str, number: int) -> str:
+    object_ref(run_id, generation, claim_hash)
+    if type(number) is not int or not 0 <= number < MAX_SEGMENTS:
+        raise ObservationError("segment_number_invalid")
+    return "private/arena-training/runs/%s/leases/%d/observations-%s/segment-%04d.json.gz" % (
+        run_id, generation, claim_hash[7:], number)
 
 
 def _canonical(value: Any) -> bytes:
@@ -595,3 +607,194 @@ def read_snapshot(objects: Any, run_id: str, kind: str, lease_generation: int, c
         raise
     except Exception:
         raise ObservationError("observations_unavailable") from None
+
+
+_SEGMENT_FIELDS = frozenset({
+    "observation_from", "observations", "receipt_from", "response_receipts",
+    "receipt_updates", "agent_from", "agent_observations", "observation_count",
+    "local_refusal_count", "response_receipt_count", "agent_observation_count",
+    "failures",
+})
+
+
+def _clean_segment_payload(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> dict:
+    if not isinstance(value, Mapping) or set(value) != _SEGMENT_FIELDS:
+        raise ObservationError("segment_payload_invalid")
+    for key in ("observation_from", "receipt_from", "agent_from", "observation_count",
+                "local_refusal_count", "response_receipt_count", "agent_observation_count"):
+        if type(value[key]) is not int or not 0 <= value[key] <= MAX_JOURNAL_ATTEMPTS:
+            raise ObservationError("segment_count_invalid")
+    if not isinstance(value["failures"], list) or any(x != "capture_incomplete" for x in value["failures"]):
+        raise ObservationError("segment_failure_invalid")
+    for key in ("observations", "response_receipts", "receipt_updates", "agent_observations"):
+        if not isinstance(value[key], list) or len(value[key]) > MAX_OBSERVATIONS:
+            raise ObservationError("segment_rows_invalid")
+    if (value["observation_from"] + len(value["observations"]) > MAX_OBSERVATIONS
+            or value["receipt_from"] + len(value["response_receipts"]) > MAX_OBSERVATIONS
+            or value["agent_from"] + len(value["agent_observations"]) > MAX_AGENT_OBSERVATIONS):
+        raise ObservationError("segment_rows_invalid")
+    cleaned = dict(value)
+    cleaned["observations"] = [clean_observation(row, secrets) for row in value["observations"]]
+    cleaned["response_receipts"] = [clean_response_receipt(row) for row in value["response_receipts"]]
+    cleaned["receipt_updates"] = [clean_response_receipt(row) for row in value["receipt_updates"]]
+    cleaned["agent_observations"] = [clean_agent_observation(row, secrets) for row in value["agent_observations"]]
+    if (any(row["write_state"] == "prepared" for row in cleaned["receipt_updates"])
+            or len(_canonical(cleaned)) > MAX_SEGMENT_BYTES - 4096):
+        raise ObservationError("segment_size_or_transition_invalid")
+    return cleaned
+
+
+def build_segment(run_id: str, kind: str, value: Mapping[str, Any], *,
+                  lease_generation: int, claim_request_hash: str, number: int,
+                  previous_sha256: str | None, cumulative_bytes: int,
+                  secrets: Sequence[str] = ()) -> tuple[dict, bytes]:
+    segment_ref(run_id, lease_generation, claim_request_hash, number)
+    if (kind not in {"execute", "score"} or
+            (number == 0) != (previous_sha256 is None) or
+            previous_sha256 is not None and not contracts.SHA256_RE.fullmatch(previous_sha256)):
+        raise ObservationError("segment_identity_invalid")
+    payload = _clean_segment_payload(value, secrets)
+    payload_bytes = len(_canonical(payload))
+    if (type(cumulative_bytes) is not int or not payload_bytes <= cumulative_bytes <= MAX_OBJECT_BYTES):
+        raise ObservationError("journal_capacity_invalid")
+    segment = {"schema_version": JOURNAL_SCHEMA_VERSION, "run_id": run_id,
+               "kind": kind, "lease_generation": lease_generation,
+               "claim_request_hash": claim_request_hash, "number": number,
+               "previous_sha256": previous_sha256, "cumulative_bytes": cumulative_bytes,
+               "payload": payload,
+               "payload_sha256": contracts.document_hash(payload)}
+    segment["segment_sha256"] = contracts.document_hash(segment)
+    raw = _canonical(segment)
+    if len(raw) > MAX_SEGMENT_BYTES:
+        raise ObservationError("segment_size_limit")
+    return segment, gzip.compress(raw, compresslevel=6, mtime=0)
+
+
+def read_segment(objects: Any, run_id: str, kind: str, lease_generation: int,
+                 claim_request_hash: str, number: int) -> dict | None:
+    ref = segment_ref(run_id, lease_generation, claim_request_hash, number)
+    getter = getattr(objects, "get_optional_bounded", None)
+    if not callable(getter):
+        raise ObservationError("journal_store_unavailable")
+    try:
+        compressed = getter(ref, MAX_SEGMENT_BYTES + 65536)
+        if compressed is None:
+            return None
+        with gzip.GzipFile(fileobj=io.BytesIO(compressed)) as stream:
+            raw = stream.read(MAX_SEGMENT_BYTES + 1)
+        if len(raw) > MAX_SEGMENT_BYTES:
+            raise ObservationError("segment_size_limit")
+        segment = json.loads(raw)
+        if (not isinstance(segment, dict) or set(segment) != {
+                "schema_version", "run_id", "kind", "lease_generation", "claim_request_hash",
+                "number", "previous_sha256", "cumulative_bytes", "payload", "payload_sha256", "segment_sha256"}
+                or segment["schema_version"] != JOURNAL_SCHEMA_VERSION
+                or segment["run_id"] != run_id or segment["kind"] != kind
+                or type(segment["lease_generation"]) is not int
+                or segment["lease_generation"] != lease_generation
+                or segment["claim_request_hash"] != claim_request_hash
+                or type(segment["number"]) is not int
+                or segment["number"] != number
+                or (number > 0 and not isinstance(segment["previous_sha256"], str))
+                or (number > 0 and not contracts.SHA256_RE.fullmatch(segment["previous_sha256"]))
+                or type(segment["cumulative_bytes"]) is not int
+                or not len(_canonical(segment["payload"])) <= segment["cumulative_bytes"] <= MAX_OBJECT_BYTES
+                or (number == 0) != (segment["previous_sha256"] is None)
+                or contracts.document_hash(segment["payload"]) != segment["payload_sha256"]
+                or contracts.document_hash({key: value for key, value in segment.items()
+                                            if key != "segment_sha256"}) != segment["segment_sha256"]
+                or _clean_segment_payload(segment["payload"]) != segment["payload"]):
+            raise ObservationError("journal_invalid")
+        return segment
+    except ObservationError:
+        raise
+    except Exception:
+        raise ObservationError("journal_unavailable") from None
+
+
+def read_journal_prefix(objects: Any, run_id: str, kind: str, lease_generation: int,
+                        claim_request_hash: str) -> tuple[list[dict], dict | None, str | None]:
+    """Return only a verified contiguous prefix; a missing first segment is empty."""
+    segments, observations, receipts, agent_rows = [], [], [], []
+    receipt_positions: dict[int, int] = {}
+    previous = None
+    cumulative_bytes = 0
+    counts = (0, 0, 0, 0)
+    states = []
+    failure = None
+    for number in range(MAX_SEGMENTS):
+        try:
+            segment = read_segment(objects, run_id, kind, lease_generation, claim_request_hash, number)
+        except ObservationError as exc:
+            failure = str(exc)
+            break
+        if segment is None:
+            break
+        payload = segment["payload"]
+        if (segment["previous_sha256"] != previous
+                or segment["cumulative_bytes"] != cumulative_bytes + len(_canonical(payload))
+                or payload["observation_from"] != len(observations)
+                or payload["receipt_from"] != len(receipts)
+                or payload["agent_from"] != len(agent_rows)):
+            failure = "journal_chain_invalid"
+            break
+        next_receipts = list(receipts)
+        next_positions = dict(receipt_positions)
+        next_observations = observations + payload["observations"]
+        next_agent_rows = agent_rows + payload["agent_observations"]
+        next_counts = (payload["observation_count"], payload["local_refusal_count"],
+                       payload["response_receipt_count"], payload["agent_observation_count"])
+        if any(current < prior for current, prior in zip(next_counts, counts)):
+            failure = "journal_count_invalid"
+            break
+        for row in payload["receipt_updates"]:
+            position = next_positions.get(row["ordinal"])
+            if (position is None or next_receipts[position]["write_state"] != "prepared"
+                    or row["write_state"] == "prepared"
+                    or any(row[key] != next_receipts[position][key] for key in row
+                           if key not in {"write_state", "socket_written_at"})):
+                failure = "journal_transition_invalid"
+                break
+            next_receipts[position] = row
+        if failure:
+            break
+        for row in payload["response_receipts"]:
+            if row["ordinal"] in next_positions:
+                failure = "journal_receipt_duplicate"
+                break
+            next_positions[row["ordinal"]] = len(next_receipts)
+            next_receipts.append(row)
+        if failure:
+            break
+        if (next_counts[0] < len(next_observations)
+                or next_counts[1] < sum(row["kind"] == "local_refusal" for row in next_observations)
+                or next_counts[2] < len(next_receipts) or next_counts[3] < len(next_agent_rows)):
+            failure = "journal_count_invalid"
+            break
+        observations, receipts, agent_rows = next_observations, next_receipts, next_agent_rows
+        receipt_positions, counts = next_positions, next_counts
+        previous = segment["segment_sha256"]
+        cumulative_bytes = segment["cumulative_bytes"]
+        segments.append(segment)
+        states.append((observations, receipts, agent_rows, counts))
+    if len(segments) == MAX_SEGMENTS:
+        failure = "journal_segment_limit"
+    if not segments:
+        return [], None, failure
+    while states:
+        observations, receipts, agent_rows, counts = states[-1]
+        document = {"observations": sorted(observations, key=lambda row: row["ordinal"]),
+                    "observation_count": counts[0], "local_refusal_count": counts[1],
+                    "response_receipts": sorted(receipts, key=lambda row: row["ordinal"]),
+                    "response_receipt_count": counts[2], "agent_observations": agent_rows,
+                    "agent_observation_count": counts[3], "complete": False,
+                    "failures": ["capture_incomplete"]}
+        try:
+            if len(_canonical(document)) > MAX_OBJECT_BYTES:
+                raise ObservationError("journal_prefix_size_limit")
+            return segments, _validate_payload(document), failure
+        except ObservationError:
+            failure = "journal_prefix_invalid"
+            states.pop()
+            segments.pop()
+    return [], None, failure

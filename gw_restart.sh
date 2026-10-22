@@ -1907,7 +1907,11 @@ custom_ca = next(
      ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT") if os.environ.get(name)),
     None,
 )
-context = ssl.create_default_context(cafile=custom_ca)
+ca_options = (
+    {"capath" if Path(custom_ca).is_dir() else "cafile": custom_ca}
+    if custom_ca else {}
+)
+context = ssl.create_default_context(**ca_options)
 with tempfile.TemporaryDirectory(prefix="gateway-pip-bootstrap-") as directory:
     wheel = Path(directory) / "pip-26.2.2-py3-none-any.whl"
     with urllib.request.urlopen(url, context=context, timeout=60) as response:
@@ -1965,7 +1969,7 @@ identity = "\0".join(
 ).encode("utf-8")
 print(hashlib.sha256(requirements + b"\0" + identity).hexdigest())
 PY
-  )"
+  )" || return 1
   export PATH="$HOME/.local/bin:$PATH"
   if [ "$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" = "$dependency_fingerprint" ]; then
     echo "Reusing exact candidate dependency installation from pre-shutdown validation"
@@ -1979,7 +1983,7 @@ PY
       --use-deprecated=legacy-certs \
       ${pip_scope[@]+"${pip_scope[@]}"} \
       --requirement "$requirements_file" \
-      "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}"
+      "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}" || return 1
     GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="$dependency_fingerprint"
     export GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT
   fi

@@ -80,8 +80,10 @@ def test_reuse_requires_patched_stable_pip_and_bundled_certifi(
 
 @pytest.mark.parametrize("scope", [[], ["--user"]])
 @pytest.mark.parametrize("custom_ca", [None, "PIP_CERT", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE"])
+@pytest.mark.parametrize("ca_directory", [False, True])
 def test_bootstrap_hashes_before_executing_only_verified_wheel(
-    monkeypatch: pytest.MonkeyPatch, scope: list[str], custom_ca: str | None,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scope: list[str],
+    custom_ca: str | None, ca_directory: bool,
 ) -> None:
     import urllib.request
 
@@ -89,13 +91,19 @@ def test_bootstrap_hashes_before_executing_only_verified_wheel(
     calls = []
     for name in ("PIP_CERT", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE"):
         monkeypatch.delenv(name, raising=False)
+    ca_path = tmp_path / "custom-ca"
+    if ca_directory:
+        ca_path.mkdir()
     if custom_ca:
-        monkeypatch.setenv(custom_ca, "/explicit/custom-ca.pem")
+        monkeypatch.setenv(custom_ca, str(ca_path))
     context = ssl.create_default_context()
     assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
 
-    def create_context(*, cafile):
-        assert cafile == ("/explicit/custom-ca.pem" if custom_ca else None)
+    def create_context(**kwargs):
+        assert kwargs == (
+            {"capath" if ca_directory else "cafile": str(ca_path)}
+            if custom_ca else {}
+        )
         return context
 
     def download(url, *, context: ssl.SSLContext, timeout):
@@ -226,3 +234,53 @@ def test_no_unhashed_get_pip_fallback_or_tls_bypass() -> None:
     for forbidden in ("get-pip.py", "--trusted-host", "CERT_NONE", "check_hostname = False"):
         # Comment names the removed get-pip path, but it must never be invoked.
         assert forbidden not in "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
+
+
+@pytest.mark.parametrize("failure", ["fingerprint", "install"])
+def test_failed_dependency_install_cannot_mark_compatible_environment_satisfied(
+    tmp_path: Path, failure: str,
+) -> None:
+    (tmp_path / "requirements.txt").write_text("certifi>=2026.10.19\n")
+    # Cleanup and pip check must not run after either failure.
+    metadata = tmp_path / "leadpoet_subnet.egg-info"
+    metadata.mkdir()
+    capture = tmp_path / "calls.jsonl"
+    fingerprint = tmp_path / "fingerprint"
+    python = tmp_path / "gateway-python"
+    python.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        f"with open({str(capture)!r}, 'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
+        "if sys.argv[1] == '-c': sys.exit(1)\n"
+        "if sys.argv[1] == '-':\n"
+        "    sys.stdin.read()\n"
+        f"    if {failure!r} == 'fingerprint': sys.exit(23)\n"
+        "    print('new-fingerprint')\n"
+        "if sys.argv[1:4] == ['-m', 'pip', 'install']: sys.exit(23)\n"
+        # An already-compatible environment makes pip check pass. It cannot
+        # prove the failed installation succeeded.
+        "sys.exit(0)\n"
+    )
+    python.chmod(0o755)
+    harness = (
+        "set -euo pipefail\n"
+        f"GATEWAY_PYTHON_BIN={shlex.quote(str(python))}\n"
+        f"LEADPOET_REPO_ROOT={shlex.quote(str(tmp_path))}\n"
+        "GATEWAY_PREFLIGHT_TREE=\nGATEWAY_HOST_EXTRA_PYTHON_PACKAGES=(sentry-sdk)\n"
+        "GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT=\n"
+        "bootstrap_gateway_pip() { :; }\n"
+        "install_gateway_python_dependencies() {\n"
+        + shell_function("install_gateway_python_dependencies") + "\n}\n"
+        "status=0\nif ! install_gateway_python_dependencies; then status=42; fi\n"
+        f"printf '%s' \"$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT\" > {shlex.quote(str(fingerprint))}\n"
+        "exit \"$status\"\n"
+    )
+    result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+    assert result.returncode == 42, result.stderr
+    assert fingerprint.read_text() == ""
+    assert metadata.is_dir()
+    calls = [json.loads(line) for line in capture.read_text().splitlines()]
+    assert ["-m", "pip", "check"] not in calls
+    if failure == "install":
+        assert calls[-1][:4] == ["-m", "pip", "install", "--use-deprecated=legacy-certs"]
+    else:
+        assert not any(call[:2] == ["-m", "pip"] for call in calls)

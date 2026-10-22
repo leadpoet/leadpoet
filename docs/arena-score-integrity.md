@@ -125,8 +125,8 @@ allows the next identical output to obtain a judgment with its own credentials.
 
 ## Promotion
 
-After all twenty ICPs have complete valid results, rank the baseline and
-eligible challengers by their twenty-ICP scores. The best eligible challenger
+Rank the complete legitimate baseline and eligible challengers by their full
+frozen ICP-set scores. The best eligible challenger
 becomes king only when its score is at least one point above the baseline's
 effective score. Under the per-ICP policy, that score includes the zero contribution
 from each cost-ineligible ICP. The normal one-point promotion margin still applies.
@@ -135,6 +135,20 @@ and the existing champion remains.
 Qualification receipts, cost eligibility, deterministic tie ordering, and all
 other publication guards continue to apply. No extra ICP set or finalist-only
 stage can change or veto this result.
+
+Unfinished nonbaseline work retries within the frozen window. At the final
+publication deadline, active execution, judgment, and provider calls must drain.
+Each unfinished participant then has a null final score and an explicit
+**not evaluated** status with its actual cause. Completed participants continue
+through the same score, promotion, and reward rules. The complete baseline and
+valid scoring evidence remain mandatory. Accepted outputs, judgments, provider
+receipts, costs, and published history remain unchanged.
+
+An exact native OpenRouter zero-data-retention route refusal means the selected
+provider route is unavailable. It is not a credential, funding, or model-quality
+failure. The original model and strict provider `deny` and `zdr: true` policy
+remain in force. No available route means provider blocked and not evaluated;
+it never creates a zero-quality score.
 
 ## Rollout and verification
 

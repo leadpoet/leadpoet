@@ -2888,13 +2888,14 @@ class ArenaService:
         round_row = self._round(round_id)
         self.benchmark_icps(round_id)
         admitted = {p["submission_id"] for p in round_row.get("participants") or []}
+        runs = [run for run in self._store.list_runs(
+            round_id, stage=stage, kind="execute",
+            columns="*,execution_attempt:lab_arena_execution_attempt_count",
+        ) if run["submission_id"] in admitted]
         plan = scoring.build_scoring_plan(
             round_id=round_id,
             stage=stage,
-            runs=[run for run in self._store.list_runs(
-                round_id, stage=stage, kind="execute",
-                columns="*,execution_attempt:lab_arena_execution_attempt_count",
-            ) if run["submission_id"] in admitted],
+            runs=runs,
             execution_sequence_policy=(round_row.get("configuration_doc") or {}).get(
                 "execution_sequence_policy"
             ),
@@ -3774,14 +3775,13 @@ class ArenaService:
             scored_run_id = item["scored_run_id"]
             run = chosen.get(scored_run_id)
             if run is None:
-                return self._store.cancel_round(
-                    round_id, CANCEL_REASONS["scoring_incomplete"]
-                )
+                incomplete_items[scored_run_id] = "stage_closed"
+                continue
             if run["status"] == "accepted":
                 continue
             cause = str(run.get("terminal_cause") or "")
             if run["status"] in ("pending", "leased", "submitted"):
-                incomplete_items[scored_run_id] = "judge_pending"
+                incomplete_items[scored_run_id] = "stage_closed"
                 continue
             if (
                 run["status"] != "failed"
@@ -3791,8 +3791,7 @@ class ArenaService:
                 return self._store.cancel_round(
                     round_id, CANCEL_REASONS["scoring_incomplete"]
                 )
-            if cause in ("stage_closed", "judge_error", "judge_timeout",
-                         "lease_expired", "credential_error"):
+            if cause in (contracts.INFRASTRUCTURE_TERMINAL_CAUSES | {"stage_closed", "credential_error"}):
                 incomplete_items[scored_run_id] = cause
                 if (_judge_continuation_enabled(round_row)
                     and self._terminal_miner_credit_judgment(scored_run_id)):
@@ -3800,7 +3799,14 @@ class ArenaService:
                 continue
             # Only an explicit terminal score failure receives a frozen zero.
             failed_items[scored_run_id] = cause
-        if incomplete_items.keys() - terminal_credit_items and (
+        final_deadline = _parse_iso(round_row["configuration_doc"]["schedule"]["publication_deadline"])
+        isolate_incomplete = (
+            stage == 2 and self.now() >= final_deadline
+            and not any(item["submission_id"] in baseline_ids
+                and item["scored_run_id"] in incomplete_items for item in plan["work_items"])
+            and not self._evaluation_draining(round_row)
+        )
+        if not isolate_incomplete and incomplete_items.keys() - terminal_credit_items and (
             stage != 1 or
             round_row["configuration_doc"].get("execution_sequence_policy")
                 != contracts.BASELINE_SCORED_FIRST_POLICY
@@ -4476,9 +4482,9 @@ class ArenaService:
         judges = self._select_scoring_outputs(score_runs, round_row=row)
         for source in sources:
             judge = judges.get(str(source["run_id"]))
-            if (source.get("per_icp_score") is None
-                or judge is None
-                or not self._judgment_matches_execution(row, judge, source)):
+            if judge is not None and judge.get("status") == "accepted" and not self._judgment_matches_execution(row, judge, source):
+                raise ServiceError("accepted_judgment_binding_invalid", 500)
+            if source.get("per_icp_score") is None or judge is None or judge.get("status") != "accepted":
                 if (_judge_continuation_enabled(row)
                     and self._terminal_miner_credit_judgment(str(source["run_id"]))):
                     continue
@@ -4528,57 +4534,89 @@ class ArenaService:
 
     # -- publication and downstream reward activation -------------------------
 
-    def _empty_execution_infrastructure_failure(self, reads: _PublicationReads) -> bool:
+    @staticmethod
+    def _selected_execution_runs(runs, submission_id):
+        selected = {}
+        for run in runs:
+            if str(run.get("submission_id")) != submission_id or run.get("kind") != "execute":
+                continue
+            position = int(run["icp_position"])
+            current = selected.get(position)
+            rank = lambda item: (item.get("status") == "accepted", int(item.get("attempt") or 0))
+            if current is None or rank(run) > rank(current):
+                selected[position] = run
+        return selected
+
+    def _execution_infrastructure_failures(self, reads: _PublicationReads) -> Dict[str, str]:
         """Recognize saved empty outputs whose last model call could not run.
 
         Only publication uses this derived check. Original accepted runs, native
         receipts, costs, and judgments stay unchanged; other work can continue.
         """
+        failures: Dict[str, str] = {}
         for participant in reads.round_row.get("participants") or []:
-            selected = self._selected_accepted_execution_runs(
-                reads.runs, str(participant["submission_id"]),
-            )
+            submission_id = str(participant["submission_id"])
+            selected = self._selected_execution_runs(reads.runs, submission_id)
             for run in selected.values():
-                if reads.output(str(run["output_ref"]))["companies"]:
+                if run.get("status") == "accepted":
+                    if reads.output(str(run["output_ref"]))["companies"] and run.get("per_icp_score") is not None:
+                        continue
+                elif run.get("status") != "failed" or run.get("terminal_cause") not in (
+                    "provider_error", "stage_closed"):
                     continue
-                issued = self._store.latest_execution_model_reservation(str(run["run_id"]))
-                if issued is None:
-                    continue
-                document = issued.get("entry_doc") or {}
-                sequence = document.get("action_sequence")
-                operation = issued.get("operation_id")
-                if (type(sequence) is not int or sequence < 0
-                    or operation not in ("openrouter.chat", "openrouter.responses")
-                    or not isinstance(document.get("request_hash"), str)
-                    or not issued.get("call_identity")):
-                    raise ArenaStoreError("execution model reservation is invalid")
-                ledger = self._store.list_ledger(
-                    run_id=str(run["run_id"]), call_identity=issued["call_identity"], limit=20,
-                )
-                reservations = [row for row in ledger if row["entry_kind"] == "reservation"]
-                dispatches = [row for row in ledger if row["entry_kind"] == "dispatch"]
-                settlements = [row for row in ledger if row["entry_kind"] == "settlement"]
-                if len(ledger) >= 20 or any(len(rows) != 1 for rows in (reservations, dispatches, settlements)):
-                    raise ArenaStoreError("execution model call lifecycle is incomplete")
-                reservation, dispatch, terminal = reservations[0], dispatches[0], settlements[0]
-                expected = {"run_id": run["run_id"], "call_identity": issued["call_identity"],
-                            "operation_id": operation, "provider": "openrouter",
-                            "funding_source": issued.get("funding_source")}
-                if (any(row.get(key) != value for row in ledger for key, value in expected.items())
-                    or not reservation["entry_id"] < dispatch["entry_id"] < terminal["entry_id"]
-                    or max(row["entry_id"] for row in ledger) != terminal["entry_id"]
-                    or reservation["entry_id"] != issued["entry_id"]
-                    or reservation.get("entry_doc") != document):
-                    raise ArenaStoreError("execution model call binding is invalid")
-                native = terminal.get("terminal_response")
-                if not isinstance(native, Mapping):
-                    raise ArenaStoreError("execution model call receipt is missing")
-                status, _headers, body = broker_module._decode_terminal(native)
-                if broker_module._openrouter_data_policy_route_unavailable(status, body):
-                    if native.get("call_succeeded") is not False:
-                        raise ArenaStoreError("execution model call receipt contradicts its outcome")
-                    return True
+                try:
+                    unavailable = self._native_execution_route_unavailable(run)
+                except (ArenaStoreError, broker_module.BrokerError, KeyError, TypeError,
+                        ValueError, UnicodeDecodeError):
+                    if run.get("status") == "accepted":
+                        raise
+                    unavailable = False
+                if unavailable:
+                    failures[str(run["run_id"])] = "openrouter_zdr_route_unavailable"
+        return failures
+
+    def _native_execution_route_unavailable(self, run) -> bool:
+        issued = self._store.latest_execution_model_reservation(str(run["run_id"]))
+        if issued is None:
+            return False
+        document = issued.get("entry_doc") or {}
+        sequence = document.get("action_sequence")
+        operation = issued.get("operation_id")
+        if (type(sequence) is not int or sequence < 0
+            or operation not in ("openrouter.chat", "openrouter.responses")
+            or not isinstance(document.get("request_hash"), str)
+            or not issued.get("call_identity")):
+            raise ArenaStoreError("execution model reservation is invalid")
+        ledger = self._store.list_ledger(
+            run_id=str(run["run_id"]), call_identity=issued["call_identity"], limit=20,
+        )
+        reservations = [row for row in ledger if row["entry_kind"] == "reservation"]
+        dispatches = [row for row in ledger if row["entry_kind"] == "dispatch"]
+        settlements = [row for row in ledger if row["entry_kind"] == "settlement"]
+        if len(ledger) >= 20 or any(len(rows) != 1 for rows in (reservations, dispatches, settlements)):
+            raise ArenaStoreError("execution model call lifecycle is incomplete")
+        reservation, dispatch, terminal = reservations[0], dispatches[0], settlements[0]
+        expected = {"run_id": run["run_id"], "call_identity": issued["call_identity"],
+                    "operation_id": operation, "provider": "openrouter",
+                    "funding_source": issued.get("funding_source")}
+        if (any(row.get(key) != value for row in ledger for key, value in expected.items())
+            or not reservation["entry_id"] < dispatch["entry_id"] < terminal["entry_id"]
+            or max(row["entry_id"] for row in ledger) != terminal["entry_id"]
+            or reservation["entry_id"] != issued["entry_id"]
+            or reservation.get("entry_doc") != document):
+            raise ArenaStoreError("execution model call binding is invalid")
+        native = terminal.get("terminal_response")
+        if not isinstance(native, Mapping):
+            raise ArenaStoreError("execution model call receipt is missing")
+        status, _headers, body = broker_module._decode_terminal(native)
+        if broker_module._openrouter_data_policy_route_unavailable(status, body):
+            if native.get("call_succeeded") is not False:
+                raise ArenaStoreError("execution model call receipt contradicts its outcome")
+            return True
         return False
+
+    def _empty_execution_infrastructure_failure(self, reads: _PublicationReads) -> bool:
+        return bool(self._execution_infrastructure_failures(reads))
 
     def publish(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
@@ -4587,11 +4625,7 @@ class ArenaService:
         evaluation_date = str(round_row.get("evaluation_date") or "")
         if _judge_continuation_enabled(round_row):
             self._record_recovered_judgment_scores(round_row)
-        if evaluation_date and self._unfinished_judgments(round_row):
-            return self._hold_incomplete_evaluation(
-                round_row, reason=("baseline_incomplete"
-                        if not self._baseline_fully_succeeded(round_row)
-                        else "judge_incomplete"))
+        unfinished_judgments = bool(evaluation_date and self._unfinished_judgments(round_row))
         configuration = round_row.get("configuration_doc") or {}
         # An infrastructure zero is not a measured baseline. Keep the round
         # recoverable until its frozen final deadline, without comparing miners
@@ -4606,16 +4640,26 @@ class ArenaService:
             self, round_row, self._store.list_runs(round_id, kind="execute")
         )
         try:
-            infrastructure_failure = self._empty_execution_infrastructure_failure(publication_reads)
+            infrastructure_failures = self._execution_infrastructure_failures(publication_reads)
         except (ArenaStoreError, broker_module.BrokerError, OutputInvalid, KeyError,
                 TypeError, ValueError, UnicodeDecodeError):
             return self._hold_incomplete_evaluation(
                 round_row, reason="execution_evidence_unavailable",
             )
-        if infrastructure_failure:
-            return self._hold_incomplete_evaluation(
-                round_row, reason="execution_infrastructure_incomplete",
-            )
+        baseline_ids = {str(p["submission_id"]) for p in round_row.get("participants") or [] if p.get("is_king")}
+        if any(str(run.get("submission_id")) in baseline_ids and str(run.get("run_id")) in infrastructure_failures
+               for run in publication_reads.runs):
+            return self._hold_incomplete_baseline(round_row)
+        incomplete = self._participant_incomplete_reasons(round_row, publication_reads, infrastructure_failures)
+        if unfinished_judgments or incomplete:
+            if (self.now() < _parse_iso(configuration["schedule"]["publication_deadline"])
+                or self._evaluation_draining(round_row)):
+                return {"status": "retry", "round_status": round_row["status"],
+                    "reason": "judge_incomplete" if unfinished_judgments else "execution_infrastructure_incomplete"}
+            if not incomplete:
+                # An accepted mismatched judgment is an integrity failure, not
+                # an unfinished participant that publication can omit.
+                return self._hold_incomplete_evaluation(round_row, reason="scoring_evidence_invalid")
         stage1_ranking = verify.stage1_ranking(
             self._score_entries_from_runs(
                 round_row,
@@ -4633,11 +4677,19 @@ class ArenaService:
             round_row, range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))), "final_score",
             publication_reads=publication_reads,
         )
+        for entry in final_entries:
+            if str(entry["submission_id"]) in incomplete:
+                entry["final_score"] = None
+                entry["execution_incomplete"] = True
         eligibility = {
             str(entry["submission_id"]): ({
                 "cost_summary": None,
                 "eligible": False,
                 "eligibility_reason": "execution_incomplete",
+                **({"evaluation": "not_evaluated",
+                    "evaluation_status": "provider_blocked" if incomplete[str(entry["submission_id"])] == "openrouter_zdr_route_unavailable" else "evaluation_incomplete",
+                    "evaluation_reason": incomplete[str(entry["submission_id"])]}
+                    if str(entry["submission_id"]) in incomplete else {}),
             } if entry.get("execution_incomplete") else self._submission_cost_eligibility(
                 round_row,
                 str(entry["submission_id"]),
@@ -5005,6 +5057,56 @@ class ArenaService:
             "eligible", "historical_round", "cost_per_company_exceeded",
             "execution_cap_exceeded",
         )
+
+    def _participant_incomplete_reasons(self, row, reads, blocked):
+        """Describe gaps without changing accepted scores or their provenance."""
+        count = contracts.benchmark_icp_count(row.get("configuration_doc"))
+        scores = self._select_scoring_outputs(
+            self._store.list_runs(str(row["round_id"]), kind="score"), round_row=row)
+        reasons = {}
+        confirmed_model_positions = {(str(run.get("submission_id")), int(run["icp_position"]))
+            for run in reads.runs if run.get("terminal_cause") in contracts.MODEL_CAUSED_TERMINAL_CAUSES}
+        for participant in row.get("participants") or []:
+            submission_id = str(participant["submission_id"])
+            if participant.get("is_king"):
+                continue
+            selected = self._selected_execution_runs(reads.runs, submission_id)
+            for position in range(count):
+                run = selected.get(position)
+                if run is None:
+                    reasons.setdefault(submission_id, "execution_missing")
+                    continue
+                if run.get("status") != "accepted" and scores.get(str(run["run_id"]), {}).get("status") == "accepted":
+                    raise ServiceError("accepted_judgment_source_invalid", 500)
+                prior_model_failure = (submission_id, position) in confirmed_model_positions
+                if str(run["run_id"]) in blocked and (run.get("status") == "accepted" or not prior_model_failure):
+                    reasons[submission_id] = blocked[str(run["run_id"])]
+                    continue
+                if (run.get("status") == "failed" and not prior_model_failure
+                    and run.get("terminal_cause") in (contracts.INFRASTRUCTURE_TERMINAL_CAUSES | {"stage_closed"})):
+                    reasons.setdefault(submission_id, str(run["terminal_cause"]))
+                    continue
+                if run.get("per_icp_score") is not None:
+                    continue
+                if run.get("status") == "accepted":
+                    judge = scores.get(str(run["run_id"]))
+                    if judge is not None and judge.get("status") == "accepted":
+                        # Accepted but unmaterialized or invalid decisions must
+                        # pass score recovery; they are never omission evidence.
+                        raise ServiceError("accepted_judgment_score_missing", 500)
+                    cause = str((judge or {}).get("terminal_cause") or ("judge_pending" if judge else "judge_missing"))
+                    reasons.setdefault(submission_id, cause)
+                else:
+                    reasons.setdefault(submission_id, str(run.get("terminal_cause") or "execution_incomplete"))
+        return reasons
+
+    def _evaluation_draining(self, row: Mapping[str, Any]) -> bool:
+        runs = self._store.list_runs(str(row["round_id"]))
+        if any(run.get("status") in ("leased", "submitted") for run in runs):
+            return True
+        return any(int(provider.get("inflight_calls", 0)) > 0
+            for participant in row.get("participants") or []
+            for provider in self._store.submission_costs(str(participant["submission_id"]))["providers"])
 
     def _hold_incomplete_baseline(self, row: Mapping[str, Any]) -> Dict[str, Any]:
         return self._hold_incomplete_evaluation(row, reason="baseline_incomplete")

@@ -257,6 +257,14 @@ def _cost_projection(
             "cost_summary": None,
             "eligible": eligible,
             "eligibility_reason": str(reason),
+            **({"status": ranking["evaluation_status"], "score_status": "not_evaluated",
+                "evaluation_reason": ranking["evaluation_reason"]}
+                if (reason == "execution_incomplete" and not eligible
+                    and ranking.get("final_score") is None
+                    and ranking.get("evaluation") == "not_evaluated"
+                    and ranking.get("evaluation_status") in ("provider_blocked", "evaluation_incomplete")
+                    and ranking.get("evaluation_reason") in (contracts.TERMINAL_CAUSES + (
+                        "openrouter_zdr_route_unavailable", "judge_missing", "judge_pending", "execution_missing"))) else {}),
         }
     if not isinstance(summary, Mapping):
         return {}
@@ -1122,6 +1130,8 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
         for item in submissions:
             item["evaluation"] = evaluation_progress([], service.now())
     for item in submissions:
+        if item.get("score_status") == "not_evaluated" and item.get("status") in ("provider_blocked", "evaluation_incomplete"):
+            _mark_recovery_excluded(item, item["status"])
         if item["submission_id"] in exclusions:
             _mark_recovery_excluded(item, exclusions[item["submission_id"]]["status"])
     return {"round_id": round_id, "submissions": submissions}
@@ -1232,6 +1242,10 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
                     "status": _submission_lifecycle(raw_status="frozen", round_status="published",
                                                     is_champion=champion, final_score=final_score),
                 })
+                if (rankings.get(submission_id) or {}).get("evaluation") == "not_evaluated":
+                    entries[-1].update(_cost_projection(rankings[submission_id],
+                        configuration=row.get("configuration_doc"),
+                        sourcing_cost_eligibility_policy=(row.get("configuration_doc") or {}).get("sourcing_cost_eligibility_policy")))
                 if submission_id in exclusions:
                     _mark_recovery_excluded(entries[-1], exclusions[submission_id]["status"])
                 last_submission = submission_id

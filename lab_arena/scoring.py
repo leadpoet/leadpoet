@@ -187,10 +187,10 @@ def build_scoring_plan(
 
     ``runs`` are every attempt row of the stage. An assignment with an
     accepted attempt contributes exactly one work item named by its run and
-    output reference. A model-caused failure, an exhausted provider error, or
-    a provider error before a dispatched final retry reaches the stage deadline
-    contributes a zero row. Deadline-isolated infrastructure assignments stay
-    explicitly incomplete; they never erase completed work or receive a score.
+    output reference. Confirmed miner-caused failures retain their ordinary
+    zero. Infrastructure failures stay explicitly incomplete, including when
+    their retry budget or frozen window ends. They never erase completed work
+    or receive an invented score.
     """
 
     if stage not in (1, 2):
@@ -226,66 +226,21 @@ def build_scoring_plan(
             continue
         latest_run = latest[key]
         cause = str(latest_run.get("terminal_cause") or "")
-        if (
-            latest_run.get("status") == "failed"
-            and isinstance(latest_run.get("terminal_doc"), Mapping)
-            and latest_run["terminal_doc"].get("infrastructure_incomplete") is True
-            and cause in (contracts.INFRASTRUCTURE_TERMINAL_CAUSES | {"stage_closed"})
-        ):
-            incomplete_rows.append({"submission_id": submission_id, "icp_position": position, "cause": cause})
-            continue
-        provider_error_exhausted = (
-            cause == "provider_error"
-            and latest_run.get("status") == "failed"
-            # The database excludes authenticated host interruptions. Physical
-            # attempt IDs remain authoritative for ordering and output identity.
-            and int(latest_run.get("execution_attempt", latest_run.get("attempt")) or 0)
-            >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
-        )
-        terminal_doc = latest_run.get("terminal_doc")
-        deadline_provider_retry_exhausted = (
-            cause == "stage_closed"
-            and latest_run.get("status") == "failed"
-            and int(latest_run.get("execution_attempt", latest_run.get("attempt")) or 0)
-            >= contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
-            and isinstance(terminal_doc, Mapping)
-            and terminal_doc.get("previous_status") == "leased"
-            and terminal_doc.get("deadline_provider_retry_exhausted") is True
-        )
-        if (
-            cause not in contracts.MODEL_CAUSED_TERMINAL_CAUSES
-            and not provider_error_exhausted
-        ):
-            # A retry that the window closed before it ran leaves the
-            # earlier model-caused failure standing.
-            confirmed = [run for run in runs if (str(run.get("submission_id")), int(run.get("icp_position") or 0)) == key and str(run.get("terminal_cause") or "") in contracts.MODEL_CAUSED_TERMINAL_CAUSES]
+        if cause not in contracts.MODEL_CAUSED_TERMINAL_CAUSES:
+            # A confirmed miner-caused failure keeps its ordinary zero when
+            # a later infrastructure retry could not produce accepted work.
+            confirmed = [candidate for candidate in runs
+                if (str(candidate.get("submission_id")), int(candidate.get("icp_position") or 0)) == key
+                and candidate.get("terminal_cause") in contracts.MODEL_CAUSED_TERMINAL_CAUSES]
             if confirmed:
-                cause = str(max(confirmed, key=lambda run: int(run.get("attempt") or 0))["terminal_cause"])
-            elif deadline_provider_retry_exhausted:
-                confirmed_provider_failures = [
-                    run
-                    for run in runs
-                    if (
-                        (
-                            str(run.get("submission_id")),
-                            int(run.get("icp_position") or 0),
-                        )
-                        == key
-                        and run.get("status") == "failed"
-                        and str(run.get("terminal_cause") or "")
-                        == "provider_error"
-                        and int(run.get("attempt") or 0)
-                        < int(latest_run.get("attempt") or 0)
-                    )
-                ]
-                if not confirmed_provider_failures:
-                    raise ArenaContractError(
-                        "assignment %s/%d has no prior provider failure; the stage must cancel"
-                        % (submission_id, position)
-                    )
-                cause = "provider_error"
+                cause = str(max(confirmed, key=lambda candidate: int(candidate.get("attempt") or 0))["terminal_cause"])
+            elif latest_run.get("status") == "failed" and cause in (
+                contracts.INFRASTRUCTURE_TERMINAL_CAUSES | {"stage_closed"}
+            ):
+                incomplete_rows.append({"submission_id": submission_id, "icp_position": position, "cause": cause})
+                continue
             else:
-                raise ArenaContractError("assignment %s/%d ended for an infrastructure reason (%s); the stage must cancel" % (submission_id, position, cause or "none"))
+                raise ArenaContractError("assignment %s/%d has invalid terminal evidence (%s)" % (submission_id, position, cause or "none"))
         zero_rows.append({"submission_id": submission_id, "icp_position": position, "cause": cause})
     plan = {
         "schema_version": contracts.SCORING_PLAN_SCHEMA_VERSION,

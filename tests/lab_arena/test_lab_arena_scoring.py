@@ -701,11 +701,12 @@ def test_plan_makes_one_work_item_per_accepted_assignment_and_synthesizes_zero_r
     # Every accepted assignment is one item: four submissions over ten ICPs, minus the two zero rows.
     assert len(plan["work_items"]) == 40 - 2 and len({(item["submission_id"], item["icp_position"]) for item in plan["work_items"]}) == 38
     assert plan["zero_rows"] == [{"submission_id": "c2", "icp_position": 1, "cause": "model_timeout"}, {"submission_id": "c3", "icp_position": 2, "cause": "budget_exhausted"}]
-    with pytest.raises(contracts.ArenaContractError, match="infrastructure reason"):
-        scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs_for(["c9"], causes={("c9", 3): "lease_expired"}))
+    incomplete = scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs_for(["c9"], causes={("c9", 3): "lease_expired"}))
+    assert incomplete["zero_rows"] == []
+    assert incomplete["incomplete_rows"] == [{"submission_id": "c9", "icp_position": 3, "cause": "lease_expired"}]
 
 
-def test_plan_zeros_only_a_provider_error_that_exhausted_both_attempts():
+def test_plan_never_invents_zero_when_provider_error_exhausts_both_attempts():
     runs = [
         run
         for run in runs_for(["king"])
@@ -727,13 +728,8 @@ def test_plan_zeros_only_a_provider_error_that_exhausted_both_attempts():
 
     plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs)
 
-    assert plan["zero_rows"] == [
-        {
-            "submission_id": "king",
-            "icp_position": 3,
-            "cause": "provider_error",
-        }
-    ]
+    assert plan["zero_rows"] == []
+    assert plan["incomplete_rows"] == [{"submission_id": "king", "icp_position": 3, "cause": "provider_error"}]
     assert len(plan["work_items"]) == 9
 
 
@@ -746,7 +742,7 @@ def test_plan_zeros_only_a_provider_error_that_exhausted_both_attempts():
         {"attempt": 2, "status": "failed", "terminal_cause": "result_rejected"},
     ],
 )
-def test_plan_rejects_unexhausted_or_nonprovider_execution_failures(latest):
+def test_plan_explicitly_retains_infrastructure_gaps_and_rejects_unclosed_assignments(latest):
     runs = [
         run
         for run in runs_for(["king"])
@@ -763,8 +759,13 @@ def test_plan_rejects_unexhausted_or_nonprovider_execution_failures(latest):
         }
     )
 
-    with pytest.raises(contracts.ArenaContractError, match="infrastructure reason"):
-        scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs)
+    if latest["status"] == "pending":
+        with pytest.raises(contracts.ArenaContractError, match="invalid terminal evidence"):
+            scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs)
+    else:
+        plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs)
+        assert plan["zero_rows"] == [] and len(plan["incomplete_rows"]) == 1
+        assert plan["incomplete_rows"][0]["cause"] == latest["terminal_cause"]
 
 
 def test_plan_keeps_a_saved_accepted_attempt_over_a_later_provider_failure():
@@ -1721,7 +1722,7 @@ def test_real_citation_receipt_reaches_bundle_persistence_and_cost_count(
         "get_bounded": staticmethod(lambda _ref, _limit: output_bytes),
     })()
     service.evaluation_icps = lambda _round_id: [_ICPS[0]]
-    service._scoring_outputs = lambda _round_id, _stage: {
+    service._scoring_outputs = lambda _round_id, _stage, **_kwargs: {
         stage_runs[0]["run_id"]: {"status": "accepted"},
     }
     service._verified_breakdowns = (
@@ -2598,3 +2599,15 @@ def test_exact_final_tie_crowns_no_miner():
     challenger["final_score"] = 76.0
     decision = verify.king_decision([challenger], king)
     assert (decision["outcome"], decision["winner_submission_id"]) == ("crowned", "c1")
+
+
+@pytest.mark.parametrize('cause', sorted(contracts.MODEL_CAUSED_TERMINAL_CAUSES))
+@pytest.mark.parametrize('later_cause', ['stage_closed', 'provider_error', 'worker_lost'])
+def test_confirmed_miner_caused_failure_retains_ordinary_zero_across_infrastructure_retry(cause, later_cause):
+    runs = runs_for(['king'], causes={('king', 3): cause})
+    original = next(run for run in runs if run['icp_position'] == 3)
+    runs.append({**original, 'run_id': 'king:3:2', 'attempt': 2,
+        'terminal_cause': later_cause, 'status': 'failed', 'output_ref': None})
+    plan = scoring.build_scoring_plan(round_id=ROUND, stage=1, runs=runs)
+    assert plan['zero_rows'] == [{'submission_id': 'king', 'icp_position': 3, 'cause': cause}]
+    assert not plan.get('incomplete_rows')

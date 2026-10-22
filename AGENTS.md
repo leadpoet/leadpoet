@@ -1,3 +1,15 @@
+## Scoped production authorization: October 22 full-cycle dependency repair
+
+On 2026-10-22 the user authorized bounded investigation and the smallest general
+fix for confirmed October 22 execution setup failures. This includes protected
+read-only evidence, isolated installer tests, the approved sparse filesystem
+probe, narrow source and tests, safe push/merge and canonical deployment after
+review. Separate installer workspace capacity from unchanged final dependency
+limits. Preserve frozen inputs, accepted work, provider accounting, credentials,
+scoring and reward rules, and concurrent work. The coordinating agent owns
+production application and live verification; no recovery or historical score
+write is authorized by this paragraph alone. Authority ends after verification.
+
 ## Scoped production authorization: duplicate intents and refused source reads
 
 On 2026-10-22 the user authorized the tested general fixes for duplicate intent

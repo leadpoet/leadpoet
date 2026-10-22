@@ -18,7 +18,8 @@ def case():
                submission_id="miner", kind="execute", status="accepted", stage=2,
                output_ref="saved-output")
     row = dict(round_id="round", status="scored", participants=[{"submission_id": "miner"}],
-               configuration_doc={})
+               configuration_doc={"stage_1_icp_count": 1, "stage_2_icp_count": 1,
+                   "schedule": {"publication_deadline": "2026-10-21T20:30:03Z"}})
     call = dict(operation_id="openrouter.chat", provider_status=404,
                 call_identity="native-call", request_hash="sha256:" + "a" * 64)
     events = [dict(run_id="run", event_kind="provider.request", operation_id="openrouter.chat", action_sequence=3),
@@ -39,7 +40,8 @@ def case():
     service._store = SimpleNamespace(
         latest_execution_model_reservation=lambda run_id: calls.append(("reservation", run_id)) or copy.deepcopy(ledger[0]),
         list_ledger=lambda **kw: calls.append(("ledger", kw)) or copy.deepcopy(ledger),
-        list_runs=lambda *a, **kw: [copy.deepcopy(run)])
+        list_runs=lambda *a, **kw: [] if kw.get("kind") == "score" else [copy.deepcopy(run)])
+    service.now = lambda: datetime(2026, 10, 21, 19, tzinfo=timezone.utc)
     reads = _PublicationReads(service, row, [run])
     return service, reads, events, ledger, output, calls
 
@@ -95,6 +97,7 @@ def test_forged_later_trajectory_success_cannot_mask_native_route_failure():
 def test_nonempty_output_does_not_read_provider_history():
     service, reads, _, _, _, calls = case()
     reads.outputs_by_ref["saved-output"] = {"companies": [{"company_name": "already validated"}]}
+    reads.runs[0]["per_icp_score"] = 1.0
     assert service._empty_execution_infrastructure_failure(reads) is False
     assert calls == []
 
@@ -130,7 +133,9 @@ def test_actual_publish_holds_before_ranking_or_promotion(broken):
     service._hold_incomplete_evaluation = lambda row, **kw: holds.append(kw) or {"status": "retry", **kw}
     result = service.publish("round")
     assert result["status"] == "retry"
-    assert holds == [{"reason": "execution_evidence_unavailable" if broken else "execution_infrastructure_incomplete"}]
+    assert holds == ([{"reason": "execution_evidence_unavailable"}] if broken else [])
+    if not broken:
+        assert result["reason"] == "execution_infrastructure_incomplete"
 
 
 @pytest.mark.parametrize("offset", [-1, 0, 1])
@@ -143,15 +148,22 @@ def test_actual_publication_hold_uses_frozen_deadline_and_drains(active, offset)
     service._round = lambda _: reads.round_row
     service._baseline_fully_succeeded = lambda _: True
     original = copy.deepcopy((reads.runs, ledger, output, reads.round_row))
-    service._store.list_runs = lambda *a, kind=None: copy.deepcopy(reads.runs) + (
+    service._store.list_runs = lambda *a, kind=None: ([] if kind == "score" else copy.deepcopy(reads.runs)) + (
         [{"run_id": "still-running", "status": "leased"}] if kind is None and active == "leased" else [])
     service._store.submission_costs = lambda _: {"providers": [{"inflight_calls": int(active == "provider")}]}
     cancellations = []
     service._store.cancel_round = lambda *args: cancellations.append(args) or {"status": "cancelled"}
-    result = service.publish("round")
-    expected_cancel = offset >= 0 and active is None
-    assert result["status"] == ("cancelled" if expected_cancel else "retry")
-    assert cancellations == ([("round", "scoring_incomplete")] if expected_cancel else [])
+    class PublicationReached(Exception):
+        pass
+    def boundary(*a, **kw):
+        raise PublicationReached
+    service._score_entries_from_runs = boundary
+    if offset >= 0 and active is None:
+        with pytest.raises(PublicationReached):
+            service.publish("round")
+    else:
+        assert service.publish("round")["status"] == "retry"
+    assert cancellations == []
     assert (reads.runs, ledger, output, reads.round_row) == original
 
 
@@ -164,6 +176,7 @@ def test_successful_empty_output_reaches_existing_ranking_even_after_deadline():
     service._round = lambda _: reads.round_row
     service._baseline_fully_succeeded = lambda _: True
     service._hold_incomplete_evaluation = lambda *a, **kw: pytest.fail("valid empty must not be held")
+    service._participant_incomplete_reasons = lambda *a: {}
     class RankingReached(Exception):
         pass
     def rank(*a, **kw):

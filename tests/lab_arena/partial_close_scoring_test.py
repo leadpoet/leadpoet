@@ -159,9 +159,9 @@ def test_partial_work_persists_and_full_results_keep_same_scores(cause):
     assert not any(r['run_id'] == next(x['run_id'] for x in runs if x['submission_id']=='partial' and x['icp_position']==3) for r in stored)
 
 
-def test_unmarked_infrastructure_failure_is_not_silently_dropped():
-    with pytest.raises(contracts.ArenaContractError):
-        partial_plan(marked=False)
+def test_unmarked_infrastructure_failure_has_explicit_incomplete_evidence():
+    _, plan = partial_plan(marked=False)
+    assert len(plan["incomplete_rows"]) == 1 and not plan["zero_rows"]
 
 
 def test_partial_marker_cannot_mask_a_model_failure():

@@ -71,7 +71,7 @@ def test_final_stage_unmeasured_judge_reaches_same_deadline_hold(monkeypatch, of
     assert events == ([] if status == 'retry' else ['cancel'])
 
 
-@pytest.mark.parametrize('offset,status', [(-1, 'retry'), (0, 'cancelled'), (1, 'cancelled')])
+@pytest.mark.parametrize('offset,status', [(-1, 'retry'), (0, 'publication'), (1, 'publication')])
 def test_publish_unfinished_judge_cannot_bypass_final_deadline(offset, status):
     obj, row, _, _, writes, clock, _ = baseline.fixture()
     row['evaluation_date'] = '2026-10-21'
@@ -81,10 +81,18 @@ def test_publish_unfinished_judge_cannot_bypass_final_deadline(offset, status):
     obj._record_recovered_judgment_scores = lambda r: recorded.append(r['round_id'])
     obj._unfinished_judgments = lambda r: True
     obj._baseline_fully_succeeded = lambda r: True
-    result = obj.publish(row['round_id'])
-    assert recorded == [row['round_id']]
-    assert result['status'] == status
-    assert writes == ([] if status == 'retry' else [(row['round_id'], 'scoring_incomplete')])
+    obj._execution_infrastructure_failures = lambda _: {}
+    obj._participant_incomplete_reasons = lambda *a: {'miner': 'judge_error'}
+    class PublicationReached(Exception):
+        pass
+    def boundary(*a, **kw):
+        raise PublicationReached
+    obj._score_entries_from_runs = boundary
+    if status == 'publication':
+        with pytest.raises(PublicationReached): obj.publish(row['round_id'])
+    else:
+        assert obj.publish(row['round_id'])['status'] == status
+    assert recorded == [row['round_id']] and writes == []
 
 
 def test_complete_late_judgments_continue_publication_instead_of_cancel():

@@ -1,3 +1,14 @@
+## Scoped production authorization: duplicate intents and refused source reads
+
+On 2026-10-22 the user authorized the tested general fixes for duplicate intent
+criteria in future ICP creation and bounded recovery of typed public-source
+request refusals. This includes focused positive/negative tests, limited paid
+reward-disabled production replay, safe push/merge, scorer-image publication,
+and canonical deployment. Preserve frozen rounds, accepted work, qualification
+standards, score arithmetic, provider-account failures, budgets, recovery bounds,
+credentials, rewards and concurrent work. No semantic prompt rewrite or historical
+rescore is authorized by this scope. Authority ends after live verification.
+
 ## Scoped production authorization: October 22 ZDR failure message
 
 On 2026-10-22 the user authorized a narrow, rigorously tested dashboard fix

@@ -623,14 +623,30 @@ def intent_max_age_days_for_category(category: str) -> int:
     return INTENT_CATEGORY_MAX_AGE_DAYS.get(str(category or "").strip().upper(), 365)
 
 
+def _intent_signal_key(signal: str) -> str:
+    """Ignore one sentence-ending period, without rewriting identifiers."""
+    if signal.endswith(".") and signal.rsplit(None, 1)[-1][:-1].isalpha():
+        return signal[:-1]
+    return signal
+
+
 def _normalize_intent_signals(value: Any) -> list[str]:
     if isinstance(value, str):
         signals = [value]
     elif isinstance(value, list):
-        signals = [str(item) for item in value]
+        signals = [item for item in value if isinstance(item, str)]
     else:
         signals = []
-    cleaned = [" ".join(signal.strip().split()) for signal in signals if signal.strip()]
+    cleaned = []
+    seen = set()
+    for signal in signals:
+        signal = " ".join(signal.split())
+        if not signal:
+            continue
+        key = _intent_signal_key(signal)
+        if key not in seen:
+            seen.add(key)
+            cleaned.append(signal)
     return cleaned[:5]
 
 
@@ -842,9 +858,11 @@ def canonicalize_generated_icp(
     )
 
     intent_signals = _normalize_intent_signals(normalized.get("intent_signals"))
-    explicit_required = " ".join(str(normalized.get("intent_signal") or "").strip().split())
-    if explicit_required and explicit_required not in intent_signals:
-        intent_signals.insert(0, explicit_required)
+    explicit_required = normalized.get("intent_signal")
+    if isinstance(explicit_required, str) and explicit_required.strip():
+        # The explicit primary owns its wording and position. Remove aliases
+        # before rendering/storing the bonus contract for this new ICP.
+        intent_signals = _normalize_intent_signals([explicit_required, *intent_signals])
     if not intent_signals:
         intent_signals = random.sample(INTENT_SIGNALS, random.randint(1, 2))
 

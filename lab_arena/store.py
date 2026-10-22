@@ -368,6 +368,8 @@ _RUNTIME_JSON_COLUMNS = {
     "publication_doc:lab_arena_competition_publication_v1":
         "public.lab_arena_competition_publication_v1(lab_arena_rounds) AS publication_doc",
     "failure_reason:result_doc->failure_diagnostic->>reason": "result_doc #>> '{failure_diagnostic,reason}' AS failure_reason",
+    "native_failure_reason:lab_arena_public_execution_failure_reason_v1":
+        "public.lab_arena_public_execution_failure_reason_v1(lab_arena_runs) AS native_failure_reason",
     "closure_failure_reason:terminal_doc->>failure_reason": "terminal_doc ->> 'failure_reason' AS closure_failure_reason",
     "source_commit:result_doc->resource_summary->>validator_source_commit": "result_doc #>> '{resource_summary,validator_source_commit}' AS source_commit",
     "source_dirty:result_doc->resource_summary->>validator_source_dirty": "result_doc #>> '{resource_summary,validator_source_dirty}' AS source_dirty",

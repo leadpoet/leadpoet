@@ -1,3 +1,16 @@
+## Scoped production authorization: October 22 ZDR failure message
+
+On 2026-10-22 the user authorized a narrow, rigorously tested dashboard fix
+for confirmed OpenRouter Zero Data Retention route failures. This includes
+protected read-only evidence, a read-only computed diagnostic using existing
+canonical provider proof, exact committed migration if needed, focused tests,
+safe push/merge, normal deployment and live API/browser verification. Preserve
+scoring, provider accounting, retries, qualification, privacy, disclosure,
+accepted work and concurrent changes. Expose only a fixed allowlisted reason;
+keep unrelated or unproved errors generic. Do not rerun paid work or change
+historical results. Authority ends after deployment and visible verification.
+Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: restore recorded October 21 results
 
 On 2026-10-21 the user replaced the uniform rejudge outcome with immediate

@@ -124,6 +124,13 @@ _NON_SUPPLIER_ACTIVITY_ROLES = frozenset({
 INDUSTRY_RELATIONSHIP_UNPROVEN_REASON = (
     "source did not prove the company's relationship to the activity"
 )
+MISSING_INDUSTRY_OBSERVATION_REASON = (
+    "industry finding requires a nonempty source-grounded observed_industry; "
+    "the exact quote and company binding were not rejected"
+)
+REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON = (
+    "supporting quote was not company-bound in a loaded source"
+)
 _IDENTITY_LINK_CONTEXT_MARKER = (
     "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]]"
 )
@@ -645,7 +652,16 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "observed_value": {"type": ["string", "integer", "null"]},
                                 "observed_country": {"type": "string"},
                                 "observed_state": {"type": "string"},
-                                "observed_industry": {"type": "string"},
+                                "observed_industry": {
+                                    "type": "string",
+                                    "description": (
+                                        "For industry VERIFIED or CONTRADICTED, provide "
+                                        "a nonempty source-grounded industry or activity "
+                                        "description. The source need not use a taxonomy "
+                                        "label. Do not copy a requested or prior label "
+                                        "unless the source supports it."
+                                    ),
+                                },
                                 "observed_subindustry": {"type": "string"},
                                 "activity_role": {
                                     "type": "string",
@@ -3250,7 +3266,6 @@ def _validated_findings(
                     "supplier_operator", "customer_user", "internal_function",
                     "third_party", "unresolved",
                 }
-                or not finding["observed_industry"]
                 or (
                     status == "VERIFIED"
                     and finding["activity_role"] != "supplier_operator"
@@ -3266,6 +3281,13 @@ def _validated_findings(
                     evidence_url="",
                     evidence_quote="",
                     reason=INDUSTRY_RELATIONSHIP_UNPROVEN_REASON,
+                )
+            elif target == "industry" and not finding["observed_industry"]:
+                finding.update(
+                    status="UNPROVEN",
+                    evidence_url="",
+                    evidence_quote="",
+                    reason=MISSING_INDUSTRY_OBSERVATION_REASON,
                 )
             elif target == "required_attribute" and finding["activity_role"] not in {
                 "supplier_operator", "customer_user", "internal_function",
@@ -3405,7 +3427,7 @@ def _validated_findings(
                     status="UNPROVEN",
                     evidence_url="",
                     evidence_quote="",
-                    reason="supporting quote was not company-bound in a loaded source",
+                    reason=REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
                 )
             else:
                 finding["supporting_evidence"] = validated_support
@@ -4904,6 +4926,12 @@ async def investigate_company_evidence(
                         and item.get("reason") == PRIVATE_EQUITY_SUPPORT_QUOTE_REJECTION_REASON
                         for item in rejected
                     )
+                    required_attribute_support_repair = any(
+                        item.get("target") == "required_attribute"
+                        and item.get("reason")
+                        == REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
+                        for item in rejected
+                    )
                     force_stage_search = bool(
                         not scoped_correction_active
                         and rejected
@@ -5204,20 +5232,48 @@ async def investigate_company_evidence(
                                     else ""
                                 )
                                 + (
-                                    "Reassess the exact required attribute against all "
-                                    "loaded company-bound evidence, including the own "
-                                    "product/activity quote used for industry. Rejection "
-                                    "of the submitted attribute citation does not reject "
-                                    "independent evidence. Reuse the industry quote only "
-                                    "if its facts prove the complete attribute; preserve "
-                                    "every required qualifier and condition. Do not "
-                                    "transfer a subsidiary's facts to its parent or "
-                                    "infer attribute proof from an industry status. "
+                                    "The industry finding is missing observed_industry. "
+                                    "Its exact quote, company binding, and activity role "
+                                    "passed validation. Supply a nonempty source-grounded "
+                                    "industry or activity description; the source need "
+                                    "not state a taxonomy label. You may reuse the same "
+                                    "fetched URL and exact quote while correcting this "
+                                    "field. Do not invent or copy a requested or prior "
+                                    "label without source support. "
                                     if any(
-                                        item.get("target") == "required_attribute"
+                                        item.get("reason")
+                                        == MISSING_INDUSTRY_OBSERVATION_REASON
                                         for item in rejected
                                     )
                                     else ""
+                                )
+                                + (
+                                    "The required-attribute supporting pair failed "
+                                    "validation; the primary citation passed. You may "
+                                    "reuse that primary URL and exact quote. Omit support "
+                                    "only if the primary facts independently prove the "
+                                    "whole criterion; revise observed-value and reason "
+                                    "details that depended on omitted support. Otherwise "
+                                    "repair the required supporting proof or return "
+                                    "UNPROVEN. Do not infer proof of the whole criterion "
+                                    "from citation validation. "
+                                    if required_attribute_support_repair
+                                    else (
+                                        "Reassess the exact required attribute against all "
+                                        "loaded company-bound evidence, including the own "
+                                        "product/activity quote used for industry. Rejection "
+                                        "of the submitted attribute citation does not reject "
+                                        "independent evidence. Reuse the industry quote only "
+                                        "if its facts prove the complete attribute; preserve "
+                                        "every required qualifier and condition. Do not "
+                                        "transfer a subsidiary's facts to its parent or "
+                                        "infer attribute proof from an industry status. "
+                                        if any(
+                                            item.get("target") == "required_attribute"
+                                            for item in rejected
+                                        )
+                                        else ""
+                                    )
                                 )
                                 + (
                                     "The supporting classification URL/quote was not present "
@@ -5230,7 +5286,15 @@ async def investigate_company_evidence(
                                     "minority investments and funding alone remain insufficient. "
                                     "Do not repeat the invalid supporting pair unchanged. "
                                     if private_equity_support_repair
-                                    else "Never repeat a rejected quote. "
+                                    else (
+                                        "Do not repeat an unchanged rejected finding. "
+                                        if required_attribute_support_repair or any(
+                                            item.get("reason")
+                                            == MISSING_INDUSTRY_OBSERVATION_REASON
+                                            for item in rejected
+                                        )
+                                        else "Never repeat a rejected quote. "
+                                    )
                                 )
                                 + "Use one exact continuous "
                                 "company-bound span from a fetched page; do not paraphrase, "

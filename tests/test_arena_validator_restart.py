@@ -452,3 +452,146 @@ cat "$ROLLBACK/candidate.unit"
     assert "ExecStartPre=/opt/venv/bin/python3 scripts/run_arena_validator.py --check-only" in unit
     assert "ExecStart=/opt/venv/bin/python3 scripts/run_arena_validator.py" in unit
     assert "Environment=/etc/leadpoet/arena-validator.env" in unit
+
+
+# Interpreter selection reads the real canonical unit format.
+TEXT = (ROOT / "validator_restart.sh").read_text()
+SELECTOR = TEXT[TEXT.index("select_validator_python() {"):TEXT.index("\ncleanup() {")]
+TEMPLATE = (ROOT / "deploy/leadpoet-arena-validator.service").read_text()
+PATCHED = "/home/ec2-user/verified-validator/bin/python3"
+UNSET = object()
+
+
+def _select_interpreter(tmp_path, unit=TEMPLATE, override=UNSET, metadata=None, show_exit=0, link=None):
+    unit_path = tmp_path / "validator.service"
+    if unit is not None:
+        unit_path.write_text(unit)
+    if link is not None:
+        unit_path.symlink_to(link)
+    if metadata is None:
+        metadata = ("LoadState=loaded\nFragmentPath=" + str(unit_path)
+                    + "\nDropInPaths=\nNeedDaemonReload=no\n")
+    show = tmp_path / "systemctl"
+    show.write_text("#!/bin/sh\n"
+                    '[ "$#" = 4 ] && [ "$1" = show ] && [ "$2" = leadpoet-arena-validator.service ] '
+                    '&& [ "$3" = --all ] && [ "$4" = --property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload ] || exit 29\n'
+                    + "printf '%s' " + shlex.quote(metadata) + "\nexit " + str(show_exit) + "\n")
+    show.chmod(0o755)
+    setting = "unset VALIDATOR_PYTHON_BIN" if override is UNSET else (
+        "VALIDATOR_PYTHON_BIN=" + shlex.quote(override))
+    program = f"""set -euo pipefail
+fail() {{ echo "$*" >&2; exit 1; }}
+UNIT_PATH={shlex.quote(str(unit_path))}
+SERVICE=leadpoet-arena-validator.service
+{setting}
+{SELECTOR}
+select_validator_python
+[[ "$PYTHON" =~ ^/[A-Za-z0-9_./-]+$ ]] && [ "$PYTHON" != / ] || fail invalid-path
+echo "$PYTHON"
+echo SELECTION_PASSED
+"""
+    return subprocess.run(["bash", "-c", program], text=True, capture_output=True,
+                          env={"PATH": str(tmp_path) + ":/usr/bin:/bin"})
+
+
+def _installed_unit():
+    return TEMPLATE.replace("=/usr/bin/python3 ", "=" + PATCHED + " ")
+
+
+def test_installed_canonical_interpreter_is_reused(tmp_path):
+    result = _select_interpreter(tmp_path, _installed_unit())
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [PATCHED, "SELECTION_PASSED"]
+
+
+def test_canonical_command_whitespace_and_comments_are_accepted(tmp_path):
+    text = _installed_unit().replace("ExecStart=", "  ExecStart=").replace("--environment-file ", "--environment-file\t")
+    result = _select_interpreter(tmp_path, "# comment\n" + text)
+    assert result.returncode == 0
+    assert result.stdout.splitlines()[0] == PATCHED
+
+
+def test_systemd_inspection_failure_cannot_fall_back(tmp_path):
+    result = _select_interpreter(tmp_path, None, show_exit=4)
+    assert result.returncode != 0
+    assert "SELECTION_PASSED" not in result.stdout
+
+
+@pytest.mark.parametrize("exists", [True, False])
+def test_unit_symlinks_are_rejected(tmp_path, exists):
+    target = tmp_path / "target.service"
+    if exists:
+        target.write_text(_installed_unit())
+    result = _select_interpreter(tmp_path, None, link=target)
+    assert result.returncode != 0
+    assert "SELECTION_PASSED" not in result.stdout
+
+
+def test_explicit_override_precedes_even_ambiguous_installed_unit(tmp_path):
+    result = _select_interpreter(tmp_path, "not a unit", override="/operator/venv/bin/python3",
+                    metadata="must not be inspected")
+    assert result.returncode == 0
+    assert result.stdout.splitlines()[0] == "/operator/venv/bin/python3"
+
+
+@pytest.mark.parametrize("override", ["", "python3", "/path with spaces/python3", "/"])
+def test_invalid_explicit_override_cannot_fall_back(tmp_path, override):
+    result = _select_interpreter(tmp_path, _installed_unit(), override=override)
+    assert result.returncode != 0
+    assert "SELECTION_PASSED" not in result.stdout
+
+
+def test_initial_install_only_uses_old_default_when_unit_not_found(tmp_path):
+    metadata = "LoadState=not-found\nFragmentPath=\nDropInPaths=\nNeedDaemonReload=no\n"
+    result = _select_interpreter(tmp_path, None, metadata=metadata)
+    assert result.returncode == 0
+    assert result.stdout.splitlines()[0] == "/home/ec2-user/arena-validator-venv311/bin/python3"
+
+
+@pytest.mark.parametrize("change", [
+    lambda text: text.replace("ExecStart=", "ExecStart=/different/python3 ignored\nExecStart="),
+    lambda text: text.replace("ExecStartPre=", "ExecStartPre=\nExecStartPre="),
+    lambda text: text.replace("ExecStartPre=" + PATCHED, "ExecStartPre=/different/python3"),
+    lambda text: text.replace("ExecStart=" + PATCHED, "ExecStart=/usr/bin/env python3"),
+    lambda text: text.replace("ExecStart=" + PATCHED, 'ExecStart="' + PATCHED + '"'),
+    lambda text: text.replace("ExecStart=" + PATCHED, "ExecStart=$PYTHON"),
+    lambda text: text.replace("ExecStart=" + PATCHED, "ExecStart=%h/venv/bin/python3"),
+    lambda text: text.replace("ExecStart=", "ExecStart ="),
+    lambda text: text.replace("ExecStart=", "ExecStart=\x00"),
+    lambda text: text.replace("Environment=PYTHONDONTWRITEBYTECODE=1", "Environment=PYTHONDONTWRITEBYTECODE=1 \\"),
+    lambda text: ".include /other/unit\n" + text,
+    lambda text: text.replace(" --check-only", " --check-only --extra"),
+    lambda text: text.replace("[Service]", "[Unexpected]"),
+    lambda text: text.replace("ExecStartPre=", "#ExecStartPre="),
+    lambda text: text.replace("--environment-file /home", "--environment-file /different", 1),
+])
+def test_ambiguous_or_unsupported_unit_fails_before_followons(tmp_path, change):
+    result = _select_interpreter(tmp_path, change(_installed_unit()))
+    assert result.returncode != 0
+    assert "SELECTION_PASSED" not in result.stdout
+
+
+@pytest.mark.parametrize("metadata", [
+    "LoadState=loaded\nFragmentPath=/other/unit\nDropInPaths=\nNeedDaemonReload=no\n",
+    "LoadState=loaded\nFragmentPath=UNIT\nDropInPaths=/override.conf\nNeedDaemonReload=no\n",
+    "LoadState=loaded\nFragmentPath=UNIT\nDropInPaths=\nNeedDaemonReload=yes\n",
+    "LoadState=loaded\nLoadState=loaded\nFragmentPath=UNIT\nDropInPaths=\nNeedDaemonReload=no\n",
+    "LoadState=loaded\nFragmentPath=UNIT\nNeedDaemonReload=no\n",
+])
+def test_effective_unit_ambiguity_is_rejected(tmp_path, metadata):
+    result = _select_interpreter(tmp_path, _installed_unit(), metadata=metadata.replace("UNIT", str(tmp_path / "validator.service")))
+    assert result.returncode != 0
+    assert "SELECTION_PASSED" not in result.stdout
+
+
+def test_missing_file_but_loaded_unit_is_not_initial_install(tmp_path):
+    result = _select_interpreter(tmp_path, None)
+    assert result.returncode != 0
+    assert "SELECTION_PASSED" not in result.stdout
+
+
+def test_selection_runs_under_lock_before_existing_trust_gate_and_stop():
+    selection = TEXT.index("\nselect_validator_python\n")
+    assert TEXT.index('flock -n 9') < selection
+    assert selection < TEXT.index('"$PYTHON" -I -B "$RELEASE/scripts/check_validator_python_security.py"')
+    assert selection < TEXT.index('timeout "$STOP_TIMEOUT" sudo systemctl stop "$SERVICE"')

@@ -11,7 +11,7 @@ ENV_FILE="${VALIDATOR_ENV_FILE:-/home/ec2-user/.config/leadpoet/arena-validator.
 SERVICE_ENV="${VALIDATOR_SERVICE_ENV:-/home/ec2-user/.config/leadpoet/arena-validator-service.env}"
 SERVICE="${VALIDATOR_SERVICE_NAME:-leadpoet-arena-validator.service}"
 UNIT_PATH="${VALIDATOR_SERVICE_UNIT_PATH:-/etc/systemd/system/$SERVICE}"
-PYTHON="${VALIDATOR_PYTHON_BIN:-/home/ec2-user/arena-validator-venv311/bin/python3}"
+PYTHON=""
 # Leave room for supervised retries when the public chain RPC is rate limited.
 # Every retry still passes the full readiness check and ten-second PID stability.
 READY_TIMEOUT="${VALIDATOR_READY_TIMEOUT_SECONDS:-300}"
@@ -28,6 +28,69 @@ PROMOTED=0
 ACTIVATED=0
 PREVIOUS_CURRENT_TARGET=""
 fail() { echo "ERROR: $*" >&2; exit 1; }
+
+select_validator_python() {
+  if [ "${VALIDATOR_PYTHON_BIN+x}" = x ]; then
+    PYTHON="$VALIDATOR_PYTHON_BIN"
+    return
+  fi
+  local metadata key value seen="|" count=0 load_state="" fragment="" drop_ins="" reload=""
+  metadata="$(systemctl show "$SERVICE" --all --property=LoadState,FragmentPath,DropInPaths,NeedDaemonReload)" \
+    || fail "cannot inspect installed validator unit"
+  while IFS='=' read -r key value; do
+    [[ "$seen" != *"|$key|"* ]] || fail "ambiguous installed validator unit metadata"
+    seen+="$key|"
+    count=$((count + 1))
+    case "$key" in
+      LoadState) load_state="$value" ;;
+      FragmentPath) fragment="$value" ;;
+      DropInPaths) drop_ins="$value" ;;
+      NeedDaemonReload) reload="$value" ;;
+      *) fail "unexpected installed validator unit metadata" ;;
+    esac
+  done <<< "$metadata"
+  [ "$count" -eq 4 ] && [ -z "$drop_ins" ] && [ "$reload" = no ] \
+    || fail "installed validator unit has overrides or requires reload"
+  if [ ! -e "$UNIT_PATH" ] && [ ! -L "$UNIT_PATH" ]; then
+    [ "$load_state" = not-found ] && [ -z "$fragment" ] \
+      || fail "missing validator unit is still installed in systemd"
+    PYTHON=/home/ec2-user/arena-validator-venv311/bin/python3
+    return
+  fi
+  [ -f "$UNIT_PATH" ] && [ ! -L "$UNIT_PATH" ] && [ -r "$UNIT_PATH" ] \
+    || fail "installed validator unit must be a readable regular file"
+  [ "$load_state" = loaded ] && [ "$fragment" = "$UNIT_PATH" ] \
+    || fail "installed validator unit differs from systemd fragment"
+  local text_status=0
+  LC_ALL=C grep -aq '[^[:print:][:space:]]' "$UNIT_PATH" || text_status=$?
+  [ "$text_status" -eq 1 ] || fail "installed validator unit must be plain text"
+  local section="" line start="" pre="" start_count=0 pre_count=0 environment_file
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      ''|\#*|\;*) continue ;;
+      *\\*|.include*) fail "unsupported validator unit continuation or include" ;;
+      \[*\]) section="$line" ;;
+      ExecStartPre=*)
+        [ "$section" = '[Service]' ] || fail "validator start command outside Service section"
+        pre_count=$((pre_count + 1)); pre="${line#ExecStartPre=}" ;;
+      ExecStart=*)
+        [ "$section" = '[Service]' ] || fail "validator start command outside Service section"
+        start_count=$((start_count + 1)); start="${line#ExecStart=}" ;;
+      ExecStart*) fail "unsupported installed validator start command" ;;
+    esac
+  done < "$UNIT_PATH"
+  [ "$start_count" -eq 1 ] && [ "$pre_count" -eq 1 ] \
+    || fail "installed validator unit must have one start and one preflight command"
+  local start_pattern='^(/[A-Za-z0-9_./-]+)[[:space:]]+scripts/run_arena_validator[.]py[[:space:]]+--environment-file[[:space:]]+(/[A-Za-z0-9_./-]+)$'
+  local pre_pattern='^(/[A-Za-z0-9_./-]+)[[:space:]]+scripts/run_arena_validator[.]py[[:space:]]+--environment-file[[:space:]]+(/[A-Za-z0-9_./-]+)[[:space:]]+--check-only$'
+  [[ "$start" =~ $start_pattern ]] || fail "unsupported installed validator start command"
+  PYTHON="${BASH_REMATCH[1]}"; environment_file="${BASH_REMATCH[2]}"
+  [[ "$pre" =~ $pre_pattern ]] || fail "unsupported installed validator preflight command"
+  [ "${BASH_REMATCH[1]}" = "$PYTHON" ] && [ "${BASH_REMATCH[2]}" = "$environment_file" ] \
+    || fail "installed validator start and preflight commands differ"
+}
 
 cleanup() {
   status=$?
@@ -72,15 +135,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for path in "$SOURCE_ROOT" "$RELEASE_ROOT" "$CURRENT_LINK" "$ENV_FILE" "$SERVICE_ENV" "$UNIT_PATH" "$LOCK_FILE" "$PYTHON"; do
+for path in "$SOURCE_ROOT" "$RELEASE_ROOT" "$CURRENT_LINK" "$ENV_FILE" "$SERVICE_ENV" "$UNIT_PATH" "$LOCK_FILE"; do
   [[ "$path" =~ ^/[A-Za-z0-9_./-]+$ ]] && [ "$path" != / ] || fail "restart paths must be explicit absolute paths"
 done
 [[ "$SERVICE" =~ ^[A-Za-z0-9_.-]+\.service$ ]] || fail "invalid service name"
 [[ "$READY_TIMEOUT" =~ ^[1-9][0-9]*$ ]] && [[ "$STOP_TIMEOUT" =~ ^[1-9][0-9]*$ ]] || fail "invalid restart timeout"
-[ -x "$PYTHON" ] || fail "validator interpreter is unavailable"
 mkdir -p "$(dirname "$LOCK_FILE")" "$RELEASE_ROOT"
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another validator restart owns the controller lock"
+select_validator_python
+[[ "$PYTHON" =~ ^/[A-Za-z0-9_./-]+$ ]] && [ "$PYTHON" != / ] \
+  || fail "validator interpreter must be an explicit absolute path"
+[ -x "$PYTHON" ] || fail "validator interpreter is unavailable"
 cd "$SOURCE_ROOT"
 git rev-parse --git-dir >/dev/null || fail "installed validator checkout is unavailable"
 git diff --quiet && git diff --cached --quiet || fail "installed checkout has tracked changes"

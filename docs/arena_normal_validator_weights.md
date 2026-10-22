@@ -518,11 +518,14 @@ service. It then switches the service and retains the old release and private
 configuration for rollback. It does not export an enclave key or create a new
 hotkey. Use an existing owner-held wallet for the transition.
 
-The primary controller defaults to
-`/home/ec2-user/arena-validator-venv311/bin/python3`. Install the committed
-`requirements.txt` in that dedicated environment before restarting, or set
-`VALIDATOR_PYTHON_BIN` to an already prepared compatible environment. Keep the
-old environment intact so rollback can still start the previous service.
+Set `VALIDATOR_PYTHON_BIN` to select an already prepared compatible environment.
+Without that override, the controller preserves the installed service unit's
+explicit interpreter. It requires matching canonical start/preflight commands,
+the exact loaded unit file, no drop-ins and no pending daemon reload; ambiguous
+units fail before shutdown. Only a fresh installation with no unit file or
+loaded unit defaults to `/home/ec2-user/arena-validator-venv311/bin/python3`.
+Install the committed `requirements.txt` in the selected environment before
+restarting. Keep old environments intact for rollback and other live users.
 The controller checks the selected interpreter before wallet/chain readiness
 and before stopping the service. It requires stable pip 26.2.2 or newer,
 runtime certifi 2026.10.19 or newer, and pip's own patched certifi bundle at

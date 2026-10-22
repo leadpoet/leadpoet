@@ -49,6 +49,7 @@ def test_three_exclusions_remain_visible_despite_old_zero_scores(status):
     assert len(by_id) == 6 and "never-public" not in by_id
     for item in excluded:
         assert_blocked(by_id[item["submission_id"]])
+        assert by_id[item["submission_id"]]["evaluation"]["failure_reasons"] == ["openrouter_zdr_route_unavailable"]
     if status == "published":
         assert by_id["champion"]["is_champion"] is True
     assert "private-native-receipt" not in json.dumps(result)
@@ -73,6 +74,7 @@ def test_history_paginates_excluded_entrants_and_preserves_real_zero():
     for entry in results:
         if entry["submission_id"].endswith("blocked"):
             assert_blocked(entry)
+            assert entry["evaluation"]["failure_reasons"] == ["openrouter_zdr_route_unavailable"]
     assert next(item for item in results if item["submission_id"] == "day1-miner0")["final_score"] == 0
     filtered = public_dashboard.history_snapshot(service, hotkey="Blocked")
     assert len(filtered["submissions"]) == 3
@@ -137,11 +139,14 @@ def restoration_history(round_id):
                         "private_actor": "must-not-leak"}}]}
 
 
-def test_restored_original_scores_keep_excluded_entrants_visible():
+@pytest.mark.parametrize("reason", [None, "private-provider-prose", "openrouter_zdr_route_unavailable"])
+def test_restored_original_scores_keep_excluded_entrants_visible(reason):
     row = _row("published")
     row.update(scoring_generation_floor=0, stage_generation=11)
     service, transport = _service(row)
     evidence = restoration_history(row["round_id"])
+    if reason is not None:
+        evidence["revisions"][0]["restoration"]["excluded_participants"][0]["reason"] = reason
     service._store.scoring_policy_history = lambda _: evidence
     for item in evidence["revisions"][0]["restoration"]["excluded_participants"]:
         transport.submissions.append({**item, "status": "frozen", "source_ref": "private-source"})
@@ -151,6 +156,11 @@ def test_restored_original_scores_keep_excluded_entrants_visible():
         result = public_dashboard.submissions_snapshot(service, row["round_id"])
     by_id = {item["submission_id"]: item for item in result["submissions"]}
     assert_blocked(by_id["blocked"])
+    if reason == "openrouter_zdr_route_unavailable":
+        assert by_id["blocked"]["evaluation"]["failure_reasons"] == [reason]
+    else:
+        assert "failure_reasons" not in by_id["blocked"]["evaluation"]
+    assert "private-provider-prose" not in json.dumps(result)
     incomplete = by_id["unfinished"]
     assert incomplete["status"] == "evaluation_incomplete"
     assert incomplete["score_status"] == "not_evaluated"
@@ -160,11 +170,15 @@ def test_restored_original_scores_keep_excluded_entrants_visible():
     assert "must-not-leak" not in json.dumps(result)
 
 
-def test_restored_history_pagination_keeps_incomplete_and_provider_causes_separate():
+@pytest.mark.parametrize("reason", [None, "private-provider-prose", "openrouter_zdr_route_unavailable"])
+def test_restored_history_pagination_keeps_incomplete_and_provider_causes_separate(reason):
     service, _calls, rows = fixture(1)
     row = rows[0]
     row.update(scoring_generation_floor=0, stage_generation=11)
-    service._store.scoring_policy_history = lambda _: restoration_history(row["round_id"])
+    evidence = restoration_history(row["round_id"])
+    if reason is not None:
+        evidence["revisions"][0]["restoration"]["excluded_participants"][0]["reason"] = reason
+    service._store.scoring_policy_history = lambda _: evidence
     entries, cursor = [], None
     while True:
         result = public_dashboard.history_snapshot(service, cursor=cursor, limit=2)
@@ -175,6 +189,11 @@ def test_restored_history_pagination_keeps_incomplete_and_provider_causes_separa
     assert len(entries) == 5 and len({item["submission_id"] for item in entries}) == 5
     by_id = {item["submission_id"]: item for item in entries}
     assert_blocked(by_id["blocked"])
+    if reason == "openrouter_zdr_route_unavailable":
+        assert by_id["blocked"]["evaluation"]["failure_reasons"] == [reason]
+    else:
+        assert "failure_reasons" not in by_id["blocked"]["evaluation"]
+    assert "private-provider-prose" not in json.dumps(entries)
     assert by_id["unfinished"]["final_score"] is None
     assert by_id["unfinished"]["evaluation"]["state"] == "evaluation_incomplete"
     assert by_id["day1-miner0"]["final_score"] == 0

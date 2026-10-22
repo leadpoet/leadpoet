@@ -1142,3 +1142,32 @@ def test_public_review_does_not_promise_retry_after_deadline():
     }, round_row={'status': 'open', 'configuration_doc': {'schedule': {
         'benchmark_deadline': '2026-09-11T02:01:00Z'}}}, now=_now())
     assert view['retryable'] is False
+
+
+@pytest.mark.parametrize('kind,cause,native,runner_reason,expected', [
+    ('execute', 'provider_error', 'openrouter_zdr_route_unavailable', None, 'openrouter_zdr_route_unavailable'),
+    ('execute', 'stage_closed', 'openrouter_zdr_route_unavailable', None, 'openrouter_zdr_route_unavailable'),
+    ('execute', 'provider_error', None, 'openrouter_zdr_route_unavailable', 'provider'),
+    ('score', 'provider_error', 'openrouter_zdr_route_unavailable', None, 'provider'),
+    ('execute', 'credential_error', 'openrouter_zdr_route_unavailable', None, 'provider_credentials'),
+    ('execute', 'provider_error', 'private provider prose', None, 'provider'),
+])
+def test_evaluation_native_privacy_route_reason_is_strictly_allowlisted(kind, cause, native, runner_reason, expected):
+    run = dict(kind=kind, terminal_cause=cause, native_failure_reason=native, failure_reason=runner_reason)
+    assert public_dashboard._evaluation_failure_reason(run) == expected
+
+
+def test_published_native_failure_reason_survives_not_evaluated_projection():
+    item = dict(evaluation_reason='openrouter_zdr_route_unavailable',
+                evaluation={'state': 'failed', 'counts': {'failed': 1}, 'validators': []})
+    public_dashboard._mark_recovery_excluded(item, 'provider_blocked')
+    assert item['evaluation']['failure_reasons'] == ['openrouter_zdr_route_unavailable']
+    assert item['evaluation']['state'] == 'provider_blocked'
+    assert item['final_score'] is None
+    assert item['score_status'] == 'not_evaluated'
+
+
+def test_provider_blocked_status_does_not_invent_native_failure_proof():
+    item = {'evaluation': {'state': 'failed'}}
+    public_dashboard._mark_recovery_excluded(item, 'provider_blocked')
+    assert 'failure_reasons' not in item['evaluation']

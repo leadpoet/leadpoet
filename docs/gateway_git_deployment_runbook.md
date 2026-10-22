@@ -6,6 +6,23 @@ with its local hotkey.
 
 ## Release
 
+The gateway dependency preflight requires stable pip 26.2.2 or newer with a
+vendored certifi 2026.10.19 or newer bundle inside the pip package. Otherwise it
+bootstraps pip from the PSF's SHA256-pinned 26.2.2 wheel before it downloads host
+dependencies, including on a host without pip. It uses the selected gateway
+interpreter and its existing virtualenv or user install scope. A failed
+download, TLS check, checksum, or offline install
+stops the preflight before production shutdown. Host dependency downloads use
+pip's patched certificate bundle with `--use-deprecated=legacy-certs`; the old
+host CA store is not added. Explicit `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and
+`PIP_CERT` overrides remain supported. Keep custom CA bundles current.
+This follows the [PSF emSign incident guidance](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576)
+and [pip's certificate-store documentation](https://pip.pypa.io/en/stable/topics/https-certificates/).
+It does not update the operating system trust store.
+The separate [AL2023 host CA distrust procedure](../deploy/ca-trust/README.md)
+records the reviewed OS configuration, purpose limits, rollback, and context
+activation requirements. It is an explicit provisioning action.
+
 1. Fetch `origin/main`. Keep local and concurrent changes intact.
 2. Run the current tests in [the deployment checklist](v2_deployment_verification_checklist.md)
    from the exact candidate checkout. Run real PostgreSQL checks for changes

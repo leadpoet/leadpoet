@@ -429,17 +429,26 @@ def _recovery_exclusions(service: Any, row: Mapping[str, Any]) -> Dict[str, dict
             result[item["submission_id"]] = {
                 "submission_id": item["submission_id"], "miner_hotkey": item["miner_hotkey"],
                 "status": item["status"],
+                **({"reason": "openrouter_zdr_route_unavailable"}
+                   if item.get("reason") == "openrouter_zdr_route_unavailable" else {}),
             }
     return result
 
 
-def _mark_recovery_excluded(entry: dict, status: str) -> None:
+def _mark_recovery_excluded(entry: dict, status: str, *, reason: Optional[str] = None) -> None:
     entry.update(status=status, score_status="not_evaluated",
                  stage1_score=None, final_score=None, is_champion=False,
                  eligible=False, eligibility_reason=status)
     entry.pop("cost_summary", None)
+    if reason == "openrouter_zdr_route_unavailable":
+        entry["evaluation_reason"] = reason
     if "evaluation" in entry:
         entry["evaluation"]["state"] = status
+        if entry.get("evaluation_reason") == "openrouter_zdr_route_unavailable":
+            reasons = set(entry["evaluation"].get("failure_reasons") or ())
+            entry["evaluation"]["failure_reasons"] = sorted(
+                reasons | {"openrouter_zdr_route_unavailable"}
+            )
 
 
 def _rankings(row: Mapping[str, Any], key: str) -> Dict[str, Mapping[str, Any]]:
@@ -808,6 +817,7 @@ _EVALUATION_COLUMNS = (
     "source_commit:result_doc->resource_summary->>validator_source_commit,"
     "source_dirty:result_doc->resource_summary->>validator_source_dirty,"
     "failure_reason:result_doc->failure_diagnostic->>reason,"
+    "native_failure_reason:lab_arena_public_execution_failure_reason_v1,"
     "closure_failure_reason:terminal_doc->>failure_reason"
 )
 
@@ -828,6 +838,12 @@ def _evaluation_failure_reason(run: Mapping[str, Any]) -> str:
     cause = run.get("terminal_cause")
     if not isinstance(cause, str):
         return "unknown"
+    if (
+        run.get("kind") == "execute"
+        and cause in ("provider_error", "stage_closed")
+        and run.get("native_failure_reason") == "openrouter_zdr_route_unavailable"
+    ):
+        return "openrouter_zdr_route_unavailable"
     if cause == "stage_closed" and run.get("kind") == "score":
         if run.get("closure_failure_reason") == "provider_credit_exhausted":
             return "provider_credit_exhausted"
@@ -1133,7 +1149,8 @@ def submissions_snapshot(service: Any, round_id: str) -> dict:
         if item.get("score_status") == "not_evaluated" and item.get("status") in ("provider_blocked", "evaluation_incomplete"):
             _mark_recovery_excluded(item, item["status"])
         if item["submission_id"] in exclusions:
-            _mark_recovery_excluded(item, exclusions[item["submission_id"]]["status"])
+            exclusion = exclusions[item["submission_id"]]
+            _mark_recovery_excluded(item, exclusion["status"], reason=exclusion.get("reason"))
     return {"round_id": round_id, "submissions": submissions}
 
 
@@ -1247,7 +1264,8 @@ def history_snapshot(service: Any, *, cursor: Optional[str] = None, limit: int =
                         configuration=row.get("configuration_doc"),
                         sourcing_cost_eligibility_policy=(row.get("configuration_doc") or {}).get("sourcing_cost_eligibility_policy")))
                 if submission_id in exclusions:
-                    _mark_recovery_excluded(entries[-1], exclusions[submission_id]["status"])
+                    exclusion = exclusions[submission_id]
+                    _mark_recovery_excluded(entries[-1], exclusion["status"], reason=exclusion.get("reason"))
                 last_submission = submission_id
             after_submission = ""
         if fetched < 25 or pinned is not None:

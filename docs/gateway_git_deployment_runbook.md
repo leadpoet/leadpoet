@@ -19,6 +19,9 @@ host CA store is not added. Explicit `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, and
 This follows the [PSF emSign incident guidance](https://discuss.python.org/t/information-for-python-users-regarding-emudhra-emsign-ca-certificate-security-incident/109576)
 and [pip's certificate-store documentation](https://pip.pypa.io/en/stable/topics/https-certificates/).
 It does not update the operating system trust store.
+The separate [AL2023 host CA blocklist procedure](../deploy/ca-trust/README.md)
+records the reviewed OS configuration, purpose limits, rollback, and context
+activation requirements. It is an explicit provisioning action.
 
 1. Fetch `origin/main`. Keep local and concurrent changes intact.
 2. Run the current tests in [the deployment checklist](v2_deployment_verification_checklist.md)

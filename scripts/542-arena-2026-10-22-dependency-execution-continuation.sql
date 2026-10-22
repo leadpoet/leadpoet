@@ -29,7 +29,7 @@ BEGIN
  END IF;
  IF c.operator_paused OR c.guard_commitment<>'' OR c.owner_commitment<>''
   OR c.restart_phase<>'' OR c.guard_expires_at IS NOT NULL OR c.captured_leases<>'[]'::JSONB
-  OR c.guard_generation<>627 THEN RAISE EXCEPTION 'Oct22 control preimage differs'; END IF;
+  OR c.guard_generation<>628 THEN RAISE EXCEPTION 'Oct22 control preimage differs'; END IF;
  IF r.status<>'scored'OR r.status_generation<>11 OR r.stage_generation<>8 OR r.scoring_generation_floor<>0
   OR r.benchmark_ref<>'arena/arena-2026-10-22/benchmark.json'
   OR r.evaluation_date::TEXT<>'2026-10-22'OR r.icp_set_date::TEXT<>'2026-10-21'

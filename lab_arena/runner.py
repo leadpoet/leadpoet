@@ -4315,7 +4315,9 @@ class AssignmentExecutor:
             _record_trajectory(config, lease, lease_token, [trajectory.event(
                 "runtime.error",
                 {"status": terminal, "failure_stage": "setup",
-                 "error_class": type(exc).__name__},
+                 "error_class": type(exc).__name__,
+                 "failure_kind": exc.failure_kind,
+                 "diagnostic_detail": exc.diagnostic_detail},
                 occurred_at=_timestamp(config.clock),
             )])
         except AgentDependencyError as exc:
@@ -4329,7 +4331,9 @@ class AssignmentExecutor:
             _record_trajectory(config, lease, lease_token, [trajectory.event(
                 "runtime.error",
                 {"status": terminal, "failure_stage": "setup",
-                 "error_class": type(exc).__name__},
+                 "error_class": type(exc).__name__,
+                 "failure_kind": "source_error",
+                 "diagnostic_detail": exc.diagnostic_detail},
                 occurred_at=_timestamp(config.clock),
             )])
         except Exception as exc:

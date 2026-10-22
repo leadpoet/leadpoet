@@ -264,7 +264,7 @@ def _cost_projection(
                     and ranking.get("evaluation") == "not_evaluated"
                     and ranking.get("evaluation_status") in ("provider_blocked", "evaluation_incomplete")
                     and ranking.get("evaluation_reason") in (contracts.TERMINAL_CAUSES + (
-                        "openrouter_zdr_route_unavailable", "judge_missing", "judge_pending", "execution_missing"))) else {}),
+                        "openrouter_zdr_route_unavailable", "judge_missing", "judge_pending", "execution_missing", "execution_score_missing"))) else {}),
         }
     if not isinstance(summary, Mapping):
         return {}

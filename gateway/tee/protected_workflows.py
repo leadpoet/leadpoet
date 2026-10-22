@@ -251,7 +251,10 @@ def _symbol_index(tree: ast.Module) -> Dict[str, ast.AST]:
 
 def _symbol_hash(node: ast.AST) -> str:
     normalized = _StripDocstrings().visit(ast.fix_missing_locations(node))
-    encoded = ast.dump(normalized, annotate_fields=True, include_attributes=False).encode("utf-8")
+    # Python 3.12 adds an empty type_params field to ordinary definitions.
+    # Keep their manifest hashes equal to those produced by the host's 3.11.
+    dumped = ast.dump(normalized, annotate_fields=True, include_attributes=False)
+    encoded = dumped.replace(", type_params=[]", "").encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 

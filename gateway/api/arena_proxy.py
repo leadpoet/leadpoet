@@ -19,6 +19,7 @@ from typing import Mapping
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
+from starlette.requests import ClientDisconnect
 
 from lab_arena import operations, training_input, training_observations
 
@@ -228,11 +229,14 @@ async def _bounded_body(request: Request, *, limit: int = _MAX_REQUEST_BYTES) ->
     _check_declared_body_size(request, limit)
     chunks: list[bytes] = []
     size = 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > limit:
-            raise HTTPException(status_code=413, detail="body too large")
-        chunks.append(chunk)
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > limit:
+                raise HTTPException(status_code=413, detail="body too large")
+            chunks.append(chunk)
+    except ClientDisconnect as exc:
+        raise HTTPException(status_code=400, detail="request body incomplete") from exc
     return b"".join(chunks)
 
 
@@ -308,7 +312,11 @@ async def proxy_testnet_request(arena_path: str, request: Request) -> Response:
 
 
 async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = False) -> Response:
-    if not arena_path or any(part in {"", ".", ".."} for part in arena_path.split("/")):
+    if (
+        not arena_path
+        or any(ord(char) < 32 or ord(char) == 127 for char in arena_path)
+        or any(part in {"", ".", ".."} for part in arena_path.split("/"))
+    ):
         raise HTTPException(status_code=404, detail="arena path invalid")
 
     parts = arena_path.split("/")

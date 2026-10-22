@@ -1861,6 +1861,78 @@ trap 'on_gateway_restart_signal 129' HUP
 trap 'on_gateway_restart_signal 130' INT
 trap 'on_gateway_restart_signal 143' TERM
 
+bootstrap_gateway_pip() {
+  # pip vendors its own CA bundle. Upgrade it before any dependency download,
+  # including when the ordinary dependency fingerprint is already satisfied.
+  "$GATEWAY_PYTHON_BIN" - "$@" <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import re
+import ssl
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+def patched_pip_is_installed():
+    try:
+        import pip
+        from pip._vendor import certifi
+
+        def stable_version(value):
+            if not re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", value):
+                return (0, 0, 0)
+            return tuple(int(part) for part in value.split("."))
+
+        return (
+            stable_version(pip.__version__) >= (26, 2, 2)
+            and stable_version(certifi.__version__) >= (2026, 10, 19)
+            and Path(certifi.where()).resolve().is_relative_to(
+                Path(pip.__file__).resolve().parent
+            )
+        )
+    except Exception:
+        return False
+
+if patched_pip_is_installed():
+    raise SystemExit(0)
+
+# PSF emSign incident guidance, 2026-10-20. The hash also protects this first
+# download while the host CA store still contains the compromised root.
+url = "https://files.pythonhosted.org/packages/3f/06/3e4420302363fbb71be3c7f35ce042f54bfca330e3e66b3a2e3c4cca579f/pip-26.2.2-py3-none-any.whl"
+sha256 = "fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70"
+custom_ca = next(
+    (os.environ[name] for name in
+     ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT") if os.environ.get(name)),
+    None,
+)
+ca_options = (
+    {"capath" if Path(custom_ca).is_dir() else "cafile": custom_ca}
+    if custom_ca else {}
+)
+context = ssl.create_default_context(**ca_options)
+with tempfile.TemporaryDirectory(prefix="gateway-pip-bootstrap-") as directory:
+    wheel = Path(directory) / "pip-26.2.2-py3-none-any.whl"
+    with urllib.request.urlopen(url, context=context, timeout=60) as response:
+        payload = response.read()
+    if hashlib.sha256(payload).hexdigest() != sha256:
+        raise SystemExit("ERROR: gateway pip bootstrap SHA256 mismatch")
+    wheel.write_bytes(payload)
+    # Execute only the verified wheel. This works even when pip is absent;
+    # no network access, get-pip.py, ensurepip, or old pip code is needed.
+    subprocess.run(
+        [sys.executable, "-c",
+         'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); '
+         'runpy.run_module("pip", run_name="__main__", alter_sys=True)',
+         str(wheel), "install", "--no-index", "--no-deps",
+         "--disable-pip-version-check", "--force-reinstall", *sys.argv[1:],
+         str(wheel)],
+        check=True,
+    )
+PY
+}
+
 install_gateway_python_dependencies() {
   local dependency_fingerprint legacy_project_metadata pip_scope=() requirements_file
   if [ -n "${GATEWAY_PREFLIGHT_TREE:-}" ] \
@@ -1873,15 +1945,13 @@ install_gateway_python_dependencies() {
     echo "ERROR: exact gateway requirements are unavailable: $requirements_file" >&2
     return 1
   fi
-  if ! "$GATEWAY_PYTHON_BIN" -m pip --version >/dev/null 2>&1; then
-    curl -fsS https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
-    "$GATEWAY_PYTHON_BIN" /tmp/get-pip.py
-    rm -f /tmp/get-pip.py
-  fi
   if ! "$GATEWAY_PYTHON_BIN" -c \
       'import sys; raise SystemExit(0 if sys.prefix != sys.base_prefix else 1)'; then
     pip_scope=(--user)
   fi
+  # Explicit return is required: callers use this function in an `if`, which
+  # disables bash errexit throughout the function body.
+  bootstrap_gateway_pip ${pip_scope[@]+"${pip_scope[@]}"} || return 1
   dependency_fingerprint="$(
     "$GATEWAY_PYTHON_BIN" - "$requirements_file" \
       "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}" <<'PY'
@@ -1899,7 +1969,7 @@ identity = "\0".join(
 ).encode("utf-8")
 print(hashlib.sha256(requirements + b"\0" + identity).hexdigest())
 PY
-  )"
+  )" || return 1
   export PATH="$HOME/.local/bin:$PATH"
   if [ "$GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT" = "$dependency_fingerprint" ]; then
     echo "Reusing exact candidate dependency installation from pre-shutdown validation"
@@ -1910,9 +1980,10 @@ PY
       leadpoet-subnet substrate-interface py-scale-codec scalecodec \
       >/dev/null 2>&1 || true
     "$GATEWAY_PYTHON_BIN" -m pip install \
-      "${pip_scope[@]}" \
+      --use-deprecated=legacy-certs \
+      ${pip_scope[@]+"${pip_scope[@]}"} \
       --requirement "$requirements_file" \
-      "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}"
+      "${GATEWAY_HOST_EXTRA_PYTHON_PACKAGES[@]}" || return 1
     GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT="$dependency_fingerprint"
     export GATEWAY_DEPENDENCY_INSTALL_FINGERPRINT
   fi

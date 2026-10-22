@@ -99,7 +99,7 @@ def test_select_retries_one_read_failure_without_changing_query(error_type, reco
     assert requests[0].headers == requests[1].headers
 
 
-@pytest.mark.parametrize("failure", [httpx.PoolTimeout, 429, 502, 503, 504])
+@pytest.mark.parametrize("failure", [httpx.PoolTimeout, 429, 502, 503, 504, 520, 521, 522, 523, 524])
 def test_select_temporary_pressure_is_unavailable_after_bounded_retry(failure):
     requests = []
 
@@ -144,6 +144,9 @@ def test_select_local_configuration_errors_remain_base_without_retry(error_type)
     httpx.Response(401, json={"message": "not authorized"}),
     httpx.Response(403, json={"message": "permission denied"}),
     httpx.Response(400, json={"code": "PGRST100", "message": "invalid filter"}),
+    httpx.Response(500, json={"code": "42883", "message": "contract mismatch"}),
+    httpx.Response(525, content=b"TLS handshake failed"),
+    httpx.Response(526, content=b"certificate invalid"),
     httpx.Response(200, json={"unexpected": "object"}),
     httpx.Response(200, content=b"invalid JSON"),
 ])
@@ -383,7 +386,7 @@ def test_bulk_round_rpc_response_loss_is_not_blindly_replayed(error_type, bulk_f
 
 
 @pytest.mark.parametrize("response", [
-    *[httpx.Response(status, json={"code": "PGRST000"}) for status in (429, 502, 503, 504)],
+    *[httpx.Response(status, json={"code": "PGRST000"}) for status in (429, 502, 503, 504, 520, 521, 522, 523, 524)],
     httpx.Response(403, json={"code": "42501", "message": "permission denied"}),
     httpx.Response(200, content=b"invalid JSON"),
 ])

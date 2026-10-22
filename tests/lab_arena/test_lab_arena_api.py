@@ -201,7 +201,7 @@ def test_provider_rpc_transport_timeout_is_sanitized_and_next_request_is_healthy
     assert len(requests) == 2
 
 
-@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])
+@pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError, 520, 521, 522, 523, 524])
 @pytest.mark.parametrize("recovers", [True, False])
 def test_current_handles_failed_reward_basis_read(error_type, recovers):
     """Exercise the production /current -> reward-basis SELECT failure path."""
@@ -221,6 +221,8 @@ def test_current_handles_failed_reward_basis_read(error_type, recovers):
         if "reward_basis_doc" in request.url.params["select"]:
             reward_reads.append(request)
             if len(reward_reads) == 1 or not recovers:
+                if isinstance(error_type, int):
+                    return httpx.Response(error_type, content=b"private database diagnostic")
                 raise error_type("private database diagnostic", request=request)
             # A completed round without an activated reward must not invent a king.
             return httpx.Response(200, json=[published])

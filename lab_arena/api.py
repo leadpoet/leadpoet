@@ -362,6 +362,27 @@ def create_app(service: ArenaService) -> FastAPI:
             service.handle_training_observations, run_id, lease_token, document,
         )
 
+    @app.post("/arena/v1/runs/{run_id}/training-observation-segments")
+    async def capture_training_observation_segment(
+        run_id: str, request: Request,
+        x_lab_arena_lease: Optional[str] = Header(default=None),
+    ) -> JSONResponse:
+        lease_token = _lease_header(x_lab_arena_lease)
+        _refuse_declared_oversize(request, training_observations.MAX_SEGMENT_BYTES)
+        await run_in_threadpool(
+            service._training_capture_run, run_id, lease_token,
+            allow_observation_finalization=True,
+        )
+        document = await _read_json(request, limits=contracts.StrictLimits(
+            max_depth=64, max_list_items=20_000, max_object_keys=20_000,
+            max_string_bytes=training_observations.MAX_EVENT_BYTES,
+            max_total_bytes=training_observations.MAX_SEGMENT_BYTES,
+            max_abs_int=None, allow_control_characters_in_values=True,
+        ))
+        return await no_store_public_call(
+            service.handle_training_observation_segment, run_id, lease_token, document,
+        )
+
     @app.get("/arena/v1/runs/{run_id}/quota")
     async def run_quota(
         run_id: str,

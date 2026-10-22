@@ -237,7 +237,8 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
             if calls == 1:
                 return httpx.Response(503, request=request)
             return httpx.Response(200, request=request, json={
-                "results": [{"text": "Acme " + ("verified evidence " * 30)}],
+                "results": [{"url": "https://acme.example/evidence",
+                             "text": "Acme " + ("verified evidence " * 30)}],
             })
 
         transport = httpx.MockTransport(handler)
@@ -272,7 +273,8 @@ class SourceGroundingTests(unittest.IsolatedAsyncioTestCase):
                     json={"results": [], "statuses": [{"status": "pending"}]},
                 )
             return httpx.Response(200, request=request, json={
-                "results": [{"text": "Acme " + ("verified evidence " * 30)}],
+                "results": [{"url": "https://acme.example/evidence",
+                             "text": "Acme " + ("verified evidence " * 30)}],
             })
 
         transport = httpx.MockTransport(handler)

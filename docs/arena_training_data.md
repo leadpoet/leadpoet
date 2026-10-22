@@ -165,6 +165,34 @@ Privacy filtering and exact replay are separate properties from label validity.
 
 ## Remaining boundaries
 
+### Worker-loss recovery (October 22)
+
+The trusted runner also saves worker observations in a background journal in the
+existing private object store. Miners do not need to change their model, output,
+or configuration. Every ten seconds, the runner uploads immutable, ordered deltas
+bound to the run, lease generation and claim hash. These contain worker-only
+observations and response receipts; normal provider request and response bodies
+continue to use the existing ledger. No new database table or service is used.
+
+Uploads have a ten-second timeout. Failed or ambiguous uploads retry the same
+segment, with the same hash. Capture errors do not fail execution or change
+scoring, billing, or provider retries. Each segment is at most 16 MiB; a lease is
+limited to 1,024 segments and 256 MiB of uncompressed journal payload. These are
+payload limits, not a bound on exporter process memory.
+
+The final observation snapshot remains authoritative. Only when it cannot be
+read does the exporter recover a verified journal prefix, under the separate
+`partial_worker_observation_artifacts` field. It always marks that prefix
+incomplete. Missing, corrupt, conflicting or out-of-order segments cannot supply
+proof of a complete trajectory, response delivery, or settled accounting.
+
+A crash can still lose the unsent tail, including observations in the sandbox's
+capture queue or host memory before a successful upload. This journal reduces
+that loss; it does not make an interrupted run complete or recover old missing
+artifacts. Successful final uploads keep the existing completeness checks.
+
+### Other capture limits
+
 - Direct HTTPS egress itself records connection/byte totals, not page contents.
   The trusted launcher automatically observes consumed responses in supported
   Python clients, without miner configuration. Text, URL, retrieval time, byte

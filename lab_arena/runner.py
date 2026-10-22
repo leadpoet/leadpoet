@@ -741,6 +741,8 @@ class ArenaApiClient(Protocol):
 
     def training_observations(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
 
+    def training_observation_segment(self, run_id: str, lease_token: str, document: Mapping[str, Any]) -> Dict[str, Any]: ...
+
     def source(self, run_id: str, lease_token: str) -> bytes: ...
 
     def image_access(self, run_id: str, lease_token: str) -> Dict[str, Any]: ...
@@ -876,6 +878,19 @@ class HttpArenaApiClient:
             "/arena/v1/runs/%s/training-observations" % run_id, document,
             headers={"x-lab-arena-lease": lease_token},
             timeout_seconds=TRAINING_OBSERVATIONS_TIMEOUT_SECONDS,
+            preserve_http_status=True,
+        )
+
+    def training_observation_segment(
+        self, run_id: str, lease_token: str, document: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        training_input.object_ref(run_id, 1)
+        if len(contracts.canonical_json(document).encode("utf-8")) > training_observations.MAX_SEGMENT_BYTES:
+            raise RunnerError("training observation segment exceeds capture limit")
+        return self._post(
+            "/arena/v1/runs/%s/training-observation-segments" % run_id, document,
+            headers={"x-lab-arena-lease": lease_token},
+            timeout_seconds=10.0,
             preserve_http_status=True,
         )
 
@@ -3760,6 +3775,140 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
     return summary
 
 
+class _ObservationJournal:
+    """Best-effort serial uploads of bounded, immutable worker-only deltas."""
+
+    FLUSH_SECONDS = 10.0
+
+    def __init__(self, api: ArenaApiClient, lease: Mapping[str, Any], token: str, state: RunState) -> None:
+        self.api, self.lease, self.token, self.state = api, lease, token, state
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._work, name="arena-observation-journal", daemon=True)
+        self.number = 0
+        self.previous_sha256: Optional[str] = None
+        self.cumulative_bytes = 0
+        self.last_failures: Tuple[str, ...] = ()
+        self.observation_cursor = self.receipt_cursor = self.agent_cursor = 0
+        self.prepared_receipts: set[int] = set()
+        self.pending: Optional[Tuple[dict, str, int, int, int, set[int]]] = None
+
+    def start(self) -> None:
+        if (callable(getattr(self.api, "training_observation_segment", None))
+                and isinstance(self.lease.get("claim_request_hash"), str)
+                and contracts.SHA256_RE.fullmatch(self.lease["claim_request_hash"])
+                and type(self.lease.get("lease_generation")) is int):
+            self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread.ident is not None:
+            self.thread.join(0.05)
+
+    def _prepare(self) -> bool:
+        if self.number >= training_observations.MAX_SEGMENTS:
+            return False
+        with self.state.lock:
+            if self.state.worker_observations_frozen:
+                return False
+            buffer = self.state.worker_observations
+            observations = buffer.observations[self.observation_cursor:self.observation_cursor + 64]
+            receipts = [dict(row) for row in buffer.response_receipts[self.receipt_cursor:self.receipt_cursor + 64]]
+            agents = buffer.agent_observations[self.agent_cursor:self.agent_cursor + 32]
+            changed = [dict(row) for row in buffer.response_receipts
+                       if row["ordinal"] in self.prepared_receipts and row["write_state"] != "prepared"][:64]
+            counts = (buffer.attempted, buffer.local_refusals,
+                      buffer.response_receipt_count, buffer.agent_observation_count)
+            failures = sorted(buffer.failures)
+        if not (observations or receipts or agents or changed or tuple(failures) != self.last_failures):
+            return False
+        while True:
+            payload = {
+                "observation_from": self.observation_cursor, "observations": observations,
+                "receipt_from": self.receipt_cursor, "response_receipts": receipts,
+                "receipt_updates": changed, "agent_from": self.agent_cursor,
+                "agent_observations": agents, "observation_count": counts[0],
+                "local_refusal_count": counts[1], "response_receipt_count": counts[2],
+                "agent_observation_count": counts[3], "failures": failures,
+            }
+            try:
+                cleaned_payload = training_observations._clean_segment_payload(
+                    payload, secrets=(self.token,))
+                segment, _ = training_observations.build_segment(
+                    str(self.lease["run_id"]), str(self.lease.get("kind") or "execute"), cleaned_payload,
+                    lease_generation=self.lease["lease_generation"],
+                    claim_request_hash=self.lease["claim_request_hash"],
+                    number=self.number, previous_sha256=self.previous_sha256,
+                    cumulative_bytes=self.cumulative_bytes + len(
+                        contracts.canonical_json(cleaned_payload).encode("utf-8")),
+                    secrets=(self.token,),
+                )
+                break
+            except Exception:
+                # A single validated event fits the 16 MiB segment cap.
+                largest = max((observations, receipts, agents, changed),
+                              key=lambda rows: sum(len(contracts.canonical_json(row)) for row in rows))
+                if not largest:
+                    return False
+                if len(largest) == 1:
+                    if sum(bool(rows) for rows in (observations, receipts, agents, changed)) == 1:
+                        return False
+                    largest.clear()
+                else:
+                    del largest[len(largest) // 2:]
+        document = {"number": self.number, "previous_sha256": self.previous_sha256,
+                    "cumulative_bytes": segment["cumulative_bytes"],
+                    "payload": segment["payload"]}
+        prepared = (self.prepared_receipts | {row["ordinal"] for row in receipts
+                                                if row["write_state"] == "prepared"}) - {
+            row["ordinal"] for row in changed}
+        self.pending = (document, segment["segment_sha256"], len(observations),
+                        len(receipts), len(agents), prepared)
+        return True
+
+    def _work(self) -> None:
+        while not self.stop_event.wait(self.FLUSH_SECONDS):
+            while not self.stop_event.is_set():
+                if self.pending is None:
+                    try:
+                        if not self._prepare():
+                            break
+                    except Exception:
+                        return  # Capture faults cannot stop the run.
+                if not self._send_pending():
+                    break  # Retry the exact same bytes at the next tick.
+                with self.state.lock:
+                    buffer = self.state.worker_observations
+                    more = (len(buffer.observations) > self.observation_cursor
+                            or len(buffer.response_receipts) > self.receipt_cursor
+                            or len(buffer.agent_observations) > self.agent_cursor)
+                if not more:
+                    break
+
+    def _send_pending(self) -> bool:
+        if self.pending is None:
+            return False
+        document, digest, observations, receipts, agents, prepared = self.pending
+        try:
+            result = self.api.training_observation_segment(
+                str(self.lease["run_id"]), self.token, document)
+            if (not isinstance(result, Mapping) or result.get("status") != "stored"
+                    or result.get("number") != self.number
+                    or result.get("segment_sha256") != digest):
+                raise RunnerError("training observation journal rejected")
+        except Exception:
+            return False
+        self.observation_cursor += observations
+        self.receipt_cursor += receipts
+        self.agent_cursor += agents
+        self.prepared_receipts = prepared
+        self.previous_sha256 = digest
+        self.cumulative_bytes = document["cumulative_bytes"]
+        self.last_failures = tuple(document["payload"]["failures"])
+        self.number += 1
+        self.pending = None
+        return True
+
+
 def _runtime_log_events(
     result: Optional[runtime.SandboxResult], lease_token: str, observed_at: str,
 ) -> List[Dict[str, Any]]:
@@ -4027,6 +4176,11 @@ class AssignmentExecutor:
                 shutil.rmtree(socket_dir, ignore_errors=True)
             raise
 
+        try:
+            journal = _ObservationJournal(config.api, lease, lease_token, state)
+        except Exception:
+            journal = None
+
         def valid_checkpoint(candidate: bytes) -> bool:
             try:
                 output_document_from_bytes(
@@ -4225,6 +4379,11 @@ class AssignmentExecutor:
                     extra_environment=extra_environment,
                 )
                 server.start()
+                if journal is not None:
+                    try:
+                        journal.start()
+                    except Exception:
+                        pass  # Optional evidence cannot change model execution.
                 runtime_entered = True
                 result = config.sandbox_runtime.run_icp(spec)
                 if not scoring_run:
@@ -4424,6 +4583,11 @@ class AssignmentExecutor:
                 server.stop()
             except Exception as exc:
                 stop_exception = exc
+            if journal is not None:
+                try:
+                    journal.stop()
+                except Exception:
+                    pass
             observation_capture = _record_training_observations(config, lease, lease_token, state)
             if runtime_failure is not None:
                 # Authenticated abandonment can immediately expire this lease.

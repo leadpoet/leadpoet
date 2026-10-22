@@ -356,6 +356,8 @@ class ObjectStore(Protocol):
 
     def get_bounded(self, ref: str, max_bytes: int) -> bytes: ...
 
+    def get_optional_bounded(self, ref: str, max_bytes: int) -> Optional[bytes]: ...
+
     def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]: ...
 
 
@@ -437,6 +439,12 @@ class LocalObjectStore:
         if len(data) > max_bytes:
             raise ArenaContractError("object exceeds source size limit")
         return data
+
+    def get_optional_bounded(self, ref: str, max_bytes: int) -> Optional[bytes]:
+        path = self._path(ref)
+        if not path.exists():
+            return None
+        return self.get_bounded(ref, max_bytes)
 
     def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]:
         raise ServiceError("source_upload_not_configured", 503)
@@ -542,6 +550,19 @@ class S3ObjectStore:
         if len(data) > int(max_bytes):
             raise ArenaContractError("object exceeds source size limit")
         return data
+
+    def get_optional_bounded(self, ref: str, max_bytes: int) -> Optional[bytes]:
+        try:
+            return self.get_bounded(ref, max_bytes)
+        except Exception as exc:
+            response = getattr(exc, "response", {})
+            error = response.get("Error", {}) if isinstance(response, Mapping) else {}
+            metadata = response.get("ResponseMetadata", {}) if isinstance(response, Mapping) else {}
+            code = str(error.get("Code") or "") if isinstance(error, Mapping) else ""
+            status = metadata.get("HTTPStatusCode") if isinstance(metadata, Mapping) else None
+            if code in {"NoSuchKey", "404", "NotFound"} and status in {None, 404}:
+                return None
+            raise
 
     def presign_put(self, ref: str, *, size_bytes: int, content_type: str, expires_seconds: int, source_content_md5: Optional[str] = None) -> Mapping[str, Any]:
         key = self._key(ref)
@@ -5531,7 +5552,9 @@ class ArenaService:
         # round contract can request v2 output, including for legacy rounds.
         if not contact_policy.enabled(configuration):
             lease_icp.pop("contact_policy", None)
-        lease = dict(response, icp=lease_icp, lease_token=token, round_id=round_id, evaluation_date=str(round_row.get("evaluation_date") or ""))
+        lease = dict(response, icp=lease_icp, lease_token=token, round_id=round_id,
+                     claim_request_hash=contracts.request_bytes_hash(claim),
+                     evaluation_date=str(round_row.get("evaluation_date") or ""))
         if original is not None:
             lease["claim_recovery"] = "resolved"
             lease["claim_recovery_request_id"] = original["request_id"]
@@ -6049,6 +6072,58 @@ class ArenaService:
                 "ref": ref, "lease_generation": snapshot["lease_generation"],
                 "claim_request_hash": snapshot["claim_request_hash"],
                 "payload_sha256": snapshot["payload_sha256"]}
+
+    def handle_training_observation_segment(self, run_id: str, lease_token: str, document: Any) -> Dict[str, Any]:
+        run = self._training_capture_run(run_id, lease_token, allow_observation_finalization=True)
+        if not isinstance(document, Mapping):
+            raise ServiceError("training_observation_segment_invalid", 400)
+        try:
+            segment, compressed = training_observations.build_segment(
+                run_id, str(run.get("kind") or "execute"), document["payload"],
+                lease_generation=run.get("lease_generation"),
+                claim_request_hash=run.get("claim_request_hash"),
+                number=document["number"], previous_sha256=document["previous_sha256"],
+                cumulative_bytes=document["cumulative_bytes"],
+                secrets=(lease_token,),
+            )
+            if set(document) != {"number", "previous_sha256", "cumulative_bytes", "payload"}:
+                raise ValueError("segment fields invalid")
+        except (KeyError, ValueError, TypeError, RecursionError):
+            raise ServiceError("training_observation_segment_invalid", 400) from None
+        objects = self._config.training_object_store
+        if objects is None:
+            raise ServiceError("training_observation_segment_unavailable", 503)
+        if segment["number"]:
+            try:
+                previous = training_observations.read_segment(
+                    objects, run_id, segment["kind"], segment["lease_generation"],
+                    segment["claim_request_hash"], segment["number"] - 1)
+            except Exception:
+                raise ServiceError("training_observation_segment_unavailable", 503) from None
+            if (previous is None or previous["segment_sha256"] != segment["previous_sha256"]
+                    or segment["cumulative_bytes"] != previous["cumulative_bytes"]
+                    + len(contracts.canonical_json(segment["payload"]).encode("utf-8"))
+                    or any(segment["payload"][start] != previous["payload"][start]
+                           + len(previous["payload"][rows]) for start, rows in (
+                               ("observation_from", "observations"),
+                               ("receipt_from", "response_receipts"),
+                               ("agent_from", "agent_observations")))
+                    or any(segment["payload"][name] < previous["payload"][name]
+                           for name in ("observation_count", "local_refusal_count",
+                                        "response_receipt_count", "agent_observation_count"))):
+                raise ServiceError("training_observation_segment_conflict", 409)
+        elif segment["cumulative_bytes"] != len(contracts.canonical_json(segment["payload"]).encode("utf-8")):
+            raise ServiceError("training_observation_segment_invalid", 400)
+        ref = training_observations.segment_ref(
+            run_id, segment["lease_generation"], segment["claim_request_hash"], segment["number"])
+        try:
+            objects.put(ref, compressed)
+        except ArenaContractError:
+            raise ServiceError("training_observation_segment_conflict", 409) from None
+        except Exception:
+            raise ServiceError("training_observation_segment_unavailable", 503) from None
+        return {"status": "stored", "number": segment["number"],
+                "segment_sha256": segment["segment_sha256"]}
 
     def handle_source(self, run_id: str, lease_token: str) -> bytes:
         """Return source bytes only to the runner that holds the active lease."""

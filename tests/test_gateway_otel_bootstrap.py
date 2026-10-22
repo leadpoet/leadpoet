@@ -8,7 +8,7 @@ training/LLM content into a span.
 """
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
@@ -75,6 +75,43 @@ def test_emits_only_infra_metadata_no_id_or_query_leak():
         "http.response.status_code",
         "duration_ms",
     }
+
+
+def test_included_nested_and_direct_routes_export_full_templates():
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+    # Production configures telemetry before it includes API routers.
+    assert configure_gateway_otel(app, span_exporter=exp) is True
+    child = APIRouter()
+
+    @child.get("/items/{item_id}")
+    def _item(item_id: str):
+        return {"item_id": item_id}
+
+    parent = APIRouter()
+    parent.include_router(child, prefix="/nested")
+    app.include_router(parent, prefix="/v1")
+    app.include_router(child, prefix="/v2")
+
+    @app.get("/direct/{item_id}")
+    def _direct(item_id: str):
+        return {"item_id": item_id}
+
+    with TestClient(app) as client:
+        for path in ("/v1/nested/items/private-123", "/v2/items/private-456",
+                     "/direct/private-789"):
+            assert client.get(path + "?token=private-query").status_code == 200
+        assert client.get("/v1/nested/items/private-123/unknown").status_code == 404
+
+    spans = exp.get_finished_spans()
+    assert [span.attributes["http.route"] for span in spans] == [
+        "/v1/nested/items/{item_id}", "/v2/items/{item_id}",
+        "/direct/{item_id}", "/_unmatched",
+    ]
+    assert all(span.name == "GET " + span.attributes["http.route"] for span in spans)
+    assert not any(secret in repr(spans) for secret in (
+        "private-123", "private-456", "private-789", "private-query",
+    ))
 
 
 def test_health_route_is_suppressed():

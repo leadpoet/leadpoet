@@ -2544,6 +2544,46 @@ def _canonical_target_crawl_failure_receipt(value: Any) -> Optional[Dict[str, An
     }
 
 
+def _exa_result_for_requested_url(
+    document: Mapping[str, Any], requested_url: str
+) -> Optional[Mapping[str, Any]]:
+    """Select one result whose page URL matches the requested page exactly.
+
+    Exa's result ID can be opaque. Neither that ID nor a successful request
+    status proves that a different result URL is a redirect of this page.
+    """
+    requested = _normalize_url(requested_url)
+    if not requested or document.get("error") or document.get("errors"):
+        return None
+    results = document.get("results")
+    if not isinstance(results, list) or any(
+        not isinstance(result, Mapping) for result in results
+    ):
+        return None
+    statuses = document.get("statuses")
+    if statuses is not None:
+        if not isinstance(statuses, list):
+            return None
+        if statuses and (
+            len(statuses) != 1
+            or not isinstance(statuses[0], Mapping)
+            or statuses[0].get("id") != requested_url
+            or statuses[0].get("status") != "success"
+            or statuses[0].get("error")
+        ):
+            return None
+    matches = [
+        result for result in results
+        if _normalize_url(result.get("url") or "") == requested
+    ]
+    if len(matches) != 1:
+        return None
+    selected = matches[0]
+    if selected.get("error") is not None or selected.get("status") == "error":
+        return None
+    return selected
+
+
 async def _scrape_exa(url: str) -> Dict[str, Any]:
     """Exa Contents API fallback for URLs Scrapingdog cannot crack."""
     api_key = os.environ.get("EXA_API_KEY")
@@ -2566,32 +2606,34 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                 if r.status_code == 200:
                     data = r.json()
                     results = data.get("results") or []
+                    envelope_error = bool(data.get("error") or data.get("errors"))
                     target_absence = None
                     target_crawl_failure = None
                     if results:
-                        result = results[0]
-                        text = (result.get("text") or "")[:MAX_SCRAPED_CHARS]
-                        if len(text) >= 300:
-                            from qualification.scoring.intent_details import _validated_source_title
-                            # Contents responses may contain another resource.
-                            # Admit title metadata only for this exact page.
-                            source_title = (
-                                _validated_source_title(result.get("title"))
-                                if _normalize_url(result.get("url") or "") == _normalize_url(url)
-                                else ""
-                            )
-                            return {
-                                "ok": True,
-                                "stage": "exa_scraped",
-                                "content": text,
-                                **({"source_title": source_title} if source_title else {}),
-                                "source_publication_date": _source_publication_date(
-                                    result.get("publishedDate")
-                                ),
-                                "error": None,
-                            }
-                        last_error = "<300 chars"
-                        terminal_stage = "exa_thin"
+                        result = _exa_result_for_requested_url(data, url)
+                        if result is None:
+                            last_error = "target_result_mismatch"
+                            terminal_stage = "exa_source_mismatch"
+                        else:
+                            text = (result.get("text") or "")[:MAX_SCRAPED_CHARS]
+                            if len(text) >= 300:
+                                from qualification.scoring.intent_details import _validated_source_title
+                                source_title = _validated_source_title(result.get("title"))
+                                return {
+                                    "ok": True,
+                                    "stage": "exa_scraped",
+                                    "content": text,
+                                    **({"source_title": source_title} if source_title else {}),
+                                    "source_publication_date": _source_publication_date(
+                                        result.get("publishedDate")
+                                    ),
+                                    "error": None,
+                                }
+                            last_error = "<300 chars"
+                            terminal_stage = "exa_thin"
+                    elif envelope_error:
+                        last_error = "exa_response_error"
+                        terminal_stage = "exa_source_mismatch"
                     else:
                         target_absence = _exa_target_absence_receipt(data, url)
                         target_crawl_failure = _exa_target_crawl_failure_receipt(
@@ -3709,6 +3751,7 @@ async def _fetch_sd_then_exa(
                     "url": url, "title": exa.get("source_title") or "",
                     "text": exa["content"][:max_chars],
                     **({"source_title": exa["source_title"]} if exa.get("source_title") else {}),
+                    "source_publication_date": exa.get("source_publication_date") or "",
                 })
                 statuses.append({"url": url, "source": "exa_fb_route", "stage": exa.get("stage")})
                 continue

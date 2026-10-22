@@ -1,108 +1,127 @@
 # AL2023 host certificate distrust
 
-**Review candidate: do not apply.** The two-file plan is on hold until the
-already TLS-absent AAA root's baseline generic-verification behavior is proved
-to remain unchanged. Adding an otherwise absent certificate to a vendor
-blocklist can introduce an OpenSSL trusted-bundle entry that generic `any`
-verification accepts. The isolated test measured named-purpose safety but did
-not prove this baseline generic non-regression. The final policy may install
-only G3 and preserve AAA's existing absence. No live application is authorized
-by this configuration proposal.
+This is one reviewed, public OpenSSL `TRUSTED CERTIFICATE` source for
+`/etc/pki/ca-trust/source/leadpoet-emsign-ecc-g3.trusted.pem`. It is explicit
+host provisioning, separate from service deployment. Do not put it in
+`anchors/` or `blocklist/`, install AAA, or edit generated bundles.
 
-These two public certificates are configuration for the installed AL2023
-`p11-kit`/`update-ca-trust` blocklist. Apply them separately on the gateway and
-normal-validator hosts after operator review. This is explicit host provisioning;
-the gateway and validator restart scripts do not install it.
+- G3 certificate DER SHA256: `86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b`.
+- Source file SHA256: `661798181d9251cd062f8ece4712bfce980138ac3ac085b4a3c77b12065b892b`.
+- AUX has no trusted uses. It rejects `anyExtendedKeyUsage`, `serverAuth`,
+  `clientAuth`, `emailProtection`, `codeSigning`, `timeStamping`, `OCSPSigning`.
 
-| File | Certificate DER SHA256 |
-| --- | --- |
-| `leadpoet-emsign-ecc-g3.pem` | `86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b` |
-| `leadpoet-comodo-aaa.pem` | `d7a7a0fb5d7e2731d771e9484ebcdef71d5f0c3e0a2948782bc83ee0ea699ef4` |
+The unchanged X.509 certificate comes from the [official certifi 2024.08.30 bundle](https://raw.githubusercontent.com/certifi/python-certifi/2024.08.30/certifi/cacert.pem)
+(bundle SHA256 `94edeb66e91774fcae93a05650914e29096259a5c7e871a1f65d461ab5201b47`).
+That old bundle is an identity source only. The [p11-kit 0.24.1 manual](https://raw.githubusercontent.com/p11-glue/p11-kit/0.24.1/doc/manual/p11-kit-trust.xml)
+documents TRUSTED CERTIFICATE policy input; installed `update-ca-trust(8)`
+documents the neutral source directory. The source can be reproduced from the
+public G3 PEM with OpenSSL `x509 -clrtrust -clrreject`, seven `-addreject` options
+using the OIDs above in that order, and `-trustout`. No private key is involved.
 
-The bytes come from the [official certifi 2024.08.30 certificate bundle](https://raw.githubusercontent.com/certifi/python-certifi/2024.08.30/certifi/cacert.pem).
-That old bundle is an identity source only; it is never installed or trusted.
-`SHA256SUMS` pins the two PEM files. The [Red Hat incident bulletin](https://access.redhat.com/security/vulnerabilities/RHSB-2026-012)
-and installed `update-ca-trust(8)` describe the vendor blocklist mechanism.
+## Measured policy and limits
 
-## Apply
+The October 22 private-namespace test passed with installed p11-kit 0.24.1 and
+OpenSSL 3.2.2, including its `codesign` purpose. The exact test script SHA256 was
+`da8454f896392530438193d8b81b3802400e4f8bc938ea1a85a53d45295950f1`.
+It measured all ten purposes plus default before/after, with no new acceptance.
+G3 was explicitly rejected (error 28) for `sslserver`, `sslclient`,
+`nssslserver`, `smimesign`, `smimeencrypt`, `timestampsign`, `codesign`, `any`,
+and default. Its `crlsign` and `ocsphelper` compatibility acceptance stayed
+unchanged. This is not an all-purpose or all-consumer fix.
 
-Do not apply during an active release. On each host, first record the installed
-OS/tool versions, existing TLS/email/code-signing anchor fingerprints, and
-unrelated OpenSSL trust attributes. Confirm the vendor's real directory
-`/etc/pki/ca-trust/source/blocklist` exists. Both destination names below must
-be absent, including dangling symlinks. Stop on any collision; do not replace
-an existing file. Retain the exact source commit and the before-state evidence.
+AAA DER SHA256 is `d7a7a0fb5d7e2731d771e9484ebcdef71d5f0c3e0a2948782bc83ee0ea699ef4`.
+It was already excluded from TLS and rejected for client/server TLS and
+`any`/default. Its full purpose vector and AUX bytes remain unchanged; its
+existing email/code-signing and compatibility acceptance is not remediated here.
+Plain-PEM blocklisting widened generic trust for both roots, so that proposal
+was rejected. No AAA file is installed by this procedure.
 
-From the exact reviewed checkout, verify the source files:
+The passing test changed TLS anchors 143 to 142, removed only G3 from TLS,
+email and code-signing bundles, and preserved every other anchor/AUX value.
+Fresh OS-default TLS and same-endpoint wrong-hostname controls passed for
+`openrouter.ai`, `api.scrapingdog.com`, `pypi.org`, `files.pythonhosted.org`.
+Logical rollback passed; the outside whole-store manifest stayed
+`4d1b064e8292a4d83d3cef4a3dec7bd521f9d3116363c8900e9475840642c29b`.
+The manifest covers all three trust input/output trees, aliases, default CA
+paths and extraction-script hash, including file contents, links, mode/owner.
+
+## Apply on each host after review
+
+Do not overlap an active release or another trust writer. Use the exact
+reviewed commit. First record OS/tool versions and the complete trust manifest,
+all TLS/email/code-signing DER sets and OpenSSL certificate/AUX values, and both
+root verification vectors. Keep that evidence outside the trust trees. Run the
+reviewed private-namespace test against this host's current inputs first; stop
+if it differs from the reviewed policy or cannot prove isolation, retained
+anchors, TLS controls and rollback. The count/hash above is gateway evidence,
+not an assumed baseline for the validator or a later vendor update.
+
+Confirm `/etc/pki/ca-trust/source` is the real root-owned directory. The one
+destination must be absent, including dangling symlinks. Verify the installed
+`/usr/bin/update-ca-trust` SHA256 is
+`d321db9aa915ea4fc54d796badc869c3654ef0ce35dc8e35a4e8f59f0f62fa25`.
+Stop for review if it differs. This pinned vendor script ignores arguments and
+writes only its fixed extracted outputs. Verify the source checksum:
 
 ```bash
 sha256sum --check deploy/ca-trust/SHA256SUMS
+sha256sum /usr/bin/update-ca-trust
 ```
 
-Create only the two new files, without overwriting a destination, then verify
-their bytes before regeneration:
+Before installation, create a new root-owned mode-0700 backup directory and
+record its exact path. Copy the complete three trees, then verify the backup
+against the before manifest:
 
 ```bash
-sudo -n cp --no-clobber deploy/ca-trust/blocklist/leadpoet-emsign-ecc-g3.pem /etc/pki/ca-trust/source/blocklist/
-sudo -n cp --no-clobber deploy/ca-trust/blocklist/leadpoet-comodo-aaa.pem /etc/pki/ca-trust/source/blocklist/
-sudo -n cmp deploy/ca-trust/blocklist/leadpoet-emsign-ecc-g3.pem /etc/pki/ca-trust/source/blocklist/leadpoet-emsign-ecc-g3.pem
-sudo -n cmp deploy/ca-trust/blocklist/leadpoet-comodo-aaa.pem /etc/pki/ca-trust/source/blocklist/leadpoet-comodo-aaa.pem
-sudo -n chmod 0644 /etc/pki/ca-trust/source/blocklist/leadpoet-emsign-ecc-g3.pem /etc/pki/ca-trust/source/blocklist/leadpoet-comodo-aaa.pem
+CA_BACKUP=$(sudo -n mktemp -d /var/tmp/leadpoet-ca-backup.XXXXXXXX)
+sudo -n cp -a --parents /etc/pki/ca-trust /usr/share/pki/ca-trust-source /usr/share/pki/ca-trust-legacy "$CA_BACKUP"
+```
+
+The backup is evidence and recovery input; do not overwrite live vendor trees
+from it during ordinary rollback.
+
+Run the following as sequential checked operations. Stop on any failure.
+The shell's noclobber mode refuses an existing destination; do not replace it.
+
+```bash
+sudo -n /bin/sh -eu -c 'set -C; umask 022; cat "$1" > "$2"; chown 0:0 "$2"; chmod 0644 "$2"' -- deploy/ca-trust/source/leadpoet-emsign-ecc-g3.trusted.pem /etc/pki/ca-trust/source/leadpoet-emsign-ecc-g3.trusted.pem
+sudo -n cmp deploy/ca-trust/source/leadpoet-emsign-ecc-g3.trusted.pem /etc/pki/ca-trust/source/leadpoet-emsign-ecc-g3.trusted.pem
 sudo -n /usr/bin/update-ca-trust
 ```
 
-Run these as sequential checked operations. Stop immediately if any operation
-fails; do not continue to regeneration after a failed copy or comparison.
-The copies made by `sudo` are root-owned. No package, service, or generated
-trust-output file is edited directly. The vendor command ignores destination
-arguments and regenerates its fixed extracted outputs.
+No package or service action is part of this procedure. After extraction,
+require the measured source SHA256, root ownership and mode 0644. Require
+TLS/email/code-signing DER sets equal baseline minus G3 and all unrelated AUX
+bytes unchanged, including AAA. Fresh Python OS-default roots must equal the
+candidate TLS set. Repeat both full verification vectors and reject any new
+acceptance; require G3 error 28 for the nine modes listed above. Use explicit
+`-CAfile /etc/pki/ca-trust/extracted/openssl/ca-bundle.trust.crt`,
+`-no-CApath -no-CAstore`, and each `-purpose` (omit it for default). These are
+root self-verification controls, not forged-chain tests. Repeat the four fresh
+OS-default TLS/hostname controls before declaring the host ready.
 
-## Verify and activate
+## Activation, rollback and retirement
 
-Verify that TLS, email and code-signing anchor sets equal their before-state
-minus these two DER fingerprints, and that every unrelated OpenSSL trust
-attribute is unchanged. Do not assume both hosts have the same initial count.
-The October 22 gateway private-namespace test measured TLS 143 -> 142; AAA was
-already absent from TLS. It preserved all other anchors and trust attributes,
-passed real OS-default TLS and wrong-hostname controls for `openrouter.ai`,
-`api.scrapingdog.com`, `pypi.org` and `files.pythonhosted.org`, and restored the
-initial logical trust on rollback without changing the live store.
+Fresh OS-default contexts read the regenerated store. Existing contexts/pools
+can retain old roots until recreated. Apply before the next planned validator
+startup when possible. Any required process refresh uses its existing
+canonical activation path; this procedure does not restart services. The
+cached gateway Arena proxy and provider HTTPX transport use patched certifi
+(`trust_env=False`), separate from OS trust. aiohttp can cache an OS context at
+import. Container/enclave stores and custom CA overrides are separate.
 
-Use the generated `extracted/openssl/ca-bundle.trust.crt` with explicit CAfile,
-`-no-CApath -no-CAstore`, and `openssl verify -purpose` for `sslserver`,
-`sslclient`, `smimesign` and `smimeencrypt`. Each root must fail with error 28,
-`certificate rejected`. These are root self-verification controls, not forged
-certificate chains. Also inspect freshly created Python OS-default contexts
-and repeat the four-host TLS/hostname controls before declaring host readiness.
+For rollback, confirm the one destination is still a regular, root-owned file
+with the exact reviewed source SHA256 and mode. Stop on any mismatch. Remove
+only `/etc/pki/ca-trust/source/leadpoet-emsign-ecc-g3.trusted.pem`, then run the
+pinned `/usr/bin/update-ca-trust`. Require the original DER sets, all AUX values,
+both full verification vectors and fresh OS contexts to match baseline.
+Do not restore old generated bundles or remove unrelated source entries.
+Rollback restores baseline G3 trust, so keep the security consequence explicit.
+Existing contexts may still need separate activation after rollback.
 
-Generic OpenSSL `-purpose any` is supported but is not covered by this vendor
-named-purpose distrust export. Both roots remained accepted in that mode in
-the isolated test. This procedure does not claim to fix every purpose or
-consumer and does not rewrite vendor output to change generic verification.
-
-Fresh OS-default contexts read the regenerated store. Existing SSL contexts
-and connection pools can keep their old roots until recreated. Apply before
-the next normal validator startup when possible. Any needed process refresh
-must use its existing canonical activation path; this procedure does not
-restart services. Certifi-backed clients and pip's vendored certifi use their
-own bundles and require their separate patched versions. The gateway's cached
-Arena proxy context is certifi-backed (`trust_env=False`); OS regeneration does
-not change that context. Host processes that use aiohttp's cached OS context
-need recreation to observe this change. Container/enclave stores are separate.
-
-## Rollback and retirement
-
-Rollback only files newly created by this application. First compare both
-installed files to the exact reviewed source and confirm they remain regular,
-root-owned files. Stop if their identity or contents changed. Remove only these
-two named blocklist files and run `/usr/bin/update-ca-trust` again. Verify the
-initial logical anchor sets and unrelated trust attributes are restored.
-Do not restore old generated bundles or remove unrelated blocklist entries.
-Existing contexts still require separate activation after a rollback.
-
-Retire this local override only after an approved vendor trust-bundle update
-itself rejects both exact certificates for the required named purposes.
-First prove this with only these two local entries removed in an isolated
-copy, preserve all other anchors, and repeat fresh-context and TLS controls.
-Then remove only the matching owned files, regenerate, and verify again.
-Until that evidence exists, retain the blocklist across vendor updates.
+Retire this local override only after an approved vendor bundle, tested without
+this exact local source in an isolated copy, rejects G3 for the same nine modes,
+preserves AAA/unrelated policy, introduces no acceptance in any measured mode,
+and passes fresh-context and four-host TLS controls. Then remove only the
+matching local file, regenerate and verify. Keep it across vendor updates until
+those exit criteria pass. Do not delete the recorded backup as part of apply.

@@ -17,6 +17,7 @@ from leadpoet_canonical.subtensor_events_v2 import (
     load_subtensor_events_profile_v2,
     prove_timelocked_weights_reveal_v2,
     validate_subtensor_events_profile_v2,
+    supports_timelocked_queue_reveal_v2,
 )
 
 
@@ -42,6 +43,7 @@ CURRENT_RUNTIME_FIXTURES = {
     478: ROOT / "tests" / "fixtures" / "subtensor_events_spec478_block9277245.json",
     479: ROOT / "tests" / "fixtures" / "subtensor_events_spec479_block9286245.json",
     481: ROOT / "tests" / "fixtures" / "subtensor_events_spec481_block9319005.json",
+    482: ROOT / "tests" / "fixtures" / "subtensor_events_spec482_block9334846.json",
 }
 
 
@@ -260,6 +262,12 @@ def test_real_spec455_archive_events_prove_exact_adjacent_reveal():
             "4dc0d25bc11d1ea15118b433ba34e78f40ae2bfbaa188757e6f67f0a3240266a",
             "0x5fb504c1c793a3ddb5456f189ddef98b5146853aea6ff998501f1b6c6eb720bc",
             205,
+        ),
+        (
+            482,
+            "937fc71c0783462556cc26fab9da9d771e0c96b657b1cd749fb0d4e4b28d9281",
+            "0x37d83888085e2f1b7c9c36c1341cfb6c0d6689f8efd6e0c6128e3666eb5d8b62",
+            210,
         ),
     ),
 )
@@ -557,7 +565,7 @@ def test_spec477_measured_current_epoch_reveal_is_exact():
         _proof(validated, fixture, events_raw + b"\x00", count_raw)
 
 
-@pytest.mark.parametrize("spec_version,previous_spec", [(478, 477), (479, 478), (481, 479)])
+@pytest.mark.parametrize("spec_version,previous_spec", [(478, 477), (479, 478), (481, 479), (482, 481)])
 def test_recent_missing_or_wrong_profile_fails_closed(monkeypatch, spec_version, previous_spec):
     fixture = json.loads(CURRENT_RUNTIME_FIXTURES[spec_version].read_text(encoding="utf-8"))
     with pytest.raises(SubtensorEventsV2Error, match="observed spec version differs"):
@@ -575,7 +583,7 @@ def test_recent_missing_or_wrong_profile_fails_closed(monkeypatch, spec_version,
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
         load_subtensor_events_profile_v2(spec_version=480)
     with pytest.raises(SubtensorEventsV2Error, match="unavailable"):
-        load_subtensor_events_profile_v2(spec_version=482)
+        load_subtensor_events_profile_v2(spec_version=483)
 
 
 def test_spec481_prior_epoch_reveal_requires_exact_runtime_and_event_pair():
@@ -818,3 +826,64 @@ def test_profile_tampering_and_unreachable_types_fail_closed():
         decode_system_events_v2(
             b"\x00", profile=extra_field, event_count_raw=b"\x00" * 4
         )
+
+
+@pytest.mark.parametrize("control", [
+    "exact", "owner", "uid", "event_count", "trailing", "metadata",
+    "code", "genesis", "spec", "transaction",
+])
+def test_spec482_reveal_requires_exact_runtime_and_event_pair(control):
+    fixture = json.loads(CURRENT_RUNTIME_FIXTURES[482].read_text(encoding="utf-8"))
+    profile = load_subtensor_events_profile_v2(spec_version=482)
+    metadata = bytes.fromhex(fixture["metadata_hex"][2:])
+    events = bytes.fromhex(fixture["system_events"][2:])
+    count = bytes.fromhex(fixture["system_event_count"][2:])
+    assert fixture["block_number"] == 9334846
+    assert fixture["block_hash"] == "0xffb4cc331f6dd0f74bdb11e530c32e7c70619822b5f3da8e84793d7d885b0892"
+    assert fixture["metadata_block_hash"] == "0x" + fixture["parent_hash"]
+    assert len(profile["types"]) == 102
+    assert not supports_timelocked_queue_reveal_v2(profile)
+    observed = dict(
+        genesis_hash=profile["genesis_hash"], spec_version=482,
+        transaction_version=1, metadata_raw=metadata,
+        runtime_code_hash=fixture["runtime_code_storage_hash"],
+    )
+    if control == "metadata":
+        observed["metadata_raw"] = metadata[:-1] + bytes((metadata[-1] ^ 1,))
+    elif control == "code":
+        observed["runtime_code_hash"] = "0x" + "00" * 32
+    elif control == "genesis":
+        observed["genesis_hash"] = "0x" + "00" * 32
+    elif control == "spec":
+        observed["spec_version"] = 481
+    elif control == "transaction":
+        observed["transaction_version"] = 2
+    expected = copy.deepcopy(fixture)
+    if control == "owner":
+        expected["expected"]["account_id_hex"] = "00" * 32
+    elif control == "uid":
+        expected["expected"]["uid"] += 1
+    elif control == "event_count":
+        count = (211).to_bytes(4, "little")
+    elif control == "trailing":
+        events += b"\x00"
+
+    def prove():
+        validated = validate_subtensor_events_profile_v2(profile, **observed)
+        return _proof(validated, expected, events, count)
+
+    if control != "exact":
+        messages = {
+            "owner": "absent or ambiguous", "uid": "absent or ambiguous",
+            "event_count": "EventCount", "trailing": "trailing",
+            "metadata": "observed metadata differs", "code": "observed runtime code differs",
+            "genesis": "observed genesis hash differs", "spec": "observed spec version differs",
+            "transaction": "observed transaction version differs",
+        }
+        with pytest.raises(SubtensorEventsV2Error, match=messages[control]):
+            prove()
+        return
+    proof = prove()
+    assert (proof["weights_set_record_index"], proof["reveal_record_index"]) == (38, 39)
+    assert proof["uid"] == 155
+    assert proof["account_id_hex"] == fixture["expected"]["account_id_hex"]

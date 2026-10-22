@@ -232,6 +232,13 @@ impact guarantee at the execution deadline. The host folds that report into the
 same private artifact. Missing reports, overflow and unfinished sends mark
 capture incomplete and do not replace the agent's result.
 
+The automatic sender retries a timeout or transport failure once, using the same
+event token and frame. Each socket attempt keeps its one-second limit. The host
+returns the original observation ID if the first attempt already committed;
+separate fetches still remain separate events. The token is not stored in the
+artifact. This runs on the existing background sender and does not retry a
+provider call. Process death can still lose evidence that has not been uploaded.
+
 The existing mounted `lab_arena_checkpoint` module still provides `record_web_fetch`,
 `record_response_received` and `record_state_snapshot`. They are best-effort calls:
 capture failure must not change the agent result or accounting. Existing explicit
@@ -267,6 +274,12 @@ or oversized bodies remain explicit gaps. This adds no storage request.
 Training exports keep that upstream evidence separate from the response shown
 to the agent. Retaining an error does not prove delivery or resolve its cost;
 missing provider billing remains unknown.
+
+For the exact generic `provider_unavailable` response, a validated host observation
+can also retain the broker's `not_dispatched` disposition and a known admission,
+cache, or budget-wait reason. This records what the broker reported without
+creating a ledger entry or assigning a cost. Historical records without that
+field remain uncertain, and exporter accounting checks remain unchanged.
 
 ## Historical reconstruction
 
@@ -357,6 +370,16 @@ can increase memorization and contaminate evaluation: [Lee et al., ACL 2022](htt
 turns exported executions into company-qualification records. It reads the
 exports only and writes a new private directory: `train.jsonl`, `eval.jsonl`,
 `analysis.jsonl` and `manifest.json`.
+
+The shared example reader accepts one export of up to 256 MiB at a time. Larger
+exports are rejected explicitly; a valid worker snapshot plus other export data
+can exceed this limit. Parsing and hash verification use additional memory.
+The readiness report also keeps its separate 256 MiB total input-batch limit.
+
+A final verified company-fit `mismatch` or `unavailable` verdict can have no
+signal detail even when signal work was attempted. The exporter retains those
+unused signal-use records without discarding the company labels. Every emitted
+signal reference still needs its exact authority checks.
 
 Each record pairs what the agent had with the judge's verdict on one company:
 

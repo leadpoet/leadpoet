@@ -442,6 +442,32 @@ def test_cli_reports_safe_mixed_cohort_code(tmp_path, capsys):
     assert not output.exists()
 
 
+def test_cli_reads_real_export_above_old_64_mib_limit(tmp_path, capsys):
+    source = tmp_path / "large.json"
+    payload = json.dumps(example(rows=[row(0, claim(), "qualified")])).encode()
+    target_size = 64 * 1024 * 1024 + 1
+    with source.open("wb") as stream:
+        stream.write(payload)
+        remaining = target_size - len(payload)
+        while remaining:
+            chunk = min(remaining, 1024 * 1024)
+            stream.write(b" " * chunk)
+            remaining -= chunk
+    assert source.stat().st_size == target_size
+    output = tmp_path / "dataset"
+    assert cli.main(["--examples", str(source), "--output", str(output)]) == 0
+    counts = json.loads(capsys.readouterr().out)["records"]
+    assert counts["train"] + counts["eval"] == 1
+
+
+def test_cli_rejects_file_above_bounded_256_mib_limit(tmp_path):
+    source = tmp_path / "oversized.json"
+    with source.open("wb") as stream:
+        stream.truncate(cli.MAX_EXAMPLE_BYTES + 1)
+    with pytest.raises(ValueError, match="example_too_large"):
+        next(cli._examples([source]))
+
+
 def test_splits_never_share_a_company_cluster():
     companies = [claim("Company %d" % index, "company%d.com" % index, "company-%d" % index) for index in range(40)]
     examples = [example("run-%d" % index, [row(0, company, "qualified" if index % 2 else "wrong_fit")])

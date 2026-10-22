@@ -1838,6 +1838,7 @@ class RunState:
     worker_handlers_inflight: int = 0
     training_control_frames: int = 0
     training_control_bytes: int = 0
+    training_retry_tokens: Dict[str, Tuple[bytes, int]] = field(default_factory=dict)
     action_sequence: int = 0
     refusals: int = 0  # refused calls answered by the Arena for this run
     local_refusals: int = 0  # refused locally during an operation cooldown
@@ -2360,6 +2361,15 @@ class WorkerSocketServer:
                 buffer = self._state.worker_observations
                 if self._state.worker_observations_frozen:
                     return unavailable
+                retry_token = frame.get("retry_token")
+                if retry_token is not None:
+                    previous = self._state.training_retry_tokens.get(retry_token)
+                    if previous is not None:
+                        if previous[0] != hashlib.sha256(raw).digest():
+                            buffer.failures.add("capture_incomplete")
+                            return unavailable
+                        return contracts.canonical_json({"recorded": True,
+                            "observation_id": previous[1]}).encode("utf-8")
                 if frame["kind"] == "response_received":
                     matched = [row for row in buffer.response_receipts if row["call_identity"] == data["call_identity"]
                                and row["status"] == data["status"] and row["body_sha256"] == data["body_sha256"]
@@ -2387,6 +2397,8 @@ class WorkerSocketServer:
                     *(os.environ.get(name, "") for name in (
                         "OPENROUTER_API_KEY", "DEEPLINE_API_KEY", "SCRAPINGDOG_API_KEY")),
                 ))
+                if identity is not None and retry_token is not None:
+                    self._state.training_retry_tokens[retry_token] = (hashlib.sha256(raw).digest(), identity)
             if identity is None:
                 return unavailable
             return contracts.canonical_json({"recorded": True, "observation_id": identity}).encode("utf-8")
@@ -3168,6 +3180,17 @@ class WorkerSocketServer:
                     if value is not None:
                         outcome[key] = value
                 kind = observation.get("kind") or ("local_catalog" if observation["operation_id"] in operations.CATALOG_OPERATIONS else "nonstandard_response")
+                if (kind == "nonstandard_response" and receiptable_call
+                        and call.get("outcome") == "not_dispatched"
+                        and call.get("error_code") == "provider_unavailable"
+                        and isinstance(call.get("reason"), str)
+                        and call["reason"] in training_observations.BROKER_NOT_DISPATCHED_REASONS
+                        and training_observations._expected_not_dispatched_response(response)):
+                    # This host broker disposition describes this call only.
+                    # It does not prove the ledger or provider accounting.
+                    outcome["broker_disposition"] = {
+                        "outcome": "not_dispatched", "reason": call["reason"],
+                    }
                 prepared = state.worker_observations.prepare_observation({
                     **{key: observation[key] for key in ("ordinal", "action_sequence", "operation_id", "request", "contributes_to_provider_call_count")},
                     "kind": kind, "outcome": outcome,

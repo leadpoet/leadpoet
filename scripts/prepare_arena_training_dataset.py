@@ -25,7 +25,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-MAX_EXAMPLE_BYTES = 64 * 1024 * 1024
+# Worker snapshots alone may reach 256 MiB. Parse one bounded export at a
+# time; the dataset builder retains only the much smaller projected records.
+MAX_EXAMPLE_BYTES = 256 * 1024 * 1024
 
 
 def _example_paths(paths):
@@ -38,13 +40,18 @@ def _example_paths(paths):
 
 def _examples(paths):
     for path in _example_paths(paths):
-        if path.stat().st_size > MAX_EXAMPLE_BYTES:
-            raise ValueError("example_too_large")
-        with path.open(encoding="utf-8") as stream:
-            document = json.load(stream)
+        with path.open("rb") as stream:
+            if os.fstat(stream.fileno()).st_size > MAX_EXAMPLE_BYTES:
+                raise ValueError("example_too_large")
+            raw = stream.read(MAX_EXAMPLE_BYTES + 1)
+            if len(raw) > MAX_EXAMPLE_BYTES:
+                raise ValueError("example_too_large")
+        document = json.loads(raw)
+        del raw
         if not isinstance(document, dict):
             raise ValueError("example_not_object")
         yield document
+        del document
 
 
 def _write_private(path: Path, text: str) -> None:

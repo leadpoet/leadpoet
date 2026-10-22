@@ -16,6 +16,7 @@ import socket
 import tempfile
 import time
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -111,8 +112,9 @@ def validate_binary_capture_metadata(value: Any, body: bytes | None = None) -> d
 
 def validate_training_frame(value: Any) -> dict[str, Any]:
     """Validate capture reports; run identity comes from the host."""
-    if (not isinstance(value, Mapping) or set(value) != {
-            "schema_version", "control", "kind", "depends_on", "data"}
+    if (not isinstance(value, Mapping) or set(value) not in ({
+            "schema_version", "control", "kind", "depends_on", "data"}, {
+            "schema_version", "control", "kind", "depends_on", "data", "retry_token"})
             or value.get("schema_version") != TRAINING_SCHEMA_VERSION
             or value.get("control") != TRAINING_CONTROL
             or value.get("kind") not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot", "capture_failure"}
@@ -121,6 +123,9 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
             or any(not isinstance(item, str) or len(item) > 96 for item in value["depends_on"])
             or len(set(value["depends_on"])) != len(value["depends_on"])
             or not isinstance(value.get("data"), dict)):
+        raise ValueError("training frame is invalid")
+    if "retry_token" in value and (not isinstance(value["retry_token"], str)
+            or not re.fullmatch(r"[0-9a-f]{32}", value["retry_token"])):
         raise ValueError("training frame is invalid")
     data = value["data"]
     kind = value["kind"]
@@ -166,10 +171,13 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | None) -> int | None:
+def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | None,
+                     *, retry_ambiguous: bool = False, retry_token: str | None = None) -> int | None:
     _TRAINING_FAILURE.reason = None
     frame = {"schema_version": TRAINING_SCHEMA_VERSION, "control": TRAINING_CONTROL,
              "kind": kind, "depends_on": depends_on, "data": data}
+    if retry_ambiguous or retry_token is not None:
+        frame["retry_token"] = retry_token or uuid.uuid4().hex
     try:
         frame["depends_on"] = list(depends_on or [])
         normalized = validate_training_frame(frame)
@@ -220,16 +228,21 @@ def _record_training(kind: str, data: dict[str, Any], depends_on: list[str] | No
             connection.close()
     except TimeoutError:
         _TRAINING_FAILURE.reason = "timeout"
+        if retry_ambiguous:
+            return _record_training(kind, data, depends_on, retry_token=frame["retry_token"])
         return None
     except Exception:
         _TRAINING_FAILURE.reason = "transport_error"
+        if retry_ambiguous:
+            return _record_training(kind, data, depends_on, retry_token=frame["retry_token"])
         return None
 
 
 def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str,
                      body: str, retrieved_at: str | None = None,
                      depends_on: list[str] | None = None,
-                     capture: dict[str, Any] | None = None) -> int | None:
+                     capture: dict[str, Any] | None = None,
+                     _retry_ambiguous: bool = False) -> int | None:
     """Report exact text returned by a cooperative direct-web fetch."""
     try:
         body_size = len(body.encode("utf-8")) if isinstance(body, str) else -1
@@ -245,12 +258,13 @@ def record_web_fetch(*, url: str, final_url: str, status: int, content_type: str
         "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat()}
     if capture is not None:
         data["capture"] = capture
-    return _record_training("web_fetch", data, depends_on)
+    return _record_training("web_fetch", data, depends_on, retry_ambiguous=_retry_ambiguous)
 
 
 def record_web_fetch_binary(*, url: str, final_url: str, status: int, content_type: str,
                             body: bytes, retrieved_at: str | None = None,
-                            capture: dict[str, Any], depends_on: list[str] | None = None) -> int | None:
+                            capture: dict[str, Any], depends_on: list[str] | None = None,
+                            _retry_ambiguous: bool = False) -> int | None:
     """Report already consumed bytes to the private run artifact."""
     if not isinstance(body, bytes) or len(body) > MAX_TRAINING_BINARY_BODY_BYTES:
         _record_training("capture_failure", {"category": "web_fetch_binary", "reason": "size_limit"}, depends_on)
@@ -260,12 +274,13 @@ def record_web_fetch_binary(*, url: str, final_url: str, status: int, content_ty
         "url": url, "final_url": final_url, "status": status, "content_type": content_type,
         "body_b64": base64.b64encode(body).decode("ascii"),
         "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat(),
-        "capture": capture}, depends_on)
+        "capture": capture}, depends_on, retry_ambiguous=_retry_ambiguous)
 
 
 def record_response_received(*, call_identity: str, status: int, body: bytes | None = None,
                              body_sha256: str | None = None, body_bytes: int | None = None,
-                             depends_on: list[str] | None = None) -> int | None:
+                             depends_on: list[str] | None = None,
+                             _retry_ambiguous: bool = False) -> int | None:
     """Report that agent code obtained a broker response; the host checks its digest."""
     if body is not None:
         if body_sha256 is not None or body_bytes is not None:
@@ -285,7 +300,8 @@ def record_response_received(*, call_identity: str, status: int, body: bytes | N
         _TRAINING_FAILURE.reason = "invalid_frame"
         return None
     return _record_training("response_received", {"call_identity": call_identity, "status": status,
-        "body_sha256": body_sha256, "body_bytes": body_bytes}, depends_on)
+        "body_sha256": body_sha256, "body_bytes": body_bytes}, depends_on,
+        retry_ambiguous=_retry_ambiguous)
 
 
 def record_state_snapshot(name: str, value: Any, *, depends_on: list[str] | None = None) -> int | None:

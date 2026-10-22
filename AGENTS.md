@@ -1,3 +1,17 @@
+## Scoped production authorization: October 22 unfinished execution recovery
+
+On 2026-10-22 the user authorized completing the full Arena cycle, including
+production-safe correction of Arena failures that prevent eligible miners from
+scoring. The coordinating agent may apply exact committed, independently
+reviewed data repairs for never-executed work after the general cause is fixed.
+Use existing leases, audited history and operator controls. Preserve submitted
+sources, frozen ICPs and scorer, accepted executions and judgments, provider
+accounting, competition rules, worker access and concurrent work. Test normal,
+retry, failure and owned-hold release paths before application. Do not fabricate
+scores, replay accepted work, force a winner or bypass release/security gates.
+Authority ends after October 22 publication, promotion, incentives and final
+weights are verified.
+
 ## Scoped production authorization: October 22 full-cycle dependency repair
 
 On 2026-10-22 the user authorized bounded investigation and the smallest general

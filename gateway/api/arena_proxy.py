@@ -19,6 +19,7 @@ from typing import Mapping
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
+from starlette.requests import ClientDisconnect
 
 from lab_arena import operations, training_input, training_observations
 
@@ -228,11 +229,14 @@ async def _bounded_body(request: Request, *, limit: int = _MAX_REQUEST_BYTES) ->
     _check_declared_body_size(request, limit)
     chunks: list[bytes] = []
     size = 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > limit:
-            raise HTTPException(status_code=413, detail="body too large")
-        chunks.append(chunk)
+    try:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > limit:
+                raise HTTPException(status_code=413, detail="body too large")
+            chunks.append(chunk)
+    except ClientDisconnect as exc:
+        raise HTTPException(status_code=400, detail="request body incomplete") from exc
     return b"".join(chunks)
 
 

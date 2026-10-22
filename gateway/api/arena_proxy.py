@@ -308,7 +308,11 @@ async def proxy_testnet_request(arena_path: str, request: Request) -> Response:
 
 
 async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = False) -> Response:
-    if not arena_path or any(part in {"", ".", ".."} for part in arena_path.split("/")):
+    if (
+        not arena_path
+        or any(ord(char) < 32 or ord(char) == 127 for char in arena_path)
+        or any(part in {"", ".", ".."} for part in arena_path.split("/"))
+    ):
         raise HTTPException(status_code=404, detail="arena path invalid")
 
     parts = arena_path.split("/")

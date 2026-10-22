@@ -105,6 +105,17 @@ def test_missing_bundle_and_import_fail_closed(packages, monkeypatch, capsys):
     assert "running service has not been stopped" in capsys.readouterr().err
 
 
+def test_empty_parsed_ca_set_is_rejected(packages, monkeypatch):
+    class EmptyContext:
+        def get_ca_certs(self, binary_form):
+            assert binary_form
+            return []
+
+    monkeypatch.setattr(checker.ssl, "create_default_context", lambda **kwargs: EmptyContext())
+    with pytest.raises(ValueError, match="no CA roots"):
+        checker.check_security()
+
+
 @pytest.mark.parametrize("package", ["certifi", "pip._vendor.certifi"])
 def test_retained_root_is_rejected_despite_patched_versions(packages, package):
     source = (ROOT / "deploy/ca-trust/source/leadpoet-emsign-ecc-g3.trusted.pem").read_text()

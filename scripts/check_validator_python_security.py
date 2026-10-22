@@ -41,6 +41,8 @@ def check_security() -> None:
         context = ssl.create_default_context(cafile=str(ca_file))
         roots = {hashlib.sha256(cert).hexdigest()
                  for cert in context.get_ca_certs(binary_form=True)}
+        if not roots:
+            raise ValueError("a certifi bundle contains no CA roots")
         if roots & COMPROMISED_ROOTS:
             raise ValueError("a certifi bundle retains a compromised root")
 

@@ -523,6 +523,12 @@ The primary controller defaults to
 `requirements.txt` in that dedicated environment before restarting, or set
 `VALIDATOR_PYTHON_BIN` to an already prepared compatible environment. Keep the
 old environment intact so rollback can still start the previous service.
+The controller checks the selected interpreter before wallet/chain readiness
+and before stopping the service. It requires stable pip 26.2.2 or newer,
+runtime certifi 2026.10.19 or newer, and pip's own patched certifi bundle at
+that same minimum version. A source update alone does not update these packages.
+Prepare and verify a replacement environment before activation; do not upgrade
+an environment while its validator process is running.
 
 The gateway retains its existing read-only ECR access and trusted scorer
 repository setting. The validator does not need those settings. No additional

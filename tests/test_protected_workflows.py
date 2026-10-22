@@ -1,5 +1,8 @@
 import ast
 from pathlib import Path
+import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -20,6 +23,36 @@ MANIFEST_PATH = ROOT / "gateway/tee/protected_workflows.json"
 
 def test_committed_protected_manifest_matches_current_source():
     verify_manifest(ROOT, load_manifest(MANIFEST_PATH))
+
+
+def test_protected_hashes_are_cross_version_and_fail_closed():
+    python312 = shutil.which("python3.12")
+    if python312 is None:
+        pytest.skip("Python 3.12 is needed for the enclave hash compatibility check")
+    script = """
+import ast
+import sys
+from gateway.tee.protected_workflows import _symbol_hash
+
+def digest(source):
+    return _symbol_hash(ast.parse(source).body[0])
+
+original = digest('def protected(value): return value')
+changed = digest('def protected(value): return value + 1')
+assert original != changed
+if sys.version_info >= (3, 12):
+    generic_t = digest('def protected[T](value): return value')
+    generic_u = digest('def protected[U](value): return value')
+    assert generic_t != generic_u
+print(original, changed)
+"""
+    host_hashes = subprocess.check_output(
+        [sys.executable, "-c", script], cwd=ROOT, text=True
+    ).strip()
+    enclave_hashes = subprocess.check_output(
+        [python312, "-c", script], cwd=ROOT, text=True
+    ).strip()
+    assert host_hashes == enclave_hashes
 
 
 def test_retired_trust_surfaces_are_absent_from_inventory():

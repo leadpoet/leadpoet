@@ -100,6 +100,11 @@ else
   mv "$STAGE" "$RELEASE"; STAGE=""
 fi
 
+# Exact source does not update the selected environment. Check its actual trust
+# dependencies before wallet/chain readiness or any change to the running service.
+"$PYTHON" -I -B "$RELEASE/scripts/check_validator_python_security.py" \
+  || fail "selected validator interpreter failed Python trust preflight"
+
 [ -f "$ENV_FILE" ] && [ ! -L "$ENV_FILE" ] || fail "operator environment must be a regular file"
 [ "$(stat -c %u "$ENV_FILE")" = "$(id -u)" ] || fail "operator Arena environment owner differs from restart identity"
 [ "$(stat -c %a "$ENV_FILE")" = "600" ] || fail "operator Arena environment must have mode 0600"

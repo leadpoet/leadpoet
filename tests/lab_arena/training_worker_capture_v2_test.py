@@ -125,10 +125,12 @@ def _pre_reservation_document(reason):
     document["body_b64"] = base64.b64encode(b'{"error":{"code":"provider_unavailable"}}').decode()
     document["call"].update(reason=reason, error_code="provider_unavailable",
                             reserved_microusd=5000)
+    if reason == "provider_cost_uncertain":
+        document["call"]["idempotent"] = False
     return document
 
 
-@pytest.mark.parametrize("reason", sorted(training_observations.BROKER_NOT_DISPATCHED_REASONS))
+@pytest.mark.parametrize("reason", sorted(training_observations.BROKER_NOT_DISPATCHED_REASONS - {"provider_cost_uncertain"}))
 def test_pre_reservation_disposition_is_captured_without_changing_worker_response(reason):
     document = _pre_reservation_document(reason)
     state = runner.RunState(lease=lease(), lease_token="private-lease-token")
@@ -147,6 +149,19 @@ def test_pre_reservation_disposition_is_captured_without_changing_worker_respons
     assert "reserved_microusd" not in saved["outcome"]
     training_observations.build_snapshot("execute:1", "execute",
         state.worker_observations.document(), lease_generation=1, claim_request_hash=CLAIM_HASH)
+
+
+def test_temporary_cost_hold_retry_does_not_claim_intermediate_disposition():
+    held = _pre_reservation_document("provider_cost_uncertain")
+    settled = response(200, {"answer": "settled"}, outcome="settled")
+    state = runner.RunState(lease=lease(), lease_token="private-lease-token")
+    server = runner.WorkerSocketServer(Path("/tmp/unused-arena-disposition.sock"),
+                                       FakeApi([], broker_documents=[held, settled]), state)
+    returned = json.loads(server.handle_frame(shim.build_operation_frame(
+        "openrouter.chat", {"model": "openai/gpt-4o-mini",
+                            "messages": [{"role": "user", "content": "check"}], "max_tokens": 20}, 1000)))
+    assert returned["status"] == 200 and returned["body_b64"] == settled["body_b64"]
+    assert state.worker_observations.document()["observations"] == []
 
 
 @pytest.mark.parametrize("change", [

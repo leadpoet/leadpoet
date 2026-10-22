@@ -810,7 +810,7 @@ async def test_typed_date_binding_is_rechecked_and_can_remain_verified(
 
 
 @pytest.mark.asyncio
-async def test_relative_posting_repairs_three_quotes_to_two_complete_bindings(
+async def test_relative_posting_repairs_four_quotes_to_two_complete_bindings(
     monkeypatch,
 ):
     context_quote = (
@@ -840,6 +840,7 @@ async def test_relative_posting_repairs_three_quotes_to_two_complete_bindings(
                     "2026-09-25",
                     "Platform Engineer role",
                     "HarborSoft's workflow product",
+                    "role for HarborSoft",
                 ],
             )]))
         repair_unit = payload["bounded_unit_repair_control"]["units"][0]
@@ -851,7 +852,7 @@ async def test_relative_posting_repairs_three_quotes_to_two_complete_bindings(
         assert "Treat each citation_errors value as a required output" in (
             kwargs["system_prompt"]
         )
-        assert "For too_many_quotes, return at most two" in kwargs[
+        assert "For too_many_quotes, return at most three" in kwargs[
             "system_prompt"
         ]
         assert "never the original oversized list" in kwargs["system_prompt"]

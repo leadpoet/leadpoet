@@ -35,8 +35,9 @@ _CHECKS = (
     "connects_icp", "natural_paragraph",
 )
 _MAX_STATEMENT_UNITS = 6
-_MAX_UNIT_EVIDENCE_BINDINGS = 2
+_MAX_UNIT_EVIDENCE_BINDINGS = 3
 _MAX_SOURCE_CONTEXT_BYTES = 12_000
+_MAX_SOURCE_TITLE_BYTES = 1_024
 _COMPANY_SOURCE_CONTEXT_RESERVATION_BYTES = 4_000
 _MAX_REVIEW_DOCUMENT_CHARACTERS = 48_000
 _UNIT_STATUSES = ("VERIFIED", "CONTRADICTED", "UNPROVEN")
@@ -366,7 +367,7 @@ evidence. A related product benefit or funding event cannot establish an
 unstated mechanism or API behavior. Do not omit a unit or a clause because
 another clause in the same unit is supported.
 
-For each VERIFIED factual unit, return one or two evidence bindings that support
+For each VERIFIED factual unit, return one to three evidence bindings that support
 the asserted facts, not just related facts about the company. If an asserted
 detail has no support in the admitted evidence, the unit is UNPROVEN. For each
 CONTRADICTED factual unit, bind the conflicting evidence. An UNPROVEN unit may
@@ -514,6 +515,17 @@ def _utf8_prefix(value: str, maximum_bytes: int) -> str:
     return value.encode("utf-8")[:maximum_bytes].decode(
         "utf-8", errors="ignore",
     )
+
+
+def _validated_source_title(value: Any) -> str:
+    """Retain one complete fetched title, never a shortened or coerced claim."""
+
+    if (
+        not isinstance(value, str) or not value.strip() or "\x00" in value
+        or len(value.encode("utf-8")) > _MAX_SOURCE_TITLE_BYTES
+    ):
+        return ""
+    return value
 
 
 def _continuous_source_window(
@@ -764,7 +776,12 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
                 })
             context_index = append_source(
                 kind="verified_source_context",
-                admitted_text=[raw_context.get("text", "")],
+                # A title identifies this fetched report. Keep it separate
+                # from the body so a quotation cannot join unrelated fields.
+                admitted_text=[
+                    raw_context.get("text", ""),
+                    _validated_source_title(raw_context.get("source_title")),
+                ],
                 observed_dates=context_dates,
                 matched_icp_signal=matched,
                 source_url=(
@@ -1401,20 +1418,17 @@ def review_evidence(
             item = _mapping(raw)
             if item.get("url") not in urls or not isinstance(item.get("text"), str):
                 continue
-            text = (
-                _funding_auxiliary_source_window(
-                    item["text"], _MAX_SOURCE_CONTEXT_BYTES, quotes, verdict.get("authoritative_date"),
-                ) if item.get("url") in company_context_urls else
-                _continuous_source_window(item["text"], _MAX_SOURCE_CONTEXT_BYTES, quotes)
-                if item.get("url") in stage_urls
-                else _utf8_prefix(item["text"], _MAX_SOURCE_CONTEXT_BYTES)
-            )
+            # Select once, after the shared allowance is known. A prefix here
+            # can discard the paragraph's facts before final window selection.
+            text = item["text"]
             if not text:
                 continue
             context = {
                 "url": item["url"],
                 "text": text,
                 "source_publication_date": item.get("source_publication_date") or "",
+                **({"source_title": title}
+                   if (title := _validated_source_title(item.get("source_title"))) else {}),
                 **({"source_role": "matched_company_stage"}
                    if item.get("url") in stage_urls else
                    {"source_role": "first_party_context", "final_url": item.get("final_url")}
@@ -1719,23 +1733,23 @@ def review_evidence(
     context_bytes_used = 0
     for item in with_context:
         remaining = intent_context_budget // len(with_context)
-        stage_handoff = any(
-            context.get("source_role") in {"matched_company_stage", "first_party_context"}
-            for context in item["source_context"]
-        )
         for offset, context in enumerate(item["source_context"]):
-            allowance = (
-                remaining // (len(item["source_context"]) - offset)
-                if stage_handoff else remaining
-            )
+            allowance = remaining // (len(item["source_context"]) - offset)
+            title_bytes = len(context.get("source_title", "").encode("utf-8"))
+            if title_bytes >= allowance:
+                context.pop("source_title", None)
+                title_bytes = 0
+            allowance -= title_bytes
             context["text"] = (
                 _funding_auxiliary_source_window(
                     context["text"], allowance, item["supporting_quotes"], item.get("authoritative_date"),
                 ) if context.get("source_role") == "first_party_context" else
-                _continuous_source_window(context["text"], allowance, item["supporting_quotes"])
-                if stage_handoff else _utf8_prefix(context["text"], allowance)
+                _continuous_source_window(
+                    context["text"], allowance, item["supporting_quotes"],
+                    paragraph=paragraph,
+                )
             )
-            used = len(context["text"].encode("utf-8"))
+            used = len(context["text"].encode("utf-8")) + title_bytes
             remaining -= used
             context_bytes_used += used
         item["source_context"] = [
@@ -2234,7 +2248,7 @@ aggregate checks. For a flagged UNPROVEN or non-factual unit, return evidence:[]
 do not repeat an optional citation. A factual VERIFIED or CONTRADICTED unit still
 requires continuous exact bound evidence. If it cannot be bound, return evidence:[]
 and the server will reject it. Treat each citation_errors value as a required
-output correction. For too_many_quotes, return at most two bindings, never the
+output correction. For too_many_quotes, return at most three bindings, never the
 original oversized list. Choose the strongest complementary exact excerpts;
 prefer one continuous context quote for related facts plus one needed date. Do
 not omit support for a factual clause merely to meet the limit. Only
@@ -2311,16 +2325,16 @@ support from the same source_index; otherwise return UNPROVEN.
 
 For other listed units, keep their status and repair citations only. Return no
 unlisted unit, coverage, factual flags, or aggregate checks. VERIFIED and
-CONTRADICTED require exact bound evidence for the facts they assert. Use one or
-two source_index/quote bindings, each a continuous exact admitted excerpt or
+CONTRADICTED require exact bound evidence for the facts they assert. Use one to
+three source_index/quote bindings, each a continuous exact admitted excerpt or
 observed date. Aim for no more than 500 characters when that is enough; use a
 longer exact span when the facts require it. No ellipses or stitched spans. UNPROVEN may
 return evidence:[]. Treat each citation_errors value as a required output
-correction even during a semantic recheck. For too_many_quotes, return at most two
+correction even during a semantic recheck. For too_many_quotes, return at most three
 bindings, never the original oversized list. Choose the strongest complementary
 exact excerpts; prefer one continuous context quote for related facts plus one
 needed date. Do not omit support for any factual clause merely to meet the limit;
-if two bindings cannot support all clauses, do not return VERIFIED. A pure date is
+if three bindings cannot support all clauses, do not return VERIFIED. A pure date is
 not evidence for a separate company attribute.
 Return only {"repairs":[{"unit_id":...,"status":"VERIFIED|CONTRADICTED|UNPROVEN","evidence":[...]}]}.
 Trusted routing controls (not factual evidence):

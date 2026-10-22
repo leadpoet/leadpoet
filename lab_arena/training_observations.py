@@ -34,6 +34,12 @@ _V1_FIELDS = frozenset({"observations", "observation_count", "local_refusal_coun
 _V2_FIELDS = _V1_FIELDS | {"response_receipts", "response_receipt_count", "agent_observations", "agent_observation_count"}
 _AGENT_REF_RE = re.compile(r"agent:(0|[1-9][0-9]*)\Z")
 KINDS = frozenset({"local_catalog", "local_refusal", "transport_failure", "invalid_response", "nonstandard_response", "local_parse_error"})
+BROKER_NOT_DISPATCHED_REASONS = frozenset({
+    "provider_admission_deadline", "provider_admission_cancelled",
+    "judgment_cache_cancelled", "judgment_cache_busy",
+    "provider_cost_uncertain", "provider_calls_inflight", "budget_busy",
+})
+_BROKER_PROVIDER_UNAVAILABLE_BODY = b'{"error":{"code":"provider_unavailable"}}'
 
 
 class ObservationError(ValueError):
@@ -48,6 +54,17 @@ def object_ref(run_id: str, generation: int, claim_hash: str) -> str:
 
 def _canonical(value: Any) -> bytes:
     return contracts.canonical_json(value).encode("utf-8")
+
+
+def _expected_not_dispatched_response(response: Any) -> bool:
+    if (not isinstance(response, Mapping) or response.get("status") != 502
+            or type(response.get("status")) is not int
+            or not isinstance(response.get("body_b64"), str)):
+        return False
+    try:
+        return base64.b64decode(response["body_b64"], validate=True) == _BROKER_PROVIDER_UNAVAILABLE_BODY
+    except (ValueError, TypeError):
+        return False
 
 
 def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> dict:
@@ -80,8 +97,19 @@ def clean_observation(value: Mapping[str, Any], secrets: Sequence[str] = ()) -> 
         raise ObservationError("request_invalid")
     request, redactions = training_capture.sanitize_training_value(request, secrets)
     outcome = value["outcome"]
-    if not isinstance(outcome, dict) or not set(outcome) <= {"protocol", "response", "exception_class", "error_code"} or outcome.get("protocol") not in {"http", "frame"}:
+    if not isinstance(outcome, dict) or not set(outcome) <= {"protocol", "response", "exception_class", "error_code", "broker_disposition"} or outcome.get("protocol") not in {"http", "frame"}:
         raise ObservationError("outcome_invalid")
+    if "broker_disposition" in outcome:
+        disposition = outcome["broker_disposition"]
+        if (value["kind"] != "nonstandard_response" or identity is None
+                or value["action_sequence"] is None
+                or not isinstance(disposition, dict)
+                or set(disposition) != {"outcome", "reason"}
+                or disposition.get("outcome") != "not_dispatched"
+                or not isinstance(disposition.get("reason"), str)
+                or disposition.get("reason") not in BROKER_NOT_DISPATCHED_REASONS
+                or not _expected_not_dispatched_response(outcome.get("response"))):
+            raise ObservationError("broker_disposition_invalid")
     outcome = dict(outcome)
     response = outcome.pop("response", None)
     outcome, changes = training_capture.sanitize_training_value(outcome, secrets)

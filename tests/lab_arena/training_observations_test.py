@@ -41,6 +41,33 @@ def observation(*, kind="transport_failure", action=0, ordinal=0, identity=None,
             "privacy": {"redacted": False, "redactions": []}}
 
 
+def test_optional_broker_disposition_requires_nonstandard_host_error():
+    row = observation(kind="nonstandard_response", identity=IDENTITY, contributes=False)
+    row["outcome"]["response"] = {
+        "status": 502, "headers": {"content-type": "application/json"},
+        "body_b64": base64.b64encode(b'{"error":{"code":"provider_unavailable"}}').decode(),
+    }
+    row["outcome"]["broker_disposition"] = {
+        "outcome": "not_dispatched", "reason": "provider_admission_deadline"}
+    assert obs.clean_observation(row)["outcome"]["broker_disposition"] == row["outcome"]["broker_disposition"]
+    for changed in (
+        {"kind": "transport_failure"},
+        {"call_identity": None},
+        {"outcome": {**row["outcome"], "broker_disposition": {
+            "outcome": "not_dispatched", "reason": "unknown"}}},
+        {"outcome": {**row["outcome"], "broker_disposition": {
+            "outcome": "uncertain", "reason": "provider_admission_deadline"}}},
+        {"outcome": {**row["outcome"], "response": {
+            **row["outcome"]["response"], "status": 503}}},
+    ):
+        with pytest.raises(obs.ObservationError, match="broker_disposition_invalid"):
+            obs.clean_observation({**row, **changed})
+    # Old observations without the optional field remain valid.
+    old = copy.deepcopy(row)
+    del old["outcome"]["broker_disposition"]
+    assert "broker_disposition" not in obs.clean_observation(old)["outcome"]
+
+
 def payload(*rows):
     return {"observations": list(rows), "observation_count": len(rows),
             "local_refusal_count": sum(row["kind"] == "local_refusal" for row in rows),

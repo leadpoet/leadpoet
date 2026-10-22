@@ -605,12 +605,53 @@ def test_historical_export_keeps_positive_and_null_fit_failure_without_signal_po
     assert "signal_authority_evidence" not in result["judgment"]
 
 
-def test_export_entrypoint_rejects_signal_use_attached_to_null_fit_failure():
+def test_export_entrypoint_keeps_unused_signal_use_after_terminal_fit_failure():
     values = _mixed_fit_fixture()
     values["signal_judgment_uses"].append({**values["signal_judgment_uses"][0], "company_index": 1})
     result = export_run(_CompanyExportStore(values), values["objects"], values["run_id"])
-    assert "judgment" not in result
-    assert "signal_authority_unverified" in result["completeness"]["incomplete_reasons"]
+    assert len(result["companies"]) == 2
+    assert len(result["judgment"]["signal_authority_evidence"]) == 1
+    assert result["judgment"]["signal_judgment_uses"] == values["signal_judgment_uses"]
+    assert result["companies"][1]["judgment"]["intent_signals_detail"] is None
+
+
+def test_current_judge_use_survives_terminal_unavailable_without_signal_verdict():
+    values = _mixed_fit_fixture()
+    values["signal_judgment_uses"].append({**values["signal_judgment_uses"][0], "company_index": 1})
+    judge = values["runs"][1]
+    breakdowns = json.loads(values["objects"].values[judge["output_ref"]])["breakdowns"]
+    breakdowns[1]["verifier_gate_receipts"][0]["decision"] = "unavailable"
+    from lab_arena.training_input import read_input
+    scoring_input = read_input(values["objects"], judge["run_id"], "score",
+                               judge["lease_generation"], judge["claim_request_hash"])["input"]
+    evidence = _signal_authority_evidence(
+        judge=judge, breakdowns=breakdowns, scored_company_indexes=[0, 1],
+        scoring_input=scoring_input, uses=values["signal_judgment_uses"],
+        authority_rows=values["signal_judgment_rows"], company_rows=values["company_judgment_rows"],
+        runs={row["run_id"]: row for row in values["runs"]}, round_row=values["round_row"],
+    )
+    assert len(evidence) == 1
+    assert evidence[0]["company_index"] == 0
+
+
+@pytest.mark.parametrize("decision", ["mismatch", "unavailable"])
+def test_cached_source_use_survives_terminal_fit_failure(decision):
+    values = _company_cache_fixture(whole_company_hit=True)
+    judge = values["runs"][1]
+    breakdowns = json.loads(values["objects"].values[judge["output_ref"]])["breakdowns"]
+    breakdowns[0]["company_qualified"] = False
+    breakdowns[0]["intent_signals_detail"] = None
+    breakdowns[0]["verifier_gate_receipts"][0]["decision"] = decision
+    from lab_arena.training_input import read_input
+    scoring_input = read_input(values["objects"], judge["run_id"], "score",
+                               judge["lease_generation"], judge["claim_request_hash"])["input"]
+    evidence = _signal_authority_evidence(
+        judge=judge, breakdowns=breakdowns, scored_company_indexes=[0],
+        scoring_input=scoring_input, uses=values["signal_judgment_uses"],
+        authority_rows=values["signal_judgment_rows"], company_rows=values["company_judgment_rows"],
+        runs={row["run_id"]: row for row in values["runs"]}, round_row=values["round_row"],
+    )
+    assert evidence == []
 
 
 @pytest.mark.parametrize("signal_policy", [False, True])

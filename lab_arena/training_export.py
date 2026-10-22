@@ -186,6 +186,16 @@ def _signal_details(breakdown):
     return details
 
 
+def _terminal_company_fit_nonmatch(breakdown):
+    """A final fit failure has no signal verdict to reference."""
+    if (breakdown.get("intent_signals_detail") is not None
+            or breakdown.get("company_qualified") is not False):
+        return False
+    fit = [receipt for receipt in breakdown.get("verifier_gate_receipts") or []
+           if isinstance(receipt, Mapping) and receipt.get("gate") == "company_fit"]
+    return len(fit) == 1 and fit[0].get("decision") in {"mismatch", "unavailable"}
+
+
 def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
                                scoring_input, uses, authority_rows, company_rows, runs,
                                round_row):
@@ -234,6 +244,7 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
         by_authority[identity] = row
     evidence = []
     seen = set()
+    unused_terminal_uses = set()
     company_by_identity = {(row["cache_key"], row["authority_slot"]): row for row in company_rows}
     lease = (judge.get("claim_response") or {}).get("company_judgment_cache") or {}
     lease_by_index = {row["company_index"]: row for row in
@@ -273,12 +284,14 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
         return positions
     for company_index, breakdown in zip(scored_company_indexes, breakdowns):
         details = _signal_details(breakdown)
-        if not details and any(
-            (position[0] == judge["run_id"] and position[1] == company_index)
-            or source_positions(company_index, position[2], None)
-            for position in by_use
-        ):
-            raise ExportError("signal_use_without_reference")
+        unmatched = {position for position in by_use
+                     if position[0] == judge["run_id"] and position[1] == company_index}
+        for signal_index in {position[2] for position in by_use}:
+            unmatched.update(source_positions(company_index, signal_index, None))
+        if not details and unmatched:
+            if not _terminal_company_fit_nonmatch(breakdown):
+                raise ExportError("signal_use_without_reference")
+            unused_terminal_uses.update(unmatched)
         for signal_index, detail in enumerate(details):
             if not isinstance(detail, Mapping):
                 raise ExportError("signal_detail_invalid")
@@ -343,7 +356,7 @@ def _signal_authority_evidence(*, judge, breakdowns, scored_company_indexes,
                 "reference": copy.deepcopy(reference),
                 "use": copy.deepcopy(use), "authority": copy.deepcopy(row),
             })
-    if not {key for key in by_use if key[0] == judge["run_id"]}.issubset(seen):
+    if not {key for key in by_use if key[0] == judge["run_id"]}.issubset(seen | unused_terminal_uses):
         raise ExportError("signal_use_without_reference")
     return evidence
 
@@ -1278,6 +1291,9 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 round_row=round_row,
             )
             example["judgment"]["signal_authority_evidence"] = evidence
+            # Keep persisted actions as process evidence even when the final
+            # company-fit failure has no signal verdict to validate against.
+            example["judgment"]["signal_judgment_uses"] = copy.deepcopy(signal_judgment_uses)
             source_ids = {item["authority"]["source_score_run_id"] for item in evidence}
             external_source_ids = source_ids - run_ids
             selected_source_ledger = [row for row in signal_source_ledger_rows

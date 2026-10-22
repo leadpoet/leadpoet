@@ -67,7 +67,7 @@ def _wait_for_round_lock(database, rid, future):
 def _complete(cur, judge):
     cur.execute('SET LOCAL ROLE lab_arena_service')
     cur.execute("SELECT public.lab_arena_complete_attempt_v3(%s,%s,%s::jsonb,'accepted',%s,%s,'[]'::jsonb,%s)",
-        (judge['run_id'], TOKEN, json.dumps({'terminal_status': 'accepted'}),
+        (judge['run_id'], TOKEN, json.dumps(judge['result_doc']),
          judge['output_ref'], judge['_output_hash'], 'sha256:' + '9' * 64))
     result = cur.fetchone()[0]
     cur.execute('RESET ROLE')

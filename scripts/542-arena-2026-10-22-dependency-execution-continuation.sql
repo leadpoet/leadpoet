@@ -59,7 +59,9 @@ BEGIN
   RAISE EXCEPTION 'Oct22 exact submitted source differs'; END IF;
  IF (SELECT encode(extensions.digest(jsonb_agg(to_jsonb(a)ORDER BY run_id)::TEXT,'sha256'),'hex')
    FROM public.lab_arena_runs a WHERE a.round_id=rid AND a.submission_id=sid)<>'2e7d5f6f88800d7af2c37e6d75abd3244f8a6605ceed38a068082266eb8c13d1'
-  OR EXISTS(SELECT 1 FROM public.lab_arena_ledger l WHERE l.round_id=rid AND l.submission_id=sid)
+  OR EXISTS(SELECT 1 FROM public.lab_arena_ledger l WHERE l.run_id IN(
+   SELECT historical.run_id FROM public.lab_arena_runs historical WHERE historical.round_id=rid
+    AND historical.submission_id=sid AND historical.kind='execute'AND historical.attempt IN(1,2)))
   OR EXISTS(SELECT 1 FROM public.lab_arena_runs a WHERE a.round_id=rid AND a.submission_id=sid
    AND (a.kind<>'execute'OR a.status<>'failed'OR a.terminal_cause<>'model_error'OR a.attempt NOT IN(1,2)
     OR a.output_ref IS NOT NULL OR a.per_icp_score<>0)) THEN

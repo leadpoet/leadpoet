@@ -1330,6 +1330,7 @@ class _HTMLShellParser(HTMLParser):
         self.head_depth = 0
         self._label_stack: list[tuple[str, list[str]]] = []
         self._title_seen = False
+        self.title = ""
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
         tag = tag.casefold()
@@ -1361,6 +1362,8 @@ class _HTMLShellParser(HTMLParser):
                     label = " ".join(" ".join(parts).split())
                     if label:
                         self.labels.append(label)
+                    if tag == "title":
+                        self.title = label
                     if tag == "h1" and self.body_depth and not self.hidden_depth:
                         self.headings.append(label)
                     break
@@ -2270,6 +2273,11 @@ async def _scrape_sd_hardened(
                                 "observed_job_link_count": listing_count,
                             }
                     source_publication_date = _published_date_from_html(body, url)
+                    title_parser = _parse_html_shell(body)
+                    from qualification.scoring.intent_details import _validated_source_title
+                    source_title = _validated_source_title(
+                        title_parser.title if title_parser is not None else ""
+                    )
                     # Extract article body from raw HTML before truncation.
                     # Removes nav/sidebar/footer/related-posts that otherwise
                     # eat the first chars of the prompt input.
@@ -2309,6 +2317,7 @@ async def _scrape_sd_hardened(
                         )
                     return {"ok": True, "stage": f"sd:{tier_name}",
                             "content": body[:MAX_SCRAPED_CHARS],
+                            **({"source_title": source_title} if source_title else {}),
                             "source_publication_date": source_publication_date,
                             "meta": result_meta,
                             "error": None, "stage_history": history}
@@ -2563,10 +2572,19 @@ async def _scrape_exa(url: str) -> Dict[str, Any]:
                         result = results[0]
                         text = (result.get("text") or "")[:MAX_SCRAPED_CHARS]
                         if len(text) >= 300:
+                            from qualification.scoring.intent_details import _validated_source_title
+                            # Contents responses may contain another resource.
+                            # Admit title metadata only for this exact page.
+                            source_title = (
+                                _validated_source_title(result.get("title"))
+                                if _normalize_url(result.get("url") or "") == _normalize_url(url)
+                                else ""
+                            )
                             return {
                                 "ok": True,
                                 "stage": "exa_scraped",
                                 "content": text,
+                                **({"source_title": source_title} if source_title else {}),
                                 "source_publication_date": _source_publication_date(
                                     result.get("publishedDate")
                                 ),
@@ -3089,6 +3107,8 @@ def _published_date_from_html(html: str, source_url: str) -> str:
 def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
     """Bound source fields while retaining the exact validated evidence URL."""
 
+    from qualification.scoring.intent_details import _validated_source_title
+
     results: List[Dict[str, Any]] = []
     for item in (contents.get("results") or []):
         if not isinstance(item, Mapping):
@@ -3099,6 +3119,8 @@ def _project_contents_for_prompt(contents: Mapping[str, Any]) -> Dict[str, Any]:
                     item.get("url") or item.get("id")
                 ),
                 "title": item.get("title") if isinstance(item.get("title"), str) else "",
+                **({"source_title": title}
+                   if (title := _validated_source_title(item.get("source_title"))) else {}),
                 "text": item.get("text") if isinstance(item.get("text"), str) else "",
                 "meta": dict(item.get("meta")) if isinstance(item.get("meta"), Mapping) else {},
                 "source_publication_date": _source_publication_date(
@@ -3684,8 +3706,9 @@ async def _fetch_sd_then_exa(
             exa = await _scrape_exa(url)
             if exa.get("ok") and exa.get("content") and not _has_anti_bot_marker(exa["content"]):
                 results.append({
-                    "url": url, "title": "",
+                    "url": url, "title": exa.get("source_title") or "",
                     "text": exa["content"][:max_chars],
+                    **({"source_title": exa["source_title"]} if exa.get("source_title") else {}),
                 })
                 statuses.append({"url": url, "source": "exa_fb_route", "stage": exa.get("stage")})
                 continue
@@ -3714,8 +3737,9 @@ async def _fetch_sd_then_exa(
             elif _lever_posting_identity(url) is not None:
                 result_meta.setdefault("kind", "lever_job")
             results.append({
-                "url": url, "title": "",
+                "url": url, "title": sd.get("source_title") or "",
                 "text": sd["content"][:max_chars],
+                **({"source_title": sd["source_title"]} if sd.get("source_title") else {}),
                 "source_publication_date": sd.get("source_publication_date") or "",
                 "meta": result_meta,
             })
@@ -3727,8 +3751,9 @@ async def _fetch_sd_then_exa(
         exa = await _scrape_exa(url)
         if exa.get("ok") and exa.get("content"):
             results.append({
-                "url": url, "title": "",
+                "url": url, "title": exa.get("source_title") or "",
                 "text": exa["content"][:max_chars],
+                **({"source_title": exa["source_title"]} if exa.get("source_title") else {}),
                 "source_publication_date": exa.get("source_publication_date") or "",
                 "meta": (
                     {"kind": "lever_job"}
@@ -6069,11 +6094,14 @@ async def verify_three_stage(
             # signal judge's chosen quotes. Reuse fetched, cited pages; no
             # submitted snippets or additional provider calls enter this path.
             from qualification.scoring.intent_details import _body_dateline_dates
+            from qualification.scoring.intent_details import _validated_source_title
 
             result["verified_source_context"] = [
                 {
                     "url": declared[_normalize_url(item["url"])],
                     "text": retained_text(item),
+                    **({"source_title": title}
+                       if (title := _validated_source_title(item.get("source_title"))) else {}),
                     "source_publication_date": item.get("source_publication_date") or "",
                     **({"source_body_dateline_dates": _body_dateline_dates(item.get("text") or "")}
                        if not client_ready and _url_on_verified_company_identity(item["url"], verified_identity_context)

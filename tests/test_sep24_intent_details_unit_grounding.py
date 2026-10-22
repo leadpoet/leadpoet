@@ -184,7 +184,7 @@ def test_private_response_schema_orders_grounding_before_aggregates():
 
     assert list(schema["properties"]) == expected
     assert schema["required"] == expected
-    assert evidence_schema["maxItems"] == 2
+    assert evidence_schema["maxItems"] == 3
     assert evidence_schema["items"]["properties"]["quote"] == {
         "type": "string", "minLength": 1,
     }
@@ -196,7 +196,7 @@ def test_private_response_schema_orders_grounding_before_aggregates():
     assert set(repair_schema["properties"]) == {"repairs"}
     repair_item = repair_schema["properties"]["repairs"]["items"]
     assert set(repair_item["properties"]) == {"unit_id", "evidence"}
-    assert repair_item["properties"]["evidence"]["maxItems"] == 2
+    assert repair_item["properties"]["evidence"]["maxItems"] == 3
     assert repair_item["properties"]["evidence"]["items"]["properties"][
         "quote"
     ] == {"type": "string", "minLength": 1}
@@ -1043,12 +1043,13 @@ def test_long_quote_wrong_source_index_is_not_guessed_when_ambiguous():
     assert raised.value.issues[0] == ("nonexact_quote",)
 
 
-def test_more_than_two_exact_evidence_bindings_is_retryable(monkeypatch):
+def test_more_than_three_exact_evidence_bindings_is_retryable(monkeypatch):
     paragraph = "Example published a detailed report."
     quotes = [
         "Example published the report.",
         "The report covers business analytics.",
         "The report includes a market summary.",
+        "The report includes company observations.",
     ]
     source = " ".join(quotes)
     inputs = _inputs(paragraph, source, supporting_quote=quotes[0])
@@ -1089,6 +1090,7 @@ def test_one_local_repair_can_replace_a_citation_only_defect(
     extra_quotes = [
         "The financing supports product delivery.",
         "The round was announced this year.",
+        "The funding supports company operations.",
     ]
     source = " ".join([valid_quote, *extra_quotes])
     inputs = _inputs(

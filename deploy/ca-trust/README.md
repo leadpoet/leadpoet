@@ -1,5 +1,14 @@
 # AL2023 host certificate distrust
 
+**Review candidate: do not apply.** The two-file plan is on hold until the
+already TLS-absent AAA root's baseline generic-verification behavior is proved
+to remain unchanged. Adding an otherwise absent certificate to a vendor
+blocklist can introduce an OpenSSL trusted-bundle entry that generic `any`
+verification accepts. The isolated test measured named-purpose safety but did
+not prove this baseline generic non-regression. The final policy may install
+only G3 and preserve AAA's existing absence. No live application is authorized
+by this configuration proposal.
+
 These two public certificates are configuration for the installed AL2023
 `p11-kit`/`update-ca-trust` blocklist. Apply them separately on the gateway and
 normal-validator hosts after operator review. This is explicit host provisioning;

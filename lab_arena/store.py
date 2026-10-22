@@ -58,6 +58,10 @@ SERVICE_ROLE_NAME = "lab_arena_service"
 # named notation with explicit casts so both transports share this table.
 SCORE_BATCH_SIZE = 500
 
+# Read-only requests can retry one upstream capacity or origin-connectivity
+# failure. Keep mutating RPC response handling and replay policy separate.
+SELECT_UNAVAILABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504, 520, 521, 522, 523, 524})
+
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_scoring_policy_history_v1": (("p_round_id", "text"),),
     "lab_arena_signal_authority_exclusions_v1": (("p_run_id", "text"),),
@@ -791,7 +795,7 @@ class PostgrestTransport(StoreTransport):
                     headers=self._headers,
                     params=query,
                 )
-                if response.status_code in {429, 502, 503, 504} and not attempt:
+                if response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES and not attempt:
                     # Share the existing two-attempt SELECT budget; never
                     # replay a mutating RPC for an ambiguous HTTP response.
                     continue
@@ -814,7 +818,7 @@ class PostgrestTransport(StoreTransport):
         try:
             self._raise_for_status(response, "select %s" % table, operation="select", resource=table)
         except ArenaStoreError as exc:
-            if response.status_code in {429, 502, 503, 504}:
+            if response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES:
                 raise ArenaStoreUnavailable(
                     "select %s temporarily unavailable" % table,
                     **exc.store_error,

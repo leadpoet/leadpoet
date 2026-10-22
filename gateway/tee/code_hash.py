@@ -220,7 +220,7 @@ def materialize_gateway_code_hash_runtime(
 
     commit = _fallback_commit(source_root)
     identities_root = destination_root / "gateway_enclave_build_identities"
-    dependency_lock = gateway_root / "tee/requirements-enclave-py39.lock"
+    dependency_lock = gateway_root / "tee/requirements-enclave-py312.lock"
     for role in _ATTESTED_RUNTIME_ROLES:
         _run_fallback_command(
             (

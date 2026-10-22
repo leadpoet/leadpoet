@@ -1,4 +1,4 @@
-FROM python:3.9.24-slim-bookworm@sha256:9b89d7e0d7e84de70c5e441198fdccb25b8d38310b0ccde36dbcd79a175fc1d9
+FROM python:3.12.15-slim-bookworm@sha256:57d96f71de145a98e7ceca18ee4ade77bba4103a33a72dfaea026b23625c6bf0
 
 # Docker BuildKit consumes this predefined build argument when normalizing
 # image/layer creation timestamps. The value is also exported below for tools.
@@ -14,22 +14,22 @@ ENV LEADPOET_ENCLAVE_ROLE=${LEADPOET_ENCLAVE_ROLE}
 ENV PYTHONPATH=/app:/app/gateway/_attested_runtime
 
 # Install the exact identity-enclave dependency closure from the offline wheelhouse.
-COPY _enclave_source/tee/requirements-enclave-py39.in /tmp/requirements-enclave-py39.in
-COPY _enclave_source/tee/requirements-enclave-py39.lock /tmp/requirements-enclave-py39.lock
+COPY _enclave_source/tee/requirements-enclave-py312.in /tmp/requirements-enclave-py312.in
+COPY _enclave_source/tee/requirements-enclave-py312.lock /tmp/requirements-enclave-py312.lock
 COPY _enclave_source/tee/enclave_wheelhouse.py /tmp/enclave_wheelhouse.py
 COPY _enclave_source/tee/wheelhouse/ /tmp/wheelhouse/
 RUN python3 /tmp/enclave_wheelhouse.py verify-wheelhouse \
-        --input /tmp/requirements-enclave-py39.in \
-        --lock /tmp/requirements-enclave-py39.lock \
+        --input /tmp/requirements-enclave-py312.in \
+        --lock /tmp/requirements-enclave-py312.lock \
         --wheelhouse /tmp/wheelhouse \
-    && python3 -m pip install --no-index --find-links=/tmp/wheelhouse --no-deps --no-cache-dir --no-compile --require-hashes -r /tmp/requirements-enclave-py39.lock \
+    && python3 -m pip install --no-index --find-links=/tmp/wheelhouse --no-deps --no-cache-dir --no-compile --require-hashes -r /tmp/requirements-enclave-py312.lock \
     && python3 /tmp/enclave_wheelhouse.py verify-installed \
-        --lock /tmp/requirements-enclave-py39.lock \
+        --lock /tmp/requirements-enclave-py312.lock \
     && (find /usr -type f \( -name "*.pyc" -o -name "*.pyo" \) -delete 2>/dev/null || true) \
     && (find /usr -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true) \
     && (find /usr -exec touch -h -d @0 {} + 2>/dev/null || true) \
-    && rm -rf /tmp/wheelhouse /tmp/requirements-enclave-py39.in \
-        /tmp/requirements-enclave-py39.lock /tmp/enclave_wheelhouse.py
+    && rm -rf /tmp/wheelhouse /tmp/requirements-enclave-py312.in \
+        /tmp/requirements-enclave-py312.lock /tmp/enclave_wheelhouse.py
 
 # Set working directory
 WORKDIR /app

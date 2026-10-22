@@ -6,9 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ARTIFACT_ROOT="${GATEWAY_V2_OFFLINE_ARTIFACT_ROOT:-$HOME/.cache/leadpoet-v2-artifacts}"
-WHEELHOUSE="$ARTIFACT_ROOT/enclave-wheelhouse-py39"
-INPUT="$SCRIPT_DIR/requirements-enclave-py39.in"
-LOCK="$SCRIPT_DIR/requirements-enclave-py39.lock"
+WHEELHOUSE="$ARTIFACT_ROOT/enclave-wheelhouse-py312"
+INPUT="$SCRIPT_DIR/requirements-enclave-py312.in"
+LOCK="$SCRIPT_DIR/requirements-enclave-py312.lock"
 
 mkdir -p "$ARTIFACT_ROOT"
 chmod 700 "$ARTIFACT_ROOT"
@@ -19,7 +19,7 @@ mkdir -p "$TEMP_ROOT/wheelhouse"
 if [ -d "$WHEELHOUSE" ]     && ! find "$WHEELHOUSE" -mindepth 1 -maxdepth 1       \( ! -type f -o ! -name '*.whl' \) | grep -q .     && python3 "$SCRIPT_DIR/enclave_wheelhouse.py" verify-wheelhouse       --input "$INPUT" --lock "$LOCK" --wheelhouse "$WHEELHOUSE" >/dev/null 2>&1; then
   rsync -a --delete "$WHEELHOUSE/" "$TEMP_ROOT/wheelhouse/"
 else
-  python3 -m pip download     --no-deps     --require-hashes     --dest "$TEMP_ROOT/wheelhouse"     --only-binary=:all:     --platform manylinux2014_x86_64     --implementation cp     --python-version 39     --abi cp39     -r "$LOCK"
+  python3 -m pip download     --no-deps     --require-hashes     --dest "$TEMP_ROOT/wheelhouse"     --only-binary=:all:     --platform manylinux2014_x86_64     --implementation cp     --python-version 312     --abi cp312     -r "$LOCK"
 fi
 python3 "$SCRIPT_DIR/enclave_wheelhouse.py" verify-wheelhouse   --input "$INPUT" --lock "$LOCK" --wheelhouse "$TEMP_ROOT/wheelhouse"
 python3 "$SCRIPT_DIR/normalize_attested_runtime.py" --root "$TEMP_ROOT/wheelhouse"

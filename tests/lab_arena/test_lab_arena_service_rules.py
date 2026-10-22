@@ -53,6 +53,7 @@ def _schedule():
         ("2026-09-14T23:48:03.1Z", 100_000),
         ("2026-09-14T23:48:03.191883Z", 191_883),
         ("2026-09-14T23:48:03.000001Z", 1),
+        ("2026-09-14T23:48:03+00:00", 0),
     ],
 )
 def test_parse_iso_accepts_utc_seconds_and_postgres_fractional_seconds(
@@ -68,12 +69,11 @@ def test_parse_iso_accepts_utc_seconds_and_postgres_fractional_seconds(
     "value",
     [
         "2026-09-14T23:48:03",
-        "2026-09-14T23:48:03+00:00",
         "2026-09-14T23:48:03.1234567Z",
         "2026-09-14 23:48:03.191883Z",
     ],
 )
-def test_parse_iso_rejects_naive_offset_and_malformed_timestamps(value):
+def test_parse_iso_rejects_naive_and_malformed_timestamps(value):
     with pytest.raises(ValueError):
         _parse_iso(value)
 

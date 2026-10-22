@@ -527,6 +527,8 @@ The controller checks the selected interpreter before wallet/chain readiness
 and before stopping the service. It requires stable pip 26.2.2 or newer,
 runtime certifi 2026.10.19 or newer, and pip's own patched certifi bundle at
 that same minimum version. A source update alone does not update these packages.
+It also parses both certifi bundles and rejects either compromised emSign G3
+or AAA root by its exact DER fingerprint, independently of package versions.
 Prepare and verify a replacement environment before activation; do not upgrade
 an environment while its validator process is running.
 

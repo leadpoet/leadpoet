@@ -1,8 +1,16 @@
 """Reject an unpatched interpreter before canonical validator activation."""
 
+import hashlib
 from pathlib import Path
 import re
+import ssl
 import sys
+
+
+COMPROMISED_ROOTS = {
+    "86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b",
+    "d7a7a0fb5d7e2731d771e9484ebcdef71d5f0c3e0a2948782bc83ee0ea699ef4",
+}
 
 
 def stable_version(value: str) -> tuple[int, ...]:
@@ -28,6 +36,13 @@ def check_security() -> None:
         Path(pip.__file__).resolve(strict=True).parent
     ):
         raise ValueError("pip must use its patched private CA bundle")
+    for ca_file in (certifi.where(), bundle):
+        # Explicit CA files keep this check separate from OS and custom trust.
+        context = ssl.create_default_context(cafile=str(ca_file))
+        roots = {hashlib.sha256(cert).hexdigest()
+                 for cert in context.get_ca_certs(binary_form=True)}
+        if roots & COMPROMISED_ROOTS:
+            raise ValueError("a certifi bundle retains a compromised root")
 
 
 def main() -> int:

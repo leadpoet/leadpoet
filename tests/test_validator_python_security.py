@@ -1,7 +1,9 @@
 """Exercise trust checks without downloading or changing an interpreter."""
 
+import base64
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 import shlex
 import ssl
@@ -28,7 +30,9 @@ def packages(tmp_path, monkeypatch):
     pip_file.touch()
     bundle = pip_root / "_vendor/certifi/cacert.pem"
     bundle.parent.mkdir(parents=True)
-    bundle.touch()
+    bundle.write_bytes(Path(certifi.where()).read_bytes())
+    runtime_bundle = tmp_path / "runtime-cacert.pem"
+    runtime_bundle.write_bytes(bundle.read_bytes())
     modules = {}
     for name, version in (("certifi", "2026.10.19"), ("pip", "26.2.2"),
                           ("pip._vendor.certifi", "2026.10.19")):
@@ -41,6 +45,7 @@ def packages(tmp_path, monkeypatch):
     vendor = ModuleType("pip._vendor")
     vendor.certifi = modules["pip._vendor.certifi"]
     monkeypatch.setitem(sys.modules, "pip._vendor", vendor)
+    modules["certifi"].where = lambda: str(runtime_bundle)
     return modules
 
 
@@ -72,6 +77,15 @@ def test_distro_bundle_is_rejected_even_with_high_versions(packages, tmp_path):
         checker.check_security()
 
 
+def test_bundle_checks_do_not_consume_or_replace_custom_trust(packages, monkeypatch):
+    # A caller's unrelated CA override is outside this package-bundle check.
+    for name in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT", "SSL_CERT_FILE"):
+        monkeypatch.setenv(name, "/custom/operator-ca.pem")
+    checker.check_security()
+    for name in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT", "SSL_CERT_FILE"):
+        assert os.environ[name] == "/custom/operator-ca.pem"
+
+
 def test_bundle_symlink_cannot_escape_pip(packages, tmp_path):
     bundle = Path(packages["pip._vendor.certifi"].where())
     bundle.unlink()
@@ -89,6 +103,30 @@ def test_missing_bundle_and_import_fail_closed(packages, monkeypatch, capsys):
     monkeypatch.delattr(sys.modules["pip._vendor"], "certifi")
     assert checker.main() == 1
     assert "running service has not been stopped" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("package", ["certifi", "pip._vendor.certifi"])
+def test_retained_root_is_rejected_despite_patched_versions(packages, package):
+    source = (ROOT / "deploy/ca-trust/source/leadpoet-emsign-ecc-g3.trusted.pem").read_text()
+    encoded = source.split("-----BEGIN TRUSTED CERTIFICATE-----", 1)[1].split(
+        "-----END TRUSTED CERTIFICATE-----", 1)[0]
+    certificate_and_aux = base64.b64decode(encoded)
+    # Strip AUX after the first DER sequence, independently of the checker.
+    assert certificate_and_aux[0] == 0x30
+    length = certificate_and_aux[1]
+    header = 2
+    if length & 0x80:
+        count = length & 0x7f
+        length = int.from_bytes(certificate_and_aux[2:2 + count], "big")
+        header += count
+    certificate = certificate_and_aux[:header + length]
+    assert hashlib.sha256(certificate).hexdigest() == (
+        "86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b")
+    bundle = Path(packages[package].where())
+    with bundle.open("a") as handle:
+        handle.write(ssl.DER_cert_to_PEM_cert(certificate))
+    with pytest.raises(ValueError, match="retains a compromised root"):
+        checker.check_security()
 
 
 def test_installed_runtime_bundle_excludes_exact_affected_roots():

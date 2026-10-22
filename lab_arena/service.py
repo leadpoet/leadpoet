@@ -1055,6 +1055,11 @@ class ArenaService:
         )
 
     def _require_round_ownership(self, round_id: str) -> None:
+        if (
+            not isinstance(round_id, str) or not round_id or len(round_id) > 200
+            or any(char in ",.()\"'" or ord(char) < 32 or ord(char) == 127 for char in round_id)
+        ):
+            raise ServiceError("round_id_invalid", 400)
         pinned_round_id = self._pinned_round_id()
         if pinned_round_id is not None and round_id != pinned_round_id:
             raise ServiceError("round_scope_mismatch", 409)

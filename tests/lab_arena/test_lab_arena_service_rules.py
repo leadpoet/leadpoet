@@ -2307,6 +2307,7 @@ def test_source_download_requires_the_active_execute_lease():
     }
     run = {
         "run_id": "run-1",
+        "round_id": "arena-2026-09-02",
         "submission_id": "sub-1",
         "kind": "execute",
         "status": "leased",

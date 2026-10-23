@@ -224,4 +224,5 @@ def test_exact_investigator_outcomes_reach_fit_and_arena_finality(monkeypatch, s
     # Arena score_work_item. Only external provider/identity responses are
     # substituted, as in its positive and genuine-outage controls.
     fit_controls.test_negative_completion_through_fit_and_arena(
-        monkeypatch, semantic=semantic, homepage_fault=None)
+        monkeypatch, semantic=semantic, homepage_fault=None,
+        investigation_fault="", preserve_marker=True)

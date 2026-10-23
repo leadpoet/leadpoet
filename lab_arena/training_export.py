@@ -39,7 +39,8 @@ def _json_object(objects: Any, ref: str, limit: int) -> dict:
 
 def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
     """Copy a JSON value, omitting opaque reasoning while keeping readable text."""
-    from lab_arena.training_capture import empty_value, opaque_reasoning_field, readable_reasoning_item, reasoning_kind
+    from lab_arena.training_capture import (approved_history_reasoning_content, empty_value,
+                                            opaque_reasoning_field, readable_reasoning_item, reasoning_kind)
     removed = False
 
     def walk(item, path=()):
@@ -50,7 +51,10 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
             for key, child in item.items():
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
-                if opaque_reasoning_field(normalized, child, kind, safe_config, path):
+                if (normalized == "reasoning_content" and isinstance(child, str)
+                        and approved_history_reasoning_content(value, path, item)):
+                    result[key] = walk(child, (*path, normalized))
+                elif opaque_reasoning_field(normalized, child, kind, safe_config, path):
                     removed = removed or not empty_value(child)
                 else:
                     result[key] = walk(child, (*path, normalized))
@@ -555,6 +559,8 @@ def _calls(rows, run_ids, objects, run_order):
             if not captured:
                 continue
             if isinstance(captured, Mapping) and captured.get("status") == "unavailable":
+                if captured.get("reason") in {"response_capture_failed", "response_size_limit"}:
+                    call["upstream_response_capture"] = {"status": "unavailable", "reason": captured["reason"]}
                 if captured.get("reason") == "response_size_limit":
                     call_reasons.add("upstream_response_size_limit")
                 call_reasons.add("upstream_response_capture_unavailable")

@@ -182,17 +182,22 @@ remain separate configuration behavior.
 
 ## Provider reasoning capture
 
-A round with `agent_readable_reasoning_v1` requests readable provider reasoning
-through the managed gateway. The round freezes this policy before submissions
-open. It applies to miners and the baseline; no harness configuration is needed.
-The gateway keeps existing useful reasoning effort, asks for supported summaries,
-and can enable reasoning when it was off or minimal. Request changes and
-unsupported cases are recorded. Tool continuations with unproved thinking-state
-support keep their reasoning effort; returned-text visibility can still be enabled.
-This can change model output, latency and spending. The existing token limits,
-$4 execution/admission cap, company scoring and judge behavior remain unchanged.
-Readable summaries depend on the provider; encrypted private reasoning cannot
-be converted into readable text by this policy.
+A future round with `full_generated_thinking_v1` uses only the exact tested
+model/provider/API routes frozen in that round. The gateway applies the tested
+reasoning mode and output allowance. No miner-specific logging setting is needed.
+All model calls, including subagents, must use an approved route. Unsupported
+models return a clear pre-dispatch error; the gateway does not substitute models.
+
+The first approved routes are Chat Completions routes. Native Responses/Codex
+models are not approved by this registry. A miner using those models must choose
+a compatible model and client before entering a future full-thinking round.
+The gateway preserves supported reasoning history, tool IDs, and JSON schemas.
+It does not rewrite the submitted agent or promise unchanged answers or latency.
+
+The future policy has a $6 execution and cost-eligibility limit per ICP, equally
+for miners and baseline. Historical rounds and judges remain unchanged. Missing
+thinking is reported as a dataset gap; it does not itself fail a judgment.
+See [the policy and exact whitelist](arena-full-thinking-policy.md) for details.
 
 ## Decision summaries
 

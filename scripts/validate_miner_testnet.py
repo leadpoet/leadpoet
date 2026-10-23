@@ -599,7 +599,7 @@ def _serve(args: argparse.Namespace) -> int:
     import boto3
     from lab_arena import broker as broker_module
     from lab_arena import chain as chain_module
-    from lab_arena import contracts, images, scorer_image_access
+    from lab_arena import contracts, images, reasoning_capture, scorer_image_access
     from lab_arena.api import create_app
     from lab_arena.credentials import CredentialManager
     from lab_arena.code_review_runtime import SubmissionCodeReviewer
@@ -715,6 +715,8 @@ def _serve(args: argparse.Namespace) -> int:
             contacts_from=None,
             company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None,
             reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
+            reasoning_baseline_source_sha256=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256") or None,
+            reasoning_baseline_source_url=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_URL") or None,
             benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
         )
         service = ArenaService(
@@ -728,7 +730,7 @@ def _serve(args: argparse.Namespace) -> int:
                 daily_icp_source=lambda *, set_id, active_at: store.current_daily_icp_set(set_id),
                 banned_hotkeys_source=lambda: (),
                 broker_factory=broker_factory,
-                reasoning_profile_source=lambda: price_table.get("reasoning_profiles") or {},
+                reasoning_registry_source=reasoning_capture.load_registry,
                 defaults=defaults,
                 network_name=TESTNET_NETWORK,
                 netuid=TESTNET_NETUID,

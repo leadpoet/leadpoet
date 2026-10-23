@@ -11,6 +11,7 @@ import pytest
 
 
 PATH = Path(__file__).resolve().parents[1] / "scripts" / "configure_lab_arena_production.py"
+PINNED_BASELINE_URL = "https://github.com/leadpoet/leadpoet-sales-agent/archive/" + "b" * 40 + ".tar.gz"
 SPEC = importlib.util.spec_from_file_location("configure_lab_arena_production", PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -238,9 +239,13 @@ def test_contacts_scopes_are_mutually_exclusive():
         {"LAB_ARENA_INTENT_DETAILS_FROM": ""},
     ),
     (
-        ["--reasoning-capture-from", "2026-10-21T00:00:00Z"],
+        ["--reasoning-capture-from", "2026-10-21T00:00:00Z",
+         "--reasoning-baseline-source-sha256", "sha256:" + "a" * 64,
+         "--reasoning-baseline-source-url", PINNED_BASELINE_URL],
         "reasoning_capture_from_only",
-        {"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00+00:00"},
+        {"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00+00:00",
+         "LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256": "sha256:" + "a" * 64,
+         "LAB_ARENA_REASONING_BASELINE_SOURCE_URL": PINNED_BASELINE_URL},
     ),
     (
         ["--reasoning-capture-from", ""],
@@ -1018,17 +1023,30 @@ def test_remote_reasoning_capture_activation_preserves_other_settings(tmp_path, 
     updated = json.loads(_run_remote_with_fake_aws(
         tmp_path, json.dumps(initial), request_override={
             "role": "reasoning_capture_from_only",
-            "updates": {"LAB_ARENA_REASONING_CAPTURE_FROM": value},
+            "updates": {"LAB_ARENA_REASONING_CAPTURE_FROM": value,
+                        **({"LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256": "sha256:" + "a" * 64,
+                            "LAB_ARENA_REASONING_BASELINE_SOURCE_URL": PINNED_BASELINE_URL}
+                           if value else {})},
             "aliases": {}, "service_key": "",
         },
     ))
-    assert updated == {**initial, "LAB_ARENA_REASONING_CAPTURE_FROM": value.replace("Z", "+00:00")}
+    assert updated == {**initial, "LAB_ARENA_REASONING_CAPTURE_FROM": value.replace("Z", "+00:00"),
+                       "LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256":
+                       "sha256:" + "a" * 64 if value else "",
+                       "LAB_ARENA_REASONING_BASELINE_SOURCE_URL": PINNED_BASELINE_URL if value else ""}
 
 
 @pytest.mark.parametrize("updates,expected", [
-    ({"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00"}, "reasoning_capture_from_timestamp_invalid"),
+    ({"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00",
+      "LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256": "sha256:" + "a" * 64,
+      "LAB_ARENA_REASONING_BASELINE_SOURCE_URL": PINNED_BASELINE_URL},
+     "reasoning_capture_from_timestamp_invalid"),
     ({"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00Z", "KEEP": "changed"},
      "reasoning_capture_from_scope_invalid"),
+    ({"LAB_ARENA_REASONING_CAPTURE_FROM": "2026-10-21T00:00:00Z",
+      "LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256": "sha256:" + "a" * 64,
+      "LAB_ARENA_REASONING_BASELINE_SOURCE_URL": "https://example.org/archive/" + "b" * 40 + ".tar.gz"},
+     "reasoning_baseline_source_url_invalid"),
 ])
 def test_remote_reasoning_capture_activation_rejects_bad_scope_or_timestamp(tmp_path, updates, expected):
     result = _run_remote_with_fake_aws(
@@ -1036,6 +1054,23 @@ def test_remote_reasoning_capture_activation_rejects_bad_scope_or_timestamp(tmp_
         request_override={"role": "reasoning_capture_from_only", "updates": updates, "aliases": {}, "service_key": ""},
     )
     assert result == {"ok": False, "code": expected}
+
+
+def test_reasoning_activation_requires_tested_baseline_digest():
+    args = MODULE.build_parser().parse_args([
+        "--allowed-account", "493765492819", "--reasoning-capture-from", "2026-10-21T00:00:00Z",
+    ])
+    with pytest.raises(MODULE.ConfigurationError, match="tested baseline source sha256"):
+        MODULE._validate_args(args)
+
+
+def test_reasoning_activation_requires_pinned_baseline_url():
+    args = MODULE.build_parser().parse_args([
+        "--allowed-account", "493765492819", "--reasoning-capture-from", "2026-10-21T00:00:00Z",
+        "--reasoning-baseline-source-sha256", "sha256:" + "a" * 64,
+    ])
+    with pytest.raises(MODULE.ConfigurationError, match="pinned baseline source URL"):
+        MODULE._validate_args(args)
 
 
 @pytest.mark.parametrize("value", ["2026-10-19T00:00:00Z", ""])

@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
-from lab_arena import contracts, training_dataset, training_steps
+from lab_arena import contracts, training_dataset, training_steps, training_thinking
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_readiness.v1"
 _DIMENSIONS = ("context", "source_identity", "exact_inputs", "input_output_label", "costs", "research_process")
@@ -106,6 +106,8 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                               "selection": manifest["counts"],
                               "evaluation_checks": manifest.get("evaluation_checks", {})})
     steps, step_manifest = training_steps.build(valid, training_steps.Rules(production_rounds_only=production_rounds_only))
+    thinking_splits, thinking_manifest = training_thinking.build(
+        valid, training_steps.Rules(production_rounds_only=production_rounds_only))
     report = {
         "schema_version": SCHEMA_VERSION,
         "scope": "supplied_exports_only_not_a_full_production_inventory",
@@ -128,6 +130,8 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
         "agent_steps": {"candidate_records": len(steps["train"]) + len(steps["eval"]),
                         "analysis_records": len(steps["analysis"]),
                         "manifest": step_manifest},
+        "full_thinking": {"candidate_records": len(thinking_splits["train"]) + len(thinking_splits["eval"]),
+                          "manifest": thinking_manifest},
         "readiness": {"human_label_review": "not_proved_by_storage",
                       "agent_action_quality": "unreviewed",
                       "training_permission": dict(training_dataset.TRAINING_PERMISSION),

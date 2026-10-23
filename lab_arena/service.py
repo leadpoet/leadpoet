@@ -309,6 +309,9 @@ ACTIVE_ROUND_STATUSES = tuple(
 )
 SOURCE_UPLOAD_EXPIRES_SECONDS = 900
 DEFAULT_BASELINE_SOURCE_URL = "https://github.com/leadpoet/leadpoet-sales-agent/archive/refs/heads/lab.tar.gz"
+FULL_THINKING_BASELINE_URL_RE = re.compile(
+    r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz"
+)
 DEFAULT_EXECUTION_CAP_MICROUSD = 80_000_000
 DEFAULT_COST_PER_COMPANY_MICROUSD = contracts.PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
 DEFAULT_EXECUTION_ICP_CAP_MICROUSD = contracts.PER_ICP_EXECUTION_CAP_MICROUSD
@@ -661,6 +664,10 @@ class RoundDefaults:
     intent_details_from: Optional[str] = None
     # Opt-in for future intake windows only; existing rounds keep their policy.
     reasoning_capture_from: Optional[str] = None
+    # Operator declaration for the tested baseline archive. The fetched
+    # archive must match before baseline admission in a full-thinking round.
+    reasoning_baseline_source_sha256: Optional[str] = None
+    reasoning_baseline_source_url: Optional[str] = None
     # Frozen only into newly created integrity rounds. Existing rounds keep
     # their original policy, including after a gateway restart.
     normalize_intent_scale: bool = True
@@ -698,7 +705,7 @@ class ServiceConfig:
     pinned_round_id: Optional[str] = None
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     deepline_catalog_source: Optional[Callable[..., Mapping[str, Any]]] = None
-    reasoning_profile_source: Optional[Callable[[], Mapping[str, Any]]] = None
+    reasoning_registry_source: Optional[Callable[[], Mapping[str, Any]]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
     code_reviewer: Optional[Any] = None
@@ -1630,15 +1637,45 @@ class ArenaService:
         if (defaults.reasoning_capture_from is not None
             and _parse_iso(document["schedule"]["submission_open"])
             >= _activation_time(defaults.reasoning_capture_from)):
-            source = self._config.reasoning_profile_source
+            source = getattr(self._config, "reasoning_registry_source", None)
+            baseline_digest = defaults.reasoning_baseline_source_sha256
+            unready_reason = None
             try:
-                profiles = reasoning_capture.validate_profiles(source() if source else None)
-            except ValueError as exc:
-                raise ServiceError("reasoning_capture_profiles_unavailable", 503) from exc
-            if not profiles:
-                raise ServiceError("reasoning_capture_profiles_unavailable", 503)
-            document["reasoning_capture_policy"] = reasoning_capture.POLICY
-            document["reasoning_model_profiles"] = profiles
+                registry = reasoning_capture.validate_registry(
+                    source() if source is not None else reasoning_capture.load_registry()
+                )
+                if not registry.get("approved_routes") or not isinstance(registry.get("baseline_route"), Mapping):
+                    unready_reason = "registry_unavailable"
+            except Exception as exc:
+                registry = None
+                unready_reason = "registry_unavailable"
+                logger.warning("arena_full_thinking_registry_unavailable round_id=%s error=%s",
+                               round_id, type(exc).__name__)
+            if unready_reason is None and (
+                not isinstance(baseline_digest, str)
+                or re.fullmatch(r"sha256:[0-9a-f]{64}", baseline_digest) is None
+                or not isinstance(defaults.reasoning_baseline_source_url, str)
+                or FULL_THINKING_BASELINE_URL_RE.fullmatch(defaults.reasoning_baseline_source_url) is None
+            ):
+                unready_reason = "baseline_unready"
+            if unready_reason is None and not defaults.flat_per_icp_cost_policy:
+                unready_reason = "flat_policy_required"
+            if unready_reason is None:
+                document["reasoning_capture_policy"] = reasoning_capture.POLICY
+                document["reasoning_route_registry"] = registry
+                document["reasoning_baseline_source_sha256"] = baseline_digest
+                document["baseline_source_url"] = defaults.reasoning_baseline_source_url
+                per_icp_cap = contracts.FULL_THINKING_PER_ICP_CAP_MICROUSD
+                document["execution_icp_cap_microusd"] = per_icp_cap
+                document["cost_per_company_microusd"] = per_icp_cap
+                document["execution_cap_microusd"] = (
+                    per_icp_cap * contracts.benchmark_icp_count(document)
+                )
+            else:
+                document["reasoning_activation_status"] = "not_ready"
+                document["reasoning_activation_reason"] = unready_reason
+                logger.warning("arena_full_thinking_not_ready round_id=%s reason=%s",
+                               round_id, unready_reason)
         self._freeze_deepline_catalog(document)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
@@ -2544,6 +2581,26 @@ class ArenaService:
 
     # -- participant freeze and benchmark (sections 7.1, 8) --------------------
 
+    def _verify_full_thinking_baseline_source(
+        self, configuration: Mapping[str, Any], baseline: Mapping[str, Any]
+    ) -> None:
+        """Check the selected stored baseline against this round's frozen archive."""
+
+        if configuration.get("reasoning_capture_policy") != reasoning_capture.POLICY:
+            return
+        source_ref = baseline.get("source_ref")
+        if not isinstance(source_ref, str) or not source_ref:
+            raise ServiceError("baseline_source_not_ready", 503)
+        try:
+            payload = self._objects.get_bounded(
+                source_ref, source_bundle.MAX_SOURCE_ARCHIVE_BYTES
+            )
+        except Exception as exc:
+            raise ServiceError("baseline_source_not_ready", 503) from exc
+        actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+        if actual_digest != configuration.get("reasoning_baseline_source_sha256"):
+            raise ServiceError("reasoning_baseline_source_mismatch", 503)
+
     def _initial_baseline(self, round_row: Mapping[str, Any]) -> Dict[str, Any]:
         """Download and freeze the public baseline through the source path."""
 
@@ -2560,6 +2617,7 @@ class ArenaService:
         submission_id = "baseline-%s" % round_id.removeprefix("arena-")
         source_ref = "arena/%s/sources/%s.tar.gz" % (round_id, submission_id)
         row = self._store.get_submission(submission_id)
+        reused = row is not None
         if row is None:
             fetcher = self._config.baseline_source_fetcher
             if fetcher is None:
@@ -2576,7 +2634,8 @@ class ArenaService:
                     if str(configuration.get("mode") or self._config.mode) == "live":
                         if self._pending_promotion_blocks():
                             raise ServiceError("baseline_promotion_pending", 503)
-                        selected_source_url = DEFAULT_BASELINE_SOURCE_URL
+                        if configuration.get("reasoning_capture_policy") != reasoning_capture.POLICY:
+                            selected_source_url = DEFAULT_BASELINE_SOURCE_URL
                     source_observation = (
                         selected_source_url
                         if selected_source_url == DEFAULT_BASELINE_SOURCE_URL
@@ -2589,6 +2648,10 @@ class ArenaService:
                         )
                     )
                     facts = source_bundle.validate_source_archive(payload)
+                    if configuration.get("reasoning_capture_policy") == reasoning_capture.POLICY:
+                        actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+                        if actual_digest != configuration.get("reasoning_baseline_source_sha256"):
+                            raise ServiceError("reasoning_baseline_source_mismatch", 503)
                     self._objects.put(source_ref, payload)
                 except ServiceError:
                     raise
@@ -2605,6 +2668,10 @@ class ArenaService:
                     raise ServiceError(
                         "baseline_source_invalid:%s" % exc.code, 500
                     ) from exc
+            if configuration.get("reasoning_capture_policy") == reasoning_capture.POLICY:
+                actual_digest = "sha256:" + hashlib.sha256(payload).hexdigest()
+                if actual_digest != configuration.get("reasoning_baseline_source_sha256"):
+                    raise ServiceError("reasoning_baseline_source_mismatch", 503)
             logger.info(
                 "arena_baseline_source_frozen round_id=%s source=%s source_commit=%s",
                 round_id,
@@ -2632,6 +2699,8 @@ class ArenaService:
             or not row.get("is_king")
         ):
             raise ServiceError("baseline_submission_invalid", 500)
+        if reused:
+            self._verify_full_thinking_baseline_source(configuration, row)
         status = str(row.get("status") or "")
         if status == "uploading":
             try:
@@ -2699,6 +2768,10 @@ class ArenaService:
             or not baseline.get("is_king")
         ):
             raise ServiceError("baseline_submission_invalid", 500)
+        if frozen_kings:
+            self._verify_full_thinking_baseline_source(
+                round_row["configuration_doc"], baseline
+            )
         if any(
             row.get("is_king") and row.get("submission_id") != baseline_id
             for row in accepted
@@ -5789,7 +5862,7 @@ class ArenaService:
             judgment_cache_scope=judgment_cache_scope,
             deepline_catalog=configuration.get("deepline_catalog"),
             reasoning_capture_policy=configuration.get("reasoning_capture_policy"),
-            reasoning_model_profiles=configuration.get("reasoning_model_profiles"),
+            reasoning_route_registry=configuration.get("reasoning_route_registry"),
         )
 
     def handle_signal_judgment(
@@ -7870,7 +7943,11 @@ class ArenaService:
             **({"company_quality_policy": quality_policy.POLICY} if quality_policy.enabled(configuration) else {}),
             **({"company_judgment_policy": company_judgments.POLICY} if configuration.get("company_judgment_policy") else {}),
             **({"intent_details_policy": intent_details_policy.POLICY} if intent_details_policy.enabled(configuration) else {}),
-            **({"reasoning_capture_policy": reasoning_capture.POLICY} if reasoning_capture.enabled(configuration) else {}),
+            **({"reasoning_capture_policy": configuration["reasoning_capture_policy"]}
+               if reasoning_capture.enabled(configuration) else {}),
+            **({"reasoning_activation_status": configuration["reasoning_activation_status"],
+                "reasoning_activation_reason": configuration["reasoning_activation_reason"]}
+               if configuration.get("reasoning_activation_status") == "not_ready" else {}),
         }
 
     def public_round(self, round_id: str) -> Dict[str, Any]:

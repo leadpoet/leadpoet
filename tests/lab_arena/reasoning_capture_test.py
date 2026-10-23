@@ -1,603 +1,346 @@
-"""Round-frozen readable reasoning for agent model calls (agent_readable_reasoning_v1)."""
-
-from __future__ import annotations
+"""Exact full-generated-thinking admission and gateway controls."""
 
 import json
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timezone
-from types import SimpleNamespace
+from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
-from lab_arena import broker as br, contracts, operations, reasoning_capture as rc, service as service_module
-from lab_arena.service import ArenaService
+from lab_arena import broker as br, contracts, operations, reasoning_capture as rc
+from scripts import probe_full_thinking_routes as probe_script
 from tests.lab_arena import test_lab_arena_broker as broker_tests
-from tests.lab_arena.deepline_round_runtime_test import _service
-
-# Shapes copied from OpenRouter's public /api/v1/models catalog (2026-10-19).
-CATALOG = {"data": [
-    {"id": "openai/gpt-6-luna", "supported_parameters": ["reasoning", "tools"],
-     "reasoning": {"mandatory": False, "default_enabled": True, "default_effort": "medium",
-                   "supported_efforts": ["max", "xhigh", "high", "medium", "low", "none"]}},
-    {"id": "openai/gpt-5.4-mini", "supported_parameters": ["reasoning", "reasoning_effort"],
-     "reasoning": {"mandatory": False, "default_enabled": False, "default_effort": "medium",
-                   "supported_efforts": ["xhigh", "high", "medium", "low", "none"]}},
-    {"id": "openai/gpt-5-mini", "supported_parameters": ["reasoning"],
-     "reasoning": {"mandatory": True, "default_effort": "medium",
-                   "supported_efforts": ["high", "medium", "low", "minimal"]}},
-    {"id": "google/gemini-3.5-flash-lite", "supported_parameters": ["reasoning"],
-     "reasoning": {"mandatory": True, "default_enabled": True, "default_effort": "minimal",
-                   "supported_efforts": ["high", "medium", "low", "minimal"]}},
-    {"id": "google/gemini-2.5-flash", "supported_parameters": ["reasoning", "temperature", "tools"],
-     "reasoning": {"mandatory": False}},
-    {"id": "anthropic/claude-sonnet-4.5", "supported_parameters": ["reasoning", "temperature"],
-     "reasoning": {"mandatory": False}},
-    {"id": "anthropic/claude-sonnet-5.5", "supported_parameters": ["reasoning", "tools"],
-     "reasoning": {"mandatory": True, "default_effort": "high",
-                   "supported_efforts": ["max", "xhigh", "high", "medium", "low"]}},
-    {"id": "perplexity/sonar", "supported_parameters": ["temperature"]},
-    {"id": "~alias/latest", "supported_parameters": ["reasoning"]},
-]}
-PROFILES = rc.profiles_from_models_response(CATALOG)
-MESSAGES = [{"role": "user", "content": "Find fintech companies hiring revenue leaders."}]
 
 
-TOOL_LOOP = [MESSAGES[0],
-             {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {
-                 "name": "lookup", "arguments": "{}"}}]},
-             {"role": "tool", "tool_call_id": "call_1", "content": "{}"}]
+EVIDENCE_DIR = Path(__file__).resolve().parents[2] / "docs/evidence/full-thinking"
+PROBE_FILES = {
+    "openai/gpt-oss-120b": "openai--gpt-oss-120b-chat-probe-price-bound.json",
+    "mistralai/mistral-large-4-0": "mistralai--mistral-large-4-0-chat-probe-price-bound.json",
+    "deepseek/deepseek-v4.1-flash-1017": "deepseek--deepseek-v4.1-flash-1017-chat-probe-price-bound.json",
+}
 
 
 def chat(model, **extra):
-    return {"model": model, "messages": MESSAGES, "max_tokens": 1500, **extra}
-
-
-def forced(operation_id, parameters, profiles=PROFILES):
-    return rc.apply(operation_id, parameters, policy=rc.POLICY, profiles=profiles)
-
-
-def test_catalog_profiles_keep_reasoning_models_and_validate():
-    assert set(PROFILES) == {
-        "anthropic/claude-sonnet-4.5", "anthropic/claude-sonnet-5.5", "google/gemini-2.5-flash",
-        "google/gemini-3.5-flash-lite", "openai/gpt-5-mini", "openai/gpt-5.4-mini", "openai/gpt-6-luna",
-    }
-    assert PROFILES["google/gemini-2.5-flash"] == {"mandatory": False}
-    assert PROFILES["openai/gpt-5.4-mini"]["default_enabled"] is False
-    assert rc.validate_profiles(json.loads(json.dumps(PROFILES))) == PROFILES
-    many = {"data": [{"id": "vendor/m%05d" % index, "supported_parameters": ["reasoning"]}
-                     for index in range(rc.MAX_PROFILES + 5)]}
-    assert len(rc.profiles_from_models_response(many)) == rc.MAX_PROFILES
-
-
-@pytest.mark.parametrize("document", [
-    {"bad id": {"mandatory": False}},
-    {"vendor/model": {"mandatory": "no"}},
-    {"vendor/model": {"mandatory": False, "extra": 1}},
-    {"vendor/model": {"mandatory": False, "default_effort": "turbo"}},
-    {"vendor/model": {"mandatory": False, "supported_efforts": ["high", "low"]}},
-    {"vendor/model": {"mandatory": False, "supported_efforts": []}},
-    [],
-])
-def test_invalid_profiles_are_refused(document):
-    with pytest.raises(ValueError):
-        rc.validate_profiles(document)
-
-
-@pytest.mark.parametrize("model,extra,reasoning,max_tokens,changes", [
-    # Reasons by default: its catalog default becomes explicit, plus a summary.
-    ("openai/gpt-6-luna", {}, {"effort": "medium", "summary": "auto"}, 1500, ["effort", "summary"]),
-    # Off by default: turned on at the floor with an output allowance.
-    ("openai/gpt-5.4-mini", {}, {"effort": "low", "summary": "auto"}, 2524, ["effort", "headroom", "summary"]),
-    # Mandatory with a minimal default: raised to the floor.
-    ("google/gemini-3.5-flash-lite", {}, {"effort": "medium"}, 2524, ["effort", "headroom"]),
-    # Budget-style thinking (no listed efforts, or optional Anthropic) gets a
-    # hard 1,024-token budget, never an effort.
-    ("google/gemini-2.5-flash", {"temperature": 0}, {"max_tokens": 1024}, 2524, ["budget", "headroom"]),
-    ("anthropic/claude-sonnet-4.5", {}, {"max_tokens": 1024}, 2524, ["budget", "headroom"]),
-    # Mandatory adaptive thinking: an explicit floor-level effort is kept.
-    ("anthropic/claude-sonnet-5.5", {"reasoning": {"effort": "low"}}, {"effort": "low"}, 1500, []),
-    ("openai/gpt-6-luna", {"reasoning": {"effort": "high"}}, {"effort": "high", "summary": "auto"}, 1500, ["summary"]),
-    # Above the floor the agent's choice stands, even one the catalog omits.
-    ("openai/gpt-5-mini", {"reasoning": {"effort": "xhigh"}}, {"effort": "xhigh", "summary": "auto"}, 1500, ["summary"]),
-    ("openai/gpt-6-luna", {"reasoning": {"effort": "none"}}, {"effort": "low", "summary": "auto"}, 2524,
-     ["agent_disabled_overridden", "effort", "headroom", "summary"]),
-    ("openai/gpt-5-mini", {"reasoning_effort": "minimal", "include_reasoning": False},
-     {"effort": "low", "exclude": False, "summary": "auto"}, 2524,
-     ["effort", "exclude_cleared", "headroom", "legacy_effort", "legacy_include", "summary"]),
-    ("openai/gpt-6-luna", {"reasoning": {"exclude": True, "effort": "medium"}},
-     {"effort": "medium", "exclude": False, "summary": "auto"}, 1500, ["exclude_cleared", "summary"]),
-    ("google/gemini-2.5-flash", {"reasoning": {"max_tokens": 2048}}, {"max_tokens": 2048}, 1500, []),
-    # Reasoning the agent already turned on keeps the provider's default level.
-    ("openai/gpt-5.4-mini", {"reasoning": {"enabled": True}}, {"enabled": True, "summary": "auto"}, 1500, ["summary"]),
-    ("openai/gpt-5.4-mini", {"reasoning": {}}, {"effort": "low", "summary": "auto"}, 2524, ["effort", "headroom", "summary"]),
-    ("openai/gpt-5.4-mini", {"include_reasoning": True}, {"enabled": True, "exclude": False, "summary": "auto"}, 1500,
-     ["legacy_include", "summary"]),
-    ("anthropic/claude-sonnet-4.5", {"reasoning": {"enabled": True}}, {"enabled": True}, 1500, []),
-    ("openai/gpt-6-luna", {"reasoning": {"effort": "low", "max_tokens": 0}}, {"effort": "low", "summary": "auto"}, 2524,
-     ["agent_disabled_overridden", "effort", "headroom", "summary"]),
-])
-def test_chat_policy_matrix(model, extra, reasoning, max_tokens, changes):
-    parameters = chat(model, **extra)
-    original = json.loads(json.dumps(parameters))
-    updated, annotation = forced("openrouter.chat", parameters)
-    assert parameters == original
-    assert updated["reasoning"] == dict(reasoning, exclude=False)
-    changes = sorted(changes + (["exclude"] if "exclude" not in reasoning else []))
-    assert updated["max_tokens"] == max_tokens
-    assert "reasoning_effort" not in updated and "include_reasoning" not in updated
-    assert annotation["policy"] == rc.POLICY and annotation["requested"] is True
-    assert annotation["changes"] == changes
-    operations.validate_operation_request("openrouter.chat", updated)
-    assert forced("openrouter.chat", parameters) == (updated, annotation)
-
-
-@pytest.mark.parametrize("model,max_tokens,reasoning,changes", [
-    # 4,000 is the most common agent limit; 4,096 is the cap and the default.
-    ("google/gemini-2.5-flash", 4000, {"max_tokens": 1024}, ["budget", "headroom_capped"]),
-    ("anthropic/claude-sonnet-4.5", 4096, {"max_tokens": 1024}, ["budget", "headroom_capped"]),
-    ("google/gemini-3.5-flash-lite", 4000, {"effort": "medium"}, ["effort", "headroom_capped"]),
-    ("openai/gpt-5.4-mini", 4096, {"effort": "low", "summary": "auto"}, ["effort", "headroom_capped", "summary"]),
-])
-def test_near_the_cap_reasoning_shares_the_limit_up_to_the_cap(model, max_tokens, reasoning, changes):
-    updated, annotation = forced("openrouter.chat", chat(model, max_tokens=max_tokens))
-    assert updated["max_tokens"] == operations.OPENROUTER_MAX_OUTPUT_TOKENS
-    assert updated["reasoning"] == dict(reasoning, exclude=False)
-    changes = sorted(changes + ["exclude"])
-    assert annotation["requested"] is True and annotation["changes"] == changes and "skipped" not in annotation
-    operations.validate_operation_request("openrouter.chat", updated)
-    if "max_tokens" in reasoning:
-        # A hard budget leaves the visible answer at least 3,072 tokens.
-        assert updated["max_tokens"] - reasoning["max_tokens"] == 3072
-
-
-def test_toggle_only_reasoning_is_added_only_with_its_full_allowance():
-    # No listed efforts and no applied budget (for example DeepSeek V3.2):
-    # reasoning runs at the model's own length, so it needs all 1,024 tokens.
-    profiles = {"deepseek/deepseek-v3.2": {"mandatory": False}}
-    updated, annotation = forced("openrouter.chat", chat("deepseek/deepseek-v3.2"), profiles)
-    assert updated["reasoning"] == {"enabled": True, "exclude": False} and updated["max_tokens"] == 2524
-    assert annotation["changes"] == ["enabled", "exclude", "headroom"]
-    for max_tokens in (4000, 4096):
-        parameters = chat("deepseek/deepseek-v3.2", max_tokens=max_tokens)
-        assert forced("openrouter.chat", parameters, profiles) == (parameters, {
-            "policy": rc.POLICY, "treatment": "chat", "requested": False, "changes": [],
-            "skipped": "headroom_unavailable"})
-    near_cap = {"model": "deepseek/deepseek-v3.2", "input": "Research.",
-                "max_output_tokens": operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS - 100}
-    assert forced("openrouter.responses", near_cap, profiles) == (near_cap, {
-        "policy": rc.POLICY, "treatment": "responses", "requested": False, "changes": [],
-        "skipped": "operation_reasoning_control_unavailable"})
-
-
-def test_budget_models_take_the_budget_for_a_raised_effort_and_stay_below_their_limit():
-    for model in ("google/gemini-2.5-flash", "anthropic/claude-sonnet-4.5"):
-        updated, annotation = forced("openrouter.chat", chat(model, reasoning={"effort": "minimal"}))
-        assert updated["reasoning"] == {"max_tokens": rc.BUDGET_TOKENS, "exclude": False}
-        assert annotation["changes"] == ["budget", "exclude", "headroom"]
-    # Anthropic requires the output limit to exceed the thinking budget.
-    updated, _ = forced("openrouter.chat", chat("anthropic/claude-sonnet-4.5", max_tokens=1))
-    assert updated["max_tokens"] == 1025 > updated["reasoning"]["max_tokens"]
-    assert rc.HEADROOM_TOKENS >= rc.BUDGET_TOKENS
-
-
-def test_near_the_responses_cap_reasoning_shares_the_limit_up_to_the_cap():
-    parameters = {"model": "openai/gpt-5.4-mini", "input": "Research the company.",
-                  "max_output_tokens": operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS - 100}
-    updated, annotation = forced("openrouter.responses", parameters)
-    assert updated["max_output_tokens"] == operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
-    assert annotation["changes"] == ["effort", "headroom_capped", "summary"]
-    operations.validate_operation_request("openrouter.responses", updated)
-
-
-def test_explicit_opt_outs_stay_off_where_thinking_state_must_round_trip():
-    for model, reasoning in (("google/gemini-3.5-flash-lite", {"effort": "none"}),
-                             ("google/gemini-2.5-flash", {"enabled": False}),
-                             ("anthropic/claude-sonnet-4.5", {"enabled": False})):
-        parameters = chat(model, messages=TOOL_LOOP, reasoning=reasoning)
-        assert forced("openrouter.chat", parameters) == (parameters, {
-            "policy": rc.POLICY, "treatment": "chat", "requested": False, "changes": [],
-            "skipped": "thinking_tool_state_unavailable"})
-
-
-def test_models_without_a_low_effort_are_not_forced_to_a_higher_one():
-    profiles = {"mistralai/mistral-small": {"mandatory": False, "default_enabled": False,
-                                            "supported_efforts": ["medium", "high"]}}
-    parameters = chat("mistralai/mistral-small")
-    assert forced("openrouter.chat", parameters, profiles) == (parameters, {
-        "policy": rc.POLICY, "treatment": "chat", "requested": False, "changes": [], "skipped": "no_low_effort"})
-
-
-@pytest.mark.parametrize("extra", [
-    {"temperature": 0}, {"temperature": 0.2}, {"top_k": 5}, {"top_p": 0.5},
-    {"tool_choice": "required"}, {"tool_choice": {"type": "function", "function": {"name": "lookup"}}},
-    {"messages": TOOL_LOOP}, {"messages": MESSAGES + [{"role": "assistant", "content": "{"}]},
-])
-def test_anthropic_thinking_conflicts_send_the_agent_request(extra):
-    parameters = chat("anthropic/claude-sonnet-4.5", **extra)
-    updated, annotation = forced("openrouter.chat", parameters)
-    assert updated == parameters
-    assert annotation["requested"] is False and annotation["changes"] == []
-    assert annotation["skipped"] in {"thinking_tool_state_unavailable", "anthropic_thinking_conflict"}
-    # Mandatory thinking already runs; its effort is set as usual.
-    mandatory, note = forced("openrouter.chat", chat("anthropic/claude-sonnet-5.5", **extra))
-    assert note["treatment"] == "chat" and mandatory["reasoning"] == {"effort": "high", "exclude": False}
-
-
-def test_models_without_reasoning_support_are_unchanged():
-    for model in ("perplexity/sonar", "openai/gpt-4o-mini"):
-        parameters = chat(model, temperature=0)
-        assert forced("openrouter.chat", parameters) == (
-            parameters, {"policy": rc.POLICY, "treatment": "no_reasoning_support", "requested": False, "changes": []})
-
-
-def test_policy_absence_and_unknown_versions():
-    parameters = chat("openai/gpt-6-luna")
-    assert rc.apply("openrouter.chat", parameters, policy=None, profiles=PROFILES) == (parameters, None)
-    assert rc.apply("deepline.execute", {"tool": "x"}, policy=rc.POLICY, profiles=PROFILES) == ({"tool": "x"}, None)
-    with pytest.raises(ValueError):
-        rc.apply("openrouter.chat", parameters, policy="agent_readable_reasoning_v2", profiles=PROFILES)
-
-
-@pytest.mark.parametrize("reasoning,effort,max_output_tokens,changes", [
-    ({"effort": "medium"}, "medium", 4096, ["summary"]),
-    ({"effort": "minimal"}, "low", 5120, ["effort", "headroom", "summary"]),
-    ({"effort": "high", "summary": "concise"}, "high", 4096, []),
-    (None, "medium", 4096, ["effort", "summary"]),
-])
-def test_responses_policy_requests_summaries(reasoning, effort, max_output_tokens, changes):
-    parameters = {"model": "openai/gpt-6-luna", "input": "Research the company.", "max_output_tokens": 4096,
-                  **({"reasoning": reasoning} if reasoning else {})}
-    updated, annotation = forced("openrouter.responses", parameters)
-    assert updated["reasoning"]["effort"] == effort
-    assert updated["reasoning"]["summary"] == (reasoning or {}).get("summary", "auto")
-    assert updated["max_output_tokens"] == max_output_tokens
-    assert annotation["changes"] == changes and annotation["requested"] is True
-    operations.validate_operation_request("openrouter.responses", updated)
-
-
-def test_optional_anthropic_thinking_is_never_switched_on_through_responses():
-    for extra in ({}, {"tool_choice": "required"},
-                  {"input": [{"type": "function_call_output", "call_id": "c1", "output": "{}"}]}):
-        parameters = {"model": "anthropic/claude-sonnet-4.5", "input": "Research.", "max_output_tokens": 2000, **extra}
-        assert forced("openrouter.responses", parameters) == (parameters, {
-            "policy": rc.POLICY, "treatment": "responses", "requested": False, "changes": [],
-            "skipped": "thinking_tool_state_unavailable" if extra.get("tool_choice") or isinstance(extra.get("input"), list) else "anthropic_thinking_conflict"})
-    chosen = {"model": "anthropic/claude-sonnet-4.5", "input": "Research.", "max_output_tokens": 2000,
-              "reasoning": {"effort": "low"}}
-    updated, annotation = forced("openrouter.responses", chosen)
-    assert updated["reasoning"] == {"effort": "low", "summary": "auto"} and annotation["changes"] == ["summary"]
-
-
-# --- Gateway broker -------------------------------------------------------
-
-AGENT_PROFILES = {"openai/gpt-4o-mini": {"mandatory": False, "default_enabled": False,
-                                         "default_effort": "medium", "supported_efforts": ["low", "medium", "high"]}}
-POLICY_CONTEXT = replace(broker_tests.CONTEXT, reasoning_capture_policy=rc.POLICY,
-                         reasoning_model_profiles=AGENT_PROFILES)
-OK = (200, {"id": "gen", "model": "openai/gpt-4o-mini", "choices": [],
-            "usage": {"prompt_tokens": 20, "completion_tokens": 50, "cost": "0.000033"}})
-
-
-def _execute(context, broker=None, action_sequence=0):
-    broker, store, transport = broker or broker_tests.make_broker(
-        transport=broker_tests.FakeTransport([OK, OK]), judge_models=(broker_tests.CHAT["model"],))
-    result = broker.execute(context, operation_id="openrouter.chat", parameters=broker_tests.CHAT,
-                            action_sequence=action_sequence, timeout_ms=30000)
-    return result, store, transport, (broker, store, transport)
-
-
-def test_agent_call_sends_and_binds_the_policy_request():
-    result, store, transport, _ = _execute(POLICY_CONTEXT)
-    assert result.status == 200
-    body = json.loads(transport.sent[0]["body"])
-    assert body["reasoning"] == {"effort": "low", "exclude": False, "summary": "auto"}
-    assert body["max_tokens"] == broker_tests.CHAT["max_tokens"] + rc.HEADROOM_TOKENS
-    expected = br.normalized_request("openrouter.chat", broker_tests.CHAT, reasoning_capture_policy=rc.POLICY,
-                                     reasoning_model_profiles=AGENT_PROFILES)
-    assert result.call["request_hash"] == contracts.document_hash(expected)
-    call_doc = store.calls[result.call["call_identity"]]["call_doc"]
-    assert call_doc["reasoning_capture"] == {"policy": rc.POLICY, "treatment": "chat", "requested": True,
-                                             "changes": ["effort", "exclude", "headroom", "summary"], "effort": "low"}
-    assert call_doc["max_output_tokens"] == expected["max_tokens"]
-
-
-def test_retried_agent_call_keeps_one_identity_and_one_dispatch():
-    first, _store, transport, broker = _execute(POLICY_CONTEXT)
-    second, _, _, _ = _execute(POLICY_CONTEXT, broker=broker)
-    assert second.call["call_identity"] == first.call["call_identity"]
-    assert len(transport.sent) == 1
-
-
-@pytest.mark.parametrize("context", [
-    replace(POLICY_CONTEXT, kind="score"),
-    broker_tests.CONTEXT,
-], ids=["judge", "no-policy"])
-def test_judge_runs_and_rounds_without_policy_are_unchanged(context):
-    result, store, transport, _ = _execute(context)
-    body = json.loads(transport.sent[0]["body"])
-    assert "reasoning" not in body and body["max_tokens"] == broker_tests.CHAT["max_tokens"]
-    assert "reasoning_capture" not in store.calls[result.call["call_identity"]]["call_doc"]
-    assert result.call["request_hash"] == contracts.document_hash(
-        br.normalized_request("openrouter.chat", broker_tests.CHAT))
+    return {"model": model, "messages": [{"role": "user", "content": "Find evidence."}],
+            "max_tokens": 1500, **extra}
 
 
 def _near_size_cap(margin):
     parameters = {"model": "openai/gpt-4o-mini", "max_tokens": 200, "messages": []}
-
     def size():
         return len(contracts.canonical_json(parameters).encode("utf-8"))
-
-    # Each full message adds 31,000 characters plus a little JSON; the final
-    # filler then stays under the per-message content limit.
     while size() + 31_200 <= 1_000_000 - margin:
         parameters["messages"].append({"role": "user", "content": "x" * 31_000})
     parameters["messages"].append({"role": "user", "content": ""})
     parameters["messages"][-1]["content"] = "x" * (1_000_000 - margin - size())
-    assert size() == 1_000_000 - margin
     return parameters
 
 
-def test_policy_form_refused_by_the_schema_sends_the_agent_request():
-    # A valid request just under the canonical size cap: the added reasoning
-    # settings would push it over, so the agent's own form is sent instead.
-    normalized = br.normalized_request("openrouter.chat", _near_size_cap(20))
-    updated, annotation = br.agent_reasoning_parameters(
-        "openrouter.chat", normalized, policy=rc.POLICY, profiles=AGENT_PROFILES)
-    assert updated == normalized
-    assert annotation["requested"] is False and annotation["unapplied"] == "operation_schema"
+def _reviewed_registry(model="openai/gpt-4o-mini", api="openrouter.chat"):
+    # A synthetic unit-test approval, never added to the committed registry.
+    route = {
+        "model_id": model, "model_version": model,
+        "provider": "example/verified", "provider_name": "Example Provider", "api": api,
+        "mode": {"budget_tokens": 1024} if api == "openrouter.chat" else {"effort": "high"},
+        "parser_version": rc.PARSER_VERSION,
+        "semantic_class": "full_generated_thinking",
+        "full_text_fields": ["reasoning_details.text"] if api == "openrouter.chat" else ["output.content.reasoning_text"],
+        "max_output_tokens": 8192,
+        "answer_headroom_tokens": 1024, "context_tokens": 32768,
+        "price_ceiling": {"prompt": "0.0000003", "completion": "0.000001",
+                          "request": "0", "internal_reasoning": "0"},
+        "evidence": {"documentation_url": "https://example.com/exact-route",
+                     "probe_id": "probe-unit-001", "verified_at": "2026-10-23T00:00:00Z",
+                     "probe_manifest_sha256": "a" * 64},
+        "allowed_fallback_routes": [], "status": "approved",
+    }
+    return {"schema_version": 1, "approved_routes": [route],
+            "baseline_route": {"model_id": model, "api": api}}
 
 
-def test_price_table_carries_catalog_profiles_for_priced_models():
-    catalog = {"data": [dict(item, pricing={"prompt": "0.000001", "completion": "0.000002"})
-                        for item in CATALOG["data"] if item["id"] != "openai/gpt-5-mini"]}
-    table = br.price_table_from_models_response(catalog, fetched_at="2026-10-19T00:00:00Z")
-    assert "openai/gpt-5-mini" not in table["reasoning_profiles"]
-    assert table["reasoning_profiles"]["openai/gpt-6-luna"] == PROFILES["openai/gpt-6-luna"]
-    assert br.validate_price_table(json.loads(json.dumps(table))) == table
-    with pytest.raises(contracts.ArenaContractError):
-        br.validate_price_table(dict(table, reasoning_profiles={"bad": {}}))
+def test_committed_registry_approves_only_reviewed_routes():
+    registry = rc.load_registry()
+    assert {route["model_id"] for route in registry["approved_routes"]} == set(PROBE_FILES)
+    assert registry["baseline_route"] is None
+    with pytest.raises(ValueError, match="reasoning_route_unsupported"):
+        rc.apply("openrouter.chat", chat("openai/gpt-4o-mini"), policy=rc.POLICY,
+                 registry=registry)
 
 
-# --- Round configuration --------------------------------------------------
+@pytest.mark.parametrize("model_id", PROBE_FILES)
+def test_committed_price_bound_probe_replays_through_broker(model_id):
+    registry = rc.load_registry()
+    route = next(route for route in registry["approved_routes"] if route["model_id"] == model_id)
+    evidence_path = EVIDENCE_DIR / PROBE_FILES[model_id]
+    raw = evidence_path.read_bytes()
+    probe = json.loads(raw)
+    assert hashlib.sha256(raw).hexdigest() == route["evidence"]["probe_manifest_sha256"]
+    assert probe["probe_id"] == route["evidence"]["probe_id"]
+    assert probe["model"] == model_id
+    assert probe["provider"] == route["provider"]
+    assert probe["api"] == route["api"] == "openrouter.chat"
+    assert probe["zdr"] is True
+    assert probe["approval_granted"] is False  # The executable cannot approve its own result.
+    assert all(probe["checks"].values())
+    assert len(probe["attempts"]) == 3
 
-def _activated(activation="2026-10-01T00:00:00+00:00", profiles=PROFILES):
-    service = _service()
-    service._config.reasoning_profile_source = (lambda: profiles) if profiles is not None else None
-    service._config.defaults.reasoning_capture_from = activation
-    return service
-
-
-def test_new_round_freezes_the_policy_and_catalog_profiles():
-    config = _activated().create_round(datetime(2026, 10, 19, tzinfo=timezone.utc))
-    assert config["reasoning_capture_policy"] == rc.POLICY
-    assert config["reasoning_model_profiles"] == PROFILES
-    assert contracts.validate_round_configuration(json.loads(json.dumps(config))) == config
-    assert ArenaService._public_round_output_policy(config)["reasoning_capture_policy"] == rc.POLICY
-
-
-def test_rounds_opened_before_activation_keep_their_requests():
-    config = _activated("2026-11-01T00:00:00Z").create_round(datetime(2026, 10, 19, tzinfo=timezone.utc))
-    assert "reasoning_capture_policy" not in config and "reasoning_model_profiles" not in config
-    assert "reasoning_capture_policy" not in ArenaService._public_round_output_policy(config)
-
-
-@pytest.mark.parametrize("profiles", [None, {}, {"bad": {}}])
-def test_activated_round_refuses_missing_or_invalid_profiles(profiles):
-    service = _activated(profiles=profiles)
-    created = []
-    service._store.create_round = lambda *args: created.append(args)
-    with pytest.raises(service_module.ServiceError, match="reasoning_capture_profiles_unavailable") as error:
-        service.create_round(datetime(2026, 10, 19, tzinfo=timezone.utc))
-    assert error.value.status == 503
-    assert created == []
-
-
-@pytest.mark.parametrize("change,message", [
-    ({"reasoning_model_profiles": None}, "invalid reasoning capture policy"),
-    ({"reasoning_model_profiles": {}}, "invalid reasoning capture policy"),
-    ({"reasoning_capture_policy": None}, "invalid reasoning capture policy"),
-    ({"reasoning_capture_policy": "agent_readable_reasoning_v2"}, "agent_readable_reasoning_v1|choices|invalid"),
-])
-def test_contract_refuses_partial_or_unknown_policy(change, message):
-    config = _activated().create_round(datetime(2026, 10, 19, tzinfo=timezone.utc))
-    with pytest.raises(contracts.ArenaContractError, match=message):
-        contracts.validate_round_configuration(dict(config, **change))
-    without_profiles = {key: value for key, value in config.items() if key != "reasoning_model_profiles"}
-    with pytest.raises(contracts.ArenaContractError, match="frozen together"):
-        contracts.validate_round_configuration(without_profiles)
-
-
-def test_run_context_carries_the_frozen_policy_to_the_broker():
-    config = _activated().create_round(datetime(2026, 10, 19, tzinfo=timezone.utc))
-    service = object.__new__(ArenaService)
-    run = {"run_id": "r1", "round_id": config["round_id"], "assignment_id": "a1", "attempt": 1,
-           "icp_position": 0, "miner_hotkey": "5" * 48, "submission_id": "s1", "stage": 1, "kind": "execute"}
-    service._store = SimpleNamespace(get_run=lambda _run_id: run)
-    service._require_round_ownership = lambda _round_id: None
-    service._hot_round = lambda _round_id: {"round_id": config["round_id"], "configuration_doc": config}
-    _run, context = service._run_context("r1", "lease-token")
-    assert context.reasoning_capture_policy == rc.POLICY
-    assert context.reasoning_model_profiles == PROFILES
-
-
-def test_catalog_keeps_null_omitted_and_token_budget_capabilities_separate():
-    catalog = {"data": [
-        {"id": "vendor/all", "reasoning": {"supported_efforts": None}},
-        {"id": "vendor/toggle", "reasoning": {}},
-        {"id": "vendor/budget", "reasoning": {"supports_max_tokens": True}},
-        {"id": "vendor/no-budget", "reasoning": {"supports_max_tokens": False}},
-    ]}
-    profiles = rc.profiles_from_models_response(catalog)
-    assert profiles["vendor/all"]["supported_efforts"] is None
-    assert "supported_efforts" not in profiles["vendor/toggle"]
-    assert profiles["vendor/budget"]["supports_max_tokens"] is True
-    assert profiles["vendor/no-budget"]["supports_max_tokens"] is False
-    assert rc.validate_profiles(json.loads(json.dumps(profiles))) == profiles
-    assert forced("openrouter.chat", chat("vendor/all"), profiles)[0]["reasoning"] == {"effort": "low", "exclude": False}
-    assert forced("openrouter.chat", chat("vendor/budget"), profiles)[0]["reasoning"] == {"max_tokens": 1024, "exclude": False}
-    source = {"vendor/all": {"mandatory": False, "supported_efforts": ["low", "high"]}}
-    frozen = rc.validate_profiles(source)
-    source["vendor/all"]["supported_efforts"].clear()
-    assert frozen["vendor/all"]["supported_efforts"] == ["low", "high"]
-    for invalid in ("true", 1, None):
-        with pytest.raises(ValueError):
-            rc.validate_profiles({"vendor/m": {"mandatory": False, "supports_max_tokens": invalid}})
-
-
-@pytest.mark.parametrize("model", ["google/gemini-2.5-flash", "google/gemini-3.5-flash-lite", "anthropic/claude-sonnet-4.5"])
-@pytest.mark.parametrize("reasoning", [{"enabled": False}, {"effort": "none"}, {"max_tokens": 0}])
-def test_explicit_disabled_reasoning_is_enabled_only_without_tool_state(model, reasoning):
-    updated, annotation = forced("openrouter.chat", chat(model, reasoning=reasoning))
-    assert "agent_disabled_overridden" in annotation["changes"] and annotation["requested"] is True
-    expected = {"effort": "medium"} if model == "google/gemini-3.5-flash-lite" else {"max_tokens": 1024}
-    assert updated["reasoning"] == dict(expected, exclude=False)
-
-
-@pytest.mark.parametrize("model", ["google/gemini-2.5-flash", "google/gemini-3.5-flash-lite", "anthropic/claude-sonnet-4.5"])
-@pytest.mark.parametrize("extra", [
-    {"tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]},
-    {"messages": TOOL_LOOP},
-])
-def test_first_tool_call_and_continuation_do_not_gain_thinking(model, extra):
-    parameters = chat(model, **extra)
-    updated, annotation = forced("openrouter.chat", parameters)
-    if model == "google/gemini-3.5-flash-lite":
-        assert updated == dict(parameters, reasoning={"exclude": False})
-    else:
-        assert updated == parameters
-    assert annotation["skipped"] == "thinking_tool_state_unavailable"
-    if model == "google/gemini-3.5-flash-lite":
-        assert annotation["requested"] is True  # Existing mandatory minimal thinking remains.
-    else:
-        assert annotation["requested"] is False
-    # Compatible thinking already requested by the agent stays on; make only
-    # returned text visible, without reconstructing or changing signed state.
-    parameters["reasoning"] = {"max_tokens": 2048, "exclude": True}
-    updated, annotation = forced("openrouter.chat", parameters)
-    assert updated["reasoning"] == {"max_tokens": 2048, "exclude": False}
-    assert updated["max_tokens"] == parameters["max_tokens"]
-    assert annotation["changes"] == ["exclude_cleared"]
-
-
-def test_responses_continuation_protection_sees_real_function_item_shapes():
-    for item in ({"type": "function_call", "call_id": "c", "name": "lookup", "arguments": "{}"},
-                 {"type": "function_call_output", "call_id": "c", "output": "{}"}):
-        parameters = {"model": "google/gemini-2.5-flash", "input": [item], "max_output_tokens": 2000}
-        updated, annotation = forced("openrouter.responses", parameters)
-        assert updated == parameters
-        assert annotation["skipped"] == "thinking_tool_state_unavailable" and not annotation["requested"]
-
-
-def test_judge_and_historical_outbound_bytes_match_the_original_operation():
-    expected = operations.build_outbound_request("openrouter.chat", br.normalized_request("openrouter.chat", broker_tests.CHAT)).body
-    for context in (broker_tests.CONTEXT, replace(POLICY_CONTEXT, kind="score")):
-        result, store, transport, _ = _execute(context)
-        assert result.status == 200 and transport.sent[0]["body"] == expected
-        assert "reasoning_capture" not in store.calls[result.call["call_identity"]]["call_doc"]
-
-
-def test_capture_admission_and_dispatch_bind_the_same_policy_request():
-    captures = []
-    instance, store, transport = broker_tests.make_broker(
-        transport=broker_tests.FakeTransport([OK]),
-        capture_request=lambda document, **_kwargs: captures.append(document) or {"status": "unavailable"},
+    # A deliberately cheaper catalog entry proves admission and reservation
+    # use the reviewed endpoint ceiling, not the model-wide catalog floor.
+    table = broker_tests.price_table()
+    table["models"][model_id] = {
+        component: str(Decimal(route["price_ceiling"].get(component, "0")) / 2)
+        for component in br.PRICED_COMPONENTS
+    }
+    table = br.validate_price_table(table)
+    transport = broker_tests.FakeTransport(
+        [(attempt["status"], attempt["response"]) for attempt in probe["attempts"]]
     )
-    result, _, _, _ = _execute(POLICY_CONTEXT, (instance, store, transport))
+    store = broker_tests.FakeLedgerStore()
+    broker = br.Broker(
+        store=store, key_for=lambda provider: broker_tests.HOST_KEYS[provider],
+        price_table=table, transport=transport,
+        clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc),
+    )
+    context = replace(broker_tests.CONTEXT, reasoning_capture_policy=rc.POLICY,
+                      reasoning_route_registry=registry)
+    for index, attempt in enumerate(probe["attempts"]):
+        live_request = attempt["request"]
+        live_response = attempt["response"]
+        assert hashlib.sha256(probe_script.canonical(live_request)).hexdigest() == attempt["request_sha256"]
+        assert hashlib.sha256(probe_script.canonical(live_response)).hexdigest() == attempt["response_sha256"]
+        if model_id.startswith("deepseek/") and index == 2:
+            # The probe escapes Unicode; Arena's canonical ledger JSON does
+            # not. Each hash must use its own documented wire convention.
+            assert any(ord(char) > 127 for char in contracts.canonical_json(live_response))
+            assert attempt["response_sha256"] != contracts.document_hash(live_response).split(":", 1)[1]
+        # The agent supplies semantic request fields. The broker supplies the
+        # provider pin and transport stream flag on the outbound wire.
+        parameters = {key: value for key, value in live_request.items()
+                      if key not in {"provider", "stream"}}
+        result = broker.execute(context, operation_id="openrouter.chat",
+                                parameters=parameters, action_sequence=index,
+                                timeout_ms=30000)
+        assert result.status == 200
+        assert result.call["outcome"] == "settled"
+        assert len(transport.sent) == index + 1
+        sent = json.loads(transport.sent[-1]["body"])
+        assert sent["model"] == model_id
+        assert sent["messages"] == live_request["messages"]
+        assert sent["reasoning"] == live_request["reasoning"]
+        assert sent["max_tokens"] == live_request["max_tokens"]
+        assert sent["stream"] is False
+        for field in ("tools", "tool_choice", "response_format"):
+            assert sent.get(field) == live_request.get(field)
+        assert sent["provider"] == live_request["provider"]
+        assert sent["provider"]["only"] == [route["provider"]]
+        assert sent["provider"]["zdr"] is True
+        assert sent["provider"]["allow_fallbacks"] is False
+        assert json.loads(result.body) == live_response
+        assert contracts.document_hash(json.loads(result.body)) == contracts.document_hash(live_response)
+
+        normalized = br.normalized_request(
+            "openrouter.chat", parameters, reasoning_capture_policy=rc.POLICY,
+            reasoning_route_registry=registry)
+        assert result.call["request_hash"] == contracts.document_hash(normalized)
+        ledger = store.calls[result.call["call_identity"]]
+        pricing = {**table["models"][model_id], **route["price_ceiling"]}
+        assert ledger["amount"] == br._max_openrouter_cost_for_pricing(
+            pricing, normalized, max_output_tokens=normalized["max_tokens"])
+        annotation = ledger["call_doc"]["reasoning_capture"]
+        assert annotation["probe_manifest_sha256"] == route["evidence"]["probe_manifest_sha256"]
+        observation = ledger["terminal"]["reasoning_route_observation"]
+        assert observation["status"] == "matched"
+        assert observation["response_model"] == model_id
+        assert observation["response_provider_name"] == route["provider_name"]
+        assert observation["selected_endpoint_model"] == route["model_version"]
+
+
+def test_exact_route_registry_is_immutable_and_rejects_fallback_or_summary():
+    source = _reviewed_registry()
+    frozen = rc.validate_registry(source)
+    source["approved_routes"][0]["mode"]["budget_tokens"] = 2048
+    assert frozen["approved_routes"][0]["mode"] == {"budget_tokens": 1024}
+    for change in ({"allowed_fallback_routes": ["other"]},
+                   {"semantic_class": "summary"}, {"status": "candidate"},
+                   {"price_ceiling": {"prompt": "NaN", "completion": "0.000001", "request": "0", "internal_reasoning": "0"}},
+                   {"evidence": {**frozen["approved_routes"][0]["evidence"], "probe_id": ""}}):
+        bad = json.loads(json.dumps(frozen))
+        bad["approved_routes"][0].update(change)
+        with pytest.raises(ValueError):
+            rc.validate_registry(bad)
+    duplicate = json.loads(json.dumps(frozen))
+    duplicate["approved_routes"].append(duplicate["approved_routes"][0])
+    with pytest.raises(ValueError, match="duplicate"):
+        rc.validate_registry(duplicate)
+    wrong_version = json.loads(json.dumps(frozen))
+    wrong_version["approved_routes"][0]["evidence"]["verified_at"] = "2026-99-23T00:00:00Z"
+    with pytest.raises(ValueError, match="timestamp"):
+        rc.validate_registry(wrong_version)
+
+
+def test_full_policy_forces_exact_mode_and_bounded_answer_room_before_hash():
+    request = chat("openai/gpt-4o-mini", max_tokens=400, reasoning={"enabled": False, "summary": "auto"})
+    updated, annotation = rc.apply("openrouter.chat", request, policy=rc.POLICY,
+                                   registry=_reviewed_registry())
+    assert request["reasoning"]["enabled"] is False
+    assert updated["reasoning"] == {"max_tokens": 1024, "exclude": False}
+    assert updated["max_tokens"] >= 2048
+    assert annotation["reviewed_route"] is True
+    assert annotation["semantic_class"] == "full_generated_thinking"
+    assert annotation["full_text_fields"] == ["reasoning_details.text"]
+    assert annotation["api"] == "openrouter.chat"
+    assert annotation["provider_route"] == "example/verified"
+    assert len(annotation["registry_sha256"]) == 64
+    assert br.agent_reasoning_parameters("openrouter.chat", request, policy=rc.POLICY,
+                                          registry=_reviewed_registry())[0] == updated
+
+
+def test_full_policy_refuses_unapproved_model_api_and_invalid_schema():
+    registry = _reviewed_registry()
+    with pytest.raises(br.BrokerError, match="invalid_request"):
+        br.agent_reasoning_parameters("openrouter.chat", chat("vendor/other"),
+                                      policy=rc.POLICY, registry=registry)
+    with pytest.raises(br.BrokerError, match="invalid_request"):
+        br.agent_reasoning_parameters("openrouter.responses", {"model": "openai/gpt-4o-mini", "input": "hello"},
+                                      policy=rc.POLICY, registry=registry)
+    nearly_full = _near_size_cap(10)
+    with pytest.raises(br.BrokerError, match="invalid_request"):
+        br.agent_reasoning_parameters("openrouter.chat", nearly_full,
+                                      policy=rc.POLICY, registry=registry)
+
+
+def test_full_policy_can_add_output_room_above_historical_chat_limit():
+    request = chat("openai/gpt-4o-mini", max_tokens=8192)
+    updated, _ = br.agent_reasoning_parameters(
+        "openrouter.chat", request, policy=rc.POLICY, registry=_reviewed_registry())
+    assert updated["max_tokens"] == 8192
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.chat", updated)
+    assert br.normalized_request("openrouter.chat", request,
+        reasoning_capture_policy=rc.POLICY, reasoning_route_registry=_reviewed_registry())["max_tokens"] == 8192
+
+
+def test_context_limit_refuses_request_before_dispatch():
+    registry = _reviewed_registry()
+    registry["approved_routes"][0]["context_tokens"] = 8192
+    with pytest.raises(br.BrokerError, match="invalid_request"):
+        br.agent_reasoning_parameters("openrouter.chat", chat("openai/gpt-4o-mini",
+            messages=[{"role": "user", "content": "x" * 31000}]),
+            policy=rc.POLICY, registry=registry)
+
+
+def test_unpriced_hosted_search_is_not_admitted_by_full_responses_route():
+    registry = _reviewed_registry(api="openrouter.responses")
+    request = {"model": "openai/gpt-4o-mini", "input": "Find evidence.",
+               "tools": [{"type": "openrouter:web_search", "parameters": {
+                   "engine": "native", "max_uses": 1, "max_total_results": 1}}]}
+    with pytest.raises(br.BrokerError, match="invalid_request"):
+        br.agent_reasoning_parameters("openrouter.responses", request,
+                                      policy=rc.POLICY, registry=registry)
+
+
+def test_actual_route_observation_distinguishes_match_mismatch_and_absence():
+    _, annotation = rc.apply("openrouter.chat", chat("openai/gpt-4o-mini"),
+                             policy=rc.POLICY, registry=_reviewed_registry())
+    response = {"model": "openai/gpt-4o-mini", "provider": "Example Provider",
+                "openrouter_metadata": {"endpoints": {"available": [
+                    {"selected": True, "provider": "Example Provider", "model": "openai/gpt-4o-mini"}]}}}
+    assert rc.route_observation(response, annotation)["status"] == "matched"
+    response["openrouter_metadata"]["endpoints"]["available"][0]["model"] = "vendor/other"
+    assert rc.route_observation(response, annotation)["status"] == "mismatch"
+    assert rc.route_observation({}, annotation)["status"] == "unverified"
+
+
+OK = (200, {"id": "gen", "model": "openai/gpt-4o-mini", "choices": [],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 50, "cost": "0.000033"}})
+
+
+def _execute(context, *, response=OK):
+    broker, store, transport = broker_tests.make_broker(
+        transport=broker_tests.FakeTransport([response]),
+        judge_models=(broker_tests.CHAT["model"],))
+    result = broker.execute(context, operation_id="openrouter.chat",
+                            parameters=broker_tests.CHAT, action_sequence=0, timeout_ms=30000)
+    return result, store, transport
+
+
+def test_full_policy_binds_frozen_route_hash_cost_and_zdr_without_fallback():
+    registry = _reviewed_registry()
+    context = replace(broker_tests.CONTEXT, reasoning_capture_policy=rc.POLICY,
+                      reasoning_route_registry=registry)
+    result, store, transport = _execute(context)
+    assert result.status == 200
     sent = json.loads(transport.sent[0]["body"])
+    assert sent["model"] == broker_tests.CHAT["model"]
+    assert sent["max_tokens"] == 8192
+    assert sent["reasoning"] == {"max_tokens": 1024, "exclude": False}
+    assert sent["provider"]["only"] == ["example/verified"]
+    assert sent["provider"]["allow_fallbacks"] is False
+    assert sent["provider"]["require_parameters"] is True
+    assert sent["provider"]["zdr"] is True
+    assert sent["provider"]["max_price"] == {"prompt": 0.3, "completion": 1, "request": 0}
     expected = br.normalized_request("openrouter.chat", broker_tests.CHAT,
-        reasoning_capture_policy=rc.POLICY, reasoning_model_profiles=AGENT_PROFILES)
-    entry = store.calls[result.call["call_identity"]]
-    assert captures[0]["hashed_parameters"] == captures[0]["effective_parameters"] == expected
-    assert captures[0]["outbound"]["body"] == sent
-    assert captures[0]["request_hash"] == result.call["request_hash"] == contracts.document_hash(expected)
-    assert entry["amount"] == br.max_openrouter_cost_microusd(
-        broker_tests.price_table(), expected["model"], expected, max_output_tokens=expected["max_tokens"])
+        reasoning_capture_policy=rc.POLICY, reasoning_route_registry=registry)
+    assert result.call["request_hash"] == contracts.document_hash(expected)
+    assert store.calls[result.call["call_identity"]]["call_doc"]["reasoning_capture"]["probe_id"] == "probe-unit-001"
+    priced = dict(broker_tests.price_table()["models"][broker_tests.CHAT["model"]],
+                  **registry["approved_routes"][0]["price_ceiling"])
+    assert store.calls[result.call["call_identity"]]["amount"] == br._max_openrouter_cost_for_pricing(
+        priced, expected, max_output_tokens=expected["max_tokens"])
+    assert store.calls[result.call["call_identity"]]["terminal"]["reasoning_route_observation"]["status"] == "unverified"
 
 
-def test_retry_uses_frozen_context_after_runtime_catalog_changes():
-    first, _, transport, instance = _execute(POLICY_CONTEXT)
-    instance[0]._price_table["reasoning_profiles"] = {broker_tests.CHAT["model"]: {"mandatory": False}}
-    second, _, _, _ = _execute(POLICY_CONTEXT, instance)
-    assert second.call["call_identity"] == first.call["call_identity"]
-    assert second.call["request_hash"] == first.call["request_hash"]
-    assert len(transport.sent) == 1
+def test_exact_full_route_requires_provider_parameter_enforcement():
+    route = {
+        "data_collection": "deny", "zdr": True,
+        "only": ["example/verified"], "allow_fallbacks": False,
+        "require_parameters": True,
+        "max_price": {"prompt": 0.3, "completion": 1, "request": 0},
+    }
+    request = chat("openai/gpt-4o-mini")
+    outbound = operations.build_outbound_request(
+        "openrouter.chat", request, openrouter_provider_policy=route,
+        allow_full_thinking=True)
+    assert json.loads(outbound.body)["provider"] == route
+    for unsafe in ({key: value for key, value in route.items() if key != "require_parameters"},
+                   {**route, "require_parameters": False}):
+        with pytest.raises(operations.OperationRequestError):
+            operations.build_outbound_request(
+                "openrouter.chat", request, openrouter_provider_policy=unsafe,
+                allow_full_thinking=True)
+    with pytest.raises(operations.OperationRequestError):
+        operations.build_outbound_request(
+            "openrouter.chat", request, openrouter_provider_policy=route)
+    with pytest.raises(operations.OperationRequestError):
+        operations.build_outbound_request(
+            "openrouter.responses",
+            {"model": "openai/gpt-4o-mini", "input": "Find evidence."},
+            openrouter_provider_policy={key: value for key, value in route.items()
+                                        if key not in {"only", "require_parameters"}},
+            allow_full_thinking=True)
 
 
-def test_freeze_uses_submission_open_and_does_not_share_runtime_metadata():
-    service = _activated()
-    plain = _service().create_round(datetime(2026, 10, 19, tzinfo=timezone.utc))
-    submission_open = service_module._parse_iso(plain["schedule"]["submission_open"])
-    service._config.defaults.reasoning_capture_from = submission_open.isoformat()
-    source = json.loads(json.dumps(PROFILES))
-    service._config.reasoning_profile_source = lambda: source
-    config = service.create_round(datetime(2026, 10, 19, tzinfo=timezone.utc))
-    source["openai/gpt-6-luna"]["supported_efforts"].clear()
-    assert config["reasoning_model_profiles"] == PROFILES
-    later = _activated((submission_open + service_module.timedelta(seconds=1)).isoformat())
-    config = later.create_round(datetime(2026, 10, 19, tzinfo=timezone.utc))
-    assert "reasoning_capture_policy" not in config
+def test_unapproved_full_policy_call_does_not_dispatch_or_reserve():
+    context = replace(broker_tests.CONTEXT, reasoning_capture_policy=rc.POLICY,
+                      reasoning_route_registry=rc.load_registry())
+    result, store, transport = _execute(context)
+    assert result.status != 200
+    assert not transport.sent and not store.calls
 
 
-@pytest.mark.parametrize("reasoning", [{}, {"exclude": True}, {"summary": "auto"}, {"context": "current_turn"}])
-@pytest.mark.parametrize("model", ["openai/gpt-5.4-mini", "google/gemini-3.5-flash-lite"])
-def test_visibility_only_reasoning_options_do_not_claim_thinking_is_on(model, reasoning):
-    updated, annotation = forced("openrouter.chat", chat(model, reasoning=reasoning))
-    assert updated["reasoning"]["effort"] == ("medium" if model.startswith("google/") else "low")
-    assert updated["reasoning"]["exclude"] is False
-    assert annotation["requested"] is True
-    assert "effort" in annotation["changes"] and "headroom" in annotation["changes"]
-
-
-def test_annotation_does_not_copy_opaque_agent_effort_values():
-    for effort in ("arbitrary-private-text", {"text": "private"}, ["private"]):
-        _, annotation = forced("openrouter.chat", chat("openai/gpt-6-luna", reasoning={"effort": effort}))
-        assert "effort" not in annotation
-
-
-def test_added_reasoning_output_room_is_included_before_cost_admission():
-    original = br.normalized_request("openrouter.chat", broker_tests.CHAT)
-    original_bound = br.max_openrouter_cost_microusd(broker_tests.price_table(), original["model"],
-        original, max_output_tokens=original["max_tokens"])
-    store = broker_tests.FakeLedgerStore(openrouter_capacity=original_bound)
-    instance, _, transport = broker_tests.make_broker(store=store, transport=broker_tests.FakeTransport([OK]))
-    result, _, _, _ = _execute(POLICY_CONTEXT, (instance, store, transport))
-    assert result.status == 402 and result.call["error_code"] == "budget_refused"
-    assert transport.sent == []
-
-
-@pytest.mark.parametrize("effort,expected", [
-    ("none", "medium"), ("minimal", "medium"), ("low", "medium"),
-    ("medium", "medium"), ("high", "high"),
-])
-@pytest.mark.parametrize("operation", ["openrouter.chat", "openrouter.responses"])
-def test_google_effort_floor_uses_the_measured_readable_level(operation, effort, expected):
-    model = "google/gemini-3.5-flash-lite"
-    if operation == "openrouter.chat":
-        parameters = chat(model, reasoning={"effort": effort})
-    else:
-        parameters = {"model": model, "input": "Compare current expansion evidence.",
-                      "max_output_tokens": 1500, "reasoning": {"effort": effort}}
-    updated, annotation = br.agent_reasoning_parameters(operation, parameters,
-        policy=rc.POLICY, profiles=PROFILES)
-    assert updated["reasoning"]["effort"] == expected
-    assert annotation["effort"] == expected and annotation["requested"] is True
-    assert ("headroom" in annotation["changes"]) == (effort in {"none", "minimal", "low"})
-    if operation == "openrouter.chat":
-        assert updated["reasoning"]["exclude"] is False
-    else:
-        assert updated["reasoning"]["summary"] == "auto"
-    operations.validate_operation_request(operation, updated)
-
-
-@pytest.mark.parametrize("extra", [
-    {"tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]},
-    {"messages": TOOL_LOOP},
-])
-def test_google_low_effort_is_not_raised_inside_tool_workflows(extra):
-    parameters = chat("google/gemini-3.5-flash-lite", reasoning={"effort": "low"}, **extra)
-    updated, annotation = br.agent_reasoning_parameters("openrouter.chat", parameters,
-        policy=rc.POLICY, profiles=PROFILES)
-    assert updated["reasoning"] == {"effort": "low", "exclude": False}
-    assert updated["max_tokens"] == parameters["max_tokens"]
-    assert annotation["skipped"] == "thinking_tool_state_unavailable"
-    assert annotation["changes"] == ["exclude"]
+def test_broker_settlement_records_actual_selected_route_evidence():
+    registry = _reviewed_registry()
+    registry["approved_routes"][0]["model_version"] = "openai/gpt-4o-mini-20261023"
+    body = dict(OK[1], provider="Example Provider",
+                openrouter_metadata={"endpoints": {"available": [
+                    {"selected": True, "provider": "Example Provider",
+                     "model": "openai/gpt-4o-mini-20261023"}]}})
+    context = replace(broker_tests.CONTEXT, reasoning_capture_policy=rc.POLICY,
+                      reasoning_route_registry=registry)
+    result, store, _ = _execute(context, response=(200, body))
+    assert result.status == 200
+    terminal = store.calls[result.call["call_identity"]]["terminal"]
+    assert terminal["reasoning_route_observation"]["status"] == "matched"
+    assert terminal["reasoning_route_observation"]["selected_endpoint_model"] == "openai/gpt-4o-mini-20261023"

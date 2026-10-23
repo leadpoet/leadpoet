@@ -10,7 +10,7 @@ import tarfile
 
 import pytest
 
-from lab_arena import contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, verify
+from lab_arena import contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, training_thinking, verify
 from lab_arena.training_export import ExportError, _competition_cost_snapshot, assemble_example, without_hidden_reasoning
 from lab_arena.output import validate_output_document
 from scripts.export_arena_training import _ledger, export_run, write_private
@@ -249,6 +249,41 @@ def test_full_request_not_excerpt_and_plaintext_response_alias_retained():
     assert result["provider_calls"][0]["response_privacy_redactions"] == []
     assert result["privacy"]["hidden_reasoning_removed"] is False
     assert result["costs"]["confirmed_actual_microusd"] == 42
+
+
+def test_upstream_capture_failure_is_recorded_without_losing_saved_response():
+    values = fixture()
+    add_call(values)
+    values["ledger_rows"][-1]["terminal_response"]["upstream_response_receipt"] = {
+        "status": "unavailable", "reason": "response_capture_failed"}
+    result = assemble_example(**values)
+    call = result["provider_calls"][0]
+    assert call["upstream_response_capture"] == {"status": "unavailable", "reason": "response_capture_failed"}
+    assert call["response"]["choices"][0]["message"]["reasoning_content"] == "PRIVATE THOUGHT"
+
+
+def test_stored_provider_body_and_route_identity_reach_exported_coverage():
+    values = fixture()
+    add_call(values)
+    annotation = {"policy": training_thinking.POLICY, "requested": True, "reviewed_route": True,
+                  "semantic_class": "full_generated_thinking", "model_id": "test",
+                  "model_version": "2026-10-23", "provider_route": "route-a", "api": "openrouter.chat",
+                  "mode": {"effort": "high"}, "parser_version": "arena_openrouter_reasoning_v1",
+                  "probe_id": "probe-a", "probe_manifest_sha256": "a" * 64,
+                  "registry_sha256": "b" * 64,
+                  "full_text_fields": ["reasoning_content"]}
+    values["ledger_rows"][0]["entry_doc"]["reasoning_capture"] = annotation
+    complete_body = {"choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": "result", "reasoning_content": "PRIVATE THOUGHT"}}]}
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(
+        json.dumps(complete_body).encode()).decode()
+    example = assemble_example(**values)
+    call = example["provider_calls"][0]
+    assert call["request"]["outbound"]["body"]["model"] == annotation["model_id"]
+    assert call["response_sha256"] == contracts.document_hash(call["response"])
+    coverage = training_thinking.attempt_coverage(call, "miner")
+    assert coverage["returned"] == "unproved_text"
+    assert coverage["characters"] == len("PRIVATE THOUGHT")
 
 
 def test_empty_credential_fields_and_nul_do_not_create_false_export_gaps():

@@ -162,37 +162,24 @@ Ledger responses are read again at export, so historical receipts can also yield
 readable text. Earlier stored worker observations that were already redacted
 remain redacted.
 
-New rounds can freeze `agent_readable_reasoning_v1` and the model capabilities
-from the existing provider catalog. `LAB_ARENA_REASONING_CAPTURE_FROM` selects
-rounds whose submission window opens on or after the configured UTC time. It
-does not modify rounds already created. In those rounds the gateway asks for
-readable summaries on supported OpenAI calls, removes returned-text exclusion,
-and enables a supported reasoning setting when needed. Effort-based Google
-models use a medium floor: the October 23 live probe returned no readable text
-at low effort, while medium returned readable text. Other effort-based models
-use a low floor. Higher existing effort is retained. This can change cost,
-runtime and model output. Extra output
-room stays within the existing token caps; the $4 execution/admission cap stays
-unchanged. A low effort setting is not a hard reasoning-token budget.
+Future rounds can opt in to `full_generated_thinking_v1`. This policy uses the
+reviewed, exact model/provider/API registry in `lab_arena/reasoning_models.json`.
+It requests full provider-generated thinking, preserves tool history, and records
+what the provider actually returned. Summaries and encrypted state do not meet
+this policy. The gateway applies it to miner and baseline execution calls,
+including subagents; judges and already-created rounds keep their existing rules.
 
-The frozen policy applies equally to miner and baseline execution calls, before
-request hashing, budget admission and capture. Judge calls remain unchanged.
-Each provider-call record identifies the policy, request changes and any skipped
-or unsupported case. Unsafe tool continuations, unsupported controls and
-incompatible request shapes keep their original request and report the gap.
-Provider summaries are not full private reasoning. A successful request can
-still return no readable text; dataset selection must inspect the actual saved
-response. Missing or invalid catalog profiles stop creation of an activated
-round; the service does not silently create it with the policy disabled.
-No missing historical reasoning is recovered by enabling this policy.
+The future policy sets both execution admission and competition cost eligibility
+to $6 per ICP. Admission counts actual settled charges and pending reservations.
+Scoring keeps its existing successful-call and infrastructure-failure distinctions.
+No capture failure or empty thinking response stops scoring or publication.
+If activation prerequisites are missing, round creation continues with its old
+policy and a visible frozen `not_ready` reason. Activation is off by default.
 
-The October 23 diagnostic also found that GPT-5.6 Luna through the permitted
-Azure route returned empty summaries with both `auto` and `concise`, including
-calls with thousands of reasoning tokens. Two other OpenAI models also returned
-empty summaries. The native OpenAI endpoint was unavailable under the existing
-zero-data-retention requirement. The policy does not relax that requirement or
-claim these requests supplied readable reasoning. Model/provider support must
-be verified from actual returned text, not the echoed request settings.
+The [full-thinking policy](arena-full-thinking-policy.md) lists tested routes,
+protocol boundaries, export rules, and the remaining activation checks. Provider
+text must be present, complete, and tied to stored request/response evidence to
+enter the strict dataset. This cannot recover thinking that was never returned.
 Privacy filtering and exact replay are separate properties from label validity.
 
 ## Remaining boundaries

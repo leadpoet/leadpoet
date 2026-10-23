@@ -467,7 +467,9 @@ if request["role"] in (
     }[request["role"]]
     activation_error = request["role"][:-5]
     if (
-        set(updates) != {activation_key}
+        set(updates) != ({activation_key, "LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256", "LAB_ARENA_REASONING_BASELINE_SOURCE_URL"}
+                         if request["role"] == "reasoning_capture_from_only" and updates.get(activation_key)
+                         else {activation_key})
         or request.get("aliases")
         or request.get("service_key")
         or (request["role"] in {"company_judgment_from_only", "signal_judgment_from_only"}
@@ -487,6 +489,18 @@ if request["role"] in (
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             fail(activation_error + "_timestamp_invalid")
     updates[activation_key] = value
+    if request["role"] == "reasoning_capture_from_only":
+        digest = updates.get("LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256", "")
+        source_url = updates.get("LAB_ARENA_REASONING_BASELINE_SOURCE_URL", "")
+        if value and (not isinstance(digest, str)
+                      or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None):
+            fail("reasoning_baseline_source_sha256_invalid")
+        if value and (not isinstance(source_url, str)
+                      or re.fullmatch(r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz", source_url) is None):
+            fail("reasoning_baseline_source_url_invalid")
+        if not value:
+            updates["LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256"] = ""
+            updates["LAB_ARENA_REASONING_BASELINE_SOURCE_URL"] = ""
 if request["role"] == "contacts_generation_only":
     if (
         set(updates) != {"LAB_ARENA_CONTACTS_GENERATION_ENABLED"}
@@ -723,6 +737,8 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--signal-judgment-from", default=None, metavar="TIMESTAMP", help="set or clear signal judgment reuse for future rounds without changing grading")
     scope.add_argument("--intent-details-from", default=None, metavar="TIMESTAMP", help="set or clear intent details activation for future submission periods")
     scope.add_argument("--reasoning-capture-from", default=None, metavar="TIMESTAMP", help="set or clear agent reasoning capture for rounds whose intake opens at or after this time")
+    parser.add_argument("--reasoning-baseline-source-sha256", default=None, metavar="SHA256", help="tested baseline archive digest required for reasoning activation")
+    parser.add_argument("--reasoning-baseline-source-url", default=None, metavar="URL", help="immutable baseline commit archive URL required for reasoning activation")
     scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", type=int, help="inherited descriptor containing only the scoped service key")
@@ -765,6 +781,27 @@ def _validate_args(args: argparse.Namespace) -> None:
         _validate_contacts_from(args.intent_details_from, label="intent details")
     if getattr(args, "reasoning_capture_from", None) is not None:
         _validate_contacts_from(args.reasoning_capture_from, label="reasoning capture")
+        if args.reasoning_capture_from and (
+            args.reasoning_baseline_source_sha256 is None
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", args.reasoning_baseline_source_sha256) is None
+        ):
+            raise ConfigurationError("reasoning activation requires a tested baseline source sha256")
+        if args.reasoning_capture_from and (
+            args.reasoning_baseline_source_url is None
+            or re.fullmatch(r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz", args.reasoning_baseline_source_url) is None
+        ):
+            raise ConfigurationError("reasoning activation requires a pinned baseline source URL")
+        if args.apply and args.reasoning_capture_from:
+            from lab_arena import reasoning_capture
+            try:
+                registry = reasoning_capture.load_registry()
+            except (OSError, TypeError, ValueError) as exc:
+                raise ConfigurationError("approved reasoning route registry is unavailable") from exc
+            if not registry["approved_routes"] or registry["baseline_route"] is None:
+                raise ConfigurationError("approved baseline reasoning route is unavailable")
+    elif (getattr(args, "reasoning_baseline_source_sha256", None) is not None
+          or getattr(args, "reasoning_baseline_source_url", None) is not None):
+        raise ConfigurationError("baseline source URL and sha256 require --reasoning-capture-from")
     if not args.validator_credential_kms_guard and not args.ssh_key.is_file():
         raise ConfigurationError("SSH key does not exist")
     narrow_scope = (
@@ -904,6 +941,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 },
             }
+            if role == "reasoning_capture_from_only" and value:
+                request["updates"]["LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256"] = (
+                    args.reasoning_baseline_source_sha256
+                )
+                request["updates"]["LAB_ARENA_REASONING_BASELINE_SOURCE_URL"] = (
+                    args.reasoning_baseline_source_url
+                )
             result = _ssh(args.gateway_host, args.ssh_key, request)
             print(json.dumps({"ok": True, "targets": [result]}, separators=(",", ":")))
             return 0

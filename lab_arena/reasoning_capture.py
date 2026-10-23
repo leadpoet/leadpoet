@@ -1,30 +1,30 @@
-"""Round-frozen request policy for provider-returned readable reasoning.
+"""Exact reviewed routes for full provider-generated thinking.
 
-Only execute calls in opted-in rounds change. Returned text is a provider
-summary or thinking output; opaque continuity state is not training text.
-The policy runs before hashing, accounting, capture and dispatch.
+Only routes in the committed registry pass admission. Each approval records
+provider/API identity and a probe of raw text, tool continuity, privacy, and
+structured output; round activation separately requires a verified baseline.
 """
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from datetime import datetime, timezone
+from decimal import Decimal
+import hashlib
+import json
+from pathlib import Path
+import re
+from typing import Any, Dict, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 from lab_arena import operations
 
-POLICY = "agent_readable_reasoning_v1"
+POLICY = "full_generated_thinking_v1"
+REGISTRY_SCHEMA_VERSION = 1
+PARSER_VERSION = "arena_openrouter_reasoning_v1"
 OPERATIONS = frozenset({"openrouter.chat", "openrouter.responses"})
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
-EFFORT_FLOOR = "low"
-# Live sourcing probes returned no text at low, and readable summaries at
-# medium, for effort-controlled Gemini. Budget-style models keep their budget.
-GOOGLE_EFFORT_FLOOR = "medium"
-SUMMARY = "auto"
-HEADROOM_TOKENS = 1024
-BUDGET_TOKENS = 1024
-MAX_PROFILES = 4096
-_PROFILE_KEYS = frozenset({"mandatory", "default_enabled", "default_effort",
-                           "supported_efforts", "supports_max_tokens"})
-_STATEFUL_FAMILIES = ("anthropic/", "google/")
+MAX_ROUTES = 4096
+PRICE_COMPONENTS = frozenset({"prompt", "completion", "request", "internal_reasoning"})
 
 
 def enabled(configuration: Mapping[str, Any]) -> bool:
@@ -40,222 +40,204 @@ def round_policy(configuration: Mapping[str, Any]) -> Dict[str, Any]:
     return {"mode": "requested" if on else "off", "policy": POLICY if on else None}
 
 
-def profiles_from_models_response(response: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Keep capability metadata from the existing startup catalog, not a new GET."""
-    profiles = {}
-    for item in response.get("data") or ():
-        if not isinstance(item, Mapping):
-            continue
-        model, meta = item.get("id"), item.get("reasoning")
-        parameters = item.get("supported_parameters")
-        if (not isinstance(model, str) or operations._MODEL_ID_RE.fullmatch(model) is None
-            or not (isinstance(meta, Mapping)
-                    or isinstance(parameters, list) and "reasoning" in parameters)):
-            continue
-        meta = meta if isinstance(meta, Mapping) else {}
-        profile = {"mandatory": meta.get("mandatory") is True}
-        for field in ("default_enabled", "supports_max_tokens"):
-            if type(meta.get(field)) is bool:
-                profile[field] = meta[field]
-        if meta.get("default_effort") in EFFORTS:
-            profile["default_effort"] = meta["default_effort"]
-        if "supported_efforts" in meta:
-            supported = meta["supported_efforts"]
-            if supported is None:
-                profile["supported_efforts"] = None  # All effort values accepted.
-            elif isinstance(supported, list):
-                efforts = [effort for effort in EFFORTS if effort in supported]
-                if efforts:
-                    profile["supported_efforts"] = efforts
-        profiles[model] = profile
-    return dict(sorted(profiles.items())[:MAX_PROFILES])
-
-
-def validate_profiles(document: Any) -> Dict[str, Dict[str, Any]]:
-    if not isinstance(document, Mapping) or len(document) > MAX_PROFILES:
-        raise ValueError("reasoning profiles must be a bounded object")
-    for model, profile in document.items():
-        if not isinstance(model, str) or operations._MODEL_ID_RE.fullmatch(model) is None:
-            raise ValueError("reasoning profile model is invalid")
-        if not isinstance(profile, Mapping) or not set(profile) <= _PROFILE_KEYS:
-            raise ValueError("reasoning profile has unknown fields")
-        if type(profile.get("mandatory")) is not bool:
-            raise ValueError("reasoning profile requires mandatory")
-        for field in ("default_enabled", "supports_max_tokens"):
-            if field in profile and type(profile[field]) is not bool:
-                raise ValueError("reasoning profile %s is invalid" % field)
-        if "default_effort" in profile and profile["default_effort"] not in EFFORTS:
-            raise ValueError("reasoning profile default_effort is invalid")
-        if "supported_efforts" in profile and profile["supported_efforts"] is not None:
-            supported = profile["supported_efforts"]
-            if (not isinstance(supported, list) or not supported
-                or supported != [effort for effort in EFFORTS if effort in supported]):
-                raise ValueError("reasoning profile supported_efforts is invalid")
-    # A round must not share mutable lists with the runtime catalog.
+def validate_registry(document: Any) -> Dict[str, Any]:
+    """Validate exact, reviewed routes; catalog capability flags grant nothing."""
+    if (not isinstance(document, Mapping) or set(document) != {"schema_version", "approved_routes", "baseline_route"}
+            or document["schema_version"] != REGISTRY_SCHEMA_VERSION
+            or not isinstance(document["approved_routes"], list)
+            or len(document["approved_routes"]) > MAX_ROUTES):
+        raise ValueError("invalid reasoning route registry")
+    seen = set()
+    for entry in document["approved_routes"]:
+        if (not isinstance(entry, Mapping)
+                or set(entry) != {"model_id", "model_version", "provider", "provider_name", "api", "mode", "parser_version", "semantic_class", "full_text_fields", "max_output_tokens", "answer_headroom_tokens", "context_tokens", "price_ceiling", "evidence", "allowed_fallback_routes", "status"}
+                or not isinstance(entry["model_id"], str)
+                or operations._MODEL_ID_RE.fullmatch(entry["model_id"]) is None
+                or not isinstance(entry["model_version"], str)
+                or operations._MODEL_ID_RE.fullmatch(entry["model_version"]) is None
+                or not isinstance(entry["provider"], str)
+                or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,127}", entry["provider"]) is None
+                or not isinstance(entry["provider_name"], str)
+                or not 1 <= len(entry["provider_name"]) <= 128
+                or entry["api"] not in OPERATIONS
+                or entry["parser_version"] != PARSER_VERSION
+                or entry["semantic_class"] != "full_generated_thinking"
+                or not isinstance(entry["full_text_fields"], list)
+                or not entry["full_text_fields"]
+                or any(not isinstance(field, str) for field in entry["full_text_fields"])
+                or len(entry["full_text_fields"]) != len(set(entry["full_text_fields"]))
+                or any(field not in ({"reasoning", "reasoning_content", "reasoning_details.text"}
+                                     if entry["api"] == "openrouter.chat"
+                                     else {"output.content.reasoning_text"})
+                       for field in entry["full_text_fields"])
+                or entry["status"] != "approved"
+                or type(entry["max_output_tokens"]) is not int
+                or not 2048 <= entry["max_output_tokens"] <= operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
+                or type(entry["answer_headroom_tokens"]) is not int
+                or not 1024 <= entry["answer_headroom_tokens"] < entry["max_output_tokens"]
+                or type(entry["context_tokens"]) is not int
+                or entry["context_tokens"] < entry["max_output_tokens"]
+                or not isinstance(entry["mode"], Mapping)
+                or not isinstance(entry["allowed_fallback_routes"], list)
+                or entry["allowed_fallback_routes"]):
+            raise ValueError("invalid approved reasoning route")
+        pair = (entry["model_id"], entry["api"])
+        if pair in seen:
+            raise ValueError("duplicate approved reasoning route")
+        seen.add(pair)
+        mode = entry["mode"]
+        if (set(mode) == {"effort"} and mode["effort"] in EFFORTS[2:]):
+            if entry["api"] == "openrouter.responses" and mode["effort"] == "max":
+                raise ValueError("unsupported Responses reasoning effort")
+        elif set(mode) == {"budget_tokens"} and type(mode["budget_tokens"]) is int and 1024 <= mode["budget_tokens"] <= 2048 and entry["api"] == "openrouter.chat":
+            pass
+        elif set(mode) == {"enabled"} and mode["enabled"] is True and entry["api"] == "openrouter.chat":
+            pass
+        else:
+            raise ValueError("invalid generated thinking mode")
+        ceiling = entry["price_ceiling"]
+        if not isinstance(ceiling, Mapping) or set(ceiling) != PRICE_COMPONENTS:
+            raise ValueError("invalid exact route price ceiling")
+        for component, value in ceiling.items():
+            if (not isinstance(value, str)
+                    or re.fullmatch(r"[0-9]+(?:\.[0-9]{1,12})?", value) is None
+                    or Decimal(value) > (Decimal("1000") if component == "request" else Decimal("1"))):
+                raise ValueError("invalid exact route price ceiling")
+        evidence = entry["evidence"]
+        if not isinstance(evidence, Mapping) or set(evidence) != {"documentation_url", "probe_id", "verified_at", "probe_manifest_sha256"}:
+            raise ValueError("missing exact route evidence")
+        url = evidence["documentation_url"]
+        if (not isinstance(url, str) or len(url) > 2048 or urlsplit(url).scheme != "https"
+                or not urlsplit(url).hostname or not isinstance(evidence["probe_id"], str)
+                or not 8 <= len(evidence["probe_id"]) <= 128
+                or not isinstance(evidence["verified_at"], str)
+                or not evidence["verified_at"].endswith("Z")
+                or not isinstance(evidence["probe_manifest_sha256"], str)
+                or re.fullmatch(r"[a-f0-9]{64}", evidence["probe_manifest_sha256"]) is None):
+            raise ValueError("invalid exact route evidence")
+        try:
+            timestamp = datetime.fromisoformat(evidence["verified_at"].replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("invalid exact route evidence timestamp") from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() != timezone.utc.utcoffset(timestamp):
+            raise ValueError("invalid exact route evidence timestamp")
+    baseline = document["baseline_route"]
+    if baseline is not None and (not isinstance(baseline, Mapping)
+            or set(baseline) != {"model_id", "api"}
+            or (baseline["model_id"], baseline["api"]) not in seen):
+        raise ValueError("baseline reasoning route is unapproved")
     return copy.deepcopy(dict(document))
 
 
-def _annotation(treatment: str, requested: bool, changes: List[str],
-                effort: Optional[str] = None, skipped: Optional[str] = None) -> Dict[str, Any]:
-    result = {"policy": POLICY, "treatment": treatment, "requested": requested,
-              "changes": sorted(set(changes))}
-    if isinstance(effort, str) and effort in EFFORTS:
-        result["effort"] = effort
-    if skipped is not None:
-        result["skipped"] = skipped
-    return result
+def load_registry() -> Dict[str, Any]:
+    return validate_registry(json.loads(Path(__file__).with_name("reasoning_models.json").read_text()))
 
 
-def _output_limit(parameters: Mapping[str, Any], field: str) -> int:
-    value = parameters.get(field)
-    return value if type(value) is int else operations.OPENROUTER_MAX_OUTPUT_TOKENS
-
-
-def _allowance(parameters: Dict[str, Any], field: str, cap: int) -> str:
-    """Restore up to 1,024 tokens of visible allowance, within the existing cap.
-
-    This is output room, not a hard bound on effort-controlled thinking.
-    At the cap, added thinking necessarily shares the original output limit.
-    """
-    previous = _output_limit(parameters, field)
-    parameters[field] = min(previous + HEADROOM_TOKENS, cap)
-    return "headroom" if previous + HEADROOM_TOKENS <= cap else "headroom_capped"
-
-
-def _tool_state(parameters: Mapping[str, Any], responses: bool) -> bool:
-    if parameters.get("tools") or parameters.get("tool_choice") not in (None, "auto", "none"):
-        return True
-    items = parameters.get("input" if responses else "messages")
-    if not isinstance(items, list):
-        return False
-    return any(isinstance(item, Mapping) and (
-        item.get("role") == "tool" or item.get("tool_calls")
-        or item.get("type") in {"function_call", "function_call_output", "web_search_call"}
-    ) for item in items)
-
-
-def _anthropic_sampling_conflict(parameters: Mapping[str, Any]) -> bool:
-    messages = parameters.get("messages") or []
-    prefill = bool(messages) and isinstance(messages[-1], Mapping) and messages[-1].get("role") == "assistant"
-    return ((parameters.get("temperature") is not None and parameters["temperature"] != 1)
-            or parameters.get("top_k") is not None
-            or parameters.get("top_p") is not None and parameters["top_p"] < 0.95
-            or prefill)
-
-
-def _control(model: str, profile: Mapping[str, Any]) -> str:
-    if profile.get("supports_max_tokens") is True:
-        return "budget"
-    if "supported_efforts" in profile:
-        return "effort"
-    # Legacy catalog entries omit supports_max_tokens. Only these documented
-    # budget-style families get a budget fallback; an explicit false wins.
-    if "supports_max_tokens" not in profile and (
-        model.startswith("anthropic/") and profile.get("mandatory") is not True
-        or model.startswith("google/gemini-2.5-")
-    ):
-        return "budget"
-    return "toggle"
+def _apply_full(operation_id: str, parameters: Mapping[str, Any],
+                registry: Optional[Mapping[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    frozen = validate_registry(registry)
+    if operation_id not in OPERATIONS:
+        raise ValueError("reasoning_route_unsupported")
+    result = copy.deepcopy(dict(parameters))
+    model = result.get("model")
+    entry = next((item for item in frozen["approved_routes"]
+                  if item["model_id"] == model and item["api"] == operation_id), None)
+    if entry is None:
+        raise ValueError("reasoning_route_unsupported")
+    if operation_id == "openrouter.responses":
+        tools = result.get("tools")
+        items = result.get("input")
+        if (isinstance(tools, list) and any(
+                isinstance(tool, Mapping) and tool.get("type") == "openrouter:web_search"
+                for tool in tools)
+                or isinstance(items, list) and any(
+                    isinstance(item, Mapping) and item.get("type") == "web_search_call"
+                    for item in items)):
+            raise ValueError("reasoning_route_unsupported")
+    field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
+    cap = min(entry["max_output_tokens"], operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS)
+    budget = entry["mode"].get("budget_tokens", 1024)
+    required = budget + entry["answer_headroom_tokens"]
+    if required > cap:
+        raise ValueError("reasoning_headroom_unavailable")
+    # Use the exact output envelope exercised by the route probe. Shrinking
+    # it for a short agent request can consume the answer in thinking tokens.
+    result[field] = cap
+    result.pop("reasoning_effort", None)
+    result.pop("include_reasoning", None)
+    mode = entry["mode"]
+    if "effort" in mode:
+        reasoning = {"effort": mode["effort"]}
+    elif "budget_tokens" in mode:
+        reasoning = {"max_tokens": mode["budget_tokens"]}
+    else:
+        reasoning = {"enabled": True}
+    if operation_id == "openrouter.chat":
+        reasoning["exclude"] = False
+    result["reasoning"] = reasoning
+    canonical = json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode()
+    evidence = entry["evidence"]
+    annotation = {
+        "policy": POLICY, "requested": True, "reviewed_route": True,
+        "semantic_class": "full_generated_thinking", "model_id": model,
+        "model_version": entry["model_version"], "provider_route": entry["provider"],
+        "provider_name": entry["provider_name"],
+        "api": operation_id, "mode": copy.deepcopy(mode),
+        "full_text_fields": list(entry["full_text_fields"]),
+        "context_tokens": entry["context_tokens"],
+        "max_output_tokens": entry["max_output_tokens"],
+        "price_ceiling": dict(entry["price_ceiling"]),
+        "parser_version": entry["parser_version"],
+        "probe_id": evidence["probe_id"],
+        "probe_manifest_sha256": evidence["probe_manifest_sha256"],
+        "registry_sha256": hashlib.sha256(canonical).hexdigest(),
+        "changes": ["reasoning", "tested_output_allowance"],
+    }
+    return result, annotation
 
 
 def apply(operation_id: str, parameters: Mapping[str, Any], *, policy: Optional[str],
-          profiles: Optional[Mapping[str, Any]] = None) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+          registry: Optional[Mapping[str, Any]] = None) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     result = copy.deepcopy(dict(parameters))
     if policy is None or operation_id not in OPERATIONS:
         return result, None
     if policy != POLICY:
         raise ValueError("unsupported reasoning capture policy")
-    model = str(result.get("model") or "")
-    profile = (profiles or {}).get(model)
-    if profile is None:
-        return result, _annotation("no_reasoning_support", False, [])
-    responses = operation_id == "openrouter.responses"
-    treatment = "responses" if responses else "chat"
-    original = copy.deepcopy(result)
-    supplied = result.get("reasoning")
-    reasoning = dict(supplied) if isinstance(supplied, Mapping) else {}
-    changes: List[str] = []
-    legacy_effort = result.pop("reasoning_effort", None)
-    legacy_include = result.pop("include_reasoning", None)
-    if legacy_effort is not None:
-        reasoning.setdefault("effort", legacy_effort)
-        changes.append("legacy_effort")
-    if legacy_include is not None:
-        reasoning.setdefault("exclude", legacy_include is False)
-        if legacy_include is True:
-            reasoning.setdefault("enabled", True)
-        changes.append("legacy_include")
-    effort, budget = reasoning.get("effort"), reasoning.get("max_tokens")
-    disabled = reasoning.get("enabled") is False or effort == "none" or budget == 0
-    positive_budget = type(budget) is int and budget > 0
-    explicit_on = not disabled and (reasoning.get("enabled") is True or positive_budget
-        or effort is not None or legacy_include is True)
-    default_on = profile.get("mandatory") is True or profile.get("default_enabled") is True
-    was_on = not disabled and (explicit_on or default_on)
-    current_effort = effort if effort is not None else (
-        profile.get("default_effort") if not positive_budget and was_on else None
-    )
-    control = _control(model, profile)
-    floor = GOOGLE_EFFORT_FLOOR if model.startswith("google/") and control == "effort" else EFFORT_FLOOR
-    raise_reasoning = not was_on or (
-        isinstance(current_effort, str) and current_effort in EFFORTS
-        and EFFORTS.index(current_effort) < EFFORTS.index(floor)
-    )
-    skipped = None
-    if raise_reasoning:
-        if model.startswith(_STATEFUL_FAMILIES) and _tool_state(original, responses):
-            skipped = "thinking_tool_state_unavailable"
-        elif (model.startswith("anthropic/") and profile.get("mandatory") is not True
-              and (responses or _anthropic_sampling_conflict(original))):
-            skipped = "anthropic_thinking_conflict"
-        supported = profile.get("supported_efforts")
-        if skipped is None and control == "effort" and supported is not None and floor not in supported:
-            skipped = "no_%s_effort" % floor
-        if skipped is None and responses and control != "effort":
-            skipped = "operation_reasoning_control_unavailable"
-        field = "max_output_tokens" if responses else "max_tokens"
-        cap = (operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS if responses
-               else operations.OPENROUTER_MAX_OUTPUT_TOKENS)
-        if skipped is None and control == "toggle" and _output_limit(result, field) + HEADROOM_TOKENS > cap:
-            skipped = "headroom_unavailable"
-        if skipped is not None and not was_on:
-            return original, _annotation(treatment, False, [], skipped=skipped)
-        if skipped is None:
-            reasoning.pop("enabled", None)
-            reasoning.pop("effort", None)
-            reasoning.pop("max_tokens", None)
-            if control == "budget":
-                reasoning["max_tokens"] = BUDGET_TOKENS
-                changes.append("budget")
-            elif control == "effort":
-                reasoning["effort"] = floor
-                changes.append("effort")
-            else:
-                reasoning["enabled"] = True
-                changes.append("enabled")
-            changes.append(_allowance(result, field, cap))
-            if disabled:
-                changes.append("agent_disabled_overridden")
-    elif effort is None and not explicit_on and current_effort is not None:
-        # Freeze the catalog's default effort rather than trusting future defaults.
-        reasoning["effort"] = current_effort
-        changes.append("effort")
-    if not responses and reasoning.get("exclude") is not False:
-        changes.append("exclude_cleared" if reasoning.get("exclude") is True else "exclude")
-        reasoning["exclude"] = False
-    if (responses or model.startswith("openai/")) and reasoning.get("summary") not in ("auto", "concise", "detailed"):
-        reasoning["summary"] = SUMMARY
-        changes.append("summary")
-    # OpenRouter returns visible Claude summaries by default (unlike native
-    # Claude 5.5), and maps Gemini visibility through this exclusion setting.
-    if reasoning:
-        result["reasoning"] = reasoning
-    return result, _annotation(treatment, True, changes, reasoning.get("effort"), skipped)
+    return _apply_full(operation_id, parameters, registry)
 
 
-def unapplied(annotation: Mapping[str, Any], reason: str) -> Dict[str, Any]:
-    return dict(_annotation(str(annotation.get("treatment")), False, []), unapplied=reason)
+def route_observation(response: Any, annotation: Mapping[str, Any]) -> Dict[str, Any]:
+    """Record actual route fields without mistaking a pin for provider proof."""
+    document = response if isinstance(response, Mapping) else {}
+    metadata = document.get("openrouter_metadata")
+    endpoints = metadata.get("endpoints") if isinstance(metadata, Mapping) else None
+    available = endpoints.get("available") if isinstance(endpoints, Mapping) else None
+    selected = [item for item in available if isinstance(item, Mapping) and item.get("selected") is True] if isinstance(available, list) else []
+    endpoint = selected[0] if len(selected) == 1 else {}
+
+    def bounded(value: Any) -> Optional[str]:
+        return value if isinstance(value, str) and 1 <= len(value) <= 128 else None
+
+    observed = {
+        "requested_model": annotation["model_id"],
+        "requested_provider_route": annotation["provider_route"],
+        "expected_provider_name": annotation["provider_name"],
+        "expected_model_version": annotation["model_version"],
+        "response_model": bounded(document.get("model")),
+        "response_provider_name": bounded(document.get("provider")),
+        "selected_endpoint_model": bounded(endpoint.get("model")),
+        "selected_endpoint_provider_name": bounded(endpoint.get("provider")),
+    }
+    checks = (("response_model", "requested_model"),
+              ("response_provider_name", "expected_provider_name"),
+              ("selected_endpoint_model", "expected_model_version"),
+              ("selected_endpoint_provider_name", "expected_provider_name"))
+    values = [observed[key] for key, _ in checks]
+    observed["status"] = ("unverified" if any(value is None for value in values)
+                          else "matched" if all(observed[key] == observed[expected] for key, expected in checks)
+                          else "mismatch")
+    return observed
 
 
-__all__ = ["POLICY", "apply", "enabled", "profiles_from_models_response",
-           "round_policy", "unapplied", "validate_profiles"]
+__all__ = ["POLICY", "PARSER_VERSION", "apply", "enabled",
+           "load_registry", "round_policy", "route_observation", "validate_registry"]

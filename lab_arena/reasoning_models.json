@@ -1,0 +1,105 @@
+{
+  "schema_version": 1,
+  "approved_routes": [
+    {
+      "model_id": "openai/gpt-oss-120b",
+      "model_version": "openai/gpt-oss-120b",
+      "provider": "deepinfra/bf16",
+      "provider_name": "DeepInfra",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 131072,
+      "price_ceiling": {
+        "prompt": "0.000000037",
+        "completion": "0.00000017",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "evidence": {
+        "documentation_url": "https://deepinfra.com/openai/gpt-oss-120b/api",
+        "probe_id": "full-thinking-openai-gpt-oss-120b-deepinfra-bf16",
+        "verified_at": "2026-10-23T23:44:41.803525Z",
+        "probe_manifest_sha256": "e935050bb11c02b34fe4a947a79fe06af755bbaa2e2d72c2c0aab85177aed2c5"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved"
+    },
+    {
+      "model_id": "mistralai/mistral-large-4-0",
+      "model_version": "mistralai/mistral-large-4-0-20261006",
+      "provider": "mistral/zdr",
+      "provider_name": "Mistral",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.00000136",
+        "completion": "0.00000418",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "evidence": {
+        "documentation_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+        "probe_id": "full-thinking-mistralai-mistral-large-4-0-mistral-zdr",
+        "verified_at": "2026-10-23T23:44:44.427292Z",
+        "probe_manifest_sha256": "0d1d05db6de25f0cefbdc5bdcef73dd7db9a5fec74032390d5dcff4a21e43024"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved"
+    },
+    {
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.0000003",
+        "completion": "0.0000012",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "evidence": {
+        "documentation_url": "https://docs.fireworks.ai/guides/reasoning",
+        "probe_id": "full-thinking-deepseek-deepseek-v4.1-flash-1017-fireworks",
+        "verified_at": "2026-10-23T23:44:46.146026Z",
+        "probe_manifest_sha256": "00c1a8ea99507fc75f3dc27ddb72e293fa15dfe4aa3d0ee3db5dcab7b9cb5b73"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved"
+    }
+  ],
+  "baseline_route": null
+}

@@ -11,7 +11,9 @@ remaining emission is sent to the configured burn hotkey. ``pool_percent``
 defaults to ``contracts.LAB_ARENA_POOL_PERCENT`` and
 is set per round from ``LAB_ARENA_POOL_PERCENT``; every published basis
 carries the constants it was computed with, so a change reaches validators
-through the next round's signed basis and never rewrites an old one.
+through the next round's signed basis and never rewrites an old one. An
+explicit epoch policy cutover may also sign a projection inside a newly issued
+accepted state, while the source round's signed basis remains unchanged.
 """
 
 from __future__ import annotations
@@ -41,13 +43,14 @@ from leadpoet_canonical.lab_arena_rewards import (  # noqa: F401  (re-exported: 
     epoch_eligible,
     require_king_outcome,
     validate_reward_constants,
+    validate_reward_slots,
 )
 
 MAX_REWARD_WEEK_INDEX = len(KING_POOL_SHARE_PERCENT_BY_WEEK) - 1
 
-# Slot policies are selected by evaluation day, not activation time. Tier
-# percentages divide the miner pot. Each activated basis signs a copy, so
-# changes never alter an existing signed basis.
+# Slot policies follow evaluation day and the explicit reward-epoch cutover.
+# Tier percentages divide the miner pot. Every activated basis and accepted
+# state signs its own copy; existing signed documents remain unchanged.
 REWARD_SLOT_POLICY = {
     "assignment_mode": "all_qualifying",
     "pool_percent": 30,
@@ -70,16 +73,97 @@ REWARD_SLOT_POLICY_50_PERCENT = {
     ],
 }
 REWARD_SLOT_POLICY_50_PERCENT_START = date(2026, 10, 22)
+REWARD_SLOT_POLICY_OCT23_START = date(2026, 10, 23)
+# Only unissued epochs at or after this boundary may project older bases.
+REWARD_SLOT_POLICY_OCT23_EFFECTIVE_EPOCH = 25954
+REWARD_SLOT_POLICY_OCT23 = {
+    **REWARD_SLOT_POLICY_50_PERCENT,
+    "tiers": [
+        {"minimum_improvement": 20, "allocation_percent": 40},
+        {"minimum_improvement": 15, "allocation_percent": 30},
+        {"minimum_improvement": 8, "allocation_percent": 30},
+    ],
+}
 
 
-def reward_slot_policy_document(evaluation_date: Optional[date] = None) -> Dict[str, Any]:
+def reward_slot_policy_document(
+    evaluation_date: Optional[date] = None, *, effective_reward_epoch: Optional[int] = None,
+) -> Dict[str, Any]:
     """Copy the round's policy; undated legacy callers retain their old policy."""
+    if (
+        (evaluation_date is not None and evaluation_date >= REWARD_SLOT_POLICY_OCT23_START)
+        or (effective_reward_epoch is not None
+            and _require_epoch(effective_reward_epoch, "effective_reward_epoch")
+            >= REWARD_SLOT_POLICY_OCT23_EFFECTIVE_EPOCH)
+    ):
+        return _kernel.validate_slot_policy(REWARD_SLOT_POLICY_OCT23)
     policy = (
         REWARD_SLOT_POLICY_50_PERCENT
         if evaluation_date is not None and evaluation_date >= REWARD_SLOT_POLICY_50_PERCENT_START
         else REWARD_SLOT_POLICY
     )
     return _kernel.validate_slot_policy(policy)
+
+
+
+
+def reward_basis_policy_projection_document(
+    source: Mapping[str, Any], policy: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Raise thresholds over current signed holders, without reviving old owners.
+
+    Under all_qualifying assignment, a lower source slot represents an
+    achievement at least as recent as a higher slot. Scan those slots first;
+    they are the current reward authority, including while a round is reopened.
+    The caller must verify the source signature before signing this document.
+    """
+    source = validate_reward_basis(source)
+    policy = _kernel.validate_slot_policy(policy)
+    if (source["schema_version"] != _kernel.REWARD_BASIS_V2_SCHEMA_VERSION
+            or source["slot_policy"]["assignment_mode"] != "all_qualifying"
+            or policy["assignment_mode"] != "all_qualifying"
+            or any(new["minimum_improvement"] < old["minimum_improvement"]
+                   for new, old in zip(policy["tiers"], source["slot_policy"]["tiers"]))
+            or policy.get("decay") != source["slot_policy"].get("decay")):
+        raise LabArenaRewardError("reward policy projection requires increasing all_qualifying thresholds and unchanged decay")
+    slots = []
+    for index in range(3):
+        selected = None
+        for achievement in reversed(source["reward_slots"]):
+            if achievement is None:
+                continue
+            candidate = [achievement if position == index else None for position in range(3)]
+            try:
+                validate_reward_slots(
+                    candidate, policy, basis_round_id=source["round_id"],
+                    effective_reward_epoch=source["effective_reward_epoch"],
+                )
+            except LabArenaRewardError:
+                continue
+            selected = dict(achievement)
+            break
+        slots.append(selected)
+    body = {key: value for key, value in source.items()
+            if key not in ("reward_basis_hash", "signature")}
+    body.update(slot_policy=policy, reward_slots=slots)
+    return finalize_reward_basis(body)
+
+
+def reward_basis_matches_policy_projection(
+    basis: Mapping[str, Any], source: Mapping[str, Any], epoch: int,
+) -> bool:
+    """Match exact source or its deterministic projection, without re-signing."""
+    if basis.get("reward_basis_hash") == source.get("reward_basis_hash"):
+        return True
+    if epoch < REWARD_SLOT_POLICY_OCT23_EFFECTIVE_EPOCH:
+        return False
+    try:
+        expected = reward_basis_policy_projection_document(
+            source, reward_slot_policy_document(effective_reward_epoch=epoch),
+        )
+    except (TypeError, ValueError):
+        return False
+    return basis.get("reward_basis_hash") == expected["reward_basis_hash"]
 
 
 def _require_epoch(value: Any, name: str) -> int:

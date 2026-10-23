@@ -902,6 +902,11 @@
       "symbol": "_verify_company_fit"
     },
     {
+      "ast_sha256": "sha256:b9ea5c7939f54ddd15d0e6314d329fff122f024aaef0f2436fcba671a3b86f89",
+      "path": "scripts/arena_runtime_cache_retirement.py",
+      "symbol": "__module__"
+    },
+    {
       "ast_sha256": "sha256:fe6e11699b3f43121cbf0153a9ccdecaad6e02f7320e9fbc700d1cd3f90cd7cd",
       "path": "validator_tee/host/docker_operation_guard_v2.py",
       "symbol": "_EXACT_HOST_GATEWAY_ARGS"
@@ -922,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:21d374be8e47a481af1bb9e277738de729a35092fb0d8c578df27ad862b1c534",
-  "protected_source_commit": "dfe243eade8d49d24f35d94340f16571f1145c04",
+  "manifest_hash": "sha256:89f60a37199135726088a9739446d4efb1277063bae53e471e47ee9080265e69",
+  "protected_source_commit": "d03476448eb545b82afe41c546fcefc65eab4509",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

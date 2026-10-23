@@ -11609,7 +11609,13 @@ async def score_company_competition_intent(
         cost_penalty=0,
         time_penalty=0,
         final_score=final_score,
-        failure_reason=None,
+        failure_reason=(
+            _competition_intent_failure_reason(signal_results)
+            if final_score == 0.0
+            and icp.intent_signals
+            and not required_intent_satisfied(signal_results)
+            else None
+        ),
         intent_signals_detail=signal_results,
         verifier_gate_receipts=gate_receipts or None,
     )

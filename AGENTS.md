@@ -1,3 +1,16 @@
+## Scoped production authorization: October 23 judgment integrity fixes
+
+On 2026-10-23 the user authorized the confirmed archive evidence, public-listing
+attribution, same-event funding evidence and missing primary-intent diagnosis
+fixes, rigorous paired accuracy tests, safe push/merge, scorer-image publication
+and canonical deployment. Release only measured improvements with negative
+controls. Preserve qualification and scoring rules, provider cost controls,
+frozen official rounds, accepted judgments, rewards and concurrent work.
+Use the existing investigator and scoring path; add no reviewer/recovery layer
+or company-specific exceptions. Paid tests stay within the prior approved
+allowance. The coordinating task owns production actions. Authority ends after
+deployment and live verification. Keep both agent guides byte-identical.
+
 ## Scoped production authorization: October 23 Arena archive cache retirement
 
 The ongoing October 23 reward deployment authority includes the narrow restart

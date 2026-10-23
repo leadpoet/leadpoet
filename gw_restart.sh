@@ -316,6 +316,24 @@ if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
 PY
 }
 
+
+retire_arena_runtime_tree() {
+  local slot="$1" sha="$2" tree="$3" expected helper
+  expected="$(arena_runtime_tree "$slot" "$sha")" || return 1
+  if [ "$tree" != "$expected" ] || [ -L "$tree" ] || [ ! -d "$tree" ]; then
+    echo "ERROR: retired Arena runtime is not the exact owned archive" >&2
+    return 1
+  fi
+  helper="$GATEWAY_PREFLIGHT_TREE/scripts/arena_runtime_cache_retirement.py"
+  # The privileged operation removes only validated source-derived caches.
+  # Source ownership and file modes stay unchanged; the caller removes source.
+  sudo env -i PATH=/usr/bin:/bin PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+    "$GATEWAY_PYTHON_BIN" -B "$helper" --repo-root "$LEADPOET_REPO_ROOT" \
+    --slot "$slot" --sha "$sha" --owner-uid "$(id -u)" || return 1
+  find "$tree" -type d -exec chmod u+w {} + || return 1
+  rm -rf -- "$tree"
+}
+
 prepare_arena_runtime_tree() {
   local destination temporary source_root="${1:-$GATEWAY_PREFLIGHT_TREE}"
   destination="$(arena_runtime_tree "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA")" || return 1
@@ -687,39 +705,7 @@ PY
     done
     [ "$(arena_ingress_tool "$GATEWAY_PREFLIGHT_TREE" --inspect)" = \
       "dual $ARENA_CANDIDATE_SLOT $PREPARED_GATEWAY_SHA closed" ] || exit 1
-    # Recheck identity and every path immediately before deleting our retired
-    # immutable archive. Unknown additions are preserved by refusing cleanup.
-    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B - \
-        "$LEADPOET_REPO_ROOT" "$old_tree" "$PREPARED_GATEWAY_SHA" <<'PY'
-import os, stat, subprocess, sys
-from pathlib import Path
-from scripts.gateway_git_deploy import verify_materialized_tree
-root = Path(sys.argv[2])
-saved = root.lstat()
-if not stat.S_ISDIR(saved.st_mode) or saved.st_uid != os.getuid() or saved.st_mode & 0o222:
-    raise SystemExit("retired Arena archive is not an owned immutable directory")
-verify_materialized_tree(repo_root=Path(sys.argv[1]), materialized_root=root,
-                         target_sha=sys.argv[3], strict_extras=True)
-tracked = subprocess.check_output(["git", "-C", sys.argv[1], "ls-tree", "-rz", "--name-only",
-                                   sys.argv[3]], timeout=30).decode().split("\0")
-allowed = {Path(path) for path in tracked if path}
-for path in list(allowed):
-    allowed.update(parent for parent in path.parents if parent != Path("."))
-for path in root.rglob("*"):
-    relative = path.relative_to(root)
-    if relative in allowed:
-        continue
-    if path.name == "__pycache__" and relative.parent in allowed | {Path(".")} and path.is_dir() and not path.is_symlink():
-        continue
-    if path.suffix in {".pyc", ".pyo"} and path.is_file() and not path.is_symlink():
-        source = (relative.parent.parent / (path.name.split(".", 1)[0] + ".py")
-                  if path.parent.name == "__pycache__" else relative.with_suffix(".py"))
-        if source in allowed:
-            continue
-    raise SystemExit("retired Arena archive has unknown paths; preserved")
-PY
-    chmod -R u+w "$old_tree"
-    rm -rf -- "$old_tree"
+    retire_arena_runtime_tree "$old_slot" "$PREPARED_GATEWAY_SHA" "$old_tree" || exit 1
     echo "Retired exact owned Arena processes that inherited Docker locks; ingress remains closed"
   )
 }
@@ -1785,8 +1771,7 @@ rollback_arena_candidate_before_destructive() {
     echo "ERROR: candidate Arena runtime is not an owned directory" >&2
     return 1
   fi
-  chmod -R u+w "$ARENA_CANDIDATE_TREE"
-  rm -rf -- "$ARENA_CANDIDATE_TREE"
+  retire_arena_runtime_tree "$ARENA_CANDIDATE_SLOT" "$PREPARED_GATEWAY_SHA" "$ARENA_CANDIDATE_TREE"
 }
 
 on_gateway_restart_exit() {
@@ -3365,8 +3350,7 @@ if [ "$ARENA_CONTINUITY_ENABLED" = 1 ]; then
       echo "ERROR: previous Arena runtime is not an owned directory" >&2
       exit 1
     fi
-    chmod -R u+w "$ARENA_PREVIOUS_TREE"
-    rm -rf -- "$ARENA_PREVIOUS_TREE"
+    retire_arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA" "$ARENA_PREVIOUS_TREE" || exit 1
   fi
 else
   "$GATEWAY_PYTHON_BIN" "$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py" stop \

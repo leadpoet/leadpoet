@@ -22,7 +22,8 @@ from typing import Any, Dict, Iterable, Mapping, Sequence, Tuple
 SCHEMA_VERSION = "leadpoet.protected_workflows.v2"
 DEFAULT_MANIFEST = Path(__file__).with_name("protected_workflows.json")
 
-PROTECTED_SYMBOLS = {'gateway/main.py': ('lifespan',),
+PROTECTED_SYMBOLS = {'scripts/arena_runtime_cache_retirement.py': ('__module__',),
+ 'gateway/main.py': ('lifespan',),
  'gateway/chain_startup.py': ('__module__',),
  'gateway/tee/code_hash.py': ('ATTESTED_RUNTIME_DIR',
                               'ATTESTED_RUNTIME_PACKAGES',

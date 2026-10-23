@@ -3416,8 +3416,16 @@ def _build_final_judge_prompt(
             "Do not choose the oldest date automatically or invent a date when "
             "event identity or timing is unproved. The submitted source must "
             "still support the submitted claim; stage evidence alone cannot "
-            "replace it. Cite the sources actually used and exact grounded quotes. "
-            "Keep source_event_date bound to the event you established.\n"
+            "replace it. For supported or partially_supported, "
+            "evidence_urls_used must include at least one exact URL from the "
+            "submitted funding source list below that independently supports "
+            "the event. Also cite every supplemental source whose content you "
+            "used. If no submitted source supports the event, do not report "
+            "supported or partially_supported. Use exact grounded quotes and "
+            "keep source_event_date bound to the event you established.\n"
+            "SUBMITTED FUNDING SOURCE URLS: "
+            + json.dumps(row["claimed_source_urls"])
+            + "\nREUSED STAGE SOURCE URLS: "
             + json.dumps(row["_funding_stage_source_urls"])
         )
     if (row.get("_integrity_policy") and row.get("_evidence_type") == "FUNDING"

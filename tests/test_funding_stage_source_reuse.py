@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -158,6 +159,9 @@ def test_aurasell_old_event_context_reaches_first_judge_and_existing_date_gate(m
     assert STAGE_TEXT in prompt and RECAP_TEXT in prompt
     assert "Matching stage, amount or investors alone" in prompt
     assert "an older stage source must not veto a separately proved new round" in prompt
+    assert "evidence_urls_used must include at least one exact URL" in prompt
+    assert "SUBMITTED FUNDING SOURCE URLS: " + json.dumps([SECONDARY]) in prompt
+    assert "REUSED STAGE SOURCE URLS: " + json.dumps([PRIMARY]) in prompt
     contexts = receipts[-1]["verification_trace"]["verified_source_context"]
     assert {x["url"] for x in contexts} == {PRIMARY, SECONDARY}
     stage = next(x for x in contexts if x["url"] == PRIMARY)
@@ -286,6 +290,41 @@ def test_stage_only_or_unknown_citation_cannot_approve_claim(monkeypatch, urls):
     result, _, fetch, provider = _run(monkeypatch, context=[CONTEXT], urls=urls)
     assert result[0] == 0
     assert fetch.await_count == provider.await_count == 1
+
+
+def test_encoded_retained_stage_citation_still_requires_exact_submitted_source():
+    submitted = (
+        "https://www.businesswire.com/news/home/20260504989731/en/"
+        "Latus-Bio-Announces-$97-Million-Series-A-Financing-to-Expand-the-Reach-"
+        "of-Gene-Therapy-to-Larger-Populations"
+    )
+    stage = submitted.replace("$97", "%2497")
+    row = {
+        "id": "signal-1", "company": "Latus Bio", "website": "https://latusbio.com",
+        "company_linkedin": "", "contact_linkedin": "",
+        "claim": "Latus Bio closed a $97 million Series A financing.",
+        "signal_date": "2026-05-04", "signal_type": "intent",
+        "claimed_source_urls": [submitted],
+        "_integrity_policy": True,
+        "_evidence_type": "FUNDING",
+        "_target_signal_text": "Announced a Series A financing round",
+        "_funding_stage_source_urls": [stage],
+    }
+    prompt = verifier._build_final_judge_prompt(row, {"results": [
+        {"url": submitted, "title": "Latus Bio financing", "text": row["claim"]},
+        {"url": stage, "title": "Retained MATCH stage", "text": row["claim"]},
+    ]})
+    assert "SUBMITTED FUNDING SOURCE URLS: " + json.dumps([submitted]) in prompt
+    assert "REUSED STAGE SOURCE URLS: " + json.dumps([stage]) in prompt
+    assert "evidence_urls_used must include at least one exact URL" in prompt
+    for urls, expected in (
+        ([stage], "unable_to_verify"),
+        ([submitted], "supported"),
+        ([submitted, stage], "supported"),
+        ([submitted, "https://www.businesswire.com/other-event"], "unable_to_verify"),
+    ):
+        guarded = verifier._apply_guardrails(row, copy.deepcopy(_answer(None, urls=urls)["answer"]))
+        assert guarded["signal_evaluations"][0]["signal_status"] == expected
 
 
 def test_retained_stage_source_cannot_rescue_missing_submitted_body(monkeypatch):

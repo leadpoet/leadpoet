@@ -1,0 +1,61 @@
+{
+  "company": {
+    "company_linkedin": "",
+    "company_name": "Airwallex",
+    "company_stage": "Series C+",
+    "company_stage_evidence": [
+      {
+        "quote": "SAN FRANCISCO - Airwallex, a leading global financial platform for modern businesses, raised $330 million in a Series G funding round, led by Addition and with participation from T.",
+        "url": "https://www.airwallex.com/global/newsroom/awx-raises-usd330m-series-g-at-usd8b-valuation-establishes-sf-as-dual-global-hq"
+      },
+      {
+        "quote": "Airwallex raised $320 million in Series H funding in June at an $11 billion valuation to accelerate the development of its next generation of AI-native financial software.",
+        "url": "https://www.airwallex.com/global/newsroom/mclaren-mastercard-formula-1-team-designate-airwallex-as-official-ai-finance-partner-from-2027-in-multi-year-partnership-extension"
+      },
+      {
+        "quote": "SAN FRANCISCO \u2014 Airwallex, a leading global payments and financial platform for modern businesses, today announced it has raised $320 million in Series H funding, bringing the company\u2019s valuation to $11 billion, up from its $8 billion valuation in December 2025.",
+        "url": "https://www.airwallex.com/global/newsroom/airwallex-secures-320-million-in-series-h-funding-valuation-hits-11-billion"
+      }
+    ],
+    "company_website": "https://airwallex.com/",
+    "country": "Singapore",
+    "employee_count": "1,001-5,000",
+    "industry": "financial services",
+    "intent_details": "Airwallex secured key regulatory approvals for full commercial launch in Malaysia, according to a company announcement. A report dated July 23, 2026 says Visa and Airwallex joined forces to build the next generation of financial infrastructure for freight platforms. This launch and partnership may help Airwallex expand its payments infrastructure platform.",
+    "intent_signals": [
+      {
+        "date": "2026-04-01",
+        "description": "Airwallex Secures Key Regulatory Approvals for Full Commercial Launch in Malaysia",
+        "matched_icp_signal": 1,
+        "url": "https://www.businesswire.com/news/home/20260331216889/en/Airwallex-Secures-Key-Regulatory-Approvals-for-Full-Commercial-Launch-in-Malaysia"
+      },
+      {
+        "date": "2026-07-23",
+        "description": "Visa and Airwallex join forces to build the next generation ...",
+        "matched_icp_signal": 0,
+        "url": "https://www.airwallex.com/global/newsroom/visa-and-airwallex-join-forces-to-build-the-next-generation-of-financial-infrastructure-for-freight-platforms"
+      }
+    ],
+    "required_attribute": {
+      "evidence_quote": "404 Page not found Sorry, the page you are looking for has moved or does not exist. Return to homepage Cookies on the Airwallex website We use cookies to enhance your website experience at",
+      "evidence_url": "https://www.airwallex.com/global/newsroom/visa-and-airwallex-join-forces-to-build-the-next-generation-of-financial-infra",
+      "explanation": "The page states: \u201cFounded in Melbourne in 2015, Airwallex holds 85+ licenses across North America, Europe, the Middle East, and Asia-Pacific, forming one of the most comprehensive financial infrastructures in the world\u201d.",
+      "passed": true,
+      "text": "Operates a licensed cross-border payments or money-movement platform serving businesses, fintechs, or financial institutions."
+    },
+    "state": null
+  },
+  "headquarters": {
+    "url": "https://www.linkedin.com/company/airwallex",
+    "text": "Airwallex headquarters: Global, Hong Kong. (harvestapi_get_company locations.headquarter=true)",
+    "country": "Hong Kong",
+    "state": "",
+    "name": "Airwallex",
+    "website": "https://airwallex.com/",
+    "provider": "harvestapi_get_company",
+    "source_field": "locations.headquarter"
+  },
+  "source_url": "https://www.airwallex.com/global/newsroom/visa-and-airwallex-join-forces-to-build-the-next-generation-of-financial-infrastructure-for-freight-platforms",
+  "source_text": "Visa and Airwallex join forces to build the next generation of financial infrastructure for freight platforms 23 July 2026 Collaboration to help freight and shipping platforms modernise payments, improve cash flow and unlock new growth opportunities through embedded finance LONDON: Visa and Airwallex today announced a collaboration to develop embedded-finance solutions tailored to the needs of freight and shipping platforms, helping modernise how businesses manage payments, working capital and cross-border commerce across one of the world's most complex industries. The collaboration brings together Visa's expertise in commercial payments, acceptance strategy, risk management and industry-specific solution design with Airwallex's embedded-finance capabilities, multi-currency infrastructure\n\nCompany Announcement\nVisa and Airwallex join forces to build the next generation of financial infrastructure for freight platforms\nCollaboration to help freight and shipping platforms modernise payments, improve cash flow and unlock new growth opportunities through embedded finance\nLONDON: Visa and Airwallex today announced a collaboration to develop embedded-finance solutions tailored to the needs of freight and shipping platforms, helping modernise how businesses manage payments, working capital and cross-border commerce across one of the world's most complex industries.\nThe collaboration brings together Visa's expertise in commercial payments, acceptance strategy, risk management and industry-specific solution design with Airwallex's embedded-finance capabilities, multi-currency infrastructure and global platform technology. Together, they\u2019ll address longstanding challenges across the freight ecosystem, where businesses continue to face lengthy settlement cycles, working-capital constraints, foreign-exchange complexity and operational friction.\nRather than applying a one-size-fits-all approach to payments, Visa and Airwallex are collaborating to create solutions designed specifically around the operational realities of freight and shipping. The goal is to enable platforms to embed payment and financial capabilities directly into freight workflows, helping their customers manage costs more efficiently, access working capital when needed and simplify the movement of funds across multiple countries and currencies.\nAs freight platforms, digital forwarders and logistics marketplaces continue to transform how goods are booked, managed and moved, the financial infrastructure supporting those interactions has often struggled to keep pace. Despite growing digitisation across the sector, many freight businesses still rely on fragmented payment processes that can delay settlement, increase administrative costs and place pressure on cash flow.\nIn shipping, payments take on average 42 days to reach the invoicing company*, while processing and administrative costs can make up nearly one-fifth of the total transportation costs due to labour-intensive manual document handling.\nThe initiative builds on the broader Visa-Airwallex relationship and represents a natural next step from enabling cross-border B2B payments toward developing more specialised, industry-specific solutions. By combining their respective strengths, Visa and Airwallex aim to create a repeatable model that can help unlock the benefits of embedded finance for complex B2B verticals where traditional payment infrastructure has often failed to keep pace with digital innovation.\nAlessandro Figueroa, Head of New Verticals & Partnerships, Visa Commercial Solutions, Europe, said, \u201cFreight and shipping are fundamental to the global economy, yet many businesses continue to operate with payment processes that are fragmented, manual and inefficient. As digital freight platforms continue to scale, there is a growing need for financial solutions that can be embedded seamlessly into existing workflows without creating additional complexity. By combining Visa's commercial payments expertise with Airwallex's technology platform, we're helping bring new solutions to market quickly, enabling platforms to simplify payments, improve working capital and deliver greater value to the businesses they serve.\"\nChristos Chamberlain, General Manager for UK and Europe at Airwallex, said: \"Cash sitting in limbo while payments clear across borders is capital that should be funding the next shipment, not stuck in transit. Reputations are built on reliability - can you get the container there, on time, every time. Payments need to work the same way. Together with Visa, we're giving freight operators the speed and precision that global shipping demands.\"\n*https://www.csis.org/analysis/ships-dont-lie-blockchain-and-secure-future-global-shipping\nAbout Airwallex\nAirwallex is an AI native financial operating system for modern businesses. We are building the future of global banking for a borderless, real-time, intelligent economy.\nWe serve more than 676,000 businesses worldwide, either directly or through our platform customers. From startups to public enterprises, our customers use Airwallex to manage their global banking and financial operations, or to build and monetise their own financial products.\nFounded in Melbourne in 2015, Airwallex holds 85+ licenses across North America, Europe, the Middle East, and Asia-Pacific, forming one of the most comprehensive financial infrastructures in the world. This regulated backbone powers Airwallex products at global scale, including payment acceptance, billing, global accounts, corporate cards, and spend management.\nThe company is co-headquartered in San Francisco and Singapore with over 2,300 employees across 27 offices. Learn more at [www.airwallex.com](https://www.airwallex.com/).\nShare\nLatest Announcements\n[Back to newsroom](https://www.airwallex.com/global/newsroom)",
+  "quote": "About Airwallex\nAirwallex is an AI native financial operating system for modern businesses. We are building the future of global banking for a borderless, real-time, intelligent economy.\nWe serve more than 676,000 businesses worldwide, either directly or through our platform customers. From startups to public enterprises, our customers use Airwallex to manage their global banking and financial operations, or to build and monetise their own financial products.\nFounded in Melbourne in 2015, Airwallex holds 85+ licenses across North America, Europe, the Middle East, and Asia-Pacific, forming one of the most comprehensive financial infrastructures in the world. This regulated backbone powers Airwallex products at global scale, including payment acceptance, billing, global accounts, corporate cards, and spend management.\nThe company is co-headquartered in San Francisco and Singapore with over 2,300 employees across 27 offices. Learn more at [www.airwallex.com](https://www.airwallex.com/)."
+}

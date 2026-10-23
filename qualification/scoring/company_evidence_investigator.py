@@ -426,43 +426,33 @@ and quote its current company-size band with the company name. Do not infer a
 count from associated members or accept either conflicting range by default.
 If the profile cannot be fetched or its evidence remains conflicting, return
 UNPROVEN. All ordinary fetched-text, identity and quote checks still apply.
-For geography, find the current headquarters of the investigated company.
-An already fetched exact LinkedIn profile may also prove HQ when its own body
-binds the verified company. Quote its About Headquarters field; generic
-locations or search snippets are not HQ proof.
-A server-prefetched structured profile projection labelled
-"harvestapi_get_company locations.headquarter=true" supplies already fetched,
-exact company-bound HQ facts. You may quote that projection for geography;
-do not infer HQ from other profile locations or submitted source claims.
-Use verified exact-company LinkedIn headquarters first, including a validated
-About Headquarters field or the server-fetched locations.headquarter=true
-projection. A valid outside-region LinkedIn HQ remains a contradiction; do not
-replace it with a matching web location. Use company contact/about pages and
-other web evidence only when LinkedIn supplies no usable explicit HQ. A generic
-profile location, inaccessible profile, or wrong-entity profile is not usable HQ.
-A navigation label is only a locator: its page must contain an explicit
-company-bound HQ statement.
-If the headquarters heading omits the company name, first use one continuous
-adjacent span that includes both the investigated company's name and the
-heading with its address when that span exists on the fetched page.
-On a fully verified first-party contact or about page, a country-qualified
-heading such as "United States Headquarters 123..." may identify that
-company's HQ without repeating its name in the exact quote. Quote the whole
-heading and address continuously, and report that same country and location.
-Do not use a state, region, customer, parent, or regional-office heading as
-the investigated company's headquarters.
-Do not transfer a customer's, parent company's, or regional office location
-to the investigated company.
-Incorporation, an office, factory, job, customer, event, service area, or parent
-company location is not headquarters. Return a country and, for a United
-States headquarters, a state. Use a quote that explicitly identifies the
-location as the headquarters or principal executive office. Do not decide
-whether that location is inside a requested region; the deterministic scorer
-does that after the investigation. Compare sources for the exact company using
-the LinkedIn-first priority above. If fallback first-party sources disagree, or a
-dated company-bound source gives a newer conflicting headquarters, resolve the
-chronology with source dates or an explicit move statement; otherwise return
-UNPROVEN. A factory opening cannot prove an HQ move.
+For geography, prove the exact company's current headquarters, not its office,
+factory, incorporation, service area, customer, parent or regional HQ. Return
+country and, for US headquarters, state; deterministic geography decides fit.
+Use verified exact-company LinkedIn headquarters first: quote the identity-bound About
+Headquarters field or server-fetched "harvestapi_get_company
+locations.headquarter=true" projection, never generic profile locations.
+A valid outside-region LinkedIn HQ remains a contradiction unless fetched
+first-party evidence proves the same company's current co-headquarters.
+A profile can omit another global co-HQ. Compare dates and current company
+statements in existing submitted first-party sources. Use an affirmative
+present-tense co-headquartered quote; an old, superseded, proposed or ambiguous
+claim does not resolve a conflict. A named About section can bind "The company"
+to its co-HQ. Retain the LinkedIn contradiction absent current co-HQ proof;
+never substitute a convenient matching office or another entity's location.
+Apart from the explicit current co-HQ conflict above:
+Use company contact/about pages and other web evidence only when LinkedIn supplies no usable explicit HQ.
+An inaccessible or wrong-entity profile supplies no usable fact. A navigation
+label is only a fetch locator, not evidence.
+Quote an exact continuous span identifying the company, headquarters and
+location. Use one continuous adjacent span that includes both the investigated
+company's name and the heading/address when possible. A fully
+verified first-party contact/about page can bind a country-qualified heading
+like "United States Headquarters 123..." without repeating the company name;
+quote heading and address continuously. State/region/office headings do not
+prove global HQ. If fallback first-party sources disagree, resolve chronology
+with source dates or an explicit move statement; otherwise return UNPROVEN.
+A factory opening cannot prove an HQ move.
 
 For Private Equity, prove company -> current controlling owner -> same owner's
 PE identity from fetched text. Check subject, object, negation and chronology.

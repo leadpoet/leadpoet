@@ -71,7 +71,7 @@ def install_profile(monkeypatch, body, *, failure=""):
     return calls
 
 
-def run(monkeypatch, first, *, second=None, raw=None, raw_size=None, homepage_slug=True, investigator=True):
+def run(monkeypatch, first, *, second=None, raw=None, raw_size=None, homepage_slug=True, investigator=True, reviewable_hq=False):
     observations = [deepcopy(first)] + ([deepcopy(second)] if second else [])
     provider = AsyncMock(side_effect=[(value, "") for value in observations])
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-placeholder")
@@ -88,7 +88,10 @@ def run(monkeypatch, first, *, second=None, raw=None, raw_size=None, homepage_sl
         return {"outcome": "insufficient_evidence", "url": url}
 
     monkeypatch.setattr(scorer, "fetch_current_linkedin_company_size", current)
-    review = AsyncMock(side_effect=AssertionError("A verified LinkedIn decision must not reopen"))
+    review = (AsyncMock(return_value={"claims": {"geography": {
+        "target": "geography", "status": "UNPROVEN"}}, "_completed_submit": True,
+        "failure_reason": ""}) if reviewable_hq else AsyncMock(
+            side_effect=AssertionError("A verified LinkedIn decision must not reopen")))
     monkeypatch.setattr(scorer, "investigate_company_evidence", review)
     homepage = company_fit_match("verified homepage", details={"identity": {
         "decision": "match", "evidence_source": "company_homepage", "observed_name": "Quaise Energy",
@@ -106,7 +109,7 @@ def run(monkeypatch, first, *, second=None, raw=None, raw_size=None, homepage_sl
     ("51-200", "Germany", "match", "mismatch"),
     ("11-50", "Germany", "mismatch", "mismatch"),
 ])
-def test_verified_linkedin_values_control_conflicting_web_and_do_not_reopen(
+def test_verified_linkedin_values_survive_unproven_firstparty_conflict_review(
     monkeypatch, size, country, expected_size, expected_hq,
 ):
     body = deepcopy(CAPTURE)
@@ -120,7 +123,7 @@ def test_verified_linkedin_values_control_conflicting_web_and_do_not_reopen(
     if country == "United States":
         observation.update(observed_hq_country="Germany", observed_hq_state="", geography_matches=False,
             geography_evidence_quote="Quaise Energy headquarters: Berlin, Germany.")
-    result, provider, raw_calls, review = run(monkeypatch, observation)
+    result, provider, raw_calls, review = run(monkeypatch, observation, reviewable_hq=country == "Germany")
     assert result.details["dimension_decisions"] == {"employee_size": expected_size, "industry": "match", "geography": expected_hq, "stage": "match"}
     assert result.details["dimension_evidence"]["employee_size"]["url"] == URL
     assert result.details["dimension_evidence"]["geography"]["url"] == URL
@@ -128,7 +131,11 @@ def test_verified_linkedin_values_control_conflicting_web_and_do_not_reopen(
     assert calls == [("quaise.com", URL)]
     assert len(raw_calls) <= 2
     assert provider.await_count == 1
-    review.assert_not_awaited()
+    if country == "Germany":
+        review.assert_awaited_once()
+        assert review.await_args.kwargs["targets"] == ("geography",)
+    else:
+        review.assert_not_awaited()
 
 
 @pytest.mark.parametrize("missing", ["employeeCountRange", "locations"])

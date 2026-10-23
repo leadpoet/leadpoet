@@ -160,7 +160,39 @@ entries, and typed response summaries or text. The alias is retained only in
 provider responses; request copies and opaque values remain redacted.
 Ledger responses are read again at export, so historical receipts can also yield
 readable text. Earlier stored worker observations that were already redacted
-remain redacted. This change does not ask providers for additional reasoning.
+remain redacted.
+
+New rounds can freeze `agent_readable_reasoning_v1` and the model capabilities
+from the existing provider catalog. `LAB_ARENA_REASONING_CAPTURE_FROM` selects
+rounds whose submission window opens on or after the configured UTC time. It
+does not modify rounds already created. In those rounds the gateway asks for
+readable summaries on supported OpenAI calls, removes returned-text exclusion,
+and enables a supported reasoning setting when needed. Effort-based Google
+models use a medium floor: the October 23 live probe returned no readable text
+at low effort, while medium returned readable text. Other effort-based models
+use a low floor. Higher existing effort is retained. This can change cost,
+runtime and model output. Extra output
+room stays within the existing token caps; the $4 execution/admission cap stays
+unchanged. A low effort setting is not a hard reasoning-token budget.
+
+The frozen policy applies equally to miner and baseline execution calls, before
+request hashing, budget admission and capture. Judge calls remain unchanged.
+Each provider-call record identifies the policy, request changes and any skipped
+or unsupported case. Unsafe tool continuations, unsupported controls and
+incompatible request shapes keep their original request and report the gap.
+Provider summaries are not full private reasoning. A successful request can
+still return no readable text; dataset selection must inspect the actual saved
+response. Missing or invalid catalog profiles stop creation of an activated
+round; the service does not silently create it with the policy disabled.
+No missing historical reasoning is recovered by enabling this policy.
+
+The October 23 diagnostic also found that GPT-5.6 Luna through the permitted
+Azure route returned empty summaries with both `auto` and `concise`, including
+calls with thousands of reasoning tokens. Two other OpenAI models also returned
+empty summaries. The native OpenAI endpoint was unavailable under the existing
+zero-data-retention requirement. The policy does not relax that requirement or
+claim these requests supplied readable reasoning. Model/provider support must
+be verified from actual returned text, not the echoed request settings.
 Privacy filtering and exact replay are separate properties from label validity.
 
 ## Remaining boundaries

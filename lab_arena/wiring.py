@@ -541,6 +541,7 @@ def build_service_from_environment(mode: str):
         company_judgment_from=os.environ.get("LAB_ARENA_COMPANY_JUDGMENT_FROM") or None,
         signal_judgment_from=os.environ.get("LAB_ARENA_SIGNAL_JUDGMENT_FROM") or None,
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
+        reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
         benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
         execution_sequence_from=os.environ.get(
             "LAB_ARENA_EXECUTION_SEQUENCE_FROM"
@@ -639,6 +640,8 @@ def build_service_from_environment(mode: str):
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
         deepline_catalog_source=deepline_catalog_source,
+        # The same startup catalog snapshot as the price table.
+        reasoning_profile_source=lambda: price_table.get("reasoning_profiles") or {},
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
         baseline_source_fetcher=fetch_public_source_archive,
         credential_manager=credential_manager,

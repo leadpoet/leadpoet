@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations
-from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, signal_judgments, trajectory, validator_events
+from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, reasoning_capture, signal_judgments, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
@@ -659,6 +659,8 @@ class RoundDefaults:
     company_judgment_from: Optional[str] = None
     signal_judgment_from: Optional[str] = None
     intent_details_from: Optional[str] = None
+    # Opt-in for future intake windows only; existing rounds keep their policy.
+    reasoning_capture_from: Optional[str] = None
     # Frozen only into newly created integrity rounds. Existing rounds keep
     # their original policy, including after a gateway restart.
     normalize_intent_scale: bool = True
@@ -696,6 +698,7 @@ class ServiceConfig:
     pinned_round_id: Optional[str] = None
     baseline_source_fetcher: Optional[Callable[[str, int], bytes]] = None
     deepline_catalog_source: Optional[Callable[..., Mapping[str, Any]]] = None
+    reasoning_profile_source: Optional[Callable[[], Mapping[str, Any]]] = None
     reward_signer_factory: Optional[Callable[[], signing.ArenaSigner]] = None
     credential_manager: Optional[credentials_module.CredentialManager] = None
     code_reviewer: Optional[Any] = None
@@ -817,6 +820,11 @@ class ServiceConfig:
                 raise ServiceError(
                     "benchmark_disclosure_activation_invalid", 500
                 ) from exc
+        if self.defaults.reasoning_capture_from is not None:
+            try:
+                _activation_time(self.defaults.reasoning_capture_from)
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise ServiceError("reasoning_capture_activation_invalid", 500) from exc
         if self.mode not in MODES:
             raise ServiceError("mode_invalid", 500)
         if self.mode == "off":
@@ -844,6 +852,14 @@ def _parse_iso(value: str) -> datetime:
         "%Y-%m-%dT%H:%M:%S.%f%z" if "." in value else "%Y-%m-%dT%H:%M:%S%z"
     )
     return datetime.strptime(value, timestamp_format).astimezone(timezone.utc)
+
+
+def _activation_time(value: str) -> datetime:
+    """Read a timezone-aware operator activation timestamp."""
+    moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        raise ValueError("missing timezone")
+    return moment
 
 
 def _partial_baseline_transition_deadline(
@@ -1123,6 +1139,7 @@ class ArenaService:
                 raise ValueError("company judgment scorer policy mismatch")
             company_judgments.enabled(configuration)
             intent_details_enabled = intent_details_policy.enabled(configuration)
+            reasoning_capture.enabled(configuration)
             scorer_quality = quality_policy.scorer_enabled(configuration.get("scorer_policy") or {})
             scorer_intent_details = intent_details_policy.scorer_enabled(
                 configuration.get("scorer_policy") or {}
@@ -1610,6 +1627,18 @@ class ArenaService:
             document["benchmark_disclosure_policy"] = (
                 icp_disclosure.CUTOFF_PUBLIC_POLICY
             )
+        if (defaults.reasoning_capture_from is not None
+            and _parse_iso(document["schedule"]["submission_open"])
+            >= _activation_time(defaults.reasoning_capture_from)):
+            source = self._config.reasoning_profile_source
+            try:
+                profiles = reasoning_capture.validate_profiles(source() if source else None)
+            except ValueError as exc:
+                raise ServiceError("reasoning_capture_profiles_unavailable", 503) from exc
+            if not profiles:
+                raise ServiceError("reasoning_capture_profiles_unavailable", 503)
+            document["reasoning_capture_policy"] = reasoning_capture.POLICY
+            document["reasoning_model_profiles"] = profiles
         self._freeze_deepline_catalog(document)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
@@ -5759,6 +5788,8 @@ class ArenaService:
             round_id=str(run.get("round_id") or ""),
             judgment_cache_scope=judgment_cache_scope,
             deepline_catalog=configuration.get("deepline_catalog"),
+            reasoning_capture_policy=configuration.get("reasoning_capture_policy"),
+            reasoning_model_profiles=configuration.get("reasoning_model_profiles"),
         )
 
     def handle_signal_judgment(
@@ -7839,6 +7870,7 @@ class ArenaService:
             **({"company_quality_policy": quality_policy.POLICY} if quality_policy.enabled(configuration) else {}),
             **({"company_judgment_policy": company_judgments.POLICY} if configuration.get("company_judgment_policy") else {}),
             **({"intent_details_policy": intent_details_policy.POLICY} if intent_details_policy.enabled(configuration) else {}),
+            **({"reasoning_capture_policy": reasoning_capture.POLICY} if reasoning_capture.enabled(configuration) else {}),
         }
 
     def public_round(self, round_id: str) -> Dict[str, Any]:

@@ -35,7 +35,7 @@ from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 import httpx
 
-from lab_arena import contracts, deepline_catalog, operations, provider_costs, scoring_provider_compat
+from lab_arena import contracts, deepline_catalog, operations, provider_costs, reasoning_capture, scoring_provider_compat
 from lab_arena import telemetry, training_capture
 from lab_arena.contracts import ArenaContractError
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
@@ -561,7 +561,7 @@ def _price_string(value: Any, component: str) -> str:
 def validate_price_table(document: Any) -> Dict[str, Any]:
     if not isinstance(document, Mapping):
         raise ArenaContractError("price table must be an object")
-    contracts.require_only_keys(document, ("schema_version", "fetched_at", "source", "models"))
+    contracts.require_only_keys(document, ("schema_version", "fetched_at", "source", "models", "reasoning_profiles"))
     contracts.require_keys(document, ("schema_version", "fetched_at", "source", "models"))
     if document["schema_version"] != PRICE_TABLE_SCHEMA_VERSION:
         raise ArenaContractError("unsupported price table schema")
@@ -580,6 +580,12 @@ def validate_price_table(document: Any) -> Dict[str, Any]:
         "source": str(document["source"]),
         "models": models,
     }
+    if "reasoning_profiles" in document:
+        # Runtime catalog metadata. A reasoning capture round freezes its own copy.
+        try:
+            table["reasoning_profiles"] = reasoning_capture.validate_profiles(document["reasoning_profiles"])
+        except ValueError as exc:
+            raise ArenaContractError("price table reasoning profiles are invalid") from exc
     return table
 
 
@@ -615,11 +621,13 @@ def price_table_from_models_response(response: Mapping[str, Any], model_ids: Opt
         raise ArenaContractError("models endpoint lacks allowed models: %s" % ", ".join(missing))
     if not found:
         raise ArenaContractError("models endpoint has no models with usable pricing")
+    profiles = reasoning_capture.profiles_from_models_response(response)
     return validate_price_table({
         "schema_version": PRICE_TABLE_SCHEMA_VERSION,
         "fetched_at": fetched_at,
         "source": OPENROUTER_MODELS_URL,
         "models": found,
+        "reasoning_profiles": {model: profile for model, profile in profiles.items() if model in found},
     })
 
 
@@ -825,13 +833,58 @@ def openrouter_normalized(parameters: Mapping[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def normalized_request(operation_id: str, parameters: Mapping[str, Any]) -> Dict[str, Any]:
-    """Validate and normalize a request exactly as ``Broker.execute`` does."""
+def normalized_request(
+    operation_id: str,
+    parameters: Mapping[str, Any],
+    *,
+    reasoning_capture_policy: Optional[str] = None,
+    reasoning_model_profiles: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate and normalize a request exactly as ``Broker.execute`` does.
+
+    The reasoning arguments reproduce an agent run under a frozen round policy.
+    """
 
     normalized = operations.validate_operation_request(operation_id, parameters)
     if operations.OPERATIONS[operation_id].provider == "openrouter":
         normalized = openrouter_normalized(normalized)
+        normalized, _ = agent_reasoning_parameters(
+            operation_id, normalized, policy=reasoning_capture_policy,
+            profiles=reasoning_model_profiles,
+        )
     return normalized
+
+
+def agent_reasoning_parameters(
+    operation_id: str,
+    parameters: Mapping[str, Any],
+    *,
+    policy: Optional[str],
+    profiles: Optional[Mapping[str, Any]],
+    deepline_catalog: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Apply a round's frozen reasoning policy to one validated agent call.
+
+    The policy adds reasoning; it never makes a valid agent request invalid.
+    When the operation schema refuses the policy form, the agent's request is
+    sent unchanged and the annotation records why.
+    """
+
+    try:
+        updated, annotation = reasoning_capture.apply(
+            operation_id, parameters, policy=policy, profiles=profiles,
+        )
+    except ValueError as exc:
+        raise BrokerError("broker_unavailable") from exc
+    if annotation is None or not annotation["changes"]:
+        return dict(parameters), annotation
+    try:
+        updated = openrouter_normalized(operations.validate_operation_request(
+            operation_id, updated, deepline_catalog=deepline_catalog,
+        ))
+    except (operations.OperationError, BrokerError):
+        return dict(parameters), reasoning_capture.unapplied(annotation, "operation_schema")
+    return updated, annotation
 
 
 def deepline_cost_microusd(body: bytes) -> Optional[int]:
@@ -1879,6 +1932,10 @@ class RunContext:
     judgment_cache_scope: Optional[Mapping[str, Any]] = None
     # Gateway-owned, hash-bound tool and pricing snapshot for this round.
     deepline_catalog: Optional[Mapping[str, Any]] = None
+    # Gateway-owned frozen round policy and catalog profiles for readable
+    # agent reasoning. Absent on every round created without the policy.
+    reasoning_capture_policy: Optional[str] = None
+    reasoning_model_profiles: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -4445,11 +4502,23 @@ class Broker:
         reservation_cost: Optional[provider_costs.ProviderCost] = None
         reserve_remaining_budget = False
         openrouter_host_route: Optional[OpenRouterHostRoute] = None
+        reasoning_annotation: Optional[Dict[str, Any]] = None
         try:
             if effective_operation.provider == "openrouter":
                 # Record the request's price bound; current SQL admission uses
                 # confirmed spend and stores a zero-dollar lifecycle record.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
+                if getattr(context, "kind", "execute") == "execute":
+                    # Before hashing: identity, capture and the sent body all
+                    # bind the reasoning parameters actually requested.
+                    effective_normalized, reasoning_annotation = agent_reasoning_parameters(
+                        effective_operation_id, effective_normalized,
+                        policy=getattr(context, "reasoning_capture_policy", None),
+                        profiles=getattr(context, "reasoning_model_profiles", None),
+                        deepline_catalog=context.deepline_catalog,
+                    )
+                    max_output_tokens = int(effective_normalized.get(
+                        "max_output_tokens", effective_normalized.get("max_tokens")))
                 normalized = effective_normalized
                 # Server-side search can add provider-owned context and model
                 # passes that are absent from the caller body. Keep this
@@ -4629,7 +4698,7 @@ class Broker:
             provider=effective_operation.provider,
             funding_source=funding_source,
             amount_microusd=amount,
-            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"request_capture": request_capture} if request_capture else {}), **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
+            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"request_capture": request_capture} if request_capture else {}), **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **({"reasoning_capture": reasoning_annotation} if reasoning_annotation is not None else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
         if source_content_fallback:

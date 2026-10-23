@@ -714,6 +714,7 @@ def _serve(args: argparse.Namespace) -> int:
             integrity_from=os.environ.get("LAB_ARENA_INTEGRITY_FROM") or None,
             contacts_from=None,
             company_quality_from=os.environ.get("LAB_ARENA_COMPANY_QUALITY_FROM") or None,
+            reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
             benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
         )
         service = ArenaService(
@@ -727,6 +728,7 @@ def _serve(args: argparse.Namespace) -> int:
                 daily_icp_source=lambda *, set_id, active_at: store.current_daily_icp_set(set_id),
                 banned_hotkeys_source=lambda: (),
                 broker_factory=broker_factory,
+                reasoning_profile_source=lambda: price_table.get("reasoning_profiles") or {},
                 defaults=defaults,
                 network_name=TESTNET_NETWORK,
                 netuid=TESTNET_NETUID,

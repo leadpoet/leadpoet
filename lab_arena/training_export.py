@@ -542,6 +542,8 @@ def _calls(rows, run_ids, objects, run_order):
                 "provider": reserve.get("provider"), "operation_id": reserve.get("operation_id"),
                 "funding_source": reserve.get("funding_source"), "reservation_entry_id": reserve["entry_id"],
                 **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
+        if isinstance(entry.get("reasoning_capture"), Mapping):
+            call["reasoning_capture"] = copy.deepcopy(entry["reasoning_capture"])
         call_reasons = set()
         upstream_receipts = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):

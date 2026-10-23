@@ -180,6 +180,20 @@ still incur charges. Arena reward activation is a separate setting: disabling
 rewards prevents champion allocation, while scoring and competition execution
 remain separate configuration behavior.
 
+## Provider reasoning capture
+
+A round with `agent_readable_reasoning_v1` requests readable provider reasoning
+through the managed gateway. The round freezes this policy before submissions
+open. It applies to miners and the baseline; no harness configuration is needed.
+The gateway keeps existing useful reasoning effort, asks for supported summaries,
+and can enable reasoning when it was off or minimal. Request changes and
+unsupported cases are recorded. Tool continuations with unproved thinking-state
+support keep their reasoning effort; returned-text visibility can still be enabled.
+This can change model output, latency and spending. The existing token limits,
+$4 execution/admission cap, company scoring and judge behavior remain unchanged.
+Readable summaries depend on the provider; encrypted private reasoning cannot
+be converted into readable text by this policy.
+
 ## Decision summaries
 
 New or updated model harnesses should report short decision summaries through

@@ -1100,3 +1100,15 @@ def test_evidence_reader_defines_every_service_helper_its_borrowed_methods_call(
     called = {name for method in borrowed
               for name in re.findall(r"self\.(_\w+)\(", inspect.getsource(getattr(ArenaService, method)))}
     assert sorted(name for name in called if not hasattr(reader, name)) == []
+
+
+def test_export_keeps_request_reasoning_policy_metadata_without_duplicating_text():
+    values = fixture()
+    add_call(values)
+    annotation = {"policy": "agent_readable_reasoning_v1", "treatment": "chat",
+                  "requested": True, "changes": ["summary"]}
+    values["ledger_rows"][0]["entry_doc"]["reasoning_capture"] = annotation
+    example = assemble_example(**values)
+    call = example["provider_calls"][0]
+    assert call["reasoning_capture"] == annotation
+    assert "readable_reasoning" not in call

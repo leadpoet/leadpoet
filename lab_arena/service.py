@@ -27,6 +27,7 @@ from lab_arena import broker as broker_module, chain as chain_module, contracts,
 from leadpoet_verifier.identity.normalization import normalize_url
 from leadpoet_canonical.arena_weights import (
     SLOT_ELIGIBILITY_UNTIL_REPLACED,
+    accepted_weight_state_body,
     validate_accepted_weight_state,
     verify_accepted_weight_state_signature,
 )
@@ -5302,7 +5303,9 @@ class ArenaService:
                 champion_reward_factor_ppm = (
                     rewards.FULL_CHAMPION_REWARD_FACTOR_PPM
                 )
-        slot_policy = rewards.reward_slot_policy_document(self._evaluation_day(row))
+        slot_policy = rewards.reward_slot_policy_document(
+            self._evaluation_day(row), effective_reward_epoch=effective_epoch,
+        )
         reward_slots = self._store.reward_slot_snapshot(round_id, slot_policy)
         basis = self._sign(
             rewards.reward_basis_document(
@@ -7539,8 +7542,9 @@ class ArenaService:
                         # storage, as for the governing basis above. Signature
                         # verification remains mandatory in public_weight_state.
                         state = validate_accepted_weight_state(existing.get("state_doc"))
-                        if state["reward_basis"]["reward_basis_hash"] != governing["reward_basis_hash"]:
+                        if not rewards.reward_basis_matches_policy_projection(state["reward_basis"], governing, epoch):
                             raise ServiceError("accepted_weight_state_reward_conflict", 409)
+                        governing = state["reward_basis"]
                         eligibility = rewards.epoch_eligible(
                             governing, epoch,
                             until_replaced=state.get("slot_eligibility") == SLOT_ELIGIBILITY_UNTIL_REPLACED,
@@ -7593,6 +7597,62 @@ class ArenaService:
             self._usable_reward_bases(rows), int(epoch)
         )
 
+    def _project_reward_basis(self, basis: Mapping[str, Any], epoch: int) -> Dict[str, Any]:
+        """Sign new policy over verified source achievements, without history writes."""
+        if (int(epoch) < rewards.REWARD_SLOT_POLICY_OCT23_EFFECTIVE_EPOCH
+                or basis.get("schema_version") != contracts.REWARD_BASIS_V2_SCHEMA_VERSION):
+            return basis
+        policy = rewards.reward_slot_policy_document(effective_reward_epoch=int(epoch))
+        if basis["slot_policy"] == policy:
+            return basis
+        # The old signed document is immutable provenance. Verify it before
+        # signing a policy projection, so a changed database row cannot acquire
+        # reward authority merely by carrying a valid content hash.
+        signer = self._reward_signer()
+        try:
+            signing.verify_document_signature(
+                basis, public_key_der=signer.public_key_der,
+                hash_field="reward_basis_hash",
+                expected_public_key_hash=signer.public_key_hash,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("reward_history_signature_invalid", 500) from exc
+        try:
+            projected = rewards.reward_basis_policy_projection_document(basis, policy)
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("reward_policy_projection_invalid", 503) from exc
+        return self._sign(projected, "reward_basis_hash")
+
+    def _validated_existing_weight_state(
+        self, existing: Mapping[str, Any], basis: Mapping[str, Any], *,
+        network: str, netuid: int, epoch: int,
+        expected_state: Optional[Mapping[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        try:
+            state = validate_accepted_weight_state(existing.get("state_doc"))
+            signer = self._reward_signer()
+            verify_accepted_weight_state_signature(
+                state, public_key_der=signer.public_key_der,
+                expected_public_key_hash=signer.public_key_hash,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ServiceError("accepted_weight_state_invalid", 500) from exc
+        if (state["network"], state["netuid"], state["epoch"]) != (network, netuid, epoch):
+            raise ServiceError("accepted_weight_state_scope_conflict", 409)
+        if not rewards.reward_basis_matches_policy_projection(state["reward_basis"], basis, epoch):
+            raise ServiceError("accepted_weight_state_reward_conflict", 409)
+        if expected_state is not None:
+            # ECDSA bytes may differ; every other accepted body field must match.
+            def comparable(value):
+                body = accepted_weight_state_body(value)
+                body["reward_basis"] = {
+                    key: item for key, item in body["reward_basis"].items() if key != "signature"
+                }
+                return body
+            if comparable(state) != comparable(expected_state):
+                raise ServiceError("accepted_weight_state_conflict", 409)
+        return state
+
     def public_weight_state(self, epoch: int) -> Dict[str, Any]:
         """Return or atomically publish one accepted state for an Arena epoch."""
 
@@ -7605,18 +7665,9 @@ class ArenaService:
             return {"state": None, "lookup_ok": True}
         existing = self._store.get_weight_state(network, netuid, requested_epoch)
         if existing is not None:
-            try:
-                state = validate_accepted_weight_state(existing.get("state_doc"))
-                signer = self._reward_signer()
-                verify_accepted_weight_state_signature(
-                    state, public_key_der=signer.public_key_der,
-                    expected_public_key_hash=signer.public_key_hash,
-                )
-            except (TypeError, ValueError) as exc:
-                raise ServiceError("accepted_weight_state_invalid", 500) from exc
-            if state["reward_basis"].get("reward_basis_hash") != basis.get("reward_basis_hash"):
-                raise ServiceError("accepted_weight_state_reward_conflict", 409)
-            return {"state": state, "lookup_ok": True}
+            return {"state": self._validated_existing_weight_state(
+                existing, basis, network=network, netuid=netuid, epoch=requested_epoch,
+            ), "lookup_ok": True}
         try:
             epoch_scope = dict(self._config.chain.accepted_weight_epoch_scope())
             if int(epoch_scope.get("epoch", -1)) != requested_epoch:
@@ -7625,6 +7676,7 @@ class ArenaService:
             raise
         except Exception as exc:
             raise ServiceError("accepted_weight_epoch_scope_unavailable", 503) from exc
+        basis = self._project_reward_basis(basis, requested_epoch)
         try:
             state = weight_state.build_accepted_weight_state(
                 self._reward_signer(), network=network,
@@ -7639,7 +7691,18 @@ class ArenaService:
             stored = self._store.publish_weight_state(
                 network, netuid, requested_epoch, state["state_hash"], state
             )
-        except (KeyError, TypeError, ValueError, ArenaStoreError) as exc:
+        except ArenaStoreError as exc:
+            # Independently signed projections have the same basis body hash,
+            # but their nested ECDSA signatures can differ. Keep the first
+            # accepted bytes, and accept only a fully verified equivalent basis.
+            existing = self._store.get_weight_state(network, netuid, requested_epoch)
+            if existing is not None:
+                return {"state": self._validated_existing_weight_state(
+                    existing, basis, network=network, netuid=netuid, epoch=requested_epoch,
+                    expected_state=state,
+                ), "lookup_ok": True}
+            raise ServiceError("accepted_weight_state_conflict", 409) from exc
+        except (KeyError, TypeError, ValueError) as exc:
             raise ServiceError("accepted_weight_state_conflict", 409) from exc
         return {"state": validate_accepted_weight_state(stored["state"]), "lookup_ok": True}
 

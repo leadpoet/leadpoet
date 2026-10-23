@@ -626,7 +626,7 @@ def test_scoring_reward_normal_validators_restart_and_chain_readback(
     # Exercise both real economic policies without changing genuine fixture
     # dates or DB clocks. reward_shares_oct22_test proves dated selection.
     policy = rewards.reward_slot_policy_document(policy_day)
-    monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_: deepcopy(policy))
+    monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_, **__: deepcopy(policy))
     round_day += epoch_offset // 10
     round_epoch += epoch_offset
     reward_epoch += epoch_offset
@@ -1080,7 +1080,7 @@ def test_slot_decay_persists_through_daily_publication_and_normal_validator_reco
     # This legacy 30% history has fixed expected decay totals. Keep it stable
     # when the real fixture evaluation day crosses a later policy boundary.
     policy = rewards.reward_slot_policy_document(date(2026, 10, 21))
-    monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_: deepcopy(policy))
+    monkeypatch.setattr(rewards, "reward_slot_policy_document", lambda *_, **__: deepcopy(policy))
     psycopg2, dsn = integrated_database
     connect = lambda: psycopg2.connect(**dsn)
     harness = _NormalWeightHarness(
@@ -1122,7 +1122,7 @@ def test_slot_decay_persists_through_daily_publication_and_normal_validator_reco
             if legacy:
                 old_policy = rewards.reward_slot_policy_document()
                 old_policy.pop("decay")
-                patcher.setattr(rewards, "reward_slot_policy_document", lambda *_: old_policy)
+                patcher.setattr(rewards, "reward_slot_policy_document", lambda *_, **__: old_policy)
             assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
         return harness.service.store.get_round(harness.round_id)["reward_basis_doc"]
 

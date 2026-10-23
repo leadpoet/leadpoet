@@ -1,3 +1,17 @@
+## Scoped production authorization: October 23 company-fit evidence fixes
+
+On 2026-10-23 the user authorized the confirmed headquarters-conflict,
+stage-evidence and citation-repair fixes, rigorous positive/negative and
+complete-case tests, safe push/merge, scorer-image publication and canonical
+deployment with live verification. Use the existing bounded investigator and
+preserve qualification requirements, objective rules, provider budgets,
+frozen rounds, accepted judgments, caches, credentials, rewards and concurrent
+work. Paid tests must remain inside the prior approved remaining spend.
+Do not deploy a semantic change without measured accuracy gains and negative
+controls. No company-specific exceptions or additional reviewer/recovery path.
+The coordinating agent owns production application. Authority ends after
+these fixes are deployed and verified. Keep AGENTS.md and CLAUDE.md identical.
+
 ## Scoped production authorization: October 23 Arena full cycle
 
 On 2026-10-23 the user authorized monitoring the full October 23 Arena cycle,

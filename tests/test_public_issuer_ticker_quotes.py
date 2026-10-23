@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from qualification.scoring.lead_scorer import _stage_quote_supports_observation
@@ -79,7 +82,7 @@ def test_alias_and_newswire_grammar_preserves_public_stage_rejections(quote):
     assert _stage_quote_supports_observation("public", quote) is False
 
 
-def _validated_public(quote, *, company="Acme", domain="acme.example", text=None):
+def _validated_public(quote, *, company="Acme", domain="acme.example", text=None, final_url=None):
     from qualification.scoring import company_evidence_investigator as investigator
 
     url = f"https://{domain}/investors"
@@ -88,7 +91,7 @@ def _validated_public(quote, *, company="Acme", domain="acme.example", text=None
                        "observed_value": "Public", "evidence_url": url,
                        "evidence_quote": quote, "reason": "Current listing"}]},
         targets=("stage",), fetched_pages={url: quote if text is None else text},
-        fetched_final_urls={url: url}, first_party_domains={domain},
+        fetched_final_urls={url: url if final_url is None else final_url}, first_party_domains={domain},
         identity_names={company.casefold()},
         identity_anchor={"submitted_name": company, "submitted_domain": domain,
                          "observed_name": company, "observed_domain": domain},
@@ -176,3 +179,141 @@ def test_legacy_no_name_first_party_prose_does_not_expand_asx_or_ticker_trust(qu
         "Public", quote, evidence_url="https://acme.example/investors",
         first_party_domains=("acme.example",),
     ) is expected
+
+
+@pytest.mark.parametrize("quote", [
+    "Shopify Inc. (NYSE, TSX: SHOP)",
+    "Acme Inc. (NYSE, TSX: ACM) announced quarterly results.",
+    "Acme Inc. (TSX: ACM) announced quarterly results.",
+    'We are listed on both the Nasdaq Stock Exchange and the Toronto Stock Exchange under the ticker symbol "SHOP".',
+    'On what stock exchanges are Shopify shares traded, and what is the ticker symbol? We are listed on both the Nasdaq Stock Exchange and the Toronto Stock Exchange under the ticker symbol "SHOP".',
+    "We are publicly traded.",
+    "Shopify is a publicly traded company.",
+    "Shopify, a publicly traded company, announced results.",
+    "Shopify is a Canadian publicly traded company.",
+    "We are a publicly traded company.",
+    "Shopify, Inc., a Canadian publicly traded company, announced results.",
+    "Shopify Inc. is a publicly traded company.",
+    "Shopify, a Canadian multinational e-commerce company, is publicly traded.",
+    "Founded in 2006, Shopify is publicly traded.",
+    "Founded in 2006, Shopify, a Canadian company, is publicly traded.",
+    "Shopify has publicly traded shares.",
+    "Shopify has publicly listed shares.",
+])
+def test_current_issuer_listing_attribution(quote):
+    company = "Acme" if "Acme" in quote else "Shopify"
+    assert _validated_public(quote, company=company, domain="shopify.com")["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("quote", [
+    "Shopify serves Acme, a publicly traded company.",
+    "Shopify is a customer of Acme, a publicly traded company.",
+    "Shopify is a customer of publicly traded Acme.",
+    "Shopify's parent Acme is publicly traded.",
+    "Shopify's customer Acme is publicly traded.",
+    "Founded in 2006, Shopify's customer Acme is publicly traded.",
+    "Acme, Shopify's parent company, is publicly traded.",
+    "Shopify's parent Acme, a Canadian company, is publicly traded.",
+    "Shopify has a publicly traded customer.",
+    "Shopify has a publicly traded parent company.",
+    "Shopify has publicly traded shares in Acme.",
+    "Shopify's customer Acme has publicly listed shares.",
+    "Shopify works with Acme. Acme is publicly traded.",
+    "Shopify is not publicly traded.",
+    "Shopify was publicly traded.",
+    "Shopify is a publicly traded company but has been delisted.",
+    "Shopify will be publicly traded.",
+    "Our customer Acme is listed on both stock exchanges under ticker ACME.",
+    "Our subsidiary is listed on both stock exchanges under ticker ACME.",
+    "We will be listed on both stock exchanges under ticker SHOP.",
+    "We are not listed on both stock exchanges under ticker SHOP.",
+    "We were listed on both stock exchanges under ticker SHOP but have been delisted.",
+    "Our bonds are listed on both stock exchanges under ticker SHOP.",
+    "Shopify partners with Acme Inc. (NYSE, TSX: ACM).",
+    "Shopify Inc. (NYSE, TSX: SHOP) was delisted.",
+    "Shopify Inc. (NYSE, TSX: SHOP) listing is proposed.",
+    "Shopify bonds (NYSE, TSX: SHOP).",
+    "Shopify Inc. (UNKNOWN, TSX: SHOP).",
+])
+def test_current_listing_does_not_attribute_another_issuer_or_noncurrent_equity(quote):
+    assert _validated_public(quote, company="Shopify", domain="shopify.com")["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("quote", [
+    'We are listed on both stock exchanges under the ticker symbol "SHOP".',
+    "We are publicly traded.",
+])
+def test_first_person_issuer_proof_requires_same_first_party_source(quote):
+    from qualification.scoring import lead_scorer
+
+    assert not lead_scorer._stage_evidence_supports_observation(
+        "Public", quote, evidence_url="https://other.example/faq",
+        first_party_domains=("shopify.com",), identity_names=("Shopify",),
+        semantic_public_listing=True,
+    )
+
+
+def test_exact_captured_shopify_finding_and_independently_loaded_source():
+    from qualification.scoring import company_evidence_investigator as investigator
+
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "company_evidence"
+                          / "shopify_dual_exchange_captured.json").read_text())
+    url = fixture["source_url"]
+    finding = fixture["finding"]
+    assert finding["evidence_quote"] == "Shopify Inc. (NYSE, TSX: SHOP)"
+    kwargs = dict(
+        targets=("stage",), fetched_pages={url: fixture["source_text"]},
+        fetched_final_urls={url: url}, first_party_domains={"shopify.com"},
+        identity_names={"shopify"}, requested_stage="Public",
+        identity_anchor={"submitted_name": "Shopify", "submitted_domain": "shopify.com",
+                         "observed_name": "Shopify", "observed_domain": "shopify.com"},
+    )
+    result = investigator._validated_findings({"findings": [finding]}, **kwargs)["stage"]
+    assert result["status"] == "VERIFIED"
+    assert result["evidence_quote"] == finding["evidence_quote"]
+    assert result["evidence_url"] == url
+    kwargs["fetched_pages"] = {url: "Shopify provides commerce software."}
+    assert investigator._validated_findings({"findings": [finding]}, **kwargs)["stage"]["status"] == "UNPROVEN"
+
+
+@pytest.mark.parametrize("quote", [
+    "Shopify Inc. (NYSE, TSX: SHOP)",
+    'We are listed on both the Nasdaq Stock Exchange and the Toronto Stock Exchange under the ticker symbol "SHOP".',
+])
+def test_issuer_listing_also_passes_direct_company_fit_stage_guard(quote):
+    from qualification.scoring import lead_scorer
+
+    assert lead_scorer._stage_evidence_supports_observation(
+        "Public", quote, evidence_url="https://shopify.com/investors/faq",
+        evidence_final_url="https://shopify.com/investors/faq",
+        first_party_domains=("shopify.com",), identity_names=("Shopify",),
+    )
+
+
+def test_initial_or_retained_anonymous_listing_needs_fetched_provenance():
+    from qualification.scoring import lead_scorer
+
+    assert not lead_scorer._stage_evidence_supports_observation(
+        "Public", 'We are listed on both the Nasdaq Stock Exchange and the Toronto Stock Exchange under the ticker symbol "SHOP".',
+        evidence_url="https://shopify.com/investors/faq",
+        first_party_domains=("shopify.com",), identity_names=("Shopify",),
+    )
+
+
+@pytest.mark.parametrize("quote", [
+    'We are listed on both the Nasdaq Stock Exchange and the Toronto Stock Exchange under the ticker symbol "SHOP".',
+    "We are a publicly traded company.",
+    "Our common shares are listed on Nasdaq.",
+])
+@pytest.mark.parametrize("final_url", ["", "https://other.example/investors"])
+def test_first_person_listing_requires_loaded_first_party_final_url(quote, final_url):
+    assert _validated_public(
+        quote, company="Shopify", domain="shopify.com", final_url=final_url,
+    )["status"] == "UNPROVEN"
+
+
+def test_explicitly_named_issuer_proof_survives_third_party_final_source():
+    assert _validated_public(
+        "Shopify Inc. (NYSE, TSX: SHOP)", company="Shopify", domain="shopify.com",
+        final_url="https://other.example/investors",
+    )["status"] == "VERIFIED"

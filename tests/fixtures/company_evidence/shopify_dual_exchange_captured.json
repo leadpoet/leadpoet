@@ -1,0 +1,28 @@
+{
+  "capture_request_sha256": "2a09403570deadcbd2ed6a0bbf48d9c62d5ae28dfc087e3e2da5de3f28bc440f",
+  "source_url": "https://www.shopify.com/investors/press-releases/shopify-to-transfer-u-s--stock-exchange-listing-to-nasdaq-no-change-to-tsx-listing",
+  "source_text": "Shopify to Transfer U.S. Stock Exchange Listing to Nasdaq; No Change to TSX Listing Skip to Content Log in Start for free Start for free Log in Start for free Shopify to Transfer U.S. Stock Exchange Listing to Nasdaq; No Change to TSX Listing March 18, 2025 PDF version PDF Ticker symbol to remain \"SHOP\" Internet, Everywhere--(Newsfile Corp. - March 18, 2025) - Shopify Inc. (NYSE, TSX: SHOP) (\"Shopify\"), a leading commerce technology company, announced today that it will voluntarily transfer its U.S. stock exchange listing to the Nasdaq Global Select Market (\"Nasdaq\") from the New York Stock Exchange (\"NYSE\"). Shopify expects that its Class A Subordinate Voting Shares will cease trading on the NYSE at market close on Friday, March 28, 2025 and that its Class A Subordinate Voting Shares will commence trading on the Nasdaq on Monday, March 31, 2025. Shopify's listing on the Toronto Stock Exchange (\"TSX\") will not be impacted, and its Class A Subordinate Voting Shares will continue to be listed under the ticker symbol \"SHOP\" on both the TSX and Nasdaq. About Shopify Shopify is the leading global commerce company that provides essential internet infrastructure for commerce, offering trusted tools to start, scale, market, and run a retail business of any size. Shopify makes commerce better for everyone with a platform and services that are engineered for speed, customization, reliability, and security, while delivering a better shopping experience for consumers online, in store, and everywhere in between. Shopify powers millions of businesses in more than 175 countries and is trusted by brands such as BarkBox, Vuori, BevMo, Carrier, JB Hi-Fi, Meta, ButcherBox, SKIMS, Supreme, and many more. CONTACT INVESTORS: Carrie Gillard Director, Investor Relations IR@shopify.com CONTACT MEDIA: Alex Lyons Senior Lead, External Communications press@shopify.com Forward-looking Statements This press release contains forward-looking statements and forward-looking information (collectively, \"forward-looking statements\"), including statements related to Shopify transferring its stock exchange listing to the Nasdaq from the NYSE and the expected dates of the transfer. These statements can be identified by words such as \"will\" and \"expect\" and are based on Shopify's current expectations about future events. Known and unknown risks may cause actual results to differ materially from those described in the forward-looking statements. Factors and risks that may cause actual results to differ materially from those set out in the forward-looking statements are set out in Shopify's Annual Report on Form 10-K and other filings made with US and Canadian securities regulators, available at www.sedarplus.ca and www.sec.gov. Undue reliance should not be placed on the forward-looking statements in this press release, which are based on information available to management on the date hereof and represent management's beliefs regarding future events, which, by their nature, are inherently uncertain. The forward-looking statements are provided to give additional information about management's expectations and beliefs and may not be appropriate for other purposes. Shopify undertakes no duty to publicly update or revise any forward-looking statements, except as may be required by law. To view the source version of this press release, please visit https://www.newsfilecorp.com/release/245172 SOURCE Shopify [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] https://www.shopify.com/investors/press-releases/shopify-to-transfer-u-s--stock-exchange-listing-to-nasdaq-no-change-to-tsx-listing#main https://www.shopify.com/ https://www.shopify.com/login?ui_locales=en https://admin.shopify.com/signup?locale=en&language=en&signup_page=https%3A%2F%2Fwww.shopify.com%2Finvestors%2Fpress-releases%2Fshopify-to-transfer-u-s--stock-exchange-listing-to-nasdaq-no-change-to-tsx-listing&signup_types%5B%5D=paid_trial_experience&signup_types%5B%5D=e_76a08598d26d28733ced7f841ef9c032__treatment https://shopifyinvestors.gcs-web.com/node/8751/pdf https://api.newsfilecorp.com/redirect/yEDYPcGeJ1 https://api.newsfilecorp.com/redirect/1p4jnfVKGJ https://api.newsfilecorp.com/redirect/AMpY1fwrQm",
+  "finding": {
+    "activity_role": "unresolved",
+    "evidence_quote": "Shopify Inc. (NYSE, TSX: SHOP)",
+    "evidence_url": "https://www.shopify.com/investors/press-releases/shopify-to-transfer-u-s--stock-exchange-listing-to-nasdaq-no-change-to-tsx-listing",
+    "new_domain": "",
+    "new_name": "",
+    "observed_country": "",
+    "observed_industry": "",
+    "observed_state": "",
+    "observed_subindustry": "",
+    "observed_value": "Public",
+    "old_domain": "",
+    "old_name": "",
+    "ownership": null,
+    "reason": "The company-bound issuer announcement identifies Shopify Inc. with NYSE and TSX tickers and states that its shares would continue to be listed on the TSX and Nasdaq after the U.S. listing transfer. Current-stage discovery exposed no later completed delisting or take-private.",
+    "shared_linkedin_slug": "shopify",
+    "status": "VERIFIED",
+    "supporting_evidence_quote_1": "",
+    "supporting_evidence_quote_2": "",
+    "supporting_evidence_url_1": "",
+    "supporting_evidence_url_2": "",
+    "target": "stage"
+  }
+}

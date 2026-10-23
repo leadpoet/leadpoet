@@ -3255,6 +3255,10 @@ def _validated_findings(
                         normalized_stage,
                         finding["evidence_quote"],
                         evidence_url=evidence_url,
+                        evidence_final_url=(
+                            str(fetched_final_urls.get(evidence_url) or "")
+                            if fetched_final_urls is not None else None
+                        ),
                         first_party_domains=tuple(first_party_domains),
                         identity_names=tuple(stage_attribution_names),
                         semantic_public_listing=(

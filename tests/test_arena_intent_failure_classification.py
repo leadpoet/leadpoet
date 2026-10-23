@@ -1037,6 +1037,49 @@ def test_failed_primary_keeps_one_existing_penalty_and_no_gate_penalty(detail):
     ) == (0, 1)
 
 
+@pytest.mark.parametrize(
+    "primary",
+    [
+        _detail(),
+        _detail(status="wrong_entity", same_entity="fail"),
+        _detail(status="contradicted", same_entity="pass"),
+        _detail(
+            decision="rejected_freshness",
+            rejection_reason="signal_out_of_window",
+            status="verified",
+            same_entity="pass",
+        ),
+        None,
+    ],
+)
+def test_verified_bonus_does_not_hide_failed_primary_reason(monkeypatch, primary):
+    details = ([primary] if primary else []) + [_verified_detail(matched=1)]
+
+    async def fit(*args, **kwargs):
+        return company_fit_match()
+
+    async def intents(*args, **kwargs):
+        # Aggregation retains the verified bonus, but correctly zeros the score
+        # because the required primary was not verified.
+        return 60.0, 0.0, 1.0, 90, False, details
+
+    monkeypatch.setattr(lead_scorer, "_verify_company_fit", fit)
+    monkeypatch.setattr(lead_scorer, "score_company_competition_intent_signal", intents)
+    result = asyncio.run(lead_scorer.score_company_competition_intent(
+        _company(), _icp(), 0.0, 0.0, set(), integrity_policy=True,
+    ))
+    assert result.failure_reason == lead_scorer._competition_intent_failure_reason(details)
+    assert result.final_score == result.intent_signal_final == 0.0
+    assert result.intent_signal_raw == 60.0
+    assert result.intent_signals_detail == details
+    document = result.model_dump(mode="json")
+    assert type(result).model_validate_json(result.model_dump_json()) == result
+    assert count_penalizable_false_positives(
+        [document], icp_has_intent_signals=True,
+    ) == (0, 1)
+    assert not scorer_breakdown_has_retryable_infrastructure_failure(document)
+
+
 def test_category_mismatch_keeps_1password_verdict_and_penalty_arithmetic():
     detail = _detail(
         status="contradicted",

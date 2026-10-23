@@ -398,6 +398,11 @@ _VENTURE_STAGE_STATEMENT_PATTERNS = {
     stage: _series_stage_statement_patterns(label)
     for stage, label in _VENTURE_SERIES_STAGE_LABELS.items()
 }
+_PUBLIC_EXCHANGE_TICKER_LOCATOR = (
+    r"\(\s*(?i:nasdaq|nyse|asx|tsx)"
+    r"(?:\s*,\s*(?i:nasdaq|nyse|asx|tsx))*"
+    r"\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\)"
+)
 _PUBLIC_COMPANY_ALIAS_RE = re.compile(
     r"\((?:"
     r'"(?!(?i:[^"\r\n]{0,80}\b(?:formerly|previously|not|never|'
@@ -407,7 +412,7 @@ _PUBLIC_COMPANY_ALIAS_RE = re.compile(
     r'no\s+longer|planned|proposed|expected)\b))'
     r'[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*(?:\s+[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*){0,7}”)'
     r'(?:\s+or\s+the\s+(?:"Company"|“Company”))?\)\s+'
-    r'(?=\(\s*(?i:nasdaq|nyse|asx)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\))'
+    rf'(?={_PUBLIC_EXCHANGE_TICKER_LOCATOR})'
 )
 _PUBLIC_STAGE_PROOF_PATTERNS = (
     re.compile(r"\bpublicly\s+traded\b", re.I),
@@ -418,14 +423,14 @@ _PUBLIC_STAGE_PROOF_PATTERNS = (
         r"|(?<=[a-z])\s+"
         r"(?:(?:[A-Z][A-Za-z0-9&,.'’+®-]*(?<!\.)|(?:[A-Z]\.)+|[&+])\s+){0,7}"
         r"(?:[A-Z][A-Za-z0-9&,.'’+®-]*|[&+])\s+)"
-        r"\(\s*(?i:nasdaq|nyse|asx)\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\)",
+        + _PUBLIC_EXCHANGE_TICKER_LOCATOR,
     ),
     re.compile(
         r"\b(?:shares?|stock)\b.{0,35}\b(?:listed|trad(?:e|es|ed))\s+on\b",
         re.I,
     ),
     re.compile(
-        r"\blisted(?:\s+company)?\s+on\s+(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
+        r"\blisted(?:\s+company)?\s+on\s+(?:both\s+)?(?:the\s+)?(?:nasdaq|nyse|new\s+york\s+"
         r"stock\s+exchange|london\s+stock\s+exchange|lse|euronext|tsx|asx|australian\s+securities\s+exchange|"
         r"hkex|hong\s+kong\s+stock\s+exchange|tokyo\s+stock\s+exchange|"
         r"dubai\s+financial\s+market)\b",
@@ -847,8 +852,10 @@ def _public_proof_match_is_negated(quote: str, match: re.Match) -> bool:
 def _public_quote_has_bound_market_locator(
     quote: str,
     identity_names: Sequence[str],
+    *,
+    first_party: bool = False,
 ) -> bool:
-    """Require a named current market locator near the investigated issuer."""
+    """Bind a current market locator to its named or first-party issuer."""
 
     quote = _PUBLIC_COMPANY_ALIAS_RE.sub("", quote)
     names = {
@@ -863,7 +870,7 @@ def _public_quote_has_bound_market_locator(
             if not names:
                 return False
             # Parenthetical exchange forms name the issuer inside the match.
-            if re.search(r"\(\s*(?:nasdaq|nyse|asx)\s*:", match.group(0), re.I):
+            if re.search(_PUBLIC_EXCHANGE_TICKER_LOCATOR, match.group(0)):
                 candidate = match.group(0)
             else:
                 prefix = quote[max(0, match.start() - 180):match.start()]
@@ -912,7 +919,9 @@ def _public_quote_has_bound_market_locator(
                             "incorporated", "limited", "llc", "ltd", "plc",
                         }:
                             subjects.add("".join(parts[:-1]))
-                        if not names.intersection(subjects):
+                        if not names.intersection(subjects) and not (
+                            first_party and candidate.strip().casefold() == "we"
+                        ):
                             continue
                 if re.search(
                     r"\b(?:parent(?:\s+company)?|investor|owner|sponsor)\b",
@@ -922,7 +931,8 @@ def _public_quote_has_bound_market_locator(
                     continue
             compact_candidate = _compact_company_name(candidate)
             if (
-                any(name in compact_candidate for name in names)
+                (any(name in compact_candidate for name in names)
+                 or (first_party and candidate.strip().casefold() == "we"))
                 and not (
                     pattern is _PUBLIC_STAGE_PROOF_PATTERNS[2]
                     and any(
@@ -936,11 +946,69 @@ def _public_quote_has_bound_market_locator(
     return False
 
 
+def _public_quote_has_bound_status(
+    quote: str, identity_names: Sequence[str], *, first_party: bool = False,
+) -> bool:
+    """Bind a first-party public-status predicate to its issuer subject."""
+
+    names = {_compact_company_name(value) for value in identity_names}
+    qualifiers = (
+        r"((?:(?!\b(?:of|in|by|for|with|to|as|and|but|whose|which|who|that)\b)"
+        r"[\w-]+\s+){0,6})"
+    )
+    for match in re.finditer(r"\bpublicly\s+(?:traded|listed\s+(?:shares?|stock))\b", quote, re.I):
+        prefix = re.split(r"[;!?\n]|\.(?=\s+[A-Z])", quote[:match.start()])[-1]
+        subject = (
+            re.fullmatch(r"\s*(.+?)\s+(?:is|are|remains)\s+" + qualifiers, prefix, re.I)
+            or re.fullmatch(r"\s*(.+?),\s+" + qualifiers, prefix, re.I)
+        )
+        if not subject:
+            # "Has publicly traded/listed shares" describes the issuer's own
+            # equity; "has a publicly traded customer/parent" does not.
+            equity = re.match(
+                r"\s+(?:shares?|stock)\b(?!\s+(?:of|in)\b)",
+                quote[match.end():], re.I,
+            ) or re.search(r"\b(?:shares?|stock)$", match.group(0), re.I)
+            if equity:
+                subject = re.fullmatch(r"\s*(.+?)\s+has\s+" + qualifiers, prefix, re.I)
+        if not subject or (
+            _has_stage_proof_uncertainty(subject.group(2))
+            or _STAGE_PROOF_HISTORICAL_RE.search(subject.group(2))
+        ):
+            continue
+        candidate = subject.group(1).strip()
+        # A closed comma appositive modifies the subject; an introductory
+        # clause precedes it. Neither makes the customer/parent in a longer
+        # subject ("Acme's customer OtherCo") the investigated issuer.
+        if candidate.endswith(","):
+            candidate = candidate[:-1].rsplit(",", 1)[0]
+        legal_name = re.sub(
+            r",?\s+(?:inc\.?|incorporated|ltd\.?|limited|corp\.?|corporation|plc|llc)$",
+            "", candidate, flags=re.I,
+        )
+        legal_name = legal_name.rsplit(",", 1)[-1].strip()
+        if not (
+            (first_party and candidate.casefold() == "we")
+            or names.intersection({
+                _compact_company_name(candidate), _compact_company_name(legal_name),
+            })
+        ):
+            continue
+        if _has_affirmed_stage_proof(
+            quote[match.start():], _PUBLIC_STAGE_PROOF_PATTERNS[:2],
+            reject_historical=True,
+            supersession_patterns=_PUBLIC_STAGE_SUPERSESSION_PATTERNS,
+        ):
+            return True
+    return False
+
+
 def _stage_evidence_supports_observation(
     observed: str,
     quote: str,
     *,
     evidence_url: str = "",
+    evidence_final_url: Optional[str] = None,
     first_party_domains: Sequence[str] = (),
     identity_names: Sequence[str] = (),
     semantic_public_listing: bool = False,
@@ -993,15 +1061,23 @@ def _stage_evidence_supports_observation(
         source_domain = _registrable_domain(evidence_url)
     except (NormalizationError, TypeError, ValueError):
         source_domain = ""
-    if source_domain and source_domain in set(first_party_domains):
+    try:
+        final_source_domain = (
+            source_domain if evidence_final_url is None
+            else _registrable_domain(evidence_final_url)
+        )
+    except (NormalizationError, TypeError, ValueError):
+        final_source_domain = ""
+    if (
+        source_domain and source_domain in set(first_party_domains)
+        and final_source_domain in set(first_party_domains)
+    ):
+        # Only a fetched final URL can give an anonymous issuer pronoun
+        # first-party authority. Initial/full-fit and retained-evidence callers
+        # without that provenance must use the existing investigator instead.
+        first_party_issuer = evidence_final_url is not None
         return bool(
-            any(
-                not _public_proof_match_is_negated(quote, match)
-                for match in re.finditer(
-                    r"\bpublicly\s+(?:traded|listed\s+(?:shares?|stock))\b",
-                    quote, re.I,
-                )
-            )
+            _public_quote_has_bound_status(quote, identity_names, first_party=first_party_issuer)
             or any(
                 (match := next((
                     item for item in pattern.finditer(quote)
@@ -1013,7 +1089,7 @@ def _stage_evidence_supports_observation(
                         _PUBLIC_STAGE_PROOF_PATTERNS[4],
                         _PUBLIC_SEMANTIC_LISTING_RE,
                     )
-                    or _public_quote_has_bound_market_locator(quote, identity_names)
+                    or _public_quote_has_bound_market_locator(quote, identity_names, first_party=first_party_issuer)
                     or (
                         not identity_names
                         and pattern is not _PUBLIC_STAGE_PROOF_PATTERNS[2]
@@ -1053,7 +1129,7 @@ def _stage_evidence_supports_observation(
             )
             or (
                 semantic_public_listing
-                and _public_quote_has_bound_market_locator(quote, identity_names)
+                and _public_quote_has_bound_market_locator(quote, identity_names, first_party=first_party_issuer)
             )
             or current_exchange_profile
         )
@@ -11609,7 +11685,13 @@ async def score_company_competition_intent(
         cost_penalty=0,
         time_penalty=0,
         final_score=final_score,
-        failure_reason=None,
+        failure_reason=(
+            _competition_intent_failure_reason(signal_results)
+            if final_score == 0.0
+            and icp.intent_signals
+            and not required_intent_satisfied(signal_results)
+            else None
+        ),
         intent_signals_detail=signal_results,
         verifier_gate_receipts=gate_receipts or None,
     )

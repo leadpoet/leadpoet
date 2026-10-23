@@ -34,12 +34,20 @@ class BodySizeLimitMiddleware:
         if path.startswith("/testnet/"):
             path = path[len("/testnet"):]
         parts = path.split("/")
-        observation_upload = (
+        capture_upload = (
             scope.get("method") == "POST" and len(parts) == 6
             and parts[:4] == ["", "arena", "v1", "runs"]
-            and parts[4] not in {"", ".", ".."} and parts[5] == "training-observations"
+            and parts[4] not in {"", ".", ".."}
+            and parts[5] in {"training-observations", "training-observation-segments"}
         )
-        body_limit = training_observations.MAX_OBJECT_BYTES if observation_upload else self.max_body_bytes
+        if capture_upload:
+            body_limit = (
+                training_observations.MAX_OBJECT_BYTES
+                if parts[5] == "training-observations"
+                else training_observations.MAX_SEGMENT_BYTES
+            )
+        else:
+            body_limit = self.max_body_bytes
         content_length = headers.get(b"content-length")
         if content_length:
             try:

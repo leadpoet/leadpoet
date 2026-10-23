@@ -12,6 +12,21 @@ controls. No company-specific exceptions or additional reviewer/recovery path.
 The coordinating agent owns production application. Authority ends after
 these fixes are deployed and verified. Keep AGENTS.md and CLAUDE.md identical.
 
+## Scoped production authorization: October 23 training evidence additions
+
+On 2026-10-23 the user authorized the three useful additions from the capture
+audit: precise joined completeness reporting, bounded metadata for unread HTTP
+responses, and checked-source references for unavailable company-fit judgments.
+This includes focused regression tests, independent review, safe push/merge,
+canonical deployment, scorer-image publication if required, and bounded
+reward-disabled verification using controlled responses or saved evidence.
+Preserve miner prompts, outputs and requirements, provider calls and accounting,
+qualification, scoring, frozen rounds, accepted work, privacy, credentials,
+rewards and concurrent work. Do not weaken training evidence filters or claim
+native-process coverage that is not observed. No new dependencies or capture
+architecture. The coordinating task owns production actions. Authority ends
+when these additions are deployed and verified. Keep both agent guides identical.
+
 ## Scoped production authorization: October 23 reward thresholds and tooltip
 
 On 2026-10-23 the user explicitly authorized changing Arena reward thresholds

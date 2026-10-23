@@ -22,7 +22,7 @@ import threading
 import time
 import weakref
 from datetime import datetime, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 _ACTIVE = contextvars.ContextVar("arena_http_capture", default=None)
 _INSTALLED = None
@@ -34,6 +34,22 @@ _SOURCE = "runtime_http_v1"
 _PROVIDER_HOSTS = frozenset({"openrouter.ai", "code.deepline.com", "api.scrapingdog.com"})
 
 
+def _redirect_url(url, location):
+    """Keep a bounded routing target, never redirect credentials or parameters."""
+    if not isinstance(location, str) or not location or len(location) > 2000:
+        return None
+    if any(ord(character) < 32 or ord(character) == 127 for character in location):
+        return None
+    try:
+        parts = urlsplit(urljoin(url, location))
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            return None
+        target = urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+        return target if len(target) <= 2000 else None
+    except ValueError:
+        return None
+
+
 class _Body:
     def __init__(self, owner, client, url, status, headers):
         self.owner = owner
@@ -42,6 +58,7 @@ class _Body:
         self.status = int(status)
         self.content_type = str(headers.get("content-type", ""))
         self.content_encoding = str(headers.get("content-encoding", "")).lower()
+        self.redirect_url = _redirect_url(self.url, headers.get("location"))
         identity = str(headers.get("x-leadpoet-call-identity", ""))
         self.identity = identity if (urlsplit(self.url).hostname in _PROVIDER_HOSTS
                                     and re.fullmatch(r"sha256:[0-9a-f]{64}", identity)) else ""
@@ -224,7 +241,8 @@ class Recorder:
 
     def _checkpoint_result(self, kind, result):
         if result is not None:
-            self._count("provider_ack_written" if kind == "response_received" else "web_written")
+            self._count("provider_ack_written" if kind == "response_received" else
+                        "response_metadata_written" if kind == "http_response_metadata" else "web_written")
             return
         self._count("checkpoint_failure")
         getter = getattr(self.checkpoint, "_training_failure_reason", None)
@@ -256,7 +274,13 @@ class Recorder:
             # Do not publish a prefix with a digest for a different byte string.
             return
         if not body.size and not body.complete:
-            self._count("empty_or_unread_response")
+            # Headers are evidence of a response, not evidence of a body read.
+            # Keep this distinct from both a consumed empty body and a prefix.
+            result = self.checkpoint.record_http_response_metadata(
+                url=body.url, status=body.status, content_type=body.content_type,
+                redirect_url=body.redirect_url, retrieved_at=body.retrieved_at,
+                source=_SOURCE, body_unconsumed=True, _retry_ambiguous=True)
+            self._checkpoint_result("http_response_metadata", result)
             return
         media = body.content_type.split(";", 1)[0].strip().lower()
         textual = (not media or media.startswith("text/") or media in {
@@ -493,6 +517,8 @@ class Recorder:
                     authority += ":" + str(port) if port != (443 if scheme == "https" else 80) else ""
                     url = path if path.startswith(("http://", "https://")) else scheme + "://" + authority + path
                     response._arena_capture_meta = (url, response.status, response.headers)
+                    if _ACTIVE.get() is None:
+                        self._body(response, "stdlib", lambda _: response._arena_capture_meta)
                 except Exception:
                     self._count("adapter_failure")
                 return response
@@ -537,6 +563,17 @@ class Recorder:
                     underlying = getattr(response, "_original_response", None)
                     if underlying is not None:
                         underlying._arena_capture_delegated = True
+                        # getresponse already exposed the headers. Transfer its
+                        # provisional state to the adapter that owns body reads.
+                        body = getattr(underlying, "_arena_http_capture_body", None)
+                        if body is not None and body.owner is self and not body.done:
+                            with self.lock:
+                                self.counts["client_" + body.client] -= 1
+                                if not self.counts["client_" + body.client]:
+                                    del self.counts["client_" + body.client]
+                                body.client = "urllib3"
+                                self.counts["client_urllib3"] += 1
+                            response._arena_http_capture_body = body
                     body = self._body(response, "urllib3", metadata)
                     content = getattr(response, "_body", None)
                     if body is not None and isinstance(content, bytes):

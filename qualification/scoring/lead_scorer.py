@@ -8487,6 +8487,10 @@ async def _run_targeted_company_evidence_investigation(
         "usage": dict(investigation.get("usage") or {}),
         "failure_reason": str(investigation.get("failure_reason") or ""),
         "positive_semantic_review": review_positive_semantics,
+        # Host-only observations of this request's already shown sources.
+        # Never source proof, qualification authority, or a later model input.
+        **({"checked_source_provenance": investigation["_checked_source_provenance"]}
+           if investigation.get("_checked_source_provenance") else {}),
     }
     if not prior_dimensions:
         prior_dimensions = (

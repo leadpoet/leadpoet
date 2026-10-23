@@ -23,6 +23,7 @@ class Checkpoint:
     def __init__(self, delay=0):
         self.web = []
         self.binary = []
+        self.metadata = []
         self.acks = []
         self.states = []
         self.delay = delay
@@ -40,6 +41,11 @@ class Checkpoint:
         kwargs.pop("_retry_ambiguous", None)
         self.acks.append(kwargs)
         return len(self.acks)
+
+    def record_http_response_metadata(self, **kwargs):
+        kwargs.pop("_retry_ambiguous", None)
+        self.metadata.append(kwargs)
+        return len(self.metadata)
 
     def record_state_snapshot(self, name, value):
         self.states.append((name, value))
@@ -1084,6 +1090,11 @@ def test_httpx_prebuffered_observation_preserves_stream_contract(asynchronous, c
     if case in {'unread', 'provider'}:
         assert not summary['complete']
         assert checkpoint.web == checkpoint.acks == []
+        if case == 'provider':
+            assert checkpoint.metadata == []
+            assert summary['counts']['provider_ack_ineligible'] == 1
+        else:
+            assert len(checkpoint.metadata) == 1
     else:
         assert summary['complete']
         assert len(checkpoint.web) == 1
@@ -1111,3 +1122,110 @@ def test_httpx_prebuffered_does_not_replace_partial_observed_body():
     assert not summary['complete']
     assert len(checkpoint.web) == 1
     assert_web(checkpoint.web[0], BODY[:2], complete=False)
+
+
+@pytest.mark.parametrize("client", ["stdlib", "urllib", "httpx", "httpx_async", "requests", "urllib3", "aiohttp"])
+def test_unread_response_keeps_metadata_without_consuming_body(endpoint, client):
+    url, server = endpoint
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    connection = response = None
+
+    async def asynchronous():
+        if client == "httpx_async":
+            httpx = pytest.importorskip("httpx")
+            async with httpx.AsyncClient() as session:
+                async with session.stream("GET", url + "/text") as response:
+                    assert response.status_code == 200
+                    assert not response.is_stream_consumed
+        else:
+            aiohttp = pytest.importorskip("aiohttp")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url + "/text") as response:
+                    assert response.status == 200
+
+    try:
+        if client == "stdlib":
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port)
+            connection.request("GET", "/text")
+            response = connection.getresponse()
+            assert response.status == 200  # No read or close before recorder close.
+        elif client == "urllib":
+            response = urlopen(url + "/text")
+            assert response.status == 200
+        elif client == "httpx":
+            httpx = pytest.importorskip("httpx")
+            with httpx.Client() as session:
+                with session.stream("GET", url + "/text") as response:
+                    assert not response.is_stream_consumed
+        elif client == "requests":
+            requests = pytest.importorskip("requests")
+            with requests.get(url + "/text", stream=True) as response:
+                assert not response._content_consumed
+        elif client == "urllib3":
+            urllib3 = pytest.importorskip("urllib3")
+            response = urllib3.PoolManager().request("GET", url + "/text", preload_content=False)
+            assert response._body is None
+        else:
+            asyncio.run(asynchronous())
+    finally:
+        summary = finish(recorder, checkpoint)
+        if response is not None:
+            response.close()
+        if connection is not None:
+            connection.close()
+    assert checkpoint.web == checkpoint.binary == checkpoint.acks == []
+    assert len(checkpoint.metadata) == 1, summary
+    event = checkpoint.metadata[0]
+    assert event["url"] == url + "/text"
+    assert event["status"] == 200 and event["content_type"].startswith("text/plain")
+    assert event["body_unconsumed"] is True
+    assert event["source"] == "runtime_http_v1"
+    assert event["redirect_url"] is None
+    assert summary["counts"]["responses_started"] == 1
+    assert summary["counts"]["response_metadata_written"] == 1
+    assert summary["complete"] is False
+    assert server.paths == ["/text"]
+
+
+def test_unread_redirect_privacy_empty_and_partial_are_distinct():
+    checkpoint = Checkpoint()
+    recorder = install(checkpoint)
+    try:
+        unread = recorder._new("test", "https://example.com/base", 302, {
+            "content-type": "text/html", "location": "https://name:password@other.example/next?token=private#private"})
+        unread.finish(False)
+        empty = recorder._new("test", "https://example.com/empty", 204, {})
+        empty.finish(True)
+        partial = recorder._new("test", "https://example.com/partial", 200, {})
+        partial.add(b"part")
+        partial.finish(False)
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert len(checkpoint.metadata) == 1, summary
+    assert checkpoint.metadata[0]["redirect_url"] == "https://other.example/next"
+    assert len(checkpoint.web) == 2
+    assert_web(checkpoint.web[0], b"", True)
+    assert_web(checkpoint.web[1], b"part", False)
+    assert summary["counts"]["responses_complete"] == 1
+    assert summary["counts"]["responses_partial"] == 2
+
+
+def test_unread_metadata_checkpoint_failure_does_not_change_response(endpoint):
+    class BrokenCheckpoint(Checkpoint):
+        def record_http_response_metadata(self, **kwargs):
+            raise RuntimeError("capture unavailable")
+
+    httpx = pytest.importorskip("httpx")
+    checkpoint = BrokenCheckpoint()
+    recorder = install(checkpoint)
+    try:
+        with httpx.Client() as client:
+            with client.stream("GET", endpoint[0] + "/text") as response:
+                assert response.status_code == 200
+                assert not response.is_stream_consumed
+    finally:
+        summary = finish(recorder, checkpoint)
+    assert summary["counts"]["checkpoint_failure"] == 1
+    assert summary["complete"] is False
+    assert endpoint[1].paths == ["/text"]

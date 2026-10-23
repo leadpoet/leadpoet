@@ -1,3 +1,16 @@
+## Scoped production authorization: October 23 Arena full cycle
+
+On 2026-10-23 the user authorized monitoring the full October 23 Arena cycle,
+fixing confirmed general failures, focused tests, safe push and merge, and
+canonical production deployment with live verification. This includes protected
+read-only inspection and the narrow training-observation segment upload limit
+repair. The coordinating agent owns production application and verification.
+Preserve the frozen ICP bank, scorer and models, accepted work, competition
+rules, privacy, provider billing, rewards, credentials and concurrent work.
+Do not fabricate scores, replay accepted work, force a winner or bypass release
+or security gates. Authority ends after the October 23 full cycle is verified.
+Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 22 unfinished execution recovery
 
 On 2026-10-22 the user authorized completing the full Arena cycle, including

@@ -41,6 +41,63 @@ def test_edge_observation_upload_crosses_both_old_limits_after_lease_preflight(m
     assert calls == ["HEAD", "POST"]
 
 
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+@pytest.mark.parametrize("streamed", [False, True])
+def test_edge_segment_upload_uses_exact_segment_limit(monkeypatch, prefix, streamed):
+    calls = []
+    body = b"x" * arena_proxy.training_observations.MAX_SEGMENT_BYTES
+
+    async def forward(method, path, *, query, body, headers, **routing):
+        calls.append(method)
+        assert method == "POST" and path == "v1/runs/r1/training-observation-segments"
+        assert routing == ({"testnet": True} if prefix.startswith("/testnet") else {})
+        assert headers == {"x-lab-arena-lease": "a" * 64}
+        assert len(body) == arena_proxy.training_observations.MAX_SEGMENT_BYTES
+        assert body == b"x" * len(body)
+        return httpx.Response(200, json={"status": "stored"})
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", forward)
+    client = TestClient(create_app())
+    route = prefix + "/v1/runs/r1/training-observation-segments"
+    content = iter((body[:8 * 1024 * 1024], body[8 * 1024 * 1024:])) if streamed else body
+    result = client.post(route, content=content,
+        headers={"x-lab-arena-lease": "a" * 64, "authorization": "never-forward"})
+    assert result.status_code == 200 and calls == ["POST"]
+    overflow = iter((body, b"x")) if streamed else body + b"x"
+    assert client.post(route, content=overflow).status_code == 413
+    # The route exception must not expand generic or nearby route limits.
+    generic_overflow = b"x" * (arena_proxy._MAX_REQUEST_BYTES + 1)
+    assert client.post(prefix + "/v1/submissions", content=generic_overflow).status_code == 413
+    assert client.post(route + "/extra", content=generic_overflow).status_code == 413
+    assert client.post(route, content=b"{}", headers={"content-encoding": "gzip"}).status_code == 415
+    assert calls == ["POST"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
+async def test_edge_segment_declared_overflow_rejected_before_body_read(monkeypatch, prefix):
+    async def unread():
+        pytest.fail("declared segment overflow must precede body consumption")
+
+    async def no_forward(*args, **kwargs):
+        pytest.fail("declared segment overflow must not contact the sidecar")
+
+    messages = []
+    async def send(message):
+        messages.append(message)
+
+    monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setenv("LAB_ARENA_TESTNET_ENABLED", "true")
+    monkeypatch.setattr(arena_proxy, "_request_sidecar", no_forward)
+    await create_app()({"type": "http", "http_version": "1.1", "method": "POST", "scheme": "http",
+        "path": prefix + "/v1/runs/r1/training-observation-segments", "query_string": b"",
+        "headers": [(b"content-length", str(arena_proxy.training_observations.MAX_SEGMENT_BYTES + 1).encode())],
+        "server": ("testserver", 80), "client": ("127.0.0.1", 1234)}, unread, send)
+    assert [message["status"] for message in messages if message["type"] == "http.response.start"] == [413]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("prefix", ["/arena", "/testnet/arena"])
 @pytest.mark.parametrize("case,status", [("missing", 401), ("malformed", 401),

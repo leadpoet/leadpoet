@@ -881,6 +881,7 @@ def test_gate_outcomes_outside_the_vocabulary_are_dropped_whole():
     "baseline_recovery_scores_not_recorded",
     "infrastructure_retry_cost_schema_unavailable",
     "validator_events_scope_invalid",
+    "source_not_public",
 ])
 def test_a_refusal_code_names_the_4xx_without_its_message(denial_code):
     """``ServiceError.code`` can interpolate an exception message.
@@ -907,6 +908,88 @@ def test_a_refusal_code_names_the_4xx_without_its_message(denial_code):
     (span,) = exp.get_finished_spans()
     assert span.attributes["arena.denial"] == denial_code
     assert "5F3s" not in repr(dict(span.attributes))
+
+
+@pytest.mark.parametrize("public", [False, True], ids=["private", "public"])
+def test_source_disclosure_response_and_private_http_metadata(public):
+    """The real source guard and route retain their response and read behavior."""
+    import io
+    import tarfile
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from lab_arena.api import create_app
+    from lab_arena.service import ArenaService
+
+    raw = io.BytesIO()
+    source = b"def run_icp(icp): return []  # private-source-marker\n"
+    with tarfile.open(fileobj=raw, mode="w:gz") as archive:
+        member = tarfile.TarInfo("harness.py")
+        member.size = len(source)
+        archive.addfile(member, io.BytesIO(source))
+    payload = raw.getvalue()
+    submission_id = "sub-" + "a" * 32
+    submission = {
+        "submission_id": submission_id, "round_id": "arena-2026-10-22",
+        "status": "frozen" if public else "rejected",
+        "source_ref": "private-source-ref", "source_size_bytes": len(payload),
+        "consent": {"public_rerun": True},
+    }
+    round_row = {
+        "round_id": submission["round_id"], "status": "published",
+        "evaluation_date": "2026-10-22", "published_at": "2026-10-23T01:00:00Z",
+        "publication_doc": {"participants": [{"submission_id": submission_id}]},
+    }
+    reads = []
+
+    def read_source(ref, limit):
+        reads.append((ref, limit))
+        return payload
+
+    service = object.__new__(ArenaService)
+    service._store = SimpleNamespace(get_submission=lambda _: submission)
+    service._objects = SimpleNamespace(get_bounded=read_source)
+    service._round = lambda _: round_row
+    service._clock = lambda: datetime(2026, 10, 24, tzinfo=timezone.utc)
+    app = create_app(service)
+    exporter = InMemorySpanExporter()
+    recorder = configure_arena_otel(app, span_exporter=exporter)
+    telemetry.install_recorder(recorder)
+    try:
+        with TestClient(app) as client:
+            response = client.get(
+                "/arena/v1/submissions/" + submission_id + "/code?token=private-token"
+            )
+    finally:
+        telemetry.install_recorder(None)
+    if public:
+        assert response.status_code == 200
+        assert response.json() == {
+            "submission_id": submission_id,
+            "files": [{"path": "harness.py", "content": source.decode()}],
+            "truncated": False,
+        }
+        assert len(reads) == 1
+    else:
+        assert response.status_code == 403
+        assert response.json() == {"status": "rejected", "code": "source_not_public"}
+        assert reads == []
+    (span,) = exporter.get_finished_spans()
+    assert set(span.attributes) == {
+        "http.request.method", "http.route", "http.response.status_code",
+        "arena.denial", "duration_ms",
+    }
+    assert span.attributes["arena.denial"] == ("-" if public else "source_not_public")
+    exported = repr(dict(span.attributes)) + span.name
+    for secret in (submission_id, "private-source-ref", "private-source-marker", "private-token"):
+        assert secret not in exported
+    with TestClient(create_app(service)) as client:
+        uninstrumented = client.get("/arena/v1/submissions/" + submission_id + "/code")
+    assert uninstrumented.status_code == response.status_code
+    assert uninstrumented.content == response.content
+    assert uninstrumented.headers == response.headers
+    assert len(reads) == (2 if public else 0)
+    assert len(exporter.get_finished_spans()) == 1
 
 
 def test_a_denial_code_does_not_leak_into_the_next_request():

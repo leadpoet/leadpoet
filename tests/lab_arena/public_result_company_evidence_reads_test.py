@@ -154,7 +154,7 @@ def test_public_response_keeps_output_and_reduces_authority_reads(reused_failed_
     else:
         assert before == {'run_rows': 2, 'company_rows': 2,
                           'execution-output': 1, 'current-output': 3}
-        assert dict(reads) == {'run_rows': 1, 'company_rows': 1,
+        assert dict(reads) == {'company_rows': 1,
                               'execution-output': 1, 'current-output': 1}
 
 

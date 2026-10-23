@@ -1901,6 +1901,42 @@ class RunState:
     )
 
 
+def _execution_output_observation(
+    result: Optional[runtime.SandboxResult],
+    output: Optional[Mapping[str, Any]],
+    terminal: str,
+    diagnostic: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Observe selected output before provider rules can clear it; retain no body."""
+
+    state, code, count = "not_validated", None, None
+    raw = result.output_bytes if result is not None else None
+    if result is not None:
+        if result.output_error:
+            state, code = "unreadable", "sandbox_output_error"
+        elif raw is None:
+            state, code = "missing", "missing_output"
+        elif terminal == "accepted" and output is not None:
+            count = len(output["companies"])
+            state = "validated_nonempty" if count else "validated_empty"
+        elif diagnostic is not None and diagnostic.get("error_class") == "execution_output_invalid":
+            state = "invalid"
+            reason = diagnostic.get("reason")
+            code = reason if reason in (
+                "invalid_json", "output_schema_mismatch", "output_contract_violation",
+            ) else "output_contract_violation"
+    return {
+        "state": state,
+        "terminal_before_classification": terminal,
+        "failure_code": code,
+        "company_count": count,
+        "output_bytes": len(raw) if raw is not None else None,
+        "output_sha256": contracts.hash_bytes(raw) if raw is not None else None,
+        # These bytes may be the last valid checkpoint, not the rejected final file.
+        "checkpoint_output_invalid": bool(result and result.checkpoint_output_invalid),
+    }
+
+
 def _unresolved_operation_failures(
     latest_calls: Sequence[Mapping[str, Any]],
     recovered_identities: Collection[str],
@@ -4623,6 +4659,15 @@ class AssignmentExecutor:
                     )
                 except Exception:
                     pass
+        execution_output_observation = None
+        if not scoring_run:
+            try:
+                execution_output_observation = _execution_output_observation(
+                    result, output_document, terminal, execution_output_diagnostic,
+                )
+            except Exception:
+                # Optional private diagnostics must not alter classification or completion.
+                pass
         if provider_classification_ready:
             # A shared host key or account failure is infrastructure when it
             # prevents an output. An agent that handles the failure and still
@@ -4892,11 +4937,7 @@ class AssignmentExecutor:
             # Its retained partial envelope must name the final signed cause.
             output_document = dict(output_document, failure=terminal)
         body = {"run_id": lease["run_id"], "result": run_result, "output": output_document, "lease_token": lease_token}
-        _record_trajectory(config, lease, lease_token, [
-            *_provider_error_events(state), *(
-                _decision_events_and_summary(state, finished_at)
-                if not scoring_run else []
-            ), trajectory.event(
+        finished_event = trajectory.event(
             "runtime.finished",
             {"status": terminal, "resource_summary": run_result["resource_summary"],
              "started_at": started_at, "finished_at": finished_at,
@@ -4906,7 +4947,21 @@ class AssignmentExecutor:
              "failure_diagnostic": failure_diagnostic,
              **({"judge_failure_summary": judge_summary} if judge_summary else {})},
             occurred_at=finished_at,
-        ), *_runtime_log_events(result, lease_token, finished_at)])
+        )
+        if execution_output_observation is not None:
+            try:
+                finished_event = trajectory.validate_event({
+                    **finished_event,
+                    "content": {**finished_event["content"], "execution_output": execution_output_observation},
+                })
+            except trajectory.TrajectoryError:
+                # Keep the original lifecycle event if optional metadata reaches its cap.
+                pass
+        _record_trajectory(config, lease, lease_token, [
+            *_provider_error_events(state), *(
+                _decision_events_and_summary(state, finished_at)
+                if not scoring_run else []
+            ), finished_event, *_runtime_log_events(result, lease_token, finished_at)])
         return contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE,
             round_id=round_id,

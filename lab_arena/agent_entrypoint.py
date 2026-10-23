@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import importlib.util
 import inspect
 import json
 import os
 import sys
 import tempfile
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,84 @@ AUTOMATIC_CAPTURE_SUMMARY = ".arena-automatic-capture.json"
 
 class AgentContractError(RuntimeError):
     """The submitted harness does not implement the public boundary."""
+
+
+def _install_proxy_tls_cleanup(source_dir: Path = SOURCE_DIR, dependency_dir: Path = DEPENDENCY_DIR) -> None:
+    """Repair httpcore 1.0.9's failed CONNECT/TLS setup, without retrying.
+
+    Retire this adapter when an official httpcore release fixes upstream #921
+    and the proxy failure/cancellation regressions pass against that release.
+    Unknown or miner-supplied implementations keep their original behavior.
+    """
+    try:
+        specification = importlib.util.find_spec("httpcore")
+        if specification is None or not specification.origin:
+            return
+        origin = Path(specification.origin).resolve()
+        if any(origin.is_relative_to(root.resolve()) for root in (source_dir, dependency_dir)):
+            return
+        import httpcore
+        from httpcore._sync.http_proxy import TunnelHTTPConnection
+        from httpcore._async.http_proxy import AsyncTunnelHTTPConnection
+        from httpcore._synchronization import AsyncShieldCancellation
+        if httpcore.__version__ != "1.0.9":
+            return
+        classes = (
+            (TunnelHTTPConnection, "4a4a9a364dbcb188f7949db92f658695618be323348bd0b79539006b9650961f", False),
+            (AsyncTunnelHTTPConnection, "7027fbe210cc8c4d384301f65b2ce94846fbeeef7db29f9edcfde69af0a48664", True),
+        )
+        for cls, expected, _asynchronous in classes:
+            location = Path(sys.modules[cls.__module__].__file__).resolve()
+            if any(location.is_relative_to(root.resolve()) for root in (source_dir, dependency_dir)):
+                return
+            if hashlib.sha256(inspect.getsource(cls).encode()).hexdigest() != expected:
+                return
+    except Exception:
+        # Optional compatibility must not reject another dependency tree.
+        return
+
+    class CleanupLock:
+        def __init__(self, owner, lock):
+            self.owner, self.lock = weakref.ref(owner), lock
+
+        def __enter__(self):
+            return self.lock.__enter__()
+
+        def __exit__(self, kind, error, traceback):
+            try:
+                owner = self.owner()
+                if kind is not None and owner is not None and not owner._connected:
+                    owner._connection.close()
+            except BaseException:
+                # Cleanup must not replace the original request error.
+                pass
+            return self.lock.__exit__(kind, error, traceback)
+
+    class AsyncCleanupLock(CleanupLock):
+        async def __aenter__(self):
+            return await self.lock.__aenter__()
+
+        async def __aexit__(self, kind, error, traceback):
+            try:
+                owner = self.owner()
+                if kind is not None and owner is not None and not owner._connected:
+                    with AsyncShieldCancellation():
+                        await owner._connection.aclose()
+            except BaseException:
+                pass
+            return await self.lock.__aexit__(kind, error, traceback)
+
+    def adapt(original, lock_class):
+        @functools.wraps(original)
+        def initialize(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            self._connect_lock = lock_class(self, self._connect_lock)
+        initialize._arena_proxy_tls_cleanup = True
+        return initialize
+
+    for cls, _expected, asynchronous in classes:
+        if not getattr(cls.__init__, "_arena_proxy_tls_cleanup", False):
+            cls.__init__ = adapt(cls.__init__, AsyncCleanupLock if asynchronous else CleanupLock)
 
 
 @contextmanager
@@ -105,6 +186,7 @@ def _load_run_icp(source_dir: Path) -> Any:
     sys.path.insert(0, str(DEPENDENCY_DIR))
     sys.path.insert(0, str(source_dir))
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    _install_proxy_tls_cleanup(source_dir, DEPENDENCY_DIR)
     specification = importlib.util.spec_from_file_location(
         "_lab_arena_submission_harness", harness_path
     )

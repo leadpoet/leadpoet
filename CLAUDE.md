@@ -1,3 +1,17 @@
+## Scoped production authorization: October 23 Arena archive cache retirement
+
+The ongoing October 23 reward deployment authority includes the narrow restart
+repair for root-owned Python caches in a retired Arena archive. Validate the
+exact inactive slot and SHA, immutable source, derived cache paths, process
+drain and ingress before cache-only privileged removal. Keep source removal
+unprivileged. Preserve active archives, unknown files, links, source ownership,
+source file modes, credentials, signed states and concurrent work. This covers
+focused regressions, an isolated real root-owned fixture, independent review,
+safe push/merge and canonical restart verification. Do not use broad privileged
+chmod/chown or delete unproved paths. The coordinating task owns production
+actions. Authority ends after the requested deployment and live proof complete.
+Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 23 runtime 484 reveal compatibility
 
 The ongoing October 23 reward deployment and live verification authority

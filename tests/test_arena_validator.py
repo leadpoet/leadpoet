@@ -420,6 +420,7 @@ def test_successful_prior_outcome_report_clears_failed_epoch(tmp_path):
         (479, 481, "subtensor_events_spec481_block9319005.json"),
         (481, 482, "subtensor_events_spec482_block9334846.json"),
         (482, 483, "subtensor_events_spec483_block9342766.json"),
+        (483, 484, "subtensor_events_spec484_block9348526.json"),
     ],
 )
 def test_prior_poll_recovers_signed_journal_after_runtime_upgrade_reveal(

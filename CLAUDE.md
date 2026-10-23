@@ -1,3 +1,17 @@
+## Scoped production authorization: October 23 runtime 484 reveal compatibility
+
+The ongoing October 23 reward deployment and live verification authority
+includes the narrow measured Subtensor runtime 484 compatibility repair needed
+to verify the already signed epoch 25955 reveal. This covers its exact public
+archive profile and fixture, focused failure controls, independent review,
+safe push/merge and canonical normal-validator deployment. Preserve strict
+runtime, metadata, code, event and recipient checks, signed journals, accepted
+states, rewards, pending transactions and concurrent work. Do not add runtime
+autodiscovery, expand FIFO authority, bypass proof checks or broadcast manual
+weights. The coordinating task owns production actions. Authority ends after
+the outstanding automatic reveal proofs and requested live rewards are verified.
+Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 23 company-fit evidence fixes
 
 On 2026-10-23 the user authorized the confirmed headquarters-conflict,

@@ -480,6 +480,28 @@ def _check_filter_value(value: Any) -> str:
     return text
 
 
+_AUTHORITY_TABLES = frozenset({"lab_arena_company_judgments", "lab_arena_signal_judgments"})
+
+
+def _authority_pairs(table, pairs, filters=None, cache_keys=None):
+    """Validate bounded exact identities before either transport performs I/O."""
+    if (table not in _AUTHORITY_TABLES or cache_keys is not None
+            or {"cache_key", "authority_slot"}.intersection(filters or {})):
+        raise ArenaStoreError("authority pair filter is invalid")
+    if not 1 <= len(pairs) <= 25:
+        raise ArenaStoreError("authority pair filter must contain 1 to 25 pairs")
+    checked = []
+    for pair in pairs:
+        if (not isinstance(pair, (tuple, list)) or len(pair) != 2
+                or type(pair[0]) is not str or not pair[0]
+                or type(pair[1]) is not int or not 0 <= pair[1] <= 2147483647):
+            raise ArenaStoreError("authority pair identity is invalid")
+        checked.append((_check_filter_value(pair[0]), pair[1]))
+    if len(set(checked)) != len(checked):
+        raise ArenaStoreError("authority pair identities are duplicated")
+    return checked
+
+
 # ---------------------------------------------------------------------------
 # Transports
 # ---------------------------------------------------------------------------
@@ -506,6 +528,7 @@ class StoreTransport:
         public_result_pair: Optional[tuple[str, str]] = None,
         run_ids: Optional[Sequence[str]] = None,
         cache_keys: Optional[Sequence[str]] = None,
+        authority_pairs: Optional[Sequence[tuple[str, int]]] = None,
         columns: str = "*",
     ) -> List[Dict[str, Any]]:  # pragma: no cover - interface
         raise NotImplementedError
@@ -692,6 +715,7 @@ class PostgrestTransport(StoreTransport):
         public_result_pair=None,
         run_ids=None,
         cache_keys=None,
+        authority_pairs=None,
         columns="*",
     ):
         if table not in TABLES:
@@ -730,7 +754,7 @@ class PostgrestTransport(StoreTransport):
             baseline_id, target_id = (_check_filter_value(value) for value in public_result_pair)
             query.append(("or", "(and(submission_id.eq.%s,kind.eq.execute),and(submission_id.eq.%s,kind.in.(execute,score)))" % (baseline_id, target_id)))
         if run_ids is not None:
-            if table not in ("lab_arena_runs", "lab_arena_trajectory_events") or "run_id" in (filters or {}):
+            if table not in ("lab_arena_runs", "lab_arena_trajectory_events", "lab_arena_signal_judgment_uses") or "run_id" in (filters or {}):
                 raise ArenaStoreError("run inclusion filter is invalid")
             ids = tuple(str(value) for value in run_ids)
             if not ids or any(not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", value) for value in ids):
@@ -743,7 +767,16 @@ class PostgrestTransport(StoreTransport):
             if not keys:
                 raise ArenaStoreError("cache-key inclusion filter is empty")
             query.append(("cache_key", "in.(%s)" % ",".join(keys)))
-        if order == "model_call_sequence":
+        if authority_pairs is not None:
+            pairs = _authority_pairs(table, authority_pairs, filters, cache_keys)
+            query.append(("or", "(%s)" % ",".join(
+                "and(cache_key.eq.%s,authority_slot.eq.%d)" % pair for pair in pairs
+            )))
+        if order == "signal_use_identity":
+            if table != "lab_arena_signal_judgment_uses" or descending:
+                raise ArenaStoreError("signal use ordering requires scoped signal uses")
+            query.append(("order", "run_id.asc,company_index.asc,signal_index.asc"))
+        elif order == "model_call_sequence":
             if (table != "lab_arena_ledger" or not descending
                     or (filters or {}).get("provider") != "openrouter"
                     or (filters or {}).get("entry_kind") != "reservation"
@@ -955,6 +988,7 @@ class PsycopgTransport(StoreTransport):
         public_result_pair=None,
         run_ids=None,
         cache_keys=None,
+        authority_pairs=None,
         columns="*",
     ):
         if table not in TABLES:
@@ -1015,7 +1049,7 @@ class PsycopgTransport(StoreTransport):
             clauses.append("((submission_id = %s AND kind = 'execute') OR (submission_id = %s AND kind IN ('execute', 'score')))")
             values.extend((baseline_id, target_id))
         if run_ids is not None:
-            if table not in ("lab_arena_runs", "lab_arena_trajectory_events") or "run_id" in (filters or {}):
+            if table not in ("lab_arena_runs", "lab_arena_trajectory_events", "lab_arena_signal_judgment_uses") or "run_id" in (filters or {}):
                 raise ArenaStoreError("run inclusion filter is invalid")
             ids = tuple(str(value) for value in run_ids)
             if not ids or any(not re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", value) for value in ids):
@@ -1030,11 +1064,22 @@ class PsycopgTransport(StoreTransport):
                 raise ArenaStoreError("cache-key inclusion filter is empty")
             clauses.append("cache_key = ANY(%s)")
             values.append(list(keys))
+        if authority_pairs is not None:
+            pairs = _authority_pairs(table, authority_pairs, filters, cache_keys)
+            clauses.append("(" + " OR ".join(
+                "(cache_key = %s AND authority_slot = %s)" for _ in pairs
+            ) + ")")
+            for pair in pairs:
+                values.extend(pair)
         projected_columns = ",".join(_RUNTIME_JSON_COLUMNS.get(column, column) for column in columns.split(","))
         sql = "SELECT row_to_json(t) FROM (SELECT %s FROM public.%s" % (projected_columns, table)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        if order == "model_call_sequence":
+        if order == "signal_use_identity":
+            if table != "lab_arena_signal_judgment_uses" or descending:
+                raise ArenaStoreError("signal use ordering requires scoped signal uses")
+            sql += " ORDER BY run_id ASC, company_index ASC, signal_index ASC"
+        elif order == "model_call_sequence":
             if (table != "lab_arena_ledger" or not descending
                     or (filters or {}).get("provider") != "openrouter"
                     or (filters or {}).get("entry_kind") != "reservation"
@@ -2498,6 +2543,68 @@ class ArenaStore:
                 if key not in batch or key in found:
                     raise ArenaStoreError("accepted judgment cache bulk read is invalid")
                 found[key] = row
+        return found
+
+    def _get_authority_batch(self, table, identities):
+        """Read exact requested variants; missing rows remain missing authorities."""
+        found = {}
+        pairs = sorted({pair for identity in identities
+                        for pair in _authority_pairs(table, [identity])})
+        for first in range(0, len(pairs), 25):
+            batch = _authority_pairs(table, pairs[first:first + 25])
+            rows = self._transport.select(table, authority_pairs=batch, limit=26)
+            if len(rows) > len(batch):
+                raise ArenaStoreError("authority bulk read exceeds requested identities")
+            for row in rows:
+                if not isinstance(row, Mapping):
+                    raise ArenaStoreError("authority bulk row is invalid")
+                key, slot = row.get("cache_key"), row.get("authority_slot")
+                if (type(key) is not str or type(slot) is not int
+                        or (key, slot) not in batch or (key, slot) in found):
+                    raise ArenaStoreError("authority bulk read identity is invalid")
+                found[(key, slot)] = row
+        return found
+
+    def get_company_judgment_batch(self, identities):
+        return self._get_authority_batch("lab_arena_company_judgments", identities)
+
+    def get_signal_judgment_batch(self, identities):
+        return self._get_authority_batch("lab_arena_signal_judgments", identities)
+
+    def get_signal_judgment_uses_batch(self, run_ids):
+        """Read complete selected-run uses, bounded by the five by 100 schema."""
+        ids = sorted(set(run_ids))
+        found = {run_id: [] for run_id in ids}
+        for first in range(0, len(ids), 25):
+            batch = ids[first:first + 25]
+            previous = None
+            for offset in range(0, len(batch) * 500 + 1, 500):
+                rows = self._transport.select(
+                    "lab_arena_signal_judgment_uses", run_ids=batch,
+                    order="signal_use_identity", limit=500, offset=offset,
+                    columns=("run_id,company_index,signal_index,cache_key,authority_slot,"
+                             "signal_input_hash,source_score_run_id,judgment_hash"),
+                )
+                if len(rows) > 500:
+                    raise ArenaStoreError("signal use bulk page exceeds limit")
+                for row in rows:
+                    if not isinstance(row, Mapping):
+                        raise ArenaStoreError("signal use bulk row is invalid")
+                    run_id, company, signal = (row.get(field) for field in
+                                              ("run_id", "company_index", "signal_index"))
+                    if (type(run_id) is not str or run_id not in batch
+                            or type(company) is not int or not 0 <= company < 5
+                            or type(signal) is not int or not 0 <= signal < 100):
+                        raise ArenaStoreError("signal use bulk identity is invalid")
+                    identity = (run_id, company, signal)
+                    if previous is not None and identity <= previous:
+                        raise ArenaStoreError("signal use bulk order or uniqueness is invalid")
+                    previous = identity
+                    found[run_id].append(row)
+                if len(rows) < 500:
+                    break
+            else:
+                raise ArenaStoreError("signal use bulk read exceeds schema bound")
         return found
 
     def get_company_judgments(self, cache_key: str) -> List[Dict[str, Any]]:

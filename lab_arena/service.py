@@ -69,6 +69,7 @@ class _PublicResultEvidenceReads(dict):
         self.submissions: Dict[str, Optional[Dict[str, Any]]] = {}
         self.signal_uses: Dict[str, List[Dict[str, Any]]] = {}
         self.signals: Dict[Tuple[str, int], Optional[Dict[str, Any]]] = {}
+        self.companies: Dict[Tuple[str, int], Optional[Dict[str, Any]]] = {}
         self.exclusions: Dict[str, List[str]] = {}
         self.objects: Dict[Tuple[str, int], bytes] = {}
         self._bytes = 0
@@ -86,6 +87,16 @@ class _PublicResultEvidenceReads(dict):
                 rows[identity] = copy.deepcopy(value)
                 self._bytes += size
         return value
+
+    def seed(self, rows: Dict, values: Mapping) -> None:
+        for identity, value in values.items():
+            self._read(rows, identity, lambda value=value: value)
+
+    def company(self, store: ArenaStore, cache_key: str, authority_slot: int) -> Optional[Dict[str, Any]]:
+        if type(cache_key) is not str or type(authority_slot) is not int:
+            return store.get_company_judgment(cache_key, authority_slot)
+        return self._read(self.companies, (cache_key, authority_slot),
+                          lambda: store.get_company_judgment(cache_key, authority_slot))
 
     def run(self, store: ArenaStore, run_id: str) -> Optional[Dict[str, Any]]:
         return self._read(self.runs, run_id, lambda: store.get_run(run_id))
@@ -3327,7 +3338,8 @@ class ArenaService:
         )
         if evidence_reads is not None and identity is not None and identity in evidence_reads:
             return copy.deepcopy(evidence_reads[identity])
-        cached = self._store.get_company_judgment(cache_key, authority_slot)
+        cached = (reads.company(self._store, cache_key, authority_slot) if reads is not None
+                  else self._store.get_company_judgment(cache_key, authority_slot))
         if cached is None:
             raise scoring.ScoringError(
                 "accepted company judgment cache entry is missing"
@@ -8159,6 +8171,68 @@ class ArenaService:
         attributed[hotkey] = False
         return attributed
 
+    def _prefetch_public_result_evidence(
+        self, reads: _PublicResultEvidenceReads, *, round_id: str,
+        execution_runs, score_runs, public_run_ids, source_rows, round_context,
+    ) -> None:
+        """Seed bounded raw reads only; all authority validators still run below."""
+        reads.seed(reads.runs, source_rows)
+        executions = {str(run["run_id"]): run for run in execution_runs}
+        judgments = self._select_scoring_outputs(score_runs, round_row=round_context)
+        pairs = set()
+        signal_companies: Dict[str, set[int]] = {}
+        signal_policy = (((round_context.get("configuration_doc") or {}).get("scorer_policy") or {})
+                         .get("signal_judgment_policy") == signal_judgments.POLICY)
+        for execution_id, judge in judgments.items():
+            if (execution_id not in public_run_ids or judge.get("status") != "accepted"
+                    or execution_id not in executions
+                    or not self._same_scoring_membership(judge, executions[execution_id], round_id=round_id)
+                    or judge.get("company_judgment_refs") is None):
+                continue
+            try:
+                lease = company_judgments.validate_lease_context(
+                    (judge.get("claim_response") or {}).get("company_judgment_cache") or {}
+                )
+            except company_judgments.CompanyJudgmentError:
+                continue  # The unchanged consumer verifier rejects malformed leases.
+            for item in lease["hits"] + lease["misses"]:
+                pairs.add((item["cache_key"], item["authority_slot"]))
+                if not signal_policy:
+                    continue
+                evidence = item.get("evidence_doc")
+                source_id = str(evidence["source_score_run_id"]) if evidence is not None else str(judge["run_id"])
+                if evidence is None:
+                    indexes = {item["company_index"]}
+                else:
+                    source = source_rows.get(source_id) or {}
+                    indexes = {
+                        ref["company_index"] for ref in source.get("company_judgment_refs") or []
+                        if isinstance(ref, Mapping) and type(ref.get("company_index")) is int
+                        and ref.get("cache_key") == item["cache_key"]
+                        and ref.get("company_input_hash") == item["company_input_hash"]
+                    }
+                if indexes:
+                    signal_companies.setdefault(source_id, set()).update(indexes)
+        company_reader = getattr(self._store, "get_company_judgment_batch", None)
+        if pairs and company_reader is not None:
+            rows = company_reader(sorted(pairs))
+            reads.seed(reads.companies, {pair: rows.get(pair) for pair in pairs})
+        uses_reader = getattr(self._store, "get_signal_judgment_uses_batch", None)
+        if signal_companies and uses_reader is not None:
+            reads.seed(reads.signal_uses, uses_reader(sorted(signal_companies)))
+        signal_reader = getattr(self._store, "get_signal_judgment_batch", None)
+        if signal_companies and signal_reader is not None:
+            signal_pairs = set()
+            for run_id, indexes in signal_companies.items():
+                for use in reads.uses(self._store, run_id):
+                    key, slot = use.get("cache_key"), use.get("authority_slot")
+                    if (use.get("company_index") in indexes and type(key) is str
+                            and key and type(slot) is int and 0 <= slot <= 2147483647):
+                        signal_pairs.add((key, slot))
+            if signal_pairs:
+                rows = signal_reader(sorted(signal_pairs))
+                reads.seed(reads.signals, {pair: rows.get(pair) for pair in signal_pairs})
+
     def _public_result_authority_reads(
         self,
         round_id: str,
@@ -8496,7 +8570,17 @@ class ArenaService:
             round_id, execution_runs, score_runs,
             set(outputs) if verification_required else set(), round_context=row,
         )
-        evidence_reads: _CompanyEvidenceReads = _PublicResultEvidenceReads()
+        evidence_reads = _PublicResultEvidenceReads()
+        try:
+            self._prefetch_public_result_evidence(
+                evidence_reads, round_id=round_id, execution_runs=execution_runs,
+                score_runs=score_runs, public_run_ids=set(outputs),
+                source_rows=source_rows, round_context=row,
+            )
+        except ArenaStoreUnavailable:
+            raise
+        except ArenaStoreError as exc:
+            raise ServiceError("public_result_unavailable", 503) from exc
         result = {
             "round_id": round_id, "submission_id": submission_id, "submission": {
                 "miner_hotkey": participant.get("miner_hotkey"),

@@ -115,6 +115,27 @@ def test_single_article_with_related_articles_keeps_normal_extraction(monkeypatc
     assert helpers.extract_article_body(raw) == helpers._trafilatura.extract(raw)
 
 
+@pytest.mark.parametrize("with_article", [False, True])
+def test_nonarchive_visible_fallback_keeps_existing_sidebar_text(monkeypatch, with_article):
+    monkeypatch.setattr(helpers, "_TRAFILATURA_AVAILABLE", False)
+    main = _entry("First", "July 20, 2026") if with_article else "<p>Ordinary page body.</p>"
+    raw = ('<html><body>' + main
+           + '<div class="sidebar">Visible sidebar prose.</div>'
+           + '<div role="complementary">Visible complementary prose.</div></body></html>')
+    expected = helpers.visible_html_text(raw)
+    assert "Visible sidebar prose" in expected
+    assert "Visible complementary prose" in expected
+    assert helpers.extract_article_body(raw) == expected
+
+
+def test_single_article_and_sidebar_article_keep_original_fallback(monkeypatch):
+    monkeypatch.setattr(helpers, "_TRAFILATURA_AVAILABLE", False)
+    raw = ("<html><body>" + _entry("First", "July 20, 2026")
+           + '<div class="sidebar">' + _entry("Second", "January 8, 2026")
+           + "</div></body></html>")
+    assert helpers.extract_article_body(raw) == helpers.visible_html_text(raw)
+
+
 def test_nested_article_does_not_turn_single_article_into_archive(monkeypatch):
     _first_entry_extractor(monkeypatch)
     nested = _entry("First", "July 20, 2026").replace(

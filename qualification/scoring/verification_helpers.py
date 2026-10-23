@@ -306,7 +306,6 @@ def _visible_html_document(
         hidden_classes=hidden_classes,
         hidden_ids=hidden_ids,
         include_scroll_reveal=include_scroll_reveal,
-        exclude_sidebars=archive_articles_sink is not None,
     )
     try:
         parser.feed(content)
@@ -316,11 +315,23 @@ def _visible_html_document(
     text = " ".join(" ".join(parser.parts).split())
     heading = " ".join(" ".join(parser.heading_parts).split())
     heading_prefix = " ".join(" ".join(parser.heading_prefix_parts).split())
-    if archive_articles_sink is not None:
-        archive_articles_sink.extend(
-            " ".join(" ".join(parser.parts[start:end]).split())
-            for start, end in parser.archive_article_spans
+    if archive_articles_sink is not None and len(parser.archive_article_spans) > 1:
+        # Extra sidebar exclusions belong only to archive entry selection.
+        # Keep the ordinary visible document and single-article fallback intact.
+        archive_parser = _VisibleHTMLTextParser(
+            hidden_classes=hidden_classes, hidden_ids=hidden_ids,
+            include_scroll_reveal=include_scroll_reveal, exclude_sidebars=True,
         )
+        try:
+            archive_parser.feed(content)
+            archive_parser.close()
+        except Exception:
+            pass
+        else:
+            archive_articles_sink.extend(
+                " ".join(" ".join(archive_parser.parts[start:end]).split())
+                for start, end in archive_parser.archive_article_spans
+            )
     if heading_context_sink is not None and parser.heading_start is not None:
         # Use the actual visible H1, not a repeated document title or an
         # unrelated archive heading. Keep a small adjacent source window;

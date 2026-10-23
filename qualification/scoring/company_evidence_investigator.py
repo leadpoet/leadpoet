@@ -166,7 +166,7 @@ _KNOWN_BINARY_DOCUMENT_PREFIXES = (
 )
 
 _VENTURE_STAGE_DECISION_GUIDANCE = (
-    "Decide the requested claims from already loaded evidence. For stage, separate "
+    "For the requested venture stage, separate "
     "the completed stage directly proved by fetched exact-company evidence from "
     "its current applicability after required discovery and material-event review. "
     "A company buying another business, revenue or ARR, debt, and grants are not "
@@ -4576,7 +4576,6 @@ async def investigate_company_evidence(
                             ] if (
                                 requested_venture_stage
                                 and "stage" in active_submit_targets
-                                and (force_submit or required_tool == "submit_findings")
                             ) else []),
                         ],
                         "tools": [

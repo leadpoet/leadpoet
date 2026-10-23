@@ -75,9 +75,11 @@ def test_only_active_venture_stage_gets_guidance(monkeypatch, requested, targets
     assert "competing_stage_event" not in properties
 
 
-def test_ordinary_research_messages_do_not_get_guidance(monkeypatch):
+def test_research_and_early_submit_use_the_same_venture_stage_guidance(monkeypatch):
     async def post(turn, payload):
-        assert all(m.get("content") != inv._VENTURE_STAGE_DECISION_GUIDANCE for m in payload["messages"])
+        assert sum(m.get("content") == inv._VENTURE_STAGE_DECISION_GUIDANCE
+                   for m in payload["messages"]) == 1
+        assert payload["tool_choice"] == "required"
         if turn == 1:
             assert any(t["function"]["name"] == "fetch_page" for t in payload["tools"])
             return 200, _response("fetch_page", {"url": STAGE_URL})

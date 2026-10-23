@@ -9,6 +9,7 @@ import pytest
 from lab_arena import broker as br
 from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import lead_scorer
+from tests.lab_arena.score_compat_capability_test import firecrawl_catalog
 from tests.lab_arena.test_lab_arena_broker import (
     CONTEXT, DL_KEY, FakeTransport, deepline_history, deepline_history_entry,
     make_broker,
@@ -48,7 +49,9 @@ def routed_call(*, url=POST_URL, body=None, credits=0):
         credential_for=lambda *_: DL_KEY,
         funding_source_for=lambda _context: "miner_key",
     )
-    context = replace(CONTEXT, kind="score", round_id="arena-2026-10-09")
+    # Keep the route consistent with this fixture's Firecrawl response and billing.
+    context = replace(CONTEXT, kind="score", round_id="arena-2026-10-09",
+                      deepline_catalog=firecrawl_catalog())
     arguments = dict(
         operation_id="scrapingdog.scrape", parameters={"url": url},
         action_sequence=0, timeout_ms=30_000,

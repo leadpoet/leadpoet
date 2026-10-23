@@ -128,7 +128,12 @@ def test_latus_citation_correction_keeps_independent_stage(monkeypatch):
     assert feedback["untrusted_non_rejected_source_context"][0]["target"] == "stage"
     assert STAGE_QUOTE in feedback["untrusted_non_rejected_source_context"][0]["source_context"]
     assert "Only the targets in rejected_findings failed validation" in feedback["instruction"]
-    assert "specific source fact and URL" in feedback["instruction"]
+    assert "specific conflicting source fact and URL" in feedback["instruction"]
+    assert "prior statuses and observations are not authoritative" in feedback[
+        "instruction"
+    ]
+    assert "does not force acceptance" in feedback["instruction"]
+    assert "missing condition or qualifier" in feedback["instruction"]
     assert result["_completed_submit"] is True
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["status"] == "VERIFIED"

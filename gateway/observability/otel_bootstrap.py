@@ -539,6 +539,7 @@ ARENA_DENIAL_CODES = frozenset(
         "signal_judgment_policy_unavailable",
         "signal_judgment_request_invalid",
         "signal_judgment_result_invalid",
+        "source_not_public",
         "source_upload_not_configured",
         "source_upload_unavailable",
         "stage_invalid",

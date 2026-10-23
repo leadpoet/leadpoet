@@ -1,3 +1,18 @@
+## Scoped production authorization: October 23 source and correction integrity
+
+On 2026-10-23 the user authorized the general source-identity and check-specific
+citation-correction fixes for the reproduced Latus false rejections. This
+includes protected read-only inspection, captured-case and bounded paid tests,
+safe push/merge, scorer-image publication, canonical deployment and live proof.
+Use the existing investigator and source records. Preserve qualification,
+score arithmetic, cost limits, genuine semantic revisions, frozen official
+rounds, accepted results, credentials, rewards and concurrent work. Do not
+blanket-decode URLs, retain positives against contradictory evidence, add a new
+review/recovery system or create company-specific exceptions. Release only
+measured improvements with negative and genuine-revision controls. Keep tests
+inside existing approved spend. The coordinating task owns production actions.
+Authority ends after deployment and live verification. Keep both guides equal.
+
 ## Scoped production authorization: October 23 judgment integrity fixes
 
 On 2026-10-23 the user authorized the confirmed archive evidence, public-listing

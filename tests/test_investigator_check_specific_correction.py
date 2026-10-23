@@ -128,6 +128,13 @@ def test_latus_citation_correction_keeps_independent_stage(monkeypatch):
     assert feedback["untrusted_non_rejected_source_context"][0]["target"] == "stage"
     assert STAGE_QUOTE in feedback["untrusted_non_rejected_source_context"][0]["source_context"]
     assert "Only the targets in rejected_findings failed validation" in feedback["instruction"]
+    assert "no finding is retained implicitly" in feedback["instruction"]
+    assert "Resubmit every requested target with all its fields" in feedback[
+        "instruction"
+    ]
+    assert "evidence_url and exact continuous evidence_quote" in feedback[
+        "instruction"
+    ]
     assert "specific conflicting source fact and URL" in feedback["instruction"]
     assert "prior statuses and observations are not authoritative" in feedback[
         "instruction"
@@ -179,3 +186,15 @@ def test_wrong_company_quote_does_not_prove_attribute():
         first_party_domains={"latusbio.com"}, identity_names={"latus bio"},
     )
     assert validated["required_attribute"]["status"] == "UNPROVEN"
+
+
+def test_blank_stage_citation_cannot_inherit_prior_validated_proof(monkeypatch):
+    blank_stage = _stage(evidence_url="", evidence_quote="")
+    result, requests = _run(monkeypatch, revised_stage=blank_stage)
+    assert len(requests) > 2
+    rejection = json.loads(requests[2]["messages"][-1]["content"])
+    assert rejection["rejected_findings"] == [{
+        "target": "stage",
+        "reason": investigator.MISSING_CITATION_REASON,
+    }]
+    assert result["claims"].get("stage", {}).get("status") != "VERIFIED"

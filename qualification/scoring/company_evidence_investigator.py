@@ -165,22 +165,6 @@ _KNOWN_BINARY_DOCUMENT_PREFIXES = (
     "PK\x03\x04",
 )
 
-_VENTURE_STAGE_DECISION_GUIDANCE = (
-    "For the requested venture stage, separate "
-    "the completed stage directly proved by fetched exact-company evidence from "
-    "its current applicability after required discovery and material-event review. "
-    "A company buying another business, revenue or ARR, debt, and grants are not "
-    "subject-stage changes and cannot alone create currentness uncertainty. When "
-    "required discovery succeeded and review exposes no concrete material conflict, "
-    "submit the supported canonical stage and its exact fetched quote. Do not demand "
-    "a fresh round or proof of absence of all later events. Keep UNPROVEN "
-    "for missing proof, failed required discovery, an unavailable disputed material "
-    "source, an unresolved subject acquisition/IPO/take-private, or unresolved material "
-    "chronology. Reuse loaded exact facts across targets only when they prove every "
-    "mandatory condition; another target status is not proof. Do not infer stage "
-    "from prior or requested labels. Use only the currently allowed tools and budget."
-)
-
 _SYSTEM_PROMPT = """You are a bounded company evidence investigator.
 Investigate only the requested stage, rebrand, headcount, industry/activity,
 required-attribute, and headquarters claims. Examples never add subscription,
@@ -4568,15 +4552,6 @@ async def investigate_company_evidence(
                         "messages": [
                             {"role": "system", "content": _SYSTEM_PROMPT},
                             *messages,
-                            *([
-                                {
-                                    "role": "user",
-                                    "content": _VENTURE_STAGE_DECISION_GUIDANCE,
-                                },
-                            ] if (
-                                requested_venture_stage
-                                and "stage" in active_submit_targets
-                            ) else []),
                         ],
                         "tools": [
                             {

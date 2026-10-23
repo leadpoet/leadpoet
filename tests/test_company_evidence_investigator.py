@@ -15822,7 +15822,7 @@ def test_final_unproven_with_evidence_gets_one_submit_only_correction(monkeypatc
     assert len(provider_searches) == investigator.MAX_SEARCH_CALLS
     assert len(reasoning_requests) == investigator.MAX_REASONING_TURNS + 1
     correction_feedback = json.loads(
-        next(m["content"] for m in reversed(reasoning_requests[-1]["messages"]) if m["role"] == "tool")
+        reasoning_requests[-1]["messages"][-1]["content"]
     )
     assert correction_feedback["rejected_findings"] == [{
         "target": "stage",

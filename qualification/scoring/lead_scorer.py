@@ -5434,17 +5434,17 @@ async def _refresh_linkedin_employee_size_observation(
     return projected
 
 
-def _validated_first_party_coheadquarters(
+def _validated_first_party_headquarters(
     finding: Mapping[str, Any],
     *,
     verified_identity: Mapping[str, Any],
     company: CompanyOutput,
 ) -> bool:
-    """Keep only an affirmative, exact-company co-HQ finding from the reviewer.
+    """Retain the investigator's validated first-party headquarters finding.
 
-    The investigator owns fetched-text validation and source chronology. A
-    profile conflict cannot be resolved by a generic matching office or by a
-    broad web verifier observation that did not pass that investigation.
+    Existing fetched-source validation and the investigator decide company
+    attribution, headquarters meaning and chronology. This check preserves
+    provenance and objective location support without a second language rule.
     """
 
     domain = str(verified_identity.get("registrable_dns_domain") or "")
@@ -5456,24 +5456,13 @@ def _validated_first_party_coheadquarters(
         and domain and _registrable_domain(finding.get("evidence_url")) == domain
         and domain == _registrable_domain(company.company_website)
         and _company_name(name) == _company_name(company.company_name)
-        and _quote_names_company(quote, {_company_name(name)})
     ):
         return False
-    # Require the company itself as the affirmative present-tense subject.
-    # "The company" is admitted only inside its own named About section.
-    subject = re.escape(name)
-    if re.match(r"\s*(?:[#*]+\s*)?About\s+" + subject + r"\b", quote, re.I):
-        subject = "(?:" + subject + r"|the company)"
-    statement = re.search(
-        r"(?:^|[.\n]\s*)" + subject
-        + r"\s+is\s+co[-\s]?headquartered\s+in\s+[^.\n]+",
-        quote, re.I,
-    )
-    return bool(statement and _quote_supports_headquarters(
-        statement.group(),
+    return _quote_supports_headquarters(
+        quote,
         observed_country=str(finding.get("observed_country") or ""),
         observed_state=str(finding.get("observed_state") or ""),
-    ))
+    )
 
 
 def _project_verified_linkedin_headquarters(
@@ -5536,12 +5525,16 @@ def _project_verified_linkedin_headquarters(
             finding = candidates[0]
     if not finding:
         return dict(verdict)
-    if _validated_first_party_coheadquarters(
-        validated_geography_finding or {},
-        verified_identity=verified_identity, company=company,
+    if (
+        _resolve_country((validated_geography_finding or {}).get("observed_country"))
+        != _resolve_country(finding["observed_country"])
+        and _validated_first_party_headquarters(
+            validated_geography_finding or {},
+            verified_identity=verified_identity, company=company,
+        )
     ):
-        # A profile can list just one of several global headquarters. Keep the
-        # independently fetched, current co-HQ fact; ordinary deterministic
+        # Keep the existing investigator's exact-company current HQ finding.
+        # Broad web observations cannot enter here. Ordinary deterministic
         # submitted/ICP geography checks still decide qualification.
         return _project_investigator_geography(
             verdict, validated_geography_finding, icp=icp,

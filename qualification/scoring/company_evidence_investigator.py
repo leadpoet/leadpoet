@@ -433,14 +433,15 @@ Use verified exact-company LinkedIn headquarters first: quote the identity-bound
 Headquarters field or server-fetched "harvestapi_get_company
 locations.headquarter=true" projection, never generic profile locations.
 A valid outside-region LinkedIn HQ remains a contradiction unless fetched
-first-party evidence proves the same company's current co-headquarters.
-A profile can omit another global co-HQ. Compare dates and current company
-statements in existing submitted first-party sources. Use an affirmative
-present-tense co-headquartered quote; an old, superseded, proposed or ambiguous
-claim does not resolve a conflict. A named About section can bind "The company"
-to its co-HQ. Retain the LinkedIn contradiction absent current co-HQ proof;
-never substitute a convenient matching office or another entity's location.
-Apart from the explicit current co-HQ conflict above:
+first-party evidence proves the same company's current headquarters status
+and resolves the conflict. A profile can omit another global headquarters.
+Judge the meaning of exact fetched text, including first-person company
+statements, without requiring one wording for headquarters or co-headquarters.
+Compare source dates and current company statements. An old, superseded,
+proposed, negated or ambiguous claim does not resolve a conflict. A named About
+section can bind "The company" to its HQ. Retain the LinkedIn contradiction
+absent current HQ proof; never substitute a convenient matching office or
+another entity's location. Apart from this resolved current HQ conflict:
 Use company contact/about pages and other web evidence only when LinkedIn supplies no usable explicit HQ.
 An inaccessible or wrong-entity profile supplies no usable fact. A navigation
 label is only a fetch locator, not evidence.

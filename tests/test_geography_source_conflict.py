@@ -86,6 +86,18 @@ def test_validated_current_captured_coheadquarters_survives_profile_projection()
 
 
 @pytest.mark.parametrize('quote', [
+    'Airwallex maintains dual global headquarters in Singapore and San Francisco.',
+    'Airwallex has headquarters in Singapore and San Francisco.',
+    'About Airwallex\nWe maintain our global headquarters in Singapore and San Francisco.',
+    'Airwallex operates from global headquarters in Singapore and San Francisco.',
+])
+def test_validated_current_headquarters_does_not_require_one_sentence_template(quote):
+    proof = finding(quote)
+    assert proof['status'] == 'VERIFIED'
+    assert project(proof)['observed_hq_country'] == 'Singapore'
+
+
+@pytest.mark.parametrize('quote', [
     'Airwallex has an office in Singapore, but its headquarters is in Hong Kong.',
     'Airwallex is headquartered in Hong Kong. Its customer is co-headquartered in Singapore.',
     'Airwallex was co-headquartered in Singapore and San Francisco.',
@@ -96,8 +108,11 @@ def test_validated_current_captured_coheadquarters_survives_profile_projection()
     'Airwallex has offices in Singapore. Airwallex is co-headquartered in Hong Kong and London.',
     'Other Company is co-headquartered in Singapore and San Francisco.',
 ])
-def test_office_wrong_entity_historical_and_proposed_claims_do_not_override_profile(quote):
-    projected = project(finding(quote))
+def test_completed_semantic_negative_does_not_override_profile(quote):
+    # The existing investigator decides these meanings. This offline check
+    # verifies integration of its negative decision; actual-model controls
+    # must separately establish that it interprets each source correctly.
+    projected = project(finding(quote, status='UNPROVEN'))
     assert projected['observed_hq_country'] == 'Hong Kong'
     assert projected['geography_evidence_url'] == FIXTURE['headquarters']['url']
 
@@ -149,7 +164,7 @@ def test_existing_targeted_investigator_projects_fetched_coheadquarters(monkeypa
     assert updated.details['dimension_decisions']['geography'] == 'match'
 
 
-@pytest.mark.parametrize('stage_required,proof_kind', [(True, 'current'), (False, 'current'), (False, 'office'), (False, 'wrong-entity'), (False, 'missing')])
+@pytest.mark.parametrize('stage_required,proof_kind', [(True, 'current'), (False, 'current'), (False, 'office'), (False, 'regional'), (False, 'customer'), (False, 'old'), (False, 'future'), (False, 'wrong-entity'), (False, 'missing')])
 def test_captured_company_runs_through_full_company_reverification(monkeypatch, stage_required, proof_kind):
     from unittest.mock import AsyncMock
     from qualification.scoring.company_fit_decision import company_fit_match
@@ -172,9 +187,16 @@ def test_captured_company_runs_through_full_company_reverification(monkeypatch, 
         captured.append(kwargs)
         stage = company().company_stage_evidence[2]
         quote = FIXTURE['quote']
-        if proof_kind == 'office': quote = 'Airwallex has a regional headquarters and office in Singapore.'
+        if proof_kind == 'office': quote = 'Airwallex has an office in Singapore.'
+        elif proof_kind == 'regional': quote = 'Airwallex has a regional headquarters in Singapore.'
+        elif proof_kind == 'customer': quote = 'Airwallex customer Nium has headquarters in Singapore.'
+        elif proof_kind == 'old': quote = 'Airwallex formerly had headquarters in Singapore.'
+        elif proof_kind == 'future': quote = 'Airwallex will establish headquarters in Singapore.'
         elif proof_kind == 'wrong-entity': quote = 'Other Company is co-headquartered in Singapore and San Francisco.'
-        findings = [{'target': 'geography', 'status': 'VERIFIED', 'observed_country': 'Singapore',
+        # Mock completed semantic negatives, not a claim that the literal
+        # citation validator determines chronology or branch relationships.
+        semantic_negative = proof_kind in {'regional', 'customer', 'old', 'future'}
+        findings = [{'target': 'geography', 'status': 'UNPROVEN' if semantic_negative else 'VERIFIED', 'observed_country': 'Singapore',
             'observed_state': '', 'evidence_url': FIXTURE['source_url'], 'evidence_quote': quote}]
         if stage_required:
             findings.insert(0, {'target': 'stage', 'status': 'VERIFIED', 'observed_value': 'Series C+',
@@ -199,3 +221,16 @@ def test_captured_company_runs_through_full_company_reverification(monkeypatch, 
     expected = 'match' if proof_kind == 'current' else 'mismatch'
     assert final.details['dimension_decisions']['geography'] == expected
     assert final.decision == expected
+
+
+def test_broad_web_observation_cannot_resolve_profile_conflict():
+    broad = verdict()
+    broad.update(observed_hq_country='Singapore', geography_matches=True,
+        geography_evidence_url=FIXTURE['source_url'], geography_evidence_quote=FIXTURE['quote'])
+    # A plausible raw observation is not an investigator-validated finding.
+    assert project({}, observation=broad)['observed_hq_country'] == 'Hong Kong'
+
+
+@pytest.mark.parametrize('status', ['UNPROVEN', 'CONTRADICTED'])
+def test_nonverified_investigator_finding_retains_profile(status):
+    assert project(finding(status=status))['observed_hq_country'] == 'Hong Kong'

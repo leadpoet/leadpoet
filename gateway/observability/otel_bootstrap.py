@@ -325,6 +325,13 @@ ARENA_OPERATION_UNKNOWN = "unknown"
 # string. ``ARENA_TOOL_NONE`` is the value for a call that has no tool — any
 # non-Deepline provider, and a Deepline operation with no resolvable tool.
 ARENA_TOOL_NONE = "-"
+ARENA_MODEL_NONE = "-"
+# The same bound the round's price table admits a model id under
+# (``lab_arena.operations._MODEL_ID_RE``). A provider call that names anything
+# else exports the sentinel, so the attribute can never carry free text.
+_ARENA_MODEL_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+)
 ARENA_DEEPLINE_TOOLS = frozenset(
     {
         "contextdev_get_web_scrape_markdown",
@@ -741,6 +748,7 @@ PROVIDER_SPAN_ATTRIBUTE_TYPES: Dict[str, tuple] = {
     "arena.provider": (str,),
     "arena.operation": (str,),
     "arena.tool": (str,),
+    "arena.model": (str,),
     "arena.outcome": (str,),
     "arena.error_code": (str,),
     "arena.error_type": (str,),
@@ -1141,6 +1149,11 @@ def _validating_exporter(
             tool not in ARENA_DEEPLINE_TOOLS or provider != "deepline"
         ):
             return "tool"
+        model = attributes["arena.model"]
+        if model != ARENA_MODEL_NONE and (
+            _ARENA_MODEL_RE.fullmatch(model) is None or provider != "openrouter"
+        ):
+            return "model"
         if attributes["arena.outcome"] not in ARENA_PROVIDER_OUTCOMES:
             return "outcome"
         error_code = attributes["arena.error_code"]
@@ -1677,6 +1690,7 @@ class ArenaTelemetry:
         error_code: str = ARENA_NO_ERROR,
         error_type: str = ARENA_NO_ERROR,
         tool: str = ARENA_TOOL_NONE,
+        model: str = ARENA_MODEL_NONE,
         http_status: int = 0,
         provider_status: int = 0,
         attempts: int = 1,
@@ -1694,6 +1708,7 @@ class ArenaTelemetry:
                 error_code=error_code,
                 error_type=error_type,
                 tool=tool,
+                model=model,
                 http_status=http_status,
                 provider_status=provider_status,
                 attempts=attempts,
@@ -1715,6 +1730,7 @@ class ArenaTelemetry:
         error_code: str,
         error_type: str,
         tool: str,
+        model: str,
         http_status: int,
         provider_status: int,
         attempts: int,
@@ -1736,6 +1752,7 @@ class ArenaTelemetry:
         span.set_attribute("arena.provider", str(provider))
         span.set_attribute("arena.operation", str(operation))
         span.set_attribute("arena.tool", str(tool))
+        span.set_attribute("arena.model", str(model))
         span.set_attribute("arena.outcome", str(outcome))
         span.set_attribute("arena.error_code", str(error_code))
         span.set_attribute("arena.error_type", str(error_type))

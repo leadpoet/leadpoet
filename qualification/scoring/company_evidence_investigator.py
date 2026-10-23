@@ -129,8 +129,25 @@ MISSING_INDUSTRY_OBSERVATION_REASON = (
     "the exact quote and company binding were not rejected"
 )
 REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON = (
-    "supporting quote was not company-bound in a loaded source"
+    "supporting quote did not identify the investigated company"
 )
+REQUIRED_ATTRIBUTE_SUPPORT_MISSING_CITATION_REASON = (
+    "supporting evidence requires a valid URL and a nonempty exact quote"
+)
+REQUIRED_ATTRIBUTE_SUPPORT_UNLOADED_SOURCE_REASON = "supporting source URL was not loaded"
+REQUIRED_ATTRIBUTE_SUPPORT_QUOTE_ABSENT_REASON = (
+    "supporting quote was not present in fetched source"
+)
+REQUIRED_ATTRIBUTE_SUPPORT_OVERSIZED_QUOTE_REASON = (
+    "supporting quote exceeds the 2000-character limit"
+)
+REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASONS = frozenset({
+    REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+    REQUIRED_ATTRIBUTE_SUPPORT_MISSING_CITATION_REASON,
+    REQUIRED_ATTRIBUTE_SUPPORT_UNLOADED_SOURCE_REASON,
+    REQUIRED_ATTRIBUTE_SUPPORT_QUOTE_ABSENT_REASON,
+    REQUIRED_ATTRIBUTE_SUPPORT_OVERSIZED_QUOTE_REASON,
+})
 _IDENTITY_LINK_CONTEXT_MARKER = (
     "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]]"
 )
@@ -381,9 +398,9 @@ mandatory condition still needs proof there.
 Judge the whole attribute from all loaded company-bound facts. Rejecting a
 citation does not reject independent evidence of the company's own offering.
 Subsidiary facts require explicit parent binding.
-If industry's fetched activity quote proves the whole attribute, reuse its URL
-and quote; no different source is required. Industry labels or VERIFIED status
-alone never prove an attribute.
+Reuse exact loaded quotes across targets, including stage and industry, when
+they prove attribute conditions. Labels or VERIFIED status alone never prove
+an attribute.
 For compound attributes, prove every actual condition for the same company and
 product with exact loaded company-bound quotes; explain their joint proof.
 Do not add conditions absent from the criterion. Missing required proof or
@@ -2818,6 +2835,41 @@ def _semantic_ownership_proof(
     return bool(owner_words) and f" {owner_words} " in f" {quote_words} "
 
 
+def _required_attribute_support_rejection(
+    url: Any,
+    quote: Any,
+    *,
+    fetched_pages: Mapping[str, str],
+    fetched_final_urls: Optional[Mapping[str, str]],
+    first_party_domains: set[str],
+    identity_names: set[str],
+    identity_anchor: Mapping[str, Any],
+) -> Optional[str]:
+    """Keep support gates separate so a citation retry repairs the failed check."""
+
+    url = _safe_https_url(url)
+    if not url or not isinstance(quote, str) or not quote:
+        return REQUIRED_ATTRIBUTE_SUPPORT_MISSING_CITATION_REASON
+    if len(quote) > 2000:
+        return REQUIRED_ATTRIBUTE_SUPPORT_OVERSIZED_QUOTE_REASON
+    if not fetched_pages.get(url):
+        return REQUIRED_ATTRIBUTE_SUPPORT_UNLOADED_SOURCE_REASON
+    if not _quote_occurs(quote, fetched_pages[url]):
+        return REQUIRED_ATTRIBUTE_SUPPORT_QUOTE_ABSENT_REASON
+    same_company_source = bool(
+        _complete_verified_first_party_identity(
+            url, first_party_domains, identity_anchor,
+        )
+        and _complete_verified_first_party_identity(
+            str((fetched_final_urls or {}).get(url) or ""),
+            first_party_domains, identity_anchor,
+        )
+    )
+    if not (same_company_source or _quote_names_company(quote, identity_names)):
+        return REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
+    return None
+
+
 def _validated_findings(
     arguments: Any,
     *,
@@ -3389,6 +3441,7 @@ def _validated_findings(
                     )
         if target == "required_attribute" and finding["status"] != "UNPROVEN":
             validated_support: list[dict[str, str]] = []
+            support_rejection = REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
             if not isinstance(raw_support, list) or len(raw_support) > 2:
                 raw_support = None
             if raw_support is not None:
@@ -3398,27 +3451,15 @@ def _validated_findings(
                         break
                     url = _safe_https_url(item.get("url"))
                     quote = item.get("quote")
-                    same_company_source = bool(
-                        _complete_verified_first_party_identity(
-                            url, first_party_domains, identity_anchor or {}
-                        )
-                        and _complete_verified_first_party_identity(
-                            str((fetched_final_urls or {}).get(url) or ""),
-                            first_party_domains,
-                            identity_anchor or {},
-                        )
+                    rejection = _required_attribute_support_rejection(
+                        url, quote, fetched_pages=fetched_pages,
+                        fetched_final_urls=fetched_final_urls,
+                        first_party_domains=first_party_domains,
+                        identity_names=attribution_names,
+                        identity_anchor=identity_anchor or {},
                     )
-                    if (
-                        not url
-                        or not isinstance(quote, str)
-                        or not quote
-                        or len(quote) > 2000
-                        or not _quote_occurs(quote, fetched_pages.get(url, ""))
-                        or not (
-                            same_company_source
-                            or _quote_names_company(quote, attribution_names)
-                        )
-                    ):
+                    if rejection:
+                        support_rejection = rejection
                         raw_support = None
                         break
                     validated_support.append({"url": url, "quote": quote})
@@ -3427,7 +3468,7 @@ def _validated_findings(
                     status="UNPROVEN",
                     evidence_url="",
                     evidence_quote="",
-                    reason=REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+                    reason=support_rejection,
                 )
             else:
                 finding["supporting_evidence"] = validated_support
@@ -4862,8 +4903,32 @@ async def investigate_company_evidence(
                             continue
                         rejected_finding = {"target": target, "reason": reason}
                         source_url = _safe_https_url(submitted.get("evidence_url"))
+                        source_quote = str(submitted.get("evidence_quote") or "")
+                        if (
+                            target == "required_attribute"
+                            and reason in REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASONS
+                        ):
+                            for slot in (1, 2):
+                                support_url = submitted.get(f"supporting_evidence_url_{slot}")
+                                support_quote = submitted.get(f"supporting_evidence_quote_{slot}")
+                                if not (support_url or support_quote):
+                                    continue
+                                if _required_attribute_support_rejection(
+                                    support_url, support_quote,
+                                    fetched_pages=fetched_pages,
+                                    fetched_final_urls=fetched_final_urls,
+                                    first_party_domains=first_party_domains,
+                                    identity_names=identity_names,
+                                    identity_anchor=identity_anchor,
+                                ):
+                                    rejected_finding["supporting_evidence_slot"] = slot
+                                    source_url = _safe_https_url(support_url)
+                                    source_quote = str(support_quote or "")
+                                    if source_url:
+                                        rejected_finding["source_url"] = source_url
+                                    break
                         source_context = _source_context_for_quote(
-                            str(submitted.get("evidence_quote") or ""),
+                            source_quote,
                             fetched_pages.get(source_url, ""),
                         )
                         if source_url and source_context:
@@ -4930,7 +4995,7 @@ async def investigate_company_evidence(
                     required_attribute_support_repair = any(
                         item.get("target") == "required_attribute"
                         and item.get("reason")
-                        == REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
+                        in REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASONS
                         for item in rejected
                     )
                     force_stage_search = bool(
@@ -5275,6 +5340,19 @@ async def investigate_company_evidence(
                                         )
                                         else ""
                                     )
+                                )
+                                + (
+                                    "Review exact loaded facts from every target, including "
+                                    "stage and industry. Reuse their URLs and exact quotes "
+                                    "when they prove an attribute condition; use up to two "
+                                    "additional exact supporting URL/quote pairs for a "
+                                    "compound attribute. A quote-presence failure requires "
+                                    "copying the exact source span, not discarding an "
+                                    "independently supported fact. Recheck company identity, "
+                                    "current evidence, every mandatory condition, and "
+                                    "conflicts; another target's status is not proof. "
+                                    if "required_attribute" in active_submit_targets
+                                    else ""
                                 )
                                 + (
                                     "The supporting classification URL/quote was not present "

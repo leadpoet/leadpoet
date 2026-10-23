@@ -211,7 +211,7 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
     if not isinstance(value, Mapping) or set(value) != required or len(_canonical(value)) > MAX_EVENT_BYTES - 65_536:
         raise ObservationError("agent_observation_invalid")
     if (type(value["id"]) is not int or value["id"] < 0
-            or value["kind"] not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot", "capture_failure"}
+            or value["kind"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "capture_failure"}
             or not _timestamp(value["observed_at"])
             or value["after_action_sequence"] is not None and
             (type(value["after_action_sequence"]) is not int or value["after_action_sequence"] < 0)
@@ -274,6 +274,11 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
         if (data["capture"]["received_body_sha256"] != data["body_sha256"]
                 or data["capture"]["received_body_bytes"] != data["body_bytes"]):
             raise ObservationError("binary_capture_bytes_invalid")
+    elif value["kind"] == "http_response_metadata":
+        try:
+            lab_arena_checkpoint.validate_http_response_metadata(data)
+        except ValueError:
+            raise ObservationError("http_response_metadata_invalid") from None
     elif value["kind"] == "response_received":
         if (set(data) != {"call_identity", "status", "body_sha256", "body_bytes"}
                 or not isinstance(data["call_identity"], str) or not contracts.SHA256_RE.fullmatch(data["call_identity"])
@@ -285,7 +290,7 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
           or not 1 <= len(data["name"]) <= 80 or len(_canonical(data["value"])) > 65_536):
         raise ObservationError("state_snapshot_invalid")
     elif value["kind"] == "capture_failure" and (set(data) != {"category", "reason"}
-          or data["category"] not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot"}
+          or data["category"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot"}
           or data["reason"] not in {"size_limit", "invalid_value"}):
         raise ObservationError("agent_failure_invalid")
     cleaned, redactions = training_capture.sanitize_training_value(dict(data), secrets)
@@ -450,7 +455,7 @@ class Buffer:
             self.size_bytes += size
             if web_key is not None and cleaned["data"][body_field] is not None:
                 self.web_body_by_hash[web_key] = cleaned["id"]
-            if (cleaned["kind"] == "capture_failure"
+            if (cleaned["kind"] in {"capture_failure", "http_response_metadata"}
                     or cleaned["kind"] in {"web_fetch", "web_fetch_binary"}
                     and cleaned["data"].get("capture", {}).get("complete") is False
                     or cleaned["kind"] == "state_snapshot"
@@ -552,7 +557,8 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
     if document["complete"] and (document["response_receipt_count"] != len(receipts)
             or document["agent_observation_count"] != len(agent_rows)
             or any(row["write_state"] != "socket_written" for row in receipts)
-            or any(row["kind"] in {"web_fetch", "web_fetch_binary"} and row["data"].get("capture", {}).get("complete") is False
+            or any(row["kind"] == "http_response_metadata"
+                   or row["kind"] in {"web_fetch", "web_fetch_binary"} and row["data"].get("capture", {}).get("complete") is False
                    or row["kind"] == "state_snapshot"
                    and row["data"]["name"] == "automatic_capture_summary"
                    and isinstance(row["data"]["value"], dict)

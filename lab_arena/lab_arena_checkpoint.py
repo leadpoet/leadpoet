@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 
 OUTPUT_PATH = Path("/output/companies.json")
@@ -110,6 +111,36 @@ def validate_binary_capture_metadata(value: Any, body: bytes | None = None) -> d
     return dict(value)
 
 
+def validate_http_response_metadata(data: Any) -> dict[str, Any]:
+    """Validate header-only evidence without inventing a body read receipt."""
+    if (not isinstance(data, dict) or set(data) != {
+            "url", "status", "content_type", "redirect_url", "retrieved_at", "source", "body_unconsumed"}
+            or data["source"] != "runtime_http_v1" or data["body_unconsumed"] is not True
+            or type(data["status"]) is not int or not 100 <= data["status"] <= 599
+            or not isinstance(data["content_type"], str) or len(data["content_type"]) > 256
+            or not isinstance(data["retrieved_at"], str) or len(data["retrieved_at"]) > 40):
+        raise ValueError("http response metadata is invalid")
+    try:
+        if datetime.fromisoformat(data["retrieved_at"].replace("Z", "+00:00")).tzinfo is None:
+            raise ValueError("timestamp missing timezone")
+        for key in ("url", "redirect_url"):
+            value = data[key]
+            if key == "redirect_url" and value is None:
+                continue
+            if (not isinstance(value, str) or len(value) > 2000
+                    or any(ord(character) < 32 or ord(character) == 127 for character in value)):
+                raise ValueError("url invalid")
+            parts = urlsplit(value)
+            if parts.scheme not in {"http", "https"} or not parts.hostname:
+                raise ValueError("url invalid")
+            if key == "redirect_url" and (parts.username is not None or parts.password is not None
+                                          or parts.query or parts.fragment):
+                raise ValueError("redirect target contains private components")
+    except (ValueError, TypeError):
+        raise ValueError("http response metadata is invalid") from None
+    return dict(data)
+
+
 def validate_training_frame(value: Any) -> dict[str, Any]:
     """Validate capture reports; run identity comes from the host."""
     if (not isinstance(value, Mapping) or set(value) not in ({
@@ -117,7 +148,7 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
             "schema_version", "control", "kind", "depends_on", "data", "retry_token"})
             or value.get("schema_version") != TRAINING_SCHEMA_VERSION
             or value.get("control") != TRAINING_CONTROL
-            or value.get("kind") not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot", "capture_failure"}
+            or value.get("kind") not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot", "capture_failure"}
             or not isinstance(value.get("depends_on"), list)
             or len(value["depends_on"]) > 32
             or any(not isinstance(item, str) or len(item) > 96 for item in value["depends_on"])
@@ -152,6 +183,8 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
             validate_binary_capture_metadata(data["capture"], binary)
         except (ValueError, UnicodeError, TypeError):
             raise ValueError("training frame is invalid") from None
+    elif kind == "http_response_metadata":
+        validate_http_response_metadata(data)
     elif kind == "response_received":
         if (set(data) != {"call_identity", "status", "body_sha256", "body_bytes"}
                 or not isinstance(data["call_identity"], str) or not isinstance(data["body_sha256"], str)
@@ -163,7 +196,7 @@ def validate_training_frame(value: Any) -> dict[str, Any]:
           or len(json.dumps(data["value"], ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_STATE_BYTES):
         raise ValueError("training frame is invalid")
     elif kind == "capture_failure" and (set(data) != {"category", "reason"}
-          or data["category"] not in {"web_fetch", "web_fetch_binary", "response_received", "state_snapshot"}
+          or data["category"] not in {"web_fetch", "web_fetch_binary", "http_response_metadata", "response_received", "state_snapshot"}
           or data["reason"] not in {"size_limit", "invalid_value"}):
         raise ValueError("training frame is invalid")
     if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > MAX_TRAINING_FRAME_BYTES:
@@ -275,6 +308,19 @@ def record_web_fetch_binary(*, url: str, final_url: str, status: int, content_ty
         "body_b64": base64.b64encode(body).decode("ascii"),
         "retrieved_at": retrieved_at or datetime.now(timezone.utc).isoformat(),
         "capture": capture}, depends_on, retry_ambiguous=_retry_ambiguous)
+
+
+def record_http_response_metadata(*, url: str, status: int, content_type: str,
+                                  redirect_url: str | None, retrieved_at: str,
+                                  source: str, body_unconsumed: bool,
+                                  depends_on: list[str] | None = None,
+                                  _retry_ambiguous: bool = False) -> int | None:
+    """Report already available response headers; do not claim consumed bytes."""
+    return _record_training("http_response_metadata", {
+        "url": url, "status": status, "content_type": content_type,
+        "redirect_url": redirect_url, "retrieved_at": retrieved_at,
+        "source": source, "body_unconsumed": body_unconsumed}, depends_on,
+        retry_ambiguous=_retry_ambiguous)
 
 
 def record_response_received(*, call_identity: str, status: int, body: bytes | None = None,

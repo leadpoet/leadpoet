@@ -126,6 +126,30 @@ def test_socket_write_alone_does_not_prove_agent_received_response():
     assert "agent_response_receipts_unverified" in exported["completeness"]["incomplete_reasons"]
 
 
+def test_unread_http_metadata_is_retained_without_claiming_content_or_read_coverage():
+    values, payload = values_with_receipts(acknowledged=False)
+    values["runs"][0]["result_doc"]["resource_summary"]["web_egress"]["connection_count"] = 1
+    payload["agent_observations"].append({
+        "id": len(payload["agent_observations"]), "kind": "http_response_metadata",
+        "observed_at": "2026-10-16T01:00:01Z", "after_action_sequence": 0, "depends_on": [],
+        "privacy": {"redacted": False, "redactions": []},
+        "data": {"url": "https://example.com/old", "status": 302, "content_type": "text/html",
+                 "redirect_url": "https://example.com/new", "retrieved_at": "2026-10-16T01:00:01Z",
+                 "source": "runtime_http_v1", "body_unconsumed": True}})
+    payload["agent_observation_count"] += 1
+    payload["complete"] = False
+    payload["failures"] = ["capture_incomplete"]
+    snapshot = save(values, payload)
+    exported = assemble_example(**values)
+    assert exported["worker_observation_artifacts"]["execute:1"] == snapshot
+    assert exported["completeness"]["dimensions"]["input_output_label"] is True
+    reasons = exported["completeness"]["incomplete_reasons"]
+    assert "direct_web_content_not_captured" in reasons
+    assert "agent_response_receipts_unverified" in reasons
+    assert "worker_observations_incomplete" in reasons
+    assert exported["completeness"]["complete"] is False
+
+
 @pytest.mark.parametrize("changed_body", [False, True])
 def test_later_billing_recovery_cannot_replace_acknowledged_response_silently(changed_body):
     values, payload = values_with_receipts()

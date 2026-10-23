@@ -253,6 +253,14 @@ extra network read, fetch, OCR, or model call occurs. Larger bodies remain an
 explicit capture gap. Partial reads are marked incomplete. Exact duplicate acknowledgments from existing hooks are
 collapsed; distinct fetch events retain their own context.
 
+Direct HTTP responses closed before any body bytes are consumed retain bounded
+`http_response_metadata`: URL, status, content type, retrieval time and a safe
+redirect target, with `body_unconsumed=true`. Redirect targets omit credentials,
+query strings and fragments. These records do not claim an empty body, a read
+receipt, or captured page content. An empty fully consumed body and a partially
+consumed body keep their existing distinct capture records. No extra read or
+fetch is made; unsupported native and subprocess clients remain outside coverage.
+
 A background queue has 128 slots, a shared 16 MiB body-buffer limit and a 6 MiB
 per-body limit. Recording adds CPU/memory overhead. Shutdown waits at most 250 ms
 for the sender, then writes a bounded status sidecar; this is not a zero-timing-
@@ -485,6 +493,21 @@ dataset builders. Different scoring-policy/image cohorts remain separate.
 Recorded counter absence is unknown, not zero. The report does not equate a
 complete export, positive score, or successful HTTP response with a reviewed
 good example or permission to train.
+
+Each source entry also reports its joined capture status and dimensions, the
+recorder's separate buffer status, and counts of socket writes with and without
+matching reported reads. Counts cover that execution only, not its judge or
+earlier retries. A recorder that flushes an empty buffer successfully cannot
+make a native-child execution complete. Missing joined proof remains unverified.
+
+Completed company-evidence investigations with `UNPROVEN` findings also retain
+bounded `checked_source_provenance` in their private supporting receipt. It binds
+the company and requested criteria to hashes of the exact already-shown message
+and source excerpt. Loaded excerpts and search-only locators remain distinct.
+The references describe the investigation's inputs, not proof of absence,
+criterion relevance, article freshness or full-page coverage. They do not enter
+later model inputs or public output, and cannot satisfy a missing-evidence
+training filter. Incomplete investigations and older records retain their gaps.
 
 The agent-step exporter prepares **observed next-response candidates**, not a
 complete agent imitation dataset. It supports self-contained text and local

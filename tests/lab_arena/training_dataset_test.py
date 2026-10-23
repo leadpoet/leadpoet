@@ -166,6 +166,25 @@ def test_non_verdict_rows_are_never_negatives():
     assert dataset.classify(row(0, claim())) == ("unjudged", "scored")
 
 
+def test_checked_investigation_inputs_do_not_replace_missing_criterion_proof():
+    company = row(0, claim(), "fit_unproven")
+    receipt = company["judgment"]["verifier_gate_receipts"][0]
+    receipt.pop("dimension_evidence")
+    receipt["supporting_receipts"] = [{
+        "gate": "company_evidence_investigation",
+        "checked_source_provenance": {
+            "schema": "checked_investigation_sources_v1",
+            "scope": "investigation_request_only_not_criterion_proof",
+            "unproven_claims": {"industry": {"status": "UNPROVEN"}},
+            "sources": [{"kind": "loaded_page_excerpt", "url": "https://acme-robotics.com/about",
+                         "shown_content_sha256": "sha256:" + "a" * 64}]}}]
+    splits, manifest = dataset.build([example(rows=[company])])
+    assert not splits["train"] and not splits["eval"]
+    assert len(splits["analysis"]) == 1
+    assert manifest["counts"]["trainable_records_by_evidence_exclusion"] == {
+        "missing_fit_gap_source_evidence": 1}
+
+
 def test_input_keeps_retained_source_text_without_label_leakage():
     records = dataset.records_from_example(example(rows=[row(0, claim(), "qualified")]))
     record = records[0]

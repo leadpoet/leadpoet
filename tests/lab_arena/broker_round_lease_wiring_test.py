@@ -76,7 +76,8 @@ def _wired_factory(monkeypatch, *, prices=None):
     monkeypatch.setattr(wiring, "_pool_percent_from_environment", lambda: 0)
     monkeypatch.setattr(wiring, "_baseline_source_url_from_environment", lambda _mode: "https://example.com/baseline")
     monkeypatch.setattr(wiring.broker_module, "fetch_openrouter_price_table",
-                        price_table if prices is None else lambda: prices)
+                        (lambda *_a, **_kw: price_table()) if prices is None
+                        else (lambda *_a, **_kw: prices))
     monkeypatch.setattr(wiring.broker_module, "HttpxProviderTransport", lambda: provider)
 
     class Keys:

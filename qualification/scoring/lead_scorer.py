@@ -5536,10 +5536,20 @@ def _project_verified_linkedin_headquarters(
         # Keep the existing investigator's exact-company current HQ finding.
         # Broad web observations cannot enter here. Ordinary deterministic
         # submitted/ICP geography checks still decide qualification.
-        return _project_investigator_geography(
+        reviewed_projection = _project_investigator_geography(
             verdict, validated_geography_finding, icp=icp,
             company=company, company_quality=company_quality,
         )
+        # Incomplete proof cannot retain an unreviewed schema-repair location.
+        if (
+            _canonical_observed_geography_match(
+                reviewed_projection, icp, company_quality=company_quality,
+            ) is not None
+            and _validated_investigator_geography_matches_verdict(
+                reviewed_projection, validated_geography_finding,
+            )
+        ):
+            return reviewed_projection
     if (
         _resolve_country(finding["observed_country"]) == "united states"
         and not finding["observed_state"]

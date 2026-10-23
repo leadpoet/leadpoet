@@ -2018,10 +2018,18 @@ def _reservation_readback_matches(
     expected_call_doc = reservation_arguments.get("call_doc")
     if not isinstance(call_doc, Mapping) or not isinstance(expected_call_doc, Mapping):
         return False
+    # Cache sharing is policy, not the economic identity of an existing call.
+    # An older reservation can lack the new restriction, but only a boolean
+    # marker is valid. All request, funding and other evidence still must match.
+    for document in (call_doc, expected_call_doc):
+        if ("judgment_cache_own_call_only" in document
+            and type(document["judgment_cache_own_call_only"]) is not bool):
+            return False
     # Optional evidence must not change economic identity or prevent replay of
     # an older in-flight reservation after this observational feature deploys.
-    call_doc = {key: value for key, value in call_doc.items() if key != "request_capture"}
-    expected_call_doc = {key: value for key, value in expected_call_doc.items() if key != "request_capture"}
+    policy_fields = {"request_capture", "judgment_cache_own_call_only"}
+    call_doc = {key: value for key, value in call_doc.items() if key not in policy_fields}
+    expected_call_doc = {key: value for key, value in expected_call_doc.items() if key not in policy_fields}
     if dict(call_doc) != dict(expected_call_doc):
         source_fields = {
             "judgment_cache_source_call_identity",
@@ -2315,6 +2323,33 @@ def provider_authentication_failure_reason(call: Mapping[str, Any]) -> Optional[
     ):
         return "provider_authentication_failed"
     return None
+
+
+def _judgment_requires_own_call(request: Mapping[str, Any]) -> bool:
+    """Tool packets require scorer validation before they can be shared.
+
+    The gateway can check JSON shape, but cannot validate the conversation's
+    company/evidence binding. Keep their paid replies only for exact-call
+    retries; validated company and signal verdict caches remain independent.
+    """
+
+    if request.get("tools"):
+        return True
+    messages = request.get("messages")
+    if isinstance(messages, list) and any(
+        isinstance(message, Mapping) and (
+            message.get("role") == "tool"
+            or "tool_calls" in message or "tool_call_id" in message
+        ) for message in messages
+    ):
+        return True
+    inputs = request.get("input")
+    return isinstance(inputs, list) and any(
+        isinstance(item, Mapping) and item.get("type") in {
+            "function_call", "function_call_output", "custom_tool_call",
+            "custom_tool_call_output", "web_search_call", "additional_tools",
+        } for item in inputs
+    )
 
 
 def _judgment_cache_material(
@@ -4637,6 +4672,13 @@ class Broker:
                     "judgment_cache_canonical": canonical_scope,
                     "judgment_cache_scope": json.loads(canonical_scope),
                 })
+                if _judgment_requires_own_call(effective_normalized):
+                    # Preserve historic keys and exact-call replay, including
+                    # pending billing. The atomic RPC skips shared lookup only
+                    # after checking the caller's own existing ledger head.
+                    reservation_arguments["call_doc"][
+                        "judgment_cache_own_call_only"
+                    ] = True
                 if (
                     effective_operation_id == "openrouter.chat"
                     and effective_normalized.get("parallel_tool_calls") is False

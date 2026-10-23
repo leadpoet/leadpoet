@@ -98,10 +98,14 @@ class JudgmentLedger(FakeLedgerStore):
             key = arguments["call_doc"]["judgment_cache_key"]
             if identity in self.calls:
                 return self._view(self.calls[identity])
+            if arguments["call_doc"].get("judgment_cache_own_call_only") is True:
+                return super().reserve_call(**arguments)
             if self.busy_once:
                 self.busy_once = False
                 return {"status": "cache_busy", "judgment_cache_key": key}
             for source in self.calls.values():
+                if source["call_doc"].get("judgment_cache_own_call_only") is True:
+                    continue
                 if source["call_doc"].get("judgment_cache_key") != key:
                     continue
                 terminal = (
@@ -428,7 +432,7 @@ def test_actual_intent_details_schema_checks_bounds():
     )
 
 
-def test_actual_investigator_submit_findings_tool_call_reuses_exact_history():
+def test_rejected_investigator_tool_reply_does_not_poison_another_call():
     from qualification.scoring import company_evidence_investigator as investigator
 
     raw_tools = investigator._tools(["revenue"])
@@ -437,6 +441,17 @@ def test_actual_investigator_submit_findings_tool_call_reuses_exact_history():
     }} for tool in raw_tools]
     parameters = tools[-1]["function"]["parameters"]
     arguments = _sample_for_schema(parameters)
+    arguments["findings"][0].update({
+        "status": "VERIFIED", "observed_value": "$20 million",
+        "evidence_url": "https://acme.example/about",
+        "evidence_quote": "Unrelated Company reported $20 million in revenue.",
+    })
+    # A complete tool packet can still fail the scorer's evidence binding.
+    validated = investigator._validated_findings(
+        arguments, targets=("revenue",), fetched_pages={},
+        first_party_domains={"acme.example"}, identity_names={"Acme"},
+    )
+    assert validated["revenue"]["status"] == "UNPROVEN"
     tool_call = {
         "id": "call_submit_1", "type": "function",
         "function": {"name": "submit_findings", "arguments": json.dumps(arguments)},
@@ -456,8 +471,12 @@ def test_actual_investigator_submit_findings_tool_call_reuses_exact_history():
         "parallel_tool_calls": False,
         "max_tokens": 200,
     }
+    assert broker._complete_judgment_response(
+        "openrouter.chat", request, status=200,
+        body=json.dumps(answer).encode(), call_succeeded=True,
+    )
     store = JudgmentLedger()
-    instance, _, transport = _broker(store, [(200, answer), (200, answer)])
+    instance, _, transport = _broker(store, [(200, answer)] * 3)
     source = _call(instance, _context("tool-source"), request)
     hit = _call(instance, _context("tool-hit"), request)
     changed = {**request, "messages": [
@@ -466,9 +485,9 @@ def test_actual_investigator_submit_findings_tool_call_reuses_exact_history():
     ]}
     miss = _call(instance, _context("tool-changed"), changed)
     assert source.status == hit.status == miss.status == 200
-    assert hit.call["cached"] is True
+    assert hit.call.get("cached") is None
     assert miss.call.get("cached") is None
-    assert len(transport.sent) == 2
+    assert len(transport.sent) == 3
 
 
 def test_tool_call_malformed_or_undeclared_does_not_freeze_response():
@@ -522,13 +541,15 @@ def _research_tool_answer(names):
     ("fetch_page", "fetch_page", "search_web"),  # retained 57 / cached 67
     ("fetch_page", "fetch_page", "fetch_page"),  # retained 63
 ])
-def test_single_tool_request_skips_historical_paid_multi_source_once(names):
+def test_single_tool_request_skips_historical_paid_multi_source(names, monkeypatch):
     store = JudgmentLedger()
     multi = _research_tool_answer(names)
     single = _research_tool_answer(("search_web",))
-    instance, _, transport = _broker(store, [(200, multi), (200, single)])
+    instance, _, transport = _broker(store, [(200, multi), (200, single), (200, single)])
     request = _research_tool_request(False)
-    source = _call(instance, _context("legacy-multi"), request)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(broker, "_judgment_requires_own_call", lambda _: False)
+        source = _call(instance, _context("legacy-multi"), request)
     source_call = store.calls[source.call["call_identity"]]
     assert source_call["terminal"].get("judgment_cache_eligible") is not True
     # A response retained by the old gateway remains paid and unmodified.
@@ -538,23 +559,23 @@ def test_single_tool_request_skips_historical_paid_multi_source_once(names):
     hit = _call(instance, _context("single-hit"), request)
     same_paid = _call(instance, _context("legacy-multi"), request)
     assert fresh.status == hit.status == same_paid.status == 200
-    assert fresh.call.get("cached") is None and hit.call["cached"] is True
-    assert len(transport.sent) == 2
+    assert fresh.call.get("cached") is None and hit.call.get("cached") is None
+    assert len(transport.sent) == 3
     assert store.calls[source.call["call_identity"]] == before
     assert all(x["call_doc"]["judgment_cache_single_tool_required"] is True
                for x in store.judgment_reserves)
 
 
 @pytest.mark.parametrize("parallel", [True, None])
-def test_allowed_multi_tool_request_still_reuses_response(parallel):
+def test_allowed_multi_tool_request_keeps_each_call_independent(parallel):
     store = JudgmentLedger()
     answer = _research_tool_answer(("fetch_page", "search_web"))
-    instance, _, transport = _broker(store, [(200, answer)])
+    instance, _, transport = _broker(store, [(200, answer)] * 2)
     request = _research_tool_request(parallel)
     source = _call(instance, _context("allowed-source"), request)
     hit = _call(instance, _context("allowed-hit"), request)
-    assert source.status == hit.status == 200 and hit.call["cached"] is True
-    assert len(transport.sent) == 1
+    assert source.status == hit.status == 200 and hit.call.get("cached") is None
+    assert len(transport.sent) == 2
     assert all("judgment_cache_single_tool_required" not in x["call_doc"]
                for x in store.judgment_reserves)
 
@@ -580,3 +601,132 @@ def test_stop_json_response_also_respects_single_tool_request(parallel, count, e
         "openrouter.chat", _research_tool_request(parallel), status=200,
         body=json.dumps(answer).encode(), call_succeeded=True,
     ) is expected
+
+
+@pytest.mark.parametrize("choice", ["auto", "none", "required", {
+    "type": "function", "function": {"name": "search_web"},
+}])
+def test_declared_tools_never_share_even_when_choice_disables_tools(choice):
+    request = {**_REQUEST, "tools": _research_tool_request()["tools"],
+               "tool_choice": choice}
+    store = JudgmentLedger()
+    instance, _, transport = _broker(store, [(200, _answer())] * 2)
+    first = _call(instance, _context("choice-source"), request)
+    second = _call(instance, _context("choice-other"), request)
+    retry = _call(instance, _context("choice-source"), request)
+    assert first.status == second.status == retry.status == 200
+    assert first.body == retry.body and retry.call["idempotent"] is True
+    assert second.call.get("cached") is None
+    assert len(transport.sent) == 2
+    assert all(item["call_doc"]["judgment_cache_own_call_only"] is True
+               for item in store.judgment_reserves)
+
+
+@pytest.mark.parametrize("marker", [
+    {"messages": [{"role": "tool", "tool_call_id": "c", "content": "quote"}]},
+    {"messages": [{"role": "assistant", "tool_calls": []}]},
+    *[{"input": [{"type": kind}]} for kind in (
+        "function_call", "function_call_output", "custom_tool_call",
+        "custom_tool_call_output", "web_search_call", "additional_tools",
+    )],
+])
+def test_tool_history_requires_own_call_when_tools_are_omitted(marker):
+    assert broker._judgment_requires_own_call(marker) is True
+
+
+@pytest.mark.parametrize("operation,parameters", [
+    ("openrouter.chat", {**_REQUEST, "tools": []}),
+    ("openrouter.responses", {"model": _MODEL, "input": "Verify claim", "tools": []}),
+])
+def test_plain_text_requests_remain_shareable(operation, parameters):
+    assert broker._judgment_requires_own_call(parameters) is False
+    assert broker._judgment_cache_material(
+        _context("plain"), requested_operation_id=operation,
+        effective_operation_id=operation, normalized_request=parameters,
+        outbound_body=json.dumps(parameters).encode(),
+    ) is not None
+
+
+@pytest.mark.parametrize("state", ["reservation", "dispatch", "settlement", "uncertain", "cached"])
+def test_historic_tool_identity_survives_new_sharing_policy(monkeypatch, state):
+    request = _research_tool_request()
+    answer = _research_tool_answer(("search_web",))
+    store = JudgmentLedger()
+    instance, _, transport = _broker(store, [(200, answer)] * 2)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(broker, "_judgment_requires_own_call", lambda _: False)
+        first = _call(instance, _context("historic-source"), request)
+        if state == "cached":
+            first = _call(instance, _context("historic-destination"), request)
+    original = store.calls[first.call["call_identity"]]
+    original_doc = copy.deepcopy(original["call_doc"])
+    assert "judgment_cache_own_call_only" not in original_doc
+    if state in {"reservation", "dispatch"}:
+        original["kind"] = state
+        original.pop("terminal")
+        original.pop("actual")
+    elif state == "uncertain":
+        original.update(kind="uncertain", uncertain_doc={
+            "judgment_cache_response": original.pop("terminal"),
+        })
+        original.pop("actual")
+    transport.sent.clear()
+    context = _context("historic-destination" if state == "cached" else "historic-source")
+    replay = _call(instance, context, request)
+    assert original["call_doc"] == original_doc
+    assert len(transport.sent) == (1 if state == "reservation" else 0)
+    if state == "dispatch":
+        assert replay.call["outcome"] == "uncertain"
+    else:
+        assert replay.status == 200
+        if state != "reservation":
+            assert replay.body == first.body
+            assert replay.call["idempotent"] is True
+        if state == "cached":
+            assert replay.call["cached"] is True
+            assert replay.call["actual_microusd"] == 0
+
+
+@pytest.mark.parametrize("invalid", [None, 0, 1, "true", [], {}])
+def test_invalid_own_call_policy_cannot_relax_reservation_readback(invalid):
+    store = JudgmentLedger()
+    instance, _, _ = _broker(store, [(200, _answer())])
+    result = _call(instance, _context("invalid-marker"))
+    original = store.calls[result.call["call_identity"]]
+    original.update(kind="reservation")
+    original["call_doc"]["judgment_cache_own_call_only"] = invalid
+    arguments = store.judgment_reserves[0]
+    assert broker._reservation_readback_matches(
+        store, arguments, store._view(original),
+    ) is False
+
+
+@pytest.mark.parametrize("history", [None, {
+    "type": "function_call_output", "call_id": "call_search", "output": "quote",
+}])
+def test_responses_tools_and_history_keep_own_reply_and_billing(history):
+    parameters = {
+        "model": _MODEL, "input": [history] if isinstance(history, dict) else "Verify claim",
+        "max_output_tokens": 200,
+        "text": {"format": {"type": "json_schema", "name": "verdict",
+                            "strict": True, "schema": _SCHEMA}},
+    }
+    if history is None:
+        parameters.update(tools=[{"type": "function", "name": "search_web",
+                                  "parameters": {"type": "object"}}], tool_choice="none")
+    answer = {"status": "completed", "output": [{
+        "type": "message", "role": "assistant", "status": "completed",
+        "content": [{"type": "output_text", "text": '{"verdict":"verified"}'}],
+    }], "usage": {"cost": "0.000021"}}
+    store = JudgmentLedger()
+    instance, _, transport = _broker(store, [(200, answer)] * 2)
+    def call(label):
+        return instance.execute(_context(label), operation_id="openrouter.responses",
+                                parameters=parameters, action_sequence=1, timeout_ms=5000)
+    first, other, own = call("responses-source"), call("responses-other"), call("responses-source")
+    assert first.status == other.status == own.status == 200
+    assert other.call.get("cached") is None and other.call["actual_microusd"] == 21
+    assert own.call["idempotent"] is True and own.body == first.body
+    assert len(transport.sent) == 2
+    assert all(item["call_doc"]["judgment_cache_own_call_only"] is True
+               for item in store.judgment_reserves)

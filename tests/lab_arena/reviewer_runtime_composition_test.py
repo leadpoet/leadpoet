@@ -332,3 +332,96 @@ def test_completed_investigation_correction_rejects_shadowed_helper_binding(
     source += b'\n' + binding.encode() + b'\n'
     with pytest.raises(InvestigationFinalitySeamError):
         convert_investigation_finality_seam(source)
+
+
+def _numeric_alias_sources():
+    return {
+        name: (ROOT / ('lab_arena/scorer_entrypoint.py'
+                       if name == 'scorer_entrypoint.py' else name)).read_bytes()
+        for name in (composer.GRADER_FILE, composer.FINALITY_FILE, *composer.ENTRYPOINT_FILES)
+    }
+
+
+def test_numeric_homepage_alias_is_explicit_exact_and_idempotent():
+    from scripts import arena_reviewer_structured_homepage_alias_seam as seam
+    sources = _numeric_alias_sources()
+    original = sources[composer.FINALITY_FILE]
+    # This also works after the separate source correction is merged.
+    original = original.replace(seam.INSERTION.encode(), b'', 1)
+    sources[composer.FINALITY_FILE] = original
+    prior = composer.expected_overlay(sources, identity_schema_repair=True)
+    repaired = composer.expected_overlay(
+        sources, identity_schema_repair=True, structured_homepage_numeric_alias=True,
+    )
+    assert repaired[composer.FINALITY_FILE] == seam.convert_structured_homepage_alias_seam(
+        prior[composer.FINALITY_FILE])
+    assert repaired[composer.FINALITY_FILE].count(seam.INSERTION.encode()) == 1
+    assert seam.convert_structured_homepage_alias_seam(
+        repaired[composer.FINALITY_FILE]) == repaired[composer.FINALITY_FILE]
+    assert set(prior) == set(repaired)
+    for name in set(prior) - {composer.FINALITY_FILE}:
+        assert repaired[name] == prior[name]
+    # The exact insertion is the only changed byte range in this frozen file.
+    assert repaired[composer.FINALITY_FILE].replace(seam.INSERTION.encode(), b'', 1) == prior[composer.FINALITY_FILE]
+    default_sources = {k: v for k, v in sources.items() if k != composer.FINALITY_FILE}
+    assert composer.FINALITY_FILE not in composer.expected_overlay(default_sources)
+
+
+@pytest.mark.parametrize('fault', ['unknown', 'unguarded', 'weak_provider', 'weak_domain',
+                                  'weak_id', 'extra_field', 'shadowed', 'string_only'])
+def test_numeric_homepage_alias_rejects_unreviewed_identity_bypass(fault):
+    from scripts import arena_reviewer_structured_homepage_alias_seam as seam
+    source = _numeric_alias_sources()[composer.FINALITY_FILE].replace(seam.INSERTION.encode(), b'', 1)
+    repaired = seam.convert_structured_homepage_alias_seam(source)
+    insertion = seam.INSERTION.encode()
+    if fault == 'unknown':
+        source = source.replace(b'    alias_anchor = homepage_identity\n', b'    alias_anchor = dict(homepage_identity)\n', 1)
+    elif fault == 'unguarded':
+        insertion = insertion.replace(b'        homepage_slug.isdigit()\n', b'        True\n', 1)
+    elif fault == 'weak_provider':
+        insertion = insertion.replace(b'        and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER\n', b'', 1)
+    elif fault == 'weak_domain':
+        insertion = insertion.replace(b'        and homepage_identity.get("registrable_dns_domain") == transport_domain\n', b'', 1)
+    elif fault == 'weak_id':
+        insertion = insertion.replace(b'        and evidence.get("company_id") == homepage_slug\n', b'', 1)
+    elif fault == 'extra_field':
+        insertion = insertion.replace(b'        and set(evidence) == {\n', b'        and set(evidence) >= {\n', 1)
+    elif fault == 'shadowed':
+        source += b'\n_investigator_identity_context = lambda *args: ({}, "")\n'
+    else:
+        source = b'decoy = ' + repr(source.decode()).encode() + b'\n'
+    if fault in {'unguarded', 'weak_provider', 'weak_domain', 'weak_id', 'extra_field'}:
+        assert insertion != seam.INSERTION.encode()
+        source = repaired.replace(seam.INSERTION.encode(), insertion, 1)
+    with pytest.raises(seam.StructuredHomepageAliasSeamError):
+        seam.convert_structured_homepage_alias_seam(source)
+
+
+def test_numeric_homepage_alias_builder_flag_and_receipt(monkeypatch, capsys):
+    import json
+    from scripts import arena_reviewer_structured_homepage_alias_seam as seam
+    sources = _numeric_alias_sources()
+    seen = {}
+    base = {'Architecture': 'amd64', 'Os': 'linux', 'Config': {},
+            'RootFS': {'Layers': ['sha256:base']}}
+    candidate = deepcopy(base)
+    candidate['RootFS']['Layers'].append('sha256:overlay')
+    grading = 'registry.example/model@sha256:' + 'a' * 64
+    monkeypatch.setattr('sys.argv', ['build', '--grading-image', grading,
+                                    '--verify-image', 'reviewed:runtime',
+                                    '--structured-homepage-numeric-alias'])
+    monkeypatch.setattr(composer, 'checked_output', lambda *args, **kwargs: 'b' * 40)
+    monkeypatch.setattr(composer, 'image_inspect', lambda ref: base if ref == grading else candidate)
+    def extract(ref, destination, **kwargs):
+        seen.update(kwargs)
+        return sources
+    monkeypatch.setattr(composer, 'extract_frozen_sources', extract)
+    monkeypatch.setattr(composer, 'verify_saved_overlay', lambda ref, digest, files: seen.update(files=files))
+    assert composer.main() == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert seen['structured_homepage_numeric_alias'] is True
+    assert receipt['grading_corrections'] == [seam.CORRECTION_ID]
+    assert receipt['base_layers_unchanged'] is True
+    assert receipt['process_configuration_unchanged'] is True
+    assert receipt['original_files'][composer.FINALITY_FILE] == hashlib.sha256(sources[composer.FINALITY_FILE]).hexdigest()
+    assert seen['files'][composer.FINALITY_FILE] == seam.convert_structured_homepage_alias_seam(sources[composer.FINALITY_FILE])

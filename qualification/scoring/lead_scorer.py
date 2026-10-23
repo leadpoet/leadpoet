@@ -5759,6 +5759,44 @@ def _investigator_identity_context(
     evidence = structured_identity if isinstance(structured_identity, Mapping) else {}
     observed_slug = str(web_identity.get("observed_linkedin_slug") or "")
     if (
+        homepage_slug.isdigit()
+        and observed_slug
+        and not observed_slug.isdigit()
+        and submitted_slug in {"", observed_slug}
+        and set(evidence) == {
+            "name", "provider", "source_field", "url", "website",
+            "company_id", "requested_url",
+        }
+        and all(isinstance(value, str) for value in evidence.values())
+        and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and evidence.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        and evidence.get("company_id") == homepage_slug
+        and _strict_linkedin_company_profile_url(evidence.get("requested_url"))
+        and linkedin_company_page_slug(evidence.get("requested_url")) == homepage_slug
+        and _strict_linkedin_company_profile_url(evidence.get("url"))
+        and linkedin_company_page_slug(evidence.get("url")) == observed_slug
+        and web_identity.get("decision") == COMPANY_FIT_MATCH
+        and web_identity.get("evidence_source") == "company_web_reverification"
+        and web_identity.get("submitted_linkedin_slug") == submitted_slug
+        and transport_domain
+        and homepage_identity.get("registrable_dns_domain") == transport_domain
+        and _canonical_company_domain(evidence.get("website")) == transport_domain
+        and web_identity.get("submitted_domain") == transport_domain
+        and web_identity.get("observed_domain") == transport_domain
+        and _company_name(evidence.get("name"))
+        and _company_name(evidence.get("name"))
+        == _company_name(homepage_identity.get("normalized_name"))
+        == _company_name(web_identity.get("submitted_name"))
+        == _company_name(web_identity.get("observed_name"))
+    ):
+        # The existing structured parser can prove the homepage's numeric ID
+        # even when the submitted LinkedIn field is optional or already vanity.
+        # Carry that exact proof into quote binding without changing the locator.
+        return {
+            **homepage_identity,
+            "linkedin_company_slug": observed_slug,
+        }, str(submitted_linkedin or "")
+    if (
         not homepage_identity
         and not submitted_slug.isdigit()
         and set(evidence) == {"name", "provider", "source_field", "url", "website"}

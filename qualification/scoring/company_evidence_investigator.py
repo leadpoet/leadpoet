@@ -451,6 +451,9 @@ locations.headquarter=true" projection, never generic profile locations.
 A valid outside-region LinkedIn HQ remains a contradiction unless fetched
 first-party evidence proves the same company's current headquarters status
 and resolves the conflict. A profile can omit another global headquarters.
+A current explicit first-party statement of simultaneous global headquarters
+for this same company itself resolves that profile omission; no third source
+or headquarters move is required.
 Judge the meaning of exact fetched text, including first-person company
 statements, without requiring one wording for headquarters or co-headquarters.
 Compare source dates and current company statements. An old, superseded,

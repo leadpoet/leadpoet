@@ -324,6 +324,13 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         request.method == "POST" and len(parts) == 4
         and parts[:2] == ["v1", "runs"] and parts[3] == "training-observations"
     )
+    # The segmented upload route carries the same private capture payload but
+    # authorizes per segment in the Arena handler, so it is bounded here only.
+    segment_upload = (
+        request.method == "POST" and len(parts) == 4
+        and parts[:2] == ["v1", "runs"]
+        and parts[3] == "training-observation-segments"
+    )
     request_limit = (
         _MAX_COMPLETION_REQUEST_BYTES
         if request.method == "POST"
@@ -337,6 +344,8 @@ async def _proxy_request(arena_path: str, request: Request, *, testnet: bool = F
         and parts[3] == "trajectory"
         else training_observations.MAX_OBJECT_BYTES
         if observation_upload
+        else training_observations.MAX_SEGMENT_BYTES
+        if segment_upload
         else training_input.MAX_INPUT_BYTES
         if request.method == "POST"
         and len(parts) == 4

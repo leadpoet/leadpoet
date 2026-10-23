@@ -12,6 +12,23 @@ controls. No company-specific exceptions or additional reviewer/recovery path.
 The coordinating agent owns production application. Authority ends after
 these fixes are deployed and verified. Keep AGENTS.md and CLAUDE.md identical.
 
+## Scoped production authorization: October 23 reward thresholds and tooltip
+
+On 2026-10-23 the user explicitly authorized changing Arena reward thresholds
+from +1/+5/+10 to +8/+15/+20, with 15%/15%/20% of total emissions, and applying
+the new rules to current reward ownership. Recompute owners from verified
+published achievements: the existing +11.10 achievement moves to the +8 slot;
+the +6.0454545 achievement earns no slot. This includes protected read-only
+inspection, narrow code and regression tests, safe push/merge, canonical
+gateway/normal-validator deployment, and finalized automated weight readback.
+Apply the cutover only through newly issued signed states. Preserve historical
+scores, signed bases, accepted states, payout history, decay clocks, funding
+rules, credentials and concurrent work. No manual vectors or miner-specific
+exceptions. Add the same-day baseline score to the champion chart tooltip and
+verify its normal dashboard deployment. The coordinating task owns production
+actions. Authority ends when the changes and live outputs are verified.
+Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 23 Arena full cycle
 
 On 2026-10-23 the user authorized monitoring the full October 23 Arena cycle,

@@ -537,14 +537,59 @@
       "symbol": "REWARD_SLOT_POLICY_50_PERCENT_START"
     },
     {
+      "ast_sha256": "sha256:89591f3f56bec2c65b5853e4c468d1a86567095d8de6ffe37810da2f6b1abfab",
+      "path": "lab_arena/rewards.py",
+      "symbol": "REWARD_SLOT_POLICY_OCT23"
+    },
+    {
+      "ast_sha256": "sha256:04d599e72f6ceab27caec83365ab3d41ed09a99116894ad1a8df1b1b9f4db39e",
+      "path": "lab_arena/rewards.py",
+      "symbol": "REWARD_SLOT_POLICY_OCT23_EFFECTIVE_EPOCH"
+    },
+    {
+      "ast_sha256": "sha256:6cd863a895ef3c5cdb4c8cd48a85c86eefb7d4a96fc7ff2b7b8261155415f6c0",
+      "path": "lab_arena/rewards.py",
+      "symbol": "REWARD_SLOT_POLICY_OCT23_START"
+    },
+    {
       "ast_sha256": "sha256:c54118dcf175e12df1e85dce2c1844bb203476ea4f38b163e8e00964cf0b16d7",
       "path": "lab_arena/rewards.py",
       "symbol": "reward_basis_document"
     },
     {
-      "ast_sha256": "sha256:3708089ec7700b715864b1ef1fe87e27a5bf0ea00d136750219228dd6474d984",
+      "ast_sha256": "sha256:b4189892aa5ed39cef4ee5f943095914f7af08726763f8b2c9b2707bc91bcf5e",
+      "path": "lab_arena/rewards.py",
+      "symbol": "reward_basis_matches_policy_projection"
+    },
+    {
+      "ast_sha256": "sha256:851c99deaff4c78fd33f96ef334a43e789158afac41e9393f645088190cb7f82",
+      "path": "lab_arena/rewards.py",
+      "symbol": "reward_basis_policy_projection_document"
+    },
+    {
+      "ast_sha256": "sha256:9d29084aedb8f11de015ac983a24d646c24455aaf33e90bb22fb249931726ee9",
       "path": "lab_arena/rewards.py",
       "symbol": "reward_slot_policy_document"
+    },
+    {
+      "ast_sha256": "sha256:1e83be57d84321d2237f6b2398124ec7efd810ff14bb5d8eb64a2897a223364c",
+      "path": "lab_arena/service.py",
+      "symbol": "ArenaService._project_reward_basis"
+    },
+    {
+      "ast_sha256": "sha256:02c8036c0174cbdd133c6dcbeaaca958ea62f80ea99bbc71b34678caeb5ebb64",
+      "path": "lab_arena/service.py",
+      "symbol": "ArenaService._validated_existing_weight_state"
+    },
+    {
+      "ast_sha256": "sha256:a4c7cdcc5c7b5e2ec2c17af190fc7a8fd520f885a6ad35818e7425e0f6e0cd39",
+      "path": "lab_arena/service.py",
+      "symbol": "ArenaService.public_reward_basis"
+    },
+    {
+      "ast_sha256": "sha256:12b9d2722432d94ad5a10bd94764665882e99a43036dcb8447d4f7f5b8b31a71",
+      "path": "lab_arena/service.py",
+      "symbol": "ArenaService.public_weight_state"
     },
     {
       "ast_sha256": "sha256:33ac74f2e874636ccaa68cf0d01137cb2bb08429b971d1893d49925de954fc53",
@@ -877,7 +922,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:48ffe08d67ff8013c2a20553839384eed299a730556f15fe82d31de4f6221774",
-  "protected_source_commit": "15db470b77c8fa795218298375c9d297f9b621dd",
+  "manifest_hash": "sha256:e42b9497e88a3aad2e86fa9d920c983e6002c88692816168d56facc1ec902d76",
+  "protected_source_commit": "61428cd39576e8f409e7b34d309ff2ec451de88f",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

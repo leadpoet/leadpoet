@@ -49,11 +49,13 @@ class _VisibleHTMLTextParser(HTMLParser):
         hidden_classes: frozenset[str] = frozenset(),
         hidden_ids: frozenset[str] = frozenset(),
         include_scroll_reveal: bool = False,
+        exclude_sidebars: bool = False,
     ) -> None:
         super().__init__(convert_charrefs=True)
         self._hidden_classes = hidden_classes
         self._hidden_ids = hidden_ids
         self._include_scroll_reveal = include_scroll_reveal
+        self._exclude_sidebars = exclude_sidebars
         self._stack: list[tuple[str, bool, int]] = []
         self._hidden_depth = 0
         self._heading_depth: Optional[int] = None
@@ -63,6 +65,10 @@ class _VisibleHTMLTextParser(HTMLParser):
         self.heading_parts: list[str] = []
         self.heading_prefix_parts: list[str] = []
         self.links: list[str] = []
+        self.archive_article_spans: list[tuple[int, int]] = []
+        self._article_depth: Optional[int] = None
+        self._article_start = 0
+        self._article_linked_heading = False
 
     @staticmethod
     def _attribute_map(attrs: Any) -> Dict[str, str]:
@@ -102,6 +108,16 @@ class _VisibleHTMLTextParser(HTMLParser):
             or ("visibility:hidden" in style and not scroll_reveal)
             or classes & self._hidden_classes
             or element_id in self._hidden_ids
+            or (
+                self._exclude_sidebars
+                and (
+                    values.get("role", "").casefold() in {"complementary", "navigation"}
+                    or any(
+                        re.search(r"(?:^|[-_])sidebar(?:$|[-_])", value)
+                        for value in semantic_values
+                    )
+                )
+            )
             or any(
                 value == "related"
                 or any(value.startswith(prefix) for prefix in self._NON_ARTICLE_PREFIXES)
@@ -121,10 +137,22 @@ class _VisibleHTMLTextParser(HTMLParser):
         self._stack.append((lowered, hidden, len(self.parts)))
         if hidden:
             self._hidden_depth += 1
+        if (
+            lowered == "article" and not self._hidden_depth
+            and self._article_depth is None
+        ):
+            self._article_depth = len(self._stack)
+            self._article_start = len(self.parts)
+            self._article_linked_heading = False
         if lowered == "a" and not self._hidden_depth:
             href = self._attribute_map(attrs).get("href", "").strip()
             if href:
                 self.links.append(href)
+                if self._article_depth is not None and any(
+                    tag in {"h1", "h2", "h3"}
+                    for tag, _hidden, _start in self._stack[self._article_depth:]
+                ):
+                    self._article_linked_heading = True
         if (
             lowered == "h1"
             and not self._hidden_depth
@@ -167,6 +195,15 @@ class _VisibleHTMLTextParser(HTMLParser):
         del self._stack[match:]
         self._hidden_depth -= sum(hidden for _tag, hidden, _start in popped)
         self._hidden_depth = max(0, self._hidden_depth)
+        if (
+            self._article_depth is not None
+            and len(self._stack) < self._article_depth
+        ):
+            if self._article_linked_heading:
+                self.archive_article_spans.append(
+                    (self._article_start, len(self.parts))
+                )
+            self._article_depth = None
         if self._heading_depth is not None and len(self._stack) < self._heading_depth:
             self._heading_depth = None
 
@@ -260,6 +297,7 @@ def _css_hidden_selectors(content: str) -> tuple[frozenset[str], frozenset[str]]
 def _visible_html_document(
     content: str, *, include_scroll_reveal: bool = False,
     heading_context_sink: Optional[list[str]] = None,
+    archive_articles_sink: Optional[list[str]] = None,
 ) -> tuple[str, str, str]:
     """Return visible page text, its first H1, and local pre-H1 context."""
 
@@ -268,6 +306,7 @@ def _visible_html_document(
         hidden_classes=hidden_classes,
         hidden_ids=hidden_ids,
         include_scroll_reveal=include_scroll_reveal,
+        exclude_sidebars=archive_articles_sink is not None,
     )
     try:
         parser.feed(content)
@@ -277,6 +316,11 @@ def _visible_html_document(
     text = " ".join(" ".join(parser.parts).split())
     heading = " ".join(" ".join(parser.heading_parts).split())
     heading_prefix = " ".join(" ".join(parser.heading_prefix_parts).split())
+    if archive_articles_sink is not None:
+        archive_articles_sink.extend(
+            " ".join(" ".join(parser.parts[start:end]).split())
+            for start, end in parser.archive_article_spans
+        )
     if heading_context_sink is not None and parser.heading_start is not None:
         # Use the actual visible H1, not a repeated document title or an
         # unrelated archive heading. Keep a small adjacent source window;
@@ -394,6 +438,8 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
     """Extract article body from raw HTML without admitting hidden page text.
 
     Returns the cleanest content available:
+      - Multiple substantive visible articles with linked headings retain their
+        separate bodies and dates in source order, excluding page chrome.
       - If trafilatura is installed AND input looks like HTML AND extraction
         succeeds with ≥ ``min_body_chars`` chars, returns the extracted body.
       - Otherwise HTML becomes visible plain text through the stdlib parser.
@@ -410,9 +456,20 @@ def extract_article_body(content: str, *, min_body_chars: int = 200) -> str:
     if "<html" not in content[:2000].lower() and "<body" not in content[:2000].lower() and "<div" not in content[:5000].lower():
         return content
     heading_context: list[str] = []
+    archive_articles: list[str] = []
     visible_document, primary_heading, heading_prefix = _visible_html_document(
         content, heading_context_sink=heading_context,
+        archive_articles_sink=archive_articles,
     )
+    archive_articles = [
+        text for text in archive_articles if len(text) >= min_body_chars
+    ]
+    if len(archive_articles) > 1:
+        # A single-article extractor can silently select just one archive entry.
+        # Keep only substantive, visible article elements with linked headings,
+        # in source order with each entry's own dates. The same visibility
+        # parser excludes hidden, related, navigation and sidebar content.
+        return "\n\n".join(archive_articles)
     if _TRAFILATURA_AVAILABLE:
         try:
             body = _trafilatura.extract(

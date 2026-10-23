@@ -103,3 +103,32 @@ def test_failed_closed_candidate_keeps_cursor_and_next_driver_tick_recovers(fail
     assert "reconciled closed provider cost" in drive_once(service)
     assert service._closed_provider_reconciliation_after == 321
     assert [request["after_entry_id"] for request in requests] == [123, 123]
+
+
+def test_candidate_timeout_stands_the_scan_down_before_the_next_tick():
+    """One 20s candidate timeout must not be repaid on every following tick."""
+    reads = []
+
+    def candidate(**kwargs):
+        reads.append(kwargs)
+        raise ArenaStoreUnavailable("rpc timed out")
+
+    service = ArenaService.__new__(ArenaService)
+    service._config = SimpleNamespace(mode="live", network_name="finney", netuid=71)
+    service._store = SimpleNamespace(next_closed_provider_reconciliation=candidate)
+    service._closed_provider_reconciliation_after = 0
+
+    # The timeout still surfaces on the tick that hit it.
+    with pytest.raises(ArenaStoreUnavailable):
+        service.reconcile_closed_provider_costs()
+    assert len(reads) == 1
+
+    # The next tick stands down instead of spending another full read deadline.
+    assert service.reconcile_closed_provider_costs() == {"status": "none"}
+    assert len(reads) == 1
+
+    # Once the stand-down elapses the scan is attempted again.
+    service._closed_provider_reconciliation_retry_after = 0.0
+    with pytest.raises(ArenaStoreUnavailable):
+        service.reconcile_closed_provider_costs()
+    assert len(reads) == 2

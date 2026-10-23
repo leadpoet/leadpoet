@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = "391-lab-arena-verifier-provider-request-cache.sql"
 LEASE_MIGRATION = "392-lab-arena-judgment-cache-extended-lease.sql"
 SINGLE_TOOL_MIGRATION = "518-lab-arena-single-tool-response-cache.sql"
+OWN_CALL_MIGRATION = "550-lab-arena-tool-reply-own-call-cache.sql"
 ROUND = "arena-2099-10-02"
 DATE = "2099-10-02"
 POLICY = scoring.build_scorer_policy(
@@ -55,6 +56,7 @@ def database():
             MIGRATION,
             LEASE_MIGRATION,
             SINGLE_TOOL_MIGRATION,
+            OWN_CALL_MIGRATION,
         )
     )
 
@@ -574,10 +576,10 @@ def test_historical_multi_source_respects_explicit_single_tool_and_preserves_pai
     assert _ledger(seeded, action) == original
 
 
-def test_single_tool_migration_exact_replay_and_tamper_fail_closed(seeded):
+def test_own_call_migration_exact_replay_and_tamper_fail_closed(seeded):
     psycopg2, dsn = seeded
     signature = "public.lab_arena_reserve_judgment_call(text,text,text,text,text,text,bigint,jsonb,integer)"
-    sql = (ROOT / "scripts" / SINGLE_TOOL_MIGRATION).read_text()
+    sql = (ROOT / "scripts" / OWN_CALL_MIGRATION).read_text()
     with psycopg2.connect(**dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute("SELECT pg_get_functiondef(%s::regprocedure)", (signature,))
@@ -588,7 +590,7 @@ def test_single_tool_migration_exact_replay_and_tamper_fail_closed(seeded):
             assert cursor.fetchone()[0] == before
             cursor.execute("BEGIN")
             cursor.execute(before.replace("-- A native success is still paid", "-- Tampered native success is still paid"))
-            with pytest.raises(Exception, match="single-tool cache source differs"):
+            with pytest.raises(Exception, match="tool-reply cache source differs"):
                 cursor.execute(sql)
             connection.rollback()
 
@@ -601,6 +603,7 @@ def test_real_broker_skips_legacy_multi_cache_and_dispatches_once(seeded, monkey
     sql_transport = PsycopgTransport(lambda: psycopg2.connect(**dsn))
     provider = FakeTransport([
         (200, _research_tool_answer(("fetch_page", "fetch_page", "search_web"))),
+        (200, _research_tool_answer(("search_web",))),
         (200, _research_tool_answer(("search_web",))),
     ])
     instance = br.Broker(
@@ -629,6 +632,7 @@ def test_real_broker_skips_legacy_multi_cache_and_dispatches_once(seeded, monkey
         # with exactly the pre-fix response eligibility behavior.
         complete = br._complete_declared_tool_calls
         with monkeypatch.context() as legacy:
+            legacy.setattr(br, "_judgment_requires_own_call", lambda _: False)
             legacy.setattr(br, "_complete_declared_tool_calls", lambda message, request:
                 complete(message, {k: v for k, v in request.items()
                                    if k != "parallel_tool_calls"}))
@@ -642,8 +646,8 @@ def test_real_broker_skips_legacy_multi_cache_and_dispatches_once(seeded, monkey
                 before = cursor.fetchall()
         fresh, hit, own = call("miner_a"), call("miner_b"), call("baseline")
         assert fresh.status == hit.status == own.status == 200
-        assert fresh.call.get("cached") is None and hit.call["cached"] is True
-        assert len(provider.sent) == 2  # one original paid call, one fresh replacement
+        assert fresh.call.get("cached") is None and hit.call.get("cached") is None
+        assert len(provider.sent) == 3  # each new tool conversation has its own paid reply
         with psycopg2.connect(**dsn) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT row_to_json(x) FROM public.lab_arena_ledger x "
@@ -654,3 +658,59 @@ def test_real_broker_skips_legacy_multi_cache_and_dispatches_once(seeded, monkey
                 assert cursor.fetchone()[0] == 1
     finally:
         sql_transport.close()
+
+
+@pytest.mark.parametrize("state", ["reserved", "dispatched", "uncertain", "settled", "cached"])
+def test_tool_policy_keeps_historic_own_head_and_never_reads_other_calls(seeded, state):
+    request, action = "tool-policy", "old-paid"
+    assert _reserve(seeded, "baseline", request, action)["status"] == "reserved"
+    if state != "reserved":
+        _dispatch(seeded, "baseline", action)
+    if state == "uncertain":
+        pending = _terminal()
+        _call(seeded, "lab_arena_mark_uncertain", "cache-run-baseline",
+              _sha("lease-baseline"), _sha(action), json.dumps({
+                  "reason": "missing_provider_cost",
+                  "openrouter_generation_id": "gen-own-tool-policy",
+                  "credential_fingerprint": _sha("credential"),
+                  "judgment_cache_response": pending,
+              }), 120)
+    elif state in {"settled", "cached"}:
+        _settle(seeded, "baseline", action, _terminal())
+    label = "baseline"
+    if state == "cached":
+        label, action = "miner_a", "old-cached"
+        assert _reserve(seeded, label, request, action)["status"] == "cache_hit"
+    before = _ledger(seeded, action)
+    doc = {**_call_doc(request), "judgment_cache_own_call_only": True}
+    own = _reserve(seeded, label, request, action, call_doc=doc)
+    assert own["status"] == ("settled" if state == "cached" else state)
+    assert own["idempotent"] is True
+    assert _ledger(seeded, action) == before
+    if state == "uncertain":
+        assert own["judgment_cache_pending_reply"] is True
+        assert own["terminal_response"] == pending
+    if state == "cached":
+        assert own["amount_microusd"] == 0
+    fresh = _reserve(seeded, "miner_b", request, "new-tool-call", call_doc=doc)
+    assert fresh["status"] == "reserved"  # neither cache hit nor cache busy
+    assert _ledger(seeded, "new-tool-call")[0][2]["judgment_cache_own_call_only"] is True
+    assert not any(row[0] == "dispatch" for row in _ledger(seeded, "new-tool-call"))
+
+
+def test_tool_only_source_cannot_feed_an_older_gateway_shared_lookup(seeded):
+    doc = {**_call_doc("mixed-gateway"), "judgment_cache_own_call_only": True}
+    assert _reserve(seeded, "baseline", "mixed-gateway", "only-source", call_doc=doc)["status"] == "reserved"
+    _dispatch(seeded, "baseline", "only-source")
+    _settle(seeded, "baseline", "only-source", _terminal())
+    before = _ledger(seeded, "only-source")
+    assert _reserve(seeded, "miner_a", "mixed-gateway", "old-reader")["status"] == "reserved"
+    assert _ledger(seeded, "only-source") == before
+
+
+@pytest.mark.parametrize("invalid", [None, "true", 0, 1, [], {}])
+def test_invalid_tool_cache_policy_fails_before_reservation(seeded, invalid):
+    doc = {**_call_doc("invalid-policy"), "judgment_cache_own_call_only": invalid}
+    with pytest.raises(Exception, match="lab_arena_judgment_cache_input_invalid"):
+        _reserve(seeded, "baseline", "invalid-policy", "invalid-policy", call_doc=doc)
+    assert not _ledger(seeded, "invalid-policy")

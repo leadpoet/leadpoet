@@ -58,6 +58,47 @@ def test_truthy_completeness_metadata_cannot_claim_complete():
     assert report["qualification"]["candidate_records"] == 0
 
 
+def test_per_run_status_uses_joined_proof_not_successful_recorder_buffer():
+    value = document()
+    value["worker_observation_artifacts"] = {value["run_id"]: {"payload": {
+        "complete": True, "agent_observations": [{"kind": "state_snapshot", "data": {
+            "name": "automatic_capture_summary", "value": {"counts": {}, "complete": True}}}]}}}
+    value["provider_calls"] = [
+        {"run_id": value["run_id"], "response_provenance": {
+            "delivery_to_worker": "socket_written", "agent_receipt": "not_reported"}},
+        {"run_id": value["run_id"], "response_provenance": {
+            "delivery_to_worker": "socket_written", "agent_receipt": "reported_exact_body_received"}},
+        {"run_id": "prior-attempt", "response_provenance": {"delivery_to_worker": "socket_written"}},
+    ]
+    report = readiness.build([seal(value)])
+    status = report["sources"][0]["capture"]
+    assert status["status"] == "incomplete"
+    assert status["authority"] == "joined_export_checks"
+    assert status["recorder_buffer_complete"] is True
+    assert status["response_receipts"] == {
+        "socket_written": 2, "read_reported": 1, "written_without_read_report": 1}
+    assert "direct_web_content_not_captured" in status["incomplete_reasons"]
+    assert report["qualification"]["candidate_records"] == 1
+
+
+def test_per_run_status_keeps_old_missing_proof_unverified():
+    value = document()
+    value.pop("completeness")
+    status = readiness.build([seal(value)])["sources"][0]["capture"]
+    assert status["status"] == "unverified"
+    assert status["recorder_buffer_complete"] is None
+
+
+def test_per_run_complete_requires_every_export_dimension():
+    value = document()
+    value["completeness"] = {"complete": True, "dimensions": {
+        key: True for key in readiness._DIMENSIONS}, "incomplete_reasons": []}
+    report = readiness.build([seal(value)])
+    assert report["sources"][0]["capture"]["status"] == "complete"
+    value["completeness"]["dimensions"]["research_process"] = False
+    assert readiness.build([seal(value)])["sources"][0]["capture"]["status"] == "incomplete"
+
+
 def test_cli_private_report_and_no_private_payload_in_stdout(tmp_path, capsys):
     source, output = tmp_path / "export.json", tmp_path / "report.json"
     value = document("private-execution-identity")

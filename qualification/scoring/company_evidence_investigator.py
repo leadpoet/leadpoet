@@ -31,6 +31,7 @@ from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
 from qualification.scoring.company_fit_decision import _company_name
+from qualification.scoring.checked_sources import checked_source_provenance
 from qualification.scoring.country_data import US_STATES
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH,
@@ -5491,6 +5492,13 @@ async def investigate_company_evidence(
                         return {
                             "claims": claims,
                             "_completed_submit": not failure_reason,
+                            "_checked_source_provenance": (
+                                checked_source_provenance(
+                                    request_document=input_document,
+                                    messages=messages,
+                                    claims=claims,
+                                ) if not failure_reason else {}
+                            ),
                             # This receipt is constructed only after fetched-page,
                             # exact-quote, company-attribution, URL, and canonical
                             # stage validation. It is never read from model JSON.

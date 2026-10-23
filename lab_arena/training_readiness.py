@@ -44,14 +44,17 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
 
     dimensions, gaps, call_gaps, calls, recorder_counts = Counter(), Counter(), Counter(), Counter(), Counter()
     recorder_runs, recorder_missing, complete, cohorts = 0, 0, 0, defaultdict(list)
+    sources = []
     for example in valid:
         proof = example.get("completeness") or {}
+        dimensions_for_run = {name: (proof.get("dimensions") or {}).get(name) is True for name in _DIMENSIONS}
+        complete_for_run = (proof.get("complete") is True and all(dimensions_for_run.values())
+                            and not proof.get("incomplete_reasons"))
         for name in _DIMENSIONS:
-            dimensions[name] += (proof.get("dimensions") or {}).get(name) is True
-        complete += (proof.get("complete") is True
-                     and all((proof.get("dimensions") or {}).get(name) is True for name in _DIMENSIONS)
-                     and not proof.get("incomplete_reasons"))
+            dimensions[name] += dimensions_for_run[name]
+        complete += complete_for_run
         gaps.update(set(proof.get("incomplete_reasons") or []))
+        receipts = {"socket_written": 0, "read_reported": 0, "written_without_read_report": 0}
         # Inventory the execution, not its retries and judge calls again.
         for call in example.get("provider_calls") or []:
             if call.get("run_id") != example["run_id"]:
@@ -61,17 +64,35 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
             calls["retained_latest_responses"] += isinstance(call.get("response"), dict)
             calls["reported_received_responses"] += ((call.get("response_provenance") or {}).get("agent_receipt")
                                                      == "reported_exact_body_received")
+            provenance = call.get("response_provenance") or {}
+            if provenance.get("delivery_to_worker") == "socket_written":
+                receipts["socket_written"] += 1
+                received = provenance.get("agent_receipt") == "reported_exact_body_received"
+                receipts["read_reported"] += received
+                receipts["written_without_read_report"] += not received
             call_gaps.update(set(call.get("evidence_gaps") or []))
         artifact = (example.get("worker_observation_artifacts") or {}).get(example["run_id"]) or {}
         summaries = [row.get("data", {}).get("value") for row in (artifact.get("payload") or {}).get("agent_observations", [])
                      if row.get("kind") == "state_snapshot" and row.get("data", {}).get("name") == "automatic_capture_summary"]
+        recorder_complete = None
         if len(summaries) == 1 and isinstance(summaries[0], dict):
             recorder_runs += 1
+            if type(summaries[0].get("complete")) is bool:
+                recorder_complete = summaries[0]["complete"]
             for key, value in (summaries[0].get("counts") or {}).items():
                 if isinstance(key, str) and type(value) is int and value >= 0:
                     recorder_counts[key] += value
         else:
             recorder_missing += 1
+        # A recorder can successfully flush an empty buffer while a native
+        # child handles every call. Only the joined exporter proves coverage.
+        sources.append({"run_id": example["run_id"], "example_hash": example["example_hash"],
+                        "capture": {"authority": "joined_export_checks",
+                                    "status": "complete" if complete_for_run else "incomplete" if proof else "unverified",
+                                    "dimensions": dimensions_for_run,
+                                    "incomplete_reasons": sorted(set(proof.get("incomplete_reasons") or [])),
+                                    "recorder_buffer_complete": recorder_complete,
+                                    "response_receipts": receipts}})
         config = example.get("configuration") or {}
         cohorts[(config.get("scorer_image_digest"), contracts.document_hash(config.get("scorer_policy") or {}))].append(example)
 
@@ -91,7 +112,7 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
         "production_rounds_only": production_rounds_only,
         "input_exports": supplied, "distinct_verified_executions": len(valid),
         "excluded_exports": dict(sorted(rejected.items())),
-        "sources": [{"run_id": item["run_id"], "example_hash": item["example_hash"]} for item in valid],
+        "sources": sources,
         "capture": {"executions_passing_all_export_dimensions": complete,
                     "passing_dimensions": {name: dimensions[name] for name in _DIMENSIONS},
                     "execution_gap_counts": dict(sorted(gaps.items())),

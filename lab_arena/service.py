@@ -4079,6 +4079,7 @@ class ArenaService:
         self, submission_id: str, runs: Sequence[Mapping[str, Any]],
         *, positions: Optional[Sequence[int]] = None,
         publication_reads: Optional[_PublicationReads] = None,
+        evidence_reads: Optional[_PublicResultEvidenceReads] = None,
     ) -> Dict[int, int]:
         selected = self._selected_accepted_execution_runs(runs, submission_id)
         counts: Dict[int, int] = {}
@@ -4093,7 +4094,8 @@ class ArenaService:
             if publication_reads is not None:
                 output = publication_reads.output(output_ref)
             else:
-                raw = self._objects.get_bounded(output_ref, MAX_OUTPUT_BYTES)
+                raw = (evidence_reads.object(self._objects, output_ref, MAX_OUTPUT_BYTES)
+                       if evidence_reads is not None else self._objects.get_bounded(output_ref, MAX_OUTPUT_BYTES))
                 try:
                     document = json.loads(raw.decode("utf-8"))
                 except (UnicodeDecodeError, ValueError) as exc:
@@ -4137,17 +4139,20 @@ class ArenaService:
         runs: Sequence[Mapping[str, Any]],
         positions: Sequence[int],
         *, publication_reads: Optional[_PublicationReads] = None,
+        evidence_reads: Optional[_PublicResultEvidenceReads] = None,
     ) -> Dict[str, Any]:
         wanted = sorted(set(int(value) for value in positions))
         qualified = (
             publication_reads.qualified_counts(submission_id, wanted)
             if publication_reads is not None else self._qualified_company_counts(
-                round_row, submission_id, runs, positions=wanted
+                round_row, submission_id, runs, positions=wanted,
+                **({"evidence_reads": evidence_reads} if evidence_reads is not None else {}),
             )
         )
         returned = self._returned_company_counts(
             submission_id, runs, positions=wanted,
             publication_reads=publication_reads,
+            **({"evidence_reads": evidence_reads} if evidence_reads is not None else {}),
         )
         rows = []
         for position in wanted:
@@ -4217,6 +4222,7 @@ class ArenaService:
         self, round_row: Mapping[str, Any], submission_id: str,
         runs: Sequence[Mapping[str, Any]], *, positions: Optional[Sequence[int]] = None,
         publication_reads: Optional[_PublicationReads] = None,
+        evidence_reads: Optional[_PublicResultEvidenceReads] = None,
     ) -> Dict[int, int]:
         """Count qualified entities per ICP in one judgment/object pass."""
         policy = round_row["configuration_doc"]["scorer_policy"]
@@ -4260,10 +4266,16 @@ class ArenaService:
             if publication_reads is not None:
                 output = publication_reads.output(str(execution["output_ref"]))
             else:
-                document = json.loads(self._objects.get_bounded(execution["output_ref"], MAX_OUTPUT_BYTES).decode("utf-8"))
+                raw = (evidence_reads.object(self._objects, execution["output_ref"], MAX_OUTPUT_BYTES)
+                       if evidence_reads is not None else self._objects.get_bounded(execution["output_ref"], MAX_OUTPUT_BYTES))
+                document = json.loads(raw.decode("utf-8"))
                 output = validate_output_document(document)
             companies = output["companies"]
-            rows = self._verified_breakdowns(judge, icp=icps[position], companies=companies, policy=policy)
+            rows = self._verified_breakdowns(
+                judge, icp=icps[position], companies=companies, policy=policy,
+                **({"evidence_reads": evidence_reads, "round_context": round_row}
+                   if evidence_reads is not None else {}),
+            )
             scored_indexes, _ = verify.bucket_skip(icps[position], verify.slice_first_n(companies, verify.icp_company_goal(icps[position])))
             identities = set()
             for original_index, breakdown in zip(scored_indexes, rows):
@@ -4341,6 +4353,7 @@ class ArenaService:
         runs: Sequence[Mapping[str, Any]],
         *, positions: Optional[Sequence[int]] = None,
         publication_reads: Optional[_PublicationReads] = None,
+        evidence_reads: Optional[_PublicResultEvidenceReads] = None,
     ) -> Dict[str, Any]:
         """Build final cost reporting without changing the quality score."""
 
@@ -4358,6 +4371,7 @@ class ArenaService:
                     if positions is None else positions
                 ),
                 publication_reads=publication_reads,
+                **({"evidence_reads": evidence_reads} if evidence_reads is not None else {}),
             )
         if "cost_per_company_microusd" not in configuration:
             return {
@@ -7328,6 +7342,7 @@ class ArenaService:
         execution_runs = self._store.list_runs(round_id, kind="execute")
         judgment_runs = self._store.list_runs(round_id, kind="score")
         judges = self._select_scoring_outputs(judgment_runs, round_row=row)
+        loaded_rows = {str(run["run_id"]): run for run in execution_runs + judgment_runs}
         completed = {}
         icps = None
         participants = []
@@ -7390,6 +7405,16 @@ class ArenaService:
                         and not self._same_scoring_membership(judges[run_id], run, round_id=round_id)
                     ):
                         raise scoring.ScoringError("completed score membership differs")
+                # Proof reuse belongs to this model in this refresh only.
+                # Keep pending peers out of the bounded raw-read maps.
+                evidence_reads = _PublicResultEvidenceReads()
+                self._prefetch_public_result_evidence(
+                    evidence_reads, round_id=round_id, execution_runs=runs,
+                    score_runs=[judges[item["scored_run_id"]] for item in items],
+                    public_run_ids={str(run["run_id"]) for run in runs},
+                    source_rows=loaded_rows, round_context=row,
+                    include_signal_attribution=False,
+                )
                 if not stored:
                     if icps is None:
                         icps = self.evaluation_icps(round_id)
@@ -7398,11 +7423,12 @@ class ArenaService:
                     for item in items:
                         run_id = item["scored_run_id"]
                         run = selected[int(item["icp_position"])]
-                        output = validate_output_document(json.loads(self._objects.get_bounded(run["output_ref"], MAX_OUTPUT_BYTES).decode("utf-8")))
+                        output = validate_output_document(json.loads(evidence_reads.object(self._objects, run["output_ref"], MAX_OUTPUT_BYTES).decode("utf-8")))
                         outputs[run_id] = output["companies"]
                         breakdowns[run_id] = self._verified_breakdowns(
                             judges[run_id], icp=icps[int(item["icp_position"])],
                             companies=output["companies"], policy=configuration["scorer_policy"],
+                            evidence_reads=evidence_reads, round_context=row,
                         )
                     scores = scoring.build_stage_scores(
                         plan={**plan, "work_items": items, "zero_rows": zeros,
@@ -7425,7 +7451,10 @@ class ArenaService:
                         ))
                     runs = [run if run.get("per_icp_score") is not None else
                             {**run, **records[run["run_id"]]} for run in runs]
-                eligibility = self._submission_cost_eligibility(row, submission_id, runs, positions=sorted(positions))
+                eligibility = self._submission_cost_eligibility(
+                    row, submission_id, runs, positions=sorted(positions),
+                    evidence_reads=evidence_reads,
+                )
                 if not eligibility["eligible"]:
                     if on_completed is not None:
                         on_completed(submission_id, None)
@@ -8174,12 +8203,13 @@ class ArenaService:
     def _prefetch_public_result_evidence(
         self, reads: _PublicResultEvidenceReads, *, round_id: str,
         execution_runs, score_runs, public_run_ids, source_rows, round_context,
+        include_signal_attribution: bool = True,
     ) -> None:
         """Seed bounded raw reads only; all authority validators still run below."""
-        reads.seed(reads.runs, source_rows)
         executions = {str(run["run_id"]): run for run in execution_runs}
         judgments = self._select_scoring_outputs(score_runs, round_row=round_context)
         pairs = set()
+        source_ids = set(executions) | {str(run["run_id"]) for run in score_runs}
         signal_companies: Dict[str, set[int]] = {}
         signal_policy = (((round_context.get("configuration_doc") or {}).get("scorer_policy") or {})
                          .get("signal_judgment_policy") == signal_judgments.POLICY)
@@ -8197,9 +8227,11 @@ class ArenaService:
                 continue  # The unchanged consumer verifier rejects malformed leases.
             for item in lease["hits"] + lease["misses"]:
                 pairs.add((item["cache_key"], item["authority_slot"]))
-                if not signal_policy:
-                    continue
                 evidence = item.get("evidence_doc")
+                if evidence is not None:
+                    source_ids.add(str(evidence["source_score_run_id"]))
+                if not signal_policy or not include_signal_attribution:
+                    continue
                 source_id = str(evidence["source_score_run_id"]) if evidence is not None else str(judge["run_id"])
                 if evidence is None:
                     indexes = {item["company_index"]}
@@ -8213,6 +8245,9 @@ class ArenaService:
                     }
                 if indexes:
                     signal_companies.setdefault(source_id, set()).update(indexes)
+        reads.seed(reads.runs, source_rows if include_signal_attribution else {
+            run_id: source_rows[run_id] for run_id in source_ids if run_id in source_rows
+        })
         company_reader = getattr(self._store, "get_company_judgment_batch", None)
         if pairs and company_reader is not None:
             rows = company_reader(sorted(pairs))

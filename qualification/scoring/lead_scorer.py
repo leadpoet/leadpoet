@@ -93,6 +93,7 @@ from qualification.scoring.company_evidence_investigator import (
     _quote_occurs,
     _quote_names_company,
     _quote_supports_headcount,
+    _quote_supports_headquarters,
     _quote_identifies_headquarters,
     _same_domain_name_alias,
     _validated_homepage_navigation_locators,
@@ -5433,6 +5434,37 @@ async def _refresh_linkedin_employee_size_observation(
     return projected
 
 
+def _validated_first_party_headquarters(
+    finding: Mapping[str, Any],
+    *,
+    verified_identity: Mapping[str, Any],
+    company: CompanyOutput,
+) -> bool:
+    """Retain the investigator's validated first-party headquarters finding.
+
+    Existing fetched-source validation and the investigator decide company
+    attribution, headquarters meaning and chronology. This check preserves
+    provenance and objective location support without a second language rule.
+    """
+
+    domain = str(verified_identity.get("registrable_dns_domain") or "")
+    name = str(verified_identity.get("normalized_name") or "")
+    quote = str(finding.get("evidence_quote") or "")
+    if not (
+        finding.get("target") == "geography"
+        and finding.get("status") == "VERIFIED"
+        and domain and _registrable_domain(finding.get("evidence_url")) == domain
+        and domain == _registrable_domain(company.company_website)
+        and _company_name(name) == _company_name(company.company_name)
+    ):
+        return False
+    return _quote_supports_headquarters(
+        quote,
+        observed_country=str(finding.get("observed_country") or ""),
+        observed_state=str(finding.get("observed_state") or ""),
+    )
+
+
 def _project_verified_linkedin_headquarters(
     verdict: Mapping[str, Any],
     *,
@@ -5493,6 +5525,31 @@ def _project_verified_linkedin_headquarters(
             finding = candidates[0]
     if not finding:
         return dict(verdict)
+    if (
+        _resolve_country((validated_geography_finding or {}).get("observed_country"))
+        != _resolve_country(finding["observed_country"])
+        and _validated_first_party_headquarters(
+            validated_geography_finding or {},
+            verified_identity=verified_identity, company=company,
+        )
+    ):
+        # Keep the existing investigator's exact-company current HQ finding.
+        # Broad web observations cannot enter here. Ordinary deterministic
+        # submitted/ICP geography checks still decide qualification.
+        reviewed_projection = _project_investigator_geography(
+            verdict, validated_geography_finding, icp=icp,
+            company=company, company_quality=company_quality,
+        )
+        # Incomplete proof cannot retain an unreviewed schema-repair location.
+        if (
+            _canonical_observed_geography_match(
+                reviewed_projection, icp, company_quality=company_quality,
+            ) is not None
+            and _validated_investigator_geography_matches_verdict(
+                reviewed_projection, validated_geography_finding,
+            )
+        ):
+            return reviewed_projection
     if (
         _resolve_country(finding["observed_country"]) == "united states"
         and not finding["observed_state"]
@@ -7129,6 +7186,7 @@ def _targeted_company_investigation_dimensions(
     *,
     icp_stage: str,
     employee_size_conflict: bool,
+    icp: Optional[ICPPrompt] = None,
     company: Optional[CompanyOutput] = None,
     verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
     verified_homepage_identity: Optional[Mapping[str, Any]] = None,
@@ -7253,9 +7311,35 @@ def _targeted_company_investigation_dimensions(
         or reviewable_industry_mismatch
     ):
         targets.append("industry")
-    # A proven outside-region headquarters remains terminal. Research is used
-    # only when the broad verifier did not establish a usable headquarters.
-    if dimensions.get("geography") == COMPANY_FIT_UNAVAILABLE:
+    # Resolve a bound LinkedIn/submitted-country conflict in the same single
+    # bounded investigator, including a geography-only dispute. A first-party
+    # submitted URL admits source research; it never proves a matching HQ.
+    headquarters_conflict = bool(
+        company and icp and verified_linkedin_headquarters
+        and _canonical_observed_geography_match({
+            "observed_hq_country": company.country,
+            "observed_hq_state": company.state,
+        }, icp, company_quality=True) is True
+        and dimensions.get("geography") == COMPANY_FIT_MISMATCH
+        and details.get("identity_decision") == COMPANY_FIT_MATCH
+        and _resolve_country(company.country)
+        and _resolve_country(observations.get("observed_hq_country"))
+        and _resolve_country(company.country)
+        != _resolve_country(observations.get("observed_hq_country"))
+        and verified_transport_domain
+        == _registrable_domain(company.company_website)
+        and any(
+            _registrable_domain(url) == verified_transport_domain
+            for url in (
+                *(item.url for item in company.company_stage_evidence),
+                *(signal.url for signal in company.intent_signals),
+                *company.fit_evidence_urls,
+                *([company.required_attribute.evidence_url]
+                  if company.required_attribute is not None else []),
+            )
+        )
+    )
+    if dimensions.get("geography") == COMPANY_FIT_UNAVAILABLE or headquarters_conflict:
         targets.append("geography")
     elif (
         dimensions.get("geography") == COMPANY_FIT_MATCH
@@ -9368,6 +9452,7 @@ async def _llm_reverify_company(
         _targeted_company_investigation_dimensions(
             result,
             icp_stage=icp_stage,
+            icp=icp,
             employee_size_conflict=employee_size_conflict,
             company=company,
             verified_rebrand_redirect=verified_rebrand_redirect,
@@ -9920,6 +10005,7 @@ async def _llm_reverify_company(
             _targeted_company_investigation_dimensions(
                 repaired_result,
                 icp_stage=icp_stage,
+                icp=icp,
                 employee_size_conflict=employee_size_conflict,
                 company=company,
                 verified_rebrand_redirect=verified_rebrand_redirect,

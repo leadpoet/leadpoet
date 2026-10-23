@@ -75,11 +75,15 @@ def test_exact_bighat_support_failure_does_not_reject_primary_or_drop_support():
     assert "clinical-stage" not in corrected["observed_value"]
 
 
-@pytest.mark.parametrize("quote", ["", "BigHat Biosciences has invented proof."])
-def test_missing_or_nonexistent_compound_support_stays_unproven(quote):
+@pytest.mark.parametrize("quote,reason", [
+    ("", investigator.REQUIRED_ATTRIBUTE_SUPPORT_MISSING_CITATION_REASON),
+    ("BigHat Biosciences has invented proof.",
+     investigator.REQUIRED_ATTRIBUTE_SUPPORT_QUOTE_ABSENT_REASON),
+])
+def test_missing_or_nonexistent_compound_support_stays_unproven(quote, reason):
     rejected = _validate({**FINDING, "supporting_evidence_quote_1": quote})
     assert rejected["status"] == "UNPROVEN"
-    assert rejected["reason"] == SUPPORT_REASON
+    assert rejected["reason"] == reason
 
 
 @pytest.mark.parametrize("quote,text,reason", [

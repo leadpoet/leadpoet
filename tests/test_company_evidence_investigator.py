@@ -4339,6 +4339,7 @@ def test_activity_and_headquarters_findings_require_bound_direct_evidence():
         {"findings": [hq]},
         targets=("geography",),
         fetched_pages={hq_url: hq["evidence_quote"]},
+        fetched_final_urls={hq_url: hq_url},
         first_party_domains={"acme.example"},
         identity_names={"acme"},
         identity_anchor={
@@ -4356,6 +4357,7 @@ def test_activity_and_headquarters_findings_require_bound_direct_evidence():
         {"findings": [office]},
         targets=("geography",),
         fetched_pages={hq_url: office["evidence_quote"]},
+        fetched_final_urls={hq_url: hq_url},
         first_party_domains={"acme.example"},
         identity_names={"acme"},
         identity_anchor={
@@ -4805,6 +4807,7 @@ def test_complete_identity_keeps_nonindustry_literal_company_binding(
         {"findings": [finding]},
         targets=(target,),
         fetched_pages={finding["evidence_url"]: finding["evidence_quote"]},
+        fetched_final_urls={finding['evidence_url']: finding['evidence_url']},
         first_party_domains={"rapid7.com"},
         identity_names={"rapid7"},
         identity_anchor=_complete_rapid7_identity_anchor(),
@@ -4918,6 +4921,7 @@ def test_validated_procurepro_sydney_contradiction_survives_geography_projection
     finding = _validated_findings(
         {"findings": [submitted]}, targets=("geography",),
         fetched_pages={url: quote}, first_party_domains={"procurepro.co"},
+        fetched_final_urls={url: url},
         identity_names={"procurepro"},
         identity_anchor={
             "submitted_name": "ProcurePro", "observed_name": "ProcurePro",
@@ -4970,6 +4974,7 @@ def test_validated_procurepro_sydney_contradiction_survives_geography_projection
     unbound = _validated_findings(
         {"findings": [submitted]}, targets=("geography",),
         fetched_pages={url: "Other page text without the submitted quote."},
+        fetched_final_urls={url: url},
         first_party_domains={"procurepro.co"}, identity_names={"procurepro"},
         identity_anchor={
             "submitted_name": "ProcurePro", "observed_name": "ProcurePro",
@@ -5094,6 +5099,7 @@ def test_same_country_city_finding_controls(city, status, expected):
     validated = _validated_findings(
         {"findings": [finding]}, targets=("geography",),
         fetched_pages={finding["evidence_url"]: quote},
+        fetched_final_urls={finding['evidence_url']: finding['evidence_url']},
         first_party_domains={"acme.example"}, identity_names={"acme"},
         identity_anchor={
             "submitted_domain": "acme.example", "observed_domain": "acme.example",
@@ -5131,6 +5137,7 @@ def test_us_state_or_region_plus_city_uses_bound_locality_finding(
     validated = _validated_findings(
         {"findings": [finding]}, targets=("geography",),
         fetched_pages={finding["evidence_url"]: quote},
+        fetched_final_urls={finding['evidence_url']: finding['evidence_url']},
         first_party_domains={"acme.example"}, identity_names={"acme"},
         identity_anchor={
             "submitted_domain": "acme.example", "observed_domain": "acme.example",
@@ -5294,6 +5301,7 @@ def test_activity_and_hq_reject_same_name_wrong_domain_and_accept_bound_company(
                 f"{wrong_industry['evidence_quote']} {wrong_hq['evidence_quote']}"
             )
         },
+        fetched_final_urls={wrong_domain: wrong_domain},
         first_party_domains={"abec.com", "abec.co.uk"},
         identity_names={"abec"},
         identity_anchor=abec_anchor,
@@ -5332,6 +5340,7 @@ def test_activity_and_hq_reject_same_name_wrong_domain_and_accept_bound_company(
                 f"{cloudforce_hq['evidence_quote']}"
             )
         },
+        fetched_final_urls={cloudforce_url: cloudforce_url},
         first_party_domains={"gocloudforce.com"},
         identity_names={"cloudforce"},
         identity_anchor={
@@ -7004,6 +7013,7 @@ def test_audited_headquarters_controls_require_actual_hq_language(
         {"findings": [finding]},
         targets=("geography",),
         fetched_pages={url: quote},
+        fetched_final_urls={url: url},
         first_party_domains={domain},
         identity_names={key},
         identity_anchor={

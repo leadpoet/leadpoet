@@ -130,8 +130,25 @@ MISSING_INDUSTRY_OBSERVATION_REASON = (
     "the exact quote and company binding were not rejected"
 )
 REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON = (
-    "supporting quote was not company-bound in a loaded source"
+    "supporting quote did not identify the investigated company"
 )
+REQUIRED_ATTRIBUTE_SUPPORT_MISSING_CITATION_REASON = (
+    "supporting evidence requires a valid URL and a nonempty exact quote"
+)
+REQUIRED_ATTRIBUTE_SUPPORT_UNLOADED_SOURCE_REASON = "supporting source URL was not loaded"
+REQUIRED_ATTRIBUTE_SUPPORT_QUOTE_ABSENT_REASON = (
+    "supporting quote was not present in fetched source"
+)
+REQUIRED_ATTRIBUTE_SUPPORT_OVERSIZED_QUOTE_REASON = (
+    "supporting quote exceeds the 2000-character limit"
+)
+REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASONS = frozenset({
+    REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+    REQUIRED_ATTRIBUTE_SUPPORT_MISSING_CITATION_REASON,
+    REQUIRED_ATTRIBUTE_SUPPORT_UNLOADED_SOURCE_REASON,
+    REQUIRED_ATTRIBUTE_SUPPORT_QUOTE_ABSENT_REASON,
+    REQUIRED_ATTRIBUTE_SUPPORT_OVERSIZED_QUOTE_REASON,
+})
 _IDENTITY_LINK_CONTEXT_MARKER = (
     "[[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]]"
 )
@@ -382,9 +399,9 @@ mandatory condition still needs proof there.
 Judge the whole attribute from all loaded company-bound facts. Rejecting a
 citation does not reject independent evidence of the company's own offering.
 Subsidiary facts require explicit parent binding.
-If industry's fetched activity quote proves the whole attribute, reuse its URL
-and quote; no different source is required. Industry labels or VERIFIED status
-alone never prove an attribute.
+Reuse exact loaded quotes across targets, including stage and industry, when
+they prove attribute conditions. Labels or VERIFIED status alone never prove
+an attribute.
 For compound attributes, prove every actual condition for the same company and
 product with exact loaded company-bound quotes; explain their joint proof.
 Do not add conditions absent from the criterion. Missing required proof or
@@ -410,43 +427,37 @@ and quote its current company-size band with the company name. Do not infer a
 count from associated members or accept either conflicting range by default.
 If the profile cannot be fetched or its evidence remains conflicting, return
 UNPROVEN. All ordinary fetched-text, identity and quote checks still apply.
-For geography, find the current headquarters of the investigated company.
-An already fetched exact LinkedIn profile may also prove HQ when its own body
-binds the verified company. Quote its About Headquarters field; generic
-locations or search snippets are not HQ proof.
-A server-prefetched structured profile projection labelled
-"harvestapi_get_company locations.headquarter=true" supplies already fetched,
-exact company-bound HQ facts. You may quote that projection for geography;
-do not infer HQ from other profile locations or submitted source claims.
-Use verified exact-company LinkedIn headquarters first, including a validated
-About Headquarters field or the server-fetched locations.headquarter=true
-projection. A valid outside-region LinkedIn HQ remains a contradiction; do not
-replace it with a matching web location. Use company contact/about pages and
-other web evidence only when LinkedIn supplies no usable explicit HQ. A generic
-profile location, inaccessible profile, or wrong-entity profile is not usable HQ.
-A navigation label is only a locator: its page must contain an explicit
-company-bound HQ statement.
-If the headquarters heading omits the company name, first use one continuous
-adjacent span that includes both the investigated company's name and the
-heading with its address when that span exists on the fetched page.
-On a fully verified first-party contact or about page, a country-qualified
-heading such as "United States Headquarters 123..." may identify that
-company's HQ without repeating its name in the exact quote. Quote the whole
-heading and address continuously, and report that same country and location.
-Do not use a state, region, customer, parent, or regional-office heading as
-the investigated company's headquarters.
-Do not transfer a customer's, parent company's, or regional office location
-to the investigated company.
-Incorporation, an office, factory, job, customer, event, service area, or parent
-company location is not headquarters. Return a country and, for a United
-States headquarters, a state. Use a quote that explicitly identifies the
-location as the headquarters or principal executive office. Do not decide
-whether that location is inside a requested region; the deterministic scorer
-does that after the investigation. Compare sources for the exact company using
-the LinkedIn-first priority above. If fallback first-party sources disagree, or a
-dated company-bound source gives a newer conflicting headquarters, resolve the
-chronology with source dates or an explicit move statement; otherwise return
-UNPROVEN. A factory opening cannot prove an HQ move.
+For geography, prove the exact company's current headquarters, not its office,
+factory, incorporation, service area, customer, parent or regional HQ. Return
+country and, for US headquarters, state; deterministic geography decides fit.
+Use verified exact-company LinkedIn headquarters first: quote the identity-bound About
+Headquarters field or server-fetched "harvestapi_get_company
+locations.headquarter=true" projection, never generic profile locations.
+A valid outside-region LinkedIn HQ remains a contradiction unless fetched
+first-party evidence proves the same company's current headquarters status
+and resolves the conflict. A profile can omit another global headquarters.
+A current explicit first-party statement of simultaneous global headquarters
+for this same company itself resolves that profile omission; no third source
+or headquarters move is required.
+Judge the meaning of exact fetched text, including first-person company
+statements, without requiring one wording for headquarters or co-headquarters.
+Compare source dates and current company statements. An old, superseded,
+proposed, negated or ambiguous claim does not resolve a conflict. A named About
+section can bind "The company" to its HQ. Retain the LinkedIn contradiction
+absent current HQ proof; never substitute a convenient matching office or
+another entity's location. Apart from this resolved current HQ conflict:
+Use company contact/about pages and other web evidence only when LinkedIn supplies no usable explicit HQ.
+An inaccessible or wrong-entity profile supplies no usable fact. A navigation
+label is only a fetch locator, not evidence.
+Quote an exact continuous span identifying the company, headquarters and
+location. Use one continuous adjacent span that includes both the investigated
+company's name and the heading/address when possible. A fully
+verified first-party contact/about page can bind a country-qualified heading
+like "United States Headquarters 123..." without repeating the company name;
+quote heading and address continuously. State/region/office headings do not
+prove global HQ. If fallback first-party sources disagree, resolve chronology
+with source dates or an explicit move statement; otherwise return UNPROVEN.
+A factory opening cannot prove an HQ move.
 
 For Private Equity, prove company -> current controlling owner -> same owner's
 PE identity from fetched text. Check subject, object, negation and chronology.
@@ -2819,6 +2830,41 @@ def _semantic_ownership_proof(
     return bool(owner_words) and f" {owner_words} " in f" {quote_words} "
 
 
+def _required_attribute_support_rejection(
+    url: Any,
+    quote: Any,
+    *,
+    fetched_pages: Mapping[str, str],
+    fetched_final_urls: Optional[Mapping[str, str]],
+    first_party_domains: set[str],
+    identity_names: set[str],
+    identity_anchor: Mapping[str, Any],
+) -> Optional[str]:
+    """Keep support gates separate so a citation retry repairs the failed check."""
+
+    url = _safe_https_url(url)
+    if not url or not isinstance(quote, str) or not quote:
+        return REQUIRED_ATTRIBUTE_SUPPORT_MISSING_CITATION_REASON
+    if len(quote) > 2000:
+        return REQUIRED_ATTRIBUTE_SUPPORT_OVERSIZED_QUOTE_REASON
+    if not fetched_pages.get(url):
+        return REQUIRED_ATTRIBUTE_SUPPORT_UNLOADED_SOURCE_REASON
+    if not _quote_occurs(quote, fetched_pages[url]):
+        return REQUIRED_ATTRIBUTE_SUPPORT_QUOTE_ABSENT_REASON
+    same_company_source = bool(
+        _complete_verified_first_party_identity(
+            url, first_party_domains, identity_anchor,
+        )
+        and _complete_verified_first_party_identity(
+            str((fetched_final_urls or {}).get(url) or ""),
+            first_party_domains, identity_anchor,
+        )
+    )
+    if not (same_company_source or _quote_names_company(quote, identity_names)):
+        return REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
+    return None
+
+
 def _validated_findings(
     arguments: Any,
     *,
@@ -3013,12 +3059,24 @@ def _validated_findings(
                     reason="submitted quote was not present in fetched source",
                 )
             elif target in {"industry", "geography"} and not (
-                _independently_bound_first_party_url(
-                    evidence_url,
-                    first_party_domains,
-                    identity_anchor or {},
+                (
+                    (
+                        _independently_bound_first_party_url(
+                            evidence_url, first_party_domains, identity_anchor or {},
+                        )
+                        or _registrable_domain(evidence_url) in proven_rebrand_domains
+                    )
+                    and (
+                        target != "geography"
+                        or _independently_bound_first_party_url(
+                            str((fetched_final_urls or {}).get(evidence_url) or ""),
+                            first_party_domains, identity_anchor or {},
+                        )
+                        or _registrable_domain(
+                            (fetched_final_urls or {}).get(evidence_url)
+                        ) in proven_rebrand_domains
+                    )
                 )
-                or _registrable_domain(evidence_url) in proven_rebrand_domains
                 or (
                     target == "geography"
                     and _bound_structured_headquarters_finding(
@@ -3039,6 +3097,9 @@ def _validated_findings(
                     evidence_url="",
                     evidence_quote="",
                     reason=(
+                        "headquarters evidence must use independently bound "
+                        "first-party requested and fetched final URLs"
+                        if target == "geography" else
                         "activity and headquarters evidence must use an "
                         "independently bound first-party company domain"
                     ),
@@ -3390,6 +3451,7 @@ def _validated_findings(
                     )
         if target == "required_attribute" and finding["status"] != "UNPROVEN":
             validated_support: list[dict[str, str]] = []
+            support_rejection = REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
             if not isinstance(raw_support, list) or len(raw_support) > 2:
                 raw_support = None
             if raw_support is not None:
@@ -3399,27 +3461,15 @@ def _validated_findings(
                         break
                     url = _safe_https_url(item.get("url"))
                     quote = item.get("quote")
-                    same_company_source = bool(
-                        _complete_verified_first_party_identity(
-                            url, first_party_domains, identity_anchor or {}
-                        )
-                        and _complete_verified_first_party_identity(
-                            str((fetched_final_urls or {}).get(url) or ""),
-                            first_party_domains,
-                            identity_anchor or {},
-                        )
+                    rejection = _required_attribute_support_rejection(
+                        url, quote, fetched_pages=fetched_pages,
+                        fetched_final_urls=fetched_final_urls,
+                        first_party_domains=first_party_domains,
+                        identity_names=attribution_names,
+                        identity_anchor=identity_anchor or {},
                     )
-                    if (
-                        not url
-                        or not isinstance(quote, str)
-                        or not quote
-                        or len(quote) > 2000
-                        or not _quote_occurs(quote, fetched_pages.get(url, ""))
-                        or not (
-                            same_company_source
-                            or _quote_names_company(quote, attribution_names)
-                        )
-                    ):
+                    if rejection:
+                        support_rejection = rejection
                         raw_support = None
                         break
                     validated_support.append({"url": url, "quote": quote})
@@ -3428,7 +3478,7 @@ def _validated_findings(
                     status="UNPROVEN",
                     evidence_url="",
                     evidence_quote="",
-                    reason=REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON,
+                    reason=support_rejection,
                 )
             else:
                 finding["supporting_evidence"] = validated_support
@@ -4863,8 +4913,32 @@ async def investigate_company_evidence(
                             continue
                         rejected_finding = {"target": target, "reason": reason}
                         source_url = _safe_https_url(submitted.get("evidence_url"))
+                        source_quote = str(submitted.get("evidence_quote") or "")
+                        if (
+                            target == "required_attribute"
+                            and reason in REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASONS
+                        ):
+                            for slot in (1, 2):
+                                support_url = submitted.get(f"supporting_evidence_url_{slot}")
+                                support_quote = submitted.get(f"supporting_evidence_quote_{slot}")
+                                if not (support_url or support_quote):
+                                    continue
+                                if _required_attribute_support_rejection(
+                                    support_url, support_quote,
+                                    fetched_pages=fetched_pages,
+                                    fetched_final_urls=fetched_final_urls,
+                                    first_party_domains=first_party_domains,
+                                    identity_names=identity_names,
+                                    identity_anchor=identity_anchor,
+                                ):
+                                    rejected_finding["supporting_evidence_slot"] = slot
+                                    source_url = _safe_https_url(support_url)
+                                    source_quote = str(support_quote or "")
+                                    if source_url:
+                                        rejected_finding["source_url"] = source_url
+                                    break
                         source_context = _source_context_for_quote(
-                            str(submitted.get("evidence_quote") or ""),
+                            source_quote,
                             fetched_pages.get(source_url, ""),
                         )
                         if source_url and source_context:
@@ -4931,7 +5005,7 @@ async def investigate_company_evidence(
                     required_attribute_support_repair = any(
                         item.get("target") == "required_attribute"
                         and item.get("reason")
-                        == REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASON
+                        in REQUIRED_ATTRIBUTE_SUPPORT_REJECTION_REASONS
                         for item in rejected
                     )
                     force_stage_search = bool(
@@ -5276,6 +5350,19 @@ async def investigate_company_evidence(
                                         )
                                         else ""
                                     )
+                                )
+                                + (
+                                    "Review exact loaded facts from every target, including "
+                                    "stage and industry. Reuse their URLs and exact quotes "
+                                    "when they prove an attribute condition; use up to two "
+                                    "additional exact supporting URL/quote pairs for a "
+                                    "compound attribute. A quote-presence failure requires "
+                                    "copying the exact source span, not discarding an "
+                                    "independently supported fact. Recheck company identity, "
+                                    "current evidence, every mandatory condition, and "
+                                    "conflicts; another target's status is not proof. "
+                                    if "required_attribute" in active_submit_targets
+                                    else ""
                                 )
                                 + (
                                     "The supporting classification URL/quote was not present "

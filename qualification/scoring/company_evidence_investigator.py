@@ -3055,12 +3055,24 @@ def _validated_findings(
                     reason="submitted quote was not present in fetched source",
                 )
             elif target in {"industry", "geography"} and not (
-                _independently_bound_first_party_url(
-                    evidence_url,
-                    first_party_domains,
-                    identity_anchor or {},
+                (
+                    (
+                        _independently_bound_first_party_url(
+                            evidence_url, first_party_domains, identity_anchor or {},
+                        )
+                        or _registrable_domain(evidence_url) in proven_rebrand_domains
+                    )
+                    and (
+                        target != "geography"
+                        or _independently_bound_first_party_url(
+                            str((fetched_final_urls or {}).get(evidence_url) or ""),
+                            first_party_domains, identity_anchor or {},
+                        )
+                        or _registrable_domain(
+                            (fetched_final_urls or {}).get(evidence_url)
+                        ) in proven_rebrand_domains
+                    )
                 )
-                or _registrable_domain(evidence_url) in proven_rebrand_domains
                 or (
                     target == "geography"
                     and _bound_structured_headquarters_finding(
@@ -3081,6 +3093,9 @@ def _validated_findings(
                     evidence_url="",
                     evidence_quote="",
                     reason=(
+                        "headquarters evidence must use independently bound "
+                        "first-party requested and fetched final URLs"
+                        if target == "geography" else
                         "activity and headquarters evidence must use an "
                         "independently bound first-party company domain"
                     ),

@@ -186,12 +186,15 @@ def expected_overlay(
     identity_schema_repair: bool = False,
     structured_homepage_numeric_alias: bool = False,
     bound_homepage_legal_alias: bool = False,
+    numeric_profile_legal_self_name: bool = False,
     single_tool_protocol_repair: bool = False,
     rejected_final_packet: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
 
+    if numeric_profile_legal_self_name and not bound_homepage_legal_alias:
+        raise CompositionError("numeric self-name requires the reviewed legal alias repair")
     expected = {GRADER_FILE, *ENTRYPOINT_FILES}
     if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
@@ -261,6 +264,13 @@ def expected_overlay(
         files.update(convert_bound_homepage_legal_alias_files(
             {name: files[name] for name in names},
         ))
+    if numeric_profile_legal_self_name:
+        from scripts.arena_reviewer_structured_homepage_alias_seam import (
+            SELF_NAME_CHANGES, convert_numeric_profile_self_name_files,
+        )
+        files.update(convert_numeric_profile_self_name_files(
+            {name: files[name] for name in SELF_NAME_CHANGES},
+        ))
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -319,7 +329,13 @@ def main() -> int:
         "--bound-homepage-legal-alias", action="store_true",
         help="carry exact first-party legal/brand identity through frozen source; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--numeric-profile-legal-self-name", action="store_true",
+        help="retain only an exact numeric main profile's leading legal self-name; requires the existing legal alias repair",
+    )
     args = parser.parse_args()
+    if args.numeric_profile_legal_self_name and not args.bound_homepage_legal_alias:
+        raise CompositionError("numeric self-name requires the reviewed legal alias repair")
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
         raise CompositionError("grading image must be pinned by digest")
@@ -359,6 +375,7 @@ def main() -> int:
             identity_schema_repair=args.identity_schema_repair,
             structured_homepage_numeric_alias=args.structured_homepage_numeric_alias,
             bound_homepage_legal_alias=args.bound_homepage_legal_alias,
+            numeric_profile_legal_self_name=args.numeric_profile_legal_self_name,
             single_tool_protocol_repair=args.single_tool_protocol_repair,
             rejected_final_packet=args.rejected_final_packet,
         )
@@ -373,6 +390,7 @@ def main() -> int:
             + ("-identity-schema-repair" if args.identity_schema_repair else "")
             + ("-structured-homepage-alias" if args.structured_homepage_numeric_alias else "")
             + ("-bound-homepage-legal-alias" if args.bound_homepage_legal_alias else "")
+            + ("-numeric-legal-self-name" if args.numeric_profile_legal_self_name else "")
             + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
             + ("-rejected-final-packet" if args.rejected_final_packet else "")
         )
@@ -431,6 +449,9 @@ def main() -> int:
         if args.bound_homepage_legal_alias:
             from scripts.arena_reviewer_bound_homepage_alias_seam import CORRECTION_ID as BOUND_HOMEPAGE_ALIAS_CORRECTION_ID
             corrections.append(BOUND_HOMEPAGE_ALIAS_CORRECTION_ID)
+        if args.numeric_profile_legal_self_name:
+            from scripts.arena_reviewer_structured_homepage_alias_seam import SELF_NAME_CORRECTION_ID
+            corrections.append(SELF_NAME_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,

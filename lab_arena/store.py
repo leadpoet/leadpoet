@@ -61,6 +61,11 @@ SCORE_BATCH_SIZE = 500
 # Read-only requests can retry one upstream capacity or origin-connectivity
 # failure. Keep mutating RPC response handling and replay policy separate.
 SELECT_UNAVAILABLE_HTTP_STATUSES = frozenset({429, 502, 503, 504, 520, 521, 522, 523, 524})
+READ_RETRY_TRANSPORT_ERRORS = (
+    httpx.ReadError, httpx.ReadTimeout, httpx.ConnectError,
+    httpx.ConnectTimeout, httpx.WriteError, httpx.WriteTimeout,
+    httpx.RemoteProtocolError,
+)
 
 FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
     "lab_arena_scoring_policy_history_v1": (("p_round_id", "text"),),
@@ -646,16 +651,34 @@ class PostgrestTransport(StoreTransport):
                 write=timeout.write,
                 pool=timeout.pool,
             )
-        for attempt in range(DEADLOCK_RETRIES + 1):
+        # This one STABLE credential lookup is safe to repeat after an
+        # ambiguous read. Other RPCs may already have committed a write.
+        credential_read = function == "lab_arena_get_submission_credential"
+        read_retry_used = False
+        deadlock_attempts = 0
+        for _ in range(DEADLOCK_RETRIES + 1 + int(credential_read)):
             try:
                 response = self._client.post("%s/rest/v1/rpc/%s" % (self._base_url, function), headers=self._headers, content=content, **request_options)
             except httpx.TransportError as exc:
+                if (credential_read and not read_retry_used
+                    and isinstance(exc, READ_RETRY_TRANSPORT_ERRORS)):
+                    read_retry_used = True
+                    continue
                 # A mutating RPC may have committed before its response failed.
                 # Surface availability to the API, but never replay the POST.
                 raise ArenaStoreUnavailable("rpc %s transport failure: %s" % (function, type(exc).__name__), operation="rpc", resource=function, transport_error=type(exc).__name__) from exc
             except httpx.HTTPError as exc:
                 raise ArenaStoreError("rpc %s transport failure: %s" % (function, type(exc).__name__), operation="rpc", resource=function, transport_error=type(exc).__name__) from exc
-            if response.status_code >= 400 and attempt < DEADLOCK_RETRIES:
+            if credential_read and response.status_code in SELECT_UNAVAILABLE_HTTP_STATUSES:
+                if not read_retry_used:
+                    read_retry_used = True
+                    continue
+                raise ArenaStoreUnavailable(
+                    "rpc %s temporarily unavailable: HTTP %d"
+                    % (function, response.status_code), operation="rpc",
+                    resource=function, http_status=response.status_code,
+                )
+            if response.status_code >= 400 and deadlock_attempts < DEADLOCK_RETRIES:
                 try:
                     code = response.json().get("code")
                 except ValueError:
@@ -670,7 +693,8 @@ class PostgrestTransport(StoreTransport):
                     # An explicit reservation lock timeout rolls back the RPC.
                     # Repeat its exact identity before any provider dispatch.
                     self.deadlock_retries += 1
-                    time.sleep(0.01 * (attempt + 1))
+                    deadlock_attempts += 1
+                    time.sleep(0.01 * deadlock_attempts)
                     continue
             if (
                 function == "lab_arena_append_trajectory_events_v1"
@@ -833,9 +857,7 @@ class PostgrestTransport(StoreTransport):
                     # replay a mutating RPC for an ambiguous HTTP response.
                     continue
                 break
-            except (httpx.ReadError, httpx.ReadTimeout, httpx.ConnectError,
-                    httpx.ConnectTimeout, httpx.WriteError, httpx.WriteTimeout,
-                    httpx.RemoteProtocolError) as exc:
+            except READ_RETRY_TRANSPORT_ERRORS as exc:
                 if attempt:
                     raise ArenaStoreUnavailable(
                         "select %s transport failure: %s" % (table, type(exc).__name__),

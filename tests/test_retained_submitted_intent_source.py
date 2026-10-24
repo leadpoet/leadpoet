@@ -51,7 +51,7 @@ def _missing(url=URL):
         "sd_error": "http_502", "exa_stage": "exa_transient_exhausted", "exa_error": "HTTP 502"}]}
 
 
-def _run(monkeypatch, *, pages=None, answer=None, paragraph_match=True, fresh_source=False):
+def _run(monkeypatch, *, pages=None, answer=None, paragraph_match=True, fresh_source=False, company_quality=True):
     company, icp, fit = _inputs()
     async def matched_fit(*args, **kwargs):
         lead_scorer._retain_matched_investigator_source_contexts(kwargs["matched_company_source_sink"], fit,
@@ -69,7 +69,7 @@ def _run(monkeypatch, *, pages=None, answer=None, paragraph_match=True, fresh_so
     monkeypatch.setattr(verifier, "_call_openrouter", judge)
     monkeypatch.setattr(intent_details, "review_intent_details", review)
     with use_evaluation_date("2026-10-24"):
-        result = asyncio.run(lead_scorer.score_company_competition_intent(company, icp, 0, 0, set(), integrity_policy=True, company_quality=True))
+        result = asyncio.run(lead_scorer.score_company_competition_intent(company, icp, 0, 0, set(), integrity_policy=True, company_quality=company_quality))
     return result, fetch, judge, paragraph_documents
 
 
@@ -382,3 +382,88 @@ def test_new_source_context_crosses_actual_runner_socket_and_host_http_client(mo
     # Exercises WorkerSocketServer -> host validate_request -> HttpArenaApiClient
     # -> host validate_request again -> mock gateway, with no provider debit.
     controls.test_socket_to_gateway_has_no_provider_debit(monkeypatch)
+
+
+def _real_primary_response():
+    import json
+    from pathlib import Path
+    from lab_arena.contracts import document_hash
+    fixture = json.loads((Path(__file__).parent / "fixtures/amdocs_veon_primary_stage3_20261024.json").read_text())
+    assert document_hash(fixture["response"]["answer"]) == fixture["answer_sha256"]
+    return fixture["response"]
+
+
+@pytest.mark.parametrize("company_quality", [False, True])
+def test_real_primary_paraphrase_uses_original_source_without_alternate_event_marker(monkeypatch, company_quality):
+    response = _real_primary_response()
+    item = response["answer"]["signal_evaluations"][0]
+    assert item["claim"] != CLAIM
+    assert "same_event_as_submitted:verified" not in item["risk_notes"]
+    original = copy.deepcopy(response)
+    result, fetch, judge, paragraphs = _run(monkeypatch, answer=response, company_quality=company_quality)
+    assert result.final_score > 0
+    assert result.intent_signals_detail[0]["judge_verdict"]["authoritative_date"] == "2026-10-07"
+    assert response == original
+    assert fetch.await_count == judge.await_count == len(paragraphs) == 1
+
+
+@pytest.mark.parametrize("case", ["wrong_citation", "mixed_citations", "missing_citation", "wrong_entity", "missing_entity", "wrong_mode", "wrong_signal_id", "unsupported", "contradicted", "ungrounded_quote", "unbound_date", "unrelated_event"])
+def test_real_paraphrased_response_still_requires_original_source_grounding(monkeypatch, case):
+    response = _real_primary_response()
+    item = response["answer"]["signal_evaluations"][0]
+    if case == "wrong_citation":
+        item["evidence_urls_used"] = [URL + "?other=1"]
+    elif case == "mixed_citations":
+        item["evidence_urls_used"].append("https://other.example/event")
+    elif case == "missing_citation":
+        item["evidence_urls_used"] = []
+    elif case == "wrong_entity":
+        item["same_entity_check"] = "fail"
+    elif case == "missing_entity":
+        item["same_entity_check"] = "unknown"
+    elif case == "wrong_mode":
+        item["verification_mode"] = "web_search"
+    elif case == "wrong_signal_id":
+        item["signal_id"] = "other-signal"
+    elif case == "unsupported":
+        item["unsupported_parts"] = ["A required qualifier is not proved"]
+    elif case == "contradicted":
+        item["contradicting_quotes"] = ["The claimed event did not happen"]
+    elif case == "ungrounded_quote":
+        item["supporting_quotes"] = ["Amdocs announced an invented event"]
+    elif case == "unbound_date":
+        item["risk_notes"] = ["source_event_date:2026-10-08"]
+    else:
+        item.update(signal_status="unable_to_verify", unsupported_parts=["This source describes a different event"])
+    result, fetch, judge, paragraphs = _run(monkeypatch, answer=response, company_quality=False)
+    assert result.final_score == 0 and "unavailable" in result.failure_reason.lower()
+    assert result.intent_signals_detail[0]["judge_verdict"]["pipeline_decision"] == "unavailable"
+    assert fetch.await_count == judge.await_count == 1 and not paragraphs
+
+
+def test_real_primary_response_keeps_fresh_success_and_retained_recovery_equivalent(monkeypatch):
+    fresh, *_ = _run(monkeypatch, answer=_real_primary_response(), fresh_source=True, company_quality=False)
+    fallback, *_ = _run(monkeypatch, answer=_real_primary_response(), company_quality=False)
+    assert fresh.final_score == fallback.final_score > 0
+    assert fresh.intent_signals_detail[0]["judge_verdict"]["authoritative_date"] == fallback.intent_signals_detail[0]["judge_verdict"]["authoritative_date"] == "2026-10-07"
+
+
+@pytest.mark.parametrize("unrelated_date", ["Footer updated October 7, 2026.", "Copyright notice effective October 7, 2026.", "October 7, 2026"])
+def test_unquoted_body_footer_or_date_only_material_cannot_date_retained_event(monkeypatch, unrelated_date):
+    event_quote = TEXT[TEXT.index("Under the agreement,"):]
+    body = TEXT.replace("[October 7, 2026]", "[Date unavailable]") + "\n" + unrelated_date
+    response = _real_primary_response()
+    item = response["answer"]["signal_evaluations"][0]
+    item["supporting_quotes"] = [event_quote]
+    result, fetch, judge, paragraphs = _run(monkeypatch, pages={URL: {"final_url": URL, "text": body}}, answer=response, company_quality=False)
+    assert result.final_score == 0 and "unavailable" in result.failure_reason.lower()
+    assert fetch.await_count == judge.await_count == 1 and not paragraphs
+
+
+def test_grounded_standalone_dateline_quote_may_accompany_event_quote(monkeypatch):
+    response = _real_primary_response()
+    item = response["answer"]["signal_evaluations"][0]
+    item["supporting_quotes"] = ["October 7, 2026", TEXT[TEXT.index("Under the agreement,"):]]
+    result, fetch, judge, paragraphs = _run(monkeypatch, answer=response, company_quality=False)
+    assert result.final_score > 0
+    assert fetch.await_count == judge.await_count == len(paragraphs) == 1

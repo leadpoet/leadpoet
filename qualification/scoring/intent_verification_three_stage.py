@@ -5608,19 +5608,29 @@ async def verify_three_stage(
     if retained_fallback_original is not None:
         from qualification.scoring.arena_integrity import source_dates_from_verdict, source_grounded_date_verdict
         from qualification.scoring.evaluation_clock import evaluation_date
+        grounded_quotes = [str(quote) for quote in s3_item.get("supporting_quotes") or []
+                           if _grounded_exact_text(combined_text, quote)]
         event_date, _ = source_dates_from_verdict(s3_item)
         date_verdict = source_grounded_date_verdict(
             event_date=event_date, publication_dates=[],
             buyer_cap_days=buyer_max_age_days or 365, evaluated_on=evaluation_date(),
         )
+        # This is the original submitted resource, not a discovered alternate.
+        # A grounded model paraphrase needs no alternate-event marker.
         if (date_verdict.verdict == "uncertain"
             or _decision(s3_verdict, company_quality=company_quality,
                          require_same_entity=require_ats_employer_identity) != "approve"
-            or not _has_grounded_source_event_date(s3_item, combined_text)
-            or _same_event_resolution_outcome(
-                s3_verdict, contents["results"], row["claimed_source_urls"],
-                submitted_claim=str(row["claim"]),
-            ) != "verified"):
+            or not _has_grounded_source_event_date(s3_item, "\n".join(grounded_quotes))
+            or s3_item.get("verification_mode") != "source_grounded"
+            or s3_item.get("signal_id") != row["id"]
+            or s3_item.get("same_entity_check") != "pass"
+            or len(s3_verdict.get("signal_evaluations") or []) != 1
+            or s3_item.get("unsupported_parts") or s3_item.get("contradicting_quotes")
+            or not isinstance(s3_item.get("evidence_urls_used"), list)
+            or not s3_item.get("evidence_urls_used")
+            or not all(isinstance(cited, str) and _normalize_url(cited) == _normalize_url(fetch_source_url)
+                       for cited in s3_item["evidence_urls_used"])
+            or not grounded_quotes):
             # Incomplete retained text cannot turn a failed read into a
             # negative decision, or confer a guessed publication/event date.
             return retained_fallback_original

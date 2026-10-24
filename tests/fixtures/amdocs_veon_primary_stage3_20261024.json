@@ -1,0 +1,70 @@
+{
+  "capture_call_identity": "sha256:aadfd6c20624181b8ce6ce2dcd100b590e34870154387322f7648b4a063c224f",
+  "captured_at": "2026-10-24T19:19:29.591114+00:00",
+  "response": {
+    "answer": {
+      "missing_or_risks": [],
+      "overall_confidence": "high",
+      "overall_verdict": "qualified",
+      "signal_evaluations": [
+        {
+          "author_employer_matches_lead": "n/a",
+          "author_role_matches_spec": "n/a",
+          "author_satisfies_role_spec": "n/a",
+          "author_type": "n/a",
+          "claim": "Amdocs announced a 10-year strategic agreement with VEON to run and modernize VEON's core technology operations.",
+          "claim_matches_miner_date": "consistent",
+          "confidence": "high",
+          "contradicting_quotes": [],
+          "entity_match_reason": "The source identifies Amdocs as a party to the agreement, matching the verified lead identity amdocs.com. The claimed event is the bilateral agreement between Amdocs and VEON.",
+          "evidence_urls_used": [
+            "https://www.amdocs.com/press-release/veon-and-amdocs-enter-10-year-strategic-agreement-advance-digital-services"
+          ],
+          "risk_notes": [
+            "source_event_date:2026-10-07"
+          ],
+          "same_entity_check": "pass",
+          "signal_id": "signal-1",
+          "signal_status": "supported",
+          "source_accessibility": "Exact supplied source extraction is available and contains the announcement body.",
+          "source_quality": "First-party Amdocs press release; strong evidence for the announced agreement.",
+          "source_urls_supplied": [
+            "https://www.amdocs.com/press-release/veon-and-amdocs-enter-10-year-strategic-agreement-advance-digital-services"
+          ],
+          "supporting_quotes": [
+            "Dubai, Almaty and Jersey City, [October 7, 2026] \u2013 VEON Ltd. (\"VEON\") (NASDAQ: VEON), a global digital operator, and Amdocs (NASDAQ: DOX), a leading provider of software and services to communications and media companies, today announced a 10-year strategic agreement.",
+            "Under the agreement, Amdocs will run and continuously modernize VEON's core technology operations, accelerate its strategy as a digital operator, and provide long-term cost predictability across its IT operations in Eurasia."
+          ],
+          "unsupported_parts": [],
+          "verification_mode": "source_grounded"
+        }
+      ],
+      "summary": "The supplied first-party press release supports the required strategic-partnership intent: Amdocs and VEON announced a 10-year strategic agreement with concrete operational commitments. The event date stated in the release is 2026-10-07, within the 365-day window."
+    },
+    "model": "openai/gpt-6-luna",
+    "usage": {
+      "prompt_tokens": 9000,
+      "completion_tokens": 572,
+      "total_tokens": 9572,
+      "cost": 0.001410925,
+      "is_byok": false,
+      "prompt_tokens_details": {
+        "cached_tokens": 0,
+        "cache_write_tokens": 8997,
+        "audio_tokens": 0,
+        "video_tokens": 0
+      },
+      "cost_details": {
+        "upstream_inference_cost": 0.001410925,
+        "upstream_inference_prompt_cost": 0.001124925,
+        "upstream_inference_completions_cost": 0.000286
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 0,
+        "image_tokens": 0,
+        "audio_tokens": 0
+      }
+    }
+  },
+  "answer_sha256": "sha256:fa9f2a1ff9303e5c760e598909d2a42fa5c65102b2673c02aff68cb4a8f0c27b"
+}

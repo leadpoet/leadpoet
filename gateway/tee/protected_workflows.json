@@ -877,17 +877,17 @@
       "symbol": "_is_bound_homepage_name_conflict"
     },
     {
-      "ast_sha256": "sha256:8e4f428f2f506f9a9bef139b5a3ec6b03f7034cb3911e4d58be5614ea30a41d9",
+      "ast_sha256": "sha256:eca1d69f163aece40023d6c1c4a7e1a3afbeffe3885ce85ed5a6334c74bad427",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_llm_reverify_company"
     },
     {
-      "ast_sha256": "sha256:7d5ae9adf5de16167f41f9f6d84e68b706dce873e77fab936b4ba5cab4c20dc6",
+      "ast_sha256": "sha256:df84cefe8cf78696f726f6907ac4f801f718ba71ac25debd2b5317ee1a901d8a",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_reverify_decision"
     },
     {
-      "ast_sha256": "sha256:6773a2b8996450b38a5547ce0cd20884da0a6868800b31469fe2da19121f2135",
+      "ast_sha256": "sha256:97d27f8019c53acf25feb8d786d14f9fe25c10b49259a1f77db3d2597f7a1d97",
       "path": "qualification/scoring/lead_scorer.py",
       "symbol": "_run_targeted_company_evidence_investigation"
     },
@@ -927,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:89f60a37199135726088a9739446d4efb1277063bae53e471e47ee9080265e69",
-  "protected_source_commit": "d03476448eb545b82afe41c546fcefc65eab4509",
+  "manifest_hash": "sha256:53a6d287a810bf38b1b01a0cedaae41062ce3f7987b6a86e846cb9f21b2c12e4",
+  "protected_source_commit": "dc7ed55e47ea87348e9d18a648ab8cfb82d5dfd3",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

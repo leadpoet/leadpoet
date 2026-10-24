@@ -6739,11 +6739,22 @@ class ArenaService:
             raise
         document = result.to_document()
         call = result.call if isinstance(result.call, Mapping) else {}
+        try:
+            setup_diagnostics = broker_module._safe_setup_diagnostics(getattr(result, "setup_diagnostics", None))
+        except Exception:
+            setup_diagnostics = {}  # Optional observation cannot replace a broker result.
         if call.get("cached") is not True and call.get("idempotent") is not True:
             # The call summary, not the frame, owns the provider half of this
             # span. Resolving the tool from the same operation id keeps the
             # two consistent, so a degraded operation can never pair a
             # Deepline tool with an "unknown" provider and lose the span.
+            provider_fields = _provider_telemetry_fields(
+                call, result.status, len(result.attempt_trace) or 1,
+            )
+            if setup_diagnostics:
+                provider_fields["error_type"] = setup_diagnostics["error_class"]
+                if setup_diagnostics.get("store_error"):
+                    provider_fields["store_error"] = setup_diagnostics["store_error"]
             telemetry.record_provider(
                 tool=_telemetry_tool(
                     call.get("operation_id") if isinstance(call.get("operation_id"), str) else "",
@@ -6751,9 +6762,7 @@ class ArenaService:
                 ),
                 duration_ms=(time.monotonic() - started) * 1000.0,
                 run_identity=run_identity,
-                **_provider_telemetry_fields(
-                    call, result.status, len(result.attempt_trace) or 1,
-                ),
+                **provider_fields,
             )
         try:
             response_content = trajectory.provider_response_content(
@@ -6768,12 +6777,16 @@ class ArenaService:
                 response_content["provider_attempts"] = [
                     dict(item) for item in result.attempt_trace[:4]
                 ]
-            persist_provider_event(
-                trajectory.event(
-                    "provider.response",
-                    response_content,
-                )
-            )
+            response_event = trajectory.event("provider.response", response_content)
+            if setup_diagnostics:
+                try:
+                    response_event = trajectory.validate_event({
+                        **response_event,
+                        "content": {**response_event["content"], "setup_diagnostics": setup_diagnostics},
+                    })
+                except trajectory.TrajectoryError:
+                    pass  # Optional diagnostics must preserve the original event at its cap.
+            persist_provider_event(response_event)
         except Exception as exc:
             _warn_trajectory_failure("provider_response", exc)
         return document

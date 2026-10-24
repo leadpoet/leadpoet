@@ -1,3 +1,32 @@
+## Scoped production authorization: October 24 Arena cycle and bound company aliases
+
+On 2026-10-24 the user authorized monitoring the complete October 24 Arena
+cycle, fixing confirmed general failures, rigorous tests, safe push and merge,
+canonical deployment and live verification. This includes the demonstrated
+company-identity parser gap for explicit brand/legal names and same-origin
+relative Organization URLs in saved first-party evidence. Use the existing
+identity, judging and cache paths. Preserve qualification and scoring rules,
+provider privacy and billing controls, frozen official inputs and models,
+accepted work, rewards, credentials and concurrent work. Do not add fuzzy
+company matching, company-specific exceptions, fabricated judgments or a new
+recovery layer. The coordinating task owns production writes and must verify
+release identity and actual affected outputs. Authority ends after the
+requested full cycle and deployed fix are verified. Keep both guides identical.
+
+## Scoped production authorization: October 23 headcount evidence integrity
+
+On 2026-10-23 the user explicitly authorized the general headcount evidence
+fixes: reuse first-party company-profile locators through the existing bound
+structured lookup, and validate observed headcount against preserved source
+fields. Scope includes protected reads, captured-case and bounded paid tests,
+safe push/merge, scorer-image publication, canonical deployment and live proof
+through the overnight procedures. Preserve qualification, scoring, budgets,
+correction wording, frozen rounds, accepted results, credentials, rewards and
+concurrent work. No company exceptions or new review/recovery layer. Release
+only measured improvements with positive/negative controls, inside existing
+approved spend. The coordinating task owns production actions. Authority ends
+after deployment and live verification. Keep both guides byte-identical.
+
 ## Scoped production authorization: October 23 source and correction integrity
 
 On 2026-10-23 the user authorized the general source-identity and check-specific

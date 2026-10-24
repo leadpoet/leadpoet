@@ -61,6 +61,7 @@ from qualification.scoring.company_verification import (
     verify_company_exists,
 )
 from qualification.scoring.company_fit_decision import (
+    verified_homepage_brand_name,
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
@@ -2230,6 +2231,11 @@ def _verified_homepage_identity_anchor(
         )
         if aliases:
             anchor["verified_legal_name_aliases"] = aliases
+            brand = verified_homepage_brand_name({
+                **anchor, "verified_brand_name": receipt.get("verified_brand_name"),
+            })
+            if brand:
+                anchor["verified_brand_name"] = brand
     return anchor
 
 
@@ -4996,6 +5002,161 @@ def _without_employee_size_observation(verdict: Mapping[str, Any]) -> dict[str, 
     return projected
 
 
+def _headcount_quote_with_source_boundaries(quote: str, text: str) -> str:
+    """Restore only source whitespace lost when a displayed quote was flattened."""
+
+    positions: list[int] = []
+    folded: list[str] = []
+    for index, char in enumerate(text):
+        if not char.isspace():
+            value = char.casefold()
+            folded.append(value)
+            positions.extend([index] * len(value))
+    compact = "".join(folded)
+    needle = "".join(quote.split()).casefold()
+    start = compact.find(needle) if needle else -1
+    spans: dict[str, str] = {}
+    while start >= 0:
+        span = text[positions[start]:positions[start + len(needle) - 1] + 1]
+        spans.setdefault(" ".join(span.split()).casefold(), span)
+        if len(spans) > 1:
+            return ""
+        start = compact.find(needle, start + 1)
+    return next(iter(spans.values()), "")
+
+
+async def _ground_employee_size_observation(
+    verdict: Mapping[str, Any],
+    *,
+    invocation_cache: dict[str, Any],
+    source_pages: Optional[Mapping[str, Mapping[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Check the number before it can create either a match or a mismatch.
+
+    A single bounded source read can restore DOM whitespace lost by the web
+    model. It uses the existing invocation cache, not attribute URL slots.
+    """
+
+    evidence = _dimension_web_evidence(verdict, "employee_size")
+    observed = verdict.get("observed_employee_count")
+    # The existing LinkedIn reader must keep its locator even when the web
+    # quote is malformed; it independently validates the fetched size field.
+    if is_linkedin_evidence_url(evidence["url"]):
+        return dict(verdict)
+    if _quote_supports_headcount(evidence["quote"], observed):
+        return dict(verdict)
+    url, quote = evidence["url"], evidence["quote"]
+    token = str(observed).casefold().replace(",", "")
+    compact_quote = "".join(quote.split()).casefold().replace(",", "")
+    if not url or not quote or observed is None or token not in compact_quote:
+        return _without_employee_size_observation(verdict)
+    entry = (source_pages or {}).get(url)
+    if not isinstance(entry, Mapping) or not entry.get("text"):
+        sources = invocation_cache.setdefault("employee_size_sources", {})
+        entry = sources.get(url)
+        if entry is None and not sources:
+            # Keep the same bounded HTML reader and timeout as other fit facts.
+            sources[url] = {}
+            timeout = aiohttp.ClientTimeout(total=8.0, connect=3.0)
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    status, final_url, body = await _fetch_bounded_html(session, url)
+                final_url = public_http_url(final_url)
+                if status == 200 and final_url:
+                    sources[url] = {"final_url": final_url, "text": _plain_text(body)}
+                else:
+                    invocation_cache["refresh_outcome"] = "retryable_failure"
+                    invocation_cache[VERIFIER_FAILURE_DETAIL_KEY] = SOURCE_BLOCKED_FAILURE_REASON
+            except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError):
+                invocation_cache["refresh_outcome"] = "retryable_failure"
+                invocation_cache[VERIFIER_FAILURE_DETAIL_KEY] = PROVIDER_ERROR_FAILURE_REASON
+            except (TypeError, ValueError):
+                invocation_cache["refresh_outcome"] = "retryable_failure"
+                invocation_cache[VERIFIER_FAILURE_DETAIL_KEY] = MALFORMED_RESPONSE_FAILURE_REASON
+            entry = sources[url]
+    if (
+        isinstance(entry, Mapping) and entry.get("status") in {None, "fetched"}
+        and isinstance(entry.get("text"), str) and 0 < len(entry["text"]) <= MAX_PAGE_CHARACTERS
+        and _valid_web_evidence_url(entry.get("final_url"))
+        and _registrable_domain(url) == _registrable_domain(entry["final_url"])
+    ):
+        span = _headcount_quote_with_source_boundaries(quote, entry["text"])
+        if span and len(span) <= 2000 and _quote_supports_headcount(span, observed):
+            projected = dict(verdict)
+            projected["employee_size_evidence_quote"] = span
+            nested = projected.get("dimension_evidence")
+            if isinstance(nested, Mapping):
+                projected["dimension_evidence"] = {
+                    **nested, "employee_size": {"url": url, "quote": span},
+                }
+            return projected
+    return _without_employee_size_observation(verdict)
+
+
+async def _lookup_first_party_headcount_profile(
+    company: CompanyOutput,
+    web_identity: Mapping[str, Any],
+    transport_domain: str,
+    pages: Mapping[str, Mapping[str, Any]],
+    invocation_cache: dict[str, Any],
+) -> Mapping[str, str]:
+    """Use one first-party company-profile link as a locator, never size proof."""
+
+    if invocation_cache.get("structured_attempted"):
+        return {}
+    domain = _registrable_domain(company.company_website)
+    if (
+        not domain or transport_domain != domain
+        or web_identity.get("decision") != COMPANY_FIT_MATCH
+        or web_identity.get("submitted_domain") != domain
+        or web_identity.get("observed_domain") != domain
+        or not _company_name(web_identity.get("observed_name"))
+        or _company_name(web_identity.get("observed_name")) != _company_name(company.company_name)
+    ):
+        return {}
+    locators: set[str] = set()
+    for url, entry in pages.items():
+        if not isinstance(entry, Mapping) or entry.get("status") not in {None, "fetched"}:
+            continue
+        final_url, text = entry.get("final_url"), entry.get("text")
+        if (
+            not _valid_web_evidence_url(url) or not _valid_web_evidence_url(final_url)
+            or not str(url).startswith("https://") or not str(final_url).startswith("https://")
+            or _registrable_domain(url) != domain or _registrable_domain(final_url) != domain
+            or not isinstance(text, str) or not text or len(text) > MAX_PAGE_CHARACTERS
+            or _company_name(company.company_name) not in _company_name(text)
+        ):
+            continue
+        for link in re.findall(r"https://[^\s<>\"']+", text):
+            profile = _strict_linkedin_company_profile_url(link.rstrip(".,);"))
+            if profile:
+                locators.add(profile)
+    if len(locators) != 1:
+        return {}
+    profile = next(iter(locators))
+    slug = linkedin_company_page_slug(profile)
+    submitted_slug = linkedin_company_page_slug(company.company_linkedin)
+    observed_slug = str(web_identity.get("observed_linkedin_slug") or "")
+    if (submitted_slug and submitted_slug != slug) or (observed_slug and observed_slug != slug):
+        return {}
+    anchor = {"normalized_name": web_identity["observed_name"],
+              "registrable_dns_domain": domain, "linkedin_company_slug": slug}
+    await _fetch_structured_linkedin_profile_once(
+        anchor, invocation_cache, collect_employee_size=False, collect_identity=True,
+    )
+    identity = invocation_cache.get("structured_company_identity_evidence")
+    if not (
+        isinstance(identity, Mapping)
+        and identity.get("provider") == STRUCTURED_PROFILE_PROVIDER
+        and identity.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        and _registrable_domain(identity.get("website")) == domain
+        and linkedin_company_page_slug(identity.get("url")) == slug
+    ):
+        return {}
+    invocation_cache["structured_employee_size_applicable"] = True
+    return anchor
+
+
 def _linkedin_company_evidence_slug(value: Any) -> str:
     """Return the strict company slug from a profile or company subpage."""
 
@@ -6477,7 +6638,13 @@ def _reverify_decision(
             else (
                 structured_employee_size_decision
                 if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE
-                else _decision_from_observed_employee_size(verdict, icp)
+                else (
+                    _decision_from_observed_employee_size(verdict, icp)
+                    if not strict_web_proof or _quote_supports_headcount(
+                        _dimension_web_evidence(verdict, "employee_size")["quote"],
+                        verdict.get("observed_employee_count"),
+                    ) else COMPANY_FIT_UNAVAILABLE
+                )
             )
         ),
         "industry": _industry_evidence_decision(
@@ -7698,7 +7865,10 @@ def _fetched_linkedin_headcount_resolves_conflict(
     return bool(
         final_profile and linkedin_company_page_slug(final_profile) == slug
         and quote and _quote_occurs(quote, pages.get(url, ""))
-        and _quote_names_company(quote, {_compact_company_name(identity.get("normalized_name"))})
+        and _quote_names_company(quote, {
+            _compact_company_name(identity.get("normalized_name")),
+            _compact_company_name(verified_homepage_brand_name(identity)),
+        } - {""})
         and _quote_supports_headcount(quote, finding["observed_value"])
     )
 
@@ -7795,7 +7965,10 @@ def _settle_recovered_local_headcount_refresh(
         and _dimension_web_evidence(projected, "employee_size") == {"url": url, "quote": quote}
         and quote and _quote_occurs(quote, pages.get(url, ""))
         and (
-            _quote_names_company(quote, {_compact_company_name(identity.get("normalized_name"))})
+            _quote_names_company(quote, {
+                _compact_company_name(identity.get("normalized_name")),
+                _compact_company_name(verified_homepage_brand_name(identity)),
+            } - {""})
             or _profile_body_matches_company_identity(pages.get(url, ""), identity)
         )
         and _quote_supports_headcount(quote, finding["observed_value"])
@@ -8503,6 +8676,47 @@ async def _run_targeted_company_evidence_investigation(
         ),
         diagnostic=investigation_diagnostic,
     )
+    claims = investigation.get("claims")
+    if not isinstance(claims, Mapping):
+        claims = {}
+    if (
+        claims
+        and "headcount" in investigation_targets
+        and isinstance(structured_profile_invocation_cache, dict)
+        and _decision_with_web_evidence(
+            _decision_from_observed_employee_size(dict(verdict), icp),
+            _dimension_web_evidence(verdict, "employee_size"),
+        ) == COMPANY_FIT_UNAVAILABLE
+    ):
+        raw_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
+        returned_pages, returned_final_urls = _validated_returned_fetched_pages(
+            raw_pages,
+            submitted_source_urls=(tuple(raw_pages) if isinstance(raw_pages, Mapping) else ()),
+        )
+        profile_pages = {
+            url: {"text": text, "final_url": returned_final_urls[url]}
+            for url, text in returned_pages.items()
+        }
+        discovered_identity = await _lookup_first_party_headcount_profile(
+            company, investigation_web_identity, verified_transport_domain,
+            profile_pages, structured_profile_invocation_cache,
+        )
+        if discovered_identity:
+            investigation_verified_identity = discovered_identity
+            structured_profile_identity_evidence = structured_profile_invocation_cache.get(
+                "structured_company_identity_evidence"
+            )
+            structured_employee_size_evidence = structured_profile_invocation_cache.get(
+                "structured_evidence"
+            )
+            employee_size_conflict = _employee_size_sources_conflict(
+                verdict, structured_employee_size_evidence,
+            )
+            if _structured_employee_size_decision(
+                structured_employee_size_evidence, icp,
+            ) != COMPANY_FIT_UNAVAILABLE:
+                structured_profile_invocation_cache["refresh_outcome"] = "verified"
+                structured_profile_invocation_cache.pop(VERIFIER_FAILURE_DETAIL_KEY, None)
     if required_attribute_source_cache is not None:
         _hydrate_required_attribute_source_cache(
             required_attribute_source_cache,
@@ -8511,9 +8725,6 @@ async def _run_targeted_company_evidence_investigation(
                 successful_required_attribute_source_sink
             ),
         )
-    claims = investigation.get("claims")
-    if not isinstance(claims, Mapping):
-        claims = {}
     industry_claim = (
         claims.get("industry")
         if isinstance(claims.get("industry"), Mapping)
@@ -9341,6 +9552,11 @@ async def _llm_reverify_company(
         verified_homepage_navigation_locators=verified_homepage_navigation_locators,
         company_quality=company_quality,
     )
+    if require_company_fit_dimensions:
+        verdict = await _ground_employee_size_observation(
+            verdict, invocation_cache=current_profile_cache,
+            source_pages={**(verified_homepage_pages or {}), **required_attribute_source_cache},
+        )
     profile_identity = _structured_profile_identity_anchor(
         verified_identity,
         web_identity_receipt,
@@ -9401,6 +9617,20 @@ async def _llm_reverify_company(
                     ),
                 }
                 investigation_identity = profile_identity
+    if (
+        require_company_fit_dimensions and not profile_identity
+        and _decision_with_web_evidence(
+            _decision_from_observed_employee_size(verdict, icp),
+            _dimension_web_evidence(verdict, "employee_size"),
+        ) == COMPANY_FIT_UNAVAILABLE
+    ):
+        discovered_profile_identity = await _lookup_first_party_headcount_profile(
+            company, web_identity_receipt, verified_transport_domain,
+            {**(verified_homepage_pages or {}), **required_attribute_source_cache},
+            current_profile_cache,
+        )
+        if discovered_profile_identity:
+            investigation_identity = discovered_profile_identity
     if require_company_fit_dimensions:
         verdict = await _refresh_linkedin_employee_size_observation(
             verdict,
@@ -9951,6 +10181,10 @@ async def _llm_reverify_company(
             )
         )
     if require_company_fit_dimensions:
+        repaired_verdict = await _ground_employee_size_observation(
+            repaired_verdict, invocation_cache=current_profile_cache,
+            source_pages=required_attribute_source_cache,
+        )
         repaired_verdict = await _refresh_linkedin_employee_size_observation(
             repaired_verdict,
             company,

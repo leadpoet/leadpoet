@@ -38,7 +38,7 @@ import httpx
 from lab_arena import contracts, deepline_catalog, operations, provider_costs, reasoning_capture, scoring_provider_compat
 from lab_arena import telemetry, training_capture
 from lab_arena.contracts import ArenaContractError
-from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
+from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable, safe_store_error_metadata
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
 JUDGMENT_CACHE_SCHEMA_VERSION = "leadpoet.lab_arena.verifier_provider_request.v1"
@@ -493,14 +493,64 @@ def _safe_exception_class(exc: BaseException) -> str:
     return name if name in _SAFE_EXCEPTION_CLASSES else "Exception"
 
 
+_SETUP_PHASES = frozenset({
+    "submission_identity", "provider_funding", "provider_funding_validation",
+    "route_resolution", "credential_resolution", "credential_retry_check",
+})
+_SETUP_ERROR_CLASSES = _SAFE_EXCEPTION_CLASSES | frozenset({
+    "ArenaStoreUnavailable", "BrokerError", "CatalogError", "CredentialError", "Exception",
+})
+
+
+def _safe_setup_diagnostics(value: Any) -> Dict[str, Any]:
+    """Project fixed private setup facts; never exception text or arbitrary fields."""
+    try:
+        if not isinstance(value, Mapping) or value.get("phase") not in _SETUP_PHASES:
+            return {}
+        error_class = value.get("error_class")
+        result = {
+            "phase": value["phase"],
+            "error_class": error_class if error_class in _SETUP_ERROR_CLASSES else "Exception",
+        }
+        if type(value.get("funding_resolved")) is bool:
+            result["funding_resolved"] = value["funding_resolved"]
+        store_error = safe_store_error_metadata(value.get("store_error"))
+        if store_error:
+            result["store_error"] = store_error
+        return result
+    except Exception:
+        return {}
+
+
+def _setup_failure(phase: Optional[str], error: Optional[BaseException] = None) -> Dict[str, Any]:
+    """Read only approved built-in store diagnostics from a setup exception."""
+    try:
+        if type(error) is BrokerError:
+            retained = _safe_setup_diagnostics(error.__dict__.get("setup_diagnostics"))
+            if retained:
+                return retained
+        error_class = type(error).__name__ if error is not None else "BrokerError"
+        metadata = (
+            error.__dict__.get("store_error")
+            if type(error) in (ArenaStoreError, ArenaStoreUnavailable) else None
+        )
+        return _safe_setup_diagnostics({
+            "phase": phase, "error_class": error_class, "store_error": metadata,
+        })
+    except Exception:
+        return {}
+
+
 class BrokerError(RuntimeError):
     """A generic broker failure; ``code`` is one of ``GENERIC_ERRORS``."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, *, setup_phase: Optional[str] = None,
+                 setup_cause: Optional[BaseException] = None) -> None:
         if code not in GENERIC_ERRORS:
             raise ValueError("unknown broker error code")
         super().__init__(code)
         self.code = code
+        self.setup_diagnostics = _setup_failure(setup_phase, setup_cause)
 
     @property
     def status(self) -> int:
@@ -1948,6 +1998,8 @@ class BrokerResult:
     # Gateway-private diagnostics for bounded champion credential retries.
     # The worker document deliberately excludes this field.
     attempt_trace: Tuple[Dict[str, Any], ...] = ()
+    # Gateway-only setup facts. This must never enter the worker document.
+    setup_diagnostics: Optional[Mapping[str, Any]] = None
 
     def to_document(self) -> Dict[str, Any]:
         return {
@@ -2951,12 +3003,14 @@ def _account_failure_matches_call(
     )
 
 
-def _error_result(code: str, call: Mapping[str, Any]) -> BrokerResult:
+def _error_result(code: str, call: Mapping[str, Any], *,
+                  setup_diagnostics: Optional[Mapping[str, Any]] = None) -> BrokerResult:
     """A generic error reply for the model; the call summary keeps the code so
     the worker can tell a refused key or quota from a judge's own failure."""
 
     body = json.dumps({"error": {"code": code}}, separators=(",", ":")).encode("utf-8")
-    return BrokerResult(GENERIC_ERRORS[code], {"content-type": "application/json", "content-length": str(len(body))}, body, dict(call, error_code=code))
+    return BrokerResult(GENERIC_ERRORS[code], {"content-type": "application/json", "content-length": str(len(body))}, body, dict(call, error_code=code),
+                        setup_diagnostics=_safe_setup_diagnostics(setup_diagnostics) or None)
 
 
 def _openrouter_responses_native_error_code(error_type: str) -> str:
@@ -4091,9 +4145,12 @@ class Broker:
             retry_miner_credential = bool(
                 self._retry_miner_credential_for(context)
             ) if self._retry_miner_credential_for else False
-        except (BrokerError, KeyError, TypeError, ValueError):
+        except (BrokerError, KeyError, TypeError, ValueError) as exc:
+            diagnostics = _setup_failure("credential_retry_check", exc)
+            diagnostics["funding_resolved"] = False
             return _error_result(
-                "broker_unavailable", {"operation_id": str(operation_id)}
+                "broker_unavailable", {"operation_id": str(operation_id)},
+                setup_diagnostics=diagnostics,
             )
         last_result: Optional[BrokerResult] = None
         attempt_trace: list[Dict[str, Any]] = []
@@ -4110,6 +4167,7 @@ class Broker:
                     result.body,
                     result.call,
                     tuple(dict(item) for item in attempt_trace[:4]),
+                    result.setup_diagnostics,
                 )
             except Exception:
                 return result
@@ -4199,7 +4257,8 @@ class Broker:
                 if source_content_response_url is not None and not (
                     scoring_provider_compat._safe_public_source_https_url(source_content_response_url)
                 ):
-                    return final_result(_error_result("broker_unavailable", result.call))
+                    return final_result(_error_result("broker_unavailable", result.call,
+                                                      setup_diagnostics=result.setup_diagnostics))
                 continue
             if result.call.get("provider_fallback_required") is True:
                 return final_result(result)
@@ -4231,6 +4290,7 @@ class Broker:
                         champion_credential_attempts=provider_attempt,
                         provider_fallback_required=True,
                     ),
+                    setup_diagnostics=result.setup_diagnostics,
                 ))
             evidence = {
                 "error_class": "account_credential_failure",
@@ -4251,6 +4311,7 @@ class Broker:
                         champion_credential_attempts=provider_attempt,
                         provider_fallback_required=True,
                     ),
+                    setup_diagnostics=result.setup_diagnostics,
                 ))
             if not isinstance(marked, Mapping) or marked.get("status") not in (
                 "marked",
@@ -4267,6 +4328,7 @@ class Broker:
                         champion_credential_attempts=provider_attempt,
                         provider_fallback_required=True,
                     ),
+                    setup_diagnostics=result.setup_diagnostics,
                 ))
             return final_result(BrokerResult(
                 result.status,
@@ -4278,6 +4340,7 @@ class Broker:
                     provider_fallback_required=True,
                     provider_fallback_marked=True,
                 ),
+                setup_diagnostics=result.setup_diagnostics,
             ))
         assert last_result is not None
         return final_result(last_result)
@@ -4358,6 +4421,8 @@ class Broker:
         if operation_id in {"deepline.tools.list", "deepline.tools.get", "deepline.tools.search"}:
             return self._catalog_discovery(context, operation, normalized, action_sequence)
         funding_source = "host"
+        funding_resolved = False
+        setup_phase = "provider_funding"
         try:
             funding_source = (
                 self._provider_funding_source_for(context, operation.provider)
@@ -4368,6 +4433,8 @@ class Broker:
             )
             if funding_source not in ("host", "miner_key"):
                 raise BrokerError("broker_unavailable")
+            funding_resolved = True
+            setup_phase = "route_resolution"
             if (
                 self._host_shadow_score_compat_round_id
                 and funding_source == "host"
@@ -4476,10 +4543,13 @@ class Broker:
                             "actual_microusd": 0,
                         })
                 raise
+            setup_phase = "credential_resolution"
             secret = self._credential_for(context, effective_operation.provider) if self._credential_for else self._key_for(effective_operation.provider)
             if not isinstance(secret, str) or not secret:
                 raise BrokerError("miner_credentials_unavailable" if funding_source == "miner_key" else "broker_unavailable")
         except (BrokerError, KeyError, operations.OperationError, deepline_catalog.CatalogError) as exc:
+            diagnostics = _setup_failure(setup_phase, exc)
+            diagnostics["funding_resolved"] = funding_resolved
             if not isinstance(exc, BrokerError):
                 exc = BrokerError("broker_unavailable")
             return _error_result(
@@ -4490,6 +4560,7 @@ class Broker:
                     "funding_source": funding_source,
                     "provider_attempt": provider_attempt,
                 },
+                setup_diagnostics=diagnostics,
             )
         provider_credential_fingerprint = (
             _credential_fingerprint(secret)

@@ -43,6 +43,7 @@ def scoring_host(tmp_path, monkeypatch):
         lambda _inventory: SimpleNamespace(
             total_process_capacity=2,
             webshare_worker_count=1,
+            excluded_workers=(),
         ),
     )
     monkeypatch.setattr(host, "parallel_memory_capacity", lambda ceiling, _bytes: ceiling)

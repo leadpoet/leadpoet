@@ -671,6 +671,18 @@ def build_service_from_environment(mode: str):
     return service, app
 
 
+def _report_proxy_exclusions(inventory, operational_logger):
+    for excluded in inventory.excluded_workers:
+        print("Arena proxy worker excluded: %s" % excluded.diagnostic, flush=True)
+        if operational_logger is not None:
+            fields = {"phase": "proxy_preflight", "reason": "proxy_worker_excluded",
+                      "operation": excluded.operation_code,
+                      "error_class": "ProxyWorkerPreflightError"}
+            if excluded.http_status is not None:
+                fields["http_status"] = excluded.http_status
+            operational_logger.emit("validator.error", fields)
+
+
 def build_runner_from_environment(args, *, keypair=None, operational_logger=None):
     # Keep the CLI readiness check and real scoring setup on the same path.
     # This runs only inside the retryable scoring loop, never the weight loop.
@@ -689,6 +701,7 @@ def build_runner_from_environment(args, *, keypair=None, operational_logger=None
     proxy_pool = ProxyWorkerPool(startup.verified_proxies)
     print("Arena proxy workers verified: proxies=%d; execution_slots=%d; native_coordinator=1" % (
         startup.verified_proxies.webshare_worker_count, startup.parallelism), flush=True)
+    _report_proxy_exclusions(startup.verified_proxies, operational_logger)
 
     if keypair is None:
         from bittensor_wallet import Wallet

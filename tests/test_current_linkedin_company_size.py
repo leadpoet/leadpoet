@@ -3265,11 +3265,15 @@ def test_repair_reuses_successful_refresh_and_non_linkedin_evidence_is_unchanged
     assert fetches == ["https://www.linkedin.com/company/acme"]
 
     async def direct_provider(**_kwargs):
-        return _verdict(
+        observed = _verdict(
             observed_size="11-50",
             size_matches=True,
             employee_url="https://acme.example.com/about",
-        ), ""
+        )
+        # This control needs valid independent size proof; the stale one-person
+        # quote in the shared fixture does not support its observed range.
+        observed["employee_size_evidence_quote"] = "Acme has 11-50 employees."
+        return observed, ""
 
     async def unexpected_fetch(_url):
         raise AssertionError("non-LinkedIn evidence must retain the existing path")
@@ -4644,6 +4648,8 @@ def test_structured_public_profile_never_overrides_proven_nonpublic_stage(
 
 def test_exact_structured_private_company_marks_public_stage_conflict_unavailable():
     verdict = _verdict(observed_size=25, size_matches=True)
+    # Keep size proof valid while testing the independent stage decision.
+    verdict["employee_size_evidence_quote"] = "Company has 25 employees"
     verdict.update(
         observed_company_stage="Public",
         stage_matches=True,
@@ -4734,6 +4740,8 @@ def test_archived_sec_snapshot_cannot_override_bound_current_private_type(
     stage_url, stage_quote, private_update, expected
 ):
     verdict = _verdict(observed_size=25, size_matches=True)
+    # Keep size proof valid while testing the independent stage decision.
+    verdict["employee_size_evidence_quote"] = "Company has 25 employees"
     verdict.update(
         observed_company_name="Envestnet",
         observed_company_website="https://envestnet.com/",

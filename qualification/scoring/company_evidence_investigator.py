@@ -4937,7 +4937,7 @@ async def investigate_company_evidence(
                     for target, finding in claims.items():
                         submitted = submitted_findings.get(target, {})
                         if (
-                            scoped_correction_active
+                            (scoped_correction_active or correction_turn)
                             and submitted.get("status") == "UNPROVEN"
                             and finding.get("status") == "UNPROVEN"
                             and isinstance(submitted.get("evidence_url"), str)
@@ -4945,10 +4945,11 @@ async def investigate_company_evidence(
                             and finding.get("evidence_url") == ""
                             and finding.get("evidence_quote") == ""
                         ):
-                            # The existing final submit-only correction already
-                            # exhausted repair. Keep the parser's negative finding
-                            # with unused citations cleared; never clear a failed
-                            # VERIFIED/CONTRADICTED proof or ordinary correction.
+                            # After the existing final repair, keep an explicit
+                            # negative with unused citations cleared, even when
+                            # no unrelated positive finding was retained. Never
+                            # clear failed VERIFIED/CONTRADICTED proof or skip an
+                            # ordinary correction and its discovery checks.
                             continue
                         reason = _submitted_finding_rejection(submitted, finding)
                         if not reason:

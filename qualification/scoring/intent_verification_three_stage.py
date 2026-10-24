@@ -1311,7 +1311,7 @@ _HTML_DOCUMENT_RE = re.compile(
 
 
 class _HTMLShellParser(HTMLParser):
-    """Collect visible body text and title/H1 labels from one HTML document."""
+    """Collect head metadata, visible body text and title/H1 labels."""
 
     _HIDDEN = frozenset({"script", "style", "template", "noscript"})
 
@@ -1328,6 +1328,8 @@ class _HTMLShellParser(HTMLParser):
         self.headings: list[str] = []
         self.canonical_urls: list[str] = []
         self.head_depth = 0
+        self.head_closed = False
+        self.head_meta: list[Dict[str, Optional[str]]] = []
         self._label_stack: list[tuple[str, list[str]]] = []
         self._title_seen = False
         self.title = ""
@@ -1336,6 +1338,12 @@ class _HTMLShellParser(HTMLParser):
         tag = tag.casefold()
         if tag == "head":
             self.head_depth += 1
+        if tag == "meta" and self.head_depth and not self.body_seen and not self.hidden_depth:
+            # Only real head nodes count. Comments, script examples and
+            # lookalike attributes such as data-name are not page metadata.
+            if all(sum(key == field for key, _value in attrs) <= 1
+                   for field in ("name", "property", "content")):
+                self.head_meta.append(dict(attrs))
         if tag == "link" and self.head_depth and not self.body_seen and not self.hidden_depth:
             attributes = dict(attrs)
             if "canonical" in str(attributes.get("rel") or "").casefold().split():
@@ -1375,6 +1383,8 @@ class _HTMLShellParser(HTMLParser):
             self.body_depth -= 1
         if tag == "head" and self.head_depth:
             self.head_depth -= 1
+            if not self.head_depth and not self.body_seen:
+                self.head_closed = True
 
     def handle_data(self, data: str) -> None:
         if self.hidden_depth:
@@ -3079,20 +3089,17 @@ def _unaddressed_article_matches_page(
 def _published_date_from_html(html: str, source_url: str) -> str:
     """Read first-party publication metadata before body extraction drops it."""
 
-    head_match = re.search(
-        r"<head(?:\s[^>]*)?>(.*?)</head\s*>",
-        html,
-        re.IGNORECASE | re.DOTALL,
-    )
-    head = head_match.group(1) if head_match else ""
-    patterns = (
-        r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|datePublished)["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:article:published_time|datePublished)["\']',
-    )
     candidates: set[str] = set()
-    for pattern in patterns:
-        for match in re.finditer(pattern, head, re.IGNORECASE):
-            normalized = _source_publication_date(match.group(1))
+    head_document = _parse_html_shell(html)
+    if head_document is not None and head_document.head_closed:
+        for attributes in head_document.head_meta:
+            if not any(
+                str(attributes.get(field) or "").casefold()
+                in {"article:published_time", "datepublished", "publication-date"}
+                for field in ("name", "property")
+            ):
+                continue
+            normalized = _source_publication_date(attributes.get("content"))
             if normalized:
                 candidates.add(normalized)
     # WordPress block articles can expose the publication time only in the

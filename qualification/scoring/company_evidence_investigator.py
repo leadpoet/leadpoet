@@ -2046,6 +2046,8 @@ def _quote_supports_sec_equity_listing(
         text,
     ):
         return False
+    # A bare NASDAQ cell ends the quoted row or precedes the next SEC heading;
+    # it must not admit a different venue such as Nasdaq Private Market.
     return bool(re.search(
         r"securities\s+registered\s+pursuant\s+to\s+section\s+12\s*\(b\)"
         r".{0,100}title\s+of\s+each\s+class"
@@ -2055,7 +2057,8 @@ def _quote_supports_sec_equity_listing(
         r"(?:common\s+(?:stock|shares)|ordinary\s+shares)"
         r"[^;]{0,100}?\s+[a-z][a-z0-9.-]{0,9}\s+(?:the\s+)?"
         r"(?:nasdaq\s+(?:stock\s+market|global\s+(?:select\s+)?market|"
-        r"capital\s+market)|new\s+york\s+stock\s+exchange)\b",
+        r"capital\s+market)|nasdaq(?=\s*[.;]?\s*(?:$|"
+        r"indicate\s+by\s+check\s+mark\b))|new\s+york\s+stock\s+exchange)\b",
         text,
     ))
 
@@ -4118,6 +4121,27 @@ async def investigate_company_evidence(
                             _bound_linkedin_headquarters_source(
                                 url, fetched_final_urls.get(url, ""), text,
                                 identity_anchor,
+                            )
+                            or (
+                                # A private server projection is not a full
+                                # profile body, but can bind the same HQ fact.
+                                _strict_linkedin_company_profile_url(
+                                    fetched_final_urls.get(url, "")
+                                ) == _strict_linkedin_company_profile_url(url)
+                                and _bound_structured_headquarters_finding(
+                                    {
+                                        "evidence_url": url,
+                                        "evidence_quote": text,
+                                        "observed_country": bounded_prior_observations.get(
+                                            "observed_hq_country"
+                                        ),
+                                        "observed_state": bounded_prior_observations.get(
+                                            "observed_hq_state"
+                                        ),
+                                    },
+                                    structured_headquarters_evidence,
+                                    identity_anchor,
+                                )
                             )
                             for url, text in fetched_pages.items()
                         )

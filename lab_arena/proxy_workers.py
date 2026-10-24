@@ -20,6 +20,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
 from leadpoet_canonical.proxy_transport import (
+    ProxyTransportCleanupError,
     ProxyTransportError,
     validate_http_connect_proxy_url,
     verify_tls_proxy_connect,
@@ -62,6 +63,10 @@ class ProxyWorkerPreflightError(RuntimeError):
 def _preflight_failure(exc: BaseException) -> dict:
     """Read bounded typed causes only; never copy exception text or URLs."""
     for _ in range(8):
+        # Cleanup failure may still own sockets, even when its primary error
+        # was a timeout. An unknown wrapper may also conceal a program fault.
+        if isinstance(exc, ProxyTransportCleanupError):
+            return {"failure_kind": "failed"}
         if isinstance(exc, ProxyWorkerPreflightError):
             return {"failure_kind": exc.failure_kind, "http_status": exc.http_status}
         status = exc.code if isinstance(exc, HTTPError) else (
@@ -77,7 +82,12 @@ def _preflight_failure(exc: BaseException) -> dict:
             return {"failure_kind": "tls"}
         if isinstance(exc, (ValueError, UnicodeError)):
             return {"failure_kind": "invalid_response"}
-        nested = exc.reason if isinstance(exc, URLError) else exc.__cause__
+        if isinstance(exc, URLError):
+            nested = exc.reason
+        elif type(exc) is ProxyTransportError:
+            nested = exc.__cause__
+        else:
+            break
         if not isinstance(nested, BaseException) or nested is exc:
             break
         exc = nested
@@ -133,11 +143,30 @@ class VerifiedProxyWorker:
 
 
 @dataclass(frozen=True)
+class ProxyWorkerExclusion:
+    """Only bounded, credential-free details about an unverified route."""
+
+    operation: str
+    failure_kind: str
+    http_status: int | None = None
+
+    @property
+    def operation_code(self) -> str:
+        return "%s_%s" % (self.operation, self.failure_kind)
+
+    @property
+    def diagnostic(self) -> str:
+        status = " http_status=%d" % self.http_status if self.http_status is not None else ""
+        return "operation=%s%s" % (self.operation_code, status)
+
+
+@dataclass(frozen=True)
 class VerifiedProxyWorkerInventory:
     workers: tuple[VerifiedProxyWorker, ...]
     native_exit_ip: str = field(repr=False)
     native_exit_ip_fingerprint: str
     native_coordinator_count: int = 1
+    excluded_workers: tuple[ProxyWorkerExclusion, ...] = ()
 
     @property
     def verified_workers(self) -> tuple[VerifiedProxyWorker, ...]:
@@ -348,10 +377,19 @@ def preflight_proxy_workers(
     timeout_seconds: float = DEFAULT_PREFLIGHT_TIMEOUT_SECONDS,
     max_workers: int = DEFAULT_PREFLIGHT_MAX_WORKERS,
 ) -> VerifiedProxyWorkerInventory:
-    """Verify every configured transport and require N+1 distinct public exits."""
+    """Use verified routes only, with distinct public exits and one proxy minimum."""
 
     if not isinstance(inventory, ProxyWorkerInventory) or not inventory.workers:
         raise ProxyWorkerPreflightError("proxy worker inventory is unavailable")
+    if (
+        inventory.native_coordinator_count != 1
+        or len(inventory.workers) > DEFAULT_MAX_PROXIES
+        or any(not isinstance(worker, ProxyWorker) for worker in inventory.workers)
+        or tuple(worker.slot_index for worker in inventory.workers)
+        != tuple(range(1, len(inventory.workers) + 1))
+        or len({worker.proxy_url for worker in inventory.workers}) != len(inventory.workers)
+    ):
+        raise ProxyWorkerPreflightError("proxy worker inventory is invalid")
     try:
         timeout = float(timeout_seconds)
         concurrency = int(max_workers)
@@ -420,15 +458,24 @@ def preflight_proxy_workers(
                 verified_by_slot[slot_index] = future.result()
             except ProxyWorkerPreflightError as exc:
                 failures[slot_index] = {"operation": exc.operation, **_preflight_failure(exc)}
-    if failures:
+    fatal_failures = {
+        index: failure for index, failure in failures.items()
+        if failure["failure_kind"] not in {"timeout", "dns", "tls", "http_error"}
+    }
+    if fatal_failures:
         raise ProxyWorkerPreflightError(
-            "proxy worker %d failed startup verification" % min(failures),
+            "proxy worker %d failed startup verification" % min(fatal_failures),
+            **fatal_failures[min(fatal_failures)],
+        )
+    if not verified_by_slot:
+        raise ProxyWorkerPreflightError(
+            "no proxy worker passed startup verification",
             **failures[min(failures)],
         )
 
     verified = tuple(
         verified_by_slot[index]
-        for index in range(1, len(inventory.workers) + 1)
+        for index in sorted(verified_by_slot)
     )
     exits: dict[str, int] = {native_exit_ip: -1}
     for worker in verified:
@@ -449,6 +496,9 @@ def preflight_proxy_workers(
         workers=verified,
         native_exit_ip=native_exit_ip,
         native_exit_ip_fingerprint=_exit_ip_fingerprint(native_exit_ip),
+        excluded_workers=tuple(
+            ProxyWorkerExclusion(**failures[index]) for index in sorted(failures)
+        ),
     )
 
 

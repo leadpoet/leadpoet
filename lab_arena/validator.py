@@ -823,6 +823,9 @@ def main(argv=None) -> int:
             print("Arena scoring host checks failed: %s" % scoring_startup_diagnostic(exc),
                   file=sys.stderr, flush=True)
             return 1
+        for excluded in startup.verified_proxies.excluded_workers:
+            print("Arena proxy worker excluded: %s" % excluded.diagnostic,
+                  flush=True)
         print(
             "Arena scoring host checks passed: %s; proxies=%d; execution_slots=%d; "
             "native_coordinator=1; sandbox_execution=not_checked"

@@ -139,7 +139,8 @@ def test_managed_account_provenance_precedes_request_refusal(status, tool, provi
     ("deepline_managed", False, True, 502, 1),
     ("deepline_managed", False, False, 502, 1),
     ("workspace", False, False, 402, 0),
-    ("none", True, False, 403, 0),
+    # Typed source refusals already use the investigator's exact-URL fallback.
+    ("none", True, False, 403, 1),
 ])
 def test_broker_denial_reaches_frozen_compatible_investigator(
     monkeypatch, owner, target_refusal, exa_recovers, expected_status, expected_fallback,
@@ -233,7 +234,9 @@ def test_broker_denial_reaches_frozen_compatible_investigator(
     fetches = outcome["usage"]["fetch_outcomes"]
     if expected_fallback:
         assert [fetch["ok"] for fetch in fetches] == [False, exa_recovers]
-        assert fetches[0]["error_class"] == "http_error"
+        assert fetches[0]["error_class"] == (
+            "provider_request_refused" if target_refusal else "http_error"
+        )
     elif target_refusal:
         assert fetches[0]["error_class"] == "provider_request_refused"
 

@@ -3311,7 +3311,7 @@ def _deepline_generic_http_request_refusal(
     )
 
 
-def _deepline_firecrawl_unsupported_linkedin_refusal(
+def _deepline_firecrawl_unsupported_source_refusal(
     parameters: Mapping[str, Any], response: ProviderResponse
 ) -> bool:
     """Recognize the observed unsupported source, never a general HTTP 422."""
@@ -3325,7 +3325,7 @@ def _deepline_firecrawl_unsupported_linkedin_refusal(
         target = urlsplit(payload["url"])
         if (
             target.scheme != "https"
-            or (target.hostname or "").casefold() not in {"linkedin.com", "www.linkedin.com"}
+            or not target.hostname
             or target.username is not None
             or target.password is not None
             or target.port not in (None, 443)
@@ -3340,9 +3340,43 @@ def _deepline_firecrawl_unsupported_linkedin_refusal(
         "Firecrawl does not support scraping LinkedIn URLs. Use a native "
         "HarvestAPI LinkedIn operation when it covers the requested shape."
     )
-    return (
-        document.get("code") == "UPSTREAM_BAD_INPUT"
+    if (
+        target.hostname.casefold() in {"linkedin.com", "www.linkedin.com"}
+        and document.get("code") == "UPSTREAM_BAD_INPUT"
         and all(document.get(field) == unsupported for field in ("error", "detail", "message"))
+    ):
+        return True
+    # A different observed Firecrawl refusal names the exact requested host.
+    # Require its consistent caller/validation provenance. Account failures,
+    # arbitrary bad input and unbound/private destinations keep their meaning.
+    if not scoring_provider_compat._safe_public_source_https_url(payload["url"]):
+        return False
+    unsupported = (
+        "Firecrawl does not support scraping %s. "
+        "The site is blocked by Firecrawl, not a credential problem."
+    ) % target.hostname.casefold()
+    tool_error = document.get("tool_error")
+    return (
+        response.internal_provenance is None
+        and document.get("code") == "UPSTREAM_BAD_INPUT"
+        and all(document.get(field) == unsupported for field in ("error", "detail", "message"))
+        and document.get("provider") == "firecrawl"
+        and document.get("operation") == "firecrawl_scrape"
+        and document.get("credential_owner") == "deepline_managed"
+        and document.get("credential_source") == "env"
+        and document.get("failure_origin") == "caller"
+        and document.get("error_category") == "validation"
+        and type(document.get("upstream_status")) is int
+        and document["upstream_status"] == 403
+        and isinstance(tool_error, Mapping)
+        and tool_error.get("code") == "UPSTREAM_BAD_INPUT"
+        and tool_error.get("provider") == "firecrawl"
+        and tool_error.get("operation") == "firecrawl_scrape"
+        and type(tool_error.get("statusCode")) is int
+        and tool_error["statusCode"] == 422
+        and tool_error.get("origin") == "caller"
+        and tool_error.get("category") == "validation"
+        and tool_error.get("retryable") is False
     )
 
 
@@ -3360,7 +3394,7 @@ def _provider_request_refused(
             return False
         return (
             _deepline_generic_http_request_refusal(parameters, response)
-            or _deepline_firecrawl_unsupported_linkedin_refusal(parameters, response)
+            or _deepline_firecrawl_unsupported_source_refusal(parameters, response)
         )
     return False
 

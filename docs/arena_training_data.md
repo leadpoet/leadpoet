@@ -160,7 +160,26 @@ entries, and typed response summaries or text. The alias is retained only in
 provider responses; request copies and opaque values remain redacted.
 Ledger responses are read again at export, so historical receipts can also yield
 readable text. Earlier stored worker observations that were already redacted
-remain redacted. This change does not ask providers for additional reasoning.
+remain redacted.
+
+Future rounds can opt in to `full_generated_thinking_v1`. This policy uses the
+reviewed, exact model/provider/API registry in `lab_arena/reasoning_models.json`.
+It requests full provider-generated thinking, preserves tool history, and records
+what the provider actually returned. Summaries and encrypted state do not meet
+this policy. The gateway applies it to miner and baseline execution calls,
+including subagents; judges and already-created rounds keep their existing rules.
+
+The future policy sets both execution admission and competition cost eligibility
+to $6 per ICP. Admission counts actual settled charges and pending reservations.
+Scoring keeps its existing successful-call and infrastructure-failure distinctions.
+No capture failure or empty thinking response stops scoring or publication.
+If activation prerequisites are missing, round creation continues with its old
+policy and a visible frozen `not_ready` reason. Activation is off by default.
+
+The [full-thinking policy](arena-full-thinking-policy.md) lists tested routes,
+protocol boundaries, export rules, and the remaining activation checks. Provider
+text must be present, complete, and tied to stored request/response evidence to
+enter the strict dataset. This cannot recover thinking that was never returned.
 Privacy filtering and exact replay are separate properties from label validity.
 
 ## Remaining boundaries

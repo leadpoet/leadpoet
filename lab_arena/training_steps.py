@@ -69,22 +69,36 @@ def _tool_calls(calls):
     _require(isinstance(calls, list) and calls, 'tool_call_shape_unsupported')
     ids = set()
     for call in calls:
-        _require(isinstance(call, dict) and set(call) <= {'id', 'type', 'function'}
+        _require(isinstance(call, dict) and set(call) <= {'id', 'type', 'function', 'index'}
                  and call.get('type') == 'function' and isinstance(call.get('id'), str)
                  and bool(call['id']) and call['id'] not in ids, 'tool_call_shape_unsupported')
+        _require('index' not in call or type(call['index']) is int and call['index'] >= 0,
+                 'tool_call_shape_unsupported')
         ids.add(call['id'])
         fn = call.get('function') or {}
         _require(set(fn) == {'name', 'arguments'} and isinstance(fn['name'], str)
                  and bool(fn['name']) and _arguments(fn['arguments']), 'tool_call_shape_unsupported')
 
 
-def _chat_messages(messages):
+def _chat_messages(messages, *, allow_reasoning_history=False):
     _require(isinstance(messages, list) and messages, 'input_shape_unsupported')
     pending = set()
     for msg in messages:
-        _require(isinstance(msg, dict) and set(msg) <= {'role', 'content', 'name', 'tool_call_id', 'tool_calls'}
+        allowed = {'role', 'content', 'name', 'tool_call_id', 'tool_calls'}
+        if allow_reasoning_history:
+            allowed |= {'reasoning', 'reasoning_content', 'reasoning_details'}
+        _require(isinstance(msg, dict) and set(msg) <= allowed
                  and msg.get('role') in {'system', 'developer', 'user', 'assistant', 'tool'}
                  and (isinstance(msg.get('content'), str) or msg.get('content') is None), 'input_shape_unsupported')
+        if any(field in msg for field in ('reasoning', 'reasoning_content', 'reasoning_details')):
+            _require(allow_reasoning_history and msg['role'] == 'assistant', 'reasoning_history_unsupported')
+            for field in ('reasoning', 'reasoning_content'):
+                _require(field not in msg or msg[field] is None or isinstance(msg[field], str),
+                         'reasoning_history_unsupported')
+            details = msg.get('reasoning_details')
+            _require(details is None or isinstance(details, list) and all(
+                training_capture.readable_reasoning_item(item) for item in details),
+                'reasoning_history_unsupported')
         if msg['role'] == 'tool':
             _require(msg.get('tool_call_id') in pending, 'tool_context_unresolved')
             pending.remove(msg['tool_call_id'])
@@ -129,13 +143,13 @@ def _responses_input(value):
     _require(not pending, 'tool_context_unresolved')
 
 
-def _target(body, response, operation):
+def _target(body, response, operation, *, allow_reasoning_history=False):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
     reasoning = []
     if operation == 'openrouter.chat':
-        _chat_messages(body.get('messages'))
+        _chat_messages(body.get('messages'), allow_reasoning_history=allow_reasoning_history)
         choices = response.get('choices')
         _require(isinstance(choices, list) and len(choices) == 1, 'response_choice_ambiguous')
         choice = choices[0]
@@ -172,12 +186,20 @@ def _target(body, response, operation):
         _require(isinstance(item, dict), 'response_shape_unsupported')
         kind = item.get('type')
         if kind == 'reasoning':
-            _require(set(item) <= {'id', 'type', 'summary', 'status'}, 'reasoning_shape_unsupported')
+            _require(set(item) <= {'id', 'type', 'summary', 'content', 'text', 'status'}, 'reasoning_shape_unsupported')
             summary = item.get('summary', [])
             _require(isinstance(summary, list) and all(isinstance(part, dict)
                      and set(part) == {'type', 'text'} and part['type'] == 'summary_text'
                      and isinstance(part['text'], str) for part in summary), 'reasoning_shape_unsupported')
             reasoning.extend(summary)
+            content = item.get('content', [])
+            _require(isinstance(content, list) and all(isinstance(part, dict)
+                     and set(part) == {'type', 'text'} and part['type'] == 'reasoning_text'
+                     and isinstance(part['text'], str) for part in content), 'reasoning_shape_unsupported')
+            reasoning.extend(content)
+            if 'text' in item:
+                _require(isinstance(item['text'], str), 'reasoning_shape_unsupported')
+                reasoning.append({'type': 'reasoning_text', 'text': item['text']})
         elif kind == 'message':
             _require(set(item) <= {'id', 'type', 'status', 'role', 'content'}
                      and item.get('role') == 'assistant' and item.get('status') == 'completed'
@@ -270,7 +292,13 @@ def _candidate(example, call):
         _require(_exact(value, response=True), 'response_privacy_nonexact')
         responses.append(value)
     _require(len({contracts.document_hash(value) for value in responses}) == 1, 'delivered_response_ambiguous')
-    target, reasoning = _target(body, responses[0], op)
+    annotation = call.get('reasoning_capture') or {}
+    full_history = (isinstance(annotation, dict)
+                    and annotation.get('policy') == 'full_generated_thinking_v1'
+                    and annotation.get('requested') is True
+                    and annotation.get('reviewed_route') is True)
+    target, reasoning = _target(body, responses[0], op,
+                                allow_reasoning_history=full_history)
     definitions = [(tool.get('function') or {}) if op == 'openrouter.chat' else tool for tool in tools]
     _require(all(isinstance(fn, dict) and isinstance(fn.get('name'), str) and fn['name']
                  and isinstance(fn.get('parameters', {}), dict) for fn in definitions), 'tool_definition_unsupported')
@@ -283,6 +311,7 @@ def _candidate(example, call):
             'quality': {'status': 'unreviewed', 'correct_action': 'not_established'},
             'source_refs': [{'example_hash': example['example_hash'], 'run_id': call['run_id'],
                              'call_identity': call['call_identity'], 'teacher_reasoning_metadata': reasoning,
+                             'delivered_response_sha256': contracts.document_hash(responses[0]),
                              'response_projection': {'opaque_reasoning_omitted': any('hidden_reasoning' in (r.get('privacy_redactions') or []) for r in matches), 'exact_provider_replay': not any(r.get('privacy_redactions') for r in matches)}, 'attempt': example.get('attempt'),
                              'round_id': example.get('round_id'), 'model': body['model'],
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))

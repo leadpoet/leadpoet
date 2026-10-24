@@ -135,6 +135,34 @@ def readable_reasoning_content_path(path: tuple[str, ...]) -> bool:
             and "response" in path[2:-3] and "request" not in path[2:-3])
 
 
+def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: Any) -> bool:
+    """Keep plain assistant replay text only in a known Chat request message."""
+    if not isinstance(item, Mapping) or item.get("role") != "assistant" or not isinstance(root, Mapping):
+        return False
+    if len(path) >= 4 and path[-2] == "messages" and path[-1].isdigit():
+        prefix = path[:-2]
+    else:
+        return False
+    def projection(parts: tuple[str, ...]) -> bool:
+        return parts == ("outbound", "body") or len(parts) == 1 and parts[0] in _PARAMETER_KEYS
+
+    if not projection(prefix):
+        if (len(prefix) < 4 or prefix[0] != "provider_calls" or not prefix[1].isdigit()
+                or prefix[2] != "request" or not projection(prefix[3:])):
+            return False
+        calls = root.get("provider_calls")
+        if not isinstance(calls, list) or int(prefix[1]) >= len(calls):
+            return False
+        call = calls[int(prefix[1])]
+        operation = call.get("operation_id") if isinstance(call, Mapping) else None
+        request = call.get("request") if isinstance(call, Mapping) else None
+        if not isinstance(request, Mapping) or request.get("operation_id") != operation:
+            return False
+    else:
+        operation = root.get("operation_id")
+    return operation == "openrouter.chat"
+
+
 def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_config: bool,
                            path: tuple[str, ...] = ()) -> bool:
     """Report an opaque reasoning field without dropping returned plain text."""
@@ -287,6 +315,9 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 ) and not empty_credential:
                     result[key] = "[REDACTED]"
                     reasons.add("credential")
+                elif (normalized == "reasoning_content" and isinstance(child, str)
+                      and approved_history_reasoning_content(value, path, item)):
+                    result[key] = clean(child, (*path, key))
                 elif opaque_reasoning_field(normalized, child, item_kind, safe_config, path):
                     if empty_value(child):
                         result[key] = child

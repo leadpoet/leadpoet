@@ -1,0 +1,559 @@
+{
+  "probe_id": "full-thinking-openai-gpt-oss-120b-deepinfra-bf16",
+  "verified_at": "2026-10-23T23:44:41.803525+00:00",
+  "model": "openai/gpt-oss-120b",
+  "provider": "deepinfra/bf16",
+  "api": "openrouter.chat",
+  "zdr": true,
+  "checks": {
+    "two_tool_continuations": true,
+    "final_json": true,
+    "returned_text": true,
+    "no_truncation": true
+  },
+  "attempts": [
+    {
+      "status": 200,
+      "seconds": 4.086,
+      "request": {
+        "model": "openai/gpt-oss-120b",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "deepinfra/bf16"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.037,
+            "completion": 0.17,
+            "request": 0
+          }
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_evidence",
+              "description": "Read synthetic company evidence by ID.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "evidence_id": {
+                    "type": "string",
+                    "enum": [
+                      "profile",
+                      "headcount"
+                    ]
+                  }
+                },
+                "required": [
+                  "evidence_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "lookup_evidence"
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799072-cDwOPlXVnu9LPgcBvigG",
+        "object": "chat.completion",
+        "created": 1792799072,
+        "model": "openai/gpt-oss-120b",
+        "provider": "DeepInfra",
+        "system_fingerprint": null,
+        "service_tier": "default",
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "tool_calls",
+            "native_finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "refusal": null,
+              "reasoning": "The user wants a synthetic compatibility test. They want to qualify \"Acme Test\" only if it is a US B2B software company with 50-200 employees. They want us to first call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\n\nThus we need to do two calls: first call lookup_evidence with evidence_id \"profile\". Then after we get the result, we need to call lookup_evidence with evidence_id \"headcount\". Then after both results are returned, we need to output JSON with fields: company, qualified, evidence_ids.\n\nWe need to ensure we follow the instructions: \"Make one call per turn.\" So we need to do the first call now, then wait for the result, then do the second call, then output JSON.\n\nThus we need to call the function lookup_evidence with evidence_id \"profile\". We'll do that.",
+              "tool_calls": [
+                {
+                  "type": "function",
+                  "index": 0,
+                  "id": "chatcmpl-tool-9d78c169d71e4352b610f4ce25943360",
+                  "function": {
+                    "name": "lookup_evidence",
+                    "arguments": "{\n  \"evidence_id\": \"profile\"\n}"
+                  }
+                }
+              ],
+              "reasoning_details": [
+                {
+                  "type": "reasoning.text",
+                  "text": "The user wants a synthetic compatibility test. They want to qualify \"Acme Test\" only if it is a US B2B software company with 50-200 employees. They want us to first call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\n\nThus we need to do two calls: first call lookup_evidence with evidence_id \"profile\". Then after we get the result, we need to call lookup_evidence with evidence_id \"headcount\". Then after both results are returned, we need to output JSON with fields: company, qualified, evidence_ids.\n\nWe need to ensure we follow the instructions: \"Make one call per turn.\" So we need to do the first call now, then wait for the result, then do the second call, then output JSON.\n\nThus we need to call the function lookup_evidence with evidence_id \"profile\". We'll do that.",
+                  "format": "unknown",
+                  "index": 0
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 203,
+          "completion_tokens": 253,
+          "total_tokens": 456,
+          "cost": 5.0521e-05,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 5.0521e-05,
+            "upstream_inference_prompt_cost": 7.511e-06,
+            "upstream_inference_completions_cost": 4.301e-05
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 254,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "openai/gpt-oss-120b",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=DeepInfra",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 24,
+            "available": [
+              {
+                "provider": "DeepInfra",
+                "model": "openai/gpt-oss-120b",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 3954
+        }
+      },
+      "request_sha256": "be3e897f8cc1e296896297d7b14479f2fd2181fca26e968747df5d63032b4f35",
+      "response_sha256": "9e8411d79fdd8eae55b5ecece01c04a367300c8a0e500e6c674483c5cb42a80e",
+      "turn": 0,
+      "thinking_fields": {
+        "reasoning": 1008,
+        "reasoning_details.text": 1008
+      }
+    },
+    {
+      "status": 200,
+      "seconds": 1.65,
+      "request": {
+        "model": "openai/gpt-oss-120b",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "The user wants a synthetic compatibility test. They want to qualify \"Acme Test\" only if it is a US B2B software company with 50-200 employees. They want us to first call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\n\nThus we need to do two calls: first call lookup_evidence with evidence_id \"profile\". Then after we get the result, we need to call lookup_evidence with evidence_id \"headcount\". Then after both results are returned, we need to output JSON with fields: company, qualified, evidence_ids.\n\nWe need to ensure we follow the instructions: \"Make one call per turn.\" So we need to do the first call now, then wait for the result, then do the second call, then output JSON.\n\nThus we need to call the function lookup_evidence with evidence_id \"profile\". We'll do that.",
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "chatcmpl-tool-9d78c169d71e4352b610f4ce25943360",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\n  \"evidence_id\": \"profile\"\n}"
+                }
+              }
+            ],
+            "reasoning_details": [
+              {
+                "type": "reasoning.text",
+                "text": "The user wants a synthetic compatibility test. They want to qualify \"Acme Test\" only if it is a US B2B software company with 50-200 employees. They want us to first call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\n\nThus we need to do two calls: first call lookup_evidence with evidence_id \"profile\". Then after we get the result, we need to call lookup_evidence with evidence_id \"headcount\". Then after both results are returned, we need to output JSON with fields: company, qualified, evidence_ids.\n\nWe need to ensure we follow the instructions: \"Make one call per turn.\" So we need to do the first call now, then wait for the result, then do the second call, then output JSON.\n\nThus we need to call the function lookup_evidence with evidence_id \"profile\". We'll do that.",
+                "format": "unknown",
+                "index": 0
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "chatcmpl-tool-9d78c169d71e4352b610f4ce25943360",
+            "content": "{\"business\":\"B2B software\",\"company\":\"Acme Test\",\"country\":\"US\",\"evidence_id\":\"profile\"}"
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "deepinfra/bf16"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.037,
+            "completion": 0.17,
+            "request": 0
+          }
+        },
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "lookup_evidence",
+              "description": "Read synthetic company evidence by ID.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "evidence_id": {
+                    "type": "string",
+                    "enum": [
+                      "profile",
+                      "headcount"
+                    ]
+                  }
+                },
+                "required": [
+                  "evidence_id"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        ],
+        "tool_choice": {
+          "type": "function",
+          "function": {
+            "name": "lookup_evidence"
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799076-WsSHTJ1M89gHgMP3k6VM",
+        "object": "chat.completion",
+        "created": 1792799076,
+        "model": "openai/gpt-oss-120b",
+        "provider": "DeepInfra",
+        "system_fingerprint": null,
+        "service_tier": "default",
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "tool_calls",
+            "native_finish_reason": "tool_calls",
+            "message": {
+              "role": "assistant",
+              "content": null,
+              "refusal": null,
+              "reasoning": "Now we have the profile evidence: business: B2B software, company: Acme Test, country: US, evidence_id: profile.\n\nNow we need to call lookup_evidence with evidence_id \"headcount\".",
+              "tool_calls": [
+                {
+                  "type": "function",
+                  "index": 0,
+                  "id": "chatcmpl-tool-0577c47b6f0841959dd0e77da4ad2fe4",
+                  "function": {
+                    "name": "lookup_evidence",
+                    "arguments": "{\n  \"evidence_id\": \"headcount\"\n}"
+                  }
+                }
+              ],
+              "reasoning_details": [
+                {
+                  "type": "reasoning.text",
+                  "text": "Now we have the profile evidence: business: B2B software, company: Acme Test, country: US, evidence_id: profile.\n\nNow we need to call lookup_evidence with evidence_id \"headcount\".",
+                  "format": "unknown",
+                  "index": 0
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 492,
+          "completion_tokens": 77,
+          "total_tokens": 569,
+          "cost": 3.1294e-05,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 3.1294e-05,
+            "upstream_inference_prompt_cost": 1.8204e-05,
+            "upstream_inference_completions_cost": 1.309e-05
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 46,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "openai/gpt-oss-120b",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=DeepInfra",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 24,
+            "available": [
+              {
+                "provider": "DeepInfra",
+                "model": "openai/gpt-oss-120b",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 1573
+        }
+      },
+      "request_sha256": "00d21f38f2885bf12d4fd8896e14c307b417c1ffcda6529ec5b53f0fa24b5a06",
+      "response_sha256": "dba7cc1c15cee5e804d09b4f32536de4f815e91fd79ac527585c4a36a34b615b",
+      "turn": 1,
+      "thinking_fields": {
+        "reasoning": 179,
+        "reasoning_details.text": 179
+      }
+    },
+    {
+      "status": 200,
+      "seconds": 3.892,
+      "request": {
+        "model": "openai/gpt-oss-120b",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts."
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "The user wants a synthetic compatibility test. They want to qualify \"Acme Test\" only if it is a US B2B software company with 50-200 employees. They want us to first call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\n\nThus we need to do two calls: first call lookup_evidence with evidence_id \"profile\". Then after we get the result, we need to call lookup_evidence with evidence_id \"headcount\". Then after both results are returned, we need to output JSON with fields: company, qualified, evidence_ids.\n\nWe need to ensure we follow the instructions: \"Make one call per turn.\" So we need to do the first call now, then wait for the result, then do the second call, then output JSON.\n\nThus we need to call the function lookup_evidence with evidence_id \"profile\". We'll do that.",
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "chatcmpl-tool-9d78c169d71e4352b610f4ce25943360",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\n  \"evidence_id\": \"profile\"\n}"
+                }
+              }
+            ],
+            "reasoning_details": [
+              {
+                "type": "reasoning.text",
+                "text": "The user wants a synthetic compatibility test. They want to qualify \"Acme Test\" only if it is a US B2B software company with 50-200 employees. They want us to first call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\n\nThus we need to do two calls: first call lookup_evidence with evidence_id \"profile\". Then after we get the result, we need to call lookup_evidence with evidence_id \"headcount\". Then after both results are returned, we need to output JSON with fields: company, qualified, evidence_ids.\n\nWe need to ensure we follow the instructions: \"Make one call per turn.\" So we need to do the first call now, then wait for the result, then do the second call, then output JSON.\n\nThus we need to call the function lookup_evidence with evidence_id \"profile\". We'll do that.",
+                "format": "unknown",
+                "index": 0
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "chatcmpl-tool-9d78c169d71e4352b610f4ce25943360",
+            "content": "{\"business\":\"B2B software\",\"company\":\"Acme Test\",\"country\":\"US\",\"evidence_id\":\"profile\"}"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "reasoning": "Now we have the profile evidence: business: B2B software, company: Acme Test, country: US, evidence_id: profile.\n\nNow we need to call lookup_evidence with evidence_id \"headcount\".",
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "chatcmpl-tool-0577c47b6f0841959dd0e77da4ad2fe4",
+                "function": {
+                  "name": "lookup_evidence",
+                  "arguments": "{\n  \"evidence_id\": \"headcount\"\n}"
+                }
+              }
+            ],
+            "reasoning_details": [
+              {
+                "type": "reasoning.text",
+                "text": "Now we have the profile evidence: business: B2B software, company: Acme Test, country: US, evidence_id: profile.\n\nNow we need to call lookup_evidence with evidence_id \"headcount\".",
+                "format": "unknown",
+                "index": 0
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "chatcmpl-tool-0577c47b6f0841959dd0e77da4ad2fe4",
+            "content": "{\"employees\":80,\"evidence_id\":\"headcount\"}"
+          }
+        ],
+        "max_tokens": 8192,
+        "reasoning": {
+          "effort": "high",
+          "exclude": false
+        },
+        "stream": false,
+        "provider": {
+          "only": [
+            "deepinfra/bf16"
+          ],
+          "allow_fallbacks": false,
+          "zdr": true,
+          "data_collection": "deny",
+          "require_parameters": true,
+          "max_price": {
+            "prompt": 0.037,
+            "completion": 0.17,
+            "request": 0
+          }
+        },
+        "response_format": {
+          "type": "json_schema",
+          "json_schema": {
+            "name": "qualification",
+            "strict": true,
+            "schema": {
+              "type": "object",
+              "properties": {
+                "company": {
+                  "type": "string"
+                },
+                "qualified": {
+                  "type": "boolean"
+                },
+                "evidence_ids": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "company",
+                "qualified",
+                "evidence_ids"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      },
+      "response": {
+        "id": "gen-1792799077-hQk2kgWrPUdbqVjKUG61",
+        "object": "chat.completion",
+        "created": 1792799077,
+        "model": "openai/gpt-oss-120b",
+        "provider": "DeepInfra",
+        "system_fingerprint": null,
+        "service_tier": "default",
+        "choices": [
+          {
+            "index": 0,
+            "logprobs": null,
+            "finish_reason": "stop",
+            "native_finish_reason": "stop",
+            "message": {
+              "role": "assistant",
+              "content": "{\n  \"company\": \"Acme Test\",\n  \"evidence_ids\": [\n    \"profile\",\n    \"headcount\"\n  ],\n  \"qualified\": true\n}",
+              "refusal": null,
+              "reasoning": "Now we have both pieces of evidence. The user wants to output only JSON with company, qualified, evidence_ids. The qualification criteria: US B2B software company with 50-200 employees. Let's check:\n\n- business: B2B software (yes)\n- country: US (yes)\n- employees: 80 (within 50-200 inclusive) (yes)\n\nThus qualified = true.\n\nWe need to output JSON with fields: company, qualified, evidence_ids. evidence_ids presumably should be a list of the evidence IDs used: [\"profile\", \"headcount\"].\n\nThus output:\n\n{\n  \"company\": \"Acme Test\",\n  \"qualified\": true,\n  \"evidence_ids\": [\"profile\", \"headcount\"]\n}\n\nWe must output only JSON, no extra text.",
+              "reasoning_details": [
+                {
+                  "type": "reasoning.text",
+                  "text": "Now we have both pieces of evidence. The user wants to output only JSON with company, qualified, evidence_ids. The qualification criteria: US B2B software company with 50-200 employees. Let's check:\n\n- business: B2B software (yes)\n- country: US (yes)\n- employees: 80 (within 50-200 inclusive) (yes)\n\nThus qualified = true.\n\nWe need to output JSON with fields: company, qualified, evidence_ids. evidence_ids presumably should be a list of the evidence IDs used: [\"profile\", \"headcount\"].\n\nThus output:\n\n{\n  \"company\": \"Acme Test\",\n  \"qualified\": true,\n  \"evidence_ids\": [\"profile\", \"headcount\"]\n}\n\nWe must output only JSON, no extra text.",
+                  "format": "unknown",
+                  "index": 0
+                }
+              ]
+            }
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 529,
+          "completion_tokens": 205,
+          "total_tokens": 734,
+          "cost": 5.4423e-05,
+          "is_byok": false,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "cache_write_tokens": 0,
+            "audio_tokens": 0,
+            "video_tokens": 0
+          },
+          "cost_details": {
+            "upstream_inference_cost": 5.4423e-05,
+            "upstream_inference_prompt_cost": 1.9573e-05,
+            "upstream_inference_completions_cost": 3.485e-05
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 164,
+            "image_tokens": 0,
+            "audio_tokens": 0
+          }
+        },
+        "openrouter_metadata": {
+          "requested": "openai/gpt-oss-120b",
+          "strategy": "direct",
+          "region": "IAD",
+          "summary": "available=1, selected=DeepInfra",
+          "attempt": 1,
+          "is_byok": false,
+          "endpoints": {
+            "total": 24,
+            "available": [
+              {
+                "provider": "DeepInfra",
+                "model": "openai/gpt-oss-120b",
+                "selected": true
+              }
+            ]
+          },
+          "generation_time": 3811
+        }
+      },
+      "request_sha256": "6f653175b8fc31d34b06cfb78e338e40b89c149e871b972bb4075c0a0a133989",
+      "response_sha256": "d880d2e7b3fb9b7b8e48130347267365efcb81b46a1a5606055c6da5bc198868",
+      "turn": 2,
+      "thinking_fields": {
+        "reasoning": 637,
+        "reasoning_details.text": 637
+      }
+    }
+  ],
+  "reported_cost_usd": "0.000136238",
+  "approval_granted": false,
+  "limitation": "Synthetic compatibility evidence only; requires semantic review, gateway/export tests, and ICP evaluation."
+}

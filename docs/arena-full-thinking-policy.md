@@ -1,0 +1,129 @@
+# Full generated thinking: draft implementation scope
+
+This change is for review in a draft PR. It does not activate the policy, change
+an existing round, or deploy any service. The policy name is
+`full_generated_thinking_v1`.
+
+## Admission rule
+
+Allow a model only through a tested provider, API, and reasoning mode that emits
+its generated thinking text. A summary, encrypted state, token counter, or
+explanation requested after the answer is not a substitute. “Full” means the
+provider's unsummarized generated text; it does not mean access to neural state
+or a guarantee that the text explains every internal computation.
+
+Country of origin and open/closed weights do not decide admission. Actual route
+behavior does. Catalog capability flags alone do not grant approval.
+
+## Initial compatibility-approved whitelist
+
+The runtime source is `lab_arena/reasoning_models.json`. All six entries use Chat Completions, `exclude: false`, an 8,192-token output
+limit, ZDR, no provider fallback, and a route price bound. Five use `effort: high`;
+Gemma uses its supported `enabled: true` mode. Exact modes live in the registry.
+
+| Model ID | Exact provider selector | Tested result |
+| --- | --- | --- |
+| `openai/gpt-oss-120b` | `deepinfra/bf16` | Generated text, two tool continuations, strict JSON |
+| `mistralai/mistral-large-4-0` | `mistral/zdr` | Generated text on final turn, two tool continuations, strict JSON |
+| `deepseek/deepseek-v4.1-flash-1017` | `fireworks` | Generated text, two tool continuations, strict JSON |
+| `openai/gpt-oss-20b` | `deepinfra/bf16` | Generated text, two tool continuations, strict JSON |
+| `reflection/beam-1.0-501b-a23b` | `nebius/fp8` | Generated text, two tool continuations, strict JSON |
+| `google/gemma-4-31b-it` | `coreweave/fp4` | Generated text, two tool continuations, strict JSON |
+
+The evidence files in `docs/evidence/full-thinking/` contain only synthetic test
+inputs and exact responses. Their SHA-256 hashes are frozen in the registry.
+The tests validate returned model and selected endpoint version/provider metadata.
+The requested provider selector is recorded separately: returned metadata does
+not independently expose its quantization suffix.
+
+The probe reports say `approval_granted: false`: running a probe never approves
+a route. Registry approval is a separate review of provider semantics and the
+stored compatibility evidence. It is not approval to deploy or train.
+
+Provider semantics are documented by [DeepInfra](https://deepinfra.com/openai/gpt-oss-120b/api),
+[Mistral](https://docs.mistral.ai/studio/conversations/reasoning), [Fireworks](https://docs.fireworks.ai/guides/reasoning),
+[OpenAI GPT-OSS](https://developers.openai.com/cookbook/articles/gpt-oss/handle-raw-cot),
+[Reflection](https://developers.reflection.ai/reasoning), and
+[Gemma](https://ai.google.dev/gemma/docs/capabilities/thinking).
+Mistral's empty tool-only turns are recorded as empty, not counted as traces.
+The DeepSeek route through DeepInfra returned HTTP 429 in probes and is not approved.
+
+`docs/arena-full-thinking-candidates.json` is the broader catalog snapshot and
+review queue. It includes untested, summary-only, and unknown models, clearly
+classified. It is not a runtime allowlist or a claim that every listed model
+exposes full thinking. New routes require the same evidence and tests.
+
+## Implementation and acceptance criteria
+
+| Requirement | Implemented behavior / required proof |
+| --- | --- |
+| Central collection | Apply policy before hashing, capture, and budget admission to all execution model calls. Miner, baseline, and subagent calls share the same gateway. Judges retain their policy. |
+| Exact routes | Freeze the reviewed registry in each new round. Pin provider and version expectations. Reject unsupported routes before dispatch. Record returned route mismatches without stopping scoring; exclude them from strict exports. |
+| Tool and JSON continuity | Preserve reasoning fields, signatures, opaque continuation state, tool IDs, ordering, and caller schemas in the live conversation. Validate two tool continuations and strict JSON. Never insert thinking into a JSON answer. |
+| Useful training data | Export actual generated thinking beside prior observations and the target action. Require request/response hashes, delivery/receipt evidence, a matching frozen route, and complete provider text. Deduplicate alias fields. |
+| Linked evidence | Reuse task/ICP, prompts, tools, page observations, receipts, final output, and judgment links. Retain model/route/settings, source version, retries, cost, and runtime. Missing or unsupported evidence remains an explicit gap. |
+| Dataset quality | Reuse secret removal, failure distinctions, deduplication, held-out companies, source references, dataset versions, and existing training-permission status. Labels still require evaluation before training. |
+| Honest counts | Separate miner/baseline/judge calls, saved text, and complete trajectories. Report empty, summary-only, opaque, truncated, unavailable, failed capture, and unproved routes separately. No invented historical backfill. |
+| $6 cap | Set future execution admission and cost eligibility to $6 per ICP for both miners and baseline. Admission includes actual settled charges plus pending or uncertain holds under the existing database lock. Settlement releases unused room. Historical $4 behavior stays unchanged. |
+| Round continuity | No capture failure or missing text cancels a round or stops publication. Missing activation prerequisites create an ordinary round with a visible `not_ready` reason. No live catalog request is needed to create the round. |
+| Safe activation | Default off. Require a compatible baseline route and a tested immutable baseline source plus digest before activation. Apply only to future unopened rounds. |
+
+The output allowance is a tested total-token envelope. An effort setting is not
+a hard thinking-token budget and cannot guarantee a final answer fits. Truncated
+responses are explicitly excluded from the strict dataset. Runtime and answer
+quality may change; the user has accepted this tradeoff.
+
+## Limits and release gates
+
+- The current baseline and Tyche's hosted OpenAI route do not qualify for this
+  full-text-only registry. No baseline or miner is silently switched. The initial
+  registry deliberately has no baseline selection. Before activation, publish and
+  test a compatible baseline archive, including every subagent route. The
+  activation command requires `--reasoning-baseline-source-url` with a same-repo
+  40-character commit archive URL and `--reasoning-baseline-source-sha256`.
+  Reused accepted/frozen baselines must also match the stored digest.
+- No native Responses route is approved yet. The existing broker uses completed
+  upstream responses; this PR does not add arbitrary upstream streaming support.
+  Existing buffered Codex SSE behavior is preserved, but does not make a Codex
+  model eligible. Hosted Responses web search remains unapproved.
+- Keeping ZDR worked for all six approved routes. Relaxing retention does not
+  turn provider-withheld thinking into readable text. No privacy relaxation is
+  included.
+- A provider can return no thinking on an individual successful call. Such calls
+  are recorded, not called traces. Capture failures cannot silently enter the
+  strict dataset. A full trajectory can include valid tool-only turns without
+  counting those turns as thinking samples.
+- Synthetic compatibility tests do not prove lead quality, a six-dollar full ICP
+  run, or production readiness. Before activation, run representative ICPs,
+  verify stored/exported artifacts and publication, and review latency, spend,
+  failure rates, and output quality. No production claim is made in this PR.
+- Apply exact committed migration `551-lab-arena-full-thinking-six-dollar-cap.sql`
+  through the normal release workflow before activation. It checks source hashes
+  and database privileges, preserves unrelated behavior, and is idempotent.
+
+## Reproducible checks
+
+`scripts/probe_full_thinking_routes.py` runs only explicit synthetic probes. It
+does not approve a route, activate a policy, use production miner data, or retry
+with another provider. Credentials are supplied through the environment and are
+not written to the report.
+
+`scripts/prepare_arena_full_thinking_dataset.py` builds a private strict dataset
+from existing exports. Empty datasets return a nonzero result. This is a dataset
+preparation tool, not authorization to train on miner submissions.
+
+Tests cover exact evidence hashes, broker routing and reservations, stored live
+three-turn probes, malformed history, summary/opaque/truncated exclusion, empty
+tool turns, activation failure, old-round behavior, and local PostgreSQL cap
+concurrency and settlement. See the PR verification record for executed commands
+and remaining exclusions.
+
+## Capture audit follow-up
+
+The [end-to-end audit](arena-trace-capture-audit.md) records fresh real provider
+calls through disposable PostgreSQL, object storage, worker socket delivery,
+agent read acknowledgements, and raw/readable export readback for every approved
+route. It also records tested routes that did not qualify, without silently
+admitting them or changing the provider. These are compatibility approvals, not
+a claim that every call returns thinking or that any model has passed a full
+sales task evaluation.

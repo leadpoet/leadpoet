@@ -180,6 +180,25 @@ still incur charges. Arena reward activation is a separate setting: disabling
 rewards prevents champion allocation, while scoring and competition execution
 remain separate configuration behavior.
 
+## Provider reasoning capture
+
+A future round with `full_generated_thinking_v1` uses only the exact tested
+model/provider/API routes frozen in that round. The gateway applies the tested
+reasoning mode and output allowance. No miner-specific logging setting is needed.
+All model calls, including subagents, must use an approved route. Unsupported
+models return a clear pre-dispatch error; the gateway does not substitute models.
+
+The first approved routes are Chat Completions routes. Native Responses/Codex
+models are not approved by this registry. A miner using those models must choose
+a compatible model and client before entering a future full-thinking round.
+The gateway preserves supported reasoning history, tool IDs, and JSON schemas.
+It does not rewrite the submitted agent or promise unchanged answers or latency.
+
+The future policy has a $6 execution and cost-eligibility limit per ICP, equally
+for miners and baseline. Historical rounds and judges remain unchanged. Missing
+thinking is reported as a dataset gap; it does not itself fail a judgment.
+See [the policy and exact whitelist](arena-full-thinking-policy.md) for details.
+
 ## Decision summaries
 
 New or updated model harnesses should report short decision summaries through

@@ -39,7 +39,8 @@ def _json_object(objects: Any, ref: str, limit: int) -> dict:
 
 def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
     """Copy a JSON value, omitting opaque reasoning while keeping readable text."""
-    from lab_arena.training_capture import empty_value, opaque_reasoning_field, readable_reasoning_item, reasoning_kind
+    from lab_arena.training_capture import (approved_history_reasoning_content, empty_value,
+                                            opaque_reasoning_field, readable_reasoning_item, reasoning_kind)
     removed = False
 
     def walk(item, path=()):
@@ -50,7 +51,10 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
             for key, child in item.items():
                 normalized = str(key).lower().replace("-", "_")
                 safe_config = normalized == "reasoning" and isinstance(child, dict) and set(child) <= {"effort", "summary", "context", "max_tokens", "exclude", "enabled"}
-                if opaque_reasoning_field(normalized, child, kind, safe_config, path):
+                if (normalized == "reasoning_content" and isinstance(child, str)
+                        and approved_history_reasoning_content(value, path, item)):
+                    result[key] = walk(child, (*path, normalized))
+                elif opaque_reasoning_field(normalized, child, kind, safe_config, path):
                     removed = removed or not empty_value(child)
                 else:
                     result[key] = walk(child, (*path, normalized))
@@ -542,6 +546,8 @@ def _calls(rows, run_ids, objects, run_order):
                 "provider": reserve.get("provider"), "operation_id": reserve.get("operation_id"),
                 "funding_source": reserve.get("funding_source"), "reservation_entry_id": reserve["entry_id"],
                 **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
+        if isinstance(entry.get("reasoning_capture"), Mapping):
+            call["reasoning_capture"] = copy.deepcopy(entry["reasoning_capture"])
         call_reasons = set()
         upstream_receipts = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):
@@ -549,10 +555,13 @@ def _calls(rows, run_ids, objects, run_order):
             terminal = row.get("terminal_response") or {}
             captured = (saved_call.get("upstream_response_receipt")
                         if isinstance(saved_call, Mapping) else None)
-            captured = captured or terminal.get("upstream_response_receipt")
+            captured = (captured or terminal.get("upstream_response_receipt")
+                        or (row.get("entry_doc") or {}).get("upstream_response_receipt"))
             if not captured:
                 continue
             if isinstance(captured, Mapping) and captured.get("status") == "unavailable":
+                if captured.get("reason") in {"response_capture_failed", "response_size_limit"}:
+                    call["upstream_response_capture"] = {"status": "unavailable", "reason": captured["reason"]}
                 if captured.get("reason") == "response_size_limit":
                     call_reasons.add("upstream_response_size_limit")
                 call_reasons.add("upstream_response_capture_unavailable")
@@ -610,7 +619,8 @@ def _calls(rows, run_ids, objects, run_order):
                              "openrouter_delayed_reconciliation", "deepline_delayed_reconciliation",
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
                              "openrouter_generation_id", "deepline_request_id", "deepline_operation",
-                             "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost"}
+                             "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost",
+                             "transport_elapsed_ms", "timing_scope"}
         call["lifecycle"] = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):
             metadata = {key: copy.deepcopy(row[key]) for key in

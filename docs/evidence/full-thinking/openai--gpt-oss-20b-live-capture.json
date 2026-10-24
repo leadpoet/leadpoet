@@ -1,0 +1,1346 @@
+{
+  "schema_version": 1,
+  "kind": "live_broker_postgres_capture_probe",
+  "model": "openai/gpt-oss-20b",
+  "provider": "deepinfra/bf16",
+  "verified_at": "2026-10-24T00:50:28.356440Z",
+  "semantic_source": "https://developers.openai.com/cookbook/articles/gpt-oss/handle-raw-cot",
+  "qualification": "provider-exposed generated text; not a claim about all internal computation",
+  "proof_limit": "Synthetic local PostgreSQL, object-store, and worker socket/SDK receipt calls; no deployed gateway, full ICP quality, or complete labeled trajectory claim.",
+  "checks": {
+    "raw_and_readable_readback": true,
+    "two_tool_continuations": true,
+    "strict_json": true,
+    "positive_and_negative_qualification": true,
+    "evidence_id_order_not_significant": true,
+    "worker_socket_and_agent_acknowledgement": true
+  },
+  "runs": [
+    {
+      "scenario": "live",
+      "original_report_sha256": "66dfa1ea8e6b6f0c1b7fc523c8de104727e787d5563464a09c293219bc8931ad",
+      "export_sha256": "29486b8330db562d8f46267567b2e997f5ea59320cf7bd584c090f1c88335e5b",
+      "thinking_chars": [
+        4130,
+        713,
+        793
+      ],
+      "validated_final_json": {
+        "company": "Acme Test",
+        "evidence_ids": [
+          "profile",
+          "headcount"
+        ],
+        "qualified": true
+      },
+      "calls": [
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.14,
+                "prompt": 0.03,
+                "request": 0
+              },
+              "only": [
+                "deepinfra/bf16"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "We have a user: \"Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\"\n\nSo the user wants me to qualify Acme Test. We need to call the provided function lookup_evidence twice: first with evidence_id 'profile', then later 'headcount'. We must only do one call per turn. And we must not infer missing facts. We need to structure calls accordingly.\n\nThis is a two-step: first call to 'profile', then later call to 'headcount'. After we get both results returned, we only output JSON with keys: company, qualified, evidence_ids.\n\nSo I must proceed step by step. According to policy, the first turn: I should call lookup_evidence with evidence_id: \"profile\". I must not output JSON yet, because we need more information. So I will produce a function call to lookup_evidence with evidence_id \"profile\". Then next turn we will get that result; then we may call the second function or we might end the turns... But the user wants \"Make one call per turn. After both results return only JSON with company, qualified, evidence_ids.\" So we need to produce an output after the second call.\n\nHence, my first turn: I should call lookup_evidence.\n\nThus I produce a function call. According to the format: a single JSON object with function name and arguments.\n\nThe function name: \"lookup_evidence\". The argument must be evidence_id: \"profile\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n}\n\nBut I should ensure the syntax: In this environment, we can respond with a function call. According to the example, we can do:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": {\n    \"evidence_id\": \"profile\"\n  }\n}\n\nBut the guidelines say \"the arguments must be a JSON string\". Wait: usage: in the prompt it's described: \"The arguments field should contain the arguments as a JSON string.\" But the format in the example does shows that the JSON object is within string? Let's look carefully: The 'function call' is basically an object with keys \"name\" and \"arguments\". In second, \"arguments\" is a string that contains a JSON representation of the arguments. But that might be a convention. We can just put \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\". But the examples—maybe different. Let's check the guidelines:\n\n\"You must NOT respond with anything else besides a function call or your final output JSON. ... Use the ... arguments ... must contain the arguments as a JSON string.\"\n\nThus \"arguments\" may be a string: e.g., \"\\\"{\\\\\\\"evidence_id\\\\\\\": \\\\\\\"profile\\\\\\\"}\\\"\"? That seems crazy. Let's read the guidelines exactly:\n\n**Detailed format:**\n\n```\n{\n  \"name\": \"function_name\",\n  \"arguments\": \"<arguments>\"\n}\n```\n\n> The arguments are compulsory, this should be valid JSON string with the arguments to the function.\n\nExamples show the 'arguments' value is a JSON string. E.g., in system messages, they sometimes do:\n\n\"name\": \"lookup_evidence\",\n\"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n\nYes that is correct. So we must produce a string in quotes that contains the JSON of arguments.\n\nThus for first turn, we produce:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"profile\\\"}\"\n}\n\nNote that we might not need spaces inside. It's fine.\n\nGiven the conversation, we respond that function call. Then we wait to receive result. Since this is a turn-based than many times. So final output is just the function call. Then after next turn they will give us 'profile' evidence result, and we will call second function with 'headcount' evidence_id. Then after receiving that, we produce final JSON object: { company: \"Acme Test\", qualified: true/false, evidence_ids: [...] }.\n\nWe must not add any additional commentary.\n\nThus this message: function call for the first evidence.\n\nWe will produce that JSON.\n\nWe need exactly one call per turn. So we're done.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "We have a user: \"Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\"\n\nSo the user wants me to qualify Acme Test. We need to call the provided function lookup_evidence twice: first with evidence_id 'profile', then later 'headcount'. We must only do one call per turn. And we must not infer missing facts. We need to structure calls accordingly.\n\nThis is a two-step: first call to 'profile', then later call to 'headcount'. After we get both results returned, we only output JSON with keys: company, qualified, evidence_ids.\n\nSo I must proceed step by step. According to policy, the first turn: I should call lookup_evidence with evidence_id: \"profile\". I must not output JSON yet, because we need more information. So I will produce a function call to lookup_evidence with evidence_id \"profile\". Then next turn we will get that result; then we may call the second function or we might end the turns... But the user wants \"Make one call per turn. After both results return only JSON with company, qualified, evidence_ids.\" So we need to produce an output after the second call.\n\nHence, my first turn: I should call lookup_evidence.\n\nThus I produce a function call. According to the format: a single JSON object with function name and arguments.\n\nThe function name: \"lookup_evidence\". The argument must be evidence_id: \"profile\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n}\n\nBut I should ensure the syntax: In this environment, we can respond with a function call. According to the example, we can do:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": {\n    \"evidence_id\": \"profile\"\n  }\n}\n\nBut the guidelines say \"the arguments must be a JSON string\". Wait: usage: in the prompt it's described: \"The arguments field should contain the arguments as a JSON string.\" But the format in the example does shows that the JSON object is within string? Let's look carefully: The 'function call' is basically an object with keys \"name\" and \"arguments\". In second, \"arguments\" is a string that contains a JSON representation of the arguments. But that might be a convention. We can just put \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\". But the examples—maybe different. Let's check the guidelines:\n\n\"You must NOT respond with anything else besides a function call or your final output JSON. ... Use the ... arguments ... must contain the arguments as a JSON string.\"\n\nThus \"arguments\" may be a string: e.g., \"\\\"{\\\\\\\"evidence_id\\\\\\\": \\\\\\\"profile\\\\\\\"}\\\"\"? That seems crazy. Let's read the guidelines exactly:\n\n**Detailed format:**\n\n```\n{\n  \"name\": \"function_name\",\n  \"arguments\": \"<arguments>\"\n}\n```\n\n> The arguments are compulsory, this should be valid JSON string with the arguments to the function.\n\nExamples show the 'arguments' value is a JSON string. E.g., in system messages, they sometimes do:\n\n\"name\": \"lookup_evidence\",\n\"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n\nYes that is correct. So we must produce a string in quotes that contains the JSON of arguments.\n\nThus for first turn, we produce:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"profile\\\"}\"\n}\n\nNote that we might not need spaces inside. It's fine.\n\nGiven the conversation, we respond that function call. Then we wait to receive result. Since this is a turn-based than many times. So final output is just the function call. Then after next turn they will give us 'profile' evidence result, and we will call second function with 'headcount' evidence_id. Then after receiving that, we produce final JSON object: { company: \"Acme Test\", qualified: true/false, evidence_ids: [...] }.\n\nWe must not add any additional commentary.\n\nThus this message: function call for the first evidence.\n\nWe will produce that JSON.\n\nWe need exactly one call per turn. So we're done.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"evidence_id\":\"profile\"}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "chatcmpl-tool-ad78fd2154fb458aa5119430a1255451",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792801365,
+            "id": "gen-1792801365-QUWf3JUeX4GqN37Jf2kc",
+            "model": "openai/gpt-oss-20b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "openai/gpt-oss-20b",
+                    "provider": "DeepInfra",
+                    "selected": true
+                  }
+                ],
+                "total": 11
+              },
+              "generation_time": 8781,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "openai/gpt-oss-20b",
+              "strategy": "direct",
+              "summary": "available=1, selected=DeepInfra"
+            },
+            "provider": "DeepInfra",
+            "service_tier": "default",
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 951,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 1051
+              },
+              "cost": 0.00013923,
+              "cost_details": {
+                "upstream_inference_completions_cost": 0.00013314,
+                "upstream_inference_cost": 0.00013923,
+                "upstream_inference_prompt_cost": 6.09e-06
+              },
+              "is_byok": false,
+              "prompt_tokens": 203,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 1154
+            }
+          },
+          "response_sha256": "sha256:b4a7dbe9d4ad2eaf7ed24f53f55afa014682e0c1b968cd35efa3c395d90012d0",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:22:54.207358+00:00",
+              "entry_id": 3,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "10075",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00013923"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "openai/gpt-oss-20b",
+                  "expected_provider_name": "DeepInfra",
+                  "requested_model": "openai/gpt-oss-20b",
+                  "requested_provider_route": "deepinfra/bf16",
+                  "response_model": "openai/gpt-oss-20b",
+                  "response_provider_name": "DeepInfra",
+                  "selected_endpoint_model": "openai/gpt-oss-20b",
+                  "selected_endpoint_provider_name": "DeepInfra",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 8977
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 3,
+                "field": "response"
+              },
+              "response_sha256": "sha256:b4a7dbe9d4ad2eaf7ed24f53f55afa014682e0c1b968cd35efa3c395d90012d0",
+              "wire_body_bytes": 10075,
+              "wire_body_sha256": "sha256:6eb99a376d144a7ce165812353086d1abe2c32d3399c1770c04fc743575b4f54"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "We have a user: \"Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\"\n\nSo the user wants me to qualify Acme Test. We need to call the provided function lookup_evidence twice: first with evidence_id 'profile', then later 'headcount'. We must only do one call per turn. And we must not infer missing facts. We need to structure calls accordingly.\n\nThis is a two-step: first call to 'profile', then later call to 'headcount'. After we get both results returned, we only output JSON with keys: company, qualified, evidence_ids.\n\nSo I must proceed step by step. According to policy, the first turn: I should call lookup_evidence with evidence_id: \"profile\". I must not output JSON yet, because we need more information. So I will produce a function call to lookup_evidence with evidence_id \"profile\". Then next turn we will get that result; then we may call the second function or we might end the turns... But the user wants \"Make one call per turn. After both results return only JSON with company, qualified, evidence_ids.\" So we need to produce an output after the second call.\n\nHence, my first turn: I should call lookup_evidence.\n\nThus I produce a function call. According to the format: a single JSON object with function name and arguments.\n\nThe function name: \"lookup_evidence\". The argument must be evidence_id: \"profile\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n}\n\nBut I should ensure the syntax: In this environment, we can respond with a function call. According to the example, we can do:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": {\n    \"evidence_id\": \"profile\"\n  }\n}\n\nBut the guidelines say \"the arguments must be a JSON string\". Wait: usage: in the prompt it's described: \"The arguments field should contain the arguments as a JSON string.\" But the format in the example does shows that the JSON object is within string? Let's look carefully: The 'function call' is basically an object with keys \"name\" and \"arguments\". In second, \"arguments\" is a string that contains a JSON representation of the arguments. But that might be a convention. We can just put \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\". But the examples—maybe different. Let's check the guidelines:\n\n\"You must NOT respond with anything else besides a function call or your final output JSON. ... Use the ... arguments ... must contain the arguments as a JSON string.\"\n\nThus \"arguments\" may be a string: e.g., \"\\\"{\\\\\\\"evidence_id\\\\\\\": \\\\\\\"profile\\\\\\\"}\\\"\"? That seems crazy. Let's read the guidelines exactly:\n\n**Detailed format:**\n\n```\n{\n  \"name\": \"function_name\",\n  \"arguments\": \"<arguments>\"\n}\n```\n\n> The arguments are compulsory, this should be valid JSON string with the arguments to the function.\n\nExamples show the 'arguments' value is a JSON string. E.g., in system messages, they sometimes do:\n\n\"name\": \"lookup_evidence\",\n\"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n\nYes that is correct. So we must produce a string in quotes that contains the JSON of arguments.\n\nThus for first turn, we produce:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"profile\\\"}\"\n}\n\nNote that we might not need spaces inside. It's fine.\n\nGiven the conversation, we respond that function call. Then we wait to receive result. Since this is a turn-based than many times. So final output is just the function call. Then after next turn they will give us 'profile' evidence result, and we will call second function with 'headcount' evidence_id. Then after receiving that, we produce final JSON object: { company: \"Acme Test\", qualified: true/false, evidence_ids: [...] }.\n\nWe must not add any additional commentary.\n\nThus this message: function call for the first evidence.\n\nWe will produce that JSON.\n\nWe need exactly one call per turn. So we're done.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "We have a user: \"Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\"\n\nSo the user wants me to qualify Acme Test. We need to call the provided function lookup_evidence twice: first with evidence_id 'profile', then later 'headcount'. We must only do one call per turn. And we must not infer missing facts. We need to structure calls accordingly.\n\nThis is a two-step: first call to 'profile', then later call to 'headcount'. After we get both results returned, we only output JSON with keys: company, qualified, evidence_ids.\n\nSo I must proceed step by step. According to policy, the first turn: I should call lookup_evidence with evidence_id: \"profile\". I must not output JSON yet, because we need more information. So I will produce a function call to lookup_evidence with evidence_id \"profile\". Then next turn we will get that result; then we may call the second function or we might end the turns... But the user wants \"Make one call per turn. After both results return only JSON with company, qualified, evidence_ids.\" So we need to produce an output after the second call.\n\nHence, my first turn: I should call lookup_evidence.\n\nThus I produce a function call. According to the format: a single JSON object with function name and arguments.\n\nThe function name: \"lookup_evidence\". The argument must be evidence_id: \"profile\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n}\n\nBut I should ensure the syntax: In this environment, we can respond with a function call. According to the example, we can do:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": {\n    \"evidence_id\": \"profile\"\n  }\n}\n\nBut the guidelines say \"the arguments must be a JSON string\". Wait: usage: in the prompt it's described: \"The arguments field should contain the arguments as a JSON string.\" But the format in the example does shows that the JSON object is within string? Let's look carefully: The 'function call' is basically an object with keys \"name\" and \"arguments\". In second, \"arguments\" is a string that contains a JSON representation of the arguments. But that might be a convention. We can just put \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\". But the examples—maybe different. Let's check the guidelines:\n\n\"You must NOT respond with anything else besides a function call or your final output JSON. ... Use the ... arguments ... must contain the arguments as a JSON string.\"\n\nThus \"arguments\" may be a string: e.g., \"\\\"{\\\\\\\"evidence_id\\\\\\\": \\\\\\\"profile\\\\\\\"}\\\"\"? That seems crazy. Let's read the guidelines exactly:\n\n**Detailed format:**\n\n```\n{\n  \"name\": \"function_name\",\n  \"arguments\": \"<arguments>\"\n}\n```\n\n> The arguments are compulsory, this should be valid JSON string with the arguments to the function.\n\nExamples show the 'arguments' value is a JSON string. E.g., in system messages, they sometimes do:\n\n\"name\": \"lookup_evidence\",\n\"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n\nYes that is correct. So we must produce a string in quotes that contains the JSON of arguments.\n\nThus for first turn, we produce:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"profile\\\"}\"\n}\n\nNote that we might not need spaces inside. It's fine.\n\nGiven the conversation, we respond that function call. Then we wait to receive result. Since this is a turn-based than many times. So final output is just the function call. Then after next turn they will give us 'profile' evidence result, and we will call second function with 'headcount' evidence_id. Then after receiving that, we produce final JSON object: { company: \"Acme Test\", qualified: true/false, evidence_ids: [...] }.\n\nWe must not add any additional commentary.\n\nThus this message: function call for the first evidence.\n\nWe will produce that JSON.\n\nWe need exactly one call per turn. So we're done.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\":\"profile\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "chatcmpl-tool-ad78fd2154fb458aa5119430a1255451",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\"}",
+                "role": "tool",
+                "tool_call_id": "chatcmpl-tool-ad78fd2154fb458aa5119430a1255451"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.14,
+                "prompt": 0.03,
+                "request": 0
+              },
+              "only": [
+                "deepinfra/bf16"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "We have been returned the result of calling lookup_evidence with evidence_id 'profile'. Now we should request the headcount evidence. After receiving that, we should produce a final output JSON.\n\nWe must not produce any additional content. We must make one call per turn. So the next step is to call lookup_evidence with evidence_id 'headcount'. Then we will get result, after which we produce final JSON.\n\nThus we call lookup_evidence with evidence_id \"headcount\".\n\nWe should use the same pattern: function call with name and arguments string. It must be exactly \"headcount\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"headcount\\\"}\"\n}\n\nWe'll produce that.\n\nThus answer: function call.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "We have been returned the result of calling lookup_evidence with evidence_id 'profile'. Now we should request the headcount evidence. After receiving that, we should produce a final output JSON.\n\nWe must not produce any additional content. We must make one call per turn. So the next step is to call lookup_evidence with evidence_id 'headcount'. Then we will get result, after which we produce final JSON.\n\nThus we call lookup_evidence with evidence_id \"headcount\".\n\nWe should use the same pattern: function call with name and arguments string. It must be exactly \"headcount\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"headcount\\\"}\"\n}\n\nWe'll produce that.\n\nThus answer: function call.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"evidence_id\":\"headcount\"}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "chatcmpl-tool-060953e751ef4d73abdba9821ee398ff",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792801374,
+            "id": "gen-1792801374-AfxrH5j3lWQdAWi2iOE5",
+            "model": "openai/gpt-oss-20b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "openai/gpt-oss-20b",
+                    "provider": "DeepInfra",
+                    "selected": true
+                  }
+                ],
+                "total": 11
+              },
+              "generation_time": 1740,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "openai/gpt-oss-20b",
+              "strategy": "direct",
+              "summary": "available=1, selected=DeepInfra"
+            },
+            "provider": "DeepInfra",
+            "service_tier": "default",
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 183,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 183
+              },
+              "cost": 6.138e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 2.562e-05,
+                "upstream_inference_cost": 6.138e-05,
+                "upstream_inference_prompt_cost": 3.576e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 1192,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 1375
+            }
+          },
+          "response_sha256": "sha256:ca274dd711e4cc98fc4cdccff5a46f151f6c37a247dc312711601bd6a1e3df86",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:22:56.380877+00:00",
+              "entry_id": 6,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2893",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00006138"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "openai/gpt-oss-20b",
+                  "expected_provider_name": "DeepInfra",
+                  "requested_model": "openai/gpt-oss-20b",
+                  "requested_provider_route": "deepinfra/bf16",
+                  "response_model": "openai/gpt-oss-20b",
+                  "response_provider_name": "DeepInfra",
+                  "selected_endpoint_model": "openai/gpt-oss-20b",
+                  "selected_endpoint_provider_name": "DeepInfra",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 1996
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 6,
+                "field": "response"
+              },
+              "response_sha256": "sha256:ca274dd711e4cc98fc4cdccff5a46f151f6c37a247dc312711601bd6a1e3df86",
+              "wire_body_bytes": 2893,
+              "wire_body_sha256": "sha256:5ac96c58d2c6285af6c4bd5ea20757be912d57066befed8a5fa0ae1bc6ab384c"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "We have a user: \"Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\"\n\nSo the user wants me to qualify Acme Test. We need to call the provided function lookup_evidence twice: first with evidence_id 'profile', then later 'headcount'. We must only do one call per turn. And we must not infer missing facts. We need to structure calls accordingly.\n\nThis is a two-step: first call to 'profile', then later call to 'headcount'. After we get both results returned, we only output JSON with keys: company, qualified, evidence_ids.\n\nSo I must proceed step by step. According to policy, the first turn: I should call lookup_evidence with evidence_id: \"profile\". I must not output JSON yet, because we need more information. So I will produce a function call to lookup_evidence with evidence_id \"profile\". Then next turn we will get that result; then we may call the second function or we might end the turns... But the user wants \"Make one call per turn. After both results return only JSON with company, qualified, evidence_ids.\" So we need to produce an output after the second call.\n\nHence, my first turn: I should call lookup_evidence.\n\nThus I produce a function call. According to the format: a single JSON object with function name and arguments.\n\nThe function name: \"lookup_evidence\". The argument must be evidence_id: \"profile\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n}\n\nBut I should ensure the syntax: In this environment, we can respond with a function call. According to the example, we can do:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": {\n    \"evidence_id\": \"profile\"\n  }\n}\n\nBut the guidelines say \"the arguments must be a JSON string\". Wait: usage: in the prompt it's described: \"The arguments field should contain the arguments as a JSON string.\" But the format in the example does shows that the JSON object is within string? Let's look carefully: The 'function call' is basically an object with keys \"name\" and \"arguments\". In second, \"arguments\" is a string that contains a JSON representation of the arguments. But that might be a convention. We can just put \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\". But the examples—maybe different. Let's check the guidelines:\n\n\"You must NOT respond with anything else besides a function call or your final output JSON. ... Use the ... arguments ... must contain the arguments as a JSON string.\"\n\nThus \"arguments\" may be a string: e.g., \"\\\"{\\\\\\\"evidence_id\\\\\\\": \\\\\\\"profile\\\\\\\"}\\\"\"? That seems crazy. Let's read the guidelines exactly:\n\n**Detailed format:**\n\n```\n{\n  \"name\": \"function_name\",\n  \"arguments\": \"<arguments>\"\n}\n```\n\n> The arguments are compulsory, this should be valid JSON string with the arguments to the function.\n\nExamples show the 'arguments' value is a JSON string. E.g., in system messages, they sometimes do:\n\n\"name\": \"lookup_evidence\",\n\"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n\nYes that is correct. So we must produce a string in quotes that contains the JSON of arguments.\n\nThus for first turn, we produce:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"profile\\\"}\"\n}\n\nNote that we might not need spaces inside. It's fine.\n\nGiven the conversation, we respond that function call. Then we wait to receive result. Since this is a turn-based than many times. So final output is just the function call. Then after next turn they will give us 'profile' evidence result, and we will call second function with 'headcount' evidence_id. Then after receiving that, we produce final JSON object: { company: \"Acme Test\", qualified: true/false, evidence_ids: [...] }.\n\nWe must not add any additional commentary.\n\nThus this message: function call for the first evidence.\n\nWe will produce that JSON.\n\nWe need exactly one call per turn. So we're done.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "We have a user: \"Synthetic compatibility test. Qualify Acme Test only if it is a US B2B software company with 50-200 employees. First call lookup_evidence with evidence_id exactly 'profile', then call lookup_evidence with evidence_id exactly 'headcount'. Make one call per turn. After both results return only JSON with company, qualified, evidence_ids. Use only the supplied tool evidence. Do not infer missing facts.\"\n\nSo the user wants me to qualify Acme Test. We need to call the provided function lookup_evidence twice: first with evidence_id 'profile', then later 'headcount'. We must only do one call per turn. And we must not infer missing facts. We need to structure calls accordingly.\n\nThis is a two-step: first call to 'profile', then later call to 'headcount'. After we get both results returned, we only output JSON with keys: company, qualified, evidence_ids.\n\nSo I must proceed step by step. According to policy, the first turn: I should call lookup_evidence with evidence_id: \"profile\". I must not output JSON yet, because we need more information. So I will produce a function call to lookup_evidence with evidence_id \"profile\". Then next turn we will get that result; then we may call the second function or we might end the turns... But the user wants \"Make one call per turn. After both results return only JSON with company, qualified, evidence_ids.\" So we need to produce an output after the second call.\n\nHence, my first turn: I should call lookup_evidence.\n\nThus I produce a function call. According to the format: a single JSON object with function name and arguments.\n\nThe function name: \"lookup_evidence\". The argument must be evidence_id: \"profile\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n}\n\nBut I should ensure the syntax: In this environment, we can respond with a function call. According to the example, we can do:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": {\n    \"evidence_id\": \"profile\"\n  }\n}\n\nBut the guidelines say \"the arguments must be a JSON string\". Wait: usage: in the prompt it's described: \"The arguments field should contain the arguments as a JSON string.\" But the format in the example does shows that the JSON object is within string? Let's look carefully: The 'function call' is basically an object with keys \"name\" and \"arguments\". In second, \"arguments\" is a string that contains a JSON representation of the arguments. But that might be a convention. We can just put \"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\". But the examples—maybe different. Let's check the guidelines:\n\n\"You must NOT respond with anything else besides a function call or your final output JSON. ... Use the ... arguments ... must contain the arguments as a JSON string.\"\n\nThus \"arguments\" may be a string: e.g., \"\\\"{\\\\\\\"evidence_id\\\\\\\": \\\\\\\"profile\\\\\\\"}\\\"\"? That seems crazy. Let's read the guidelines exactly:\n\n**Detailed format:**\n\n```\n{\n  \"name\": \"function_name\",\n  \"arguments\": \"<arguments>\"\n}\n```\n\n> The arguments are compulsory, this should be valid JSON string with the arguments to the function.\n\nExamples show the 'arguments' value is a JSON string. E.g., in system messages, they sometimes do:\n\n\"name\": \"lookup_evidence\",\n\"arguments\": \"{\\\"evidence_id\\\": \\\"profile\\\"}\"\n\nYes that is correct. So we must produce a string in quotes that contains the JSON of arguments.\n\nThus for first turn, we produce:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"profile\\\"}\"\n}\n\nNote that we might not need spaces inside. It's fine.\n\nGiven the conversation, we respond that function call. Then we wait to receive result. Since this is a turn-based than many times. So final output is just the function call. Then after next turn they will give us 'profile' evidence result, and we will call second function with 'headcount' evidence_id. Then after receiving that, we produce final JSON object: { company: \"Acme Test\", qualified: true/false, evidence_ids: [...] }.\n\nWe must not add any additional commentary.\n\nThus this message: function call for the first evidence.\n\nWe will produce that JSON.\n\nWe need exactly one call per turn. So we're done.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\":\"profile\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "chatcmpl-tool-ad78fd2154fb458aa5119430a1255451",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\"}",
+                "role": "tool",
+                "tool_call_id": "chatcmpl-tool-ad78fd2154fb458aa5119430a1255451"
+              },
+              {
+                "content": null,
+                "reasoning": "We have been returned the result of calling lookup_evidence with evidence_id 'profile'. Now we should request the headcount evidence. After receiving that, we should produce a final output JSON.\n\nWe must not produce any additional content. We must make one call per turn. So the next step is to call lookup_evidence with evidence_id 'headcount'. Then we will get result, after which we produce final JSON.\n\nThus we call lookup_evidence with evidence_id \"headcount\".\n\nWe should use the same pattern: function call with name and arguments string. It must be exactly \"headcount\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"headcount\\\"}\"\n}\n\nWe'll produce that.\n\nThus answer: function call.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "We have been returned the result of calling lookup_evidence with evidence_id 'profile'. Now we should request the headcount evidence. After receiving that, we should produce a final output JSON.\n\nWe must not produce any additional content. We must make one call per turn. So the next step is to call lookup_evidence with evidence_id 'headcount'. Then we will get result, after which we produce final JSON.\n\nThus we call lookup_evidence with evidence_id \"headcount\".\n\nWe should use the same pattern: function call with name and arguments string. It must be exactly \"headcount\". So:\n\n{\n  \"name\": \"lookup_evidence\",\n  \"arguments\": \"{\\\"evidence_id\\\":\\\"headcount\\\"}\"\n}\n\nWe'll produce that.\n\nThus answer: function call.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\":\"headcount\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "chatcmpl-tool-060953e751ef4d73abdba9821ee398ff",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"headcount\",\"employees\":80}",
+                "role": "tool",
+                "tool_call_id": "chatcmpl-tool-060953e751ef4d73abdba9821ee398ff"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.14,
+                "prompt": 0.03,
+                "request": 0
+              },
+              "only": [
+                "deepinfra/bf16"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "response_format": {
+              "json_schema": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true
+              },
+              "type": "json_schema"
+            },
+            "stream": false
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": "{\n  \"company\": \"Acme Test\",\n  \"evidence_ids\": [\"profile\", \"headcount\"],\n  \"qualified\": true\n}",
+                  "reasoning": "We now have both evidence: profile says \"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\". Headcount says employees: 80. We need to produce final JSON with keys: company, qualified, evidence_ids.\n\nHow to decide qualified? Condition: \"qualify Acme Test only if it is a US B2B software company with 50-200 employees.\" According to evidence: location: US, business: B2B software, employees: 80. All conditions satisfied: US, B2B software, headcount 80 (between 50 and 200). Thus qualified: true.\n\nThus final JSON: { \"company\":\"Acme Test\", \"qualified\": true, \"evidence_ids\": [\"profile\",\"headcount\"] }\n\nWe must output only JSON with company, qualified, evidence_ids. Without any extra text. That is final.\n\nWe'll produce exactly that.\n\nMake sure to use true (no quotes). So final JSON.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "We now have both evidence: profile says \"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\". Headcount says employees: 80. We need to produce final JSON with keys: company, qualified, evidence_ids.\n\nHow to decide qualified? Condition: \"qualify Acme Test only if it is a US B2B software company with 50-200 employees.\" According to evidence: location: US, business: B2B software, employees: 80. All conditions satisfied: US, B2B software, headcount 80 (between 50 and 200). Thus qualified: true.\n\nThus final JSON: { \"company\":\"Acme Test\", \"qualified\": true, \"evidence_ids\": [\"profile\",\"headcount\"] }\n\nWe must output only JSON with company, qualified, evidence_ids. Without any extra text. That is final.\n\nWe'll produce exactly that.\n\nMake sure to use true (no quotes). So final JSON.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant"
+                },
+                "native_finish_reason": "stop"
+              }
+            ],
+            "created": 1792801376,
+            "id": "gen-1792801376-0FLQIOLKv2X2ak6S7UI2",
+            "model": "openai/gpt-oss-20b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "openai/gpt-oss-20b",
+                    "provider": "DeepInfra",
+                    "selected": true
+                  }
+                ],
+                "total": 11
+              },
+              "generation_time": 2312,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "openai/gpt-oss-20b",
+              "strategy": "direct",
+              "summary": "available=1, selected=DeepInfra"
+            },
+            "provider": "DeepInfra",
+            "service_tier": "default",
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 238,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 201
+              },
+              "cost": 7.343e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 3.332e-05,
+                "upstream_inference_cost": 7.343e-05,
+                "upstream_inference_prompt_cost": 4.011e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 1337,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 1575
+            }
+          },
+          "response_sha256": "sha256:6e8acac6753639db44057cb2b1de82a2fc7c137703f4c9e5d5f02786b0f70c15",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:22:59.014109+00:00",
+              "entry_id": 9,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2967",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00007343"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "openai/gpt-oss-20b",
+                  "expected_provider_name": "DeepInfra",
+                  "requested_model": "openai/gpt-oss-20b",
+                  "requested_provider_route": "deepinfra/bf16",
+                  "response_model": "openai/gpt-oss-20b",
+                  "response_provider_name": "DeepInfra",
+                  "selected_endpoint_model": "openai/gpt-oss-20b",
+                  "selected_endpoint_provider_name": "DeepInfra",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 2489
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 9,
+                "field": "response"
+              },
+              "response_sha256": "sha256:6e8acac6753639db44057cb2b1de82a2fc7c137703f4c9e5d5f02786b0f70c15",
+              "wire_body_bytes": 2967,
+              "wire_body_sha256": "sha256:65f8406aaf4314e793f06e30e72607b61e0e7a2f3d9251da8f3b8c828435def8"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": "complex",
+      "artifact_name": "worker-final-openai--gpt-oss-20b",
+      "original_report_sha256": "449ac84502a745f9ab3d4a121791ca5a351696fd938c191fc791aed583b86ac8",
+      "export_sha256": "314560b2e0acc20ee4321d1e6b6a7732edc5cb918d18f8a10036f52f20a90a10",
+      "worker_receipts_proved": true,
+      "thinking_chars": [
+        5307,
+        463,
+        1035
+      ],
+      "validated_final_json": {
+        "company": "Acme Test",
+        "evidence_ids": [
+          "profile",
+          "headcount"
+        ],
+        "qualified": false
+      },
+      "calls": [
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.14,
+                "prompt": 0.03,
+                "request": 0
+              },
+              "only": [
+                "deepinfra/bf16"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "The user asks: \"Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.\"\n\nWe need to adhere to the instructions. The user specifically instructs to do a two-step process: first call lookup_evidence for 'profile', then call for 'headcount', one call per turn. We cannot do both calls in a single message. The correct process: First call lookup_evidence('profile'). That is per the guidelines: one call per turn. Then after receiving the result, we parse it and then decide, but we also need to call lookup_evidence('headcount') afterwards. But we cannot conclusively decide until we have both. We presumably need to produce a final JSON output only after having both calls. The instruction says: After both tools return only strict JSON with company, qualified, evidence_ids. \n\nGiven the structure we should:\n\n- Turn 1: Call lookup_evidence('profile')\n- Turn 2: Receive the result (profile)\n- Turn 2: Then call lookup_evidence('headcount') (newer official)\n- Turn 3: Receive the result (headcount)\n- Produce JSON with company info, whether qualified, evidence_ids.\n\nBut the user wants us to \"After both tools return only strict JSON with company, qualified, evidence_ids.\" It might mean that after retrieving both, we output a JSON: {company: ..., qualified: ..., evidence_ids: [...]}.\n\nThe user also clarified: \"Use both sources and do not infer missing facts.\"\n\nThus we must get evidence:\n\n- We need to call lookup_evidence for 'profile'. The tool should return some synthetic evidence (profile). We'll get JSON presumably. Then later we call for 'headcount'.\n\nWe must comply exactly, not skipping steps. We must output only JSON after obtaining both results. But we can't provide final output until we have both evidence.\n\nThe constraint: \"After both tools return only strict JSON with company, qualified, evidence_ids.\" Means final response after both calls must be a strict JSON object: company, qualified, evidence_ids.\n\nWe are not making predictions or assumptions. We rely on evidence.\n\nGiven that earlier we are in conversation: the user hasn't provided evidence. We are the first actor. According to instruction: \"First call lookup_evidence for 'profile', then for 'headcount', one call per turn.\" So we must call the function, get profile, then call headcount, then output final JSON. We'll do the calls.\n\nWe need to use function call format: As a separate assistant message with \"function call\" content. Then we will get the tool's response. Then we do the second function call. Then produce final JSON. That means we produce three messages: first a function call 'lookup_evidence' with argument 'profile', then after receiving 'profile' we then call 'lookup_evidence' with argument 'headcount', then produce final JSON.\n\nBut we need to mimic conversation steps properly: after first function call, we must wait for the tool's result. The tool's result will provide synthetic evidence. The user didn't supply any data. Our code will use tool output. We'll proceed accordingly.\n\nThus:\n\nAssistant 1: call lookup_evidence with 'profile'.\n\nAssistant 2: function result with profile data. We parse it.\n\nAssistant 3: call lookup_evidence with 'headcount'.\n\nAssistant 4: function result with headcount data.\n\nAssistant 5: produce final JSON using both sources.\n\nWe need to follow AI safety guidelines. No disallowed content. The content is benign. So safe.\n\nWe must use the function correctly. Must pass the evidence_id string correctly.\n\nWe must not ask the tool for anything else. So we do the call. The tool \"lookup_evidence\" returns some data. We must produce final JSON exactly as:\n\n{\n  \"company\": \"Acme Test\",\n  \"qualified\": true/false,\n  \"evidence_ids\": [\"profile\", \"headcount\"]\n}\n\nBut first we must check if the company qualifies: It must be US B2B software company with 50-200 current employees. We need evidence from both profile and headcount. We are told the older profile and newer official headcount disagree. Use newer official headcount for employee criterion. That means if headcount says we have 50-200 employees, we use that; if not, we don't qualify. Also need to check other criteria: US location, B2B software company. The profile might give details about location and business model. Perhaps the profile indicates it's a US company, B2B software. The headcount might say number of employees. The \"older profile and the newer official headcount disagree\" likely means that the profile says maybe different employee number. But we use the headcount for employee count. Indeed we should not infer or use the older profile if it gives employee number; use headcount. So we need to read the headcount.\n\nThus we need to wait for function responses to decide.\n\nWe cannot produce final answer until we get both. So first: call.\n\nWe'll produce the function call: { \"name\": \"lookup_evidence\", \"arguments\": {\"evidence_id\": \"profile\"} }\n\nThe assistant may not produce other text. Let's produce that.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "The user asks: \"Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.\"\n\nWe need to adhere to the instructions. The user specifically instructs to do a two-step process: first call lookup_evidence for 'profile', then call for 'headcount', one call per turn. We cannot do both calls in a single message. The correct process: First call lookup_evidence('profile'). That is per the guidelines: one call per turn. Then after receiving the result, we parse it and then decide, but we also need to call lookup_evidence('headcount') afterwards. But we cannot conclusively decide until we have both. We presumably need to produce a final JSON output only after having both calls. The instruction says: After both tools return only strict JSON with company, qualified, evidence_ids. \n\nGiven the structure we should:\n\n- Turn 1: Call lookup_evidence('profile')\n- Turn 2: Receive the result (profile)\n- Turn 2: Then call lookup_evidence('headcount') (newer official)\n- Turn 3: Receive the result (headcount)\n- Produce JSON with company info, whether qualified, evidence_ids.\n\nBut the user wants us to \"After both tools return only strict JSON with company, qualified, evidence_ids.\" It might mean that after retrieving both, we output a JSON: {company: ..., qualified: ..., evidence_ids: [...]}.\n\nThe user also clarified: \"Use both sources and do not infer missing facts.\"\n\nThus we must get evidence:\n\n- We need to call lookup_evidence for 'profile'. The tool should return some synthetic evidence (profile). We'll get JSON presumably. Then later we call for 'headcount'.\n\nWe must comply exactly, not skipping steps. We must output only JSON after obtaining both results. But we can't provide final output until we have both evidence.\n\nThe constraint: \"After both tools return only strict JSON with company, qualified, evidence_ids.\" Means final response after both calls must be a strict JSON object: company, qualified, evidence_ids.\n\nWe are not making predictions or assumptions. We rely on evidence.\n\nGiven that earlier we are in conversation: the user hasn't provided evidence. We are the first actor. According to instruction: \"First call lookup_evidence for 'profile', then for 'headcount', one call per turn.\" So we must call the function, get profile, then call headcount, then output final JSON. We'll do the calls.\n\nWe need to use function call format: As a separate assistant message with \"function call\" content. Then we will get the tool's response. Then we do the second function call. Then produce final JSON. That means we produce three messages: first a function call 'lookup_evidence' with argument 'profile', then after receiving 'profile' we then call 'lookup_evidence' with argument 'headcount', then produce final JSON.\n\nBut we need to mimic conversation steps properly: after first function call, we must wait for the tool's result. The tool's result will provide synthetic evidence. The user didn't supply any data. Our code will use tool output. We'll proceed accordingly.\n\nThus:\n\nAssistant 1: call lookup_evidence with 'profile'.\n\nAssistant 2: function result with profile data. We parse it.\n\nAssistant 3: call lookup_evidence with 'headcount'.\n\nAssistant 4: function result with headcount data.\n\nAssistant 5: produce final JSON using both sources.\n\nWe need to follow AI safety guidelines. No disallowed content. The content is benign. So safe.\n\nWe must use the function correctly. Must pass the evidence_id string correctly.\n\nWe must not ask the tool for anything else. So we do the call. The tool \"lookup_evidence\" returns some data. We must produce final JSON exactly as:\n\n{\n  \"company\": \"Acme Test\",\n  \"qualified\": true/false,\n  \"evidence_ids\": [\"profile\", \"headcount\"]\n}\n\nBut first we must check if the company qualifies: It must be US B2B software company with 50-200 current employees. We need evidence from both profile and headcount. We are told the older profile and newer official headcount disagree. Use newer official headcount for employee criterion. That means if headcount says we have 50-200 employees, we use that; if not, we don't qualify. Also need to check other criteria: US location, B2B software company. The profile might give details about location and business model. Perhaps the profile indicates it's a US company, B2B software. The headcount might say number of employees. The \"older profile and the newer official headcount disagree\" likely means that the profile says maybe different employee number. But we use the headcount for employee count. Indeed we should not infer or use the older profile if it gives employee number; use headcount. So we need to read the headcount.\n\nThus we need to wait for function responses to decide.\n\nWe cannot produce final answer until we get both. So first: call.\n\nWe'll produce the function call: { \"name\": \"lookup_evidence\", \"arguments\": {\"evidence_id\": \"profile\"} }\n\nThe assistant may not produce other text. Let's produce that.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"evidence_id\":\"profile\"}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "chatcmpl-tool-a8e2fb0f9fc0429ca7507c3fc98f2ebb",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792802434,
+            "id": "gen-1792802434-RN2ZLBLOyyUEwQceLpUq",
+            "model": "openai/gpt-oss-20b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "openai/gpt-oss-20b",
+                    "provider": "DeepInfra",
+                    "selected": true
+                  }
+                ],
+                "total": 11
+              },
+              "generation_time": 10792,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "openai/gpt-oss-20b",
+              "strategy": "direct",
+              "summary": "available=1, selected=DeepInfra"
+            },
+            "provider": "DeepInfra",
+            "service_tier": "default",
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 1168,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 1343
+              },
+              "cost": 0.00016982,
+              "cost_details": {
+                "upstream_inference_completions_cost": 0.00016352,
+                "upstream_inference_cost": 0.00016982,
+                "upstream_inference_prompt_cost": 6.3e-06
+              },
+              "is_byok": false,
+              "prompt_tokens": 210,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 1378
+            }
+          },
+          "response_sha256": "sha256:357691c7f70fb50d3b0edf77dff7cb13a822009429e4b075b4ab60bda94ef07f",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:40:45.533688+00:00",
+              "entry_id": 3,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "12247",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00016982"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "openai/gpt-oss-20b",
+                  "expected_provider_name": "DeepInfra",
+                  "requested_model": "openai/gpt-oss-20b",
+                  "requested_provider_route": "deepinfra/bf16",
+                  "response_model": "openai/gpt-oss-20b",
+                  "response_provider_name": "DeepInfra",
+                  "selected_endpoint_model": "openai/gpt-oss-20b",
+                  "selected_endpoint_provider_name": "DeepInfra",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 10979
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 3,
+                "field": "response"
+              },
+              "response_sha256": "sha256:357691c7f70fb50d3b0edf77dff7cb13a822009429e4b075b4ab60bda94ef07f",
+              "wire_body_bytes": 12247,
+              "wire_body_sha256": "sha256:7679c9527b505b8396b47fe38a58e10c3bd85d64a1b7b9eeb07365c1f2d2b84f"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user asks: \"Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.\"\n\nWe need to adhere to the instructions. The user specifically instructs to do a two-step process: first call lookup_evidence for 'profile', then call for 'headcount', one call per turn. We cannot do both calls in a single message. The correct process: First call lookup_evidence('profile'). That is per the guidelines: one call per turn. Then after receiving the result, we parse it and then decide, but we also need to call lookup_evidence('headcount') afterwards. But we cannot conclusively decide until we have both. We presumably need to produce a final JSON output only after having both calls. The instruction says: After both tools return only strict JSON with company, qualified, evidence_ids. \n\nGiven the structure we should:\n\n- Turn 1: Call lookup_evidence('profile')\n- Turn 2: Receive the result (profile)\n- Turn 2: Then call lookup_evidence('headcount') (newer official)\n- Turn 3: Receive the result (headcount)\n- Produce JSON with company info, whether qualified, evidence_ids.\n\nBut the user wants us to \"After both tools return only strict JSON with company, qualified, evidence_ids.\" It might mean that after retrieving both, we output a JSON: {company: ..., qualified: ..., evidence_ids: [...]}.\n\nThe user also clarified: \"Use both sources and do not infer missing facts.\"\n\nThus we must get evidence:\n\n- We need to call lookup_evidence for 'profile'. The tool should return some synthetic evidence (profile). We'll get JSON presumably. Then later we call for 'headcount'.\n\nWe must comply exactly, not skipping steps. We must output only JSON after obtaining both results. But we can't provide final output until we have both evidence.\n\nThe constraint: \"After both tools return only strict JSON with company, qualified, evidence_ids.\" Means final response after both calls must be a strict JSON object: company, qualified, evidence_ids.\n\nWe are not making predictions or assumptions. We rely on evidence.\n\nGiven that earlier we are in conversation: the user hasn't provided evidence. We are the first actor. According to instruction: \"First call lookup_evidence for 'profile', then for 'headcount', one call per turn.\" So we must call the function, get profile, then call headcount, then output final JSON. We'll do the calls.\n\nWe need to use function call format: As a separate assistant message with \"function call\" content. Then we will get the tool's response. Then we do the second function call. Then produce final JSON. That means we produce three messages: first a function call 'lookup_evidence' with argument 'profile', then after receiving 'profile' we then call 'lookup_evidence' with argument 'headcount', then produce final JSON.\n\nBut we need to mimic conversation steps properly: after first function call, we must wait for the tool's result. The tool's result will provide synthetic evidence. The user didn't supply any data. Our code will use tool output. We'll proceed accordingly.\n\nThus:\n\nAssistant 1: call lookup_evidence with 'profile'.\n\nAssistant 2: function result with profile data. We parse it.\n\nAssistant 3: call lookup_evidence with 'headcount'.\n\nAssistant 4: function result with headcount data.\n\nAssistant 5: produce final JSON using both sources.\n\nWe need to follow AI safety guidelines. No disallowed content. The content is benign. So safe.\n\nWe must use the function correctly. Must pass the evidence_id string correctly.\n\nWe must not ask the tool for anything else. So we do the call. The tool \"lookup_evidence\" returns some data. We must produce final JSON exactly as:\n\n{\n  \"company\": \"Acme Test\",\n  \"qualified\": true/false,\n  \"evidence_ids\": [\"profile\", \"headcount\"]\n}\n\nBut first we must check if the company qualifies: It must be US B2B software company with 50-200 current employees. We need evidence from both profile and headcount. We are told the older profile and newer official headcount disagree. Use newer official headcount for employee criterion. That means if headcount says we have 50-200 employees, we use that; if not, we don't qualify. Also need to check other criteria: US location, B2B software company. The profile might give details about location and business model. Perhaps the profile indicates it's a US company, B2B software. The headcount might say number of employees. The \"older profile and the newer official headcount disagree\" likely means that the profile says maybe different employee number. But we use the headcount for employee count. Indeed we should not infer or use the older profile if it gives employee number; use headcount. So we need to read the headcount.\n\nThus we need to wait for function responses to decide.\n\nWe cannot produce final answer until we get both. So first: call.\n\nWe'll produce the function call: { \"name\": \"lookup_evidence\", \"arguments\": {\"evidence_id\": \"profile\"} }\n\nThe assistant may not produce other text. Let's produce that.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user asks: \"Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.\"\n\nWe need to adhere to the instructions. The user specifically instructs to do a two-step process: first call lookup_evidence for 'profile', then call for 'headcount', one call per turn. We cannot do both calls in a single message. The correct process: First call lookup_evidence('profile'). That is per the guidelines: one call per turn. Then after receiving the result, we parse it and then decide, but we also need to call lookup_evidence('headcount') afterwards. But we cannot conclusively decide until we have both. We presumably need to produce a final JSON output only after having both calls. The instruction says: After both tools return only strict JSON with company, qualified, evidence_ids. \n\nGiven the structure we should:\n\n- Turn 1: Call lookup_evidence('profile')\n- Turn 2: Receive the result (profile)\n- Turn 2: Then call lookup_evidence('headcount') (newer official)\n- Turn 3: Receive the result (headcount)\n- Produce JSON with company info, whether qualified, evidence_ids.\n\nBut the user wants us to \"After both tools return only strict JSON with company, qualified, evidence_ids.\" It might mean that after retrieving both, we output a JSON: {company: ..., qualified: ..., evidence_ids: [...]}.\n\nThe user also clarified: \"Use both sources and do not infer missing facts.\"\n\nThus we must get evidence:\n\n- We need to call lookup_evidence for 'profile'. The tool should return some synthetic evidence (profile). We'll get JSON presumably. Then later we call for 'headcount'.\n\nWe must comply exactly, not skipping steps. We must output only JSON after obtaining both results. But we can't provide final output until we have both evidence.\n\nThe constraint: \"After both tools return only strict JSON with company, qualified, evidence_ids.\" Means final response after both calls must be a strict JSON object: company, qualified, evidence_ids.\n\nWe are not making predictions or assumptions. We rely on evidence.\n\nGiven that earlier we are in conversation: the user hasn't provided evidence. We are the first actor. According to instruction: \"First call lookup_evidence for 'profile', then for 'headcount', one call per turn.\" So we must call the function, get profile, then call headcount, then output final JSON. We'll do the calls.\n\nWe need to use function call format: As a separate assistant message with \"function call\" content. Then we will get the tool's response. Then we do the second function call. Then produce final JSON. That means we produce three messages: first a function call 'lookup_evidence' with argument 'profile', then after receiving 'profile' we then call 'lookup_evidence' with argument 'headcount', then produce final JSON.\n\nBut we need to mimic conversation steps properly: after first function call, we must wait for the tool's result. The tool's result will provide synthetic evidence. The user didn't supply any data. Our code will use tool output. We'll proceed accordingly.\n\nThus:\n\nAssistant 1: call lookup_evidence with 'profile'.\n\nAssistant 2: function result with profile data. We parse it.\n\nAssistant 3: call lookup_evidence with 'headcount'.\n\nAssistant 4: function result with headcount data.\n\nAssistant 5: produce final JSON using both sources.\n\nWe need to follow AI safety guidelines. No disallowed content. The content is benign. So safe.\n\nWe must use the function correctly. Must pass the evidence_id string correctly.\n\nWe must not ask the tool for anything else. So we do the call. The tool \"lookup_evidence\" returns some data. We must produce final JSON exactly as:\n\n{\n  \"company\": \"Acme Test\",\n  \"qualified\": true/false,\n  \"evidence_ids\": [\"profile\", \"headcount\"]\n}\n\nBut first we must check if the company qualifies: It must be US B2B software company with 50-200 current employees. We need evidence from both profile and headcount. We are told the older profile and newer official headcount disagree. Use newer official headcount for employee criterion. That means if headcount says we have 50-200 employees, we use that; if not, we don't qualify. Also need to check other criteria: US location, B2B software company. The profile might give details about location and business model. Perhaps the profile indicates it's a US company, B2B software. The headcount might say number of employees. The \"older profile and the newer official headcount disagree\" likely means that the profile says maybe different employee number. But we use the headcount for employee count. Indeed we should not infer or use the older profile if it gives employee number; use headcount. So we need to read the headcount.\n\nThus we need to wait for function responses to decide.\n\nWe cannot produce final answer until we get both. So first: call.\n\nWe'll produce the function call: { \"name\": \"lookup_evidence\", \"arguments\": {\"evidence_id\": \"profile\"} }\n\nThe assistant may not produce other text. Let's produce that.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\":\"profile\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "chatcmpl-tool-a8e2fb0f9fc0429ca7507c3fc98f2ebb",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "role": "tool",
+                "tool_call_id": "chatcmpl-tool-a8e2fb0f9fc0429ca7507c3fc98f2ebb"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.14,
+                "prompt": 0.03,
+                "request": 0
+              },
+              "only": [
+                "deepinfra/bf16"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "stream": false,
+            "tool_choice": {
+              "function": {
+                "name": "lookup_evidence"
+              },
+              "type": "function"
+            },
+            "tools": [
+              {
+                "function": {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": null,
+                  "reasoning": "Now we got the profile: indicates company: Acme Test, country: US, business: B2B software, employees: 80, observed_on: 2024-01-01. The employees count is 80. But the headcount is newer official. It might give different number. But the company is US B2B software per profile. So condition is satisfied for UE: US, B2B software. For employee count, we need between 50-200. The profile says 80 but we might disregard if headcount says different.\n\nNow call headcount.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Now we got the profile: indicates company: Acme Test, country: US, business: B2B software, employees: 80, observed_on: 2024-01-01. The employees count is 80. But the headcount is newer official. It might give different number. But the company is US B2B software per profile. So condition is satisfied for UE: US, B2B software. For employee count, we need between 50-200. The profile says 80 but we might disregard if headcount says different.\n\nNow call headcount.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant",
+                  "tool_calls": [
+                    {
+                      "function": {
+                        "arguments": "{\"evidence_id\":\"headcount\"}",
+                        "name": "lookup_evidence"
+                      },
+                      "id": "chatcmpl-tool-c3073af1a27d4d5fbe9590aafac0fd5b",
+                      "index": 0,
+                      "type": "function"
+                    }
+                  ]
+                },
+                "native_finish_reason": "tool_calls"
+              }
+            ],
+            "created": 1792802445,
+            "id": "gen-1792802445-UK4WvkoRso3F3t3ieYDe",
+            "model": "openai/gpt-oss-20b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "openai/gpt-oss-20b",
+                    "provider": "DeepInfra",
+                    "selected": true
+                  }
+                ],
+                "total": 11
+              },
+              "generation_time": 1667,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "openai/gpt-oss-20b",
+              "strategy": "direct",
+              "summary": "available=1, selected=DeepInfra"
+            },
+            "provider": "DeepInfra",
+            "service_tier": "default",
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 146,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 117
+              },
+              "cost": 6.337e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 2.044e-05,
+                "upstream_inference_cost": 6.337e-05,
+                "upstream_inference_prompt_cost": 4.293e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 1431,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 1577
+            }
+          },
+          "response_sha256": "sha256:89332d7f586c0963bddfe90ea38bdc150167d66860121941411b575fc0f25642",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:40:47.452865+00:00",
+              "entry_id": 6,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "2327",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00006337"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "openai/gpt-oss-20b",
+                  "expected_provider_name": "DeepInfra",
+                  "requested_model": "openai/gpt-oss-20b",
+                  "requested_provider_route": "deepinfra/bf16",
+                  "response_model": "openai/gpt-oss-20b",
+                  "response_provider_name": "DeepInfra",
+                  "selected_endpoint_model": "openai/gpt-oss-20b",
+                  "selected_endpoint_provider_name": "DeepInfra",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 1849
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 6,
+                "field": "response"
+              },
+              "response_sha256": "sha256:89332d7f586c0963bddfe90ea38bdc150167d66860121941411b575fc0f25642",
+              "wire_body_bytes": 2327,
+              "wire_body_sha256": "sha256:393c331b7e3c5acf02aac858b96759a3bfea4cc6ad49c4d436eddaabe8bc3a8e"
+            }
+          ]
+        },
+        {
+          "request": {
+            "max_tokens": 8192,
+            "messages": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": null,
+                "reasoning": "The user asks: \"Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.\"\n\nWe need to adhere to the instructions. The user specifically instructs to do a two-step process: first call lookup_evidence for 'profile', then call for 'headcount', one call per turn. We cannot do both calls in a single message. The correct process: First call lookup_evidence('profile'). That is per the guidelines: one call per turn. Then after receiving the result, we parse it and then decide, but we also need to call lookup_evidence('headcount') afterwards. But we cannot conclusively decide until we have both. We presumably need to produce a final JSON output only after having both calls. The instruction says: After both tools return only strict JSON with company, qualified, evidence_ids. \n\nGiven the structure we should:\n\n- Turn 1: Call lookup_evidence('profile')\n- Turn 2: Receive the result (profile)\n- Turn 2: Then call lookup_evidence('headcount') (newer official)\n- Turn 3: Receive the result (headcount)\n- Produce JSON with company info, whether qualified, evidence_ids.\n\nBut the user wants us to \"After both tools return only strict JSON with company, qualified, evidence_ids.\" It might mean that after retrieving both, we output a JSON: {company: ..., qualified: ..., evidence_ids: [...]}.\n\nThe user also clarified: \"Use both sources and do not infer missing facts.\"\n\nThus we must get evidence:\n\n- We need to call lookup_evidence for 'profile'. The tool should return some synthetic evidence (profile). We'll get JSON presumably. Then later we call for 'headcount'.\n\nWe must comply exactly, not skipping steps. We must output only JSON after obtaining both results. But we can't provide final output until we have both evidence.\n\nThe constraint: \"After both tools return only strict JSON with company, qualified, evidence_ids.\" Means final response after both calls must be a strict JSON object: company, qualified, evidence_ids.\n\nWe are not making predictions or assumptions. We rely on evidence.\n\nGiven that earlier we are in conversation: the user hasn't provided evidence. We are the first actor. According to instruction: \"First call lookup_evidence for 'profile', then for 'headcount', one call per turn.\" So we must call the function, get profile, then call headcount, then output final JSON. We'll do the calls.\n\nWe need to use function call format: As a separate assistant message with \"function call\" content. Then we will get the tool's response. Then we do the second function call. Then produce final JSON. That means we produce three messages: first a function call 'lookup_evidence' with argument 'profile', then after receiving 'profile' we then call 'lookup_evidence' with argument 'headcount', then produce final JSON.\n\nBut we need to mimic conversation steps properly: after first function call, we must wait for the tool's result. The tool's result will provide synthetic evidence. The user didn't supply any data. Our code will use tool output. We'll proceed accordingly.\n\nThus:\n\nAssistant 1: call lookup_evidence with 'profile'.\n\nAssistant 2: function result with profile data. We parse it.\n\nAssistant 3: call lookup_evidence with 'headcount'.\n\nAssistant 4: function result with headcount data.\n\nAssistant 5: produce final JSON using both sources.\n\nWe need to follow AI safety guidelines. No disallowed content. The content is benign. So safe.\n\nWe must use the function correctly. Must pass the evidence_id string correctly.\n\nWe must not ask the tool for anything else. So we do the call. The tool \"lookup_evidence\" returns some data. We must produce final JSON exactly as:\n\n{\n  \"company\": \"Acme Test\",\n  \"qualified\": true/false,\n  \"evidence_ids\": [\"profile\", \"headcount\"]\n}\n\nBut first we must check if the company qualifies: It must be US B2B software company with 50-200 current employees. We need evidence from both profile and headcount. We are told the older profile and newer official headcount disagree. Use newer official headcount for employee criterion. That means if headcount says we have 50-200 employees, we use that; if not, we don't qualify. Also need to check other criteria: US location, B2B software company. The profile might give details about location and business model. Perhaps the profile indicates it's a US company, B2B software. The headcount might say number of employees. The \"older profile and the newer official headcount disagree\" likely means that the profile says maybe different employee number. But we use the headcount for employee count. Indeed we should not infer or use the older profile if it gives employee number; use headcount. So we need to read the headcount.\n\nThus we need to wait for function responses to decide.\n\nWe cannot produce final answer until we get both. So first: call.\n\nWe'll produce the function call: { \"name\": \"lookup_evidence\", \"arguments\": {\"evidence_id\": \"profile\"} }\n\nThe assistant may not produce other text. Let's produce that.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "The user asks: \"Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.\"\n\nWe need to adhere to the instructions. The user specifically instructs to do a two-step process: first call lookup_evidence for 'profile', then call for 'headcount', one call per turn. We cannot do both calls in a single message. The correct process: First call lookup_evidence('profile'). That is per the guidelines: one call per turn. Then after receiving the result, we parse it and then decide, but we also need to call lookup_evidence('headcount') afterwards. But we cannot conclusively decide until we have both. We presumably need to produce a final JSON output only after having both calls. The instruction says: After both tools return only strict JSON with company, qualified, evidence_ids. \n\nGiven the structure we should:\n\n- Turn 1: Call lookup_evidence('profile')\n- Turn 2: Receive the result (profile)\n- Turn 2: Then call lookup_evidence('headcount') (newer official)\n- Turn 3: Receive the result (headcount)\n- Produce JSON with company info, whether qualified, evidence_ids.\n\nBut the user wants us to \"After both tools return only strict JSON with company, qualified, evidence_ids.\" It might mean that after retrieving both, we output a JSON: {company: ..., qualified: ..., evidence_ids: [...]}.\n\nThe user also clarified: \"Use both sources and do not infer missing facts.\"\n\nThus we must get evidence:\n\n- We need to call lookup_evidence for 'profile'. The tool should return some synthetic evidence (profile). We'll get JSON presumably. Then later we call for 'headcount'.\n\nWe must comply exactly, not skipping steps. We must output only JSON after obtaining both results. But we can't provide final output until we have both evidence.\n\nThe constraint: \"After both tools return only strict JSON with company, qualified, evidence_ids.\" Means final response after both calls must be a strict JSON object: company, qualified, evidence_ids.\n\nWe are not making predictions or assumptions. We rely on evidence.\n\nGiven that earlier we are in conversation: the user hasn't provided evidence. We are the first actor. According to instruction: \"First call lookup_evidence for 'profile', then for 'headcount', one call per turn.\" So we must call the function, get profile, then call headcount, then output final JSON. We'll do the calls.\n\nWe need to use function call format: As a separate assistant message with \"function call\" content. Then we will get the tool's response. Then we do the second function call. Then produce final JSON. That means we produce three messages: first a function call 'lookup_evidence' with argument 'profile', then after receiving 'profile' we then call 'lookup_evidence' with argument 'headcount', then produce final JSON.\n\nBut we need to mimic conversation steps properly: after first function call, we must wait for the tool's result. The tool's result will provide synthetic evidence. The user didn't supply any data. Our code will use tool output. We'll proceed accordingly.\n\nThus:\n\nAssistant 1: call lookup_evidence with 'profile'.\n\nAssistant 2: function result with profile data. We parse it.\n\nAssistant 3: call lookup_evidence with 'headcount'.\n\nAssistant 4: function result with headcount data.\n\nAssistant 5: produce final JSON using both sources.\n\nWe need to follow AI safety guidelines. No disallowed content. The content is benign. So safe.\n\nWe must use the function correctly. Must pass the evidence_id string correctly.\n\nWe must not ask the tool for anything else. So we do the call. The tool \"lookup_evidence\" returns some data. We must produce final JSON exactly as:\n\n{\n  \"company\": \"Acme Test\",\n  \"qualified\": true/false,\n  \"evidence_ids\": [\"profile\", \"headcount\"]\n}\n\nBut first we must check if the company qualifies: It must be US B2B software company with 50-200 current employees. We need evidence from both profile and headcount. We are told the older profile and newer official headcount disagree. Use newer official headcount for employee criterion. That means if headcount says we have 50-200 employees, we use that; if not, we don't qualify. Also need to check other criteria: US location, B2B software company. The profile might give details about location and business model. Perhaps the profile indicates it's a US company, B2B software. The headcount might say number of employees. The \"older profile and the newer official headcount disagree\" likely means that the profile says maybe different employee number. But we use the headcount for employee count. Indeed we should not infer or use the older profile if it gives employee number; use headcount. So we need to read the headcount.\n\nThus we need to wait for function responses to decide.\n\nWe cannot produce final answer until we get both. So first: call.\n\nWe'll produce the function call: { \"name\": \"lookup_evidence\", \"arguments\": {\"evidence_id\": \"profile\"} }\n\nThe assistant may not produce other text. Let's produce that.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\":\"profile\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "chatcmpl-tool-a8e2fb0f9fc0429ca7507c3fc98f2ebb",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "role": "tool",
+                "tool_call_id": "chatcmpl-tool-a8e2fb0f9fc0429ca7507c3fc98f2ebb"
+              },
+              {
+                "content": null,
+                "reasoning": "Now we got the profile: indicates company: Acme Test, country: US, business: B2B software, employees: 80, observed_on: 2024-01-01. The employees count is 80. But the headcount is newer official. It might give different number. But the company is US B2B software per profile. So condition is satisfied for UE: US, B2B software. For employee count, we need between 50-200. The profile says 80 but we might disregard if headcount says different.\n\nNow call headcount.",
+                "reasoning_details": [
+                  {
+                    "format": "unknown",
+                    "index": 0,
+                    "text": "Now we got the profile: indicates company: Acme Test, country: US, business: B2B software, employees: 80, observed_on: 2024-01-01. The employees count is 80. But the headcount is newer official. It might give different number. But the company is US B2B software per profile. So condition is satisfied for UE: US, B2B software. For employee count, we need between 50-200. The profile says 80 but we might disregard if headcount says different.\n\nNow call headcount.",
+                    "type": "reasoning.text"
+                  }
+                ],
+                "role": "assistant",
+                "tool_calls": [
+                  {
+                    "function": {
+                      "arguments": "{\"evidence_id\":\"headcount\"}",
+                      "name": "lookup_evidence"
+                    },
+                    "id": "chatcmpl-tool-c3073af1a27d4d5fbe9590aafac0fd5b",
+                    "index": 0,
+                    "type": "function"
+                  }
+                ]
+              },
+              {
+                "content": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+                "role": "tool",
+                "tool_call_id": "chatcmpl-tool-c3073af1a27d4d5fbe9590aafac0fd5b"
+              }
+            ],
+            "model": "openai/gpt-oss-20b",
+            "provider": {
+              "allow_fallbacks": false,
+              "data_collection": "deny",
+              "max_price": {
+                "completion": 0.14,
+                "prompt": 0.03,
+                "request": 0
+              },
+              "only": [
+                "deepinfra/bf16"
+              ],
+              "require_parameters": true,
+              "zdr": true
+            },
+            "reasoning": {
+              "effort": "high",
+              "exclude": false
+            },
+            "response_format": {
+              "json_schema": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true
+              },
+              "type": "json_schema"
+            },
+            "stream": false
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "logprobs": null,
+                "message": {
+                  "content": "{\"company\":\"Acme Test\",\"evidence_ids\":[\"profile\",\"headcount\"],\"qualified\":false}",
+                  "reasoning": "Now we have headcount: employees: 12, observed_on: 2026-10-23, source: current official staffing. That is a newer official headcount, indicating 12 employees. It states employees: 12. This conflicts with older profile's 80 employees. According to instruction to use newer official headcount for employee criterion. So employees is 12 which is not in 50-200 range. So the company does NOT qualify. However company still is US, B2B software. But the employees count fails. So 'qualified' is false.\n\nNow final response: output JSON with company: \"Acme Test\", qualified: false, evidence_ids: [\"profile\", \"headcount\"].\n\nWe must not provide anything other than strict JSON. The user explicitly says \"After both tools return only strict JSON with company, qualified, evidence_ids.\" So we must produce exactly that JSON object.\n\nThus our final response: { \"company\":\"Acme Test\", \"qualified\":false, \"evidence_ids\":[\"profile\",\"headcount\"] }\n\nEnsure proper formatting: double quotes, etc. No trailing or preceding text.\n\nNow produce final answer.",
+                  "reasoning_details": [
+                    {
+                      "format": "unknown",
+                      "index": 0,
+                      "text": "Now we have headcount: employees: 12, observed_on: 2026-10-23, source: current official staffing. That is a newer official headcount, indicating 12 employees. It states employees: 12. This conflicts with older profile's 80 employees. According to instruction to use newer official headcount for employee criterion. So employees is 12 which is not in 50-200 range. So the company does NOT qualify. However company still is US, B2B software. But the employees count fails. So 'qualified' is false.\n\nNow final response: output JSON with company: \"Acme Test\", qualified: false, evidence_ids: [\"profile\", \"headcount\"].\n\nWe must not provide anything other than strict JSON. The user explicitly says \"After both tools return only strict JSON with company, qualified, evidence_ids.\" So we must produce exactly that JSON object.\n\nThus our final response: { \"company\":\"Acme Test\", \"qualified\":false, \"evidence_ids\":[\"profile\",\"headcount\"] }\n\nEnsure proper formatting: double quotes, etc. No trailing or preceding text.\n\nNow produce final answer.",
+                      "type": "reasoning.text"
+                    }
+                  ],
+                  "refusal": null,
+                  "role": "assistant"
+                },
+                "native_finish_reason": "stop"
+              }
+            ],
+            "created": 1792802447,
+            "id": "gen-1792802447-LaH1S0JyoYMv7TSVnbQR",
+            "model": "openai/gpt-oss-20b",
+            "object": "chat.completion",
+            "openrouter_metadata": {
+              "attempt": 1,
+              "endpoints": {
+                "available": [
+                  {
+                    "model": "openai/gpt-oss-20b",
+                    "provider": "DeepInfra",
+                    "selected": true
+                  }
+                ],
+                "total": 11
+              },
+              "generation_time": 2765,
+              "is_byok": false,
+              "region": "SJC",
+              "requested": "openai/gpt-oss-20b",
+              "strategy": "direct",
+              "summary": "available=1, selected=DeepInfra"
+            },
+            "provider": "DeepInfra",
+            "service_tier": "default",
+            "system_fingerprint": null,
+            "usage": {
+              "completion_tokens": 265,
+              "completion_tokens_details": {
+                "audio_tokens": 0,
+                "image_tokens": 0,
+                "reasoning_tokens": 262
+              },
+              "cost": 8.378e-05,
+              "cost_details": {
+                "upstream_inference_completions_cost": 3.71e-05,
+                "upstream_inference_cost": 8.378e-05,
+                "upstream_inference_prompt_cost": 4.668e-05
+              },
+              "is_byok": false,
+              "prompt_tokens": 1556,
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cache_write_tokens": 0,
+                "cached_tokens": 0,
+                "video_tokens": 0
+              },
+              "total_tokens": 1821
+            }
+          },
+          "response_sha256": "sha256:53b5785a0cde9edf67d7608784f0b5f11c228a1ea6f89c7e2b19e0a76415fe51",
+          "response_receipts": [
+            {
+              "created_at": "2026-10-24T00:40:50.43248+00:00",
+              "entry_id": 9,
+              "entry_kind": "settlement",
+              "metadata": {
+                "call_succeeded": true,
+                "headers": {
+                  "content-length": "3421",
+                  "content-type": "application/json"
+                },
+                "provider_cost": {
+                  "basis": "openrouter_usage_cost",
+                  "operation": "openrouter.chat",
+                  "unit_name": "usd",
+                  "units": "0.00008378"
+                },
+                "reasoning_route_observation": {
+                  "expected_model_version": "openai/gpt-oss-20b",
+                  "expected_provider_name": "DeepInfra",
+                  "requested_model": "openai/gpt-oss-20b",
+                  "requested_provider_route": "deepinfra/bf16",
+                  "response_model": "openai/gpt-oss-20b",
+                  "response_provider_name": "DeepInfra",
+                  "selected_endpoint_model": "openai/gpt-oss-20b",
+                  "selected_endpoint_provider_name": "DeepInfra",
+                  "status": "matched"
+                },
+                "status": 200,
+                "timing_scope": "initial_provider_transport_send",
+                "transport_elapsed_ms": 2922
+              },
+              "privacy_redactions": [],
+              "response_ref": {
+                "entry_id": 9,
+                "field": "response"
+              },
+              "response_sha256": "sha256:53b5785a0cde9edf67d7608784f0b5f11c228a1ea6f89c7e2b19e0a76415fe51",
+              "wire_body_bytes": 3421,
+              "wire_body_sha256": "sha256:951cdfd7a636787f181e00f2c97ca6442d3352a8ad745a82a33dd17bf09cd9be"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -35,7 +35,7 @@ from urllib.parse import quote, unquote_to_bytes, urlsplit
 
 import httpx
 
-from lab_arena import contracts, deepline_catalog, operations, provider_costs, scoring_provider_compat
+from lab_arena import contracts, deepline_catalog, operations, provider_costs, reasoning_capture, scoring_provider_compat
 from lab_arena import telemetry, training_capture
 from lab_arena.contracts import ArenaContractError
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable
@@ -810,13 +810,13 @@ def actual_openrouter_cost_microusd(price_table: Mapping[str, Any], model: str, 
 
 
 
-def openrouter_normalized(parameters: Mapping[str, Any]) -> Dict[str, Any]:
+def openrouter_normalized(parameters: Mapping[str, Any], *, allow_full_thinking: bool = False) -> Dict[str, Any]:
     """The OpenRouter body the broker hashes and sends: the output cap is always explicit."""
 
     token_field = "max_output_tokens" if "input" in parameters else "max_tokens"
     requested = parameters.get(token_field)
     cap = (operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
-           if token_field == "max_output_tokens" else operations.OPENROUTER_MAX_OUTPUT_TOKENS)
+           if token_field == "max_output_tokens" or allow_full_thinking else operations.OPENROUTER_MAX_OUTPUT_TOKENS)
     max_tokens = operations.OPENROUTER_MAX_OUTPUT_TOKENS if requested is None else min(int(requested), cap)
     if max_tokens < 1:
         raise BrokerError("invalid_request")
@@ -825,13 +825,67 @@ def openrouter_normalized(parameters: Mapping[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def normalized_request(operation_id: str, parameters: Mapping[str, Any]) -> Dict[str, Any]:
-    """Validate and normalize a request exactly as ``Broker.execute`` does."""
+def normalized_request(
+    operation_id: str,
+    parameters: Mapping[str, Any],
+    *,
+    reasoning_capture_policy: Optional[str] = None,
+    reasoning_route_registry: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate and normalize a request exactly as ``Broker.execute`` does.
 
-    normalized = operations.validate_operation_request(operation_id, parameters)
+    The reasoning arguments reproduce an agent run under a frozen round policy.
+    """
+
+    normalized = operations.validate_operation_request(
+        operation_id, parameters,
+        allow_full_thinking=reasoning_capture_policy == reasoning_capture.POLICY,
+    )
     if operations.OPERATIONS[operation_id].provider == "openrouter":
         normalized = openrouter_normalized(normalized)
+        normalized, _ = agent_reasoning_parameters(
+            operation_id, normalized, policy=reasoning_capture_policy,
+            registry=reasoning_route_registry,
+        )
     return normalized
+
+
+def agent_reasoning_parameters(
+    operation_id: str,
+    parameters: Mapping[str, Any],
+    *,
+    policy: Optional[str],
+    registry: Optional[Mapping[str, Any]] = None,
+    deepline_catalog: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Apply a round's frozen reasoning policy to one validated agent call.
+
+    The full-thinking policy admits only an exact reviewed route. A request
+    that cannot carry its pinned thinking form is refused before dispatch.
+    """
+
+    try:
+        updated, annotation = reasoning_capture.apply(
+            operation_id, parameters, policy=policy,
+            registry=registry,
+        )
+    except ValueError as exc:
+        code = "invalid_request" if str(exc) in {"reasoning_route_unsupported", "reasoning_headroom_unavailable"} else "broker_unavailable"
+        raise BrokerError(code) from exc
+    if annotation is None or not annotation["changes"]:
+        return dict(parameters), annotation
+    if policy == reasoning_capture.POLICY:
+        output_field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
+        if bounded_input_tokens(updated) + updated[output_field] > annotation["context_tokens"]:
+            raise BrokerError("invalid_request")
+    try:
+        updated = openrouter_normalized(operations.validate_operation_request(
+            operation_id, updated, deepline_catalog=deepline_catalog,
+            allow_full_thinking=policy == reasoning_capture.POLICY,
+        ), allow_full_thinking=policy == reasoning_capture.POLICY)
+    except (operations.OperationError, BrokerError) as exc:
+        raise BrokerError("invalid_request") from exc
+    return updated, annotation
 
 
 def deepline_cost_microusd(body: bytes) -> Optional[int]:
@@ -1879,6 +1933,10 @@ class RunContext:
     judgment_cache_scope: Optional[Mapping[str, Any]] = None
     # Gateway-owned, hash-bound tool and pricing snapshot for this round.
     deepline_catalog: Optional[Mapping[str, Any]] = None
+    # Gateway-owned frozen round policy and catalog profiles for readable
+    # agent reasoning. Absent on every round created without the policy.
+    reasoning_capture_policy: Optional[str] = None
+    reasoning_route_registry: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -2725,8 +2783,15 @@ def _decode_terminal(
         "deepline_response_missing_reason",
         "compatibility_failure_code",
         "upstream_response_receipt",  # Private evidence has no replay authority.
+        "transport_elapsed_ms", "timing_scope",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
+        raise BrokerError("broker_unavailable")
+    if ("transport_elapsed_ms" in document or "timing_scope" in document) and (
+        type(document.get("transport_elapsed_ms")) is not int
+        or not 0 <= document["transport_elapsed_ms"] <= 3_600_000
+        or document.get("timing_scope") != "initial_provider_transport_send"
+    ):
         raise BrokerError("broker_unavailable")
     compatibility_failure_code = document.get("compatibility_failure_code")
     if "compatibility_failure_code" in document and (
@@ -4282,6 +4347,8 @@ class Broker:
         try:
             normalized = operations.validate_operation_request(
                 operation_id, parameters, deepline_catalog=context.deepline_catalog,
+                allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
+                                     and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY),
             )
         except operations.OperationError:
             return _error_result("invalid_request", {"operation_id": operation_id})
@@ -4386,6 +4453,8 @@ class Broker:
             try:
                 effective_normalized = operations.validate_operation_request(
                     effective_operation_id, effective_parameters, deepline_catalog=context.deepline_catalog,
+                    allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
+                                         and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY),
                 )
             except operations.OperationError:
                 # Distinguish an absent frozen score route from malformed input.
@@ -4445,16 +4514,27 @@ class Broker:
         reservation_cost: Optional[provider_costs.ProviderCost] = None
         reserve_remaining_budget = False
         openrouter_host_route: Optional[OpenRouterHostRoute] = None
+        reasoning_annotation: Optional[Dict[str, Any]] = None
         try:
             if effective_operation.provider == "openrouter":
-                # Record the request's price bound; current SQL admission uses
-                # confirmed spend and stores a zero-dollar lifecycle record.
+                # Record the request's price bound. Full-thinking admission
+                # holds this amount; historical policies keep their rules.
                 effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
+                if getattr(context, "kind", "execute") == "execute":
+                    # Before hashing: identity, capture and the sent body all
+                    # bind the reasoning parameters actually requested.
+                    effective_normalized, reasoning_annotation = agent_reasoning_parameters(
+                        effective_operation_id, effective_normalized,
+                        policy=getattr(context, "reasoning_capture_policy", None),
+                        registry=getattr(context, "reasoning_route_registry", None),
+                        deepline_catalog=context.deepline_catalog,
+                    )
+                    max_output_tokens = int(effective_normalized.get(
+                        "max_output_tokens", effective_normalized.get("max_tokens")))
                 normalized = effective_normalized
                 # Server-side search can add provider-owned context and model
                 # passes that are absent from the caller body. Keep this
-                # dynamic-price marker for historical reservation policies;
-                # current SQL admission does not hold the remaining budget.
+                # dynamic-price marker for existing reservation policies.
                 reserve_remaining_budget = _openrouter_web_search_enabled(
                     normalized
                 )
@@ -4466,6 +4546,34 @@ class Broker:
                     pricing=pricing,
                     parameters=normalized,
                 )
+                if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
+                    # Exact tested provider only. OpenRouter must neither pick
+                    # a different provider nor fail over within a model family.
+                    route_prices = {
+                        component: max(
+                            Decimal(str(pricing[component])),
+                            Decimal(str(reasoning_annotation["price_ceiling"].get(
+                                component, pricing[component],
+                            ))),
+                        ) for component in PRICED_COMPONENTS
+                    }
+                    openrouter_host_route = OpenRouterHostRoute(
+                        provider_policy={
+                            "data_collection": "deny", "zdr": True,
+                            "only": [reasoning_annotation["provider_route"]],
+                            "allow_fallbacks": False,
+                            "require_parameters": True,
+                            "max_price": {
+                                "prompt": _json_decimal_number(route_prices["prompt"] * OPENROUTER_PRICE_PER_MILLION),
+                                "completion": _json_decimal_number((route_prices["completion"] + route_prices["internal_reasoning"]) * OPENROUTER_PRICE_PER_MILLION),
+                                "request": _json_decimal_number(route_prices["request"]),
+                            },
+                        },
+                        reservation_pricing={
+                            component: format(value.normalize(), "f")
+                            for component, value in route_prices.items()
+                        },
+                    )
                 amount = _max_openrouter_cost_for_pricing(
                     (
                         openrouter_host_route.reservation_pricing
@@ -4592,6 +4700,7 @@ class Broker:
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
                     ),
+                    allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
                 )
                 prepared = capture_request({
                     "operation_id": operation_id,
@@ -4601,6 +4710,7 @@ class Broker:
                     "normalized_parameters": requested_normalized,
                     "effective_operation_id": effective_operation_id,
                     "effective_parameters": effective_normalized,
+                    **({"reasoning_capture": reasoning_annotation} if reasoning_annotation is not None else {}),
                     "route": route.summary() if route is not None else {},
                     "outbound": {
                         "method": captured_outbound.target.method,
@@ -4629,7 +4739,7 @@ class Broker:
             provider=effective_operation.provider,
             funding_source=funding_source,
             amount_microusd=amount,
-            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"request_capture": request_capture} if request_capture else {}), **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **(route.summary() if route else {})},
+            call_doc={"request_hash": request_hash, "base_call_identity": base_call_identity, "provider_attempt": provider_attempt, "action_sequence": action_sequence, "max_output_tokens": max_output_tokens, **request_accounting, **contact_finder_binding, **({"request_capture": request_capture} if request_capture else {}), **({"reserve_remaining_budget": True} if reserve_remaining_budget else {}), **({"reasoning_capture": reasoning_annotation} if reasoning_annotation is not None else {}), **(route.summary() if route else {})},
             lease_ttl_seconds=self._lease_ttl_seconds,
         )
         if source_content_fallback:
@@ -4655,6 +4765,7 @@ class Broker:
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
                     ),
+                    allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
                 )
             except operations.OperationError:
                 return _error_result("invalid_request", summary)
@@ -5410,6 +5521,7 @@ class Broker:
                 if openrouter_host_route is not None
                 else None
             ),
+            allow_full_thinking=reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY,
         )
         raw_document: Any = None
         deepline_readback_cost: Optional[provider_costs.ProviderCost] = None
@@ -5436,6 +5548,13 @@ class Broker:
         openrouter_completed_rate_limit_proven = False
         openrouter_retry_after_seconds: object = _RETRY_AFTER_ABSENT
         scrapingdog_observed_success_status: Optional[int] = None
+        transport_elapsed_ms: Optional[int] = None
+
+        def retain_transport_timing(document: Dict[str, Any]) -> None:
+            if transport_elapsed_ms is not None:
+                document["transport_elapsed_ms"] = transport_elapsed_ms
+                document["timing_scope"] = "initial_provider_transport_send"
+
         try:
             url, headers = inject_credential(outbound, secret)
             if deepline_request_id is not None:
@@ -5450,23 +5569,39 @@ class Broker:
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
                 try:
-                    response = deepline_recovery_response or self._transport.send(
-                        method=outbound.target.method,
-                        url=url,
-                        headers=headers,
-                        body=outbound.body,
-                        timeout_seconds=timeout_seconds,
-                        **(
-                            {
-                                "max_response_bytes": (
-                                    _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
-                                )
-                            }
-                            if route is not None
-                            and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
-                            else {}
-                        ),
-                    )
+                    if deepline_recovery_response is not None:
+                        response = deepline_recovery_response
+                    else:
+                        try:
+                            transport_started = time.monotonic()
+                        except Exception:
+                            transport_started = None
+                        try:
+                            response = self._transport.send(
+                                method=outbound.target.method,
+                                url=url,
+                                headers=headers,
+                                body=outbound.body,
+                                timeout_seconds=timeout_seconds,
+                                **(
+                                    {
+                                        "max_response_bytes": (
+                                            _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                                        )
+                                    }
+                                    if route is not None
+                                    and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
+                                    else {}
+                                ),
+                            )
+                        finally:
+                            try:
+                                elapsed = ((time.monotonic() - transport_started) * 1000
+                                           if transport_started is not None else float("nan"))
+                                if math.isfinite(elapsed):
+                                    transport_elapsed_ms = max(0, min(int(elapsed), 3_600_000))
+                            except Exception:
+                                pass  # Observation cannot change the provider outcome.
                 except ProviderTransportError as transport_error:
                     recovered = (
                         _deepline_execution_response_readback(
@@ -5862,6 +5997,7 @@ class Broker:
                 uncertain_doc["transport_error_class"] = transport_error_class
                 if exc.observed_status is not None:
                     uncertain_doc["observed_provider_status"] = exc.observed_status
+                retain_transport_timing(uncertain_doc)
                 if (
                     deepline_readback_cost is None
                     and scrapingdog_observed_success_status is None
@@ -6151,6 +6287,11 @@ class Broker:
                             judgment_cache_eligible=True,
                         )
                     )
+                if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
+                    uncertain_doc["reasoning_route_observation"] = reasoning_capture.route_observation(
+                        raw_document, reasoning_annotation,
+                    )
+                retain_transport_timing(uncertain_doc)
                 retain_upstream_response(uncertain_doc)
                 uncertain_state = self._persist_provider_accounting(self._store.mark_uncertain,
                     deadline=accounting_store_deadline,
@@ -6297,6 +6438,11 @@ class Broker:
                 judgment_cache_eligible=judgment_cache_eligible,
                 account_failure_evidence=account_failure_evidence,
             )
+            retain_transport_timing(terminal)
+            if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
+                terminal["reasoning_route_observation"] = reasoning_capture.route_observation(
+                    raw_document, reasoning_annotation,
+                )
             if deepline_lost_response:
                 terminal["deepline_response_missing"] = True
                 terminal["deepline_response_missing_reason"] = "transport_failure"
@@ -6344,6 +6490,7 @@ class Broker:
                                 refused.status, refused.headers, refused.body,
                                 call_succeeded=False, provider_cost=cost_record,
                             )
+                            retain_transport_timing(compact_terminal)
                             if deepline_async_ids:
                                 compact_terminal["deepline_async_job_ids"] = list(deepline_async_ids)
                             settled = self._persist_provider_accounting(self._store.settle_call,
@@ -6422,6 +6569,7 @@ class Broker:
                     provider_cost=cost_record,
                     compatibility_failure_code=compatibility_failure_code,
                 )
+                retain_transport_timing(terminal)
                 retain_upstream_response(terminal)
                 try:
                     settled = self._persist_provider_accounting(self._store.settle_call,
@@ -6509,6 +6657,7 @@ class Broker:
                     "observed_provider_status": scrapingdog_observed_success_status,
                     "transport_error_class": summary["transport_error_class"],
                 })
+            retain_transport_timing(uncertain_doc)
             retain_upstream_response(uncertain_doc)
             try:
                 self._persist_provider_accounting(self._store.mark_uncertain,

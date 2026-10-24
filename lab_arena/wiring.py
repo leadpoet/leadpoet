@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from lab_arena import broker as broker_module, chain as chain_module, contracts, images, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture
+from lab_arena import broker as broker_module, chain as chain_module, contracts, images, reasoning_capture, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
 from lab_arena.service import (
@@ -541,6 +541,9 @@ def build_service_from_environment(mode: str):
         company_judgment_from=os.environ.get("LAB_ARENA_COMPANY_JUDGMENT_FROM") or None,
         signal_judgment_from=os.environ.get("LAB_ARENA_SIGNAL_JUDGMENT_FROM") or None,
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
+        reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
+        reasoning_baseline_source_sha256=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256") or None,
+        reasoning_baseline_source_url=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_URL") or None,
         benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,
         execution_sequence_from=os.environ.get(
             "LAB_ARENA_EXECUTION_SEQUENCE_FROM"
@@ -639,6 +642,8 @@ def build_service_from_environment(mode: str):
         mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
         deepline_catalog_source=deepline_catalog_source,
+        # Approved routes are pinned locally and never inferred from a live catalog.
+        reasoning_registry_source=reasoning_capture.load_registry,
         banned_hotkeys_source=banned_hotkeys_from_environment, broker_factory=broker_factory, defaults=defaults,
         baseline_source_fetcher=fetch_public_source_archive,
         credential_manager=credential_manager,

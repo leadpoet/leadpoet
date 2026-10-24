@@ -387,6 +387,30 @@ def test_encrypted_reasoning_history_uses_structural_string_ceiling():
         operations.validate_operation_request("openrouter.responses", params)
 
 
+def test_azure_reasoning_format_survives_stateless_tool_continuation():
+    # The Responses bridge returned this exact item shape for Azure's GPT-5.6
+    # route. The opaque bytes are synthetic, but format and IDs are retained.
+    reasoning = {"id": "rs_test_1", "type": "reasoning", "status": "completed",
+                 "summary": [], "encrypted_content": "opaque-token-dummy",
+                 "format": "azure-openai-responses-v1"}
+    call = {"id": "fc_tmp_1", "type": "function_call", "status": "completed",
+            "call_id": "call_test_1", "name": "lookup_evidence",
+            "arguments": '{"evidence_id":"profile"}'}
+    output = {"type": "function_call_output", "call_id": "call_test_1",
+              "output": '{"evidence_id":"profile"}'}
+    params = {"model": "openai/gpt-5.6-luna", "input": [
+        {"role": "user", "content": "Check the company."}, reasoning, call, output],
+        "max_output_tokens": 2048}
+    normalized = operations.validate_operation_request("openrouter.responses", params)
+    assert normalized["input"][1:] == [reasoning, call, output]
+    assert '"format":"azure-openai-responses-v1"' in operations.build_outbound_request(
+        "openrouter.responses", params).body.decode()
+    for invalid in ("", "x" * 129, 42):
+        changed = dict(params, input=[params["input"][0], dict(reasoning, format=invalid), call, output])
+        with pytest.raises(operations.OperationRequestError):
+            operations.validate_operation_request("openrouter.responses", changed)
+
+
 def test_codex_tool_output_chunk_limit_matches_operation_contract():
     assert codex.TOOL_OUTPUT_TEXT_CHARS == operations.OPENROUTER_MAX_CONTENT_CHARS
 

@@ -75,6 +75,16 @@ tick: `advance_billing_read`, `advance_admission`, `advance_lock_wait`
 `advance_score_stage`, `advance_publish`. They carry the same five attributes
 and the same fail-closed envelope as every other stage.
 
+The steps that run once the round’s schedule is known also carry
+`arena.round_id` and `arena.scoring_deadline` (the round’s
+`final_scoring_close`, ISO-8601 UTC). Two rounds can be open at once, so
+without the round id a stage span cannot say which round it served; and the
+cancellation of last resort falls two hours after that deadline, which is
+otherwise not reported anywhere. Both values are Arena-generated and
+shape-checked — a value the exporter cannot vouch for is dropped on its own,
+leaving the stage span itself intact, because these spans are the Arena’s
+liveness signal and must never be lost to a diagnostic.
+
 **`arena.provider`** — one INTERNAL span per outbound provider call. The
 Arena's cost, latency and failure all originate upstream at OpenRouter,
 Deepline and Scrapingdog, and none of it was visible: a slow round and a
@@ -121,6 +131,14 @@ idempotent completion responses do not count as new completed runs.
 | `arena.run_kind` | `execute` \| `score` |
 | `arena.terminal_cause` | `budget_exhausted` (all thirteen of `contracts.TERMINAL_CAUSES`) |
 | `arena.outcome` | `ok` when the cause is `accepted`, else `failed` |
+| `arena.failure_stage` | `scoring_output` (the completion's `failure_diagnostic.stage`); `-` when the run was accepted |
+| `arena.failure_class` | `scoring_output_invalid` (its `failure_diagnostic.error_class`); `-` when the run was accepted |
+
+The two failure fields say WHERE a run failed and WHAT failed there, which
+`arena.terminal_cause` alone does not: a run that keeps failing as
+`judge_error` is otherwise indistinguishable from any other. Both are closed
+choice sets owned by the completion contract, so no judge or miner text can
+ride along; the contract's free-text `reason` is deliberately not reported.
 
 Span name is `arena.run.<kind>`. There is deliberately no duration: the run
 row carries no start time, so any duration here would be invented rather

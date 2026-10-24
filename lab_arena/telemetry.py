@@ -75,6 +75,7 @@ def record(
     source_sha: Optional[str] = None,
     store_error: Optional[Mapping[str, Any]] = None,
     billing_lookup: Optional[Mapping[str, Any]] = None,
+    round_scope: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Record one stage outcome. Never raises."""
     recorder = _recorder
@@ -91,6 +92,7 @@ def record(
             source_sha=source_sha,
             **({"store_error": store_error} if store_error else {}),
             **({"billing_lookup": billing_lookup} if billing_lookup else {}),
+            **({"round_scope": round_scope} if round_scope else {}),
         )
     except BaseException:
         pass
@@ -178,17 +180,27 @@ def record_provider(
 def record_run(
     run_kind: str, terminal_cause: str,
     *, run_identity: Optional[Mapping[str, Any]] = None,
+    failure_stage: str = "-",
+    failure_class: str = "-",
 ) -> None:
     """Record one finished evaluation run. Never raises.
 
     No duration: the run row carries no start time, so the sidecar can only
     honestly report that a run ended and which cause ended it.
+
+    ``failure_stage`` and ``failure_class`` are the completion contract's
+    bounded diagnostic: where the run failed and what failed there. Both are
+    closed choice sets, so a repeated failure is readable without any judge or
+    miner content leaving the host. An accepted run reports neither.
     """
     recorder = _recorder
     if recorder is None:
         return
     try:
-        recorder.record_run(run_kind, terminal_cause, run_identity=run_identity)
+        recorder.record_run(
+            run_kind, terminal_cause, run_identity=run_identity,
+            failure_stage=failure_stage, failure_class=failure_class,
+        )
     except BaseException:
         pass
 
@@ -282,7 +294,10 @@ class StageResult:
 
 
 @contextmanager
-def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> Iterator[StageResult]:
+def stage(
+    name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None,
+    round_scope: Optional[Mapping[str, Any]] = None,
+) -> Iterator[StageResult]:
     """Time one pipeline stage and record its outcome, success or failure.
 
     The wrapped exception is re-raised unchanged — this observes, it never
@@ -303,6 +318,7 @@ def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> I
             start_ns=start_ns,
             store_error=_store_error_metadata(exc),
             billing_lookup=billing_lookup,
+            round_scope=round_scope,
         )
         raise
     record(
@@ -312,6 +328,7 @@ def stage(name: str, *, billing_lookup: Optional[Mapping[str, Any]] = None) -> I
         duration_ms=(time.monotonic() - start_mono) * 1000.0,
         start_ns=start_ns,
         billing_lookup=billing_lookup,
+        round_scope=round_scope,
     )
 
 

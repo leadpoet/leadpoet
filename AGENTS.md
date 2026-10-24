@@ -1,3 +1,20 @@
+## Scoped production authorization: October 24 optional ICP stage requirements
+
+On 2026-10-24 the user authorized limiting funding/ownership-stage requirements
+to two or three ICPs per newly generated Arena bank, with everything else
+unchanged, and an end-to-end test that creates a real new set. Use exactly
+three for normal banks, capped by bank size. This includes narrow generator
+and regression changes, a bounded real-provider test using isolated test
+persistence, protected read-only production checks, safe push/merge and
+canonical gateway/normal-validator deployment with live source verification.
+Preserve existing and frozen banks, industries, geography, employee sizes,
+contacts, intent requirements, exclusions, goals, scoring, budgets, accepted
+work, rewards, credentials and concurrent work. Do not replace or activate
+an official bank for testing, weaken verification of explicit stage criteria,
+or expose private ICP contents or credentials. The coordinating task owns
+production actions. Authority ends after deployment and end-to-end verification.
+Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 24 Arena cycle and bound company aliases
 
 On 2026-10-24 the user authorized monitoring the complete October 24 Arena

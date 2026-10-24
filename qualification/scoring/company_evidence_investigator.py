@@ -2074,6 +2074,9 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
         return False
     if isinstance(observed_value, bool) or not isinstance(observed_value, (str, int)):
         return False
+    # Preserve the existing literal field parser's supported local languages,
+    # after rejecting department/office scope. The added heading carries no fact.
+    localized = extract_linkedin_company_size("## About us\n" + quote)
     token = str(observed_value).strip().replace("\u2013", "-").replace("\u2014", "-")
     if not token:
         return False
@@ -2100,7 +2103,8 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
         if re.search(approximate_or_bounded, normalized_quote):
             return False
     else:
-        token_pattern = re.escape(compact_token)
+        range_pattern = re.escape(compact_token).replace(r"\-", r"\s*-\s*")
+        token_pattern = rf"(?<![\d-]){range_pattern}(?![\d+]|-\d)"
     count_noun = r"(?:employees?|workers?|people)"
     # A profile may show followers above its separate Company size field.
     # Only an explicit employee-size span can disambiguate those counts.
@@ -2114,6 +2118,8 @@ def _quote_supports_headcount(quote: str, observed_value: Any) -> bool:
             r"\bteam\b.{0,40}$", normalized_quote[:company_size_span.start()]
         ):
             return False
+    if localized and localized["employee_count"] == observed_value:
+        return True
     return bool(
         re.search(
             rf"{token_pattern}(?:\s+[a-z-]+){{0,3}}\s+{count_noun}\b",

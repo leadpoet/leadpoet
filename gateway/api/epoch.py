@@ -39,16 +39,28 @@ async def get_epoch_information(epoch_id: int):
     Example:
         GET /epoch/100/info
     """
-    try:
-        from gateway.utils.epoch import get_epoch_info_async
+    from gateway.utils.epoch import (
+        HistoricalEpochUnavailable,
+        get_epoch_info_async,
+    )
 
-        info = await get_epoch_info_async(epoch_id)
-        return info
-    
-    except Exception as e:
+    try:
+        return await get_epoch_info_async(epoch_id)
+
+    except HistoricalEpochUnavailable:
+        # The gateway serves the current settlement epoch only. Asking for any
+        # other epoch is a client error, not a gateway failure.
+        raise HTTPException(
+            status_code=404,
+            detail="Epoch details are available for the current epoch only.",
+        )
+
+    except Exception:
+        # Do not echo the internal failure text on a public, unauthenticated
+        # endpoint.
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get epoch info: {str(e)}"
+            detail="Failed to get epoch info.",
         )
 
 

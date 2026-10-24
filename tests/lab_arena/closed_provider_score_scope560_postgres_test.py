@@ -387,3 +387,27 @@ def test_all_closed_history_none_candidate_filters_execution_before_global_heads
         cur.close()
         conn.close()
         store.close()
+
+
+def test_newer_execution_head_still_suppresses_eligible_score_across_rounds(database):
+    """The new score prefilter never narrows the GLOBAL later-CID fence."""
+    first = old._closed_call(database, "q560a")
+    later = old._closed_call(database, "q560b")
+    try:
+        with database[0].connect(**database[1]) as conn, conn.cursor() as cur:
+            cur.execute("SET LOCAL session_replication_role=replica")
+            assert old._equivalent(cur, first[1])[0]["status"] == "ok"
+            cur.execute(
+                "UPDATE lab_arena_runs SET kind='execute' WHERE run_id=%s",
+                (later[2]["run_id"],),
+            )
+            cur.execute(
+                "UPDATE lab_arena_ledger SET call_identity=%s,entry_kind='settlement' WHERE entry_id=%s",
+                (first[2]["call_identity"], later[2]["uncertain_entry_id"]),
+            )
+            assert later[2]["uncertain_entry_id"] > first[2]["uncertain_entry_id"]
+            assert old._equivalent(cur, first[1]) == [{"status": "none"}] * 2
+            conn.rollback()
+    finally:
+        first[0].close()
+        later[0].close()

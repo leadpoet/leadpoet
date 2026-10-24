@@ -97,13 +97,20 @@ def test_summary_only_candidate_stays_diagnostic(tmp_path):
         message.pop("reasoning_content", None)
         message["reasoning_details"] = [{"type": "reasoning.summary", "summary": "brief"}]
         replies.append((200, response))
+    transport = FakeTransport(replies)
     result = run_probe(model=candidate["model_id"], route_file=path,
                        output=tmp_path / "evidence", key=KEY,
-                       transport=FakeTransport(replies), ledger_mode="local_diagnostic")
+                       transport=transport, ledger_mode="local_diagnostic",
+                       mode="summary_diagnostic")
     assert result["tool_continuations_and_final_json"] is True
     assert result["production_whitelist_approved"] is False
     assert result["classification"] == "summary_only_diagnostic"
     assert all(row["capture"]["returned"] == "summary" for row in result["readback"])
+    assert all(json.loads(item["body"])["provider"]["only"] == [candidate["provider"]]
+               and json.loads(item["body"])["provider"]["allow_fallbacks"] is False
+               for item in transport.sent)
+    export = json.loads((tmp_path / "evidence/diagnostic-export.json").read_text())
+    assert all("reasoning_capture" not in call for call in export["provider_calls"])
 
 
 def test_responses_summary_only_candidate_stays_diagnostic(tmp_path):
@@ -137,9 +144,10 @@ def test_responses_summary_only_candidate_stays_diagnostic(tmp_path):
                               "provider": candidate["provider_name"], "status": "completed",
                               "output": output, "usage": source["usage"],
                               "openrouter_metadata": metadata}))
+    transport = FakeTransport(replies)
     result = run_probe(model=candidate["model_id"], route_file=path,
                        output=tmp_path / "evidence", key=KEY,
-                       transport=FakeTransport(replies), ledger_mode="local_diagnostic",
+                       transport=transport, ledger_mode="local_diagnostic",
                        mode="summary_diagnostic")
     assert result["probe_failure"] is None
     assert result["readback_failure"] is None
@@ -147,6 +155,11 @@ def test_responses_summary_only_candidate_stays_diagnostic(tmp_path):
     assert result["tool_continuations_and_final_json"] is True
     assert result["classification"] == "summary_only_diagnostic"
     assert result["full_thinking_eligible"] is False
+    assert all(json.loads(item["body"])["provider"]["only"] == [candidate["provider"]]
+               and json.loads(item["body"])["provider"]["allow_fallbacks"] is False
+               for item in transport.sent)
+    export = json.loads((tmp_path / "evidence/diagnostic-export.json").read_text())
+    assert all("reasoning_capture" not in call for call in export["provider_calls"])
 
 
 def test_single_route_registry_candidate_file_is_probe_only(tmp_path):

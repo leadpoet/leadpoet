@@ -8,7 +8,7 @@ validator identity, or wallet use.
 
 ## Daily benchmark settings
 
-New rounds default to 10 ICPs and a champion promotion margin of 0.5 points.
+New rounds default to 10 ICPs and a champion promotion margin of 8 points.
 The gateway accepts `LAB_ARENA_BENCHMARK_ICP_COUNT` (2 to 100) and
 `LAB_ARENA_PROMOTION_MARGIN` (0 to 100). Restart through the normal deployment
 workflow after changing these settings. They apply to newly created rounds.

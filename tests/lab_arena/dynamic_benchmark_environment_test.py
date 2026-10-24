@@ -18,12 +18,12 @@ def test_invalid_count_fails_before_round_creation_or_generation(monkeypatch, ra
     with pytest.raises(ServiceError): wiring._benchmark_icp_count_from_environment()
     with pytest.raises(ValueError): configured_benchmark_icp_count()
 
-@pytest.mark.parametrize("raw,expected", [("",.5),("0.5",.5),("1",1),("0",0)])
+@pytest.mark.parametrize("raw,expected", [("",8),("0.5",.5),("1",1),("0",0)])
 def test_margin_override_and_new_defaults(monkeypatch, raw, expected):
     monkeypatch.setenv("LAB_ARENA_PROMOTION_MARGIN", raw)
     assert wiring._promotion_margin_from_environment() == expected
     assert RoundDefaults().benchmark_icp_count == 10
-    assert RoundDefaults().promotion_margin == .5
+    assert RoundDefaults().promotion_margin == 8
     assert contracts.promotion_margin({}) == 1
 
 @pytest.mark.parametrize("raw", ["NaN","inf","-1","101","true"])

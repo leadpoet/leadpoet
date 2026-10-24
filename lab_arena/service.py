@@ -21,7 +21,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations
+from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations, training_eligibility, training_reader
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, reasoning_capture, signal_judgments, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
@@ -2142,8 +2142,16 @@ class ArenaService:
         row = self._store.get_submission(submission_id)
         if row is None:
             raise ServiceError("submission_missing", 404)
-        if not self._is_daily_baseline(row, round_row) and row.get("code_review_status") != "passed":
-            raise ServiceError("code_review_required", 409)
+        if not self._is_daily_baseline(row, round_row):
+            if row.get("code_review_status") != "passed":
+                raise ServiceError("code_review_required", 409)
+            # A frozen entrant must be allowed to finish after a restart or
+            # review-policy change. Recheck its current proof at publication;
+            # do not turn a data-eligibility gap into a stuck execution lease.
+            if row.get("status") != "frozen" and not training_eligibility.assess_source(
+                row, enabled=self._full_thinking_required(round_row),
+            )["eligible"]:
+                raise ServiceError("code_review_required", 409)
 
     def review_pending_submissions(
         self, *, should_continue: Optional[Callable[[], bool]] = None,
@@ -2783,7 +2791,10 @@ class ArenaService:
         frozen_count = sum(1 for row in frozen if not row.get("is_king"))
         for row in accepted:
             is_king = row["submission_id"] == baseline_id
-            if not is_king and row.get("code_review_status") != "passed":
+            if not is_king and (row.get("code_review_status") != "passed"
+                    or not training_eligibility.assess_source(
+                        row, enabled=self._full_thinking_required(round_row),
+                    )["eligible"]):
                 rule = "code_review_rejected" if row.get("code_review_status") == "rejected" else "code_review_incomplete"
                 self._store.update_submission(round_id, row["submission_id"], "accepted", "rejected", {"rejection_rule": rule})
                 continue
@@ -4778,6 +4789,48 @@ class ArenaService:
     def _empty_execution_infrastructure_failure(self, reads: _PublicationReads) -> bool:
         return bool(self._execution_infrastructure_failures(reads))
 
+    @staticmethod
+    def _full_thinking_required(round_row: Mapping[str, Any]) -> bool:
+        return ((round_row.get("configuration_doc") or {}).get("reasoning_capture_policy")
+                == reasoning_capture.POLICY)
+
+    def _submission_training_eligibility(
+        self, round_row: Mapping[str, Any], submission_id: str,
+        runs: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        """Read persisted evidence only. A capture failure cannot cancel a round."""
+        try:
+            submission = self._store.get_submission(submission_id)
+            if not submission:
+                return {"eligible": False, "reasons": ["submission_evidence_missing"]}
+            baseline = self._is_daily_baseline(submission, round_row)
+            source = (training_eligibility.assess_source(submission, enabled=True)
+                      if not baseline else {"eligible": True, "reasons": [],
+                                            "exemption": "organizer_baseline"})
+            selected = self._selected_accepted_execution_runs(runs, submission_id)
+            positions = set(range(contracts.benchmark_icp_count(round_row.get("configuration_doc"))))
+            if set(selected) != positions:
+                return {"eligible": False, "reasons": ["selected_execution_coverage_incomplete"],
+                        "source_review": source}
+            examples = {}
+            for position in sorted(positions):
+                run_id = str(selected[position]["run_id"])
+                try:
+                    examples[run_id] = training_reader.export_run(self._store, self._objects, run_id)
+                except Exception:
+                    # Raw evidence reads can fail independently of accepted scores.
+                    # Keep the reason explicit; never reinterpret a missing trace as misconduct.
+                    examples[run_id] = None
+            capture = training_eligibility.assess_capture(
+                submission, examples, list(examples), enabled=True,
+            )
+            return {"eligible": source["eligible"] and capture["eligible"],
+                    "reasons": sorted(set(source["reasons"] + capture["reasons"])),
+                    "source_review": source, "capture": capture}
+        except Exception:
+            # The data check affects eligibility only, not publication availability.
+            return {"eligible": False, "reasons": ["training_evidence_check_failed"]}
+
     def publish(self, round_id: str) -> Dict[str, Any]:
         round_row = self._round(round_id)
         if round_row["status"] != "scored":
@@ -4876,6 +4929,20 @@ class ArenaService:
             # the same final cost consequence to the baseline that challengers
             # face. Other fail-closed cost states do not invent a zero score.
             king_entry["final_score"] = 0.0
+        if self._full_thinking_required(round_row):
+            for entry in effective_final_entries:
+                submission_id = str(entry["submission_id"])
+                training = self._submission_training_eligibility(
+                    round_row, submission_id, publication_reads.runs,
+                )
+                eligibility[submission_id]["training_data_eligibility"] = training
+                if not training["eligible"]:
+                    if eligibility[submission_id]["eligible"]:
+                        eligibility[submission_id]["eligibility_reason"] = "training_data_incomplete"
+                    eligibility[submission_id]["eligible"] = False
+            # The organizer baseline remains a measured comparison, never a
+            # contender. Its missing training data must not halt publication or
+            # prevent a verified challenger from competing against its score.
         decision = verify.king_decision(
             [
                 entry

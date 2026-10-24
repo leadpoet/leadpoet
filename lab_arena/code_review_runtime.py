@@ -112,7 +112,17 @@ class SubmissionCodeReviewer:
         preparation_error = None
         exact_duplicate = False
         reservation = 0
+        research_control = False
         try:
+            get_round = getattr(self._store, "get_round", None)
+            if callable(get_round):
+                round_row = get_round(str(row["round_id"]))
+                if not isinstance(round_row, Mapping) or not isinstance(round_row.get("configuration_doc"), Mapping):
+                    raise ValueError("round configuration unavailable")
+                research_control = (
+                    round_row["configuration_doc"].get("reasoning_capture_policy")
+                    == "full_generated_thinking_v1"
+                )
             payload = self._objects.get_bounded(
                 str(row["source_ref"]), source_bundle.MAX_SOURCE_ARCHIVE_BYTES
             )
@@ -120,7 +130,7 @@ class SubmissionCodeReviewer:
                 raise code_review.CodeReviewError("code_review_source_size_mismatch")
             # First validate the full archive, even when a local duplicate can
             # skip the paid review. Persisted digests bind rows to object bytes.
-            prepared = code_review.prepare_request(payload)
+            prepared = code_review.prepare_request(payload, research_control=research_control)
             if (self._similarity_references_for is not None or row.get("source_archive_sha256")
                     or row.get("source_normalized_sha256")):
                 candidate = submission_similarity.inspect_archive(payload)
@@ -173,7 +183,8 @@ class SubmissionCodeReviewer:
                             contexts.append(context)
                 if contexts and not exact_duplicate:
                     prepared = code_review.prepare_request(
-                        payload, similarity_contexts=tuple(contexts)
+                        payload, similarity_contexts=tuple(contexts),
+                        research_control=research_control,
                     )
             if not exact_duplicate:
                 reservation = broker.max_openrouter_cost_microusd(
@@ -328,6 +339,17 @@ class SubmissionCodeReviewer:
                             "categories": sorted({item["category"] for item in result.findings}),
                         }
                         status = "passed" if result.passed else "rejected"
+                        if research_control:
+                            document["research_control"] = dict(result.research_control)
+                            classification = result.research_control["classification"]
+                            if classification == "workflow" and status == "passed":
+                                status = "rejected"
+                                document.update({"passed": False, "verdict": "reject"})
+                            elif classification == "unverified" and status == "passed":
+                                status = "error"
+                                document.update(code_review_policy.diagnostic(
+                                    "code_review_research_unverified", retryable=False
+                                ))
                     elif (
                         response.status == 403
                         and broker._openrouter_request_policy_refusal(response)

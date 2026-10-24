@@ -67,7 +67,7 @@ python3 -m pytest -q -rs \
   tests/lab_arena/full_thinking_six_dollar_postgres_test.py
 ```
 
-The PostgreSQL checks use disposable local databases. They apply migration 551
+The PostgreSQL checks use disposable local databases. They apply migration 555 (previously numbered 551)
 twice, verify exact function source hashes/privileges, and test $6 boundaries,
 parallel holds, settlement release, uncertain costs, dynamic tools, paid failures,
 retries, charged host loss, free calls, and historical $4 behavior.
@@ -145,3 +145,62 @@ Python compilation, `git diff --check`, unchanged AGENTS/CLAUDE parity, and a
 scoped secret-pattern scan passed. Only synthetic public test evidence is in Git.
 Private full test artifacts remain under `Arena_Trace_Audit_20261023` in Downloads.
 No merge, deployment, production write, restart, or round mutation occurred.
+
+
+## Reviewer and champion eligibility follow-up — 2026-10-24
+
+This follow-up uses the existing source reviewer and a deterministic post-run
+read of stored exports. It keeps custom Python/tools/harnesses and adds no second
+LLM review of runtime data. The code-review assessment is source- and policy-bound.
+Only future full-thinking rounds apply the gate. Frozen entrants with a stale
+review can finish scoring after a restart; their stale evidence prevents a win.
+Missing trace evidence cannot cancel publication or overwrite measured scores.
+
+Live tests used the explicitly authorized gateway OpenRouter key, with a shared
+$8 internal cap below the user's $15 allowance. Production source reviews still
+use the submitting miner's key. The post-run check performs no paid calls.
+
+- Ten independent synthetic source fixtures were executed under controlled model
+  and observation changes. The existing paid source reviewer matched all ten
+  expected labels: three model-directed, six fixed/decoy workflows, one unverified.
+  These small test cases do not establish general reviewer accuracy.
+- All six approved routes were attempted through the real Broker, disposable SQL
+  ledger, local worker socket, agent read receipts, and raw/readable readback.
+  Mistral, DeepSeek, Reflection, and Gemma passed two continuations and correct JSON.
+  GPT-OSS 120B and 20B returned HTTP404 because this gateway account ignores their
+  pinned DeepInfra provider. Account restrictions were not changed. Earlier route
+  evidence remains; current availability with this key is not claimed.
+- Four live runs executed the exact previously reviewed adaptive, fixed-extractor,
+  and post-hoc fixture sources using the approved DeepSeek/Fireworks route. The
+  adaptive source used two or three calls and changed its executed action when
+  evidence changed. Fixed and post-hoc sources each produced real full thinking,
+  but correctly failed the independent source research requirement. All seven
+  calls retained exact provider receipts and readable thinking. This is an
+  injected synthetic runtime, not an admitted or scored production submission.
+- Confirmed cost: $0.3881845396. Unpriced failure bounds held: $0.011323.
+  Combined: $0.3995075396. No paid source-review or provider calls were made by
+  subagents. Raw artifacts remain in a private local validation directory.
+
+Relevant broad suite: 1,424 passed and two existing declared-field cases skipped.
+Final focused eligibility, publication, dashboard, SQL, and saved-capture replay checks: 84 passed. The final SQL556 regressions cover
+ordinary assessed pass/reject, unverified/parser errors, zero-cost local duplicate
+rejection, misconduct rejection, settlement replay, legacy isolation, source
+mismatch, and guarded migration replay. Independent review identified and fixed
+both discarded database assessment metadata and stale-frozen scoring blockage.
+
+A separate 17-test replay/helper run passed. Saved live ledger rows, provider
+bytes, worker receipts and agent acknowledgments passed through the real export
+assembler and final gate with explicitly synthetic benchmark, source context,
+input/output, judgment and phase records. Source bytes match the reviewed fixture.
+The original phase-incomplete diagnostic export failed, as did missing-request
+and missing-agent-ack variants. This is a hybrid replay, not a live admitted
+production qualification.
+
+The new gate does not prove thinking faithfulness, downstream training gain,
+production latency, or full real-ICP quality. Large-round export-read latency has
+not been measured. Default-off activation and representative end-to-end release
+validation remain prerequisites. No production apply, restart, merge, or deploy
+was performed. Migration555 is the renamed former551; migration556 persists the
+new bounded review result. Both must pass the normal release workflow.
+
+Machine summary: [reviewer/capture evidence](evidence/full-thinking/reviewer-capture-validation-20261024.json).

@@ -105,6 +105,7 @@ def test_marker_absent_round_retains_historical_cost_projection_shape():
     baseline = public_dashboard.round_summary(_published_row(policy=False))["baseline"]
 
     cost = baseline["cost_summary"]
+    assert "training_data_eligibility" not in baseline
     assert set(cost) == {
         "returned_company_count",
         "execution_cap_microusd",
@@ -128,6 +129,69 @@ def test_marker_absent_round_retains_historical_cost_projection_shape():
         "provider",
         *(expected_bucket_keys - {"providers"}),
     }
+
+
+def test_training_eligibility_projects_only_fixed_reasons_and_counts():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    ranking["training_data_eligibility"] = {
+        "eligible": False,
+        "reasons": ["full_thinking_call_missing", "source_review_not_passed"],
+        "source_review": {
+            "eligible": False,
+            "reasons": ["source_review_not_passed"],
+            "counts": {"enabled": 1, "reviewed": 0, "private_count": 999},
+            "reviewer_excerpt": "private source text",
+        },
+        "capture": {
+            "eligible": False,
+            "reasons": ["full_thinking_call_missing"],
+            "counts": {"enabled": 1, "selected_runs": 20, "checked_runs": 19,
+                       "model_calls": 40, "full_thinking_calls": 0,
+                       "tool_only_empty_calls": 1},
+            "raw_trace": "private reasoning text",
+        },
+        "metadata": {"private": "do not publish"},
+    }
+
+    baseline = public_dashboard.round_summary(row)["baseline"]
+
+    assert baseline["eligible"] is False
+    assert baseline["eligibility_reason"] == "training_data_incomplete"
+    assert baseline["training_data_eligibility"] == {
+        "eligible": False,
+        "reasons": ["full_thinking_call_missing", "source_review_not_passed"],
+        "source_review": {
+            "eligible": False,
+            "reasons": ["source_review_not_passed"],
+            "counts": {"enabled": 1, "reviewed": 0},
+        },
+        "capture": {
+            "eligible": False,
+            "reasons": ["full_thinking_call_missing"],
+            "counts": {"enabled": 1, "selected_runs": 20, "checked_runs": 19,
+                       "model_calls": 40, "full_thinking_calls": 0,
+                       "tool_only_empty_calls": 1},
+        },
+    }
+    assert "private source text" not in str(baseline)
+    assert "private reasoning text" not in str(baseline)
+
+
+def test_training_eligibility_drops_unrecognized_reason_text():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    ranking["training_data_eligibility"] = {
+        "eligible": False,
+        "reasons": ["raw secret: should never publish"],
+    }
+
+    baseline = public_dashboard.round_summary(row)["baseline"]
+
+    assert baseline["eligibility_reason"] == "training_data_incomplete"
+    assert "training_data_eligibility" not in baseline
 
 
 def test_new_policy_projection_rejects_incomplete_successful_call_counters():

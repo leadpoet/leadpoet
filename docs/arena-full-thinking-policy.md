@@ -57,6 +57,8 @@ exposes full thinking. New routes require the same evidence and tests.
 
 | Requirement | Implemented behavior / required proof |
 | --- | --- |
+| Existing source review | In future full-thinking rounds, the existing paid full-source review also checks reachable model-directed research. Python, custom tools, harnesses, and fixed safety/budget scaffolding remain allowed. Fixed extraction workflows and ignored/post-hoc model calls do not satisfy the requirement. Ambiguous control remains unverified. Store the assessment against the exact source archive and review policy. |
+| Champion data eligibility | After execution, ordinary code reads the selected accepted runs from durable storage. Require complete linked raw evidence and readable full-thinking text on the approved route. A missing or stale source assessment, missing export, truncation, or wrong route prevents champion eligibility; it does not cancel the round or change the measured score. No extra LLM call reviews runtime traces. |
 | Central collection | Apply policy before hashing, capture, and budget admission to all execution model calls. Miner, baseline, and subagent calls share the same gateway. Judges retain their policy. |
 | Exact routes | Freeze the reviewed registry in each new round. Pin provider and version expectations. Reject unsupported routes before dispatch. Record returned route mismatches without stopping scoring; exclude them from strict exports. |
 | Tool and JSON continuity | Preserve reasoning fields, signatures, opaque continuation state, tool IDs, ordering, and caller schemas in the live conversation. Validate two tool continuations and strict JSON. Never insert thinking into a JSON answer. |
@@ -97,8 +99,8 @@ quality may change; the user has accepted this tradeoff.
   run, or production readiness. Before activation, run representative ICPs,
   verify stored/exported artifacts and publication, and review latency, spend,
   failure rates, and output quality. No production claim is made in this PR.
-- Apply exact committed migration `551-lab-arena-full-thinking-six-dollar-cap.sql`
-  through the normal release workflow before activation. It checks source hashes
+- Apply exact committed migration `555-lab-arena-full-thinking-six-dollar-cap.sql`
+  and `556-lab-arena-research-review-result.sql` through the normal release workflow before activation. It checks source hashes
   and database privileges, preserves unrelated behavior, and is idempotent.
 
 ## Reproducible checks
@@ -127,3 +129,31 @@ route. It also records tested routes that did not qualify, without silently
 admitting them or changing the provider. These are compatibility approvals, not
 a claim that every call returns thinking or that any model has passed a full
 sales task evaluation.
+
+## Source review and final stored-data check — 2026-10-24
+
+The new scope keeps the current miner-controlled harness. It does not add a
+mandatory shared agent loop, new judge, or confidence-based reward. The review
+request adds source-backed research-control findings to the existing review.
+The reviewer uses the submitting miner's credential and existing reservation,
+settlement, and retry rules. The post-run check makes no provider requests.
+Existing organizer baseline funding and its source-review exemption remain;
+the baseline is only a measured comparison and is never a contender. Its capture
+gaps are reported, but do not prevent a verified challenger from beating its score.
+
+The source review estimates whether the code can use observations to choose
+substantive research actions and finish/continue. It is not proof that every run
+uses that capability. The stored-data check verifies what was returned, delivered,
+and retained; it does not prove written thinking faithfully caused a decision or
+that a long trace is good training data. No unseen private reasoning is inferred.
+Missing full text is distinct from summaries, opaque state, or token counts.
+Opaque continuation state can coexist with eligible full text and is preserved.
+
+Each finalist's saved publication includes a bounded training eligibility result.
+The public round/submission view shows reasons and counts without exposing source
+review prose or private traces. Training dataset permissions, splits, deduplication,
+and label checks remain separate; they are not new champion score rules.
+
+Only future opted-in rounds use these requirements. This PR stays default off.
+Migration 555 was renumbered from 551 after the latest main branch added its own
+551 through 554 migrations. No production migration or activation is part of this PR.

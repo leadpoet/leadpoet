@@ -3,7 +3,7 @@
 BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='30s';
-DO $full_thinking_cap551$
+DO $full_thinking_cap555$
 DECLARE
   item RECORD;
   source TEXT;
@@ -114,6 +114,6 @@ BEGIN
     END IF;
   END LOOP;
 END;
-$full_thinking_cap551$;
+$full_thinking_cap555$;
 NOTIFY pgrst,'reload schema';
 COMMIT;

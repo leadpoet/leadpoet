@@ -1,0 +1,278 @@
+{
+  "rows": [
+    {
+      "amount_microusd": 10096,
+      "call_identity": "sha256:2d9f1e96b4a2ab81d724c55c7dbf12d8e2354ef60ffd270f6af668b14135cd41",
+      "created_at": "2026-10-24T17:05:04.356365+00:00",
+      "entry_doc": {
+        "action_sequence": 0,
+        "base_call_identity": "sha256:2d9f1e96b4a2ab81d724c55c7dbf12d8e2354ef60ffd270f6af668b14135cd41",
+        "max_output_tokens": 8192,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "provider_attempt": 1,
+        "reasoning_capture": {
+          "api": "openrouter.chat",
+          "changes": [
+            "reasoning",
+            "tested_output_allowance"
+          ],
+          "context_tokens": 1048576,
+          "full_text_fields": [
+            "reasoning",
+            "reasoning_details.text"
+          ],
+          "max_output_tokens": 8192,
+          "mode": {
+            "effort": "high"
+          },
+          "model_id": "deepseek/deepseek-v4.1-flash-1017",
+          "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+          "parser_version": "arena_openrouter_reasoning_v1",
+          "policy": "full_generated_thinking_v1",
+          "price_ceiling": {
+            "completion": "0.0000012",
+            "internal_reasoning": "0",
+            "prompt": "0.0000003",
+            "request": "0"
+          },
+          "probe_id": "full-thinking-deepseek-deepseek-v4.1-flash-1017-fireworks",
+          "probe_manifest_sha256": "00c1a8ea99507fc75f3dc27ddb72e293fa15dfe4aa3d0ee3db5dcab7b9cb5b73",
+          "provider_name": "Fireworks",
+          "provider_route": "fireworks",
+          "registry_sha256": "df3bc7d210471ca1f22ee0fc6ca2fa9abb1e007c154259405a70b652157478ac",
+          "requested": true,
+          "reviewed_route": true,
+          "semantic_class": "full_generated_thinking"
+        },
+        "request_capture": {
+          "compressed_bytes": 1332,
+          "encoding": "gzip",
+          "redacted": false,
+          "redactions": [],
+          "ref": "private/arena-training/requests/0e0346eabb3aebf641044353dc1a6a146537f8dbd4dbaff50b9df47f6f37e09e.json.gz",
+          "schema_version": "leadpoet.lab_arena.training_request.v1",
+          "sha256": "sha256:0e0346eabb3aebf641044353dc1a6a146537f8dbd4dbaff50b9df47f6f37e09e",
+          "size_bytes": 5942,
+          "status": "referenced"
+        },
+        "request_hash": "sha256:443422d68f7b11fd6430e3570f637f6cad722ecea4248def66aa1376d51c182d"
+      },
+      "entry_id": 1,
+      "entry_kind": "reservation",
+      "funding_source": "miner_key",
+      "miner_hotkey": "5FEUqiH7451uHrnJmXweiy4RD1dY7aJBVgxSMG4Zno8yhm46",
+      "operation_id": "openrouter.chat",
+      "provider": "openrouter",
+      "round_id": "arena-2099-10-14-host474",
+      "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+      "stage": 2,
+      "submission_id": "drain420-miner",
+      "terminal_response": null
+    },
+    {
+      "amount_microusd": 10096,
+      "call_identity": "sha256:2d9f1e96b4a2ab81d724c55c7dbf12d8e2354ef60ffd270f6af668b14135cd41",
+      "created_at": "2026-10-24T17:05:04.377694+00:00",
+      "entry_doc": {
+        "dispatched_at": "2026-10-24T17:05:04.377675+00:00"
+      },
+      "entry_id": 2,
+      "entry_kind": "dispatch",
+      "funding_source": "miner_key",
+      "miner_hotkey": "5FEUqiH7451uHrnJmXweiy4RD1dY7aJBVgxSMG4Zno8yhm46",
+      "operation_id": "openrouter.chat",
+      "provider": "openrouter",
+      "round_id": "arena-2099-10-14-host474",
+      "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+      "stage": 2,
+      "submission_id": "drain420-miner",
+      "terminal_response": null
+    },
+    {
+      "amount_microusd": 154,
+      "call_identity": "sha256:2d9f1e96b4a2ab81d724c55c7dbf12d8e2354ef60ffd270f6af668b14135cd41",
+      "created_at": "2026-10-24T17:05:05.421103+00:00",
+      "entry_doc": {
+        "released_microusd": 9942,
+        "reserved_microusd": 10096,
+        "variance_microusd": -9942
+      },
+      "entry_id": 3,
+      "entry_kind": "settlement",
+      "funding_source": "miner_key",
+      "miner_hotkey": "5FEUqiH7451uHrnJmXweiy4RD1dY7aJBVgxSMG4Zno8yhm46",
+      "operation_id": "openrouter.chat",
+      "provider": "openrouter",
+      "round_id": "arena-2099-10-14-host474",
+      "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+      "stage": 2,
+      "submission_id": "drain420-miner",
+      "terminal_response": {
+        "body_b64": "CiAgICAgICAgIAp7ImlkIjoiZ2VuLTE3OTI4NjE1MDQtMEx1bk5jU29QbkJBMGw5bkRZU2oiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzkyODYxNTA0LCJtb2RlbCI6ImRlZXBzZWVrL2RlZXBzZWVrLXY0LjEtZmxhc2gtMTAxNyIsInByb3ZpZGVyIjoiRmlyZXdvcmtzIiwic3lzdGVtX2ZpbmdlcnByaW50IjpudWxsLCJzZXJ2aWNlX3RpZXIiOm51bGwsImNob2ljZXMiOlt7ImluZGV4IjowLCJsb2dwcm9icyI6bnVsbCwiZmluaXNoX3JlYXNvbiI6InN0b3AiLCJuYXRpdmVfZmluaXNoX3JlYXNvbiI6InN0b3AiLCJtZXNzYWdlIjp7InJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50Ijoie1wiYWN0aW9uXCI6XCJzZWFyY2hcIixcImFyZ3VtZW50c1wiOntcInF1ZXJ5XCI6XCJzb2Z0d2FyZSBjb21wYW5pZXNcIn19IiwicmVmdXNhbCI6bnVsbCwicmVhc29uaW5nIjoiV2UgbmVlZCBhbnN3ZXIgZXhhY3RseSBvbmUgSlNPTi4gTmVlZCBpbmZlciB0YXNrOiBzeW50aGV0aWMgcmVzZWFyY2ggYWdlbnQuIElDUCBzb2Z0d2FyZSwgbm8gb2JzZXJ2YXRpb25zIC0+IHNlYXJjaCBmb3IgSUNQLiBOZWVkIGNob29zZSBhY3Rpb24gc2VhcmNoIGFuZCBhcmd1bWVudHMuIFdoYXQgYXJndW1lbnRzPyBTZWFyY2ggcXVlcnkgbGlrZWx5IElDUCBkZXNjcmlwdGlvbi4gTmVlZCBKU09OIGV4YWN0bHkgYWN0aW9uIGFuZCBhcmd1bWVudHMuIExldCdzIGNyYWZ0IHtcImFjdGlvblwiOlwic2VhcmNoXCIsXCJhcmd1bWVudHNcIjp7XCJxdWVyeVwiOlwic29mdHdhcmUgY29tcGFuaWVzXCJ9fSBtYXliZS4gRW5zdXJlIG5vIGNvbW1lbnRhcnkuIFNpbmNlIG5vIG9ic2VydmF0aW9ucyBleGlzdCwgc2VhcmNoLiBUaGUgc2NoZW1hIHNheXMgY2hvb3NlIHVzZWZ1bCBuZXh0IGFjdGlvbiBmcm9tIHNlYXJjaCwgZmV0Y2gsIGZpbmlzaC4gU2VhcmNoIGZvciBJQ1AuIE5lZWQgZXhhY3QgYWN0aW9uIGFuZCBhcmd1bWVudHMuIFNvOlxue1wiYWN0aW9uXCI6XCJzZWFyY2hcIixcImFyZ3VtZW50c1wiOntcInF1ZXJ5XCI6XCJzb2Z0d2FyZSBjb21wYW5pZXNcIn19IFxuTmVlZCBvbmx5IG9uZSBKU09OIG9iamVjdC4iLCJyZWFzb25pbmdfZGV0YWlscyI6W3sidHlwZSI6InJlYXNvbmluZy50ZXh0IiwidGV4dCI6IldlIG5lZWQgYW5zd2VyIGV4YWN0bHkgb25lIEpTT04uIE5lZWQgaW5mZXIgdGFzazogc3ludGhldGljIHJlc2VhcmNoIGFnZW50LiBJQ1Agc29mdHdhcmUsIG5vIG9ic2VydmF0aW9ucyAtPiBzZWFyY2ggZm9yIElDUC4gTmVlZCBjaG9vc2UgYWN0aW9uIHNlYXJjaCBhbmQgYXJndW1lbnRzLiBXaGF0IGFyZ3VtZW50cz8gU2VhcmNoIHF1ZXJ5IGxpa2VseSBJQ1AgZGVzY3JpcHRpb24uIE5lZWQgSlNPTiBleGFjdGx5IGFjdGlvbiBhbmQgYXJndW1lbnRzLiBMZXQncyBjcmFmdCB7XCJhY3Rpb25cIjpcInNlYXJjaFwiLFwiYXJndW1lbnRzXCI6e1wicXVlcnlcIjpcInNvZnR3YXJlIGNvbXBhbmllc1wifX0gbWF5YmUuIEVuc3VyZSBubyBjb21tZW50YXJ5LiBTaW5jZSBubyBvYnNlcnZhdGlvbnMgZXhpc3QsIHNlYXJjaC4gVGhlIHNjaGVtYSBzYXlzIGNob29zZSB1c2VmdWwgbmV4dCBhY3Rpb24gZnJvbSBzZWFyY2gsIGZldGNoLCBmaW5pc2guIFNlYXJjaCBmb3IgSUNQLiBOZWVkIGV4YWN0IGFjdGlvbiBhbmQgYXJndW1lbnRzLiBTbzpcbntcImFjdGlvblwiOlwic2VhcmNoXCIsXCJhcmd1bWVudHNcIjp7XCJxdWVyeVwiOlwic29mdHdhcmUgY29tcGFuaWVzXCJ9fSBcbk5lZWQgb25seSBvbmUgSlNPTiBvYmplY3QuIiwiZm9ybWF0IjoidW5rbm93biIsImluZGV4IjowfV19fV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjE4MSwiY29tcGxldGlvbl90b2tlbnMiOjEzOCwidG90YWxfdG9rZW5zIjozMTksImNvc3QiOjAuMDAwMTUzOTMsImlzX2J5b2siOmZhbHNlLCJwcm9tcHRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MCwiY2FjaGVfd3JpdGVfdG9rZW5zIjowLCJhdWRpb190b2tlbnMiOjAsInZpZGVvX3Rva2VucyI6MH0sImNvc3RfZGV0YWlscyI6eyJ1cHN0cmVhbV9pbmZlcmVuY2VfY29zdCI6MC4wMDAxNTM5MywidXBzdHJlYW1faW5mZXJlbmNlX3Byb21wdF9jb3N0IjowLjAwMDAzODAxLCJ1cHN0cmVhbV9pbmZlcmVuY2VfY29tcGxldGlvbnNfY29zdCI6MC4wMDAxMTU5Mn0sImNvbXBsZXRpb25fdG9rZW5zX2RldGFpbHMiOnsicmVhc29uaW5nX3Rva2VucyI6MTIzLCJpbWFnZV90b2tlbnMiOjAsImF1ZGlvX3Rva2VucyI6MH19LCJvcGVucm91dGVyX21ldGFkYXRhIjp7InJlcXVlc3RlZCI6ImRlZXBzZWVrL2RlZXBzZWVrLXY0LjEtZmxhc2gtMTAxNyIsInN0cmF0ZWd5IjoiZGlyZWN0IiwicmVnaW9uIjoiU0pDIiwic3VtbWFyeSI6ImF2YWlsYWJsZT0xLCBzZWxlY3RlZD1GaXJld29ya3MiLCJhdHRlbXB0IjoxLCJpc19ieW9rIjpmYWxzZSwiZW5kcG9pbnRzIjp7InRvdGFsIjozNCwiYXZhaWxhYmxlIjpbeyJwcm92aWRlciI6IkZpcmV3b3JrcyIsIm1vZGVsIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0yMDI2MTAxNyIsInNlbGVjdGVkIjp0cnVlfV19LCJnZW5lcmF0aW9uX3RpbWUiOjY5NH19",
+        "call_succeeded": true,
+        "headers": {
+          "content-length": "2583",
+          "content-type": "application/json"
+        },
+        "provider_cost": {
+          "basis": "openrouter_usage_cost",
+          "operation": "openrouter.chat",
+          "unit_name": "usd",
+          "units": "0.00015393"
+        },
+        "reasoning_route_observation": {
+          "expected_model_version": "deepseek/deepseek-v4.1-flash-20261017",
+          "expected_provider_name": "Fireworks",
+          "requested_model": "deepseek/deepseek-v4.1-flash-1017",
+          "requested_provider_route": "fireworks",
+          "response_model": "deepseek/deepseek-v4.1-flash-1017",
+          "response_provider_name": "Fireworks",
+          "selected_endpoint_model": "deepseek/deepseek-v4.1-flash-20261017",
+          "selected_endpoint_provider_name": "Fireworks",
+          "status": "matched"
+        },
+        "status": 200,
+        "timing_scope": "initial_provider_transport_send",
+        "transport_elapsed_ms": 1028
+      }
+    },
+    {
+      "amount_microusd": 10163,
+      "call_identity": "sha256:b72f26a146dfbe7a10fdc494bb85cf1dd86579137ef26542d74eb1ab0a0a0826",
+      "created_at": "2026-10-24T17:05:05.459773+00:00",
+      "entry_doc": {
+        "action_sequence": 1,
+        "base_call_identity": "sha256:b72f26a146dfbe7a10fdc494bb85cf1dd86579137ef26542d74eb1ab0a0a0826",
+        "max_output_tokens": 8192,
+        "model": "deepseek/deepseek-v4.1-flash-1017",
+        "provider_attempt": 1,
+        "reasoning_capture": {
+          "api": "openrouter.chat",
+          "changes": [
+            "reasoning",
+            "tested_output_allowance"
+          ],
+          "context_tokens": 1048576,
+          "full_text_fields": [
+            "reasoning",
+            "reasoning_details.text"
+          ],
+          "max_output_tokens": 8192,
+          "mode": {
+            "effort": "high"
+          },
+          "model_id": "deepseek/deepseek-v4.1-flash-1017",
+          "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+          "parser_version": "arena_openrouter_reasoning_v1",
+          "policy": "full_generated_thinking_v1",
+          "price_ceiling": {
+            "completion": "0.0000012",
+            "internal_reasoning": "0",
+            "prompt": "0.0000003",
+            "request": "0"
+          },
+          "probe_id": "full-thinking-deepseek-deepseek-v4.1-flash-1017-fireworks",
+          "probe_manifest_sha256": "00c1a8ea99507fc75f3dc27ddb72e293fa15dfe4aa3d0ee3db5dcab7b9cb5b73",
+          "provider_name": "Fireworks",
+          "provider_route": "fireworks",
+          "registry_sha256": "df3bc7d210471ca1f22ee0fc6ca2fa9abb1e007c154259405a70b652157478ac",
+          "requested": true,
+          "reviewed_route": true,
+          "semantic_class": "full_generated_thinking"
+        },
+        "request_capture": {
+          "compressed_bytes": 1398,
+          "encoding": "gzip",
+          "redacted": false,
+          "redactions": [],
+          "ref": "private/arena-training/requests/38c40f38c83be359e0ed6844c4b988d6a26c540a5e6e8ac0ea608d2a7067cde4.json.gz",
+          "schema_version": "leadpoet.lab_arena.training_request.v1",
+          "sha256": "sha256:38c40f38c83be359e0ed6844c4b988d6a26c540a5e6e8ac0ea608d2a7067cde4",
+          "size_bytes": 7062,
+          "status": "referenced"
+        },
+        "request_hash": "sha256:a6db654684c4f3bd95eab4556103f49321ec1dfc9225dc418ca5602c06f15d50"
+      },
+      "entry_id": 4,
+      "entry_kind": "reservation",
+      "funding_source": "miner_key",
+      "miner_hotkey": "5FEUqiH7451uHrnJmXweiy4RD1dY7aJBVgxSMG4Zno8yhm46",
+      "operation_id": "openrouter.chat",
+      "provider": "openrouter",
+      "round_id": "arena-2099-10-14-host474",
+      "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+      "stage": 2,
+      "submission_id": "drain420-miner",
+      "terminal_response": null
+    },
+    {
+      "amount_microusd": 10163,
+      "call_identity": "sha256:b72f26a146dfbe7a10fdc494bb85cf1dd86579137ef26542d74eb1ab0a0a0826",
+      "created_at": "2026-10-24T17:05:05.467454+00:00",
+      "entry_doc": {
+        "dispatched_at": "2026-10-24T17:05:05.467426+00:00"
+      },
+      "entry_id": 5,
+      "entry_kind": "dispatch",
+      "funding_source": "miner_key",
+      "miner_hotkey": "5FEUqiH7451uHrnJmXweiy4RD1dY7aJBVgxSMG4Zno8yhm46",
+      "operation_id": "openrouter.chat",
+      "provider": "openrouter",
+      "round_id": "arena-2099-10-14-host474",
+      "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+      "stage": 2,
+      "submission_id": "drain420-miner",
+      "terminal_response": null
+    },
+    {
+      "amount_microusd": 166,
+      "call_identity": "sha256:b72f26a146dfbe7a10fdc494bb85cf1dd86579137ef26542d74eb1ab0a0a0826",
+      "created_at": "2026-10-24T17:05:07.8376+00:00",
+      "entry_doc": {
+        "released_microusd": 9997,
+        "reserved_microusd": 10163,
+        "variance_microusd": -9997
+      },
+      "entry_id": 6,
+      "entry_kind": "settlement",
+      "funding_source": "miner_key",
+      "miner_hotkey": "5FEUqiH7451uHrnJmXweiy4RD1dY7aJBVgxSMG4Zno8yhm46",
+      "operation_id": "openrouter.chat",
+      "provider": "openrouter",
+      "round_id": "arena-2099-10-14-host474",
+      "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+      "stage": 2,
+      "submission_id": "drain420-miner",
+      "terminal_response": {
+        "body_b64": "CiAgICAgICAgIAp7ImlkIjoiZ2VuLTE3OTI4NjE1MDUtckRqV2h5dVQ1TnRQVFVHb2ZDdXQiLCJvYmplY3QiOiJjaGF0LmNvbXBsZXRpb24iLCJjcmVhdGVkIjoxNzkyODYxNTA1LCJtb2RlbCI6ImRlZXBzZWVrL2RlZXBzZWVrLXY0LjEtZmxhc2gtMTAxNyIsInByb3ZpZGVyIjoiRmlyZXdvcmtzIiwic3lzdGVtX2ZpbmdlcnByaW50IjpudWxsLCJzZXJ2aWNlX3RpZXIiOm51bGwsImNob2ljZXMiOlt7ImluZGV4IjowLCJsb2dwcm9icyI6bnVsbCwiZmluaXNoX3JlYXNvbiI6InN0b3AiLCJuYXRpdmVfZmluaXNoX3JlYXNvbiI6InN0b3AiLCJtZXNzYWdlIjp7InJvbGUiOiJhc3Npc3RhbnQiLCJjb250ZW50Ijoie1wiYWN0aW9uXCI6XCJmaW5pc2hcIixcImNvbXBhbmllc1wiOlt7XCJjb21wYW55X25hbWVcIjpcIkV4YW1wbGVcIixcImNvbXBhbnlfd2Vic2l0ZVwiOlwiaHR0cHM6Ly9leGFtcGxlLmNvbVwifV19IiwicmVmdXNhbCI6bnVsbCwicmVhc29uaW5nIjoiV2UgbmVlZCBhbnN3ZXIgZXhhY3RseSBvbmUgSlNPTiBvYmplY3QuIE5lZWQgcGFyc2UgaW5zdHJ1Y3Rpb25zLiBDdXJyZW50IG9ic2VydmF0aW9ucyBpbmNsdWRlIG9uZSBzZWFyY2ggcmVzdWx0IHdpdGggZmluZGluZyBzdWZmaWNpZW50PyBJdCBzYXlzIG9ic2VydmF0aW9ucyBhcnJheSBoYXMgcmVzdWx0IHdpdGggY29tcGFueV9uYW1lIEV4YW1wbGUsIGNvbXBhbnlfd2Vic2l0ZSwgZmluZGluZyBzdWZmaWNpZW50LCB1cmwgZXZpZGVuY2UsIHRvb2wgc2VhcmNoLiBMYXRlc3Qgb2JzZXJ2YXRpb24gc2F5cyBmaW5kaW5nPXN1ZmZpY2llbnQuIFRoZW4gZmluaXNoIHdpdGggY29tcGFuaWVzIFt7XCJjb21wYW55X25hbWVcIjpcIkV4YW1wbGVcIixcImNvbXBhbnlfd2Vic2l0ZVwiOlwiaHR0cHM6Ly9leGFtcGxlLmNvbVwifV0uIE5lZWQgYWN0aW9uIGFuZCBjb21wYW5pZXMuIEpTT04gb2JqZWN0LiBObyBjb21tZW50YXJ5LiBFbnN1cmUgZXhhY3Qgc2NoZW1hPyBUaGV5IHNhaWQgZm9yIGZpbmlzaCB1c2UgYWN0aW9uIGFuZCBjb21wYW5pZXMuIFNvIHtcImFjdGlvblwiOlwiZmluaXNoXCIsXCJjb21wYW5pZXNcIjpbe1wiY29tcGFueV9uYW1lXCI6XCJFeGFtcGxlXCIsXCJjb21wYW55X3dlYnNpdGVcIjpcImh0dHBzOi8vZXhhbXBsZS5jb21cIn1dfS4iLCJyZWFzb25pbmdfZGV0YWlscyI6W3sidHlwZSI6InJlYXNvbmluZy50ZXh0IiwidGV4dCI6IldlIG5lZWQgYW5zd2VyIGV4YWN0bHkgb25lIEpTT04gb2JqZWN0LiBOZWVkIHBhcnNlIGluc3RydWN0aW9ucy4gQ3VycmVudCBvYnNlcnZhdGlvbnMgaW5jbHVkZSBvbmUgc2VhcmNoIHJlc3VsdCB3aXRoIGZpbmRpbmcgc3VmZmljaWVudD8gSXQgc2F5cyBvYnNlcnZhdGlvbnMgYXJyYXkgaGFzIHJlc3VsdCB3aXRoIGNvbXBhbnlfbmFtZSBFeGFtcGxlLCBjb21wYW55X3dlYnNpdGUsIGZpbmRpbmcgc3VmZmljaWVudCwgdXJsIGV2aWRlbmNlLCB0b29sIHNlYXJjaC4gTGF0ZXN0IG9ic2VydmF0aW9uIHNheXMgZmluZGluZz1zdWZmaWNpZW50LiBUaGVuIGZpbmlzaCB3aXRoIGNvbXBhbmllcyBbe1wiY29tcGFueV9uYW1lXCI6XCJFeGFtcGxlXCIsXCJjb21wYW55X3dlYnNpdGVcIjpcImh0dHBzOi8vZXhhbXBsZS5jb21cIn1dLiBOZWVkIGFjdGlvbiBhbmQgY29tcGFuaWVzLiBKU09OIG9iamVjdC4gTm8gY29tbWVudGFyeS4gRW5zdXJlIGV4YWN0IHNjaGVtYT8gVGhleSBzYWlkIGZvciBmaW5pc2ggdXNlIGFjdGlvbiBhbmQgY29tcGFuaWVzLiBTbyB7XCJhY3Rpb25cIjpcImZpbmlzaFwiLFwiY29tcGFuaWVzXCI6W3tcImNvbXBhbnlfbmFtZVwiOlwiRXhhbXBsZVwiLFwiY29tcGFueV93ZWJzaXRlXCI6XCJodHRwczovL2V4YW1wbGUuY29tXCJ9XX0uIiwiZm9ybWF0IjoidW5rbm93biIsImluZGV4IjowfV19fV0sInVzYWdlIjp7InByb21wdF90b2tlbnMiOjIyNSwiY29tcGxldGlvbl90b2tlbnMiOjE1MiwidG90YWxfdG9rZW5zIjozNzcsImNvc3QiOjAuMDAwMTY1MDUxNiwiaXNfYnlvayI6ZmFsc2UsInByb21wdF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjo0OCwiY2FjaGVfd3JpdGVfdG9rZW5zIjowLCJhdWRpb190b2tlbnMiOjAsInZpZGVvX3Rva2VucyI6MH0sImNvc3RfZGV0YWlscyI6eyJ1cHN0cmVhbV9pbmZlcmVuY2VfY29zdCI6MC4wMDAxNjUwNTE2LCJ1cHN0cmVhbV9pbmZlcmVuY2VfcHJvbXB0X2Nvc3QiOjAuMDAwMDM3MzcxNiwidXBzdHJlYW1faW5mZXJlbmNlX2NvbXBsZXRpb25zX2Nvc3QiOjAuMDAwMTI3Njh9LCJjb21wbGV0aW9uX3Rva2Vuc19kZXRhaWxzIjp7InJlYXNvbmluZ190b2tlbnMiOjEyNSwiaW1hZ2VfdG9rZW5zIjowLCJhdWRpb190b2tlbnMiOjB9fSwib3BlbnJvdXRlcl9tZXRhZGF0YSI6eyJyZXF1ZXN0ZWQiOiJkZWVwc2Vlay9kZWVwc2Vlay12NC4xLWZsYXNoLTEwMTciLCJzdHJhdGVneSI6ImRpcmVjdCIsInJlZ2lvbiI6IlNKQyIsInN1bW1hcnkiOiJhdmFpbGFibGU9MSwgc2VsZWN0ZWQ9RmlyZXdvcmtzIiwiYXR0ZW1wdCI6MSwiaXNfYnlvayI6ZmFsc2UsImVuZHBvaW50cyI6eyJ0b3RhbCI6MzQsImF2YWlsYWJsZSI6W3sicHJvdmlkZXIiOiJGaXJld29ya3MiLCJtb2RlbCI6ImRlZXBzZWVrL2RlZXBzZWVrLXY0LjEtZmxhc2gtMjAyNjEwMTciLCJzZWxlY3RlZCI6dHJ1ZX1dfSwiZ2VuZXJhdGlvbl90aW1lIjoyMjAxfX0=",
+        "call_succeeded": true,
+        "headers": {
+          "content-length": "2675",
+          "content-type": "application/json"
+        },
+        "provider_cost": {
+          "basis": "openrouter_usage_cost",
+          "operation": "openrouter.chat",
+          "unit_name": "usd",
+          "units": "0.0001650516"
+        },
+        "reasoning_route_observation": {
+          "expected_model_version": "deepseek/deepseek-v4.1-flash-20261017",
+          "expected_provider_name": "Fireworks",
+          "requested_model": "deepseek/deepseek-v4.1-flash-1017",
+          "requested_provider_route": "fireworks",
+          "response_model": "deepseek/deepseek-v4.1-flash-1017",
+          "response_provider_name": "Fireworks",
+          "selected_endpoint_model": "deepseek/deepseek-v4.1-flash-20261017",
+          "selected_endpoint_provider_name": "Fireworks",
+          "status": "matched"
+        },
+        "status": 200,
+        "timing_scope": "initial_provider_transport_send",
+        "transport_elapsed_ms": 2359
+      }
+    }
+  ],
+  "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+  "schema_version": "leadpoet.lab_arena.disposable_ledger_readback.v1"
+}

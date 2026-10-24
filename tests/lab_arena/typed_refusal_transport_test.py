@@ -239,14 +239,18 @@ def test_complete_refusal_review_can_be_unproven_but_incomplete_claim_cannot(
     result, calls = _investigate(
         monkeypatch, broker.BrokerResult(status, headers, body, call),
     )
-    assert calls == {"fetch": 1, "exa": 0, "model": 2}
+    # Existing typed source refusals use the bounded exact-URL Exa fallback.
+    assert calls == {"fetch": 1, "exa": 1, "model": 2}
     assert result["_completed_submit"] is True
     assert result["failure_reason"] == ""
     outcomes = result["usage"]["fetch_outcomes"]
-    assert len(outcomes) == 1
+    assert len(outcomes) == 2
     assert outcomes[0]["ok"] is False
     assert outcomes[0]["error_class"] == "provider_request_refused"
     assert outcomes[0]["loaded_text_length"] == 0
+    assert outcomes[1]["ok"] is True
+    assert outcomes[1]["url_sha256"] == outcomes[0]["url_sha256"]
+    assert outcomes[1]["loaded_text_length"] > 0
     receipt = {
         "gate": "company_evidence_investigation",
         "completed_submitted_findings": result["_completed_submit"],

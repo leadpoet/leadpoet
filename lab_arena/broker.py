@@ -395,6 +395,24 @@ class OpenRouterSharedGate:
                     self._cleanup_locked(now)
                     _record_gate("timed_out")
                     return None
+                # This caller is next and has capacity; only the throttle
+                # cooldown holds it. When that cooldown outlasts its own
+                # deadline the wait cannot succeed, so sleeping to the
+                # deadline only spends the run's budget on a refusal it
+                # already has to handle. Give the time back to the retry and
+                # say which refusal this was.
+                if (
+                    state.waiters
+                    and state.waiters[0] == ticket
+                    and state.active < self.max_concurrency
+                    and state.cooldown_until >= deadline
+                ):
+                    state.waiters.popleft()
+                    state.last_used = now
+                    self._condition.notify_all()
+                    self._cleanup_locked(now)
+                    _record_gate("cooldown_exceeds_deadline")
+                    return None
                 wake_at = deadline
                 if (
                     state.waiters

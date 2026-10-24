@@ -1,19 +1,17 @@
 -- Take a shared, not exclusive, hold on the round row in lab_arena_expire_leases.
 --
 -- The lease sweep reads the round (status and stage_generation) and never writes
--- it; its writes are all to lab_arena_runs. The exclusive hold it takes therefore
--- buys nothing it needs, and it conflicts with the FOR SHARE hold that
--- lab_arena_claim_assignment takes on the same row. Once a claim is slow enough
--- that one is almost always in flight, the sweep waits, sits at the head of the
--- lock queue, and every claim arriving behind it waits too and dies on its 5s
--- lock_timeout (55P03). Observed 2026-10-24 from 14:25Z: the sweep timed out on
--- every attempt and 13-20% of run claims were refused.
+-- it; its writes are all to lab_arena_runs. Provider and completion RPCs hold
+-- FOR SHARE on the round before locking their run. An exclusive sweep waits
+-- behind them while holding the claim-control advisory lock, which blocks
+-- subsequent claims. A healthy sweep needs no run locks and can instead finish
+-- under FOR SHARE. Recovery still locks each affected run before checking its
+-- current provider accounting, so it excludes provider changes on that run.
 --
 -- FOR SHARE still excludes lab_arena_close_stage and the other progression RPCs,
--- which take FOR UPDATE — the migration-490 lock order is unchanged. Two sweeps
--- may now overlap; under READ COMMITTED each re-checks a run row after taking
--- FOR UPDATE on it, so a run already moved to 'failed' no longer matches the
--- status='leased' predicate and is not processed twice.
+-- which take FOR UPDATE. The control -> round -> run lock order is unchanged.
+-- Sweeps retain their existing exclusive claim-control advisory lock, which
+-- serializes sweeps and claims and prevents duplicate retry creation.
 --
 -- Only the lock acquisition changes. The guard below asserts the swapped
 -- definition is byte-identical to the live one apart from that single clause,
@@ -40,10 +38,14 @@ BEGIN
      AND p.proconfig = ARRAY['search_path=pg_catalog, public']::TEXT[]
      AND l.lanname = 'plpgsql';
 
-  -- Already applied.
-  IF (length(d) - length(replace(d, replacement, ''))) = length(replacement)
-     AND strpos(d, old) = 0 THEN
+  -- Accept only the measured current definition or its exact postimage.
+  IF encode(extensions.digest(d,'sha256'),'hex') =
+      'd1ffdf531e598254d3fd4241e44ca2a1d5721580e559d1c613ad8ccfd3b3f0ad' THEN
     RETURN;
+  END IF;
+  IF encode(extensions.digest(d,'sha256'),'hex') <>
+      '61e1dd5c5c472ce8060d356794bd9f621a8fc0f579ce091941826e19bf261468' THEN
+    RAISE EXCEPTION 'expire leases round lock preimage differs' USING ERRCODE = '55000';
   END IF;
 
   -- The round lock must appear exactly once, in the form this script expects.
@@ -59,7 +61,9 @@ BEGIN
   EXECUTE updated;
 
   IF (SELECT to_jsonb(p)-'prosrc' FROM pg_proc p WHERE p.oid = target) IS DISTINCT FROM metadata
-     OR pg_get_functiondef(target) IS DISTINCT FROM updated THEN
+     OR pg_get_functiondef(target) IS DISTINCT FROM updated
+     OR encode(extensions.digest(pg_get_functiondef(target),'sha256'),'hex') <>
+       'd1ffdf531e598254d3fd4241e44ca2a1d5721580e559d1c613ad8ccfd3b3f0ad' THEN
     RAISE EXCEPTION 'expire leases round lock readback differs' USING ERRCODE = '55000';
   END IF;
 END;

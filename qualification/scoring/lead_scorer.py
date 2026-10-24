@@ -400,8 +400,8 @@ _VENTURE_STAGE_STATEMENT_PATTERNS = {
     for stage, label in _VENTURE_SERIES_STAGE_LABELS.items()
 }
 _PUBLIC_EXCHANGE_TICKER_LOCATOR = (
-    r"\(\s*(?i:nasdaq|nyse|asx|tsx)"
-    r"(?:\s*,\s*(?i:nasdaq|nyse|asx|tsx))*"
+    r"\(\s*(?i:nasdaq(?:/(?:gs|gm|cm))?|nyse|asx|tsx)"
+    r"(?:\s*,\s*(?i:nasdaq(?:/(?:gs|gm|cm))?|nyse|asx|tsx))*"
     r"\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\)"
 )
 _PUBLIC_COMPANY_ALIAS_RE = re.compile(

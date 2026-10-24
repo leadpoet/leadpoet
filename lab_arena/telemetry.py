@@ -133,6 +133,34 @@ def note_denial(code: str, *, error: Optional[BaseException] = None) -> None:
         pass
 
 
+def note_store_duration(duration_ms: float) -> None:
+    """Accumulate store-call time for the public read currently being served.
+
+    Scoped to ``/arena/v1/current``, ``/arena/v1/competition``, and
+    ``/arena/v1/history`` — the request span is the only place that can
+    separate store time from chain time from everything else in the handler.
+    Multiple calls in one request (e.g. a paged store read) accumulate.
+    """
+    recorder = _recorder
+    if recorder is None:
+        return
+    try:
+        recorder.note_store_duration(duration_ms)
+    except BaseException:
+        pass
+
+
+def note_chain_duration(duration_ms: float) -> None:
+    """Accumulate chain-read time for the public read currently being served."""
+    recorder = _recorder
+    if recorder is None:
+        return
+    try:
+        recorder.note_chain_duration(duration_ms)
+    except BaseException:
+        pass
+
+
 def record_provider(
     provider: str,
     operation: str,
@@ -320,7 +348,9 @@ __all__ = [
     "NO_TOOL",
     "StageResult",
     "install_recorder",
+    "note_chain_duration",
     "note_denial",
+    "note_store_duration",
     "record",
     "record_gate",
     "record_provider",

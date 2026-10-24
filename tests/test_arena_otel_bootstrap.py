@@ -238,6 +238,112 @@ def test_public_round_store_503_retains_bounded_diagnostics():
     assert span.attributes["arena.store_transport_error"] == "ReadTimeout"
 
 
+def test_read_timing_attrs_are_exported_on_the_three_public_reads():
+    """Store/chain time accumulated during the handler reaches the request span.
+
+    Covers the 2026-10 latency investigation's gap: the request span used to
+    carry only ``duration_ms``, so three separate daily investigations could
+    not tell store time from chain time from everything else in the handler.
+    """
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+    recorder = configure_arena_otel(app, span_exporter=exp)
+
+    @app.get("/arena/v1/current")
+    def _current():
+        recorder.note_chain_duration(12.5)
+        return {"status": "ok"}
+
+    @app.get("/arena/v1/competition")
+    def _competition():
+        # A paginated store read accumulates across calls.
+        recorder.note_store_duration(30.0)
+        recorder.note_store_duration(5.5)
+        return {"status": "ok"}
+
+    @app.get("/arena/v1/history")
+    def _history():
+        recorder.note_store_duration(8.0)
+        return {"status": "ok"}
+
+    @app.get("/arena/v1/signing-key")
+    def _signing_key():
+        # Not one of the three timed routes; must never carry these attrs.
+        return {"status": "ok"}
+
+    with TestClient(app) as client:
+        assert client.get("/arena/v1/current").status_code == 200
+        assert client.get("/arena/v1/competition").status_code == 200
+        assert client.get("/arena/v1/history").status_code == 200
+        assert client.get("/arena/v1/signing-key").status_code == 200
+
+    current_span, competition_span, history_span, signing_key_span = exp.get_finished_spans()
+    assert current_span.attributes["arena.chain_duration_ms"] == pytest.approx(12.5)
+    assert "arena.store_duration_ms" not in current_span.attributes
+    assert competition_span.attributes["arena.store_duration_ms"] == pytest.approx(35.5)
+    assert "arena.chain_duration_ms" not in competition_span.attributes
+    assert history_span.attributes["arena.store_duration_ms"] == pytest.approx(8.0)
+    assert "arena.store_duration_ms" not in signing_key_span.attributes
+    assert "arena.chain_duration_ms" not in signing_key_span.attributes
+
+
+def test_read_timing_does_not_leak_into_the_next_request():
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+    recorder = configure_arena_otel(app, span_exporter=exp)
+
+    @app.get("/arena/v1/current")
+    def _current(note: bool = True):
+        if note:
+            recorder.note_chain_duration(7.0)
+        return {"status": "ok"}
+
+    with TestClient(app) as client:
+        assert client.get("/arena/v1/current").status_code == 200
+        assert client.get("/arena/v1/current?note=false").status_code == 200
+
+    noted, unnoted = exp.get_finished_spans()
+    assert noted.attributes["arena.chain_duration_ms"] == pytest.approx(7.0)
+    assert "arena.chain_duration_ms" not in unnoted.attributes
+
+
+def test_read_timing_on_an_unapproved_route_drops_the_span_whole():
+    """The allowlist is fail-closed per-route, same as ``arena.round_id``.
+
+    A route outside the three public reads reporting a timing attribute is a
+    programming error, not a value to sanitize — the whole span is dropped
+    rather than exported with an attribute from an unexpected origin.
+    """
+    from gateway.observability.otel_bootstrap import _validating_exporter
+    from opentelemetry.context import Context
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.trace import SpanKind
+
+    route = "/arena/v1/signing-key"
+    exp = InMemorySpanExporter()
+    resource = {"service.name": ARENA_SERVICE_NAME}
+    validator = _validating_exporter(
+        exp, allowed_routes=lambda: {route}, expected_resource=resource,
+        scopes={ARENA_HTTP_SCOPE: "arena_http"},
+    )
+    provider = TracerProvider(resource=Resource(resource))
+    provider.add_span_processor(SimpleSpanProcessor(validator))
+    tracer = provider.get_tracer(ARENA_HTTP_SCOPE)
+
+    span = tracer.start_span("GET " + route, kind=SpanKind.SERVER, context=Context())
+    for key, value in {
+        "http.request.method": "GET", "http.route": route,
+        "http.response.status_code": 200, "arena.denial": "-",
+        "duration_ms": 1.0, "arena.store_duration_ms": 9.0,
+    }.items():
+        span.set_attribute(key, value)
+    span.end()
+
+    assert exp.get_finished_spans() == ()
+
+
 def test_arena_identity_is_never_the_gateway_identity():
     """INC-238's shape: a second emitter must not inherit the first's name."""
     exp = InMemorySpanExporter()

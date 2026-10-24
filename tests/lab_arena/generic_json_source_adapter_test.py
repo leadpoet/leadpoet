@@ -64,7 +64,7 @@ def test_malformed_native_json_is_not_accepted():
 
 
 @pytest.mark.parametrize("scheme", ["http", "https"])
-def test_actual_frozen_wayback_caller_routes_both_legs_and_keeps_http_refused(monkeypatch, scheme):
+def test_wayback_caller_routes_both_legs_with_source_bound_snapshot_https(monkeypatch, scheme):
     from qualification.scoring import intent_verification_three_stage as intent
 
     original = "https://publisher.example/article"
@@ -81,7 +81,8 @@ def test_actual_frozen_wayback_caller_routes_both_legs_and_keeps_http_refused(mo
     # Only synthetic archived HTML is used. This proves route/source binding,
     # not that the captured live snapshot contains usable evidence.
     html = '<html><body><a href="' + original + '">Original</a>' + "Archived fixture. " * 40 + "</body></html>"
-    snapshot_wire = shim._trusted_page_fetch("GET", snapshot, b"")[1]["url"] if scheme == "https" else snapshot
+    transport_snapshot = "https" + snapshot[4:] if scheme == "http" else snapshot
+    snapshot_wire = shim._trusted_page_fetch("GET", transport_snapshot, b"")[1]["url"]
     archived = _envelope(html, source_url=snapshot_wire)
     archived["result"]["data"]["metadata"]["url"] = snapshot_wire
     broker, ledger, transport = _broker([(200, native), (200, generic), (200, archived)])
@@ -115,18 +116,12 @@ def test_actual_frozen_wayback_caller_routes_both_legs_and_keeps_http_refused(mo
 
     monkeypatch.setattr(intent, "httpx", SimpleNamespace(AsyncClient=Client))
     result = asyncio.run(intent._try_wayback(original))
-    assert calls == [availability_url, snapshot], (result, dispatched, len(transport.sent))
-    if scheme == "http":
-        assert dispatched == [availability_wire]
-        assert len(transport.sent) == 2
-        assert result["ok"] is False and result["stage"] == "wayback_exception"
-        assert "ConnectError" in result["error"]
-    else:
-        assert dispatched == [availability_wire, snapshot_wire]
-        assert len(transport.sent) == 3
-        assert result["ok"] is True and result["content"] == html
-        assert result["meta"]["ownership_archive_url"] == snapshot
-    assert [call["actual"] for call in ledger.calls.values()] == ([2000, 0] if scheme == "http" else [2000, 0, 2000])
+    assert calls == [availability_url, transport_snapshot]
+    assert dispatched == [availability_wire, snapshot_wire]
+    assert len(transport.sent) == 3
+    assert result["ok"] is True and result["content"] == html
+    assert result["meta"]["ownership_archive_url"] == transport_snapshot
+    assert [call["actual"] for call in ledger.calls.values()] == [2000, 0, 2000]
 
 
 def generic_json(value):

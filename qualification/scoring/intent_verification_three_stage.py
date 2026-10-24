@@ -2144,7 +2144,33 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
             if not snap.get("url"):
                 return {"ok": False, "stage": "wayback_no_snapshot",
                         "content": "", "error": "no archived snapshot"}
-            r = await cli.get(snap["url"])
+            snapshot_url = str(snap["url"])
+            snapshot_parts = urlsplit(snapshot_url)
+            timestamp = snap.get("timestamp")
+            if (
+                snapshot_parts.scheme == "http"
+                and snapshot_parts.netloc == "web.archive.org"
+                and "#" not in snapshot_url
+                and snap.get("available") is True
+                and snap.get("status") == "200"
+                and isinstance(timestamp, str)
+                and re.fullmatch(r"[0-9]{14}", timestamp)
+                and re.match(r"/web/" + timestamp + r"(?:[a-z_]+)?/", snapshot_parts.path)
+                and (archived_original := _wayback_original_url(snapshot_url))
+                and _normalize_url(archived_original) == _normalize_url(url)
+            ):
+                # Wayback publishes HTTP locators for its own HTTPS service.
+                # Preserve the exact source and timestamp; only its transport
+                # scheme changes. Other locators retain existing URL guards.
+                from ipaddress import ip_address
+                from qualification.competition_models import public_http_url
+
+                public_http_url(archived_original)
+                try:
+                    ip_address(urlsplit(archived_original).hostname or "")
+                except ValueError:
+                    snapshot_url = "https" + snapshot_url[4:]
+            r = await cli.get(snapshot_url)
             if r.status_code != 200:
                 return {"ok": False, "stage": "wayback_http_error",
                         "content": "", "error": f"HTTP {r.status_code}"}

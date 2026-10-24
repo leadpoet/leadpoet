@@ -1,0 +1,1095 @@
+{
+  "schema_version": "leadpoet.research_control.development_evidence.v1",
+  "policy_id": "model_directed_research_v1",
+  "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+  "captured_at_utc": "2026-10-24",
+  "runtime_assumption": "The offline test calls configure(model, tools, trace=None) with injected local model and tool callables before run_icp(icp). Optional external helpers or controllers are injected separately for causal tests. This configuration step is not provided by the production Arena entry point. Labels describe the controller under this test contract, not independently runnable admitted submissions.",
+  "limits": [
+    "Conditional injected controller fixtures, not production-runnable submissions or an independent accuracy estimate.",
+    "Provider response and exact excerpts do not prove semantic truth, complete runtime behavior, or training gains.",
+    "Public champion assessment failed closed; no model classification accepted.",
+    "No production admission, scoring, capture, or round configuration was changed."
+  ],
+  "provider_request_override": {
+    "only": [
+      "google-vertex/global"
+    ],
+    "max_price": {
+      "prompt": 2,
+      "completion": 10
+    }
+  },
+  "fixture_max_output_tokens": 4096,
+  "fixture_results": [
+    {
+      "case": "adaptive_json",
+      "expected_conditional_controller": "model_directed",
+      "report": {
+        "case": "adaptive_json",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:47839f8ac440956a9e99d676d0199356722d38d92244aeb4b95583669983dd99",
+        "source_archive_sha256": "sha256:c7efb616fa9e81ba14b66abe83fc2d9bb330f6a5f1dfb60b9ce7884444620187",
+        "source_manifest_sha256": "sha256:ea397446336510b94fd88a06878822fae04d5dbf82c1925e33c0aacd0df7f190",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.125522",
+        "cost_usd": 0.036434,
+        "response_sha256": "1766a7473ae12fa150695f06e1b5c3a4263b29682cb70ad2de1ab9253a4441e9",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "model_directed",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "model_directed",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:c7efb616fa9e81ba14b66abe83fc2d9bb330f6a5f1dfb60b9ce7884444620187",
+          "source_manifest_sha256": "sha256:ea397446336510b94fd88a06878822fae04d5dbf82c1925e33c0aacd0df7f190",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "observation_to_action",
+              "file": "harness.py",
+              "excerpt": "action = _decode(_model({\"icp\": icp, \"observations\": observations}))",
+              "explanation": "Each loop iteration passes the accumulated observations back to the model. The decoded model output is the action that gets dispatched next."
+            },
+            {
+              "claim": "observation_to_action",
+              "file": "harness.py",
+              "excerpt": "observation = _tools(name, arguments)\n        observations.append({\"tool\": name, \"arguments\": arguments, \"result\": observation})",
+              "explanation": "The model-selected tool name (search or fetch) and its arguments are dispatched to the injected tools. The result is appended to observations, which the next model call sees, so observations drive later actions."
+            },
+            {
+              "claim": "finish_continue",
+              "file": "harness.py",
+              "excerpt": "if action.get(\"action\") == \"finish\":\n            companies = action.get(\"companies\")",
+              "explanation": "The model's output decides whether to finish or continue. A finish action returns the model-supplied companies. Any other valid action continues the loop with another tool call."
+            },
+            {
+              "claim": "finish_continue",
+              "file": "harness.py",
+              "excerpt": "raise RuntimeError(\"research step limit reached\")",
+              "explanation": "The MAX_STEPS=4 budget is a scaffold-level stop that applies when the model never finishes. It does not choose the actions."
+            }
+          ],
+          "limitations": [
+            "Source-only review: the model and tools are injected through configure(), so the concrete model implementation and tool backends are not in the archive. The result says the controller can be model-directed, not that a given runtime wires a real model.",
+            "Whether the injected callables behave adaptively, and the quality or correctness of the actions and results, were not assessed.",
+            "The classification does not attest to runtime behavior, hidden reasoning, or any particular execution.",
+            "Only harness.py and the LICENSE file were present. No entrypoint calling configure() or run_icp() is included, so the invoking caller is inferred from the module's API."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n{\"id\":\"gen-1792818757-0ojL27Q3fVCYvtwsAOCX\",\"object\":\"chat.completion\",\"created\":1792818757,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:c7efb616fa9e81ba14b66abe83fc2d9bb330f6a5f1dfb60b9ce7884444620187\\\",\\\"source_manifest_sha256\\\":\\\"sha256:ea397446336510b94fd88a06878822fae04d5dbf82c1925e33c0aacd0df7f190\\\",\\\"classification\\\":\\\"model_directed\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"observation_to_action\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"action = _decode(_model({\\\\\\\"icp\\\\\\\": icp, \\\\\\\"observations\\\\\\\": observations}))\\\",\\\"explanation\\\":\\\"Each loop iteration passes the accumulated observations back to the model. The decoded model output is the action that gets dispatched next.\\\"},{\\\"claim\\\":\\\"observation_to_action\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"observation = _tools(name, arguments)\\\\n        observations.append({\\\\\\\"tool\\\\\\\": name, \\\\\\\"arguments\\\\\\\": arguments, \\\\\\\"result\\\\\\\": observation})\\\",\\\"explanation\\\":\\\"The model-selected tool name (search or fetch) and its arguments are dispatched to the injected tools. The result is appended to observations, which the next model call sees, so observations drive later actions.\\\"},{\\\"claim\\\":\\\"finish_continue\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"if action.get(\\\\\\\"action\\\\\\\") == \\\\\\\"finish\\\\\\\":\\\\n            companies = action.get(\\\\\\\"companies\\\\\\\")\\\",\\\"explanation\\\":\\\"The model's output decides whether to finish or continue. A finish action returns the model-supplied companies. Any other valid action continues the loop with another tool call.\\\"},{\\\"claim\\\":\\\"finish_continue\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"raise RuntimeError(\\\\\\\"research step limit reached\\\\\\\")\\\",\\\"explanation\\\":\\\"The MAX_STEPS=4 budget is a scaffold-level stop that applies when the model never finishes. It does not choose the actions.\\\"}],\\\"limitations\\\":[\\\"Source-only review: the model and tools are injected through configure(), so the concrete model implementation and tool backends are not in the archive. The result says the controller can be model-directed, not that a given runtime wires a real model.\\\",\\\"Whether the injected callables behave adaptively, and the quality or correctness of the actions and results, were not assessed.\\\",\\\"The classification does not attest to runtime behavior, hidden reasoning, or any particular execution.\\\",\\\"Only harness.py and the LICENSE file were present. No entrypoint calling configure() or run_icp() is included, so the invoking caller is inferred from the module's API.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13712,\"completion_tokens\":901,\"total_tokens\":14613,\"cost\":0.036434,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.036434,\"upstream_inference_prompt_cost\":0.027424,\"upstream_inference_completions_cost\":0.00901},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "native_tools",
+      "expected_conditional_controller": "model_directed",
+      "report": {
+        "case": "native_tools",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:f44b43469d86feac2dd59541a7c4a74c868c5a0c6c3adcbba75bfb61ffd63fe1",
+        "source_archive_sha256": "sha256:1fa2c6efb590e314bacc3cb2984f039304b4f81dc0c9b2171e58b4e5f639563a",
+        "source_manifest_sha256": "sha256:fed0c6d30579cbc6a9e045a1955954a11f6922190c492bb59d54607d95c75d1c",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.127476",
+        "cost_usd": 0.03757,
+        "response_sha256": "86c0e43ffc6eb0c2a24cdc6ff69b2b230e1bed11192f03ae96506024dbbd91b7",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "model_directed",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "model_directed",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:1fa2c6efb590e314bacc3cb2984f039304b4f81dc0c9b2171e58b4e5f639563a",
+          "source_manifest_sha256": "sha256:fed0c6d30579cbc6a9e045a1955954a11f6922190c492bb59d54607d95c75d1c",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "observation_to_action",
+              "file": "harness.py",
+              "excerpt": "reply = _model({\"messages\": messages, \"tools\": [\"search\", \"fetch\"], \"tool_choice\": \"auto\"})",
+              "explanation": "Each loop iteration calls the model with the full message history, including prior tool results. The model chooses whether to call tools, which tool, and with what arguments."
+            },
+            {
+              "claim": "observation_to_action",
+              "file": "harness.py",
+              "excerpt": "result = _tools(name, arguments)\n            messages.append({\"role\": \"tool\", \"tool_call_id\": call_id, \"content\": json.dumps(result)})",
+              "explanation": "The model-selected tool name and arguments are dispatched to _tools. The result is appended to messages and goes back to the model on the next iteration, so observations feed the next action selection."
+            },
+            {
+              "claim": "finish_continue",
+              "file": "harness.py",
+              "excerpt": "if not calls:\n            try:\n                final = json.loads(reply[\"content\"])\n                companies = final[\"companies\"]",
+              "explanation": "If the model reply has no tool_calls, the harness treats that as finishing and returns the model-provided companies. If the reply has tool calls, the loop continues, so the model's output decides between finishing and continuing."
+            },
+            {
+              "claim": "finish_continue",
+              "file": "harness.py",
+              "excerpt": "raise RuntimeError(\"research step limit reached\")",
+              "explanation": "MAX_STEPS = 4 is only a budget stop. It bounds the model-controlled loop and does not fix the research actions."
+            }
+          ],
+          "limitations": [
+            "Source-only review: the model and tool callables are injected through configure(), and their implementations are not in the archive. How search and fetch actually behave, and which model is used, cannot be verified.",
+            "The caller of configure() and run_icp() is not included, so the real entrypoint wiring is assumed from the harness design.",
+            "The classification reflects reachable capability for model-directed control, not the quality of the actions, factual correctness, or what happens in any particular run.",
+            "The LICENSE file is standard AGPL text and contains no control logic."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n\n         \n{\"id\":\"gen-1792818766-FFJaomqeSo8DorpdeI5P\",\"object\":\"chat.completion\",\"created\":1792818766,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:1fa2c6efb590e314bacc3cb2984f039304b4f81dc0c9b2171e58b4e5f639563a\\\",\\\"source_manifest_sha256\\\":\\\"sha256:fed0c6d30579cbc6a9e045a1955954a11f6922190c492bb59d54607d95c75d1c\\\",\\\"classification\\\":\\\"model_directed\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"observation_to_action\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"reply = _model({\\\\\\\"messages\\\\\\\": messages, \\\\\\\"tools\\\\\\\": [\\\\\\\"search\\\\\\\", \\\\\\\"fetch\\\\\\\"], \\\\\\\"tool_choice\\\\\\\": \\\\\\\"auto\\\\\\\"})\\\",\\\"explanation\\\":\\\"Each loop iteration calls the model with the full message history, including prior tool results. The model chooses whether to call tools, which tool, and with what arguments.\\\"},{\\\"claim\\\":\\\"observation_to_action\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"result = _tools(name, arguments)\\\\n            messages.append({\\\\\\\"role\\\\\\\": \\\\\\\"tool\\\\\\\", \\\\\\\"tool_call_id\\\\\\\": call_id, \\\\\\\"content\\\\\\\": json.dumps(result)})\\\",\\\"explanation\\\":\\\"The model-selected tool name and arguments are dispatched to _tools. The result is appended to messages and goes back to the model on the next iteration, so observations feed the next action selection.\\\"},{\\\"claim\\\":\\\"finish_continue\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"if not calls:\\\\n            try:\\\\n                final = json.loads(reply[\\\\\\\"content\\\\\\\"])\\\\n                companies = final[\\\\\\\"companies\\\\\\\"]\\\",\\\"explanation\\\":\\\"If the model reply has no tool_calls, the harness treats that as finishing and returns the model-provided companies. If the reply has tool calls, the loop continues, so the model's output decides between finishing and continuing.\\\"},{\\\"claim\\\":\\\"finish_continue\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"raise RuntimeError(\\\\\\\"research step limit reached\\\\\\\")\\\",\\\"explanation\\\":\\\"MAX_STEPS = 4 is only a budget stop. It bounds the model-controlled loop and does not fix the research actions.\\\"}],\\\"limitations\\\":[\\\"Source-only review: the model and tool callables are injected through configure(), and their implementations are not in the archive. How search and fetch actually behave, and which model is used, cannot be verified.\\\",\\\"The caller of configure() and run_icp() is not included, so the real entrypoint wiring is assumed from the harness design.\\\",\\\"The classification reflects reachable capability for model-directed control, not the quality of the actions, factual correctness, or what happens in any particular run.\\\",\\\"The LICENSE file is standard AGPL text and contains no control logic.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":14065,\"completion_tokens\":944,\"total_tokens\":15009,\"cost\":0.03757,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.03757,\"upstream_inference_prompt_cost\":0.02813,\"upstream_inference_completions_cost\":0.00944},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "bounded_hybrid",
+      "expected_conditional_controller": "model_directed",
+      "report": {
+        "case": "bounded_hybrid",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:8e9a8ca93ecf67a86249d7ee7bc1516ba74b51db6c81162f38d9ad9071c2344a",
+        "source_archive_sha256": "sha256:70671a9fb0a2bb75206765cf05f78346f7171398bfbf2beac0f8f72fc781dcf2",
+        "source_manifest_sha256": "sha256:5df9c40896c8bc95f1097d4a92e5bc1dcddd6bbf56ae0bbd55480d9367778079",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.125380",
+        "cost_usd": 0.037654,
+        "response_sha256": "4dad400f5607fbd5ae189e31e86732129631766a52c3ebe182648748bf995786",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "model_directed",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "model_directed",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:70671a9fb0a2bb75206765cf05f78346f7171398bfbf2beac0f8f72fc781dcf2",
+          "source_manifest_sha256": "sha256:5df9c40896c8bc95f1097d4a92e5bc1dcddd6bbf56ae0bbd55480d9367778079",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "observation_to_action",
+              "file": "harness.py",
+              "excerpt": "action = _model({\"icp\": icp, \"observations\": observations})",
+              "explanation": "The model is called with the accumulated observations, including the initial search result and every later tool result, so its next output is conditioned on what the tools returned."
+            },
+            {
+              "claim": "observation_to_action",
+              "file": "harness.py",
+              "excerpt": "name, arguments = action.get(\"action\"), action.get(\"arguments\")\n        if not isinstance(name, str) or name not in {\"search\", \"fetch\"} or not isinstance(arguments, dict):\n            raise ValueError(\"invalid model action\")\n        observations.append({\"tool\": name, \"result\": _tools(name, arguments)})",
+              "explanation": "The model output selects the tool (search or fetch) and its arguments. The code dispatches that call through _tools and appends the result to observations, which feed the next model call. The code only validates the action."
+            },
+            {
+              "claim": "finish_continue",
+              "file": "harness.py",
+              "excerpt": "if action.get(\"action\") == \"finish\":\n            companies = action.get(\"companies\")\n            if not isinstance(companies, list) or any(not isinstance(x, dict) for x in companies):\n                raise ValueError(\"invalid final companies\")\n            return companies",
+              "explanation": "The model's own action value decides whether the loop finishes. A finish action returns the model-supplied companies. Any other valid action continues with another tool call. Finishing on the first turn is permitted."
+            }
+          ],
+          "limitations": [
+            "Source-only review: configure() injects _model and _tools from outside, and the supplied archive does not show what they are. The model may be an LLM, and the tools may be real search and fetch providers. This was not verified.",
+            "The caller of run_icp and configure is not in the archive, so the runtime entrypoint is not shown. The harness is reachable only if an external runner invokes it.",
+            "The deterministic initial search on icp['industry'] is a fixed step. It is followed by a model-controlled loop of at most 3 steps. After the third non-finish action the code raises a RuntimeError.",
+            "This label describes capability from the source. It says nothing about the quality of the model's actions or the correctness of the results, and it is not a guarantee about any particular execution.",
+            "The LICENSE file is the standard AGPL text and has no bearing on research control."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n\n         \n{\"id\":\"gen-1792818775-CxdRnTQURTrZGB4uzqC7\",\"object\":\"chat.completion\",\"created\":1792818775,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:70671a9fb0a2bb75206765cf05f78346f7171398bfbf2beac0f8f72fc781dcf2\\\",\\\"source_manifest_sha256\\\":\\\"sha256:5df9c40896c8bc95f1097d4a92e5bc1dcddd6bbf56ae0bbd55480d9367778079\\\",\\\"classification\\\":\\\"model_directed\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"observation_to_action\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"action = _model({\\\\\\\"icp\\\\\\\": icp, \\\\\\\"observations\\\\\\\": observations})\\\",\\\"explanation\\\":\\\"The model is called with the accumulated observations, including the initial search result and every later tool result, so its next output is conditioned on what the tools returned.\\\"},{\\\"claim\\\":\\\"observation_to_action\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"name, arguments = action.get(\\\\\\\"action\\\\\\\"), action.get(\\\\\\\"arguments\\\\\\\")\\\\n        if not isinstance(name, str) or name not in {\\\\\\\"search\\\\\\\", \\\\\\\"fetch\\\\\\\"} or not isinstance(arguments, dict):\\\\n            raise ValueError(\\\\\\\"invalid model action\\\\\\\")\\\\n        observations.append({\\\\\\\"tool\\\\\\\": name, \\\\\\\"result\\\\\\\": _tools(name, arguments)})\\\",\\\"explanation\\\":\\\"The model output selects the tool (search or fetch) and its arguments. The code dispatches that call through _tools and appends the result to observations, which feed the next model call. The code only validates the action.\\\"},{\\\"claim\\\":\\\"finish_continue\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"if action.get(\\\\\\\"action\\\\\\\") == \\\\\\\"finish\\\\\\\":\\\\n            companies = action.get(\\\\\\\"companies\\\\\\\")\\\\n            if not isinstance(companies, list) or any(not isinstance(x, dict) for x in companies):\\\\n                raise ValueError(\\\\\\\"invalid final companies\\\\\\\")\\\\n            return companies\\\",\\\"explanation\\\":\\\"The model's own action value decides whether the loop finishes. A finish action returns the model-supplied companies. Any other valid action continues with another tool call. Finishing on the first turn is permitted.\\\"}],\\\"limitations\\\":[\\\"Source-only review: configure() injects _model and _tools from outside, and the supplied archive does not show what they are. The model may be an LLM, and the tools may be real search and fetch providers. This was not verified.\\\",\\\"The caller of run_icp and configure is not in the archive, so the runtime entrypoint is not shown. The harness is reachable only if an external runner invokes it.\\\",\\\"The deterministic initial search on icp['industry'] is a fixed step. It is followed by a model-controlled loop of at most 3 steps. After the third non-finish action the code raises a RuntimeError.\\\",\\\"This label describes capability from the source. It says nothing about the quality of the model's actions or the correctness of the results, and it is not a guarantee about any particular execution.\\\",\\\"The LICENSE file is the standard AGPL text and has no bearing on research control.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13677,\"completion_tokens\":1030,\"total_tokens\":14707,\"cost\":0.037654,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.037654,\"upstream_inference_prompt_cost\":0.027354,\"upstream_inference_completions_cost\":0.0103},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "fixed_extractor",
+      "expected_conditional_controller": "workflow",
+      "report": {
+        "case": "fixed_extractor",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:0d5a139f37b8da7915740437bc962aac23d9589a7b45f161fc34fa54c5d5fe2b",
+        "source_archive_sha256": "sha256:23f97e18e52e23ad877565997bf6fd6cd26304b97d09a141302d20077de99679",
+        "source_manifest_sha256": "sha256:a64573fb610c86049e67b269ef5f01eab74fa9000b4719e89c118137058acf5c",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.123598",
+        "cost_usd": 0.03404,
+        "response_sha256": "61c450907096d8872952656a1e6198e113871e62ad87060e44d16a05f0eabdb4",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "workflow",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "workflow",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:23f97e18e52e23ad877565997bf6fd6cd26304b97d09a141302d20077de99679",
+          "source_manifest_sha256": "sha256:a64573fb610c86049e67b269ef5f01eab74fa9000b4719e89c118137058acf5c",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "results = _tools(\"search\", {\"query\": icp[\"industry\"]})\n    page = _tools(\"fetch\", {\"url\": results[\"url\"]})",
+              "explanation": "The search and fetch actions are hard-coded in sequence. The search query comes directly from the ICP industry field, and the fetch URL comes from the search result. No model output selects the tool, the query, or the URL."
+            },
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "final = _model({\"icp\": icp, \"evidence\": page, \"schema\": \"companies\"})\n    final = json.loads(final) if isinstance(final, str) else final\n    return final[\"companies\"]",
+              "explanation": "The model is called once, after all research is done, and only to format the collected page into a companies list. Its output is returned directly. It does not choose a further action or decide between finishing and continuing, and the function has no loop or branch that depends on it."
+            }
+          ],
+          "limitations": [
+            "This is a source-only assessment of the two supplied files. It does not attest to runtime behavior.",
+            "Nothing in the archive calls run_icp or configure, so the external caller and the model and tool implementations passed in are not visible. Any control outside this archive could not be assessed.",
+            "The LICENSE file is standard AGPL text and contains no control logic.",
+            "The label describes capability visible in the source. It says nothing about the quality or factual correctness of results."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n{\"id\":\"gen-1792818786-c5ojy18RvSu7eZZtiIYx\",\"object\":\"chat.completion\",\"created\":1792818786,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:23f97e18e52e23ad877565997bf6fd6cd26304b97d09a141302d20077de99679\\\",\\\"source_manifest_sha256\\\":\\\"sha256:a64573fb610c86049e67b269ef5f01eab74fa9000b4719e89c118137058acf5c\\\",\\\"classification\\\":\\\"workflow\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"results = _tools(\\\\\\\"search\\\\\\\", {\\\\\\\"query\\\\\\\": icp[\\\\\\\"industry\\\\\\\"]})\\\\n    page = _tools(\\\\\\\"fetch\\\\\\\", {\\\\\\\"url\\\\\\\": results[\\\\\\\"url\\\\\\\"]})\\\",\\\"explanation\\\":\\\"The search and fetch actions are hard-coded in sequence. The search query comes directly from the ICP industry field, and the fetch URL comes from the search result. No model output selects the tool, the query, or the URL.\\\"},{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"final = _model({\\\\\\\"icp\\\\\\\": icp, \\\\\\\"evidence\\\\\\\": page, \\\\\\\"schema\\\\\\\": \\\\\\\"companies\\\\\\\"})\\\\n    final = json.loads(final) if isinstance(final, str) else final\\\\n    return final[\\\\\\\"companies\\\\\\\"]\\\",\\\"explanation\\\":\\\"The model is called once, after all research is done, and only to format the collected page into a companies list. Its output is returned directly. It does not choose a further action or decide between finishing and continuing, and the function has no loop or branch that depends on it.\\\"}],\\\"limitations\\\":[\\\"This is a source-only assessment of the two supplied files. It does not attest to runtime behavior.\\\",\\\"Nothing in the archive calls run_icp or configure, so the external caller and the model and tool implementations passed in are not visible. Any control outside this archive could not be assessed.\\\",\\\"The LICENSE file is standard AGPL text and contains no control logic.\\\",\\\"The label describes capability visible in the source. It says nothing about the quality or factual correctness of results.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13380,\"completion_tokens\":728,\"total_tokens\":14108,\"cost\":0.03404,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.03404,\"upstream_inference_prompt_cost\":0.02676,\"upstream_inference_completions_cost\":0.00728},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "fixed_query_plan",
+      "expected_conditional_controller": "workflow",
+      "report": {
+        "case": "fixed_query_plan",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:554bdb11cc9478757517935dc126555c0c4a46324640bcc5222fd97d4c73cf2a",
+        "source_archive_sha256": "sha256:ecddffa284ebefe71dbb7602d0bfcedf013698d94575360c67b3caebb3d0e8ae",
+        "source_manifest_sha256": "sha256:34ca1f072e3972f5c3883ed2a1ac59fa9e83e70dc1777801d37e24e487627c48",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.123952",
+        "cost_usd": 0.03634,
+        "response_sha256": "688fce66635ce6b07b943783e850c02c948aac9ecbebc35198197d6c4c831fde",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "workflow",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "workflow",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:ecddffa284ebefe71dbb7602d0bfcedf013698d94575360c67b3caebb3d0e8ae",
+          "source_manifest_sha256": "sha256:34ca1f072e3972f5c3883ed2a1ac59fa9e83e70dc1777801d37e24e487627c48",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "    plan = _model({\"icp\": icp, \"stage\": \"plan\"})\n    plan = json.loads(plan) if isinstance(plan, str) else plan\n    pages = []\n    for query in plan[\"queries\"][:2]:\n        results = _tools(\"search\", {\"query\": query})\n        pages.append(_tools(\"fetch\", {\"url\": results[\"url\"]}))",
+              "explanation": "The model is called once to draft queries. Python then runs a fixed loop over at most two queries, always performing search followed by fetch. The model does not select the tool or the next action, and no observation is fed back to it before the loop finishes."
+            },
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "    final = _model({\"stage\": \"extract\", \"evidence\": pages})\n    final = json.loads(final) if isinstance(final, str) else final\n    return final[\"companies\"]",
+              "explanation": "The second model call is a fixed final extraction stage over the collected pages. Its output is returned as companies. It contains no continue or finish decision and cannot trigger further research. The function always terminates after this one pass."
+            },
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "\"\"\"A model plans initial queries, then Python runs every fixed research stage.\"\"\"",
+              "explanation": "This docstring is only a claim. It agrees with the code, which has no model-to-tool dispatch and no model-controlled loop. LICENSE is legal text with no control flow."
+            }
+          ],
+          "limitations": [
+            "Source-only review of two files; no runtime behavior was observed.",
+            "The model and tools callables are injected through configure() and are not in the archive, so their internal behavior is unknown. Fixed control is judged only from harness.py's call structure.",
+            "The caller of run_icp and any external orchestrator are not supplied. Such code could add outer-loop behavior not visible here.",
+            "The label describes capability under this policy and says nothing about output quality, correctness, or all possible executions."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n{\"id\":\"gen-1792818794-6RXBI4nW0YfH9MfHI2R2\",\"object\":\"chat.completion\",\"created\":1792818794,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:ecddffa284ebefe71dbb7602d0bfcedf013698d94575360c67b3caebb3d0e8ae\\\",\\\"source_manifest_sha256\\\":\\\"sha256:34ca1f072e3972f5c3883ed2a1ac59fa9e83e70dc1777801d37e24e487627c48\\\",\\\"classification\\\":\\\"workflow\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"    plan = _model({\\\\\\\"icp\\\\\\\": icp, \\\\\\\"stage\\\\\\\": \\\\\\\"plan\\\\\\\"})\\\\n    plan = json.loads(plan) if isinstance(plan, str) else plan\\\\n    pages = []\\\\n    for query in plan[\\\\\\\"queries\\\\\\\"][:2]:\\\\n        results = _tools(\\\\\\\"search\\\\\\\", {\\\\\\\"query\\\\\\\": query})\\\\n        pages.append(_tools(\\\\\\\"fetch\\\\\\\", {\\\\\\\"url\\\\\\\": results[\\\\\\\"url\\\\\\\"]}))\\\",\\\"explanation\\\":\\\"The model is called once to draft queries. Python then runs a fixed loop over at most two queries, always performing search followed by fetch. The model does not select the tool or the next action, and no observation is fed back to it before the loop finishes.\\\"},{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"    final = _model({\\\\\\\"stage\\\\\\\": \\\\\\\"extract\\\\\\\", \\\\\\\"evidence\\\\\\\": pages})\\\\n    final = json.loads(final) if isinstance(final, str) else final\\\\n    return final[\\\\\\\"companies\\\\\\\"]\\\",\\\"explanation\\\":\\\"The second model call is a fixed final extraction stage over the collected pages. Its output is returned as companies. It contains no continue or finish decision and cannot trigger further research. The function always terminates after this one pass.\\\"},{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"\\\\\\\"\\\\\\\"\\\\\\\"A model plans initial queries, then Python runs every fixed research stage.\\\\\\\"\\\\\\\"\\\\\\\"\\\",\\\"explanation\\\":\\\"This docstring is only a claim. It agrees with the code, which has no model-to-tool dispatch and no model-controlled loop. LICENSE is legal text with no control flow.\\\"}],\\\"limitations\\\":[\\\"Source-only review of two files; no runtime behavior was observed.\\\",\\\"The model and tools callables are injected through configure() and are not in the archive, so their internal behavior is unknown. Fixed control is judged only from harness.py's call structure.\\\",\\\"The caller of run_icp and any external orchestrator are not supplied. Such code could add outer-loop behavior not visible here.\\\",\\\"The label describes capability under this policy and says nothing about output quality, correctness, or all possible executions.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13465,\"completion_tokens\":941,\"total_tokens\":14406,\"cost\":0.03634,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.03634,\"upstream_inference_prompt_cost\":0.02693,\"upstream_inference_completions_cost\":0.00941},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "ignored_model_decoy",
+      "expected_conditional_controller": "workflow",
+      "report": {
+        "case": "ignored_model_decoy",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:01b0d5e8837fec21cfc172aa10f49a437a95b0056083975bf9217cc5e042b9bf",
+        "source_archive_sha256": "sha256:97c9148f3d3be2d1a8fd53dd12be06c916613afaa7696f8a8adf36a72c1baa8e",
+        "source_manifest_sha256": "sha256:4ade877a69fe3c65c136272fc2a357452f6ece948031dfedec08f7c4ea31a8b4",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.123790",
+        "cost_usd": 0.035642,
+        "response_sha256": "26fd043a1e96c0f96d18e1d0bc834e5ca7a9d918081b58a35de9e8afba8d82cf",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": false,
+        "failure": "ResearchControlError:evidence_keys"
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n{\"id\":\"gen-1792818804-0bzuO5Ytl6sTfK1OicET\",\"object\":\"chat.completion\",\"created\":1792818804,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:97c9148f3d3be2d1a8fd53dd12be06c916613afaa7696f8a8adf36a72c1baa8e\\\",\\\"source_manifest_sha256\\\":\\\"sha256:4ade877a69fe3c65c136272fc2a357452f6ece948031dfedec08f7c4ea31a8b4\\\",\\\"classification\\\":\\\"workflow\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"for name, arguments in ((\\\\\\\"search\\\\\\\", {\\\\\\\"query\\\\\\\": icp[\\\\\\\"industry\\\\\\\"]}), (\\\\\\\"fetch\\\\\\\", {\\\\\\\"url\\\\\\\": \\\\\\\"https://example.com/fixed\\\\\\\"})):\\\",\\\"explanation\\\":\\\"The sequence of actions (search, then fetch of a hardcoded URL) and their arguments come from a literal tuple in code. They do not come from model output, so the code fixes the research path.\\\"},{\\\"claimed_control\\\":\\\"decoy\\\",\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"decision = _model({\\\\\\\"observations\\\\\\\": [], \\\\\\\"available_actions\\\\\\\": [\\\\\\\"search\\\\\\\", \\\\\\\"fetch\\\\\\\", \\\\\\\"finish\\\\\\\"]})\\\",\\\"explanation\\\":\\\"The model is called with an empty observations list on every iteration. The tool results are never fed back, so there is no observation-to-action flow.\\\"},{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"        _tools(name, arguments)\\\\n    return []\\\",\\\"explanation\\\":\\\"Tool dispatch uses only the loop's fixed name and arguments, and `decision` is never read for this. The loop ends after two iterations regardless of the model, and the function returns an empty list. The model's \\\\\\\"finish\\\\\\\" option has no effect, so the decision is a decoy and the stop path is fixed too.\\\"}],\\\"limitations\\\":[\\\"Classification rests on static reading of the two supplied files only. No code was executed, and runtime behavior was not observed.\\\",\\\"The harness is assumed to be the entrypoint. If other code outside the archive calls or wraps it, that code was not reviewed.\\\",\\\"The behavior of the injected _model and _tools callables is unknown. They cannot change the fixed loop in harness.py, but any external side effects they have were not assessed.\\\",\\\"LICENSE is boilerplate legal text and has no bearing on control flow.\\\",\\\"This label describes control capability only. It says nothing about result quality, factual correctness, or hidden reasoning.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13421,\"completion_tokens\":880,\"total_tokens\":14301,\"cost\":0.035642,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.035642,\"upstream_inference_prompt_cost\":0.026842,\"upstream_inference_completions_cost\":0.0088},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "forced_tool_decoy",
+      "expected_conditional_controller": "workflow",
+      "report": {
+        "case": "forced_tool_decoy",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:2c3131eaea65b133fc6015fd339db74e184c6b351f21b8c70f57704a9e333fcf",
+        "source_archive_sha256": "sha256:1fef6745cbff8467b1bb77af9cf72342d90eb4fff8a211590a25d6d6c75bfd1e",
+        "source_manifest_sha256": "sha256:a416f96d62b41c77cdaf449d1aee1ae17018dd832816e875585012b8fe78542b",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.123946",
+        "cost_usd": 0.035528,
+        "response_sha256": "838e7bec74b61e720a92c0705e1d974bddaac8f584b6c22f015b26c5880ae165",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "workflow",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "workflow",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:1fef6745cbff8467b1bb77af9cf72342d90eb4fff8a211590a25d6d6c75bfd1e",
+          "source_manifest_sha256": "sha256:a416f96d62b41c77cdaf449d1aee1ae17018dd832816e875585012b8fe78542b",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "for name, arguments in ((\"search\", {\"query\": icp[\"industry\"]}), (\"fetch\", {\"url\": \"https://example.com/fixed\"})):",
+              "explanation": "The sequence of actions (search, then fetch) and their arguments are hard-coded in a literal tuple in run_icp. The model does not choose the tool or its arguments; the fetch URL is a fixed constant."
+            },
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "reply = _model({\"messages\": [{\"role\": \"user\", \"content\": icp}], \"tool_choice\": {\"type\": \"function\", \"function\": {\"name\": name}}})",
+              "explanation": "The model call is forced to a specific function via tool_choice set from the loop variable. Nothing in the model's reply selects the next action."
+            },
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "_tools(name, arguments)\n    return []",
+              "explanation": "The tool is dispatched with the hard-coded name and arguments, not values parsed from the model reply. The reply is only appended to the trace, and the tool output is neither captured nor fed back. The function then returns an empty list after exactly two iterations. No finish/continue decision draws on model output."
+            }
+          ],
+          "limitations": [
+            "Source-only review of two files (LICENSE and harness.py); runtime behavior was not observed.",
+            "The assessment assumes harness.py is the entrypoint; no other controller was supplied, and callers of configure and run_icp are not visible.",
+            "The configured model and tools callables are injected externally and their implementations are not in the archive, though they cannot alter the fixed loop in run_icp.",
+            "The classification states a capability judgment from source, not action quality, correctness, or a guarantee about all executions."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n{\"id\":\"gen-1792818813-00XhomdxaN8dGmF1Z6Qs\",\"object\":\"chat.completion\",\"created\":1792818813,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:1fef6745cbff8467b1bb77af9cf72342d90eb4fff8a211590a25d6d6c75bfd1e\\\",\\\"source_manifest_sha256\\\":\\\"sha256:a416f96d62b41c77cdaf449d1aee1ae17018dd832816e875585012b8fe78542b\\\",\\\"classification\\\":\\\"workflow\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"for name, arguments in ((\\\\\\\"search\\\\\\\", {\\\\\\\"query\\\\\\\": icp[\\\\\\\"industry\\\\\\\"]}), (\\\\\\\"fetch\\\\\\\", {\\\\\\\"url\\\\\\\": \\\\\\\"https://example.com/fixed\\\\\\\"})):\\\",\\\"explanation\\\":\\\"The sequence of actions (search, then fetch) and their arguments are hard-coded in a literal tuple in run_icp. The model does not choose the tool or its arguments; the fetch URL is a fixed constant.\\\"},{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"reply = _model({\\\\\\\"messages\\\\\\\": [{\\\\\\\"role\\\\\\\": \\\\\\\"user\\\\\\\", \\\\\\\"content\\\\\\\": icp}], \\\\\\\"tool_choice\\\\\\\": {\\\\\\\"type\\\\\\\": \\\\\\\"function\\\\\\\", \\\\\\\"function\\\\\\\": {\\\\\\\"name\\\\\\\": name}}})\\\",\\\"explanation\\\":\\\"The model call is forced to a specific function via tool_choice set from the loop variable. Nothing in the model's reply selects the next action.\\\"},{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"_tools(name, arguments)\\\\n    return []\\\",\\\"explanation\\\":\\\"The tool is dispatched with the hard-coded name and arguments, not values parsed from the model reply. The reply is only appended to the trace, and the tool output is neither captured nor fed back. The function then returns an empty list after exactly two iterations. No finish/continue decision draws on model output.\\\"}],\\\"limitations\\\":[\\\"Source-only review of two files (LICENSE and harness.py); runtime behavior was not observed.\\\",\\\"The assessment assumes harness.py is the entrypoint; no other controller was supplied, and callers of configure and run_icp are not visible.\\\",\\\"The configured model and tools callables are injected externally and their implementations are not in the archive, though they cannot alter the fixed loop in run_icp.\\\",\\\"The classification states a capability judgment from source, not action quality, correctness, or a guarantee about all executions.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13459,\"completion_tokens\":861,\"total_tokens\":14320,\"cost\":0.035528,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.035528,\"upstream_inference_prompt_cost\":0.026918,\"upstream_inference_completions_cost\":0.00861},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "dynamic_helper",
+      "expected_conditional_controller": "unverified",
+      "report": {
+        "case": "dynamic_helper",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:8734291fa44d618e5f4e5ffa72bcf39bbe6231251efec8aa10fc9a377702fdde",
+        "source_archive_sha256": "sha256:4e03f2a765879b3538559766f9641d38266fbbc8e08472c2cbd598c820b4e45c",
+        "source_manifest_sha256": "sha256:75f27f487c389038fa7125f7d0ae28c0ad1a8ee555bac845afb3cdbe26a01a02",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.123234",
+        "cost_usd": 0.034684,
+        "response_sha256": "fb16eebc38296d070b28444e6ebd08c24f3df09761fbccb45aa5f42974f49164",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "unverified",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "unverified",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:4e03f2a765879b3538559766f9641d38266fbbc8e08472c2cbd598c820b4e45c",
+          "source_manifest_sha256": "sha256:75f27f487c389038fa7125f7d0ae28c0ad1a8ee555bac845afb3cdbe26a01a02",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "uncertainty",
+              "file": "harness.py",
+              "excerpt": "helper = _helper or importlib.import_module(icp[\"research_helper\"]).run\n    return helper(icp, _model, _tools)",
+              "explanation": "run_icp hands the entire research flow to a helper. The helper is either one injected through configure() or a module named by icp[\"research_helper\"], which is resolved dynamically at runtime. No helper source is in the archive. The model and tools are only passed through, so the source cannot show how model output selects actions, how observations feed back, or how finishing is decided."
+            },
+            {
+              "claim": "uncertainty",
+              "file": "harness.py",
+              "excerpt": "def configure(model, tools, trace=None, helper=None):\n    global _model, _tools, _trace, _helper\n    _model, _tools, _trace, _helper = model, tools, trace, helper",
+              "explanation": "The model, tools, trace and helper are all injected from outside the archive. The archive contains no entrypoint, controller, tool dispatch or stop logic, and nothing links the model to action selection. Neither model_directed nor workflow can be supported."
+            }
+          ],
+          "limitations": [
+            "Only LICENSE and harness.py were supplied. LICENSE is the AGPL text and has no bearing on control flow.",
+            "The controlling helper is loaded dynamically from a value in the ICP input and is not part of the archive, so its behavior cannot be inspected.",
+            "The model and tools objects are injected externally, and their implementations are not visible.",
+            "The source shows no model-result parsing, tool dispatch, observation feedback or finish/continue path.",
+            "This is a source-only assessment. It does not assert runtime behavior, action quality or factual correctness."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n{\"id\":\"gen-1792818822-5ll052ttXGyAzqiPHPGY\",\"object\":\"chat.completion\",\"created\":1792818822,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:4e03f2a765879b3538559766f9641d38266fbbc8e08472c2cbd598c820b4e45c\\\",\\\"source_manifest_sha256\\\":\\\"sha256:75f27f487c389038fa7125f7d0ae28c0ad1a8ee555bac845afb3cdbe26a01a02\\\",\\\"classification\\\":\\\"unverified\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"uncertainty\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"helper = _helper or importlib.import_module(icp[\\\\\\\"research_helper\\\\\\\"]).run\\\\n    return helper(icp, _model, _tools)\\\",\\\"explanation\\\":\\\"run_icp hands the entire research flow to a helper. The helper is either one injected through configure() or a module named by icp[\\\\\\\"research_helper\\\\\\\"], which is resolved dynamically at runtime. No helper source is in the archive. The model and tools are only passed through, so the source cannot show how model output selects actions, how observations feed back, or how finishing is decided.\\\"},{\\\"claim\\\":\\\"uncertainty\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"def configure(model, tools, trace=None, helper=None):\\\\n    global _model, _tools, _trace, _helper\\\\n    _model, _tools, _trace, _helper = model, tools, trace, helper\\\",\\\"explanation\\\":\\\"The model, tools, trace and helper are all injected from outside the archive. The archive contains no entrypoint, controller, tool dispatch or stop logic, and nothing links the model to action selection. Neither model_directed nor workflow can be supported.\\\"}],\\\"limitations\\\":[\\\"Only LICENSE and harness.py were supplied. LICENSE is the AGPL text and has no bearing on control flow.\\\",\\\"The controlling helper is loaded dynamically from a value in the ICP input and is not part of the archive, so its behavior cannot be inspected.\\\",\\\"The model and tools objects are injected externally, and their implementations are not visible.\\\",\\\"The source shows no model-result parsing, tool dispatch, observation feedback or finish/continue path.\\\",\\\"This is a source-only assessment. It does not assert runtime behavior, action quality or factual correctness.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13322,\"completion_tokens\":804,\"total_tokens\":14126,\"cost\":0.034684,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.034684,\"upstream_inference_prompt_cost\":0.026644,\"upstream_inference_completions_cost\":0.00804},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "unreachable_adaptive",
+      "expected_conditional_controller": "workflow",
+      "report": {
+        "case": "unreachable_adaptive",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:74f608021c79ee0ae0c3c055d4fca936b585a22e019fbd15ee73f430f4d66cd5",
+        "source_archive_sha256": "sha256:bbf1d46cedfc52e36b6bf9a37abdf573a1fb14575ed733e43dcbc778fee441b0",
+        "source_manifest_sha256": "sha256:f9b53379f634e704baae3d1682fdcab3a3cf52761ae7dcc64942cba0e8f40352",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.125396",
+        "cost_usd": 0.034886,
+        "response_sha256": "094b3214a7f28976d13c214cf9429405404e404947a0fb476ef42d2db262dab5",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "workflow",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "workflow",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:bbf1d46cedfc52e36b6bf9a37abdf573a1fb14575ed733e43dcbc778fee441b0",
+          "source_manifest_sha256": "sha256:f9b53379f634e704baae3d1682fdcab3a3cf52761ae7dcc64942cba0e8f40352",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "def run_icp(icp):\n    _tools(\"search\", {\"query\": icp[\"industry\"]})\n    _tools(\"fetch\", {\"url\": \"https://example.com/fixed\"})\n    return []",
+              "explanation": "run_icp is the entry point. It runs a fixed search keyed on the ICP industry, then a fixed fetch of a hard-coded URL, then returns an empty list. It never calls _model, never uses tool results, and has no model-driven choice between continuing and finishing."
+            },
+            {
+              "claim": "fixed_control",
+              "file": "harness.py",
+              "excerpt": "def adaptive_controller(icp):\n    observations = []\n    for _ in range(4):\n        action = _model({\"icp\": icp, \"observations\": observations})",
+              "explanation": "adaptive_controller does let model output choose actions and finish from observations. But nothing in the archive calls it. run_icp does not reference it, and no other file does either, so it is dead code and creates no reachable route."
+            }
+          ],
+          "limitations": [
+            "Source-only review: no runtime execution was done and no one can attest what actually ran.",
+            "The only possible callers are outside the supplied archive. If an external harness invoked adaptive_controller directly, this label would not capture that. Within the archive, run_icp is the sole entry point and it is fixed.",
+            "LICENSE is a standard AGPL text and has no control logic.",
+            "The classification covers capability only, not output quality or correctness."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n{\"id\":\"gen-1792818926-MoWih4get2sXAuv71rsZ\",\"object\":\"chat.completion\",\"created\":1792818926,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:bbf1d46cedfc52e36b6bf9a37abdf573a1fb14575ed733e43dcbc778fee441b0\\\",\\\"source_manifest_sha256\\\":\\\"sha256:f9b53379f634e704baae3d1682fdcab3a3cf52761ae7dcc64942cba0e8f40352\\\",\\\"classification\\\":\\\"workflow\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"def run_icp(icp):\\\\n    _tools(\\\\\\\"search\\\\\\\", {\\\\\\\"query\\\\\\\": icp[\\\\\\\"industry\\\\\\\"]})\\\\n    _tools(\\\\\\\"fetch\\\\\\\", {\\\\\\\"url\\\\\\\": \\\\\\\"https://example.com/fixed\\\\\\\"})\\\\n    return []\\\",\\\"explanation\\\":\\\"run_icp is the entry point. It runs a fixed search keyed on the ICP industry, then a fixed fetch of a hard-coded URL, then returns an empty list. It never calls _model, never uses tool results, and has no model-driven choice between continuing and finishing.\\\"},{\\\"claim\\\":\\\"fixed_control\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"def adaptive_controller(icp):\\\\n    observations = []\\\\n    for _ in range(4):\\\\n        action = _model({\\\\\\\"icp\\\\\\\": icp, \\\\\\\"observations\\\\\\\": observations})\\\",\\\"explanation\\\":\\\"adaptive_controller does let model output choose actions and finish from observations. But nothing in the archive calls it. run_icp does not reference it, and no other file does either, so it is dead code and creates no reachable route.\\\"}],\\\"limitations\\\":[\\\"Source-only review: no runtime execution was done and no one can attest what actually ran.\\\",\\\"The only possible callers are outside the supplied archive. If an external harness invoked adaptive_controller directly, this label would not capture that. Within the archive, run_icp is the sole entry point and it is fixed.\\\",\\\"LICENSE is a standard AGPL text and has no control logic.\\\",\\\"The classification covers capability only, not output quality or correctness.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13693,\"completion_tokens\":750,\"total_tokens\":14443,\"cost\":0.034886,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.034886,\"upstream_inference_prompt_cost\":0.027386,\"upstream_inference_completions_cost\":0.0075},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    },
+    {
+      "case": "guarded_dispatch",
+      "expected_conditional_controller": "unverified",
+      "report": {
+        "case": "guarded_dispatch",
+        "model": "anthropic/claude-sonnet-5.5",
+        "provider": "Google",
+        "request_sha256": "sha256:d9e5fa5ce9fafc6c1b35ac1735d2a38611d31f8618d8aa7e2e57eaf5ee36ba66",
+        "source_archive_sha256": "sha256:0c356d3bda628d456394ec9d589971a0c9efc9d8032e9a0a38f219a8c4acb766",
+        "source_manifest_sha256": "sha256:2d073117ce2d2758968728ca7a15bfa1481cec062599133518b535b729127e30",
+        "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+        "bound_usd": "0.123860",
+        "cost_usd": 0.034794,
+        "response_sha256": "974587360173ea54222917bd029e8c06ff42c45badeb076b6ac6d920ac976ddd",
+        "finish_reason": "stop",
+        "source_coverage_files": 2,
+        "valid": true,
+        "classification": "unverified",
+        "assessment": {
+          "schema_version": "leadpoet.arena.research_control.assessment.v1",
+          "classification": "unverified",
+          "policy_id": "model_directed_research_v1",
+          "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+          "source_archive_sha256": "sha256:0c356d3bda628d456394ec9d589971a0c9efc9d8032e9a0a38f219a8c4acb766",
+          "source_manifest_sha256": "sha256:2d073117ce2d2758968728ca7a15bfa1481cec062599133518b535b729127e30",
+          "reviewed_files": [
+            "LICENSE",
+            "harness.py"
+          ],
+          "evidence": [
+            {
+              "claim": "uncertainty",
+              "file": "harness.py",
+              "excerpt": "if icp.get(\"use_external_controller\"):\n        name = icp[\"controller\"]\n        controller = _controllers.get(name)\n        if controller is None:\n            controller = importlib.import_module(name).run\n        return controller(icp, _model, _tools)",
+              "explanation": "When the input ICP sets use_external_controller, run_icp hands the model and tools to a controller that is either injected through configure() or imported dynamically by a name taken from the input. No such controller is in the supplied source. Whether it lets model output pick actions and decide when to finish therefore cannot be assessed."
+            },
+            {
+              "claim": "uncertainty",
+              "file": "harness.py",
+              "excerpt": "_tools(\"search\", {\"query\": icp[\"industry\"]})\n    return []",
+              "explanation": "The built-in fallback runs one fixed search on the industry field and returns an empty list. It never calls the model and never reads the search result. This path is fixed, but it is not the only route, so the whole submission cannot be labeled workflow."
+            }
+          ],
+          "limitations": [
+            "Source-only review: the actual runtime configuration, the ICP inputs, and whether use_external_controller is set cannot be observed.",
+            "The controller module is selected dynamically from input data or injected through configure(), and its code is absent from the archive, so its control behavior is unknown.",
+            "The only visible built-in path is a single fixed search that returns no companies. It does not show what the reachable external route does.",
+            "The LICENSE file is boilerplate AGPL text and contains no control logic.",
+            "This classification states source-level capability only. It does not attest runtime behavior, action quality, or correctness of results."
+          ]
+        }
+      },
+      "raw_provider_response": "\n         \n\n         \n\n         \n{\"id\":\"gen-1792818934-rbqtyRtKHZGpig6x0etR\",\"object\":\"chat.completion\",\"created\":1792818934,\"model\":\"anthropic/claude-sonnet-5.5\",\"provider\":\"Google\",\"system_fingerprint\":null,\"service_tier\":null,\"choices\":[{\"index\":0,\"logprobs\":null,\"finish_reason\":\"stop\",\"native_finish_reason\":\"end_turn\",\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"schema_version\\\":\\\"leadpoet.arena.research_control.assessment.v1\\\",\\\"policy_id\\\":\\\"model_directed_research_v1\\\",\\\"policy_hash\\\":\\\"sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d\\\",\\\"source_archive_sha256\\\":\\\"sha256:0c356d3bda628d456394ec9d589971a0c9efc9d8032e9a0a38f219a8c4acb766\\\",\\\"source_manifest_sha256\\\":\\\"sha256:2d073117ce2d2758968728ca7a15bfa1481cec062599133518b535b729127e30\\\",\\\"classification\\\":\\\"unverified\\\",\\\"reviewed_files\\\":[\\\"LICENSE\\\",\\\"harness.py\\\"],\\\"evidence\\\":[{\\\"claim\\\":\\\"uncertainty\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"if icp.get(\\\\\\\"use_external_controller\\\\\\\"):\\\\n        name = icp[\\\\\\\"controller\\\\\\\"]\\\\n        controller = _controllers.get(name)\\\\n        if controller is None:\\\\n            controller = importlib.import_module(name).run\\\\n        return controller(icp, _model, _tools)\\\",\\\"explanation\\\":\\\"When the input ICP sets use_external_controller, run_icp hands the model and tools to a controller that is either injected through configure() or imported dynamically by a name taken from the input. No such controller is in the supplied source. Whether it lets model output pick actions and decide when to finish therefore cannot be assessed.\\\"},{\\\"claim\\\":\\\"uncertainty\\\",\\\"file\\\":\\\"harness.py\\\",\\\"excerpt\\\":\\\"_tools(\\\\\\\"search\\\\\\\", {\\\\\\\"query\\\\\\\": icp[\\\\\\\"industry\\\\\\\"]})\\\\n    return []\\\",\\\"explanation\\\":\\\"The built-in fallback runs one fixed search on the industry field and returns an empty list. It never calls the model and never reads the search result. This path is fixed, but it is not the only route, so the whole submission cannot be labeled workflow.\\\"}],\\\"limitations\\\":[\\\"Source-only review: the actual runtime configuration, the ICP inputs, and whether use_external_controller is set cannot be observed.\\\",\\\"The controller module is selected dynamically from input data or injected through configure(), and its code is absent from the archive, so its control behavior is unknown.\\\",\\\"The only visible built-in path is a single fixed search that returns no companies. It does not show what the reachable external route does.\\\",\\\"The LICENSE file is boilerplate AGPL text and contains no control logic.\\\",\\\"This classification states source-level capability only. It does not attest runtime behavior, action quality, or correctness of results.\\\"]}\",\"refusal\":null,\"reasoning\":null}}],\"usage\":{\"prompt_tokens\":13417,\"completion_tokens\":796,\"total_tokens\":14213,\"cost\":0.034794,\"is_byok\":false,\"prompt_tokens_details\":{\"cached_tokens\":0,\"cache_write_tokens\":0,\"audio_tokens\":0,\"video_tokens\":0},\"cost_details\":{\"upstream_inference_cost\":0.034794,\"upstream_inference_prompt_cost\":0.026834,\"upstream_inference_completions_cost\":0.00796},\"completion_tokens_details\":{\"reasoning_tokens\":0,\"image_tokens\":0,\"audio_tokens\":0}}}"
+    }
+  ],
+  "public_champion": {
+    "case": "public-champion",
+    "model": "anthropic/claude-sonnet-5.5",
+    "provider": "Google",
+    "request_sha256": "sha256:fb92e428d9fea3f4c00d1fe03e4e8f0ad0c094a88172067d9e4937fb9317f71d",
+    "source_archive_sha256": "sha256:4f34dec291c2ccf477609eb63a839c29a438d769eb2bfbab8e0471499a00a08d",
+    "source_manifest_sha256": "sha256:596cd4d110490d0a867588d79e11a44b970c976eff1ef94bbb3c37a22d79dc58",
+    "policy_hash": "sha256:006dc1ec1d65c896a2ffdd57aedd20320c24f61cf488d1febd56f18c21dd9a3d",
+    "bound_usd": "2.689690",
+    "cost_usd": 1.090464,
+    "response_sha256": "18dbe25e8782659aae7f68b20def37e34d0af2ad271d0b8d3494e1f6307c62f2",
+    "finish_reason": "length",
+    "source_coverage_files": 31,
+    "valid": false,
+    "failure": "ResearchControlError:context_integrity",
+    "provider_response_projection": {
+      "model": "anthropic/claude-sonnet-5.5",
+      "provider": "Google",
+      "usage": {
+        "prompt_tokens": 534992,
+        "completion_tokens": 2048,
+        "total_tokens": 537040,
+        "cost": 1.090464,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 1.090464,
+          "upstream_inference_prompt_cost": 1.069984,
+          "upstream_inference_completions_cost": 0.02048
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 1123,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "finish_reason": "length",
+      "has_openrouter_metadata": false
+    },
+    "projection_sha256": "sha256:a6ffbf431ff9e41ae79ca922975225fe2d8a5b01a9f161d2e9508ce52ef3071f",
+    "projection_note": "Original response stays private with response_sha256. Published projection omits generated content, reasoning, and opaque signatures. It is not a byte-exact raw response."
+  },
+  "public_source": {
+    "fetched_at_utc": "2026-10-24T05:07:37.509902+00:00",
+    "round_url": "https://gateway.subnet71.com/arena/v1/rounds/arena-2026-10-23",
+    "source_url": "https://gateway.subnet71.com/arena/v1/submissions/sub-b342d25fb1d9d63f60265c1b697c5420/code",
+    "results_url": "https://gateway.subnet71.com/arena/v1/rounds/arena-2026-10-23/results/sub-b342d25fb1d9d63f60265c1b697c5420",
+    "submission_id": "sub-b342d25fb1d9d63f60265c1b697c5420",
+    "promoted_repository": "https://github.com/leadpoet/leadpoet-sales-agent",
+    "promoted_branch": "lab",
+    "promoted_commit": "15bd359703f4ce0b6420bc4531e666fc12098622",
+    "truncated": false,
+    "files": [
+      {
+        "path": "harness.py",
+        "sha256": "64e26d8079677343ffaecc0edd3513c1303477c5af312f9edc1c1343d70a2406",
+        "bytes": 116565
+      },
+      {
+        "path": "LICENSE",
+        "sha256": "7f8f48e4266aa8fd3033dfaa4bb7f6e83a60c6e099f82d4959b81de90e67cd8f",
+        "bytes": 34503
+      },
+      {
+        "path": "LICENSE-leadpoet-platform.txt",
+        "sha256": "9136bbb34e0222316d1ad17d9140c66998a776161eac2ec192a1d8b150a6e18f",
+        "bytes": 1065
+      },
+      {
+        "path": "__init__.py",
+        "sha256": "d887b54cdba6d40884300231aa25473f5f952365aaf437a80a582c57ba00c1aa",
+        "bytes": 63
+      },
+      {
+        "path": "arena_tools.py",
+        "sha256": "d0677723457c0efe79ec42b80cf57bb3e291c4e0b429e62f53d1fd029b40354c",
+        "bytes": 72742
+      },
+      {
+        "path": "arena_transport.py",
+        "sha256": "5d9af8fb5373953ea6bb40743f6e6b55b300e8cac0d37c402077afb669a0bfb1",
+        "bytes": 3939
+      },
+      {
+        "path": "ats_bonus.py",
+        "sha256": "cf61382858d7d29d00c15a777d78e424df8fba606209613aaaa257ec55de3c9b",
+        "bytes": 18884
+      },
+      {
+        "path": "cost.py",
+        "sha256": "9d9917959c1d51e213b8f1e5a5e1ff5f68673ccd49a9f6b96df072697e85fbfb",
+        "bytes": 6349
+      },
+      {
+        "path": "diagnostics.py",
+        "sha256": "1234c5f213f1243a841be9b07385642d7096fdaba86c3735b8cc321c944008d9",
+        "bytes": 11440
+      },
+      {
+        "path": "edgar.py",
+        "sha256": "478dc5f72bc0e6c23ae35fbddf2b92c67d1bf44d3eed3a9071179453e512d291",
+        "bytes": 44099
+      },
+      {
+        "path": "hiring.py",
+        "sha256": "9b8ce6aaa361a658ceef7eaf808caef8185dfbaaf0d73f724f1227c297b3fefe",
+        "bytes": 30830
+      },
+      {
+        "path": "identity.py",
+        "sha256": "3c433c10401f4f058efd97777fc441e4363cd53b8568204f75565c4467786ceb",
+        "bytes": 16062
+      },
+      {
+        "path": "intent_details.py",
+        "sha256": "68d6ebb2087afd24f384913390c89b8c6abc1c3969da257ed0ceea60dcca79c2",
+        "bytes": 73140
+      },
+      {
+        "path": "judge.py",
+        "sha256": "ac7953459f1a88fe6b824f333328e2cac80ab9529118e1378cf0c2f9028ea1c1",
+        "bytes": 26889
+      },
+      {
+        "path": "leadpoet_industry_taxonomy.json",
+        "sha256": "3cfccdc6e635082ff67d718f04d4d6e8887769d946cd6d6891d7924a76d69fd1",
+        "bytes": 57566
+      },
+      {
+        "path": "ownnews.py",
+        "sha256": "18ffb3dccb607c7fa3da1985c5c58fc0b080e5eeee43ee97eb79c052c36b4a57",
+        "bytes": 29185
+      },
+      {
+        "path": "precision.py",
+        "sha256": "cb74c9cb65d2294ce1b4d88533f22918a33762234c814c5ed66296d4aac0ff62",
+        "bytes": 48381
+      },
+      {
+        "path": "reverify.py",
+        "sha256": "7110285eb66218c02d0242566d240e4d97f8d5ba8c1a7e8f6db501a796381b25",
+        "bytes": 88857
+      },
+      {
+        "path": "roster.py",
+        "sha256": "b1cdcf481c83a251d045ca509c1410a7b77446e3c69339fa2c15a5962f848ee3",
+        "bytes": 34775
+      },
+      {
+        "path": "scorer_mirror.py",
+        "sha256": "202281e5046e73e0618104dfa8a85d127643a7df668702b83b6d08ee34c88acc",
+        "bytes": 38150
+      },
+      {
+        "path": "scout.py",
+        "sha256": "d597779b3643753edec448be1e9985a5cdfa630c3d365c9ae7d1b68223689788",
+        "bytes": 207197
+      },
+      {
+        "path": "seedlane.py",
+        "sha256": "a8c88508768074bdcebe19d8d60b10c14c5ea58582697ee145031717badeb186",
+        "bytes": 7584
+      },
+      {
+        "path": "sourcetype.py",
+        "sha256": "1a6270f26f1f2e726d3fc1ca04e25b4995934dd2d0e6f866ae2465face196fc7",
+        "bytes": 14529
+      },
+      {
+        "path": "stagefirst.py",
+        "sha256": "f56ed12ac4d7a34c3872c8a416f64cef4bc18a46e48c298b186028c10da35981",
+        "bytes": 29981
+      },
+      {
+        "path": "strategy.json",
+        "sha256": "f67839ccb70476609a8f302521a3bdd840e1feadfc60988d581c036cb42b6825",
+        "bytes": 5032
+      },
+      {
+        "path": "vendored_industry_fit.py",
+        "sha256": "f71ac3db0a3bc490ed1eaa01d6edfa7e82ea5f618df37574feb41e64c19ee0df",
+        "bytes": 11438
+      },
+      {
+        "path": "vendored_industry_taxonomy.py",
+        "sha256": "aa4d6108682a4e096df07017917d5c7ef0b92642ee49f9dc889a37cf0bc029fa",
+        "bytes": 14796
+      },
+      {
+        "path": "vendored_psl.py",
+        "sha256": "b793228be35893e61963ff92a1589bfaed7e9d722a0c2bc5623d22a1eb5b4c94",
+        "bytes": 3813
+      },
+      {
+        "path": "verify.py",
+        "sha256": "75e495a392502dd2780ebc37e1cfe65af58ca5f2d77cd7183295c0244ad364e6",
+        "bytes": 81743
+      },
+      {
+        "path": "webfetch.py",
+        "sha256": "35679d4a741576abf5d6c79592116658efcf1c97f590b369d45e9cc72f970df6",
+        "bytes": 34703
+      },
+      {
+        "path": "yieldmap.py",
+        "sha256": "f71f1c044d622cc2c8236c270c23f110b565984912b051b9b7600fc2326f9375",
+        "bytes": 4491
+      }
+    ],
+    "matching_promoted_files": [
+      "harness.py",
+      "LICENSE",
+      "LICENSE-leadpoet-platform.txt",
+      "__init__.py",
+      "arena_tools.py",
+      "arena_transport.py",
+      "ats_bonus.py",
+      "cost.py",
+      "diagnostics.py",
+      "edgar.py",
+      "hiring.py",
+      "identity.py",
+      "intent_details.py",
+      "judge.py",
+      "leadpoet_industry_taxonomy.json",
+      "ownnews.py",
+      "precision.py",
+      "reverify.py",
+      "roster.py",
+      "scorer_mirror.py",
+      "scout.py",
+      "seedlane.py",
+      "sourcetype.py",
+      "stagefirst.py",
+      "strategy.json",
+      "vendored_industry_fit.py",
+      "vendored_industry_taxonomy.py",
+      "vendored_psl.py",
+      "verify.py",
+      "webfetch.py",
+      "yieldmap.py"
+    ],
+    "fresh_source_verification": {
+      "url": "https://gateway.subnet71.com/arena/v1/submissions/sub-b342d25fb1d9d63f60265c1b697c5420/code",
+      "fetched_at_utc": "2026-10-24T05:09:06.437345+00:00",
+      "http_status": 200,
+      "raw_payload_sha256": "ac16e6f2dfe499f692fc520534ce9f943053c56fb6bcb45a40500a20bfc72d0f",
+      "summary": {
+        "submission_id": "sub-b342d25fb1d9d63f60265c1b697c5420",
+        "files": 31,
+        "all_files_match_saved_manifest": true,
+        "truncated": false
+      }
+    },
+    "fresh_round_verification": {
+      "url": "https://gateway.subnet71.com/arena/v1/rounds/arena-2026-10-23",
+      "fetched_at_utc": "2026-10-24T05:09:07.429987+00:00",
+      "http_status": 200,
+      "raw_payload_sha256": "75f580e36872cc0a4491099dce7aaca43c658b0c85f63b3b638d2fbe16c0a164",
+      "summary": {
+        "round_id": "arena-2026-10-23",
+        "status": "published",
+        "king_decision": {
+          "outcome": "crowned",
+          "king_hotkey": "5DcmcmVr2mpPjE5m2LBBVnAYG5P4dVQvNtNkeDNHVH98cY6v",
+          "king_submission_id": "sub-b342d25fb1d9d63f60265c1b697c5420",
+          "winner_submission_id": "sub-b342d25fb1d9d63f60265c1b697c5420"
+        }
+      }
+    }
+  },
+  "scout_causal_controls": {
+    "source_commit": "15bd359703f4ce0b6420bc4531e666fc12098622",
+    "checks": {
+      "model_query_changes_actual_search_request": true,
+      "remaining_template_searches_unchanged": true,
+      "model_ranking_changes_resolution_queue_order": true,
+      "model_extraction_changes_candidate_presence": true,
+      "fixed_stage_order_under_changed_evidence": true,
+      "second_pass_disabled_in_actual_strategy": true,
+      "optional_second_prompt_carries_previous_queries": true,
+      "llm_request_has_no_declared_tools": true
+    },
+    "all_passed": true,
+    "plan_controls": [
+      {
+        "model_response": {
+          "queries": [
+            "software announces partnership alpha"
+          ]
+        },
+        "planned_queries": [
+          "software announces partnership alpha",
+          "Business software company announces partnership United States",
+          "Business software strategic partnership United States"
+        ],
+        "actual_search_calls": [
+          {
+            "query": "software announces partnership alpha",
+            "recency_days": 30,
+            "limit": 6,
+            "category": "news"
+          },
+          {
+            "query": "Business software company announces partnership United States",
+            "recency_days": 30,
+            "limit": 6,
+            "category": "news"
+          },
+          {
+            "query": "Business software strategic partnership United States",
+            "recency_days": 30,
+            "limit": 6,
+            "category": "news"
+          }
+        ],
+        "model_prompt_count": 1
+      },
+      {
+        "model_response": {
+          "queries": [
+            "software announces partnership beta"
+          ]
+        },
+        "planned_queries": [
+          "software announces partnership beta",
+          "Business software company announces partnership United States",
+          "Business software strategic partnership United States"
+        ],
+        "actual_search_calls": [
+          {
+            "query": "software announces partnership beta",
+            "recency_days": 30,
+            "limit": 6,
+            "category": "news"
+          },
+          {
+            "query": "Business software company announces partnership United States",
+            "recency_days": 30,
+            "limit": 6,
+            "category": "news"
+          },
+          {
+            "query": "Business software strategic partnership United States",
+            "recency_days": 30,
+            "limit": 6,
+            "category": "news"
+          }
+        ],
+        "model_prompt_count": 1
+      }
+    ],
+    "ranking_controls": [
+      {
+        "preferred_model_index": 0,
+        "model_response": {
+          "ranked": [
+            {
+              "i": 0,
+              "fit": "likely",
+              "hq": ""
+            },
+            {
+              "i": 1,
+              "fit": "unknown",
+              "hq": ""
+            },
+            {
+              "i": 2,
+              "fit": "unknown",
+              "hq": ""
+            },
+            {
+              "i": 3,
+              "fit": "unknown",
+              "hq": ""
+            },
+            {
+              "i": 4,
+              "fit": "unknown",
+              "hq": ""
+            }
+          ]
+        },
+        "output_candidate_order": [
+          "Candidate 0",
+          "Candidate 1",
+          "Candidate 2",
+          "Candidate 3",
+          "Candidate 4"
+        ]
+      },
+      {
+        "preferred_model_index": 4,
+        "model_response": {
+          "ranked": [
+            {
+              "i": 0,
+              "fit": "unknown",
+              "hq": ""
+            },
+            {
+              "i": 1,
+              "fit": "unknown",
+              "hq": ""
+            },
+            {
+              "i": 2,
+              "fit": "unknown",
+              "hq": ""
+            },
+            {
+              "i": 3,
+              "fit": "unknown",
+              "hq": ""
+            },
+            {
+              "i": 4,
+              "fit": "likely",
+              "hq": ""
+            }
+          ]
+        },
+        "output_candidate_order": [
+          "Candidate 4",
+          "Candidate 0",
+          "Candidate 1",
+          "Candidate 2",
+          "Candidate 3"
+        ]
+      }
+    ],
+    "extraction_controls": [
+      {
+        "emit_model_candidate": true,
+        "model_response": {
+          "companies": [
+            {
+              "id": 1,
+              "company_name": "Candidate Zero",
+              "domain": "candidate.example",
+              "event": "Announced partnership",
+              "date": "2026-10-20",
+              "snippet": "Candidate Zero announced a partnership with Example Corporation for enterprise software delivery.",
+              "fit": "likely"
+            }
+          ]
+        },
+        "output_candidates": [
+          {
+            "company_name": "Candidate Zero",
+            "domain": "candidate.example",
+            "event": "Announced partnership",
+            "date": "2026-10-20",
+            "url": "https://candidate.example/news",
+            "snippet": "Candidate Zero announced a partnership with Example Corporation for enterprise software delivery.",
+            "fit": "likely",
+            "source": "exa"
+          }
+        ]
+      },
+      {
+        "emit_model_candidate": false,
+        "model_response": {
+          "companies": []
+        },
+        "output_candidates": []
+      }
+    ],
+    "stage_controls": [
+      {
+        "returned_evidence_count": 0,
+        "stage_sequence": [
+          "plan_queries",
+          "harvest",
+          "extract",
+          "stage_first_lane",
+          "roster_lane",
+          "triage"
+        ],
+        "output": [],
+        "source_configuration_unchanged": {
+          "STAGE_FIRST": true,
+          "ROSTER": true,
+          "SECOND_PASS": false,
+          "SEED_LANE": false
+        }
+      },
+      {
+        "returned_evidence_count": 5,
+        "stage_sequence": [
+          "plan_queries",
+          "harvest",
+          "extract",
+          "stage_first_lane",
+          "roster_lane",
+          "triage"
+        ],
+        "output": [],
+        "source_configuration_unchanged": {
+          "STAGE_FIRST": true,
+          "ROSTER": true,
+          "SECOND_PASS": false,
+          "SEED_LANE": false
+        }
+      }
+    ],
+    "limits": [
+      "Stub model responses establish executable local causation, not actual production model choices.",
+      "The stage control isolates run_scout through triage; downstream candidate resolution is not exercised.",
+      "Actual strategy and public source remain unchanged; patched functions exist only in this test process.",
+      "No production prompt, private thought, complete trajectory, factual quality, or training gain is proved.",
+      "No paid call, source mutation, or repository edit is performed."
+    ]
+  },
+  "scout_control_script_sha256": "cc562f29e5e86cab176ef2a808e788369fc537828ae391c34d968df9ad6a0ba6",
+  "new_provider_reported_spend_usd": "1.448036",
+  "shared_budget_state_after": {
+    "cap_usd": "8",
+    "reserved_usd": "5.277604",
+    "spent_usd": "1.4702087126"
+  }
+}

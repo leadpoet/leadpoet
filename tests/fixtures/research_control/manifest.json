@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "scope": "Conditional controller-classification test oracle, not admitted-submission qualification accuracy or agent quality. Never include this manifest in a reviewed source bundle.",
+  "runtime_assumption": "The offline test calls configure(model, tools, trace=None) with injected local model and tool callables before run_icp(icp). Optional external helpers or controllers are injected separately for causal tests. This configuration step is not provided by the production Arena entry point. Labels describe the controller under this test contract, not independently runnable admitted submissions.",
+  "fixtures": [
+    {"id": "adaptive_json", "expected": "model_directed", "reason": "Under the injected-runtime contract, a model chooses each research action and when to finish from accumulated observations."},
+    {"id": "native_tools", "expected": "model_directed", "reason": "Under the injected-runtime contract, native tool calls and final JSON govern the actual continuation and stop."},
+    {"id": "bounded_hybrid", "expected": "model_directed", "reason": "Under the injected-runtime contract, a fixed discovery step is followed by bounded model-owned continuation or early finish."},
+    {"id": "fixed_extractor", "expected": "workflow", "reason": "The model extracts output only after fixed research stages."},
+    {"id": "fixed_query_plan", "expected": "workflow", "reason": "An initial query plan does not control subsequent research from observations."},
+    {"id": "ignored_model_decoy", "expected": "workflow", "reason": "Logged model decisions do not control tool execution or stopping."},
+    {"id": "forced_tool_decoy", "expected": "workflow", "reason": "Native tool syntax is logged but fixed Python actions override it."},
+    {"id": "dynamic_helper", "expected": "unverified", "reason": "The submitted source does not contain the runtime-selected controlling helper."},
+    {"id": "unreachable_adaptive", "expected": "workflow", "reason": "The adaptive controller is never called by run_icp, which always executes fixed research stages."},
+    {"id": "guarded_dispatch", "expected": "unverified", "reason": "A runtime guard can select an external controller whose implementation is absent from the submitted source."}
+  ]
+}

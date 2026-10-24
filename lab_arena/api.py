@@ -155,8 +155,8 @@ def create_app(service: ArenaService) -> FastAPI:
         return await no_store_public_call(service.public_current)
 
     @app.get("/arena/v1/competition")
-    async def competition() -> Any:
-        return await run_in_threadpool(service.public_competition)
+    async def competition() -> JSONResponse:
+        return await no_store_public_call(service.public_competition)
 
     @app.get("/arena/v1/history")
     async def history(cursor: Optional[str] = Query(None, max_length=1024, pattern=r"^[A-Za-z0-9_-]+$"),
@@ -166,8 +166,8 @@ def create_app(service: ArenaService) -> FastAPI:
         return await no_store_public_call(service.public_history, cursor=cursor, limit=limit, day=day.isoformat() if day else None, hotkey=hotkey)
 
     @app.get("/arena/v1/signing-key")
-    async def signing_key() -> Any:
-        return await run_in_threadpool(service.signing_key_document)
+    async def signing_key() -> JSONResponse:
+        return await no_store_public_call(service.signing_key_document)
 
     @app.post("/arena/v1/validators/events")
     async def append_validator_events(request: Request) -> JSONResponse:
@@ -189,8 +189,8 @@ def create_app(service: ArenaService) -> FastAPI:
         return await run_in_threadpool(service.record_chain_outcome, document)
 
     @app.get("/arena/v1/chain-outcomes")
-    async def chain_outcomes(epoch: int) -> Any:
-        return await run_in_threadpool(service.public_chain_outcomes, int(epoch))
+    async def chain_outcomes(epoch: int) -> JSONResponse:
+        return await no_store_public_call(service.public_chain_outcomes, int(epoch))
 
     @app.get("/arena/v1/rounds/{round_id}")
     async def round_view(round_id: str) -> Any:
@@ -201,8 +201,8 @@ def create_app(service: ArenaService) -> FastAPI:
         return await no_store_public_call(service.public_benchmark, round_id)
 
     @app.get("/arena/v1/rounds/{round_id}/submissions")
-    async def round_submissions(round_id: str) -> Any:
-        return await run_in_threadpool(service.public_submissions, round_id)
+    async def round_submissions(round_id: str) -> JSONResponse:
+        return await no_store_public_call(service.public_submissions, round_id)
 
     @app.get("/arena/v1/rounds/{round_id}/results/{submission_id}")
     async def round_results(round_id: str, submission_id: str) -> JSONResponse:

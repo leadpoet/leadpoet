@@ -670,7 +670,7 @@ def _report_proxy_exclusions(inventory, operational_logger):
     for excluded in inventory.excluded_workers:
         print("Arena proxy worker excluded: %s" % excluded.diagnostic, flush=True)
         if operational_logger is not None:
-            fields = {"phase": "scoring_setup", "reason": "proxy_worker_excluded",
+            fields = {"phase": "proxy_preflight", "reason": "proxy_worker_excluded",
                       "operation": excluded.operation_code,
                       "error_class": "ProxyWorkerPreflightError"}
             if excluded.http_status is not None:

@@ -227,6 +227,7 @@ def test_partial_proxy_readiness_logs_safe_slot_and_central_event(capsys):
     event = log._queue[0]
     assert "operation=proxy_worker_4_connect_http_error http_status=407" in output
     assert event["kind"] == "validator.error"
+    assert event["content"]["phase"] == "proxy_preflight"
     assert event["content"]["reason"] == "proxy_worker_excluded"
     assert event["content"]["operation"] == "proxy_worker_4_connect_http_error"
     assert event["content"]["http_status"] == 407

@@ -21,7 +21,7 @@ class SubmissionProviderKeys:
             or row.get("miner_hotkey") != context.miner_hotkey
             or row.get("status") not in ("accepted", "frozen")
         ):
-            raise BrokerError("broker_unavailable")
+            raise BrokerError("broker_unavailable", setup_phase="submission_identity")
         return row
 
     def _is_baseline(self, row: Mapping[str, Any]) -> bool:
@@ -43,7 +43,7 @@ class SubmissionProviderKeys:
         try:
             funding = self._store.provider_funding(context.run_id, provider)
         except Exception as exc:
-            raise BrokerError("broker_unavailable") from exc
+            raise BrokerError("broker_unavailable", setup_phase="provider_funding", setup_cause=exc) from exc
         required = {
             "status",
             "funding_source",
@@ -60,13 +60,13 @@ class SubmissionProviderKeys:
             or not isinstance(funding.get("champion_funding"), bool)
             or not isinstance(funding.get("restart_required"), bool)
         ):
-            raise BrokerError("broker_unavailable")
+            raise BrokerError("broker_unavailable", setup_phase="provider_funding_validation")
         if funding["funding_source"] == "host":
             if (
                 funding.get("credential_submission_id") is not None
                 or funding.get("credential_miner_hotkey") is not None
             ):
-                raise BrokerError("broker_unavailable")
+                raise BrokerError("broker_unavailable", setup_phase="provider_funding_validation")
         elif not all(
             isinstance(funding.get(field), str) and funding.get(field)
             for field in (
@@ -74,7 +74,7 @@ class SubmissionProviderKeys:
                 "credential_miner_hotkey",
             )
         ):
-            raise BrokerError("broker_unavailable")
+            raise BrokerError("broker_unavailable", setup_phase="provider_funding_validation")
         return funding
 
     def provider_funding_source_for(
@@ -166,4 +166,5 @@ class SubmissionProviderKeys:
         try:
             return self._credentials.runtime_key(encrypted, provider)
         except CredentialError as exc:
-            raise BrokerError("broker_unavailable" if exc.retryable else "miner_credentials_unavailable") from None
+            raise BrokerError("broker_unavailable" if exc.retryable else "miner_credentials_unavailable",
+                              setup_phase="credential_resolution", setup_cause=exc) from None

@@ -313,6 +313,41 @@ def test_large_old_history_and_later_recovery_do_not_replace_current_session():
     assert pair.ready_session(rows, candidate=SHA, started_at=STARTED) == SESSION
 
 
+def test_excluded_proxy_event_does_not_block_healthy_scoring_readiness():
+    from types import SimpleNamespace
+    from lab_arena import wiring
+    from lab_arena.proxy_workers import ProxyWorkerExclusion
+    from lab_arena.validator_logging import ValidatorOperationalLogger
+
+    log = ValidatorOperationalLogger(
+        "https://gateway.invalid", keypair=None, network="finney", netuid=71,
+    )
+    log.emit("validator.startup", {"phase": "startup"})
+    wiring._report_proxy_exclusions(SimpleNamespace(excluded_workers=(
+        ProxyWorkerExclusion("proxy_worker_4_connect", "timeout"),
+    )), log)
+    log.emit("validator.ready", {"phase": "weights"})
+    log.emit("validator.ready", {"phase": "scoring_setup", "ready_slots": 2})
+    log.recovered("scoring_setup")
+
+    def rows():
+        return [dict(validator_event_id=index, event_kind=event["kind"],
+                     created_at=event["occurred_at"].replace("Z", "+00:00"),
+                     occurred_at=event["occurred_at"].replace("Z", "+00:00"),
+                     content=event["content"])
+                for index, event in enumerate(log._queue, 1)]
+
+    candidate = log._queue[0]["content"]["validator_source_commit"]
+    assert [event["kind"] for event in log._queue] == [
+        "validator.startup", "validator.error", "validator.ready", "validator.ready"]
+    assert pair.ready_session(rows(), candidate=candidate, started_at=STARTED) == log.session_id
+
+    log.error("scoring_setup", RuntimeError("private error"))
+    assert pair.ready_session(rows(), candidate=candidate, started_at=STARTED) is None
+    log.recovered("scoring_setup")
+    assert pair.ready_session(rows(), candidate=candidate, started_at=STARTED) == log.session_id
+
+
 def test_waits_for_both_loops_then_rereads_same_primary_process(tmp_path, monkeypatch):
     p = FakePair(tmp_path)
     hotkey = '5' * 48

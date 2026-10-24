@@ -303,6 +303,7 @@ def test_submission_costs_extends_only_its_read_deadline():
     ("lab_arena_open_scoring_v2", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
     ("lab_arena_open_scoring_v3", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
     ("lab_arena_record_run_scores", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
+    ("lab_arena_expire_leases", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
 ])
 def test_scoped_rpc_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch, function, timeout_setting):
     # Shortened deadlines exercise the real HTTP read clock without a long test.

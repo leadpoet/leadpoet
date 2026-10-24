@@ -555,7 +555,8 @@ def _calls(rows, run_ids, objects, run_order):
             terminal = row.get("terminal_response") or {}
             captured = (saved_call.get("upstream_response_receipt")
                         if isinstance(saved_call, Mapping) else None)
-            captured = captured or terminal.get("upstream_response_receipt")
+            captured = (captured or terminal.get("upstream_response_receipt")
+                        or (row.get("entry_doc") or {}).get("upstream_response_receipt"))
             if not captured:
                 continue
             if isinstance(captured, Mapping) and captured.get("status") == "unavailable":
@@ -618,7 +619,8 @@ def _calls(rows, run_ids, objects, run_order):
                              "openrouter_delayed_reconciliation", "deepline_delayed_reconciliation",
                              "reconciled_uncertainty_entry_id", "reconciled_uncertainty_reason",
                              "openrouter_generation_id", "deepline_request_id", "deepline_operation",
-                             "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost"}
+                             "request_hash", "base_call_identity", "action_sequence", "provider_attempt", "provider_cost",
+                             "transport_elapsed_ms", "timing_scope"}
         call["lifecycle"] = []
         for row in sorted(entries, key=lambda row: int(row["entry_id"])):
             metadata = {key: copy.deepcopy(row[key]) for key in

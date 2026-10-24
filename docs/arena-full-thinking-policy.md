@@ -17,15 +17,18 @@ behavior does. Catalog capability flags alone do not grant approval.
 
 ## Initial compatibility-approved whitelist
 
-The runtime source is `lab_arena/reasoning_models.json`. All three entries use
-Chat Completions, `effort: high`, `exclude: false`, an 8,192-token output limit,
-ZDR, no provider fallback, and a route price bound.
+The runtime source is `lab_arena/reasoning_models.json`. All six entries use Chat Completions, `exclude: false`, an 8,192-token output
+limit, ZDR, no provider fallback, and a route price bound. Five use `effort: high`;
+Gemma uses its supported `enabled: true` mode. Exact modes live in the registry.
 
 | Model ID | Exact provider selector | Tested result |
 | --- | --- | --- |
 | `openai/gpt-oss-120b` | `deepinfra/bf16` | Generated text, two tool continuations, strict JSON |
 | `mistralai/mistral-large-4-0` | `mistral/zdr` | Generated text on final turn, two tool continuations, strict JSON |
 | `deepseek/deepseek-v4.1-flash-1017` | `fireworks` | Generated text, two tool continuations, strict JSON |
+| `openai/gpt-oss-20b` | `deepinfra/bf16` | Generated text, two tool continuations, strict JSON |
+| `reflection/beam-1.0-501b-a23b` | `nebius/fp8` | Generated text, two tool continuations, strict JSON |
+| `google/gemma-4-31b-it` | `coreweave/fp4` | Generated text, two tool continuations, strict JSON |
 
 The evidence files in `docs/evidence/full-thinking/` contain only synthetic test
 inputs and exact responses. Their SHA-256 hashes are frozen in the registry.
@@ -38,8 +41,10 @@ a route. Registry approval is a separate review of provider semantics and the
 stored compatibility evidence. It is not approval to deploy or train.
 
 Provider semantics are documented by [DeepInfra](https://deepinfra.com/openai/gpt-oss-120b/api),
-[Mistral](https://docs.mistral.ai/studio/conversations/reasoning), and
-[Fireworks](https://docs.fireworks.ai/guides/reasoning).
+[Mistral](https://docs.mistral.ai/studio/conversations/reasoning), [Fireworks](https://docs.fireworks.ai/guides/reasoning),
+[OpenAI GPT-OSS](https://developers.openai.com/cookbook/articles/gpt-oss/handle-raw-cot),
+[Reflection](https://developers.reflection.ai/reasoning), and
+[Gemma](https://ai.google.dev/gemma/docs/capabilities/thinking).
 Mistral's empty tool-only turns are recorded as empty, not counted as traces.
 The DeepSeek route through DeepInfra returned HTTP 429 in probes and is not approved.
 
@@ -81,7 +86,7 @@ quality may change; the user has accepted this tradeoff.
   upstream responses; this PR does not add arbitrary upstream streaming support.
   Existing buffered Codex SSE behavior is preserved, but does not make a Codex
   model eligible. Hosted Responses web search remains unapproved.
-- Keeping ZDR worked for all three approved routes. Relaxing retention does not
+- Keeping ZDR worked for all six approved routes. Relaxing retention does not
   turn provider-withheld thinking into readable text. No privacy relaxation is
   included.
 - A provider can return no thinking on an individual successful call. Such calls
@@ -112,3 +117,13 @@ three-turn probes, malformed history, summary/opaque/truncated exclusion, empty
 tool turns, activation failure, old-round behavior, and local PostgreSQL cap
 concurrency and settlement. See the PR verification record for executed commands
 and remaining exclusions.
+
+## Capture audit follow-up
+
+The [end-to-end audit](arena-trace-capture-audit.md) records fresh real provider
+calls through disposable PostgreSQL, object storage, worker socket delivery,
+agent read acknowledgements, and raw/readable export readback for every approved
+route. It also records tested routes that did not qualify, without silently
+admitting them or changing the provider. These are compatibility approvals, not
+a claim that every call returns thinking or that any model has passed a full
+sales task evaluation.

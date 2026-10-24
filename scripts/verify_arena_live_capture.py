@@ -3,9 +3,10 @@
 
 One exact OpenRouter route, three sequential synthetic turns. The real Broker,
 HTTP transport, request capture, response receipt, and training-export decoder
-are exercised. The ledger is a durable local diagnostic adapter, not PostgreSQL.
-No worker socket, agent acknowledgement, complete trajectory, or production
-round is claimed. Candidate route files are admitted only in this process.
+are exercised against disposable PostgreSQL by default. A local file ledger is
+available for diagnostics. No worker socket, agent acknowledgement, complete
+trajectory, or production round is claimed. Candidate route files are admitted
+only in this process.
 """
 from __future__ import annotations
 
@@ -20,9 +21,11 @@ import json
 import os
 from pathlib import Path
 from contextlib import nullcontext
+import shutil
+import tempfile
 from unittest.mock import patch
 
-from lab_arena import broker as br, contracts, operations, reasoning_capture as rc, training_capture, training_thinking
+from lab_arena import broker as br, contracts, lab_arena_checkpoint, operations, reasoning_capture as rc, runner, shim, training_capture, training_observations, training_thinking
 from lab_arena.service import LocalObjectStore
 from lab_arena.store import ArenaStore, PsycopgTransport
 from lab_arena.training_export import _calls
@@ -31,6 +34,30 @@ from tests.lab_arena.test_lab_arena_broker import FakeLedgerStore, CONTEXT
 
 BUDGET_USD = Decimal("8")
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def scenario_spec(name: str):
+    if name == "acme":
+        return {"initial": copy.deepcopy(INITIAL), "evidence": copy.deepcopy(EVIDENCE),
+                "expected": {"company": "Acme Test", "qualified": True,
+                             "evidence_ids": ["profile", "headcount"]}}
+    if name == "conflicting_evidence":
+        return {"initial": [{"role": "user", "content": (
+            "Synthetic compatibility test. Decide whether Acme Test is a US B2B software "
+            "company with 50-200 current employees. First call lookup_evidence for 'profile', "
+            "then for 'headcount', one call per turn. The older profile and the newer official "
+            "headcount disagree; use the newer official headcount for the employee criterion. "
+            "After both tools return only strict JSON with company, qualified, evidence_ids. "
+            "Use both sources and do not infer missing facts.")}],
+                "evidence": {
+                    "profile": {"evidence_id": "profile", "company": "Acme Test",
+                                "country": "US", "business": "B2B software",
+                                "employees": 80, "observed_on": "2024-01-01"},
+                    "headcount": {"evidence_id": "headcount", "employees": 12,
+                                  "observed_on": "2026-10-23", "source": "current official staffing"}},
+                "expected": {"company": "Acme Test", "qualified": False,
+                             "evidence_ids": ["profile", "headcount"]}}
+    raise ValueError("unknown_probe_scenario")
 
 
 def _private_write(path: Path, data: bytes) -> None:
@@ -157,6 +184,7 @@ class DisposablePostgres:
         self.transport = None
         self.store = None
         self.context = None
+        self.run = None
 
     def open(self, registry):
         from tests.lab_arena import full_thinking_six_dollar_postgres_test as fixture
@@ -182,6 +210,7 @@ class DisposablePostgres:
             reasoning_capture_policy=rc.POLICY, reasoning_route_registry=registry)
         self.transport = PsycopgTransport(lambda: psycopg.connect(**dsn), pool_size=1)
         self.store = ArenaStore(self.transport)
+        self.run = self.store.get_run(self.context.run_id)
         return self.store, self.context
 
     def rows(self):
@@ -271,13 +300,31 @@ class WireTransport:
             close()
 
 
+class BrokerSocketApi:
+    """Adapter at the worker's real provider API boundary, not a fake reply."""
+
+    def __init__(self, broker, context):
+        self.broker, self.context = broker, context
+        self.results = []
+
+    def provider(self, run_id, lease_token, frame):
+        if run_id != self.context.run_id:
+            raise ValueError("socket_run_mismatch")
+        result = self.broker.execute(
+            self.context, operation_id=frame["operation_id"],
+            parameters=frame["parameters"], action_sequence=frame["action_sequence"],
+            timeout_ms=frame["timeout_ms"])
+        self.results.append(result)
+        return result.to_document()
+
+
 def route_registry(route_file: Path | None, model: str):
-    committed = rc.load_registry()
+    working_registry = rc.load_registry()
     if route_file is None:
-        route = next((r for r in committed["approved_routes"] if r["model_id"] == model), None)
+        route = next((r for r in working_registry["approved_routes"] if r["model_id"] == model), None)
         if route is None:
-            raise ValueError("route_not_in_committed_registry; supply --candidate-route")
-        return committed, route, "committed"
+            raise ValueError("route_not_in_working_registry; supply --candidate-route")
+        return working_registry, route, "working_registry"
     candidate = json.loads(route_file.read_text())
     if isinstance(candidate, dict) and "approved_routes" in candidate:
         routes = candidate.get("approved_routes")
@@ -305,7 +352,7 @@ def conservative_bound(route) -> Decimal:
     price = route["price_ceiling"]
     bound = (Decimal(route["context_tokens"]) * Decimal(price["prompt"])
              + Decimal(route["max_output_tokens"]) *
-             max(Decimal(price["completion"]), Decimal(price["internal_reasoning"]))
+             (Decimal(price["completion"]) + Decimal(price["internal_reasoning"]))
              + Decimal(price["request"]))
     return bound.quantize(Decimal("0.000001"), rounding=ROUND_UP)
 
@@ -319,14 +366,14 @@ def _price_table(route):
                                         for key in br.PRICED_COMPONENTS}}})
 
 
-def _diagnostic_host_route(route):
+def _diagnostic_host_route(route, *, responses_compat=False):
     """Pin a probe-only route without assigning full-thinking policy evidence."""
     ceiling = route["price_ceiling"]
     price = {key: Decimal(ceiling.get(key, "0")) for key in br.PRICED_COMPONENTS}
     return br.OpenRouterHostRoute(
         provider_policy={"data_collection": "deny", "zdr": True,
                          "only": [route["provider"]], "allow_fallbacks": False,
-                         "require_parameters": True,
+                         "require_parameters": not responses_compat,
                          "max_price": {
                              "prompt": float(price["prompt"] * br.OPENROUTER_PRICE_PER_MILLION),
                              "completion": float((price["completion"] + price["internal_reasoning"])
@@ -335,37 +382,40 @@ def _diagnostic_host_route(route):
         reservation_pricing={key: ceiling.get(key, "0") for key in br.PRICED_COMPONENTS})
 
 
-def _parameters(model, messages, turn, operation_id, mode, route):
+def _parameters(model, messages, turn, operation_id, mode, route, *,
+                diagnostic_tool_choice_auto=False, diagnostic_responses_compat=False):
+    output_limit = min(2048, int(route["max_output_tokens"]))
     if operation_id == "openrouter.responses":
         value = {"model": model, "input": copy.deepcopy(messages),
-                 "max_output_tokens": 2048}
+                 "max_output_tokens": output_limit}
         if mode == "summary_diagnostic":
             value["reasoning"] = {"effort": route["mode"].get("effort", "high"),
-                                  "summary": "detailed"}
+                                  "summary": "auto" if diagnostic_responses_compat else "detailed"}
         if turn < 2:
             value.update(tools=[{"type": "function", "name": "lookup_evidence",
                                  "description": "Read synthetic company evidence by ID.",
                                  "parameters": TOOLS[0]["function"]["parameters"]}],
-                         tool_choice="required", parallel_tool_calls=False,
+                         tool_choice="required",
                          )
         else:
             value["text"] = {"format": {"type": "json_schema", "name": "qualification",
                                          "strict": True, "schema": SCHEMA}}
         return value
     value = {"model": model, "messages": copy.deepcopy(messages),
-             "max_tokens": 2048}
+             "max_tokens": output_limit}
     if mode == "summary_diagnostic":
         value["reasoning"] = {**route["mode"], "exclude": False}
     if turn < 2:
-        value.update(tools=TOOLS, tool_choice={"type": "function",
-                                                "function": {"name": "lookup_evidence"}})
+        choice = ("auto" if diagnostic_tool_choice_auto else
+                  {"type": "function", "function": {"name": "lookup_evidence"}})
+        value.update(tools=TOOLS, tool_choice=choice)
     else:
         value["response_format"] = {"type": "json_schema", "json_schema": {
             "name": "qualification", "strict": True, "schema": SCHEMA}}
     return value
 
 
-def _next_message(body, turn, operation_id):
+def _next_message(body, turn, operation_id, spec):
     response = json.loads(body)
     if operation_id == "openrouter.responses":
         output = response.get("output") or []
@@ -380,12 +430,11 @@ def _next_message(body, turn, operation_id):
                 raise ValueError("tool_arguments_invalid")
             return response, [*copy.deepcopy(output), {"type": "function_call_output",
                                "call_id": call["call_id"],
-                               "output": json.dumps(EVIDENCE[expected], separators=(",", ":"))}]
+                               "output": json.dumps(spec["evidence"][expected], separators=(",", ":"))}]
         texts = [part.get("text") for item in output if item.get("type") == "message"
                  for part in item.get("content") or [] if part.get("type") == "output_text"]
         final = json.loads(texts[0]) if len(texts) == 1 else None
-        if final != {"company": "Acme Test", "qualified": True,
-                     "evidence_ids": ["profile", "headcount"]}:
+        if not _valid_final(final, spec["expected"]):
             raise ValueError("strict_final_json_mismatch")
         return response, []
     choice = (response.get("choices") or [{}])[0]
@@ -401,16 +450,27 @@ def _next_message(body, turn, operation_id):
             raise ValueError("tool_arguments_invalid")
         return response, [assistant_history(message), {"role": "tool",
                           "tool_call_id": call["id"],
-                          "content": json.dumps(EVIDENCE[expected], separators=(",", ":"))}]
+                          "content": json.dumps(spec["evidence"][expected], separators=(",", ":"))}]
     final = json.loads(message.get("content") or "null")
-    if final != {"company": "Acme Test", "qualified": True,
-                 "evidence_ids": ["profile", "headcount"]}:
+    if not _valid_final(final, spec["expected"]):
         raise ValueError("strict_final_json_mismatch")
     return response, []
 
 
+def _valid_final(value, expected):
+    return (isinstance(value, dict) and set(value) == set(expected)
+            and value["company"] == expected["company"]
+            and type(value["qualified"]) is bool
+            and value["qualified"] is expected["qualified"]
+            and isinstance(value["evidence_ids"], list)
+            and len(value["evidence_ids"]) == 2
+            and all(isinstance(item, str) for item in value["evidence_ids"])
+            and set(value["evidence_ids"]) == set(expected["evidence_ids"]))
+
+
 def verify_storage(root: Path, context, registry, wire_records, *, rows=None,
-                   operation_id="openrouter.chat") -> list[dict]:
+                   operation_id="openrouter.chat", worker_run=None,
+                   worker_snapshot=None) -> list[dict]:
     # New instances prove disk readback, and _calls is the real training export
     # ledger/request/response decoder. It cannot prove worker delivery.
     objects = LocalObjectStore(root / "objects")
@@ -423,17 +483,25 @@ def verify_storage(root: Path, context, registry, wire_records, *, rows=None,
         if "path" not in wire:
             raise ValueError("transport_substituted_response")
         raw = (root / wire["path"]).read_bytes()
-        terminal = next(r for r in rows if r["entry_kind"] == "settlement"
-                        and r["call_identity"] == call["call_identity"])
-        receipt = terminal["terminal_response"]
-        decoded = base64.b64decode(receipt["body_b64"], validate=True)
-        exact = (contracts.hash_bytes(raw) == wire["sha256"]
-                 and contracts.hash_bytes(decoded) == wire["sha256"])
-        # Response privacy can alter the exported JSON. Compare the sanitized
-        # value with the real export, and report exactness separately.
+        upstream = [item for item in call.get("upstream_response_receipts") or []
+                    if item.get("wire_body_sha256") == wire["sha256"]
+                    and item.get("wire_body_bytes") == wire["bytes"]
+                    and item.get("status") == wire["status"]]
+        terminal = next((r for r in rows if r["entry_kind"] == "settlement"
+                         and r["call_identity"] == call["call_identity"]), None)
+        receipt = terminal.get("terminal_response") or {} if terminal else {}
         from lab_arena.training_export import _response_value
-        sanitized, redactions = _response_value(receipt, "openrouter")
-        readable = call.get("response") == sanitized
+        try:
+            sanitized, redactions = _response_value(receipt, "openrouter")
+        except Exception:
+            sanitized, redactions = None, []
+        readable = sanitized is not None and call.get("response") == sanitized
+        terminal_exact = False
+        if isinstance(receipt.get("body_b64"), str):
+            decoded = base64.b64decode(receipt["body_b64"], validate=True)
+            terminal_exact = contracts.hash_bytes(decoded) == wire["sha256"]
+        exact = (contracts.hash_bytes(raw) == wire["sha256"]
+                 and (len(upstream) == 1 or terminal_exact))
         outbound = ((call.get("request") or {}).get("outbound") or {})
         saved_outbound_hash = outbound.get("body_sha256")
         coverage = training_thinking.attempt_coverage(call, "miner", registry)
@@ -442,14 +510,38 @@ def verify_storage(root: Path, context, registry, wire_records, *, rows=None,
                        "outbound_request_exact": saved_outbound_hash == wire["outbound_body_sha256"],
                        "stored_request_readable": isinstance(call.get("request"), dict),
                        "stored_response_readable": readable,
+                       "stored_provider_response_readable": bool(upstream and isinstance(upstream[0].get("response"), dict)),
+                       "provider_response_status": wire["status"],
+                       "accounting_state": call.get("accounting_state"),
+                       "selected_terminal_differs_from_provider": bool(terminal and not terminal_exact),
                        "response_privacy_redactions": redactions,
                        "capture": coverage,
                        "evidence_gaps": call.get("evidence_gaps", [])})
     if len(calls) != len(wire_records):
         raise ValueError("ledger_wire_count_mismatch")
-    if any(not all(row[key] for key in ("wire_receipt_exact", "outbound_request_exact", "stored_request_readable",
-                                       "stored_response_readable")) for row in checks):
+    def complete_readback(row):
+        required = ["wire_receipt_exact", "outbound_request_exact", "stored_request_readable"]
+        if row["accounting_state"] == "settlement" and row["provider_response_status"] == 200:
+            required.append("stored_response_readable")
+        if row["accounting_state"] == "uncertain":
+            required.append("stored_provider_response_readable")
+        return all(row[key] for key in required)
+
+    if any(not complete_readback(row) for row in checks):
         raise ValueError("durable_readback_mismatch")
+    worker_gaps = []
+    if worker_snapshot is not None:
+        from lab_arena.training_export import _link_worker_receipts
+        worker_gaps = sorted(_link_worker_receipts(worker_run, calls, worker_snapshot))
+        if any(gap != "agent_task_state_unverified" for gap in worker_gaps):
+            raise ValueError("worker_receipt_link_invalid:" + ",".join(worker_gaps))
+        for check, call in zip(checks, calls):
+            provenance = call.get("response_provenance") or {}
+            check["worker_socket_written"] = provenance.get("delivery_to_worker") == "socket_written"
+            check["agent_exact_response_acknowledged"] = (
+                provenance.get("agent_receipt") == "reported_exact_body_received")
+            check["worker_selected_response_acknowledged"] = (
+                provenance.get("selected_response_acknowledged") is True)
     # This is a clearly incomplete diagnostic export assembled from real
     # _calls rows. It does not assert a worker trajectory, score, or label.
     diagnostic = {"schema_version": "leadpoet.lab_arena.training_example.v1",
@@ -458,8 +550,11 @@ def verify_storage(root: Path, context, registry, wire_records, *, rows=None,
                                     "reasoning_route_registry": context.reasoning_route_registry},
                   "provider_calls": calls,
                   "completeness": {"complete": False,
-                                   "incomplete_reasons": ["worker_receipts_unavailable",
-                                                          "scoring_label_unavailable"]}}
+                                   "incomplete_reasons": (["scoring_label_unavailable", *worker_gaps]
+                                                          if worker_snapshot is not None else
+                                                          ["worker_receipts_unavailable", "scoring_label_unavailable"])}}
+    if worker_snapshot is not None:
+        diagnostic["worker_observation_artifacts"] = {context.run_id: worker_snapshot}
     diagnostic["example_hash"] = contracts.document_hash(diagnostic)
     _private_write(root / "diagnostic-export.json", _json_bytes(diagnostic))
     readable = training_thinking.readable_trace(diagnostic)
@@ -473,11 +568,22 @@ def verify_storage(root: Path, context, registry, wire_records, *, rows=None,
 def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = None,
               transport=None, budget_usd: Decimal = BUDGET_USD,
               ledger_mode: str = "postgres", budget_state: Path | None = None,
-              mode: str = "full"):
+              mode: str = "full", scenario: str = "acme", worker_socket: bool = False,
+              diagnostic_tool_choice_auto: bool = False,
+              diagnostic_responses_compat: bool = False):
     registry, route, authority = route_registry(route_file, model)
+    spec = scenario_spec(scenario)
     operation_id = route["api"]
     if mode not in {"full", "summary_diagnostic"}:
         raise ValueError("invalid_probe_mode")
+    if (diagnostic_tool_choice_auto or diagnostic_responses_compat) and mode != "summary_diagnostic":
+        raise ValueError("diagnostic_controls_require_summary_mode")
+    if diagnostic_tool_choice_auto and operation_id != "openrouter.chat":
+        raise ValueError("diagnostic_auto_tool_requires_chat")
+    if diagnostic_responses_compat and operation_id != "openrouter.responses":
+        raise ValueError("diagnostic_responses_compat_requires_responses")
+    if worker_socket and ledger_mode != "postgres":
+        raise ValueError("worker_socket_requires_disposable_postgres")
     per_call = conservative_bound(route)
     if per_call <= 0 or per_call * 3 > budget_usd or budget_usd > BUDGET_USD:
         raise ValueError("worst_case_three_call_budget_exceeded")
@@ -511,12 +617,38 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                        capture_request=capture.prepare,
                        credential_for=lambda _context, provider: key if provider == "openrouter" else "",
                        funding_source_for=lambda _context: "miner_key")
-    messages = copy.deepcopy(INITIAL)
+    socket_dir = None
+    socket_server = None
+    socket_api = None
+    socket_state = None
+    previous_socket = os.environ.get(shim.WORKER_SOCKET_ENV)
+    if worker_socket:
+        if backend.run is None:
+            raise ValueError("disposable_run_missing")
+        lease = dict(backend.run)
+        lease["kind"] = "execute"
+        socket_state = runner.RunState(lease=lease, lease_token="capture-probe-local-socket")
+        socket_api = BrokerSocketApi(broker, context)
+        socket_dir = Path(tempfile.mkdtemp(prefix="ar-probe-", dir="/tmp"))
+        socket_server = runner.WorkerSocketServer(socket_dir / "w.sock", socket_api, socket_state)
+        # The production worker may poll a broker's temporary no-dispatch
+        # billing hold. This paid probe has a stricter one-attempt contract.
+        # Disable that server-instance poll; all socket framing and receipts
+        # still use the real worker implementation.
+        socket_server._temporary_hold = lambda document, operation_id, action_sequence: False
+        # The production Responses bridge can retry a proved-free 429. The
+        # probe's one-attempt and shared-budget contract forbids that retry.
+        socket_server._responses_rate_limit_delay = lambda call, retry: None
+        socket_server.start()
+        os.environ[shim.WORKER_SOCKET_ENV] = str(socket_dir / "w.sock")
+    messages = copy.deepcopy(spec["initial"])
     spent = Decimal(0)
     reserved_uncertain = Decimal(0)
     outcomes = []
     protocol_complete = False
     failure = None
+    failure_turn = None
+    failure_phase = None
     try:
         for turn in range(3):
             if spent + reserved_uncertain + per_call > budget_usd:
@@ -527,7 +659,8 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
             reserved_uncertain += per_call
             wire_transport.arm(turn)
             route_scope = (patch.object(br, "_openrouter_host_route",
-                                        return_value=_diagnostic_host_route(route))
+                                        return_value=_diagnostic_host_route(
+                                            route, responses_compat=diagnostic_responses_compat))
                            if mode == "summary_diagnostic" else nullcontext())
             original_build = operations.build_outbound_request
 
@@ -537,22 +670,54 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                 # that request shape, without adding policy/approval annotation.
                 if selected_operation == operation_id:
                     kwargs["allow_full_thinking"] = True
-                return original_build(selected_operation, parameters, **kwargs)
+                    if diagnostic_responses_compat:
+                        strict_policy = dict(kwargs["openrouter_provider_policy"])
+                        strict_policy["require_parameters"] = True
+                        kwargs["openrouter_provider_policy"] = strict_policy
+                outbound = original_build(selected_operation, parameters, **kwargs)
+                if selected_operation == operation_id and diagnostic_responses_compat:
+                    # Preserve the production validator and change only this
+                    # isolated diagnostic outbound after exact-pin validation.
+                    document = json.loads(outbound.body)
+                    if document["provider"].get("require_parameters") is not True:
+                        raise ValueError("diagnostic_pin_invalid")
+                    document["provider"]["require_parameters"] = False
+                    outbound = replace(outbound, body=json.dumps(
+                        document, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=False, allow_nan=False).encode("utf-8"))
+                return outbound
 
             build_scope = (patch.object(operations, "build_outbound_request",
                                         side_effect=diagnostic_build)
                            if mode == "summary_diagnostic" else nullcontext())
             with route_scope, build_scope:
-                result = broker.execute(context, operation_id=operation_id,
-                                        parameters=_parameters(model, messages, turn,
-                                                               operation_id, mode, route),
-                                        action_sequence=turn, timeout_ms=120000)
+                parameters = _parameters(
+                    model, messages, turn, operation_id, mode, route,
+                    diagnostic_tool_choice_auto=diagnostic_tool_choice_auto,
+                    diagnostic_responses_compat=diagnostic_responses_compat)
+                if worker_socket:
+                    status, headers, delivered_body = shim.dispatch(operation_id, parameters, 120000)
+                    result = socket_api.results[-1]
+                    if status != result.status or delivered_body != result.body:
+                        raise ValueError("socket_delivery_mismatch")
+                    identity = headers.get(shim.CALL_IDENTITY_HEADER)
+                    if identity != result.call.get("call_identity"):
+                        raise ValueError("socket_identity_mismatch")
+                    if lab_arena_checkpoint.record_response_received(
+                            call_identity=identity, status=status, body=delivered_body) is None:
+                        raise ValueError("socket_agent_ack_failed")
+                else:
+                    result = broker.execute(context, operation_id=operation_id,
+                                            parameters=parameters,
+                                            action_sequence=turn, timeout_ms=120000)
             outcomes.append({"turn": turn, "status": result.status,
                              "outcome": result.call.get("outcome"),
                              "call_identity": result.call.get("call_identity")})
             if result.call.get("outcome") != "settled" or result.status != 200:
                 break
-            response, continuation = _next_message(result.body, turn, operation_id)
+            # Account for a definite provider charge even when the model
+            # violates the requested tool/final format below.
+            response = json.loads(result.body)
             observed_cost = response.get("usage", {}).get("cost")
             if observed_cost is None:
                 # A settled ledger can lack a provider cost. Keep the worst
@@ -565,47 +730,105 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                 shared_budget.settle(per_call, cost)
                 reserved_uncertain -= per_call
                 spent += cost
+            _, continuation = _next_message(result.body, turn, operation_id, spec)
             messages.extend(continuation)
         protocol_complete = len(outcomes) == 3 and all(
             row["status"] == 200 and row["outcome"] == "settled" for row in outcomes)
     except Exception as exc:
         failure = type(exc).__name__
+        failure_turn = turn
+        failure_phase = ("after_provider_http_send" if wire_transport.armed_turn == turn
+                         and wire_transport.sent_in_turn else
+                         "before_provider_http_send")
     finally:
         wire_transport.close()
+        worker_snapshot = None
+        worker_failure = None
+        if socket_server is not None:
+            socket_server.stop()
+            if previous_socket is None:
+                os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+            else:
+                os.environ[shim.WORKER_SOCKET_ENV] = previous_socket
+            shutil.rmtree(socket_dir)
+            try:
+                payload = socket_state.worker_observations.document()
+                run = backend.run
+                snapshot, compressed = training_observations.build_snapshot(
+                    context.run_id, "execute", payload,
+                    lease_generation=run["lease_generation"],
+                    claim_request_hash=run["claim_request_hash"],
+                    secrets=(socket_state.lease_token, key))
+                ref = training_observations.object_ref(
+                    context.run_id, run["lease_generation"], run["claim_request_hash"])
+                objects.put(ref, compressed)
+                worker_snapshot = training_observations.read_snapshot(
+                    LocalObjectStore(output / "objects"), context.run_id, "execute",
+                    run["lease_generation"], run["claim_request_hash"])
+                if worker_snapshot["payload_sha256"] != snapshot["payload_sha256"]:
+                    raise ValueError("worker_snapshot_readback_mismatch")
+            except Exception as exc:
+                worker_failure = type(exc).__name__
         try:
             rows = backend.rows() if backend is not None else None
+            if rows is not None:
+                # The fixture database is disposable. Keep its actual SQL
+                # readback before a later export or comparison can fail.
+                _private_write(output / "ledger-readback.json", _json_bytes({
+                    "schema_version": "leadpoet.lab_arena.disposable_ledger_readback.v1",
+                    "run_id": context.run_id, "rows": rows}))
             readback = verify_storage(output, context, registry, wire_transport.records,
-                                      rows=rows, operation_id=operation_id) if wire_transport.records else []
+                                      rows=rows, operation_id=operation_id,
+                                      worker_run=backend.run if backend is not None else None,
+                                      worker_snapshot=worker_snapshot) if wire_transport.records else []
             readback_failure = None
         except Exception as exc:
             readback, readback_failure = [], type(exc).__name__
         returned = [row["capture"]["returned"] for row in readback]
+        worker_receipts_proved = bool(readback) and all(
+            row.get("worker_socket_written") and row.get("agent_exact_response_acknowledged")
+            and row.get("worker_selected_response_acknowledged") for row in readback)
         classification = ("full_thinking_observed" if protocol_complete and len(returned) == 3
                           and "full_thinking" in returned
-                          and all(value in {"full_thinking", "empty"} for value in returned) else
+                          and all(value in {"full_thinking", "requested_empty"} for value in returned) else
                           "summary_only_diagnostic" if returned and all(value == "summary" for value in returned) else
                           "incomplete_or_unproved")
         report = {"model": model, "provider": route["provider"], "route_authority": authority,
                   "mode": mode,
+                  "diagnostic_tool_choice_auto": diagnostic_tool_choice_auto,
+                  "diagnostic_responses_compat": diagnostic_responses_compat,
+                  "scenario": scenario,
                   "ledger_mode": ledger_mode,
+                  "worker_socket_enabled": worker_socket,
+                  "worker_temporary_hold_retry_disabled": worker_socket,
+                  "worker_responses_429_retry_disabled": worker_socket,
+                  "worker_receipts_proved": worker_receipts_proved,
+                  "worker_snapshot_failure": worker_failure,
+                  "worker_snapshot_payload_sha256": worker_snapshot.get("payload_sha256") if worker_snapshot else None,
                   "operation_id": operation_id, "budget_usd": str(budget_usd),
                   "shared_budget_state": str(shared_budget.path),
                   "worst_case_per_call_usd": str(per_call),
                   "provider_reported_spend_usd": str(spent),
                   "still_reserved_or_unpriced_usd": str(reserved_uncertain),
                   "turns": outcomes, "readback": readback,
-                  "probe_failure": failure, "readback_failure": readback_failure,
+                  "probe_failure": failure, "probe_failure_turn": failure_turn,
+                  "probe_failure_phase": failure_phase,
+                  "readback_failure": readback_failure,
+                  "budget_hold_note": "Unpriced or failed attempts retain their full reserved bound; no charge is inferred.",
                   "classification": classification,
                   "all_turns_full_thinking": len(returned) == 3 and all(
                       value == "full_thinking" for value in returned),
                   "tool_continuations_and_final_json": protocol_complete,
-                  "production_whitelist_approved": authority == "committed",
-                  "full_thinking_eligible": mode == "full" and authority == "committed"
+                  "registry_listed": authority == "working_registry",
+                  "production_activation": False,
+                  "route_probe_passed": mode == "full" and authority == "working_registry"
                                             and classification == "full_thinking_observed",
                   "transport_body_note": "Exact bytes returned by HTTP transport after HTTP content decoding; distinct from privacy-sanitized export.",
                   "proof_limit": ("Disposable PostgreSQL ArenaStore RPC and SQL ledger readback; " if backend else
                                   "Local diagnostic file ledger; ") +
-                                 "no worker receipt, agent acknowledgement, complete training trajectory, or production activation."}
+                                 ("real local worker socket write and SDK read acknowledgement; " if worker_receipts_proved else
+                                  "no proven worker receipt or agent acknowledgement; ") +
+                                 "no complete training trajectory or production activation."}
         try:
             _private_write(output / "report.json", _json_bytes(report))
         finally:
@@ -620,6 +843,13 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--candidate-route", type=Path)
     parser.add_argument("--mode", choices=("full", "summary_diagnostic"), default="full")
+    parser.add_argument("--scenario", choices=("acme", "conflicting_evidence"), default="acme")
+    parser.add_argument("--worker-socket", action="store_true",
+                        help="exercise real local worker socket and SDK acknowledgement")
+    parser.add_argument("--diagnostic-tool-choice-auto", action="store_true",
+                        help="summary-only Chat probe: permit an automatic tool decision")
+    parser.add_argument("--diagnostic-responses-compat", action="store_true",
+                        help="summary-only Responses probe: summary auto, require_parameters false")
     parser.add_argument("--budget-usd", type=Decimal, default=BUDGET_USD)
     parser.add_argument("--budget-state", type=Path,
                         help="shared private budget file for all route probes; defaults to output parent")
@@ -632,7 +862,10 @@ def main():
     result = run_probe(model=args.model, output=args.output, key=key,
                        route_file=args.candidate_route, budget_usd=args.budget_usd,
                        ledger_mode=args.ledger_mode, budget_state=args.budget_state,
-                       mode=args.mode)
+                       mode=args.mode, scenario=args.scenario,
+                       worker_socket=args.worker_socket,
+                       diagnostic_tool_choice_auto=args.diagnostic_tool_choice_auto,
+                       diagnostic_responses_compat=args.diagnostic_responses_compat)
     print(json.dumps({key: result[key] for key in ("model", "provider", "route_authority",
                                                "provider_reported_spend_usd",
                                                "tool_continuations_and_final_json", "classification")}))

@@ -302,6 +302,30 @@ def test_plaintext_reasoning_content_alias_is_response_only():
     assert cleaned["choices"][0]["message"]["reasoning_content"] == "Visible DeepSeek text."
     assert cleaned["choices"][1]["message"]["reasoning_content"] == "[REDACTED]"
     assert reasons == ["hidden_reasoning"]
+
+
+def test_chat_assistant_replay_alias_is_saved_without_full_thinking_approval(tmp_path):
+    document = {"operation_id": "openrouter.chat", "outbound": {"body": {"messages": [
+        {"role": "assistant", "content": None, "reasoning_content": "Visible prior summary."},
+        {"role": "user", "content": "Prompt", "reasoning_content": "Untrusted user state"},
+    ]}}}
+    cleaned, redactions = capture.sanitize_training_value(document)
+    assert cleaned["outbound"]["body"]["messages"][0]["reasoning_content"] == "Visible prior summary."
+    assert cleaned["outbound"]["body"]["messages"][1]["reasoning_content"] == "[REDACTED]"
+    assert redactions == ["hidden_reasoning"]
+    objects = LocalObjectStore(tmp_path)
+    pointer = capture.RequestCapture(objects)(document)
+    assert pointer["status"] == "stored"
+    assert capture.read_request(objects, pointer)["outbound"]["body"]["messages"][0][
+        "reasoning_content"] == "Visible prior summary."
+    # The same projection survives the export's second privacy pass.
+    from lab_arena.training_export import without_hidden_reasoning
+    projected, removed = without_hidden_reasoning({"provider_calls": [{
+        "operation_id": "openrouter.chat", "request": document}]})
+    messages = projected["provider_calls"][0]["request"]["outbound"]["body"]["messages"]
+    assert messages[0]["reasoning_content"] == "Visible prior summary."
+    assert "reasoning_content" not in messages[1]
+    assert removed is True
     request = {"admitted_parameters": {"messages": [{"role": "assistant",
                                                        "reasoning_content": "prior text"}],
                                        "choices": [{"message": {"reasoning_content": "spoofed"}}]}}

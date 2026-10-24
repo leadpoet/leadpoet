@@ -2783,8 +2783,15 @@ def _decode_terminal(
         "deepline_response_missing_reason",
         "compatibility_failure_code",
         "upstream_response_receipt",  # Private evidence has no replay authority.
+        "transport_elapsed_ms", "timing_scope",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
+        raise BrokerError("broker_unavailable")
+    if ("transport_elapsed_ms" in document or "timing_scope" in document) and (
+        type(document.get("transport_elapsed_ms")) is not int
+        or not 0 <= document["transport_elapsed_ms"] <= 3_600_000
+        or document.get("timing_scope") != "initial_provider_transport_send"
+    ):
         raise BrokerError("broker_unavailable")
     compatibility_failure_code = document.get("compatibility_failure_code")
     if "compatibility_failure_code" in document and (
@@ -5541,6 +5548,13 @@ class Broker:
         openrouter_completed_rate_limit_proven = False
         openrouter_retry_after_seconds: object = _RETRY_AFTER_ABSENT
         scrapingdog_observed_success_status: Optional[int] = None
+        transport_elapsed_ms: Optional[int] = None
+
+        def retain_transport_timing(document: Dict[str, Any]) -> None:
+            if transport_elapsed_ms is not None:
+                document["transport_elapsed_ms"] = transport_elapsed_ms
+                document["timing_scope"] = "initial_provider_transport_send"
+
         try:
             url, headers = inject_credential(outbound, secret)
             if deepline_request_id is not None:
@@ -5555,23 +5569,39 @@ class Broker:
             timeout_seconds = max(0.001, request_deadline - time.monotonic())
             try:
                 try:
-                    response = deepline_recovery_response or self._transport.send(
-                        method=outbound.target.method,
-                        url=url,
-                        headers=headers,
-                        body=outbound.body,
-                        timeout_seconds=timeout_seconds,
-                        **(
-                            {
-                                "max_response_bytes": (
-                                    _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
-                                )
-                            }
-                            if route is not None
-                            and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
-                            else {}
-                        ),
-                    )
+                    if deepline_recovery_response is not None:
+                        response = deepline_recovery_response
+                    else:
+                        try:
+                            transport_started = time.monotonic()
+                        except Exception:
+                            transport_started = None
+                        try:
+                            response = self._transport.send(
+                                method=outbound.target.method,
+                                url=url,
+                                headers=headers,
+                                body=outbound.body,
+                                timeout_seconds=timeout_seconds,
+                                **(
+                                    {
+                                        "max_response_bytes": (
+                                            _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES
+                                        )
+                                    }
+                                    if route is not None
+                                    and route.adapter in scoring_provider_compat.SOURCE_HTML_ADAPTERS
+                                    else {}
+                                ),
+                            )
+                        finally:
+                            try:
+                                elapsed = ((time.monotonic() - transport_started) * 1000
+                                           if transport_started is not None else float("nan"))
+                                if math.isfinite(elapsed):
+                                    transport_elapsed_ms = max(0, min(int(elapsed), 3_600_000))
+                            except Exception:
+                                pass  # Observation cannot change the provider outcome.
                 except ProviderTransportError as transport_error:
                     recovered = (
                         _deepline_execution_response_readback(
@@ -5967,6 +5997,7 @@ class Broker:
                 uncertain_doc["transport_error_class"] = transport_error_class
                 if exc.observed_status is not None:
                     uncertain_doc["observed_provider_status"] = exc.observed_status
+                retain_transport_timing(uncertain_doc)
                 if (
                     deepline_readback_cost is None
                     and scrapingdog_observed_success_status is None
@@ -6260,6 +6291,7 @@ class Broker:
                     uncertain_doc["reasoning_route_observation"] = reasoning_capture.route_observation(
                         raw_document, reasoning_annotation,
                     )
+                retain_transport_timing(uncertain_doc)
                 retain_upstream_response(uncertain_doc)
                 uncertain_state = self._persist_provider_accounting(self._store.mark_uncertain,
                     deadline=accounting_store_deadline,
@@ -6406,6 +6438,7 @@ class Broker:
                 judgment_cache_eligible=judgment_cache_eligible,
                 account_failure_evidence=account_failure_evidence,
             )
+            retain_transport_timing(terminal)
             if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
                 terminal["reasoning_route_observation"] = reasoning_capture.route_observation(
                     raw_document, reasoning_annotation,
@@ -6457,6 +6490,7 @@ class Broker:
                                 refused.status, refused.headers, refused.body,
                                 call_succeeded=False, provider_cost=cost_record,
                             )
+                            retain_transport_timing(compact_terminal)
                             if deepline_async_ids:
                                 compact_terminal["deepline_async_job_ids"] = list(deepline_async_ids)
                             settled = self._persist_provider_accounting(self._store.settle_call,
@@ -6535,6 +6569,7 @@ class Broker:
                     provider_cost=cost_record,
                     compatibility_failure_code=compatibility_failure_code,
                 )
+                retain_transport_timing(terminal)
                 retain_upstream_response(terminal)
                 try:
                     settled = self._persist_provider_accounting(self._store.settle_call,
@@ -6622,6 +6657,7 @@ class Broker:
                     "observed_provider_status": scrapingdog_observed_success_status,
                     "transport_error_class": summary["transport_error_class"],
                 })
+            retain_transport_timing(uncertain_doc)
             retain_upstream_response(uncertain_doc)
             try:
                 self._persist_provider_accounting(self._store.mark_uncertain,

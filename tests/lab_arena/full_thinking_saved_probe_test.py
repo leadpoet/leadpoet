@@ -127,4 +127,4 @@ def test_live_three_turn_body_through_private_storage_and_strict_export(probe):
         assert len(record["generated_thinking"][0]["source_paths"]) == 2
         assert ref["response_sha256"] == contracts.document_hash(original)
     assert manifest["coverage"]["trajectories"]["complete_full_thinking"] == 1
-    assert manifest["coverage"]["returned_classes"].get("empty", 0) == 3 - expected
+    assert manifest["coverage"]["returned_classes"].get("requested_empty", 0) == 3 - expected

@@ -6,11 +6,12 @@ annotation establishes route semantics; returned text alone never does.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections import Counter, defaultdict
 from typing import Any, Mapping
 
-from lab_arena import contracts, reasoning_capture, training_capture, training_dataset, training_steps
+from lab_arena import contracts, reasoning_capture, training_capture, training_dataset, training_export, training_steps
 
 SCHEMA_VERSION = "leadpoet.lab_arena.full_thinking_dataset.v1"
 RECORD_SCHEMA_VERSION = "leadpoet.lab_arena.full_thinking_step.v1"
@@ -121,6 +122,18 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                 kind = item.get("type")
                 if kind in {"reasoning.summary", "summary_text"} or item.get("summary"):
                     summary = True
+                    value = item.get("summary")
+                    if isinstance(value, str) and value.strip() and "[REDACTED]" not in value:
+                        segments.append({"source_path": ["choices", ci, "message", "reasoning_details", ri, "summary"],
+                                         "field": "reasoning_details.summary", "text": value})
+                    elif isinstance(value, list):
+                        for pi, part in enumerate(value):
+                            if (isinstance(part, Mapping) and part.get("type") == "summary_text"
+                                    and isinstance(part.get("text"), str) and part["text"].strip()
+                                    and "[REDACTED]" not in part["text"]):
+                                segments.append({"source_path": ["choices", ci, "message", "reasoning_details", ri,
+                                                                 "summary", pi, "text"],
+                                                 "field": "reasoning_details.summary", "text": part["text"]})
                 if training_capture.reasoning_kind(item) == "opaque":
                     opaque = True
                     continue
@@ -141,6 +154,12 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                 continue
             if item.get("summary"):
                 summary = True
+                for pi, part in enumerate(item["summary"] if isinstance(item["summary"], list) else []):
+                    if (isinstance(part, Mapping) and part.get("type") == "summary_text"
+                            and isinstance(part.get("text"), str) and part["text"].strip()
+                            and "[REDACTED]" not in part["text"]):
+                        segments.append({"source_path": ["output", oi, "summary", pi, "text"],
+                                         "field": "output.summary.summary_text", "text": part["text"]})
             if item.get("encrypted_content") or item.get("redacted_thinking"):
                 opaque = True
             for field in ("text", "thinking", "content"):
@@ -187,6 +206,27 @@ def _execution_model_call(example: Mapping[str, Any], call: Mapping[str, Any]) -
             and _role(example, call) in {"miner", "baseline"})
 
 
+def _reasoning_request_state(call: Mapping[str, Any], annotation: Mapping[str, Any]) -> str:
+    """Report what the saved outbound request asked for, without route approval."""
+    body = (((call.get("request") or {}).get("outbound") or {}).get("body"))
+    if isinstance(body, Mapping):
+        control = body.get("reasoning")
+        if isinstance(control, Mapping):
+            if control.get("exclude") is True or control.get("enabled") is False:
+                return "not_requested"
+            if (control.get("effort") not in (None, "", "none")
+                    or control.get("summary") not in (None, "", "none")
+                    or control.get("enabled") is True
+                    or any(type(control.get(key)) is int and control[key] > 0
+                           for key in ("max_tokens", "budget_tokens"))):
+                return "requested"
+        if (body.get("include_reasoning") is True
+                or body.get("reasoning_effort") not in (None, "", "none")):
+            return "requested"
+        return "requested" if annotation.get("requested") is True else "not_requested"
+    return "requested" if annotation.get("requested") is True else "unknown"
+
+
 def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -> dict:
     """Describe one stored provider attempt without asserting model cognition."""
     annotation = call.get("reasoning_capture") or {}
@@ -212,13 +252,17 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
     usage = usage if isinstance(usage, Mapping) else {}
     details = usage.get("completion_tokens_details")
     details = details if isinstance(details, Mapping) else {}
-    tokens = usage.get("reasoning_tokens", details.get("reasoning_tokens"))
-    if type(tokens) is not int or tokens < 0:
-        tokens = None
+    output_details = usage.get("output_tokens_details")
+    output_details = output_details if isinstance(output_details, Mapping) else {}
+    tokens = next((value for value in (usage.get("reasoning_tokens"), details.get("reasoning_tokens"),
+                                      output_details.get("reasoning_tokens"))
+                   if type(value) is int and value >= 0), None)
     capture_reason = (call.get("upstream_response_capture") or {}).get("reason")
     storage = ("saved" if isinstance(response, Mapping) else
                "storage_failed" if capture_reason == "response_capture_failed" else
                "size_limited" if capture_reason == "response_size_limit" else "unavailable")
+    request_state = _reasoning_request_state(call, annotation)
+    contains_opaque = opaque or "hidden_reasoning" in redactions
     if storage == "storage_failed":
         content_class = "storage_failed"
     elif storage == "size_limited":
@@ -227,8 +271,6 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
         content_class = "unavailable"
     elif "credential" in redactions:
         content_class = "redacted"
-    elif "hidden_reasoning" in redactions:
-        content_class = "opaque"
     elif finish in {"length", "max_tokens", "incomplete"} or response.get("incomplete_details"):
         content_class = "truncated"
     elif (call.get("operation_id") == "openrouter.chat" and finish not in {"stop", "tool_calls"}
@@ -236,24 +278,25 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
         content_class = "interrupted"
     elif summary:
         content_class = "summary"
-    elif opaque:
-        content_class = "opaque"
     elif unproved:
         content_class = "unproved_text"
     elif segments:
-        content_class = "full_thinking" if route_verified else "unproved_text"
+        content_class = "full_thinking" if route_verified and not contains_opaque else "unproved_text"
+    elif contains_opaque:
+        content_class = "opaque"
     else:
-        content_class = "empty" if route_verified else "unsupported"
+        content_class = "requested_empty" if request_state == "requested" else request_state
     return {"run_id": call.get("run_id"), "call_identity": call.get("call_identity"),
             "provider_attempt": call.get("provider_attempt"), "role": role,
             "model_id": annotation.get("model_id") or (((call.get("request") or {}).get("outbound") or {}).get("body") or {}).get("model"),
             "requested_provider_route": annotation.get("provider_route"), "api": call.get("operation_id"),
-            "requested": annotation.get("requested") is True, "route_reviewed": policy_verified,
+            "requested": request_state == "requested", "request_state": request_state,
+            "route_reviewed": policy_verified,
             "provider_route_verified": observation_verified,
             "returned": content_class, "storage": storage, "finish_reason": finish,
             "characters": sum(len(part["text"]) for part in segments),
             "tokens_reported": tokens, "segment_count": len(segments),
-            "contains_summary": summary, "contains_opaque": opaque,
+            "contains_summary": summary, "contains_opaque": contains_opaque,
             "redactions": sorted(redactions)}
 
 
@@ -310,6 +353,240 @@ def coverage(examples) -> dict:
                                      "api": key[3], "counts": dict(sorted(value.items()))}
                                     for key, value in sorted(grouped.items(), key=lambda item: str(item[0]))],
             "trajectories": dict(sorted(trajectories.items()))}
+
+
+def readable_trace(example: Mapping[str, Any]) -> dict:
+    """Index a private export for review without replacing its complete raw JSON.
+
+    Paths point into the supplied, hash-verified export. No text is shortened.
+    Provider receipts are distinct from the response confirmed as delivered.
+    """
+    if (not isinstance(example, Mapping)
+            or example.get("example_hash") != contracts.document_hash(
+                {key: value for key, value in example.items() if key != "example_hash"})):
+        raise ValueError("example_hash_mismatch")
+    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    calls = []
+    for ci, call in enumerate(example.get("provider_calls") or []):
+        prefix = ["provider_calls", ci]
+        body = ((call.get("request") or {}).get("outbound") or {}).get("body")
+        events = []
+
+        def add(kind, path, value, *, delivery=None, reasoning_field=None, alias_paths=()):
+            events.append({"kind": kind, "source_path": path, "value": copy.deepcopy(value),
+                           "value_sha256": contracts.document_hash(value),
+                           **({"delivery": delivery} if delivery else {}),
+                           **({"reasoning_field": reasoning_field} if reasoning_field else {}),
+                           **({"alias_source_paths": [path_prefix for path_prefix in alias_paths]}
+                              if alias_paths else {})})
+
+        def add_derived(kind, evidence_path, *, delivery):
+            events.append({"kind": kind, "derived": True,
+                           "evidence_source_path": evidence_path, "value": True,
+                           "delivery": delivery})
+
+        if isinstance(body, Mapping):
+            for key in sorted(body):
+                if key not in {"messages", "input", "tools"}:
+                    add("request_parameter", prefix + ["request", "outbound", "body", key], body[key])
+            if isinstance(body.get("messages"), list):
+                for mi, message in enumerate(body["messages"]):
+                    if not isinstance(message, Mapping):
+                        continue
+                    path = prefix + ["request", "outbound", "body", "messages", mi]
+                    add("input_message", path, message)
+            if isinstance(body.get("input"), list):
+                for ii, item in enumerate(body["input"]):
+                    add("input_item", prefix + ["request", "outbound", "body", "input", ii], item)
+            elif isinstance(body.get("input"), str):
+                add("input_text", prefix + ["request", "outbound", "body", "input"], body["input"])
+            if isinstance(body.get("tools"), list):
+                for ti, tool in enumerate(body["tools"]):
+                    add("tool_definition", prefix + ["request", "outbound", "body", "tools", ti], tool)
+
+        def response_events(response, path, delivery):
+            if not isinstance(response, Mapping):
+                return
+            operation = call.get("operation_id")
+            for key in sorted(response):
+                if key not in {"choices", "output", "usage"}:
+                    add("response_metadata", path + [key], response[key], delivery=delivery)
+            segments, summary, opaque = _segments(response, operation)
+            status = attempt_coverage({**call, "response": response}, _role(example, call), registry)
+            for segment in segments:
+                classification = ("summary" if "summary" in segment["field"] else
+                                  "full_generated_thinking" if (delivery == "selected_terminal"
+                                                                 and status["returned"] == "full_thinking") else
+                                  "unverified_reasoning_text")
+                sources = segment["source_paths"]
+                add(classification, path + sources[0], segment["text"], delivery=delivery,
+                    reasoning_field=segment["field"],
+                    alias_paths=[path + source for source in sources[1:]])
+            if summary and not any("summary" in segment["field"] for segment in segments):
+                add_derived("summary_present_without_readable_text", path, delivery=delivery)
+            if opaque or "hidden_reasoning" in (call.get("response_privacy_redactions") or []):
+                add_derived("opaque_reasoning_removed", path, delivery=delivery)
+            if isinstance(response.get("usage"), Mapping):
+                add("usage", path + ["usage"], response["usage"], delivery=delivery)
+            if operation == "openrouter.chat":
+                for choice_index, choice in enumerate(response.get("choices") or []):
+                    if not isinstance(choice, Mapping):
+                        continue
+                    message = choice.get("message")
+                    if isinstance(message, Mapping):
+                        base = path + ["choices", choice_index, "message"]
+                        if "content" in message:
+                            add("assistant_output", base + ["content"], message["content"], delivery=delivery)
+                        for tool_index, tool in enumerate(message.get("tool_calls") or []):
+                            add("tool_call", base + ["tool_calls", tool_index], tool, delivery=delivery)
+            elif operation == "openrouter.responses":
+                for output_index, item in enumerate(response.get("output") or []):
+                    if not isinstance(item, Mapping):
+                        continue
+                    if item.get("type") in {"message", "function_call", "function_call_output"}:
+                        add("assistant_output" if item.get("type") == "message" else "tool_call",
+                            path + ["output", output_index], item, delivery=delivery)
+
+        if isinstance(call.get("response"), Mapping):
+            response_events(call["response"], prefix + ["response"], "selected_terminal")
+        receipts = []
+        for ri, receipt in enumerate(call.get("response_receipts") or []):
+            record = {"entry_id": receipt.get("entry_id"), "entry_kind": receipt.get("entry_kind"),
+                      "created_at": receipt.get("created_at"), "metadata": copy.deepcopy(receipt.get("metadata")),
+                      "response_sha256": receipt.get("response_sha256"),
+                      "wire_body_sha256": receipt.get("wire_body_sha256"),
+                      "wire_body_bytes": receipt.get("wire_body_bytes"),
+                      "privacy_redactions": copy.deepcopy(receipt.get("privacy_redactions")),
+                      "source_path": prefix + ["response_receipts", ri]}
+            if isinstance(receipt.get("response"), Mapping):
+                response_events(receipt["response"], record["source_path"] + ["response"], "terminal_receipt")
+            else:
+                record["response_ref"] = copy.deepcopy(receipt.get("response_ref"))
+            receipts.append(record)
+        calls.append({"call_identity": call.get("call_identity"), "run_id": call.get("run_id"),
+                      "operation_id": call.get("operation_id"), "provider": call.get("provider"),
+                      "request_path": prefix + ["request"],
+                      "request_sha256": (call.get("request_capture") or {}).get("sha256"),
+                      "response_path": prefix + ["response"], "response_sha256": call.get("response_sha256"),
+                      "response_status": call.get("response_status"),
+                      "response_provenance": copy.deepcopy(call.get("response_provenance")),
+                      "reasoning_coverage": attempt_coverage(call, _role(example, call), registry),
+                      "actual_microusd": call.get("actual_microusd"),
+                      "provider_cost": copy.deepcopy(call.get("provider_cost")),
+                      "lifecycle": copy.deepcopy(call.get("lifecycle")),
+                      "response_receipts": receipts,
+                      "upstream_response_receipts": copy.deepcopy(call.get("upstream_response_receipts")),
+                      "evidence_gaps": copy.deepcopy(call.get("evidence_gaps") or []),
+                      "events": events})
+    observations = []
+    for field in ("worker_observation_artifacts", "partial_worker_observation_artifacts"):
+        for run_id, artifact in sorted((example.get(field) or {}).items()):
+            payload = artifact.get("payload") if isinstance(artifact, Mapping) else None
+            if not isinstance(payload, Mapping):
+                continue
+            for collection in ("observations", "agent_observations", "response_receipts"):
+                for index, row in enumerate(payload.get(collection) or []):
+                    observations.append({"run_id": run_id, "kind": row.get("kind", collection)
+                                         if isinstance(row, Mapping) else collection,
+                                         "source_path": [field, run_id, "payload", collection, index],
+                                         "value": copy.deepcopy(row),
+                                         "value_sha256": contracts.document_hash(row),
+                                         "payload_sha256": artifact.get("payload_sha256")})
+    core_context = ("icp", "configuration", "input_snapshots", "output", "judgment",
+                    "runtime", "costs", "competition_cost_eligibility", "completeness")
+    separate = {"provider_calls", "worker_observation_artifacts",
+                "partial_worker_observation_artifacts", "example_hash"}
+    context_keys = list(core_context) + sorted(set(example) - set(core_context) - separate)
+    document_context = [
+        {"field": key, "status": "present", "source_path": [key],
+         "value_sha256": contracts.document_hash(example[key]), "value": copy.deepcopy(example[key])}
+        if key in example else {"field": key, "status": "absent", "source_path": [key]}
+        for key in context_keys]
+    completeness = example.get("completeness") or {}
+    incomplete_reasons = completeness.get("incomplete_reasons") if isinstance(completeness, Mapping) else []
+    return {"schema_version": "leadpoet.lab_arena.readable_trace.v1",
+            "run_id": example.get("run_id"), "example_hash": example["example_hash"],
+            "raw_source": "private_training_export", "projection_truncated": False,
+            "runtime": copy.deepcopy(example.get("runtime")),
+            "capture_limits": {"request_max_bytes": training_capture.MAX_OBJECT_BYTES,
+                               "receipt_max_bytes": training_export.MAX_RECEIPT_BYTES},
+            "document_context": document_context,
+            "capture_gaps": sorted(set(incomplete_reasons or []) |
+                                   {gap for call in calls for gap in call["evidence_gaps"]}),
+            "calls": calls, "observations": observations, "worker_observation_paths": [
+                ["worker_observation_artifacts", key] for key in sorted(example.get("worker_observation_artifacts") or {})],
+            "partial_worker_observation_paths": [
+                ["partial_worker_observation_artifacts", key] for key in sorted(example.get("partial_worker_observation_artifacts") or {})]}
+
+
+def readable_trace_markdown(report: Mapping[str, Any], *, raw_export_name: str | None = None) -> str:
+    """Render every indexed visible value, with paths back to the private export."""
+    if report.get("schema_version") != "leadpoet.lab_arena.readable_trace.v1":
+        raise ValueError("readable_trace_schema_invalid")
+
+    def block(value):
+        rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, indent=2)
+        longest = max((len(match[0]) for match in re.finditer(r"`+", rendered)), default=0)
+        fence = "`" * max(3, longest + 1)
+        return f"{fence}\n{rendered}\n{fence}"
+
+    def event_lines(event):
+        if event.get("derived") is True:
+            return [f"#### {event['kind']}", "Derived status: `true`  ",
+                    f"Evidence path: `{contracts.canonical_json(event['evidence_source_path'])}`  ",
+                    *([f"Receipt source: `{event['delivery']}`  "] if event.get("delivery") else []),
+                    "This marker is inferred from the saved response or redaction metadata; it is not a raw value.", ""]
+        return [f"#### {event['kind']}",
+                *([f"Reasoning field: `{event['reasoning_field']}`  "] if event.get("reasoning_field") else []),
+                *([f"Receipt source: `{event['delivery']}`  "] if event.get("delivery") else []),
+                f"Raw path: `{contracts.canonical_json(event['source_path'])}`  ",
+                *([f"Alias paths: `{contracts.canonical_json(event['alias_source_paths'])}`  "]
+                  if event.get("alias_source_paths") else []),
+                f"Value hash: `{event['value_sha256']}`",
+                block(event["value"]), ""]
+
+    lines = ["# Arena readable trace", "",
+             f"Run: `{report.get('run_id')}`  ",
+             f"Raw export hash: `{report.get('example_hash')}`  ",
+             "Projection truncation: none. Capture gaps and size limits appear below.", ""]
+    if raw_export_name is not None:
+        if (not raw_export_name or any(character in raw_export_name for character in "<>\n\r")
+                or raw_export_name.startswith("/") or ".." in raw_export_name.split("/")):
+            raise ValueError("raw_export_name_invalid")
+        lines.extend([f"[Open the raw private export](<{raw_export_name}>)", ""])
+    for key in ("runtime", "capture_limits", "capture_gaps"):
+        lines.extend([f"## {key.replace('_', ' ').title()}", "", block(report.get(key)), ""])
+    lines.extend(["## Document context", "",
+                  "Each present value is copied from the hash-verified private export. Absent means the field was not saved.", ""])
+    for entry in report.get("document_context") or []:
+        lines.extend([f"### {entry['field']}", "", f"Status: `{entry['status']}`  ",
+                      f"Raw path: `{contracts.canonical_json(entry['source_path'])}`  "])
+        if entry["status"] == "present":
+            lines.extend([f"Value hash: `{entry['value_sha256']}`", block(entry["value"]), ""])
+        else:
+            lines.append("")
+    for index, call in enumerate(report.get("calls") or []):
+        lines.extend([f"## Call {index + 1}: {call.get('operation_id')}", "",
+                      f"Identity: `{call.get('call_identity')}`  ",
+                      f"Request path: `{contracts.canonical_json(call.get('request_path'))}`  ",
+                      f"Request hash: `{call.get('request_sha256')}`  ",
+                      f"Response path: `{contracts.canonical_json(call.get('response_path'))}`  ",
+                      f"Response hash: `{call.get('response_sha256')}`  ",
+                      f"HTTP status: `{call.get('response_status')}`  ",
+                      f"Actual cost (micro USD): `{call.get('actual_microusd')}`", ""])
+        for label, key in (("Reasoning classification", "reasoning_coverage"),
+                           ("Provider cost", "provider_cost"), ("Lifecycle timing", "lifecycle"),
+                           ("Terminal receipts", "response_receipts"),
+                           ("Upstream receipts", "upstream_response_receipts"),
+                           ("Delivery proof", "response_provenance"), ("Evidence gaps", "evidence_gaps")):
+            lines.extend([f"### {label}", "", block(call.get(key)), ""])
+        lines.extend(["### Visible events", ""])
+        for event in call.get("events") or []:
+            lines.extend(event_lines(event))
+    lines.extend(["## Worker observations and receipt events", ""])
+    for event in report.get("observations") or []:
+        lines.extend(event_lines(event))
+    return "\n".join(lines) + "\n"
 
 
 def _prior_observations(example: Mapping[str, Any], call: Mapping[str, Any]) -> list[dict]:

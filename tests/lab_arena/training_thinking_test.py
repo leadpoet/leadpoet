@@ -100,6 +100,190 @@ def test_summary_unproved_and_redacted_text_are_excluded():
         assert manifest["counts"]["records_by_split"]["train"] == 0
 
 
+def test_summary_only_text_is_counted_with_source_paths_but_not_admitted():
+    for operation, response in (
+        ("openrouter.chat", {"choices": [{"message": {"reasoning_details": [
+            {"type": "reasoning.summary", "summary": "A short visible summary."}]},
+            "finish_reason": "stop"}]}),
+        ("openrouter.responses", {"status": "completed", "output": [{"type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "A short visible summary."}]}]}),
+    ):
+        segments, summary, opaque = training_thinking._segments(response, operation)
+        assert summary is True and opaque is False
+        assert segments == [{"field": ("reasoning_details.summary" if operation == "openrouter.chat"
+                                      else "output.summary.summary_text"),
+                             "text": "A short visible summary.",
+                             "source_paths": [(["choices", 0, "message", "reasoning_details", 0, "summary"]
+                                               if operation == "openrouter.chat" else
+                                               ["output", 0, "summary", 0, "text"])]}]
+        example = full_example()
+        call = example["provider_calls"][0]
+        call["operation_id"] = operation
+        call["response"] = response
+        attempt = training_thinking.attempt_coverage(call, "miner")
+        assert attempt["returned"] == "summary"
+        assert attempt["characters"] == len("A short visible summary.")
+
+
+def test_summary_route_coverage_uses_actual_request_and_nested_responses_usage():
+    call = copy.deepcopy(full_example()["provider_calls"][0])
+    call.pop("reasoning_capture")
+    call["operation_id"] = "openrouter.responses"
+    call["request"]["outbound"]["body"]["reasoning"] = {"effort": "high", "summary": "auto"}
+    call["response"] = {"status": "completed", "output": [{"type": "reasoning",
+                         "summary": [{"type": "summary_text", "text": "Visible summary"}]}],
+                        "usage": {"output_tokens_details": {"reasoning_tokens": 81}}}
+    call["response_privacy_redactions"] = ["hidden_reasoning"]
+    result = training_thinking.attempt_coverage(call, "miner")
+    assert result["request_state"] == "requested" and result["requested"] is True
+    assert result["returned"] == "summary" and result["contains_opaque"] is True
+    assert result["characters"] == len("Visible summary") and result["tokens_reported"] == 81
+    assert result["route_reviewed"] is False
+
+
+def test_mixed_unverified_readable_text_and_opaque_is_not_labeled_opaque_only():
+    call = copy.deepcopy(full_example()["provider_calls"][0])
+    call.pop("reasoning_capture")
+    call["request"]["outbound"]["body"]["reasoning"] = {"effort": "high", "exclude": False}
+    call["response_privacy_redactions"] = ["hidden_reasoning"]
+    result = training_thinking.attempt_coverage(call, "miner")
+    assert result["returned"] == "unproved_text"
+    assert result["contains_opaque"] is True and result["characters"] > 0
+    assert result["requested"] is True and result["route_reviewed"] is False
+
+
+def test_empty_reasoning_class_uses_saved_request_state():
+    call = copy.deepcopy(full_example()["provider_calls"][0])
+    call.pop("reasoning_capture")
+    call["response"]["choices"][0]["message"].pop("reasoning_content")
+    call["request"]["outbound"]["body"]["reasoning"] = {"effort": "high", "exclude": False}
+    assert training_thinking.attempt_coverage(call, "miner")["returned"] == "requested_empty"
+    del call["request"]["outbound"]["body"]["reasoning"]
+    assert training_thinking.attempt_coverage(call, "miner")["returned"] == "not_requested"
+    del call["request"]
+    assert training_thinking.attempt_coverage(call, "miner")["returned"] == "unknown"
+
+
+def test_request_coverage_reads_budget_and_legacy_include_controls():
+    for body, expected in (
+        ({"reasoning": {"max_tokens": 1024}}, "requested"),
+        ({"reasoning": {"budget_tokens": 1024}}, "requested"),
+        ({"include_reasoning": True}, "requested"),
+        ({"reasoning": {"effort": "none", "summary": "none"}}, "not_requested"),
+        ({"reasoning": {"max_tokens": 0}}, "not_requested"),
+        ({"reasoning": {"exclude": True, "effort": "high"}}, "not_requested"),
+        ({"reasoning": {"enabled": False}, "include_reasoning": True}, "not_requested"),
+    ):
+        call = {"request": {"outbound": {"body": body}}}
+        assert training_thinking._reasoning_request_state(call, {}) == expected
+
+
+def test_reasoning_usage_null_alias_does_not_hide_nested_count():
+    call = {"operation_id": "openrouter.responses", "response": {
+        "status": "completed", "output": [], "usage": {
+            "reasoning_tokens": None, "completion_tokens_details": {"reasoning_tokens": None},
+            "output_tokens_details": {"reasoning_tokens": 81}}}}
+    assert training_thinking.attempt_coverage(call, "miner")["tokens_reported"] == 81
+
+
+def test_readable_trace_indexes_exact_values_and_keeps_summary_unverified():
+    example = full_example()
+    call = example["provider_calls"][0]
+    call["response"]["usage"] = {"prompt_tokens": 17, "completion_tokens": 31,
+                                   "completion_tokens_details": {"reasoning_tokens": 11}}
+    call["response"]["choices"][0]["message"]["reasoning_details"] = [
+        {"type": "reasoning.summary", "summary": "Summary is visible."}]
+    call["response_sha256"] = contracts.document_hash(call["response"])
+    call["response_receipts"][0]["response_sha256"] = call["response_sha256"]
+    call["actual_microusd"] = 1234
+    call["lifecycle"] = [{"created_at": "2026-10-23T00:00:00Z", "entry_kind": "reservation"}]
+    report = training_thinking.readable_trace(seal(example))
+    assert report["projection_truncated"] is False
+    assert report["capture_limits"]["receipt_max_bytes"] == training_export.MAX_RECEIPT_BYTES
+    record = report["calls"][0]
+    assert record["actual_microusd"] == 1234
+    assert record["lifecycle"][0]["created_at"] == "2026-10-23T00:00:00Z"
+    assert record["response_sha256"] == call["response_sha256"]
+    assert record["reasoning_coverage"]["returned"] == "summary"
+    kinds = {event["kind"] for event in record["events"]}
+    assert {"summary", "usage", "assistant_output", "input_message"} <= kinds
+    assert report["observations"]
+    for event in record["events"] + report["observations"]:
+        source = example
+        for part in event["source_path"]:
+            source = source[part]
+        assert source == event["value"]
+        assert contracts.document_hash(source) == event["value_sha256"]
+    markdown = training_thinking.readable_trace_markdown(report, raw_export_name="raw-export.json")
+    assert "[Open the raw private export](<raw-export.json>)" in markdown
+    assert "Summary is visible." in markdown and "Inspect the retained page, then answer." in markdown
+    assert "reasoning_details.summary" in markdown
+    assert "1234" in markdown
+    assert "[TRUNCATED" not in markdown
+
+
+def test_readable_trace_preserves_document_context_and_all_evidence_gaps():
+    example = full_example()
+    example["configuration"]["task_label"] = "Exact saved configuration"
+    example["input_snapshots"] = {"run": {"prompt": "Exact saved input"}}
+    example["output"] = {"answer": "Exact saved final output"}
+    example["runtime"] = {"wall_seconds": 7.5, "code_ref": "test-revision"}
+    example["costs"] = {"confirmed_actual_microusd": 1234}
+    example["completeness"] = {"complete": False,
+                               "incomplete_reasons": ["worker_call_accounting_unverified"]}
+    example["provider_calls"][0]["evidence_gaps"] = ["agent_receipt_missing"]
+    report = training_thinking.readable_trace(seal(example))
+    context = {entry["field"]: entry for entry in report["document_context"]}
+    assert context["input_snapshots"]["value"] == example["input_snapshots"]
+    assert context["input_snapshots"]["source_path"] == ["input_snapshots"]
+    assert context["input_snapshots"]["value_sha256"] == contracts.document_hash(example["input_snapshots"])
+    assert context["output"]["value"] == example["output"]
+    assert context["judgment"]["value"] == example["judgment"]
+    assert context["competition_cost_eligibility"]["status"] == "absent"
+    assert report["capture_gaps"] == ["agent_receipt_missing", "worker_call_accounting_unverified"]
+    markdown = training_thinking.readable_trace_markdown(report)
+    for value in ("Exact saved configuration", "Exact saved input", "Exact saved final output",
+                  "test-revision", "worker_call_accounting_unverified", "agent_receipt_missing"):
+        assert value in markdown
+
+
+def test_readable_derived_markers_do_not_claim_exact_raw_value():
+    example = full_example()
+    call = example["provider_calls"][0]
+    call["response"]["choices"][0]["message"]["reasoning_details"] = [
+        {"type": "reasoning.summary", "summary": []}]
+    call["response_privacy_redactions"] = ["hidden_reasoning"]
+    report = training_thinking.readable_trace(seal(example))
+    markers = [event for event in report["calls"][0]["events"] if event.get("derived")]
+    assert {event["kind"] for event in markers} == {"opaque_reasoning_removed", "summary_present_without_readable_text"}
+    assert all("source_path" not in event and "value_sha256" not in event for event in markers)
+    assert "Derived status" in training_thinking.readable_trace_markdown(report)
+
+
+def test_readable_trace_markdown_fence_cannot_be_closed_by_provider_text():
+    report = {"schema_version": "leadpoet.lab_arena.readable_trace.v1", "calls": [{
+        "events": [{"kind": "assistant_output", "source_path": ["provider_calls", 0, "response"],
+                    "value_sha256": "sha256:" + "a" * 64,
+                    "value": "before\n```\nafter"}]}]}
+    markdown = training_thinking.readable_trace_markdown(report)
+    assert "````\nbefore\n```\nafter\n````" in markdown
+
+
+def test_readable_trace_shows_repeated_reasoning_alias_once_with_both_paths():
+    example = full_example()
+    response = example["provider_calls"][0]["response"]
+    message = response["choices"][0]["message"]
+    message["reasoning"] = message["reasoning_content"]
+    report = training_thinking.readable_trace(seal(example))
+    reasoning = [event for event in report["calls"][0]["events"]
+                 if event["kind"] in {"full_generated_thinking", "unverified_reasoning_text"}]
+    assert len(reasoning) == 1
+    assert reasoning[0]["alias_source_paths"] == [
+        ["provider_calls", 0, "response", "choices", 0, "message", "reasoning_content"]]
+    markdown = training_thinking.readable_trace_markdown(report)
+    assert markdown.count("Inspect the retained page, then answer.") == 1
+
+
 def test_legitimate_tool_only_empty_turn_does_not_disqualify_later_text():
     example = full_example()
     extra = copy.deepcopy(example["provider_calls"][0])
@@ -111,7 +295,7 @@ def test_legitimate_tool_only_empty_turn_does_not_disqualify_later_text():
     extra["response_receipts"][0]["response_sha256"] = extra["response_sha256"]
     example["provider_calls"].append(extra)
     report = training_thinking.coverage([seal(example)])
-    assert report["returned_classes"] == {"empty": 1, "full_thinking": 1}
+    assert report["returned_classes"] == {"requested_empty": 1, "full_thinking": 1}
     assert report["trajectories"]["eligible_without_disqualifying_capture"] == 1
 
 
@@ -167,9 +351,9 @@ def test_registry_and_actual_route_must_match_frozen_request():
         assert manifest["coverage"]["trajectories"]["ineligible"] == 1
 
 
-def test_history_alias_retained_only_for_approved_assistant_replay():
+def test_history_alias_retained_for_chat_assistant_replay_independent_of_full_route():
     annotation = copy.deepcopy(full_example()["provider_calls"][0]["reasoning_capture"])
-    document = {"reasoning_capture": annotation,
+    document = {"operation_id": "openrouter.chat", "reasoning_capture": annotation,
                 "outbound": {"body": {"messages": [
                     {"role": "assistant", "content": None, "reasoning_content": "Generated prior thought"},
                     {"role": "user", "content": "Request", "reasoning_content": "User-authored claim"}]}}}
@@ -183,7 +367,7 @@ def test_history_alias_retained_only_for_approved_assistant_replay():
     assert removed
     annotation["full_text_fields"] = ["reasoning"]
     cleaned, _ = training_capture.sanitize_training_value(document)
-    assert cleaned["outbound"]["body"]["messages"][0]["reasoning_content"] == "[REDACTED]"
+    assert cleaned["outbound"]["body"]["messages"][0]["reasoning_content"] == "Generated prior thought"
 
 
 def test_missing_saved_response_is_storage_failed_without_fabricating_text():
@@ -209,7 +393,8 @@ def test_truncated_and_opaque_attempts_are_separate_from_full_text():
     call = opaque["provider_calls"][0]
     call["response_receipts"][0]["privacy_redactions"] = ["hidden_reasoning"]
     row = training_thinking.coverage([seal(opaque)])["attempts"][0]
-    assert row["returned"] == "opaque"
+    assert row["returned"] == "unproved_text"
+    assert row["contains_opaque"] is True
     assert row["storage"] == "saved"
     assert not rows(opaque)[0]
 

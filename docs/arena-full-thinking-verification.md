@@ -5,7 +5,7 @@ Scope: [implementation policy](arena-full-thinking-policy.md). The base was
 checkout. No merge, deployment, restart, production SQL, round mutation, or model
 substitution was performed.
 
-## Live synthetic evidence
+## Earlier draft live evidence
 
 Three exact routes passed two consecutive tool continuations and a final strict
 JSON response with generated thinking, ZDR, no fallback, required parameter
@@ -30,9 +30,9 @@ hashes and route identity, preserve history and JSON schemas, and deduplicate
 thinking aliases. The probe's ASCII JSON hash format and Arena's UTF-8 JSON hash
 format are explicitly checked on the Unicode DeepSeek response.
 
-## Local checks
+## Earlier draft local checks
 
-Final combined result: **1,762 passed, 21 skipped**, one dependency deprecation
+Earlier combined result: **1,762 passed, 21 skipped**, one dependency deprecation
 warning, in 154.43 seconds. Nineteen skips require the real Codex CLI package or
 Linux root/runsc; two are existing declared-field operation cases. None of the
 new full-thinking route, export, round, or PostgreSQL tests was skipped.
@@ -99,3 +99,49 @@ new-policy publication run passed. A representative full ICP run, compatible
 baseline evaluation, production storage/export verification, and publication
 proof remain activation gates. The committed registry has `baseline_route: null`
 and the policy defaults off. No production migration was attempted.
+
+## End-to-end capture audit follow-up
+
+See [the audit](arena-trace-capture-audit.md) and its committed machine manifest.
+The follow-up ran 85 real OpenRouter attempts across 13 models. Every one of the
+six runtime-whitelisted routes passed a fresh three-turn model/tool/JSON test
+through disposable PostgreSQL, private object storage, the actual worker socket,
+SDK read acknowledgement, and raw/readable readback. Three exact routes were
+added. Hosted OpenAI returned and retained a summary with ZDR enabled after the
+Responses history-format regression was fixed; it remains excluded from the
+full-thinking registry.
+
+An independent readback checked 36 saved exports with 84 calls. All returned
+readable reasoning strings and usage objects survived raw-to-export-to-view.
+Source paths and value hashes matched. One early error probe lacked a successful
+export readback and is marked unverified; its route was not admitted.
+
+Final follow-up test runs:
+
+| Check | Result |
+| --- | --- |
+| Earlier command above plus live harness and renderer tests | 1,797 passed, 28 skipped, one dependency warning |
+| Seven opt-in PostgreSQL/socket checks from the live harness | 7 passed, no skips, one dependency warning |
+| Final coverage/renderer/saved-probe/harness checks after two reporting edge-case regressions | 46 passed, 7 opt-in skips already exercised separately |
+
+The final edge cases cover `reasoning.max_tokens`, legacy `include_reasoning`,
+explicit `none` controls, and null usage aliases beside valid nested token counts.
+They change reporting only. No provider call or request was repeated for this
+projection-only change. Saved readable views were regenerated and checked again.
+
+The PostgreSQL harness checks ran with `ARENA_CAPTURE_POSTGRES_TEST=1`. They cover
+real SQL readback, durable ledger evidence when export fails, successful and
+error-body socket acknowledgements, diagnostic route controls, and conservative
+budget holds before dispatch. The remaining 21 skips are the earlier real Codex
+CLI/Linux-sandbox and existing declared-field cases described above.
+
+Independent review verified live history order, tool IDs, all six worker receipt
+chains, current exact OpenRouter endpoint/ZDR metadata, new evidence hashes,
+reader provenance, and unchanged active-round behavior. Review findings about an
+old Reflection probe reference, derived marker paths, and misleading local-registry
+labels were fixed and rechecked. The original failed probe records were retained.
+
+Python compilation, `git diff --check`, unchanged AGENTS/CLAUDE parity, and a
+scoped secret-pattern scan passed. Only synthetic public test evidence is in Git.
+Private full test artifacts remain under `Arena_Trace_Audit_20261023` in Downloads.
+No merge, deployment, production write, restart, or round mutation occurred.

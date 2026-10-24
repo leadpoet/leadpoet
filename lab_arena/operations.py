@@ -1677,7 +1677,11 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
         "custom_tool_call": {"call_id": identifier, "name": identifier, "namespace": dataclasses.replace(identifier, required=False), "input": dataclasses.replace(text, required=True), "status": status},
         "custom_tool_call_output": {"call_id": identifier, "output": FieldSpec("any", required=True)},
         "additional_tools": {"role": FieldSpec("str", required=True, choices=("developer",)), "tools": FieldSpec("any", required=True)},
-        "reasoning": {"summary": FieldSpec("any"), "encrypted_content": FieldSpec("str", max_length=128_000), "content": FieldSpec("any"), "status": status},
+        "reasoning": {"summary": FieldSpec("any"), "encrypted_content": FieldSpec("str", max_length=128_000), "content": FieldSpec("any"), "status": status,
+                      # OpenRouter's Azure Responses route returns an opaque
+                      # format tag with the encrypted item. Stateless replay
+                      # must retain it with the signed/opaque content and ID.
+                      "format": FieldSpec("str", min_length=1, max_length=128)},
         "web_search_call": {
             "status": status,
             "action": FieldSpec("object", required=True),

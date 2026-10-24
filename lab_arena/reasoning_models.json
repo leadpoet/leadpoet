@@ -99,6 +99,106 @@
       },
       "allowed_fallback_routes": [],
       "status": "approved"
+    },
+    {
+      "model_id": "openai/gpt-oss-20b",
+      "model_version": "openai/gpt-oss-20b",
+      "provider": "deepinfra/bf16",
+      "provider_name": "DeepInfra",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 131072,
+      "price_ceiling": {
+        "prompt": "0.00000003",
+        "completion": "0.00000014",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "evidence": {
+        "documentation_url": "https://developers.openai.com/cookbook/articles/gpt-oss/handle-raw-cot",
+        "probe_id": "live-capture-openai-gpt-oss-20b",
+        "verified_at": "2026-10-24T00:50:28.356440Z",
+        "probe_manifest_sha256": "e5e973e6bf0a13baf85357904606a2fe4fad2556833c2e96a9aa4747739ecd80"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved"
+    },
+    {
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+      "provider": "nebius/fp8",
+      "provider_name": "Nebius",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning_content",
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.00000025",
+        "completion": "0.000001",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "evidence": {
+        "documentation_url": "https://developers.reflection.ai/reasoning",
+        "probe_id": "live-capture-reflection-beam-1.0-501b-a23b",
+        "verified_at": "2026-10-24T00:50:28.358893Z",
+        "probe_manifest_sha256": "28bb9573c724701de2901d8d1255fb3cab4d1f1d99d2cbd144fdca07c0514f08"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved"
+    },
+    {
+      "model_id": "google/gemma-4-31b-it",
+      "model_version": "google/gemma-4-31b-it-20260402",
+      "provider": "coreweave/fp4",
+      "provider_name": "CoreWeave",
+      "api": "openrouter.chat",
+      "mode": {
+        "enabled": true
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.0000001",
+        "completion": "0.00000034",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "evidence": {
+        "documentation_url": "https://ai.google.dev/gemma/docs/capabilities/thinking",
+        "probe_id": "live-capture-google-gemma-4-31b-it",
+        "verified_at": "2026-10-24T00:50:28.360839Z",
+        "probe_manifest_sha256": "6d96034811502edd0c5d745582c5099d4fa164c3924f55ba2bb93d37376b9cc3"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved"
     }
   ],
   "baseline_route": null

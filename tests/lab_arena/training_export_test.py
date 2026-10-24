@@ -10,7 +10,7 @@ import tarfile
 
 import pytest
 
-from lab_arena import contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, training_thinking, verify
+from lab_arena import broker as br, contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, training_thinking, verify
 from lab_arena.training_export import ExportError, _competition_cost_snapshot, assemble_example, without_hidden_reasoning
 from lab_arena.output import validate_output_document
 from scripts.export_arena_training import _ledger, export_run, write_private
@@ -242,6 +242,8 @@ def assert_legacy_agent_gaps(result):
 def test_full_request_not_excerpt_and_plaintext_response_alias_retained():
     values = fixture()
     add_call(values)
+    values["ledger_rows"][-1]["terminal_response"].update(
+        transport_elapsed_ms=37, timing_scope="initial_provider_transport_send")
     result = assemble_example(**values)
     assert_legacy_agent_gaps(result)
     assert len(result["provider_calls"][0]["request"]["admitted_parameters"]["messages"][0]["content"]) == 12000
@@ -249,6 +251,9 @@ def test_full_request_not_excerpt_and_plaintext_response_alias_retained():
     assert result["provider_calls"][0]["response_privacy_redactions"] == []
     assert result["privacy"]["hidden_reasoning_removed"] is False
     assert result["costs"]["confirmed_actual_microusd"] == 42
+    metadata = result["provider_calls"][0]["response_receipts"][0]["metadata"]
+    assert (metadata["transport_elapsed_ms"], metadata["timing_scope"]) == (
+        37, "initial_provider_transport_send")
 
 
 def test_upstream_capture_failure_is_recorded_without_losing_saved_response():
@@ -260,6 +265,24 @@ def test_upstream_capture_failure_is_recorded_without_losing_saved_response():
     call = result["provider_calls"][0]
     assert call["upstream_response_capture"] == {"status": "unavailable", "reason": "response_capture_failed"}
     assert call["response"]["choices"][0]["message"]["reasoning_content"] == "PRIVATE THOUGHT"
+
+
+def test_uncertain_entry_top_level_upstream_receipt_survives_export():
+    values = fixture()
+    add_call(values, status="uncertain")
+    reserve, _, uncertain = values["ledger_rows"]
+    raw = b'{"error":{"message":"provider unavailable"}}'
+    captured = br._capture_upstream_response(
+        br.ProviderResponse(503, {"content-type": "application/json"}, raw),
+        operation_id="openrouter.chat", request_hash=reserve["entry_doc"]["request_hash"],
+        call_identity=reserve["call_identity"])
+    uncertain["entry_doc"]["upstream_response_receipt"] = captured
+    call = assemble_example(**values)["provider_calls"][0]
+    receipt = call["upstream_response_receipts"][0]
+    assert receipt["response"] == {"error": {"message": "provider unavailable"}}
+    assert receipt["wire_body_sha256"] == contracts.hash_bytes(raw)
+    assert receipt["delivery_to_worker"] == "not_proved"
+    assert call["actual_microusd"] is None
 
 
 def test_stored_provider_body_and_route_identity_reach_exported_coverage():
@@ -428,8 +451,11 @@ def test_exact_snapshot_hash_does_not_override_wrong_frozen_context():
 def test_unresolved_money_is_not_reported_as_confirmed_actual_cost():
     values = fixture()
     add_call(values, status="uncertain")
+    values["ledger_rows"][-1]["entry_doc"].update(
+        transport_elapsed_ms=41, timing_scope="initial_provider_transport_send")
     result = assemble_example(**values)
     assert result["provider_calls"][0]["actual_microusd"] is None
+    assert result["provider_calls"][0]["lifecycle"][-1]["accounting"]["transport_elapsed_ms"] == 41
     assert result["costs"]["confirmed_actual_microusd"] == 0
     assert result["completeness"]["dimensions"]["costs"] is False
 

@@ -20,6 +20,11 @@ PROBE_FILES = {
     "mistralai/mistral-large-4-0": "mistralai--mistral-large-4-0-chat-probe-price-bound.json",
     "deepseek/deepseek-v4.1-flash-1017": "deepseek--deepseek-v4.1-flash-1017-chat-probe-price-bound.json",
 }
+LIVE_CAPTURE_FILES = {
+    "openai/gpt-oss-20b": "openai--gpt-oss-20b-live-capture.json",
+    "reflection/beam-1.0-501b-a23b": "reflection--beam-1.0-501b-a23b-live-capture.json",
+    "google/gemma-4-31b-it": "google--gemma-4-31b-it-live-capture.json",
+}
 
 
 def chat(model, **extra):
@@ -62,11 +67,63 @@ def _reviewed_registry(model="openai/gpt-4o-mini", api="openrouter.chat"):
 
 def test_committed_registry_approves_only_reviewed_routes():
     registry = rc.load_registry()
-    assert {route["model_id"] for route in registry["approved_routes"]} == set(PROBE_FILES)
+    assert {route["model_id"] for route in registry["approved_routes"]} == set(PROBE_FILES) | set(LIVE_CAPTURE_FILES)
     assert registry["baseline_route"] is None
     with pytest.raises(ValueError, match="reasoning_route_unsupported"):
         rc.apply("openrouter.chat", chat("openai/gpt-4o-mini"), policy=rc.POLICY,
                  registry=registry)
+
+
+@pytest.mark.parametrize("model_id", LIVE_CAPTURE_FILES)
+def test_new_route_evidence_preserves_real_tool_history_and_final_schema(model_id):
+    """Replay committed live evidence; neither metadata nor a model family grants admission."""
+    from scripts.verify_arena_live_capture import _valid_final, assistant_history
+    registry = rc.load_registry()
+    route = next(r for r in registry["approved_routes"] if r["model_id"] == model_id)
+    raw = (EVIDENCE_DIR / LIVE_CAPTURE_FILES[model_id]).read_bytes()
+    proof = json.loads(raw)
+    assert hashlib.sha256(raw).hexdigest() == route["evidence"]["probe_manifest_sha256"]
+    assert proof["model"] == model_id
+    assert proof["provider"] == route["provider"]
+    assert proof["semantic_source"] == route["evidence"]["documentation_url"]
+    assert all(proof["checks"].values())
+    assert {r["scenario"] for r in proof["runs"]} == {"live", "complex"}
+    for run in proof["runs"]:
+        assert len(run["calls"]) == 3
+        assert any(run["thinking_chars"])
+        expected = {"company": "Acme Test", "qualified": run["scenario"] == "live",
+                    "evidence_ids": ["profile", "headcount"]}
+        assert _valid_final(run["validated_final_json"], expected)
+        table = broker_tests.price_table()
+        table["models"][model_id] = {component: route["price_ceiling"].get(component, "0")
+                                     for component in br.PRICED_COMPONENTS}
+        transport = broker_tests.FakeTransport([(200, c["response"]) for c in run["calls"]])
+        store = broker_tests.FakeLedgerStore()
+        broker = br.Broker(store=store, key_for=lambda p: broker_tests.HOST_KEYS[p],
+                           price_table=br.validate_price_table(table), transport=transport,
+                           clock=lambda: datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc))
+        context = replace(broker_tests.CONTEXT, reasoning_capture_policy=rc.POLICY,
+                          reasoning_route_registry=registry)
+        previous_message = None
+        for index, call in enumerate(run["calls"]):
+            request, response = call["request"], call["response"]
+            assert contracts.document_hash(response) == call["response_sha256"]
+            parameters = {k: v for k, v in request.items() if k not in {"provider", "stream"}}
+            result = broker.execute(context, operation_id="openrouter.chat", parameters=parameters,
+                                    action_sequence=index, timeout_ms=30000)
+            assert result.status == 200 and json.loads(result.body) == response
+            sent = json.loads(transport.sent[-1]["body"])
+            assert sent == request
+            assert sent["provider"]["zdr"] is True
+            assert sent["provider"]["only"] == [route["provider"]]
+            assert sent["provider"]["allow_fallbacks"] is False
+            if previous_message is not None:
+                assert previous_message in sent["messages"]
+                tool_id = previous_message["tool_calls"][0]["id"]
+                assert sent["messages"][-1]["tool_call_id"] == tool_id
+            observation = store.calls[result.call["call_identity"]]["terminal"]["reasoning_route_observation"]
+            assert observation["status"] == "matched"
+            previous_message = assistant_history(response["choices"][0]["message"])
 
 
 @pytest.mark.parametrize("model_id", PROBE_FILES)

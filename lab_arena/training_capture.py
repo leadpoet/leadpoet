@@ -136,7 +136,7 @@ def readable_reasoning_content_path(path: tuple[str, ...]) -> bool:
 
 
 def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: Any) -> bool:
-    """Keep assistant replay state only under a broker-approved full-text field."""
+    """Keep plain assistant replay text only in a known Chat request message."""
     if not isinstance(item, Mapping) or item.get("role") != "assistant" or not isinstance(root, Mapping):
         return False
     if len(path) >= 4 and path[-2] == "messages" and path[-1].isdigit():
@@ -154,15 +154,13 @@ def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: A
         if not isinstance(calls, list) or int(prefix[1]) >= len(calls):
             return False
         call = calls[int(prefix[1])]
-        annotation = call.get("reasoning_capture") if isinstance(call, Mapping) else None
+        operation = call.get("operation_id") if isinstance(call, Mapping) else None
+        request = call.get("request") if isinstance(call, Mapping) else None
+        if not isinstance(request, Mapping) or request.get("operation_id") != operation:
+            return False
     else:
-        annotation = root.get("reasoning_capture")
-    return (isinstance(annotation, Mapping)
-            and annotation.get("policy") == "full_generated_thinking_v1"
-            and annotation.get("requested") is True
-            and annotation.get("reviewed_route") is True
-            and isinstance(annotation.get("full_text_fields"), list)
-            and "reasoning_content" in annotation["full_text_fields"])
+        operation = root.get("operation_id")
+    return operation == "openrouter.chat"
 
 
 def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_config: bool,

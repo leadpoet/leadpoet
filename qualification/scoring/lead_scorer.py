@@ -61,6 +61,7 @@ from qualification.scoring.company_verification import (
     verify_company_exists,
 )
 from qualification.scoring.company_fit_decision import (
+    verified_homepage_brand_name,
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
     COMPANY_FIT_UNAVAILABLE,
@@ -2230,6 +2231,11 @@ def _verified_homepage_identity_anchor(
         )
         if aliases:
             anchor["verified_legal_name_aliases"] = aliases
+            brand = verified_homepage_brand_name({
+                **anchor, "verified_brand_name": receipt.get("verified_brand_name"),
+            })
+            if brand:
+                anchor["verified_brand_name"] = brand
     return anchor
 
 
@@ -7859,7 +7865,10 @@ def _fetched_linkedin_headcount_resolves_conflict(
     return bool(
         final_profile and linkedin_company_page_slug(final_profile) == slug
         and quote and _quote_occurs(quote, pages.get(url, ""))
-        and _quote_names_company(quote, {_compact_company_name(identity.get("normalized_name"))})
+        and _quote_names_company(quote, {
+            _compact_company_name(identity.get("normalized_name")),
+            _compact_company_name(verified_homepage_brand_name(identity)),
+        } - {""})
         and _quote_supports_headcount(quote, finding["observed_value"])
     )
 
@@ -7956,7 +7965,10 @@ def _settle_recovered_local_headcount_refresh(
         and _dimension_web_evidence(projected, "employee_size") == {"url": url, "quote": quote}
         and quote and _quote_occurs(quote, pages.get(url, ""))
         and (
-            _quote_names_company(quote, {_compact_company_name(identity.get("normalized_name"))})
+            _quote_names_company(quote, {
+                _compact_company_name(identity.get("normalized_name")),
+                _compact_company_name(verified_homepage_brand_name(identity)),
+            } - {""})
             or _profile_body_matches_company_identity(pages.get(url, ""), identity)
         )
         and _quote_supports_headcount(quote, finding["observed_value"])

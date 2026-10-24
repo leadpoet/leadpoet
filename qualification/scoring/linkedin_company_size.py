@@ -26,7 +26,9 @@ from leadpoet_verifier.identity.normalization import (
 from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
 from qualification.company_quality import canonical_us_state
 from qualification.scoring.pre_checks import _resolve_country
-from qualification.scoring.company_fit_decision import _company_name
+from qualification.scoring.company_fit_decision import (
+    _company_name, verified_homepage_brand_name,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1066,7 +1068,10 @@ def _profile_body_matches_company_identity(
     """Bind the profile's own website or title, never a name mentioned in prose."""
 
     domain = _canonical_company_domain(identity.get("registrable_dns_domain"))
-    names = {_company_name(identity.get("normalized_name"))}
+    names = {
+        _company_name(identity.get("normalized_name")),
+        _company_name(verified_homepage_brand_name(identity)),
+    }
     aliases = identity.get("verified_legal_name_aliases")
     if isinstance(aliases, list):
         names.update(_company_name(value) for value in aliases[:3])

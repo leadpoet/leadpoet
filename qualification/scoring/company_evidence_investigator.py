@@ -30,7 +30,9 @@ from arena_reviewer_runtime.transport import post_json
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
-from qualification.scoring.company_fit_decision import _company_name
+from qualification.scoring.company_fit_decision import (
+    _company_name, verified_homepage_brand_name,
+)
 from qualification.scoring.checked_sources import checked_source_provenance
 from qualification.scoring.country_data import US_STATES
 from qualification.scoring.company_verification import (
@@ -3955,6 +3957,12 @@ async def investigate_company_evidence(
                 "",
                 _normalized_span(
                     (verified_homepage_identity or {}).get("normalized_name")
+                ),
+            ),
+            re.sub(
+                r"[^a-z0-9]+", "",
+                _normalized_span(
+                    verified_homepage_brand_name(verified_homepage_identity or {})
                 ),
             ),
         )

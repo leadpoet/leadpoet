@@ -7,8 +7,9 @@ extractions can be added by default. An explicit option applies only the
 approved terminal-negative, exact-source-access, pending-final-correction and
 shared failed attribute-source review, identity schema-repair reachability and
 rejected-final-packet completion and structured numeric-homepage alias
-repairs to frozen source.
-Neither path imports today's grading code.
+repairs to frozen source. A separate exact-source option repairs explicit
+first-party legal/brand identity and same-origin Organization URL resolution.
+No option imports today's complete grading implementation.
 """
 from __future__ import annotations
 
@@ -31,6 +32,11 @@ if str(ROOT) not in sys.path:
 GRADER_FILE = "qualification/scoring/company_evidence_investigator.py"
 VERIFICATION_FILE = "qualification/scoring/company_verification.py"
 FINALITY_FILE = "qualification/scoring/lead_scorer.py"
+BOUND_IDENTITY_FILES = (
+    VERIFICATION_FILE,
+    "qualification/scoring/company_fit_decision.py",
+    "qualification/scoring/linkedin_company_size.py",
+)
 ENTRYPOINT_FILES = ("lab_arena/scorer_entrypoint.py", "scorer_entrypoint.py")
 RUNTIME_DIRECTORY = "arena_reviewer_runtime"
 MAX_OVERLAY_BYTES = 4 * 1024 * 1024
@@ -144,6 +150,7 @@ def extract_frozen_sources(
     completed_investigation_finality: bool = False,
     identity_schema_repair: bool = False,
     structured_homepage_numeric_alias: bool = False,
+    bound_homepage_legal_alias: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -151,11 +158,14 @@ def extract_frozen_sources(
         names = (GRADER_FILE, *ENTRYPOINT_FILES)
         if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
-                or identity_schema_repair or structured_homepage_numeric_alias):
+                or identity_schema_repair or structured_homepage_numeric_alias
+                or bound_homepage_legal_alias):
             names += (FINALITY_FILE,)
         if authenticated_page_refusal:
             names += (VERIFICATION_FILE,)
-        for name in names:
+        if bound_homepage_legal_alias:
+            names += BOUND_IDENTITY_FILES
+        for name in dict.fromkeys(names):
             path = destination / name
             path.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["docker", "cp", container + ":/model/" + name,
@@ -175,6 +185,7 @@ def expected_overlay(
     completed_investigation_finality: bool = False,
     identity_schema_repair: bool = False,
     structured_homepage_numeric_alias: bool = False,
+    bound_homepage_legal_alias: bool = False,
     single_tool_protocol_repair: bool = False,
     rejected_final_packet: bool = False,
 ) -> dict[str, bytes]:
@@ -184,18 +195,24 @@ def expected_overlay(
     expected = {GRADER_FILE, *ENTRYPOINT_FILES}
     if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
-                or identity_schema_repair or structured_homepage_numeric_alias):
+                or identity_schema_repair or structured_homepage_numeric_alias
+                or bound_homepage_legal_alias):
         expected.add(FINALITY_FILE)
     if authenticated_page_refusal:
         expected.add(VERIFICATION_FILE)
+    if bound_homepage_legal_alias:
+        expected.update(BOUND_IDENTITY_FILES)
     if set(original) != expected:
         raise CompositionError("frozen operational sources are incomplete")
     files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
     files.update({name: convert_checkpoint_seam(original[name]) for name in ENTRYPOINT_FILES})
     if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
-                or identity_schema_repair or structured_homepage_numeric_alias):
+                or identity_schema_repair or structured_homepage_numeric_alias
+                or bound_homepage_legal_alias):
         files[FINALITY_FILE] = original[FINALITY_FILE]
+    if bound_homepage_legal_alias:
+        files.update({name: original[name] for name in BOUND_IDENTITY_FILES})
     if complete_negative_finality:
         from scripts.arena_reviewer_finality_seam import convert_finality_seam
         files[FINALITY_FILE] = convert_finality_seam(files[FINALITY_FILE])
@@ -236,6 +253,14 @@ def expected_overlay(
     if rejected_final_packet:
         from scripts.arena_reviewer_rejected_final_packet_seam import convert_rejected_final_packet_seam
         files[GRADER_FILE] = convert_rejected_final_packet_seam(files[GRADER_FILE])
+    if bound_homepage_legal_alias:
+        from scripts.arena_reviewer_bound_homepage_alias_seam import (
+            convert_bound_homepage_legal_alias_files,
+        )
+        names = (GRADER_FILE, FINALITY_FILE, *BOUND_IDENTITY_FILES)
+        files.update(convert_bound_homepage_legal_alias_files(
+            {name: files[name] for name in names},
+        ))
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -290,6 +315,10 @@ def main() -> int:
         "--structured-homepage-numeric-alias", action="store_true",
         help="carry independently proved numeric-homepage identity into quote binding; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--bound-homepage-legal-alias", action="store_true",
+        help="carry exact first-party legal/brand identity through frozen source; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
@@ -315,6 +344,8 @@ def main() -> int:
                if args.identity_schema_repair else {}),
             **({"structured_homepage_numeric_alias": True}
                if args.structured_homepage_numeric_alias else {}),
+            **({"bound_homepage_legal_alias": True}
+               if args.bound_homepage_legal_alias else {}),
             **({"authenticated_page_refusal": True}
                if args.authenticated_page_refusal else {}),
         )
@@ -327,6 +358,7 @@ def main() -> int:
             completed_investigation_finality=args.completed_investigation_finality,
             identity_schema_repair=args.identity_schema_repair,
             structured_homepage_numeric_alias=args.structured_homepage_numeric_alias,
+            bound_homepage_legal_alias=args.bound_homepage_legal_alias,
             single_tool_protocol_repair=args.single_tool_protocol_repair,
             rejected_final_packet=args.rejected_final_packet,
         )
@@ -340,6 +372,7 @@ def main() -> int:
             + ("-investigation-finality" if args.completed_investigation_finality else "")
             + ("-identity-schema-repair" if args.identity_schema_repair else "")
             + ("-structured-homepage-alias" if args.structured_homepage_numeric_alias else "")
+            + ("-bound-homepage-legal-alias" if args.bound_homepage_legal_alias else "")
             + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
             + ("-rejected-final-packet" if args.rejected_final_packet else "")
         )
@@ -395,6 +428,9 @@ def main() -> int:
         if args.rejected_final_packet:
             from scripts.arena_reviewer_rejected_final_packet_seam import CORRECTION_ID as REJECTED_FINAL_PACKET_CORRECTION_ID
             corrections.append(REJECTED_FINAL_PACKET_CORRECTION_ID)
+        if args.bound_homepage_legal_alias:
+            from scripts.arena_reviewer_bound_homepage_alias_seam import CORRECTION_ID as BOUND_HOMEPAGE_ALIAS_CORRECTION_ID
+            corrections.append(BOUND_HOMEPAGE_ALIAS_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,

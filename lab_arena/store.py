@@ -401,7 +401,7 @@ ROUND_NETUID_COLUMN = "arena_netuid"
 
 DEADLOCK_SQLSTATE = "40P01"
 DEADLOCK_RETRIES = 3
-# Stage creation, scoring queue creation, lease recovery, and score batches can
+# Stage creation, lease recovery, stage/round closure, and score batches can
 # take longer than an ordinary RPC. Let their bounded database work return a
 # result before giving up on the response.
 BULK_ROUND_RPC_READ_TIMEOUT_SECONDS = 65.0
@@ -632,6 +632,9 @@ class PostgrestTransport(StoreTransport):
             "lab_arena_open_scoring_v3",
             "lab_arena_record_run_scores",
             "lab_arena_expire_leases",
+            "lab_arena_close_stage",
+            "lab_arena_close_scoring",
+            "lab_arena_cancel_round",
         }:
             read_timeout = BULK_ROUND_RPC_READ_TIMEOUT_SECONDS
         elif (

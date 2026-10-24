@@ -550,7 +550,10 @@ def _parse_research_control(document: Any, prepared: PreparedCodeReview) -> Mapp
         if not isinstance(claim, str) or claim not in _RESEARCH_CLAIMS or not isinstance(path, str) or path not in contents:
             invalid("research_evidence")
         excerpt, explanation = item["excerpt"], item["explanation"]
-        if not isinstance(excerpt, str) or not excerpt.strip() or len(excerpt) > 2_000 or excerpt not in contents[path]:
+        # A single matching punctuation mark is not usable source evidence.
+        # Length is only a floor for review context, not proof of the claim.
+        if (not isinstance(excerpt, str) or len(excerpt) > 2_000
+                or len("".join(excerpt.split())) < 12 or excerpt not in contents[path]):
             invalid("research_evidence_mismatch")
         if not isinstance(explanation, str) or not explanation.strip() or len(explanation) > 4_000:
             invalid("research_evidence")

@@ -8,7 +8,7 @@ DO $research_review556$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)';
   v_preimage CONSTANT TEXT := '7db9233a48f24be3cf2fa61572546774cccefc1d69d95af2ad3c5dc10bea8083';
-  v_postimage CONSTANT TEXT := '9a553aacae9312c94023a6f768b6a6b9e31f2dde07051ce406a135332b95b3c0';
+  v_postimage CONSTANT TEXT := 'ff26bac4c0d08183378c9aa0d8a2fa7e07f461ee3c3ac2a22ed2068455971e74';
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;
@@ -55,6 +55,15 @@ BEGIN$new556a$;
          'review_response_invalid', 'code_review_research_unverified'$new556b$;
   IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old) THEN
     RAISE EXCEPTION 'Arena review556 error anchor differs' USING ERRCODE='55000'; END IF;
+  v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
+
+  v_old:=$old556g$'code_review_provider_unavailable', 'code_review_transport_error'
+        ))$old556g$;
+  v_new:=$new556g$'code_review_provider_unavailable', 'code_review_transport_error',
+          'code_review_research_unverified'
+        ))$new556g$;
+  IF length(v_updated)-length(pg_catalog.replace(v_updated,v_old,''))<>length(v_old) THEN
+    RAISE EXCEPTION 'Arena review556 retryable anchor differs' USING ERRCODE='55000'; END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
 
   v_old:=$old556c$'finding_evidence_mismatch', 'finding_explanation'$old556c$;

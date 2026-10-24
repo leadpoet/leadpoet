@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from lab_arena import code_review
+from lab_arena import code_review, code_review_policy
 from lab_arena.store import ArenaStoreError, new_lease_token
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
@@ -95,7 +95,7 @@ def _document(classification="model_directed", *, status="passed"):
     }
     if status == "error":
         document["error_code"] = "code_review_research_unverified"
-        document["retryable"] = False
+        document["retryable"] = True
     return document
 
 
@@ -131,9 +131,57 @@ def test_unverified_assessment_finishes_and_settles(recovery_store, recovery_sup
     row = recovery_store.get_submission(submission)
     assert row["code_review_status"] == "error"
     assert row["code_review_doc"]["error_code"] == "code_review_research_unverified"
+    assert row["code_review_doc"]["retryable"] is True
     assert row["code_review_doc"]["research_control"]["classification"] == "unverified"
     assert row["code_review_doc"]["cost_status"] == "settled"
     assert recovery_store.list_ledger(submission_id=submission)[-1]["amount_microusd"] == 1_000
+    assert code_review_policy.review_retry_available(row)
+    assert code_review_policy.retry_ready_at(row) is not None
+
+    assert recovery_store.begin_submission_review(
+        submission, miner, new_lease_token(), 50_000,
+        code_review.DEFAULT_REVIEW_MODEL, 3, 1200,
+    )["status"] == "backoff"
+    with recovery_superuser.cursor() as cursor:
+        cursor.execute(
+            "UPDATE public.lab_arena_submissions SET "
+            "code_review_started_at=clock_timestamp() - interval '61 seconds' "
+            "WHERE submission_id=%s",
+            (submission,),
+        )
+    claimed = recovery_store.begin_submission_review(
+        submission, miner, new_lease_token(), 50_000,
+        code_review.DEFAULT_REVIEW_MODEL, 3, 1200,
+    )
+    assert claimed["status"] == "claimed"
+    assert claimed["attempt"] == 2
+    retried = recovery_store.get_submission(submission)
+    assert retried["code_review_status"] == "reviewing"
+    assert retried["code_review_attempts"] == 2
+    assert [entry["entry_kind"] for entry in recovery_store.list_ledger(submission_id=submission)] == [
+        "reservation", "dispatch", "settlement", "reservation", "dispatch",
+    ]
+
+
+@pytest.mark.parametrize("suffix,error_code", [
+    ("e28", "code_review_provider_authentication"),
+    ("e29", "unknown_error_code"),
+])
+def test_retryable_research_error_does_not_admit_other_codes(
+    recovery_store, recovery_superuser, suffix, error_code,
+):
+    submission, miner, token = _claim(recovery_store, recovery_superuser, suffix)
+    document = _document("unverified", status="error")
+    document["error_code"] = error_code
+    document.pop("research_control")
+    with pytest.raises(ArenaStoreError, match="lab_arena_code_review_input_invalid"):
+        recovery_store.finish_submission_review(
+            submission, miner, token, "error", document, 1_000,
+        )
+    assert recovery_store.get_submission(submission)["code_review_status"] == "reviewing"
+    assert [entry["entry_kind"] for entry in recovery_store.list_ledger(submission_id=submission)] == [
+        "reservation", "dispatch",
+    ]
 
 
 def test_workflow_rejection_is_billed_without_a_misconduct_category(recovery_store, recovery_superuser):

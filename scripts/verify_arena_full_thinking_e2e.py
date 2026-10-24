@@ -151,21 +151,57 @@ def _capture_private_ledger(harness: "FullThinkingHarness", report: Path,
 
 
 def full_thinking_database():
-    """Disposable committed authority through the full-thinking source freeze."""
-    # The 538 fixture carries the 517 write-once trigger required by 561 and
-    # the modern scorer history. Each tail migration checks its exact preimage.
+    """Disposable current authority through the full-thinking source freeze."""
+    # The 538 fixture carries the 517 write-once trigger and scorer history.
+    # It omits several independently tested mainline branches. Apply their
+    # exact guarded migrations before the post-538 tail; the dated 542-546
+    # October 22 data repairs do not belong in a fresh round database.
     database = authority_fixture.database.__wrapped__()
     try:
         psycopg2, dsn = next(database)
-        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
-            for name in (
-                "539-lab-arena-held-recovery-provider-admission.sql",
-                "555-lab-arena-full-thinking-six-dollar-cap.sql",
-                "556-lab-arena-research-review-result.sql",
-                "561-lab-arena-full-thinking-champion-baseline.sql",
-                "562-lab-arena-full-thinking-catalog-commit.sql",
-            ):
-                cursor.execute((REPO / "scripts" / name).read_text())
+        connection = psycopg2.connect(**dsn)
+        connection.autocommit = True  # Mainline concurrent index migrations require it.
+        try:
+            with connection.cursor() as cursor:
+                for name in (
+                    "462-lab-arena-deepline-native-settlement-binding.sql",
+                    "505-lab-arena-execute-reconciliation-run-scope.sql",
+                    "506-lab-arena-closed-reconciliation-eligible-run-scope.sql",
+                    "507-lab-arena-closed-provider-round-membership.sql",
+                    "508-lab-arena-openrouter-uncertain-run-index.sql",
+                    "518-lab-arena-single-tool-response-cache.sql",
+                    "524-lab-arena-proven-funding-recovery.sql",
+                    "525-lab-arena-private-registration-helper.sql",
+                    "526-lab-arena-funding-proof-scalars.sql",
+                    "528-lab-arena-internal-table-public-access.sql",
+                    "529-lab-arena-hide-public-icp-examples.sql",
+                    "531-lab-arena-round-open-call-index.sql",
+                    "533-lab-arena-cancel-latest-call-heads.sql",
+                    "534-lab-arena-remove-open-call-index.sql",
+                    "539-lab-arena-held-recovery-provider-admission.sql",
+                    "540-lab-arena-incomplete-participant-publication.sql",
+                    "541-lab-arena-public-execution-failure-reason.sql",
+                    "547-lab-arena-unmeasured-terminal-publication.sql",
+                    "548-lab-arena-company-judgment-validation-projection.sql",
+                    "549-lab-arena-open-scoring-frozen-config-projection.sql",
+                    "550-lab-arena-tool-reply-own-call-cache.sql",
+                    "551-lab-arena-expire-leases-shared-round-lock.sql",
+                    "552-lab-arena-expiry-recovery-candidate-locks.sql",
+                    "553-lab-arena-paid-native-request-index.sql",
+                    "554-lab-arena-funding-proof-throughput.sql",
+                    "555-lab-arena-full-thinking-six-dollar-cap.sql",
+                    "556-lab-arena-research-review-result.sql",
+                    "557-lab-arena-closed-provider-scoped-candidates.sql",
+                    "558-lab-arena-funding-proof-keyed-lookups.sql",
+                    "559-lab-arena-deepline-uncertain-round-entry-index.sql",
+                    "560-lab-arena-closed-provider-score-run-scope.sql",
+                    "561-lab-arena-full-thinking-champion-baseline.sql",
+                    "562-lab-arena-full-thinking-catalog-commit.sql",
+                    "563-lab-arena-training-publication-eligibility.sql",
+                ):
+                    cursor.execute((REPO / "scripts" / name).read_text())
+        finally:
+            connection.close()
         yield psycopg2, dsn
     finally:
         database.close()
@@ -388,7 +424,15 @@ class FullThinkingChain(FakeChain):
 
 
 class FullThinkingCaptureApi(InProcessApi):
-    """Expose the production training capture endpoints to the local runner."""
+    """Expose training capture and scorer controls to the local runner."""
+
+    def signal_judgment(self, run_id, lease_token, request):
+        return self._guard(lambda: self.service.handle_signal_judgment(
+            run_id, lease_token, request))
+
+    def quota_usage(self, run_id, lease_token, *, include_sourcing_cost=False):
+        return self._guard(lambda: self.service.handle_quota_snapshot(
+            run_id, lease_token, include_sourcing_cost=include_sourcing_cost))
 
     def trajectory(self, run_id, lease_token, events):
         return self._guard(lambda: self.service.handle_trajectory(

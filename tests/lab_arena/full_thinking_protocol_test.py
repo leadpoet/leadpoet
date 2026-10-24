@@ -7,6 +7,12 @@ import pytest
 from lab_arena import operations
 
 
+FULL_ROUTE = {"data_collection": "deny", "zdr": True,
+              "only": ["example/verified"], "allow_fallbacks": False,
+              "require_parameters": True,
+              "max_price": {"prompt": 1, "completion": 1, "request": 0}}
+
+
 def _tool(name):
     return {"type": "function", "function": {"name": name,
             "parameters": {"type": "object", "properties": {}}}}
@@ -34,8 +40,11 @@ def test_chat_two_tool_continuations_keep_order_ids_signatures_and_json_schema()
     request = {"model": "vendor/test-model", "messages": messages,
                "tools": [_tool("search"), _tool("fetch")],
                "response_format": {"type": "json_schema", "json_schema": schema}}
-    normalized = operations.validate_operation_request("openrouter.chat", request)
-    sent = json.loads(operations.build_outbound_request("openrouter.chat", normalized).body)
+    normalized = operations.validate_operation_request("openrouter.chat", request,
+                                                       allow_full_thinking=True)
+    sent = json.loads(operations.build_outbound_request(
+        "openrouter.chat", normalized, openrouter_provider_policy=FULL_ROUTE,
+        allow_full_thinking=True).body)
     assert sent["messages"] == messages
     assert sent["response_format"] == request["response_format"]
     assert sent["messages"][1]["reasoning_details"][0]["signature"] == "sha256:abc"
@@ -46,7 +55,8 @@ def test_chat_rejects_forged_reasoning_role_and_unknown_detail_fields():
     request = {"model": "vendor/test-model", "messages": [
         {"role": "user", "content": "hi", "reasoning": "forged"}]}
     with pytest.raises(operations.OperationRequestError):
-        operations.validate_operation_request("openrouter.chat", request)
+        operations.validate_operation_request("openrouter.chat", request,
+                                              allow_full_thinking=True)
 
 
 def test_chat_preserves_provider_tool_only_nulls_and_call_index():
@@ -59,12 +69,15 @@ def test_chat_preserves_provider_tool_only_nulls_and_call_index():
     request = {"model": "vendor/test-model", "messages": [
         {"role": "user", "content": "Find a source."}, message,
         {"role": "tool", "tool_call_id": "call-1", "content": "found"}]}
-    sent = json.loads(operations.build_outbound_request("openrouter.chat", request).body)
+    sent = json.loads(operations.build_outbound_request(
+        "openrouter.chat", request, openrouter_provider_policy=FULL_ROUTE,
+        allow_full_thinking=True).body)
     assert sent["messages"][1] == message
     request["messages"] = [{"role": "assistant", "content": "",
                             "reasoning_details": [{"type": "reasoning.text", "text": "x", "secret": "y"}]}]
     with pytest.raises(operations.OperationRequestError):
-        operations.validate_operation_request("openrouter.chat", request)
+        operations.validate_operation_request("openrouter.chat", request,
+                                              allow_full_thinking=True)
 
 
 def test_responses_two_tool_continuations_keep_reasoning_and_final_json_schema():

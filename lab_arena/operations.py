@@ -1560,6 +1560,22 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
         raise OperationRequestError("request_too_large")
     parameters = _drop_superseded_fields(operation, parameters)
     request_fields = operation.request_fields
+    if operation_id == "openrouter.chat" and not allow_full_thinking:
+        # Existing rounds must retain the exact Chat schema and normalized
+        # request hash they used before full-thinking protocol replay.
+        message_spec = request_fields["messages"]
+        assert message_spec.fields is not None
+        message_fields = dict(message_spec.fields)
+        message_fields["content"] = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
+        for name in ("reasoning", "reasoning_content", "reasoning_details", "refusal"):
+            message_fields.pop(name)
+        call_spec = message_fields["tool_calls"]
+        assert call_spec.fields is not None
+        call_fields = dict(call_spec.fields)
+        call_fields.pop("index")
+        message_fields["tool_calls"] = dataclasses.replace(call_spec, fields=call_fields)
+        request_fields = dict(request_fields,
+                              messages=dataclasses.replace(message_spec, fields=message_fields))
     if operation_id.startswith("deepline.tools.") and deepline_catalog is None:
         raise OperationRequestError("no_matching_operation")
     if operation_id in {"deepline.execute", "deepline.tools.get"} and deepline_catalog is not None:
@@ -1586,7 +1602,7 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
             raise OperationRequestError("invalid_field")
     if operation_id == "openrouter.responses":
         _validate_responses(normalized)
-    if operation_id == "openrouter.chat":
+    if operation_id == "openrouter.chat" and allow_full_thinking:
         # Generic object validation omits JSON nulls. A returned assistant
         # tool turn may carry them, and replay must keep the provider's shape.
         for original, message in zip(parameters["messages"], normalized["messages"]):
@@ -2026,6 +2042,7 @@ def match_request(
     headers: Optional[Mapping[str, Any]],
     *,
     deepline_catalog: Optional[Mapping[str, Any]] = None,
+    allow_full_thinking: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     """Map one client request to ``(operation_id, normalized_parameters)``.
 
@@ -2086,7 +2103,10 @@ def match_request(
             if name in parameters:
                 raise OperationRequestError("invalid_query")
             parameters[name] = value
-    return operation.operation_id, validate_operation_request(operation.operation_id, parameters, deepline_catalog=deepline_catalog)
+    return operation.operation_id, validate_operation_request(
+        operation.operation_id, parameters, deepline_catalog=deepline_catalog,
+        allow_full_thinking=allow_full_thinking,
+    )
 
 
 # ---------------------------------------------------------------------------

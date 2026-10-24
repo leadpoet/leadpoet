@@ -204,3 +204,71 @@ was performed. Migration555 is the renamed former551; migration556 persists the
 new bounded review result. Both must pass the normal release workflow.
 
 Machine summary: [reviewer/capture evidence](evidence/full-thinking/reviewer-capture-validation-20261024.json).
+
+## Real ten-ICP sourcing test and review corrections — 2026-10-24
+
+**This end-to-end test is not complete. The PR remains a draft and activation
+remains off.** Earlier component and synthetic tests did not prove the actual
+database publication boundary or real sourcing/qualification workflow.
+
+The new run used the actual source archive, signed submission review, worker
+entrypoints, provider broker, durable PostgreSQL ledger, and private object store.
+Both the candidate and baseline completed all ten real ICP executions (20 accepted
+executions). An independent raw export readback of candidate ICP0 verified clean
+committed source identity, complete worker capture, exact agent receipts, required
+phase coverage, and five full-thinking model calls.
+
+Judging did not complete. Configured Scrapingdog credentials returned authorization
+errors. The Deepline-managed Firecrawl route reported
+`THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED`. The test adapter also lacked the scorer signal-cache control. A regression
+reproduced the missing-method failure through the real worker socket; the adapter
+now forwards that request and quota reads to the actual service. The run was stopped to avoid repeated failed charges.
+The local database dump and exact referenced objects were preserved for resume.
+The test database fixture was also missing current mainline publication, cache,
+and locking migrations. It now applies 34 additional guarded migrations, including
+the missing independent branches before migration538. Dated round-repair scripts
+535 and542–546 are excluded from a fresh database. Independent checks verify five
+function definitions and four indexes. The paid result above
+predates that fixture correction and must not be presented as release proof.
+No scores were fabricated or substituted. Some raw exports also contain explicit
+privacy redactions and remain excluded by the strict training-data gate.
+
+Confirmed review defects now have focused regressions:
+
+- Terminal broker replay accepts and validates saved reasoning-route observations
+  without another provider call or charge.
+- Champion and dataset checks preserve approved full thinking alongside auxiliary
+  summaries/opaque state, while keeping the distinct representations separate.
+- Migration561 freezes a newly promoted compatible source and payer for a later
+  round. Frozen existing rounds remain unchanged.
+- Migration562 permits the six-dollar frozen catalog policy at the actual round
+  commit boundary without changing historical four-dollar rounds.
+- Migration563 permits coherent training-data ineligibility at the real
+  publication SQL boundary. A full service/PostgreSQL regression publishes all
+  measured scores, excludes the affected contender, and crowns an eligible peer.
+  A second case stops one contender with no output: it retains no measured score,
+  while the round publishes and the eligible peer wins.
+  This regression uses controlled training outcomes and an isolated scorer; it is
+  not a substitute for the incomplete live ten-ICP test.
+- Source review rejects one-character evidence quotes. Ambiguous `unverified`
+  results use the existing bounded retry path. A real SQL test exposed a missing
+  retryable-error allowance in migration556; this is corrected. Its 16-test
+  PostgreSQL suite proves persistence, backoff, a second claim, settlement,
+  permanent-error rejection, and migration replay.
+- Policy-off Chat normalization and hashes retain main's legacy behavior.
+
+The focused protocol, worker/shim, reviewer, and real SQL regression suite passed 854 tests;
+two existing declared-field cases were skipped. Additional worker frame and HTTP tests verify that only an execute lease with
+the frozen policy can use full-thinking continuation fields. Score leases and
+forged sandbox hints cannot enable them. A stale error-text assertion was aligned
+with main's existing retryable provider-failure behavior; its charge and replay
+assertions remain unchanged. The updated quota suite passed 27 tests; the
+provider-provenance suite passed 24 tests. Both changes correct stale test
+expectations for existing mainline behavior, without changing production scoring.
+
+This test's authorized limits are $10 OpenRouter and $5 combined search/scraping.
+At the stopped checkpoint, charges plus unresolved reservations are $1.029009 and
+$3.059750 respectively. These are conservative ledger amounts, not final invoices.
+No production migration, publication, restart, merge, or deployment was performed.
+
+Machine summary: [real sourcing E2E status](evidence/full-thinking/full-sourcing-e2e-status-20261024.json).

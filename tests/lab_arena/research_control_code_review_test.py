@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from lab_arena import code_review
+from lab_arena import code_review, code_review_policy
 from tests.lab_arena.test_lab_arena_code_review import _archive
 from tests.lab_arena.test_lab_arena_code_review_runtime import (
     ReviewStore, ReviewTransport, _price_table, _review_body, MINER_KEY, SUBMISSION,
@@ -99,6 +99,17 @@ def test_active_model_direction_is_bound_to_full_source_and_prompt_is_untrusted(
     assert result.research_control["source_archive_sha256"] == prepared.source_archive_sha256
     assert "excerpt" not in result.research_control
     assert "explanation" not in result.research_control
+
+
+def test_research_evidence_rejects_one_character_quote_but_accepts_code_context():
+    prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
+    assessment = _assessment(prepared)
+    assessment["evidence"][0]["excerpt"] = "="
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(_response(prepared, assessment), prepared)
+    assert failure.value.response_reason == "research_evidence_mismatch"
+    assessment["evidence"][0]["excerpt"] = "choice = model.decide(icp, observations)"
+    assert code_review.parse_response(_response(prepared, assessment), prepared).passed
 
 
 @pytest.mark.parametrize("classification", ["workflow", "unverified"])
@@ -201,7 +212,17 @@ def test_runtime_uses_one_paid_request_and_stores_only_bounded_result(classifica
     assert "choice = model.decide" not in repr(document)
     if classification == "unverified":
         assert document["error_code"] == "code_review_research_unverified"
-        assert document["retryable"] is False
+        assert document["retryable"] is True
+        for attempts in (1, code_review_policy.MAX_TRANSIENT_ATTEMPTS - 1):
+            assert code_review_policy.review_retry_available({
+                "code_review_status": "error", "code_review_attempts": attempts,
+                "code_review_doc": document,
+            })
+        assert not code_review_policy.review_retry_available({
+            "code_review_status": "error",
+            "code_review_attempts": code_review_policy.MAX_TRANSIENT_ATTEMPTS,
+            "code_review_doc": document,
+        })
 
 
 def test_frozen_round_policy_is_authoritative_over_submission_fields():

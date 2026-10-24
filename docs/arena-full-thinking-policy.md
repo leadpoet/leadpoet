@@ -107,8 +107,9 @@ quality may change; the user has accepted this tradeoff.
   failure rates, and output quality. No production claim is made in this PR.
 - Apply exact committed migrations `555-lab-arena-full-thinking-six-dollar-cap.sql`,
   `556-lab-arena-research-review-result.sql`,
-  `561-lab-arena-full-thinking-champion-baseline.sql`, and
-  `562-lab-arena-full-thinking-catalog-commit.sql` through the normal release workflow before activation. They check source hashes
+  `561-lab-arena-full-thinking-champion-baseline.sql`,
+  `562-lab-arena-full-thinking-catalog-commit.sql`, and
+  `563-lab-arena-training-publication-eligibility.sql` through the normal release workflow before activation. They check source hashes
   and database privileges, preserve unrelated behavior, and are idempotent.
 
 ## Reproducible checks
@@ -168,3 +169,19 @@ and label checks remain separate; they are not new champion score rules.
 Only future opted-in rounds use these requirements. This PR stays default off.
 Migration 555 was renumbered from 551 after the latest main branch added its own
 551 through 554 migrations. No production migration or activation is part of this PR.
+
+## Review fixes — 2026-10-24
+
+Policy-off Chat requests retain the existing message normalization and request hashes.
+Full-thinking history preservation applies only when the frozen policy enables it.
+Research citations require an exact source excerpt with at least 12 non-whitespace
+characters. This is a context floor, not proof that the reviewer is correct. An
+`unverified` assessment uses the existing bounded retry policy; a clearly fixed
+workflow still fails eligibility.
+
+Migration563 lets the real publication validator accept a coherent
+`training_data_incomplete` result while preserving measured scores and all cost
+guards. Missing training data disqualifies that contender; it must not stop the
+round, hide other results, or prevent an eligible peer from becoming champion.
+The database check validates the publication report. The service separately reads
+and verifies the durable raw training evidence.

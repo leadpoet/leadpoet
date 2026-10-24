@@ -348,7 +348,7 @@ class SubmissionCodeReviewer:
                             elif classification == "unverified" and status == "passed":
                                 status = "error"
                                 document.update(code_review_policy.diagnostic(
-                                    "code_review_research_unverified", retryable=False
+                                    "code_review_research_unverified", retryable=True
                                 ))
                     elif (
                         response.status == 403

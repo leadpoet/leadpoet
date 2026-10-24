@@ -3330,7 +3330,12 @@ class WorkerSocketServer:
         if control_response is not None:
             return control_response
         try:
-            operation_id, parameters, timeout_ms = shim.decode_operation_frame(raw, deepline_catalog=self._state.lease.get("deepline_catalog"))
+            operation_id, parameters, timeout_ms = shim.decode_operation_frame(
+                raw, deepline_catalog=self._state.lease.get("deepline_catalog"),
+                allow_full_thinking=self._state.lease.get("kind") == "execute"
+                and self._state.lease.get("reasoning_capture_policy")
+                == shim.FULL_THINKING_POLICY,
+            )
         except shim.OperationFrameError as exc:
             code = str(exc) if str(exc) in shim.FRAME_ERROR_CODES else "invalid_frame"
             self._record_parse_observation({"raw_frame": self._observation_text(raw)}, {"error": code}, "frame", code)
@@ -3374,7 +3379,13 @@ class WorkerSocketServer:
         """The miner contract: a provider's own HTTP request, sent over the socket without a credential."""
 
         try:
-            operation_id, parameters = operations.match_request(method, url, body, headers, deepline_catalog=self._state.lease.get("deepline_catalog"))
+            operation_id, parameters = operations.match_request(
+                method, url, body, headers,
+                deepline_catalog=self._state.lease.get("deepline_catalog"),
+                allow_full_thinking=self._state.lease.get("kind") == "execute"
+                and self._state.lease.get("reasoning_capture_policy")
+                == shim.FULL_THINKING_POLICY,
+            )
         except operations.OperationError as exc:
             code = getattr(exc, "code", "invalid_request")
             status, payload = HTTP_ERROR_STATUS.get(code, 400), _http_error_body(code)
@@ -4308,6 +4319,11 @@ class AssignmentExecutor:
                     input_document["provider_operations"] = sorted(
                         set(operations.OPERATIONS) | set(operations.CATALOG_OPERATIONS)
                     )
+            if (lease.get("kind") == "execute"
+                    and lease.get("reasoning_capture_policy") == shim.FULL_THINKING_POLICY):
+                # The shim needs a local parse hint; the worker's lease remains
+                # the authority for the same request after it crosses the socket.
+                extra_environment[shim.REASONING_POLICY_ENV] = shim.FULL_THINKING_POLICY
             (input_dir / runtime.INPUT_FILE_NAME).write_text(json.dumps(input_document, sort_keys=True), encoding="utf-8")
             _record_training_input(config, lease, lease_token, input_document)
             staged_agent_entrypoint = (

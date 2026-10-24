@@ -5826,6 +5826,10 @@ class ArenaService:
             "scoring_wall_clock_seconds", contracts.SCORING_WALL_CLOCK_SECONDS
         ))
         lease["lease_ttl_seconds"] = int(configuration["lease_ttl_seconds"])
+        if response.get("kind") == "execute" and reasoning_capture.enabled(configuration):
+            # The worker's request validator receives the frozen round policy
+            # through the gateway lease, never through a miner operation frame.
+            lease["reasoning_capture_policy"] = reasoning_capture.POLICY
         if configuration.get("deepline_catalog") is not None:
             lease["deepline_catalog"] = configuration["deepline_catalog"]
         checkpoint_policy = configuration.get("checkpoint_deadline_policy")

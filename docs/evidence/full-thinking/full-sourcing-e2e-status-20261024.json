@@ -1,0 +1,54 @@
+{
+  "accepted_baseline_executions": 10,
+  "accepted_candidate_executions": 10,
+  "accepted_scores": 0,
+  "benchmark_icps": 10,
+  "budget_caps_usd": {
+    "openrouter": 10,
+    "search_scraping": 5
+  },
+  "budget_charges_plus_unresolved_reservations_usd": {
+    "openrouter": 1.029009,
+    "search_scraping": 3.05975
+  },
+  "budget_is_final_invoice": false,
+  "candidate_icp0_readback": {
+    "clean_committed_source": true,
+    "complete_worker_capture": true,
+    "exact_agent_receipts": true,
+    "final_judgment_available": false,
+    "full_thinking_calls": 5,
+    "required_phase_coverage": true
+  },
+  "corrected_test_fixture_defect": "The in-process E2E API lacked signal_judgment and quota_usage controls; real worker/socket/PostgreSQL regression now passes.",
+  "failed_score_attempts": 8,
+  "merge_or_deploy": false,
+  "model": "deepseek/deepseek-v4.1-flash-1017",
+  "paid_attempt_used_complete_current_schema": false,
+  "preserved_for_resume": [
+    "PostgreSQL custom dump",
+    "private ledger",
+    "exact referenced private objects",
+    "agent/scorer private artifacts"
+  ],
+  "privacy_limit": "Some exports contain explicit privacy redactions and remain excluded by the strict dataset gate. They were not rewritten to force eligibility.",
+  "production_actions": false,
+  "real_10_icp_publication_and_training_export_passed": false,
+  "real_scoring_blockers": [
+    "Configured Scrapingdog test credentials return authorization errors.",
+    "Deepline-managed Firecrawl reports THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED."
+  ],
+  "regressions": {
+    "existing_declared_field_skips": 2,
+    "homepage_provenance_passed": 24,
+    "protocol_worker_reviewer_sql_passed": 854,
+    "quota_passed": 27
+  },
+  "round_status": "stage1_scoring",
+  "schema_fixture_correction": "Added 34 exact guarded migrations, including omitted independent branches before 538. Current service publication passes; five function definitions and four indexes independently match expected state. Dated data repairs 535 and 542-546 excluded. Paid trial must resume or rerun with corrected authority.",
+  "schema_version": "leadpoet.arena.full_thinking_e2e_status.v1",
+  "source_archive_sha256": "48e6baa8e27125cd4c83763389373cc9237ccc7950fbb2c4152fbb902ea4e3c0",
+  "source_review": "model_directed",
+  "status": "blocked_before_complete_scoring",
+  "test_source_commit": "d5539cd1e"
+}

@@ -78,18 +78,6 @@ def _readable_full_segments(example, report, call_index, delivered, segments):
     return True
 
 
-def _tool_only_empty(call, delivered):
-    if call.get("operation_id") == "openrouter.chat":
-        choices = delivered.get("choices") or []
-        return (len(choices) == 1 and choices[0].get("finish_reason") == "tool_calls"
-                and bool((choices[0].get("message") or {}).get("tool_calls")))
-    if call.get("operation_id") == "openrouter.responses":
-        output = delivered.get("output") or []
-        return bool(output) and any(item.get("type") == "function_call" for item in output) and not any(
-            item.get("type") == "message" for item in output)
-    return False
-
-
 def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | None],
                    selected_run_ids: Sequence[str], *, enabled: bool) -> dict:
     """Check each selected final execute run against its persisted raw export.
@@ -160,29 +148,19 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 candidate = training_steps._candidate(example, call)
                 digest = candidate["source_refs"][0]["delivered_response_sha256"]
                 delivered = training_thinking._delivered_response(call, digest)
-                status = training_thinking.attempt_coverage(
+                full_segments, status = training_thinking.full_text_segments(
                     {**call, "response": delivered, "response_sha256": digest},
                     example["role"], registry)
                 if not status["route_reviewed"] or not status["provider_route_verified"]:
                     reasons.append("full_thinking_route_unverified")
                     continue
-                segments, _, _ = training_thinking._segments(delivered, call["operation_id"])
-                allowed = set(call["reasoning_capture"]["full_text_fields"])
-                full_segments = [segment for segment in segments
-                                 if segment["field"] in allowed and
-                                 all(alias in allowed for alias in segment.get("alias_fields", []))]
-                extra_text = [segment for segment in segments if segment not in full_segments
-                              and "summary" not in segment["field"]]
-                if (full_segments and status["storage"] == "saved"
-                        and status["returned"] not in {"redacted", "truncated", "interrupted",
-                                                   "storage_failed", "size_limited", "unavailable"}):
-                    if (extra_text or not _readable_full_segments(
-                            example, report, index, delivered, full_segments)):
+                if full_segments:
+                    if not _readable_full_segments(example, report, index, delivered, full_segments):
                         reasons.append("readable_full_thinking_unverified")
                     else:
                         counts["full_thinking_calls"] += 1
                         has_full = True
-                elif status["returned"] == "requested_empty" and _tool_only_empty(call, delivered):
+                elif training_thinking.verified_tool_only_empty(call, delivered, status):
                     counts["tool_only_empty_calls"] += 1
                 else:
                     reasons.append("full_thinking_unavailable")

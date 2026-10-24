@@ -2835,9 +2835,14 @@ def _decode_terminal(
         "deepline_response_missing_reason",
         "compatibility_failure_code",
         "upstream_response_receipt",  # Private evidence has no replay authority.
+        "reasoning_route_observation",  # Bounded diagnostic; never changes the saved response.
         "transport_elapsed_ms", "timing_scope",
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
+        raise BrokerError("broker_unavailable")
+    if "reasoning_route_observation" in document and not reasoning_capture.valid_route_observation(
+        document["reasoning_route_observation"]
+    ):
         raise BrokerError("broker_unavailable")
     if ("transport_elapsed_ms" in document or "timing_scope" in document) and (
         type(document.get("transport_elapsed_ms")) is not int

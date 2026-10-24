@@ -290,6 +290,10 @@ def test_legitimate_tool_only_empty_turn_does_not_disqualify_later_text():
     extra["call_identity"] = "tool-only"
     extra["action_sequence"] = 2
     extra["response"]["choices"][0]["message"].pop("reasoning_content")
+    extra["response"]["choices"][0]["message"]["content"] = None
+    extra["response"]["choices"][0]["message"]["tool_calls"] = [{
+        "id": "lookup-1", "type": "function",
+        "function": {"name": "lookup", "arguments": "{}"}}]
     extra["response"]["choices"][0]["finish_reason"] = "tool_calls"
     extra["response_sha256"] = contracts.document_hash(extra["response"])
     extra["response_receipts"][0]["response_sha256"] = extra["response_sha256"]
@@ -381,7 +385,7 @@ def test_missing_saved_response_is_storage_failed_without_fabricating_text():
     assert row["characters"] == 0
 
 
-def test_truncated_and_opaque_attempts_are_separate_from_full_text():
+def test_truncated_attempt_is_excluded_and_opaque_state_stays_separate_from_full_text():
     truncated = full_example()
     truncated["provider_calls"][0]["response"]["choices"][0]["finish_reason"] = "length"
     row = training_thinking.coverage([seal(truncated)])["attempts"][0]
@@ -396,10 +400,17 @@ def test_truncated_and_opaque_attempts_are_separate_from_full_text():
     assert row["returned"] == "unproved_text"
     assert row["contains_opaque"] is True
     assert row["storage"] == "saved"
+    exported, _ = rows(opaque)
+    assert len(exported) == 1
+    assert [part["text"] for part in exported[0]["generated_thinking"]] == [
+        "Inspect the retained page, then answer."]
+    call["response"]["choices"][0]["message"].pop("reasoning_content")
+    call["response_sha256"] = contracts.document_hash(call["response"])
+    call["response_receipts"][0]["response_sha256"] = call["response_sha256"]
     assert not rows(opaque)[0]
 
 
-def test_responses_full_content_qualifies_but_summary_does_not():
+def test_responses_full_content_with_ancillary_summary_qualifies_but_summary_only_does_not():
     example = response_fixture()
     chat = full_example()["provider_calls"][0]
     call = example["provider_calls"][0]
@@ -426,6 +437,12 @@ def test_responses_full_content_qualifies_but_summary_does_not():
     assert len(got) == 1
     assert got[0]["generated_thinking"][0]["text"] == "Check evidence first."
     call["response"]["output"][0]["summary"] = [{"type": "summary_text", "text": "Brief summary"}]
+    call["response_sha256"] = contracts.document_hash(call["response"])
+    call["response_receipts"][0]["response_sha256"] = call["response_sha256"]
+    got, _ = rows(example)
+    assert len(got) == 1
+    assert [part["text"] for part in got[0]["generated_thinking"]] == ["Check evidence first."]
+    call["response"]["output"][0].pop("content")
     call["response_sha256"] = contracts.document_hash(call["response"])
     call["response_receipts"][0]["response_sha256"] = call["response_sha256"]
     assert not rows(example)[0]

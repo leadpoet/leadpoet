@@ -19,10 +19,6 @@ POLICY = "full_generated_thinking_v1"
 PARSER_VERSION = "arena_openrouter_reasoning_v1"
 _ROUTE_FIELDS = ("model_id", "model_version", "provider_route", "api",
                  "parser_version", "probe_id", "probe_manifest_sha256", "registry_sha256")
-_BAD_CLASSES = frozenset({"summary", "opaque", "redacted", "truncated", "interrupted",
-                          "storage_failed", "size_limited", "unavailable", "unproved_text"})
-
-
 def _policy(call: Mapping[str, Any], registry: Any = None) -> bool:
     annotation = call.get("reasoning_capture") or {}
     model = (((call.get("request") or {}).get("outbound") or {}).get("body") or {}).get("model")
@@ -95,6 +91,39 @@ def _approved_segments(segments: list[dict], allowed: set[str]) -> bool:
         segment["field"] in allowed and
         all(alias in allowed for alias in segment.get("alias_fields", []))
         for segment in segments)
+
+
+def full_text_segments(call: Mapping[str, Any], role: str, registry: Any = None) -> tuple[list[dict], dict]:
+    """Admit only reviewed full text; keep ancillary summaries and opaque state separate."""
+    status = attempt_coverage(call, role, registry)
+    segments, _, _ = _segments(call.get("response"), str(call.get("operation_id")))
+    if (not status["route_reviewed"] or not status["provider_route_verified"]
+            or status["storage"] != "saved"
+            or status["returned"] in {"redacted", "truncated", "interrupted",
+                                   "storage_failed", "size_limited", "unavailable"}):
+        return [], status
+    allowed = set(call["reasoning_capture"]["full_text_fields"])
+    full = [segment for segment in segments if _approved_segments([segment], allowed)]
+    # A summary is ancillary. Other unapproved readable text has no verified
+    # full-text route and must not enter the generated-thinking target.
+    if any(segment not in full and "summary" not in segment["field"] for segment in segments):
+        return [], status
+    return full, status
+
+
+def verified_tool_only_empty(call: Mapping[str, Any], delivered: Mapping[str, Any], status: Mapping[str, Any]) -> bool:
+    if (not status["route_reviewed"] or not status["provider_route_verified"]
+            or status["storage"] != "saved" or status["returned"] != "requested_empty"):
+        return False
+    if call.get("operation_id") == "openrouter.chat":
+        choices = delivered.get("choices") or []
+        return (len(choices) == 1 and choices[0].get("finish_reason") == "tool_calls"
+                and bool((choices[0].get("message") or {}).get("tool_calls")))
+    if call.get("operation_id") == "openrouter.responses":
+        output = delivered.get("output") or []
+        return bool(output) and any(item.get("type") == "function_call" for item in output) and not any(
+            item.get("type") == "message" for item in output)
+    return False
 
 
 def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
@@ -312,6 +341,7 @@ def _role(example: Mapping[str, Any], call: Mapping[str, Any]) -> str:
 def coverage(examples) -> dict:
     counts, grouped, trajectories = Counter(), defaultdict(Counter), Counter()
     attempts = []
+    full_text_calls = 0
     seen = set()
     for example in examples:
         if not isinstance(example, Mapping) or example.get("schema_version") != training_dataset.EXAMPLE_SCHEMA_VERSION:
@@ -327,6 +357,7 @@ def coverage(examples) -> dict:
         registry = (example.get("configuration") or {}).get("reasoning_route_registry")
         for call in example.get("provider_calls") or []:
             row = attempt_coverage(call, _role(example, call), registry)
+            full, _ = full_text_segments(call, _role(example, call), registry)
             attempts.append(row)
             counts[row["returned"]] += 1
             key = (row["role"], row["model_id"], row["requested_provider_route"], row["api"])
@@ -334,11 +365,11 @@ def coverage(examples) -> dict:
             grouped[key]["requested"] += row["requested"]
             grouped[key]["saved"] += row["storage"] == "saved"
             execution_model = _execution_model_call(example, call)
-            has_text |= execution_model and row["returned"] == "full_thinking"
+            has_text |= execution_model and bool(full)
+            full_text_calls += execution_model and bool(full)
             full_round = (example.get("configuration") or {}).get("reasoning_capture_policy") == POLICY
             bad |= (execution_model and (row["requested"] or full_round) and
-                    (row["returned"] in _BAD_CLASSES or not row["route_reviewed"]
-                     or not row["provider_route_verified"]))
+                    not (full or verified_tool_only_empty(call, call.get("response") or {}, row)))
         trajectories["ineligible"] += bad
         trajectories["with_full_thinking"] += has_text
         trajectories["eligible_without_disqualifying_capture"] += not bad
@@ -347,7 +378,7 @@ def coverage(examples) -> dict:
     return {"attempts": attempts, "returned_classes": dict(sorted(counts.items())),
             "distinct_verified_exports": len(seen),
             "saved_calls": sum(row["storage"] == "saved" for row in attempts),
-            "generated_thinking_texts": sum(row["returned"] == "full_thinking" for row in attempts),
+            "generated_thinking_texts": full_text_calls,
             "summary_calls": sum(row["returned"] == "summary" for row in attempts),
             "by_role_model_route": [{"role": key[0], "model_id": key[1], "requested_provider_route": key[2],
                                      "api": key[3], "counts": dict(sorted(value.items()))}
@@ -412,11 +443,11 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
                 if key not in {"choices", "output", "usage"}:
                     add("response_metadata", path + [key], response[key], delivery=delivery)
             segments, summary, opaque = _segments(response, operation)
-            status = attempt_coverage({**call, "response": response}, _role(example, call), registry)
+            full, _ = full_text_segments({**call, "response": response}, _role(example, call), registry)
             for segment in segments:
                 classification = ("summary" if "summary" in segment["field"] else
                                   "full_generated_thinking" if (delivery == "selected_terminal"
-                                                                 and status["returned"] == "full_thinking") else
+                                                                 and segment in full) else
                                   "unverified_reasoning_text")
                 sources = segment["source_paths"]
                 add(classification, path + sources[0], segment["text"], delivery=delivery,
@@ -660,37 +691,35 @@ def build(examples, rules: training_steps.Rules | None = None):
                     reasons[str(exc)] += 1
                     continue
                 delivered_call = dict(call, response=delivered,
-                                      response_sha256=ref["delivered_response_sha256"],
-                                      response_privacy_redactions=[],
-                                      response_receipts=[receipt for receipt in call.get("response_receipts") or []
-                                                         if receipt.get("response_sha256") == ref["delivered_response_sha256"]])
+                                      response_sha256=ref["delivered_response_sha256"])
                 registry = (example.get("configuration") or {}).get("reasoning_route_registry")
-                status = attempt_coverage(delivered_call, _role(example, call), registry)
-                all_status = [attempt_coverage(row, _role(example, row), registry)
-                              for row in example.get("provider_calls") or []
-                              if _execution_model_call(example, row)]
-                full_round = (example.get("configuration") or {}).get("reasoning_capture_policy") == POLICY
-                if any((row["requested"] or full_round) and
-                       (row["returned"] in _BAD_CLASSES or not row["route_reviewed"]
-                        or not row["provider_route_verified"])
-                       for row in all_status):
+                trajectory_valid = True
+                for row in example.get("provider_calls") or []:
+                    if not _execution_model_call(example, row):
+                        continue
+                    try:
+                        linked = training_steps._candidate(example, row)["source_refs"][0]
+                        response = _delivered_response(row, linked["delivered_response_sha256"])
+                    except (ValueError, TypeError, KeyError, AttributeError):
+                        trajectory_valid = False
+                        break
+                    checked = dict(row, response=response,
+                                   response_sha256=linked["delivered_response_sha256"])
+                    full, state = full_text_segments(checked, _role(example, row), registry)
+                    if not full and not verified_tool_only_empty(row, response, state):
+                        trajectory_valid = False
+                        break
+                if not trajectory_valid:
                     reasons["trajectory_reasoning_ineligible"] += 1
                     continue
-                if status["returned"] != "full_thinking" or status["storage"] != "saved":
+                segments, status = full_text_segments(delivered_call, _role(example, call), registry)
+                if not segments:
                     reasons[status["returned"]] += 1
                     continue
                 try:
                     prior = _prior_observations(example, call)
                 except ValueError as exc:
                     reasons[str(exc)] += 1
-                    continue
-                segments, summary, opaque = _segments(delivered, call.get("operation_id"))
-                allowed = set(call["reasoning_capture"]["full_text_fields"])
-                if summary or opaque or not _approved_segments(segments, allowed):
-                    reasons["delivered_reasoning_not_full"] += 1
-                    continue
-                if not segments:
-                    reasons["full_thinking_text_unavailable"] += 1
                     continue
                 record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                           "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,

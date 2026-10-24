@@ -84,6 +84,12 @@ quality may change; the user has accepted this tradeoff.
   activation command requires `--reasoning-baseline-source-url` with a same-repo
   40-character commit archive URL and `--reasoning-baseline-source-sha256`.
   Reused accepted/frozen baselines must also match the stored digest.
+  At baseline freeze, a future full-thinking round adopts a completed
+  full-thinking champion's source commit, digest, and funding owner together.
+  If the current champion is from a legacy round, the first full-thinking round
+  keeps its tested bootstrap source while retaining that champion as payer.
+  This also covers a round opened before the previous round's promotion.
+  Frozen rounds do not change their baseline snapshot.
 - No native Responses route is approved yet. The existing broker uses completed
   upstream responses; this PR does not add arbitrary upstream streaming support.
   Existing buffered Codex SSE behavior is preserved, but does not make a Codex
@@ -99,9 +105,11 @@ quality may change; the user has accepted this tradeoff.
   run, or production readiness. Before activation, run representative ICPs,
   verify stored/exported artifacts and publication, and review latency, spend,
   failure rates, and output quality. No production claim is made in this PR.
-- Apply exact committed migration `555-lab-arena-full-thinking-six-dollar-cap.sql`
-  and `556-lab-arena-research-review-result.sql` through the normal release workflow before activation. It checks source hashes
-  and database privileges, preserves unrelated behavior, and is idempotent.
+- Apply exact committed migrations `555-lab-arena-full-thinking-six-dollar-cap.sql`,
+  `556-lab-arena-research-review-result.sql`,
+  `561-lab-arena-full-thinking-champion-baseline.sql`, and
+  `562-lab-arena-full-thinking-catalog-commit.sql` through the normal release workflow before activation. They check source hashes
+  and database privileges, preserve unrelated behavior, and are idempotent.
 
 ## Reproducible checks
 
@@ -115,7 +123,7 @@ from existing exports. Empty datasets return a nonzero result. This is a dataset
 preparation tool, not authorization to train on miner submissions.
 
 Tests cover exact evidence hashes, broker routing and reservations, stored live
-three-turn probes, malformed history, summary/opaque/truncated exclusion, empty
+three-turn probes, malformed history, summary-only/opaque-only/truncated exclusion, empty
 tool turns, activation failure, old-round behavior, and local PostgreSQL cap
 concurrency and settlement. See the PR verification record for executed commands
 and remaining exclusions.
@@ -148,6 +156,9 @@ and retained; it does not prove written thinking faithfully caused a decision or
 that a long trace is good training data. No unseen private reasoning is inferred.
 Missing full text is distinct from summaries, opaque state, or token counts.
 Opaque continuation state can coexist with eligible full text and is preserved.
+Distinct auxiliary summaries also stay separate from full-text training targets.
+If identical text appears in both a full-text field and a summary field, the
+strict export conservatively excludes that ambiguous alias.
 
 Each finalist's saved publication includes a bounded training eligibility result.
 The public round/submission view shows reasons and counts without exposing source

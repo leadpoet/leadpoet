@@ -90,6 +90,7 @@ def test_selected_run_full_trace_allows_empty_tool_turn_without_dataset_filters(
 @pytest.mark.parametrize("extra", ["summary", "opaque"])
 def test_full_text_remains_eligible_with_additional_summary_or_opaque_continuation(extra):
     example = captured_example()
+    example["round_status"] = "published"
     call = example["provider_calls"][2]
     if extra == "summary":
         call["response"]["choices"][0]["message"]["reasoning_details"].append(
@@ -102,6 +103,62 @@ def test_full_text_remains_eligible_with_additional_summary_or_opaque_continuati
     result = capture(example)
     assert result["eligible"] is True, result
     assert result["counts"]["full_thinking_calls"] == 2
+    splits, manifest = training_thinking.build([example])
+    records = splits["train"] + splits["eval"]
+    assert len(records) == 2, manifest["counts"]
+    assert all(len(record["generated_thinking"]) == 1 for record in records)
+    assert all(all("summary" not in segment["field"] for segment in record["generated_thinking"])
+               for record in records)
+    if extra == "summary":
+        assert "A separate short summary." not in json.dumps(records)
+    else:
+        assert all(record["source_refs"][0]["response_projection"]["opaque_reasoning_omitted"]
+                   for record in records if record["source_refs"][0]["call_identity"] == call["call_identity"])
+    assert manifest["coverage"]["generated_thinking_texts"] == 2
+    assert manifest["coverage"]["trajectories"]["complete_full_thinking"] == 1
+    trace = training_thinking.readable_trace(example)
+    assert any(event["kind"] == "full_generated_thinking"
+               for event in trace["calls"][2]["events"])
+
+
+@pytest.mark.parametrize("damage", ["summary_only", "opaque_only", "unapproved_text",
+                                    "summary_alias", "truncated", "receipt_mismatch",
+                                    "route_unverified", "empty_route_unverified"])
+def test_capture_and_strict_export_both_reject_unverified_full_text(damage):
+    example = captured_example()
+    example["round_status"] = "published"
+    call = example["provider_calls"][2]
+    message = call["response"]["choices"][0]["message"]
+    if damage in {"summary_only", "opaque_only"}:
+        message.pop("reasoning", None)
+        message.pop("reasoning_content", None)
+        message.pop("reasoning_details", None)
+        if damage == "summary_only":
+            message["reasoning_details"] = [{"type": "reasoning.summary", "summary": "Only a summary."}]
+        else:
+            call["response_privacy_redactions"] = ["hidden_reasoning"]
+            call["response_receipts"][0]["privacy_redactions"] = ["hidden_reasoning"]
+        refresh_response_links(example, 2)
+    elif damage == "unapproved_text":
+        message["reasoning_content"] = "Unapproved second text."
+        refresh_response_links(example, 2)
+    elif damage == "summary_alias":
+        message["reasoning_details"].append(
+            {"type": "reasoning.summary", "summary": message["reasoning"]})
+        refresh_response_links(example, 2)
+    elif damage == "truncated":
+        call["response"]["choices"][0]["finish_reason"] = "length"
+        refresh_response_links(example, 2)
+    elif damage == "route_unverified":
+        call["reasoning_capture"]["provider_route"] = "wrong-route"
+    elif damage == "empty_route_unverified":
+        example["provider_calls"][0]["reasoning_capture"]["provider_route"] = "wrong-route"
+    else:
+        call["response_receipts"][0]["response_sha256"] = contracts.hash_bytes(b"wrong receipt")
+    seal(example)
+    assert capture(example)["eligible"] is False, damage
+    splits, _ = training_thinking.build([example])
+    assert not splits["train"] and not splits["eval"], damage
 
 
 @pytest.mark.parametrize("damage,reason", [

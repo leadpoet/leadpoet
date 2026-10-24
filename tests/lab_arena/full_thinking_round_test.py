@@ -9,6 +9,8 @@ import pytest
 
 from lab_arena import contracts, reasoning_capture, source_bundle
 from lab_arena.service import ArenaService, RoundDefaults, ServiceConfig, ServiceError
+from lab_arena.promotion import GitPromoter
+from tests.lab_arena.test_lab_arena_promotion_git import repository, source, git
 from tests.lab_arena.deepline_round_runtime_test import _service
 from tests.lab_arena.test_deepline_catalog import frozen
 
@@ -264,3 +266,85 @@ def test_reused_full_thinking_baseline_is_verified_before_freeze(status, stored)
             else:
                 service.freeze_participants(round_id)
     assert reads == [source_ref]
+
+
+def test_open_next_round_adopts_champion_promoted_before_baseline_freeze(tmp_path):
+    remote, _, old_commit = repository(tmp_path)
+    original, champion = source("original"), source("champion")
+    service = opted_in()
+    old_url = "https://github.com/leadpoet/leadpoet-sales-agent/archive/" + old_commit + ".tar.gz"
+    service._config.defaults.reasoning_baseline_source_url = old_url
+    service._config.defaults.reasoning_baseline_source_sha256 = (
+        "sha256:" + hashlib.sha256(original).hexdigest()
+    )
+    next_config = service.create_round(datetime(2026, 10, 24, tzinfo=timezone.utc))
+    round_row = {"round_id": next_config["round_id"], "configuration_doc": next_config,
+                 "champion_funding_frozen": False}
+    assert next_config["baseline_source_url"] == old_url
+
+    promoter = GitPromoter(str(remote), tmp_path / "promotion-cache")
+    plan = promoter.prepare(champion, round_id="arena-2026-10-23", submission_id="winner",
+                            timestamp="2026-10-23T00:00:00Z")
+    assert promoter.publish(champion, plan=plan, round_id="arena-2026-10-23",
+                            submission_id="winner") == plan["commit"]
+    assert git(remote, "rev-parse", "lab") == plan["commit"]
+    champion_url = "https://github.com/leadpoet/leadpoet-sales-agent/archive/" + plan["commit"] + ".tar.gz"
+    reads, submissions, objects = [], {}, {}
+
+    class Store:
+        def latest_promoted_champion(self, **_scope):
+            return {"round_id": "arena-2026-10-23", "winner_submission_id": "winner",
+                    "commit": plan["commit"],
+                    "reasoning_capture_policy": reasoning_capture.POLICY}
+
+        def freeze_full_thinking_baseline(self, round_id, **selection):
+            assert round_id == next_config["round_id"]
+            assert selection["expected_promotion_round_id"] == "arena-2026-10-23"
+            assert selection["expected_winner_submission_id"] == "winner"
+            assert selection["source_url"] == champion_url
+            assert selection["source_sha256"] == "sha256:" + hashlib.sha256(champion).hexdigest()
+            round_row["configuration_doc"] = {
+                **round_row["configuration_doc"],
+                "baseline_source_url": selection["source_url"],
+                "reasoning_baseline_source_sha256": selection["source_sha256"],
+            }
+            round_row["champion_funding_frozen"] = True
+            round_row["champion_submission_id"] = "winner"
+            return {"status": "frozen"}
+
+        def list_submissions(self, _round_id, *, status):
+            return [row for row in submissions.values() if row["status"] == status]
+
+        def get_submission(self, submission_id):
+            return submissions.get(submission_id)
+
+        def register_submission(self, round_id, submission_id, hotkey, fields):
+            submissions[submission_id] = {
+                "round_id": round_id, "submission_id": submission_id,
+                "miner_hotkey": hotkey, "status": "accepted", **fields,
+            }
+            return {"status": "registered"}
+
+        def update_submission(self, _round_id, submission_id, old, new, *_args):
+            assert submissions[submission_id]["status"] == old
+            submissions[submission_id]["status"] = new
+            return {"status": "ok"}
+
+    service._store = Store()
+    service._round = lambda _round_id: round_row
+    service._objects = SimpleNamespace(
+        get_bounded=lambda ref, _limit: objects[ref],
+        put=lambda ref, payload: objects.__setitem__(ref, payload),
+    )
+    service._config.baseline_source_fetcher = lambda url, _limit: (
+        reads.append(url) or (champion if url == champion_url else original)
+    )
+    service._pending_promotion_blocks = lambda: False
+
+    participants = service.freeze_participants(next_config["round_id"])
+    assert len(participants) == 1 and participants[0]["is_king"] is True
+    assert round_row["champion_submission_id"] == "winner"
+    assert reads == [champion_url, champion_url]
+    assert objects[participants[0]["source_ref"]] == champion
+    assert service.freeze_participants(next_config["round_id"]) == participants
+    assert reads == [champion_url, champion_url]

@@ -2609,6 +2609,62 @@ class ArenaService:
         if actual_digest != configuration.get("reasoning_baseline_source_sha256"):
             raise ServiceError("reasoning_baseline_source_mismatch", 503)
 
+    def _freeze_full_thinking_baseline(
+        self, round_id: str, round_row: Mapping[str, Any]
+    ) -> Dict[str, Any]:
+        """Choose a compatible promoted source and the current champion payer."""
+
+        if round_row.get("champion_funding_frozen") is True:
+            return {"status": "existing"}
+        configuration = round_row.get("configuration_doc") or {}
+        source_url = str(configuration["baseline_source_url"])
+        source_sha256 = str(configuration["reasoning_baseline_source_sha256"])
+        network_name, netuid = self._chain_scope()
+        promoted = self._store.latest_promoted_champion(
+            network_name=network_name, netuid=netuid
+        )
+        promotion_round_id = winner_id = commit = None
+        if promoted is not None:
+            promotion_round_id = str(promoted.get("round_id") or "")
+            winner_id = str(promoted.get("winner_submission_id") or "")
+            commit = str(promoted.get("commit") or "")
+            if (not promotion_round_id or not winner_id
+                    or re.fullmatch(r"[0-9a-f]{40}", commit) is None):
+                raise ServiceError("baseline_promotion_invalid", 500)
+            if promoted.get("reasoning_capture_policy") == reasoning_capture.POLICY:
+                source_url = (
+                    "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
+                    + commit + ".tar.gz"
+                )
+                fetcher = self._config.baseline_source_fetcher
+                if fetcher is None:
+                    raise ServiceError("baseline_source_fetcher_missing", 500)
+                try:
+                    payload = bytes(fetcher(source_url, source_bundle.MAX_SOURCE_ARCHIVE_BYTES))
+                    source_bundle.validate_source_archive(payload)
+                except source_bundle.SourceBundleError as exc:
+                    raise ServiceError("baseline_source_invalid:%s" % exc.code, 500) from exc
+                except Exception as exc:
+                    raise ServiceError("baseline_source_not_ready", 503) from exc
+                source_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
+        result = self._store.freeze_full_thinking_baseline(
+            round_id,
+            expected_promotion_round_id=promotion_round_id,
+            expected_winner_submission_id=winner_id,
+            expected_commit=commit,
+            expected_source_url=str(configuration["baseline_source_url"]),
+            expected_source_sha256=str(configuration["reasoning_baseline_source_sha256"]),
+            source_url=source_url,
+            source_sha256=source_sha256,
+        )
+        if result.get("status") == "promotion_pending":
+            raise ServiceError("baseline_promotion_pending", 503)
+        if result.get("status") == "stale":
+            raise ServiceError("baseline_source_not_ready", 503)
+        if result.get("status") not in ("frozen", "existing"):
+            raise ServiceError("champion_funding_freeze_failed", 503)
+        return result
+
     def _initial_baseline(self, round_row: Mapping[str, Any]) -> Dict[str, Any]:
         """Download and freeze the public baseline through the source path."""
 
@@ -2735,7 +2791,11 @@ class ArenaService:
         # champion. Freeze that identity before any baseline submission or run
         # can be created. The RPC is idempotent, so recovery keeps the same
         # original submission even if repository ownership changes later.
-        funding = self._store.freeze_champion_funding(round_id)
+        if (self._full_thinking_required(round_row)
+                and (round_row.get("configuration_doc") or {}).get("mode") == "live"):
+            funding = self._freeze_full_thinking_baseline(round_id, round_row)
+        else:
+            funding = self._store.freeze_champion_funding(round_id)
         if funding.get("status") not in ("frozen", "existing"):
             raise ServiceError("champion_funding_freeze_failed", 503)
         round_row = self._round(round_id)

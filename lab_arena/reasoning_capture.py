@@ -239,5 +239,29 @@ def route_observation(response: Any, annotation: Mapping[str, Any]) -> Dict[str,
     return observed
 
 
+def valid_route_observation(value: Any) -> bool:
+    """Check stored diagnostic bounds without granting it replay authority."""
+    required = {
+        "requested_model": 129,
+        "requested_provider_route": 128,
+        "expected_provider_name": 128,
+        "expected_model_version": 129,
+    }
+    optional = {
+        "response_model", "response_provider_name",
+        "selected_endpoint_model", "selected_endpoint_provider_name",
+    }
+    if not isinstance(value, Mapping) or set(value) != set(required) | optional | {"status"}:
+        return False
+    if value["status"] not in ("matched", "mismatch", "unverified"):
+        return False
+    if any(not isinstance(value[key], str) or not 1 <= len(value[key]) <= limit
+           for key, limit in required.items()):
+        return False
+    return all(field is None or isinstance(field, str) and 1 <= len(field) <= 128
+               for field in (value[key] for key in optional))
+
+
 __all__ = ["POLICY", "PARSER_VERSION", "apply", "enabled",
-           "load_registry", "round_policy", "route_observation", "validate_registry"]
+           "load_registry", "round_policy", "route_observation",
+           "valid_route_observation", "validate_registry"]

@@ -1271,12 +1271,18 @@ def _normalized_span(value: Any) -> str:
     return _surface_span(value).casefold()
 
 
+def _quote_match_surface(value: str) -> str:
+    # Treat a terminal plural/name possessive as typography only. Keep internal
+    # apostrophes, words, numeric tokens and the shared semantic surface intact.
+    return re.sub(r"(?<!\w)([^\W\d_]+s)['\u2019](?=\s|$)", r"\1", value)
+
+
 def _quote_occurs(quote: Any, fetched_text: str) -> bool:
     normalized_quote = _normalized_span(quote)
     return bool(
         8 <= len(normalized_quote) <= 2000
-        and normalized_quote in _normalized_span(
-            _visible_quote_surface(fetched_text)
+        and _quote_match_surface(normalized_quote) in _quote_match_surface(
+            _normalized_span(_visible_quote_surface(fetched_text))
         )
     )
 

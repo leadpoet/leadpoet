@@ -20,13 +20,13 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 # Public V1 constants (labarena.md section 1)
 # ---------------------------------------------------------------------------
 
-# These constants are the historical defaults for callers without a frozen
-# round configuration. A round's stage counts are its count authority.
+# Stage counts retain historical defaults for callers without a frozen round.
+# DEFAULT_* values configure new rounds; each frozen round is its authority.
 STAGE_1_ICP_COUNT = 10
 STAGE_2_ICP_COUNT = 10
 BENCHMARK_ICP_COUNT = STAGE_1_ICP_COUNT + STAGE_2_ICP_COUNT
 DEFAULT_BENCHMARK_ICP_COUNT = 10
-DEFAULT_PROMOTION_MARGIN = 0.5
+DEFAULT_PROMOTION_MARGIN = 8.0
 MAX_BENCHMARK_ICP_COUNT = 100
 FINALIST_COUNT = 10
 MAX_CHALLENGERS = 256  # one entry per registered miner; each round pins its own admitted ceiling at or below this

@@ -1,3 +1,17 @@
+## Scoped production authorization: October 24 eight-point champion promotion
+
+On 2026-10-24 the user explicitly required at least an eight-point improvement
+for future Arena champion promotion. This authorizes the narrow default change,
+a committed guarded migration for live, open, uncommitted pre-cutoff rounds,
+focused boundary and publication tests, safe push/merge, canonical gateway and
+normal-validator deployment, and live configuration/reward verification.
+Preserve submitted sources, scoring and qualification rules, published outcomes,
+accepted results, existing reward slots, signed weight state and concurrent work.
+Do not revoke the published October 24 champion or rewrite historical rewards.
+The coordinating task owns production actions. Authority ends after the new
+promotion policy and unchanged downstream state are verified in production.
+Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 24 optional ICP stage requirements
 
 On 2026-10-24 the user authorized limiting funding/ownership-stage requirements

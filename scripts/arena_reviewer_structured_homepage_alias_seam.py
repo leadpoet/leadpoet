@@ -86,3 +86,121 @@ def convert_structured_homepage_alias_seam(source: bytes) -> bytes:
     result = "".join(lines).encode("utf-8")
     convert_structured_homepage_alias_seam(result)
     return result
+
+
+# This second delta stays in the existing identity seam and the same overlay.
+SELF_NAME_CORRECTION_ID = "numeric_profile_leading_legal_self_name_v1"
+SELF_NAME_CHANGES = {
+    'qualification/scoring/linkedin_company_size.py': (
+        'project_structured_linkedin_company_identity',
+        '3da1227084b6b3db8e992a8fe793780c1a7a25a3a375bae6fe0bc9ce97726416',
+        '527bd7c3018d9a849fa958f956505cc9b4e797e1dea0861668a633d580021d10',
+        (
+            (
+                '    if (\n        not requested_slug.isdigit()\n',
+                r"""    identity_name = name
+    identity_source_field = STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+    name_matches = _company_name(name) == _company_name(expected_company_name)
+    if not name_matches:
+        # One numeric main profile can publish a short display name and open
+        # its own description with its full legal self-name. This is not a
+        # search for customer/partner names elsewhere in provider prose.
+        description = element.get("description")
+        self_name = re.match(
+            r"([A-Za-z0-9][A-Za-z0-9 .,'&()\-]{0,199}?)[ \t]+is[ \t]+([^\r\n]{1,300})",
+            description,
+        ) if isinstance(description, str) else None
+        universal_name = element.get("universalName")
+        if (
+            website_matches
+            and company_id.isascii()
+            and self_name
+            and name.isascii()
+            and self_name[1].casefold().startswith(name.casefold() + " ")
+            and _company_name(self_name[1]) == _company_name(expected_company_name)
+            and isinstance(universal_name, str)
+            and universal_name.isascii()
+            and universal_name == returned_slug
+            and re.match(r"(?:an?|the)[ \t]+[A-Za-z0-9]", self_name[2], re.I)
+            and not re.search(
+                r"\b(?:customers?|partners?|clients?|competitors?|subsidiar(?:y|ies)|division|"
+                r"not|never|allegedly|quoted|mentioned)\b",
+                self_name[2][:120], re.I,
+            )
+        ):
+            identity_name = self_name[1]
+            identity_source_field = "description.leading_legal_name"
+            name_matches = True
+    if (
+        not requested_slug.isdigit()
+""",
+            ),
+            (
+                '        or _company_name(name) != _company_name(expected_company_name)\n',
+                r"""        or not name_matches
+""",
+            ),
+            (
+                '    evidence = {\n        "name": name,\n        "provider": STRUCTURED_PROFILE_PROVIDER,\n        "source_field": STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,\n',
+                r"""    evidence = {
+        "name": identity_name,
+        "provider": STRUCTURED_PROFILE_PROVIDER,
+        "source_field": identity_source_field,
+""",
+            ),
+        ),
+    ),
+    'qualification/scoring/lead_scorer.py': (
+        '_investigator_identity_context',
+        '59b4c46c2cb74487c04b7d3cc4b16c086ad4689280a94b144961eecdd489c997',
+        '24acb16cab038b79ea723466ead07cfe2c9c62518b51a9df1e6e2c3ad70d6dca',
+        (
+            (
+                '        and evidence.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD\n        and evidence.get("company_id") == homepage_slug\n',
+                r"""        and evidence.get("source_field") in {
+            STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
+            "description.leading_legal_name",
+        }
+        and evidence.get("company_id") == homepage_slug
+""",
+            ),
+        ),
+    ),
+}
+
+
+def convert_numeric_profile_self_name_files(files: dict[str, bytes]) -> dict[str, bytes]:
+    """Change only two exact reviewed functions after the existing alias repair."""
+    if set(files) != set(SELF_NAME_CHANGES):
+        raise StructuredHomepageAliasSeamError("numeric self-name source set is incomplete")
+    result = {}
+    for path, (name, original_hash, repaired_hash, changes) in SELF_NAME_CHANGES.items():
+        source = files[path]
+        try:
+            text = source.decode("utf-8")
+            module = ast.parse(text)
+        except (UnicodeDecodeError, SyntaxError) as exc:
+            raise StructuredHomepageAliasSeamError("numeric self-name source must be valid Python") from exc
+        if "\r" in text:
+            raise StructuredHomepageAliasSeamError("numeric self-name source must use LF newlines")
+        nodes = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == name]
+        if len(nodes) != 1 or _named_bindings(module, name) != nodes:
+            raise StructuredHomepageAliasSeamError("numeric self-name function binding is ambiguous")
+        node = nodes[0]
+        lines = text.splitlines(keepends=True)
+        body = "".join(lines[node.lineno - 1:node.end_lineno])
+        digest = hashlib.sha256(body.encode()).hexdigest()
+        if digest == repaired_hash:
+            result[path] = source
+            continue
+        if digest != original_hash:
+            raise StructuredHomepageAliasSeamError("unrecognized numeric self-name function source")
+        for before, after in changes:
+            if body.count(before) != 1:
+                raise StructuredHomepageAliasSeamError("numeric self-name repair anchor is ambiguous")
+            body = body.replace(before, after, 1)
+        if hashlib.sha256(body.encode()).hexdigest() != repaired_hash:
+            raise StructuredHomepageAliasSeamError("numeric self-name repair differs from reviewed source")
+        lines[node.lineno - 1:node.end_lineno] = [body]
+        result[path] = "".join(lines).encode()
+    return result

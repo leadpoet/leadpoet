@@ -33,7 +33,7 @@ if str(REPO) not in sys.path:
 
 from lab_arena import (
     broker, code_review, contracts, deepline_catalog, integrity, reasoning_capture, runtime, scoring,
-    shim, source_bundle, training_capture, training_reader, training_thinking,
+    shim, source_bundle, training_capture, training_reader, training_thinking, runtime_version,
 )
 from tests.lab_arena.champion_funding_paid_e2e_test import (
     Evidence, LocalEntrypointRuntime, PaidHarness, _capture_database_snapshot,
@@ -390,6 +390,10 @@ class FullThinkingChain(FakeChain):
 class FullThinkingCaptureApi(InProcessApi):
     """Expose the production training capture endpoints to the local runner."""
 
+    def trajectory(self, run_id, lease_token, events):
+        return self._guard(lambda: self.service.handle_trajectory(
+            run_id, lease_token, {"events": list(events)}))
+
     def training_input(self, run_id, lease_token, document):
         return self._guard(lambda: self.service.handle_training_input(run_id, lease_token, document))
 
@@ -537,6 +541,15 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
     The caller owns paid authorization and supplies a fail-closed transport
     enforcing the shared OpenRouter and other-provider budgets before send.
     """
+    # Strict export binds every runner result to exact committed source. Check
+    # the import-time identity as well as the current checkout before any paid
+    # review or model call; an in-process commit cannot repair a dirty import.
+    source_identity = runtime_version.SOURCE_METADATA
+    current_identity = runtime_version.source_metadata(runtime_version.__file__)
+    if (source_identity != current_identity
+            or source_identity.get("validator_source_origin") != "git_checkout"
+            or source_identity.get("validator_source_dirty") != "clean"):
+        raise ValueError("full-thinking E2E requires a clean committed runner checkout")
     prepared = preflight(
         source_archive=source_archive, baseline_archive=baseline_archive,
         icp_file=icp_file, dependency_dir=dependency_dir,

@@ -1,3 +1,17 @@
+## Scoped production authorization: October 23 headcount evidence integrity
+
+On 2026-10-23 the user explicitly authorized the general headcount evidence
+fixes: reuse first-party company-profile locators through the existing bound
+structured lookup, and validate observed headcount against preserved source
+fields. Scope includes protected reads, captured-case and bounded paid tests,
+safe push/merge, scorer-image publication, canonical deployment and live proof
+through the overnight procedures. Preserve qualification, scoring, budgets,
+correction wording, frozen rounds, accepted results, credentials, rewards and
+concurrent work. No company exceptions or new review/recovery layer. Release
+only measured improvements with positive/negative controls, inside existing
+approved spend. The coordinating task owns production actions. Authority ends
+after deployment and live verification. Keep both guides byte-identical.
+
 ## Scoped production authorization: October 23 source and correction integrity
 
 On 2026-10-23 the user authorized the general source-identity and check-specific

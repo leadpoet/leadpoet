@@ -68,7 +68,6 @@ def test_bound_root_organization_supplies_missing_brand(monkeypatch, shape):
     {"url": "https://unrelated.example/"},
     {"url": ""},
     {"url": None},
-    {"url": "/"},
     {"url": "https://user:password@acmepay.example/"},
     {"url": "https://acmepay.example:bad/"},
     {"url": "https://localhost/"},
@@ -237,3 +236,9 @@ def test_homepage_receipt_binds_real_investigator_quote_validation(
         },
     )
     assert forged["required_attribute"]["status"] == "UNPROVEN"
+
+
+def test_relative_root_url_is_bound_to_fetched_origin(monkeypatch):
+    result, _ = _verify(monkeypatch, {**RECORD, "url": "/"})
+    assert result.decision == "match"
+    assert _verified_homepage_identity_anchor(result)["normalized_name"] == "acmepay"

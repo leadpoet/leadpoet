@@ -576,6 +576,10 @@ def _canonical_linkedin_company_url(value: str) -> str:
     return f"https://www.linkedin.com/company/{slug}"
 
 
+class _OrganizationIdentityOverflow(ValueError):
+    """A JSON-LD document exceeded the bounded identity inspection."""
+
+
 def _organization_identity_records(value) -> list[dict[str, object]]:
     """Extract bounded root Organization identity records from JSON-LD."""
 
@@ -585,14 +589,18 @@ def _organization_identity_records(value) -> list[dict[str, object]]:
         return []
 
     roots = document if isinstance(document, list) else [document]
+    if len(roots) > 20:
+        raise _OrganizationIdentityOverflow
     candidates: list[object] = []
-    for root in roots[:20]:
+    for root in roots:
         if not isinstance(root, dict):
             continue
         candidates.append(root)
         graph = root.get("@graph")
         if isinstance(graph, list):
-            candidates.extend(graph[:20])
+            if len(graph) > 20:
+                raise _OrganizationIdentityOverflow
+            candidates.extend(graph)
 
     records: list[dict[str, object]] = []
     for node in candidates:
@@ -621,8 +629,8 @@ def _organization_identity_records(value) -> list[dict[str, object]]:
                 "linkedin_urls": linkedins,
             }
         )
-        if len(records) == 10:
-            break
+        if len(records) > 10:
+            raise _OrganizationIdentityOverflow
     return records
 
 
@@ -738,6 +746,7 @@ class _HomepageIdentityParser(HTMLParser):
         self.linkedin_urls: list[str] = []
         self.source_hrefs: list[str] = []
         self.organization_records: list[dict[str, object]] = []
+        self.organization_identity_overflow = False
         self._json_ld_parts: list[str] | None = None
         self._nonvisible_depth = 0
 
@@ -787,7 +796,11 @@ class _HomepageIdentityParser(HTMLParser):
             self._in_title = False
         elif tag_name == "script" and self._json_ld_parts is not None:
             json_ld = "".join(self._json_ld_parts)
-            records = _organization_identity_records(json_ld)
+            try:
+                records = _organization_identity_records(json_ld)
+            except _OrganizationIdentityOverflow:
+                self.organization_identity_overflow = True
+                records = []
             self.organization_records.extend(records)
             self.linkedin_urls.extend(_organization_same_as_urls(json_ld))
             self._json_ld_parts = None
@@ -994,11 +1007,83 @@ def _homepage_navigation_locators(
     return locators
 
 
+def _homepage_organization_url(
+    raw_url: object, observed_domain: str, homepage_url: str = "",
+) -> str:
+    """Resolve relative metadata only against the fetched homepage origin."""
+
+    if not isinstance(raw_url, str) or not 0 < len(raw_url) <= 2048:
+        return ""
+    try:
+        parts = urlsplit(raw_url)
+        if not parts.scheme and not parts.netloc:
+            base = public_http_url(homepage_url)
+            base_parts = urlsplit(base)
+            if base_parts.scheme != "https":
+                return ""
+            organization_url = public_http_url(urljoin(base, raw_url))
+            resolved = urlsplit(organization_url)
+            if (resolved.scheme, resolved.netloc) != (
+                base_parts.scheme, base_parts.netloc
+            ):
+                return ""
+        else:
+            organization_url = public_http_url(raw_url)
+        if _registrable_domain(organization_url) == observed_domain:
+            return organization_url
+    except (NormalizationError, TypeError, ValueError):
+        pass
+    return ""
+
+
+def _bound_homepage_organization_records(
+    parser: _HomepageIdentityParser,
+    observed_domain: str,
+    observed_linkedin: str,
+    homepage_url: str = "",
+) -> list[dict[str, object]]:
+    """Bind one unambiguous legal/brand pair to the homepage and LinkedIn."""
+
+    if (
+        not observed_domain or not observed_linkedin
+        or parser.organization_identity_overflow
+        or len(parser.organization_records) > 10
+    ):
+        return []
+    records: list[dict[str, object]] = []
+    brands, legal_names = set(), set()
+    for record in parser.organization_records:
+        name = record.get("name")
+        if (
+            not isinstance(name, str)
+            or not 2 < len(name.strip()) <= _MAX_ORGANIZATION_NAME_LENGTH
+            or not _company_name(name)
+            or record.get("linkedin_urls") != [observed_linkedin]
+        ):
+            continue
+        organization_url = _homepage_organization_url(
+            record.get("url"), observed_domain, homepage_url,
+        )
+        if not organization_url:
+            continue
+        brands.add(_company_name(name))
+        legal = record.get("legal_name")
+        if (
+            isinstance(legal, str)
+            and 2 < len(legal.strip()) <= _MAX_ORGANIZATION_NAME_LENGTH
+            and _company_name(legal)
+        ):
+            legal_names.add(_company_name(legal))
+            records.append({**record, "url": organization_url})
+    return records if len(brands) == len(legal_names) == 1 else []
+
+
 def _homepage_company_names(
     page_text: str,
     *,
     observed_domain: str = "",
     observed_linkedin: str = "",
+    homepage_url: str = "",
 ) -> list[str]:
     """Return names actually observed in title or first-party metadata."""
 
@@ -1008,32 +1093,28 @@ def _homepage_company_names(
     except Exception:
         return []
     candidates = [*parser.metadata_names, *parser.copyright_legal_names]
-    # A tagline-only title can omit the operating brand even though the root
-    # Organization record explicitly binds it to this domain and LinkedIn.
-    # Do not promote legal names, nested organizations, or conflicting records.
+    # Preserve brand discovery while requiring a unique explicit legal relation.
     organization_names: dict[str, str] = {}
     if observed_domain and observed_linkedin:
         for record in parser.organization_records:
             name = record.get("name")
-            organization_url = record.get("url")
             if (
-                not isinstance(name, str)
-                or not 2 < len(name.strip()) <= _MAX_ORGANIZATION_NAME_LENGTH
-                or not isinstance(organization_url, str)
-                or not 0 < len(organization_url) <= 2048
-                or record.get("linkedin_urls") != [observed_linkedin]
-            ):
-                continue
-            try:
-                organization_domain = _registrable_domain(
-                    public_http_url(organization_url)
+                isinstance(name, str)
+                and 2 < len(name.strip()) <= _MAX_ORGANIZATION_NAME_LENGTH
+                and _company_name(name)
+                and record.get("linkedin_urls") == [observed_linkedin]
+                and _homepage_organization_url(
+                    record.get("url"), observed_domain, homepage_url,
                 )
-            except (NormalizationError, TypeError, ValueError):
-                continue
-            if organization_domain == observed_domain and _company_name(name):
+            ):
                 organization_names.setdefault(_company_name(name), name.strip())
-        if len(organization_names) == 1:
-            candidates = [*organization_names.values(), *candidates]
+    records = _bound_homepage_organization_records(
+        parser, observed_domain, observed_linkedin, homepage_url,
+    )
+    candidates = [
+        *(organization_names.values() if len(organization_names) == 1 else ()),
+        *(str(record["legal_name"]).strip() for record in records), *candidates,
+    ]
     if parser.title:
         candidates.append(parser.title)
         candidates.extend(
@@ -1056,7 +1137,8 @@ def _homepage_company_names(
 
 
 def _bound_homepage_organization_identity(
-    page_text: str, observed_domain: str, observed_linkedins: list[str]
+    page_text: str, observed_domain: str, observed_linkedins: list[str],
+    homepage_url: str = "",
 ) -> dict[str, str]:
     """Keep one first-party Organization identity for later conflict checks."""
 
@@ -1073,13 +1155,10 @@ def _bound_homepage_organization_identity(
         return {}
     bound_names = set()
     for record in parser.organization_records:
-        name, url = record.get("name"), record.get("url")
-        if not isinstance(name, str) or not isinstance(url, str):
-            continue
-        try:
-            if _registrable_domain(public_http_url(url)) != observed_domain:
-                continue
-        except (NormalizationError, TypeError, ValueError):
+        name = record.get("name")
+        if not isinstance(name, str) or not _homepage_organization_url(
+            record.get("url"), observed_domain, homepage_url,
+        ):
             continue
         linkedins = record.get("linkedin_urls")
         if linkedins and linkedins != observed_linkedins:
@@ -1102,6 +1181,7 @@ def _verified_organization_legal_name_aliases(
     observed_name: str,
     observed_linkedin: str,
     company_quality: bool = False,
+    homepage_url: str = "",
 ) -> list[str]:
     """Return legal names explicitly bound to the verified homepage entity."""
 
@@ -1112,41 +1192,20 @@ def _verified_organization_legal_name_aliases(
     except Exception:
         return []
     aliases: list[str] = []
-    for record in parser.organization_records[:10]:
-        brand = record.get("name")
-        legal_name = record.get("legal_name")
-        organization_url = record.get("url")
-        linkedins = record.get("linkedin_urls")
-        if not all(
-            isinstance(value, str) and value.strip() and len(value.strip()) <= limit
-            for value, limit in (
-                (brand, _MAX_ORGANIZATION_NAME_LENGTH),
-                (legal_name, _MAX_ORGANIZATION_NAME_LENGTH),
-                (organization_url, 2048),
-            )
-        ) or not isinstance(linkedins, list):
+    for record in _bound_homepage_organization_records(
+        parser, observed_domain, observed_linkedin, homepage_url,
+    ):
+        brand, legal_name = record.get("name"), record.get("legal_name")
+        if (
+            not isinstance(legal_name, str)
+            or not 2 < len(legal_name.strip()) <= _MAX_ORGANIZATION_NAME_LENGTH
+            or _company_name(observed_name) not in {
+                _company_name(brand), _company_name(legal_name),
+            }
+        ):
             continue
-        try:
-            organization_domain = _registrable_domain(organization_url)
-        except Exception:
-            continue
-        if organization_domain != observed_domain or observed_linkedin not in linkedins:
-            continue
-        brand_receipt = evaluate_company_identity(
-            submitted_name=observed_name,
-            submitted_website=f"https://{observed_domain}",
-            submitted_linkedin=observed_linkedin,
-            observed_name=brand,
-            observed_website=organization_url,
-            observed_linkedin=observed_linkedin,
-            evidence_source="company_homepage",
-            company_quality=company_quality,
-        )
-        if brand_receipt["decision"] != "match":
-            continue
-        alias = legal_name.strip()
-        if alias not in aliases:
-            aliases.append(alias)
+        if legal_name.strip() not in aliases:
+            aliases.append(legal_name.strip())
         if len(aliases) == _MAX_ORGANIZATION_LEGAL_NAME_ALIASES:
             break
     return aliases
@@ -1519,6 +1578,7 @@ async def verify_company_exists(
     observed_names = _homepage_company_names(
         text,
         observed_domain=observed_domain,
+        homepage_url=observed_url,
         observed_linkedin=(
             observed_linkedins[0] if len(observed_linkedins) == 1 else ""
         ),
@@ -1629,7 +1689,7 @@ async def verify_company_exists(
             verified_homepage_transport_domain=domain,
         )
     bound_organization = _bound_homepage_organization_identity(
-        text, observed_domain, observed_linkedins
+        text, observed_domain, observed_linkedins, observed_url
     )
     identity_receipts = [
         evaluate_company_identity(
@@ -1668,9 +1728,20 @@ async def verify_company_exists(
             observed_name=matched["observed_name"],
             observed_linkedin=matched_linkedin,
             company_quality=company_quality,
+            homepage_url=observed_url,
         )
         if legal_name_aliases:
             matched_receipt["verified_legal_name_aliases"] = legal_name_aliases
+            parser = _HomepageIdentityParser()
+            parser.feed(text[:_MAX_BYTES])
+            parser.close()
+            bound_records = _bound_homepage_organization_records(
+                parser, matched["observed_domain"], matched_linkedin, observed_url,
+            )
+            if bound_records:
+                matched_receipt["verified_brand_name"] = str(
+                    bound_records[0]["name"]
+                ).strip()
         if homepage_navigation_locator_sink is not None:
             homepage_navigation_locator_sink.extend(
                 _homepage_navigation_locators(

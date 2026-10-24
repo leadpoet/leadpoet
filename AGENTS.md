@@ -1,3 +1,18 @@
+## Scoped production authorization: October 24 Arena cycle and bound company aliases
+
+On 2026-10-24 the user authorized monitoring the complete October 24 Arena
+cycle, fixing confirmed general failures, rigorous tests, safe push and merge,
+canonical deployment and live verification. This includes the demonstrated
+company-identity parser gap for explicit brand/legal names and same-origin
+relative Organization URLs in saved first-party evidence. Use the existing
+identity, judging and cache paths. Preserve qualification and scoring rules,
+provider privacy and billing controls, frozen official inputs and models,
+accepted work, rewards, credentials and concurrent work. Do not add fuzzy
+company matching, company-specific exceptions, fabricated judgments or a new
+recovery layer. The coordinating task owns production writes and must verify
+release identity and actual affected outputs. Authority ends after the
+requested full cycle and deployed fix are verified. Keep both guides identical.
+
 ## Scoped production authorization: October 23 headcount evidence integrity
 
 On 2026-10-23 the user explicitly authorized the general headcount evidence

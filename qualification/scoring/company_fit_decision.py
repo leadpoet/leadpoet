@@ -172,6 +172,34 @@ def _company_name(value: Any) -> str:
     return "".join(words)
 
 
+def verified_homepage_brand_name(identity: Mapping[str, Any]) -> str:
+    """Read the host-projected brand bound to this exact homepage legal name.
+
+    Callers supply an independently verified homepage anchor, never model JSON.
+    A brand cannot extend an unrelated legal identity merely by being present.
+    """
+
+    brand = identity.get("verified_brand_name")
+    aliases = identity.get("verified_legal_name_aliases")
+    name = _company_name(identity.get("normalized_name"))
+    if (
+        not isinstance(brand, str)
+        or not 2 < len(brand.strip()) <= 200
+        or not _company_name(brand)
+        or not name
+        or not isinstance(aliases, list)
+        or not aliases
+    ):
+        return ""
+    if name == _company_name(brand) or any(
+        isinstance(alias, str) and len(alias.strip()) <= 200
+        and _company_name(alias) == name
+        for alias in aliases[:3]
+    ):
+        return brand.strip()
+    return ""
+
+
 def _verified_parenthetical_name_alignment(
     submitted_name: Any,
     observed_name: Any,

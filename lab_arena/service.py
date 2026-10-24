@@ -289,6 +289,10 @@ def _warn_trajectory_failure(phase: str, exc: BaseException) -> None:
 
 MODES = ("off", "shadow", "live")
 HOT_ROUND_TTL_SECONDS = 2.0
+# An upstream gateway that stops waiting answers 502/503/504 without ever
+# learning how the statement ended. A mutating RPC behind such a response may
+# already have committed, so its outcome is unknown rather than rolled back.
+LOST_RESPONSE_HTTP_STATUSES = frozenset({502, 503, 504})
 TERMINAL_STATUSES = ("published", "cancelled")
 JUDGE_CONTINUATION_EVALUATION_DATE = "2026-10-14"
 JUDGE_CONTINUATION_SHADOW_CREATED_AT = datetime(2026, 10, 13, 16, 30, tzinfo=timezone.utc)
@@ -833,6 +837,24 @@ class ServiceConfig:
             or self.pinned_round_id != self.pinned_round_id.strip()
         ):
             raise ServiceError("pinned_round_id_invalid", 500)
+
+
+def _commit_outcome_unknown(exc: ArenaStoreError, resource: str) -> bool:
+    """True when this RPC's transaction may have committed unobserved.
+
+    A proved rollback is not ambiguous and must keep failing. An upstream
+    timeout or a transport failure is: the statement can have committed after
+    the response was lost. Callers resolve it by re-reading durable state,
+    never by replaying the POST.
+    """
+
+    if isinstance(exc, ArenaStoreUnavailable) and exc.transaction_rolled_back:
+        return False
+    metadata = getattr(exc, "store_error", None)
+    if not isinstance(metadata, dict) or metadata.get("resource") != resource:
+        return False
+    return (metadata.get("http_status") in LOST_RESPONSE_HTTP_STATUSES
+            or bool(metadata.get("transport_error")))
 
 
 def _iso(moment: datetime) -> str:
@@ -4799,10 +4821,21 @@ class ArenaService:
             "published_at": published_at,
         }
         contracts.check_strict_document(publication, contracts.PUBLICATION_LIMITS)
-        transition = self._store.transition_round(round_id, "scored", "published", {
-            "publication_doc": publication,
-            "published_at": published_at,
-        })
+        try:
+            transition = self._store.transition_round(round_id, "scored", "published", {
+                "publication_doc": publication,
+                "published_at": published_at,
+            })
+        except ArenaStoreError as exc:
+            # The publication commit is the one step that costs a whole round
+            # when its response is lost: every score above it is already final,
+            # and the work to rebuild this document takes minutes. Read the
+            # round row, which is the authority, before discarding it.
+            if not _commit_outcome_unknown(exc, "lab_arena_transition_round"):
+                raise
+            if self._round(round_id)["status"] != "published":
+                raise
+            transition = {"status": "published"}
         return {
             "status": transition.get("status"),
             "king_outcome": decision["outcome"],

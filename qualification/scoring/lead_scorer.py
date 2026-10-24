@@ -6063,7 +6063,10 @@ def _investigator_identity_context(
         }
         and all(isinstance(value, str) for value in evidence.values())
         and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
-        and evidence.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        and evidence.get("source_field") in {
+            STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
+            "description.leading_legal_name",
+        }
         and evidence.get("company_id") == homepage_slug
         and _strict_linkedin_company_profile_url(evidence.get("requested_url"))
         and linkedin_company_page_slug(evidence.get("requested_url")) == homepage_slug

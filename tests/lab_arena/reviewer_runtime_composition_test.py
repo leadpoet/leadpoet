@@ -335,11 +335,24 @@ def test_completed_investigation_correction_rejects_shadowed_helper_binding(
 
 
 def _numeric_alias_sources():
-    return {
+    sources = {
         name: (ROOT / ('lab_arena/scorer_entrypoint.py'
                        if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (composer.GRADER_FILE, composer.FINALITY_FILE, *composer.ENTRYPOINT_FILES)
     }
+
+    from scripts.arena_reviewer_structured_homepage_alias_seam import SELF_NAME_CHANGES
+    # This fixture represents the prior approved correction, before the new
+    # independently tested exact numeric-profile self-name delta.
+    for name, (_, _, _, changes) in SELF_NAME_CHANGES.items():
+        if name not in sources:
+            continue
+        text = sources[name].decode()
+        for before, after in reversed(changes):
+            assert text.count(after) == 1
+            text = text.replace(after, before, 1)
+        sources[name] = text.encode()
+    return sources
 
 
 def test_numeric_homepage_alias_is_explicit_exact_and_idempotent():

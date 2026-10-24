@@ -195,6 +195,7 @@ def full_thinking_database():
                     "558-lab-arena-funding-proof-keyed-lookups.sql",
                     "559-lab-arena-deepline-uncertain-round-entry-index.sql",
                     "560-lab-arena-closed-provider-score-run-scope.sql",
+                    "561-lab-arena-open-promotion-margin.sql",
                     "561-lab-arena-full-thinking-champion-baseline.sql",
                     "562-lab-arena-full-thinking-catalog-commit.sql",
                     "563-lab-arena-training-publication-eligibility.sql",

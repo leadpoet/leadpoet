@@ -40,12 +40,16 @@
   ],
   "regressions": {
     "existing_declared_field_skips": 2,
+    "final_current_schema_publication_passed": 4,
     "homepage_provenance_passed": 24,
+    "post_main_integration_passed": 67,
     "protocol_worker_reviewer_sql_passed": 854,
-    "quota_passed": 27
+    "quota_passed": 27,
+    "retry_sql_passed": 16,
+    "stopped_contender_keeps_round_operational": true
   },
   "round_status": "stage1_scoring",
-  "schema_fixture_correction": "Added 34 exact guarded migrations, including omitted independent branches before 538. Current service publication passes; five function definitions and four indexes independently match expected state. Dated data repairs 535 and 542-546 excluded. Paid trial must resume or rerun with corrected authority.",
+  "schema_fixture_correction": "Added 35 exact guarded migrations, including omitted independent branches before 538. Current service publication passes; five function definitions and four indexes independently match expected state. Dated data repairs 535 and 542-546 excluded. Paid trial must resume or rerun with corrected authority.",
   "schema_version": "leadpoet.arena.full_thinking_e2e_status.v1",
   "source_archive_sha256": "48e6baa8e27125cd4c83763389373cc9237ccc7950fbb2c4152fbb902ea4e3c0",
   "source_review": "model_directed",

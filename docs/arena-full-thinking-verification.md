@@ -225,7 +225,7 @@ reproduced the missing-method failure through the real worker socket; the adapte
 now forwards that request and quota reads to the actual service. The run was stopped to avoid repeated failed charges.
 The local database dump and exact referenced objects were preserved for resume.
 The test database fixture was also missing current mainline publication, cache,
-and locking migrations. It now applies 34 additional guarded migrations, including
+and locking migrations. It now applies 35 additional guarded migrations, including
 the missing independent branches before migration538. Dated round-repair scripts
 535 and542–546 are excluded from a fresh database. Independent checks verify five
 function definitions and four indexes. The paid result above
@@ -265,6 +265,11 @@ with main's existing retryable provider-failure behavior; its charge and replay
 assertions remain unchanged. The updated quota suite passed 27 tests; the
 provider-provenance suite passed 24 tests. Both changes correct stale test
 expectations for existing mainline behavior, without changing production scoring.
+
+After merging main's eight-point promotion change, 67 focused integration tests
+passed on Python3.11. The E2E schema fixture also includes main's separate
+open-round promotion-margin migration; all four publication/schema tests passed
+again against that final fixture.
 
 This test's authorized limits are $10 OpenRouter and $5 combined search/scraping.
 At the stopped checkpoint, charges plus unresolved reservations are $1.029009 and

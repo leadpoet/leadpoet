@@ -250,6 +250,12 @@ COMPANY_STAGES = [
     "Seed", "Series A", "Series B", "Series C+", "Private Equity", "Public"
 ]
 
+
+def generated_stage_target(total_icps: int) -> int:
+    """Require stage for exactly three new ICPs, capped by the bank size."""
+    return min(3, total_icps)
+
+
 # Stage -> employee-size coherence: the single authority for which exact
 # LinkedIn bands each funding/ownership stage can plausibly carry. Stage and
 # size were previously drawn independently, which produced impossible ICPs
@@ -389,6 +395,7 @@ def generated_bank_error(
     actual_distribution = {industry: 0 for industry in expected_distribution}
     identities = set()
     markets = set()
+    staged_count = 0
     for icp in icps:
         if not isinstance(icp, dict):
             return "item"
@@ -400,7 +407,13 @@ def generated_bank_error(
         if not icp_id or icp_id in identities:
             return "duplicate_id"
         identities.add(icp_id)
-        stage = str(icp.get("company_stage") or "").strip()
+        raw_stage = icp.get("company_stage")
+        if raw_stage is not None and not isinstance(raw_stage, str):
+            return "company_stage"
+        stage = (raw_stage or "").strip()
+        if stage and stage not in COMPANY_STAGES:
+            return "company_stage"
+        staged_count += bool(stage)
         category = str(icp.get("intent_category") or "").strip().upper()
         market = (
             industry,
@@ -414,6 +427,8 @@ def generated_bank_error(
         markets.add(market)
     if actual_distribution != expected_distribution:
         return "industry_distribution"
+    if staged_count != generated_stage_target(total_icps):
+        return "stage_quota"
     return None
 
 # Products/Services by industry (what the miner's model should help sell)
@@ -1021,7 +1036,7 @@ To enforce this, every ICP MUST include a `verified_example_company` field namin
 DO NOT generate ICPs where:
 - The industry × stage × geography intersection has zero real companies you can name
 - The intent signal doesn't fit the industry shape (Consulting firms don't "launch products"; Industrial Manufacturers don't have SaaS-style product launches; Real Estate firms do deals, not product launches)
-- The stage doesn't match the intent (Seed companies don't acquire other companies; Series A startups don't make big-name strategic partnerships)
+- A pinned stage doesn't match the intent (Seed companies don't acquire other companies; Series A startups don't make big-name strategic partnerships)
 - The geography is so narrow that no real candidates exist
 - The product/service is so specific that the buyer's universe collapses (use broad categories, not single named tools)
 
@@ -1057,7 +1072,7 @@ Good examples (write yours the same way — specific wording, still broad enough
 that MANY real companies match):
 - "Launched a new product or major platform capability in the last 12 months, per a press
    release, product page, or changelog"
-- "Announced a Series A or later funding round in the last 12 months, per a press release,
+- "Announced a funding round in the last 12 months, per a press release,
    Crunchbase, or news coverage"
 - "Actively hiring for platform, integration, or revenue-operations roles, per current job
    postings or careers page"
@@ -1072,12 +1087,11 @@ candidate pool.
 
 ALLOWED COMPANY STAGES: Seed, Series A, Series B, Series C+, Private Equity, Public
 
-STAGE DISTRIBUTION — SPREAD EVENLY ACROSS STAGES:
-The benchmark needs to test miner performance at ALL stages, not just late-stage companies. Skewing toward Series C+/Public (because those have the most PR coverage) makes the benchmark too easy and fails to test the harder verification cases.
+FUNDING/OWNERSHIP STAGE — LIMITED SET QUOTA:
 
 {stage_distribution}
 
-Do NOT cluster on later stages just because they're easier to verify. The realism rule still applies (every ICP must have a real `verified_example_company`), but Seed and Series A startups exist with verifiable funding announcements — find them.
+For stage-pinned ICPs, choose varied allowed stages when realistic. The other ICPs have no funding/ownership-stage filter. Do not put funding/ownership-stage restrictions in `prompt`, `product_service`, or `required_attribute` for these unrestricted ICPs (including phrases like early-stage, venture-backed, privately held, or publicly listed). Funding intents may require a recent funding event, but must not require a specific round/stage for an unrestricted ICP.
 
 ALLOWED EMPLOYEE BANDS — USE THESE EXACT LINKEDIN BUCKETS ONLY:
 11-50, 51-200, 201-500, 501-1,000, 1,001-5,000, 5,001-10,000, 10,001+
@@ -1108,11 +1122,12 @@ INDUSTRY × INTENT PAIRING (Sonar should naturally honor these):
 - Tech / SaaS / AI / Hardware / Biotech / Payments / FinTech / Cyber / Health → all intents work
 - Banking / large traditional finance → leadership change, acquisition, regulatory clearance, partnership
 
-STAGE × INTENT PAIRING:
+STAGE × INTENT PAIRING (only for ICPs with non-empty `company_stage`):
 - "Acquired another company" → REQUIRES Series B or later
 - "Announced a strategic partnership" → REQUIRES Series B or later
 - "Recent factory / facility / store opening" → REQUIRES Series A or later
 - All other intent × stage combinations are valid
+For unrestricted ICPs, these events do not imply a company-stage requirement.
 
 OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
 
@@ -1126,7 +1141,7 @@ OUTPUT — JSON ONLY, NO PROSE, NO MARKDOWN
       "geography": "<from allowed geographies, prefer broad>",
       "country": "<the country portion of the geography, e.g. United States, United Kingdom, Canada>",
       "employee_count": ["<3-5 contiguous allowed LinkedIn buckets>"],
-      "company_stage": "<from allowed stages>",
+      "company_stage": "<from allowed stages for stage-pinned ICPs; empty string otherwise>",
       "product_service": "<a specific, descriptive value proposition — what the company actually sells and the job it does for its buyer, e.g. 'A subscription B2B platform that revenue and operations teams use to manage pipeline, deals, and customer workflows'. NOT a bare category like 'B2B software'. Do NOT narrow to a single named tool.>",
       "required_attribute": "<a specific, descriptive attribute the company must have, written like the product_service — e.g. 'Sells a subscription software platform used by revenue or operations teams to manage pipeline, deals, or customer workflows'. Specific WORDING, but broad enough that many real companies match. NOT the bare template 'offers or provides X'.>",
       "intent_signal": "<a specific, descriptive intent sentence in fulfillment style — see the INTENT SIGNAL section above>",
@@ -1150,23 +1165,15 @@ FINAL CHECK before output (for every ICP):
 6. Is the geography broad enough that real candidates exist?
 7. Are there exactly {total_icps} ICPs, one for each listed industry slot in order?
 8. Are EXACTLY {international_target} ICPs international (non-US, from the allowed international list) with `country` matching their geography?
-9. No job titles, no seniority, no contact-level descriptors in the prompts?"""
+9. No job titles, no seniority, no contact-level descriptors in the prompts?
+10. Is the exact stage quota met, with no implicit funding/ownership-stage restrictions in the remaining ICPs?"""
 
     international_target = international_icp_target(total_icps)
+    stage_target = generated_stage_target(total_icps)
     stage_distribution = (
-        """Target distribution across the 20 ICPs (approximate, ±2 per bucket is fine):
-- Seed: 2-3 ICPs
-- Series A: 4-5 ICPs
-- Series B: 4-5 ICPs
-- Series C+: 3-4 ICPs
-- Private Equity: 1-2 ICPs
-- Public: 2-3 ICPs"""
-        if total_icps == len(INDUSTRY_DISTRIBUTION)
-        else (
-            f"Spread the {total_icps} ICPs as evenly as possible across the allowed stages. "
-            "Include early, middle, and later stages when the count permits, "
-            "and do not repeat a stage until needed."
-        )
+        f"EXACTLY {stage_target} of the {total_icps} ICPs MUST set `company_stage` "
+        "to one allowed stage. "
+        f'The remaining {total_icps - stage_target} ICPs MUST set `company_stage` to "".'
     )
     system_prompt = (
         system_prompt
@@ -1373,6 +1380,11 @@ Each ICP must also return these structured fields for the people to find at ever
                 )
 
             sub_industry = icp.get("sub_industry", SUB_INDUSTRIES.get(industry_normalized, ["General"])[0])
+            raw_stage = icp.get("company_stage")
+            if raw_stage is None:
+                raw_stage = ""
+            elif isinstance(raw_stage, str):
+                raw_stage = raw_stage.strip()
             validated_icp = {
                 "icp_id": icp_id,
                 "prompt": prompt,
@@ -1384,7 +1396,7 @@ Each ICP must also return these structured fields for the people to find at ever
                     icp.get("contact_geography", {}) if contacts_required else {}
                 ),
                 "employee_count": icp.get("employee_count", "51-200"),
-                "company_stage": icp.get("company_stage", "Series A"),
+                "company_stage": raw_stage,
                 "geography": geography,
                 "country": country,
                 "product_service": icp.get("product_service", "Software solution"),
@@ -1746,6 +1758,12 @@ def generate_icp_set(
     actual_distribution = {
         industry: slots.count(industry) for industry in dict.fromkeys(slots)
     }
+    # Keep selection independent of each ICP's historical random stream, so
+    # removing a stage filter changes no size, product, intent or contact draw.
+    stage_rng = random.Random(base_seed) if base_seed is not None else random.SystemRandom()
+    stage_indices = set(stage_rng.sample(
+        range(total_icps), generated_stage_target(total_icps),
+    ))
     icps = []
     seen_markets = set()
     for index, industry in enumerate(slots):
@@ -1758,6 +1776,13 @@ def generate_icp_set(
                 if base_seed is not None else None,
                 contacts_required=contacts_required,
             )
+            if index not in stage_indices:
+                icp["company_stage"] = ""
+                marker = "\n\nIntent qualification:\n"
+                icp["prompt"] = (
+                    _generated_company_brief(icp)
+                    + marker + icp["prompt"].split(marker, 1)[1]
+                )
             market = (
                 industry,
                 str(icp.get("sub_industry") or "").strip().casefold(),

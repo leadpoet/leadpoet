@@ -157,7 +157,8 @@ def test_runner_wiring_keeps_proxy_inventory_but_uses_memory_supported_slots(
     from lab_arena import proxy_workers, runner, runtime
     from lab_arena import validator_proxy_environment as proxy_environment_module
 
-    inventory = SimpleNamespace(total_process_capacity=11, webshare_worker_count=10)
+    inventory = SimpleNamespace(total_process_capacity=11, webshare_worker_count=10,
+                                excluded_workers=())
     pool = SimpleNamespace(inventory=inventory)
     captured = {}
     monkeypatch.setattr(wiring, "prepare_scoring_host", lambda *_args: None)
@@ -208,6 +209,81 @@ def test_runner_wiring_keeps_proxy_inventory_but_uses_memory_supported_slots(
     assert pool.inventory.total_process_capacity == 11
     assert config.proxy_worker_pool is pool
     assert config.max_parallel_runs == 10
+
+
+def test_partial_proxy_readiness_logs_safe_slot_and_central_event(capsys):
+    from types import SimpleNamespace
+    from lab_arena.proxy_workers import ProxyWorkerExclusion
+    from lab_arena.validator_logging import ValidatorOperationalLogger
+
+    inventory = SimpleNamespace(excluded_workers=(
+        ProxyWorkerExclusion("proxy_worker_4_connect", "http_error", 407),
+    ))
+    log = ValidatorOperationalLogger(
+        "https://gateway.invalid", keypair=None, network="finney", netuid=71,
+    )
+    wiring._report_proxy_exclusions(inventory, log)
+    output = capsys.readouterr().out
+    event = log._queue[0]
+    assert "operation=proxy_worker_4_connect_http_error http_status=407" in output
+    assert event["kind"] == "validator.error"
+    assert event["content"]["reason"] == "proxy_worker_excluded"
+    assert event["content"]["operation"] == "proxy_worker_4_connect_http_error"
+    assert event["content"]["http_status"] == 407
+    assert all(secret not in output + str(event) for secret in
+               ("secret", "proxy.example", "8.8.8.8", "private"))
+
+
+def test_partial_preflight_sets_actual_runner_and_memory_capacity(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from lab_arena import proxy_workers, runner, runtime
+    from lab_arena import validator_proxy_environment as proxy_environment_module
+
+    environment = {
+        "LAB_ARENA_WEBSHARE_PROXY_%d" % index:
+            "http://user:secret@proxy-%d.example:8080" % index
+        for index in range(1, 4)
+    }
+    raw_preflight = proxy_workers.preflight_proxy_workers
+    def preflight(inventory):
+        def connect(url, **_kwargs):
+            if url == inventory.workers[1].proxy_url:
+                raise TimeoutError("private " + url)
+        return raw_preflight(
+            inventory, transport_probe=connect,
+            exit_ip_probe=lambda url, **_kwargs: "8.8.4.%d" % (
+                next(worker.slot_index for worker in inventory.workers
+                     if worker.proxy_url == url) + 1),
+            native_ip_probe=lambda **_kwargs: "1.1.1.1",
+        )
+    monkeypatch.setattr(proxy_environment_module, "validator_proxy_environment",
+                        lambda _env: environment)
+    monkeypatch.setattr(proxy_workers, "preflight_proxy_workers", preflight)
+    monkeypatch.setattr(wiring, "prepare_scoring_host", lambda *_args: None)
+    memory_slots = []
+    monkeypatch.setattr(wiring, "parallel_memory_capacity",
+                        lambda slots, _sandbox: memory_slots.append(slots) or slots)
+    monkeypatch.setattr(runtime, "RunscRuntime", lambda _config: object())
+    monkeypatch.setattr(wiring, "registry_client_from_environment", lambda: object())
+    monkeypatch.setattr(runner, "registry_image_exporter", lambda _client: object())
+    monkeypatch.setattr(runner, "ImageCache", lambda *_args: object())
+    monkeypatch.setattr(runner, "HttpArenaApiClient", lambda _url: SimpleNamespace(source=lambda *_args: None))
+    monkeypatch.setattr(runner, "SourceCache", lambda *_args: object())
+    monkeypatch.setattr(runner, "Runner", lambda config: config)
+
+    args = SimpleNamespace(runsc_path="/usr/local/bin/runsc", work_dir=str(tmp_path),
+                           api_base_url="https://arena.example", round_id="")
+    keypair = SimpleNamespace(ss58_address="5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+                              sign=lambda _message: b"sig")
+    config = wiring.build_runner_from_environment(args, keypair=keypair)
+
+    assert memory_slots == [3]
+    assert config.max_parallel_runs == 3
+    assert config.proxy_worker_pool.capacity == 3
+    leases = [config.proxy_worker_pool.acquire(timeout=0) for _ in range(3)]
+    assert [lease.slot_index for lease in leases] == [0, 1, 3]
+    for lease in leases:
+        lease.release()
 
 
 def test_stage_minutes_override_is_complete_and_testnet_shadow_only(monkeypatch):

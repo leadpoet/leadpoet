@@ -212,6 +212,162 @@ def test_preflight_verifies_connect_and_actual_distinct_exit_ips():
     assert "8.8.4" not in repr(verified)
 
 
+def test_preflight_keeps_verified_sparse_slots_and_reports_safe_exclusion():
+    inventory = proxy_workers_from_environment(_environment(3))
+    failed = inventory.workers[1]
+    exits = {worker.proxy_url: "8.8.4.%d" % (worker.slot_index + 1)
+             for worker in inventory.workers}
+
+    def connect(proxy_url, **_kwargs):
+        if proxy_url == failed.proxy_url:
+            raise TimeoutError("private " + proxy_url)
+
+    verified = preflight_proxy_workers(
+        inventory, transport_probe=connect,
+        exit_ip_probe=lambda proxy_url, **_kwargs: exits[proxy_url],
+        native_ip_probe=lambda **_kwargs: "1.1.1.1",
+    )
+
+    assert [worker.slot_index for worker in verified.workers] == [1, 3]
+    assert verified.webshare_worker_count == 2
+    assert verified.total_process_capacity == 3
+    assert [(item.operation, item.failure_kind, item.http_status)
+            for item in verified.excluded_workers] == [
+        ("proxy_worker_2_connect", "timeout", None)]
+    assert "private" not in repr(verified)
+    assert "proxy-2.example.com" not in repr(verified)
+    pool = ProxyWorkerPool(verified)
+    leases = [pool.acquire(timeout=0) for _ in range(3)]
+    assert [lease.slot_index for lease in leases] == [0, 1, 3]
+    assert all(lease.proxy_url != failed.proxy_url for lease in leases)
+    for lease in leases:
+        lease.release()
+
+
+def test_preflight_all_excluded_proxies_still_fails():
+    inventory = proxy_workers_from_environment(_environment(2))
+    with pytest.raises(ProxyWorkerPreflightError) as raised:
+        preflight_proxy_workers(
+            inventory, transport_probe=lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("private")),
+            native_ip_probe=lambda **_kwargs: "1.1.1.1",
+        )
+    assert raised.value.failure_kind == "timeout"
+
+
+def test_preflight_unknown_failure_stays_fatal_with_healthy_peer():
+    inventory = proxy_workers_from_environment(_environment(2))
+    def connect(proxy_url, **_kwargs):
+        if proxy_url == inventory.workers[1].proxy_url:
+            raise RuntimeError("private programming failure")
+    with pytest.raises(ProxyWorkerPreflightError) as raised:
+        preflight_proxy_workers(
+            inventory, transport_probe=connect,
+            exit_ip_probe=lambda proxy_url, **_kwargs: "8.8.8.8",
+            native_ip_probe=lambda **_kwargs: "1.1.1.1",
+        )
+    assert raised.value.failure_kind == "failed"
+
+
+@pytest.mark.parametrize("error_factory", [
+    lambda: proxy_transport.ProxyTransportCleanupError(
+        stage="public_destination_cleanup",
+        primary_error=TimeoutError("private"), resources=(object(),)),
+    lambda: RuntimeError("private programming failure"),
+])
+def test_preflight_does_not_exclude_unknown_or_cleanup_wrapper_of_timeout(error_factory):
+    inventory = proxy_workers_from_environment(_environment(2))
+    def connect(proxy_url, **_kwargs):
+        if proxy_url == inventory.workers[0].proxy_url:
+            raise error_factory() from TimeoutError("private underlying timeout")
+    with pytest.raises(ProxyWorkerPreflightError) as raised:
+        preflight_proxy_workers(
+            inventory, transport_probe=connect,
+            exit_ip_probe=lambda *_args, **_kwargs: "8.8.8.8",
+            native_ip_probe=lambda **_kwargs: "1.1.1.1",
+        )
+    assert raised.value.failure_kind == "failed"
+
+
+@pytest.mark.parametrize("failure,kind,status", [
+    (module.socket.gaierror("private DNS"), "dns", None),
+    (module.ssl.SSLError("private TLS"), "tls", None),
+    (module.ProxyTransportError("private URL", http_status=407), "http_error", 407),
+])
+def test_preflight_excludes_typed_connect_failure(failure, kind, status):
+    inventory = proxy_workers_from_environment(_environment(2))
+
+    def connect(proxy_url, **_kwargs):
+        if proxy_url == inventory.workers[0].proxy_url:
+            raise failure
+
+    verified = preflight_proxy_workers(
+        inventory, transport_probe=connect,
+        exit_ip_probe=lambda *_args, **_kwargs: "8.8.8.8",
+        native_ip_probe=lambda **_kwargs: "1.1.1.1",
+    )
+    assert [worker.slot_index for worker in verified.workers] == [2]
+    assert verified.excluded_workers[0].operation_code == "proxy_worker_1_connect_" + kind
+    assert verified.excluded_workers[0].http_status == status
+    assert "private" not in verified.excluded_workers[0].diagnostic
+
+
+def test_preflight_excludes_typed_exit_probe_failure_and_checks_retained_exits():
+    inventory = proxy_workers_from_environment(_environment(3))
+    def exit_probe(proxy_url, **_kwargs):
+        if proxy_url == inventory.workers[1].proxy_url:
+            raise TimeoutError("private " + proxy_url)
+        return "8.8.8.8"
+
+    with pytest.raises(ProxyWorkerPreflightError) as raised:
+        preflight_proxy_workers(
+            inventory, transport_probe=lambda *_args, **_kwargs: None,
+            exit_ip_probe=exit_probe,
+            native_ip_probe=lambda **_kwargs: "1.1.1.1",
+        )
+    assert raised.value.failure_kind == "duplicate_exit"
+    assert raised.value.operation == "proxy_worker_3_distinct_exit"
+
+
+def test_preflight_exit_probe_timeout_keeps_other_verified_route():
+    inventory = proxy_workers_from_environment(_environment(2))
+    def exit_probe(proxy_url, **_kwargs):
+        if proxy_url == inventory.workers[0].proxy_url:
+            raise TimeoutError("private " + proxy_url)
+        return "8.8.8.8"
+    verified = preflight_proxy_workers(
+        inventory, transport_probe=lambda *_args, **_kwargs: None,
+        exit_ip_probe=exit_probe,
+        native_ip_probe=lambda **_kwargs: "1.1.1.1",
+    )
+    assert [worker.slot_index for worker in verified.workers] == [2]
+    assert verified.excluded_workers[0].operation_code == "proxy_worker_1_exit_ip_timeout"
+
+
+@pytest.mark.parametrize("exit_value", ("not-an-ip", "10.0.0.1"))
+def test_preflight_invalid_proxy_exit_remains_fatal_with_healthy_peer(exit_value):
+    inventory = proxy_workers_from_environment(_environment(2))
+    def exit_probe(proxy_url, **_kwargs):
+        return exit_value if proxy_url == inventory.workers[0].proxy_url else "8.8.8.8"
+    with pytest.raises(ProxyWorkerPreflightError) as raised:
+        preflight_proxy_workers(
+            inventory, transport_probe=lambda *_args, **_kwargs: None,
+            exit_ip_probe=exit_probe,
+            native_ip_probe=lambda **_kwargs: "1.1.1.1",
+        )
+    assert raised.value.failure_kind == "invalid_response"
+
+
+@pytest.mark.parametrize("slots", ((1, 1), (1, 3)))
+def test_preflight_rejects_direct_inventory_with_duplicate_or_missing_slot(slots):
+    from dataclasses import replace
+    inventory = proxy_workers_from_environment(_environment(2))
+    inventory = replace(inventory, workers=tuple(
+        replace(worker, slot_index=slot) for worker, slot in zip(inventory.workers, slots)
+    ))
+    with pytest.raises(ProxyWorkerPreflightError, match="inventory is invalid"):
+        preflight_proxy_workers(inventory, native_ip_probe=lambda **_kwargs: pytest.fail("must not probe"))
+
+
 @pytest.mark.parametrize(
     ("worker_exits", "message"),
     (

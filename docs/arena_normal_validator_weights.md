@@ -194,7 +194,10 @@ The recommended setup is nineteen distinct US proxies, configured as
 `LAB_ARENA_WEBSHARE_PROXY_1` through `LAB_ARENA_WEBSHARE_PROXY_19`, using your
 own credentials. Together with the native host route, these provide up to
 twenty execution slots, subject to memory and the frozen round ceiling.
-Each proxy must pass the startup connection and distinct public exit-IP checks.
+Each usable proxy must pass the startup connection and distinct public exit-IP
+checks. A typed transport failure excludes that route until the next normal
+startup; the log reports the excluded slot and verified capacity. Invalid
+inventory or exit identity still stops scoring startup.
 See [proxy configuration](arena_parallel_icps.md#validator-configuration)
 for details and reuse of an existing proxy file. Without a configured proxy,
 scoring setup fails and retries while the independent weight loop continues.

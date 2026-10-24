@@ -107,10 +107,16 @@ wallet, journal and runner paths, and run only one process for each hotkey.
 ### Configuration rules
 
 Indices must be positive. Gaps are permitted. Each configured URL must be
-valid and each route must pass an authenticated TLS CONNECT check. Startup
+valid. Startup probes each route with an authenticated TLS CONNECT check and
 also checks the public exit IP for every proxy and the native host. All exit
-IPs must be different. One invalid route or duplicate exit IP stops startup;
-the validator does not reduce its capacity silently.
+IPs must be different. A proxy with a typed connection or exit-probe timeout,
+DNS, TLS, or HTTP error is excluded for this startup. The host log and private
+validator event report its slot, probe stage, failure class, and HTTP status
+when present. Only verified routes enter the worker pool; capacity and memory
+readiness use that smaller count. The normal next startup probes excluded
+routes again. Invalid inventory, malformed or nonpublic exit responses, a
+native-host probe failure, duplicate exits, or no verified proxy still stops
+scoring startup. The independent weight loop continues.
 
 `LAB_ARENA_PROXY_ENV_FILE` can name an absolute, private, owned validator env
 file. This permits reuse of existing indexed

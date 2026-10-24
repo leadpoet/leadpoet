@@ -8664,8 +8664,12 @@ async def _run_targeted_company_evidence_investigation(
         ),
         diagnostic=investigation_diagnostic,
     )
+    claims = investigation.get("claims")
+    if not isinstance(claims, Mapping):
+        claims = {}
     if (
-        "headcount" in investigation_targets
+        claims
+        and "headcount" in investigation_targets
         and isinstance(structured_profile_invocation_cache, dict)
         and _decision_with_web_evidence(
             _decision_from_observed_employee_size(dict(verdict), icp),
@@ -8709,9 +8713,6 @@ async def _run_targeted_company_evidence_investigation(
                 successful_required_attribute_source_sink
             ),
         )
-    claims = investigation.get("claims")
-    if not isinstance(claims, Mapping):
-        claims = {}
     industry_claim = (
         claims.get("industry")
         if isinstance(claims.get("industry"), Mapping)

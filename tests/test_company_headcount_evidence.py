@@ -308,3 +308,22 @@ def test_source_read_timeout_keeps_reverify_failure_retryable(monkeypatch):
     assert result.details["failure_class"] == scorer.EMPLOYEE_SIZE_VERIFICATION_FAILURE_CLASS
     assert result.details[scorer.VERIFIER_FAILURE_DETAIL_KEY] == scorer.PROVIDER_ERROR_FAILURE_REASON
     assert calls == ["https://prospeo.io/c/zag-bio"]
+
+
+@pytest.mark.parametrize("claims", [None, {}, []])
+def test_investigation_without_claims_does_not_spend_profile_lookup(monkeypatch, claims):
+    async def investigation(**kwargs):
+        return {"claims": claims, "_completed_submit": False,
+                PRIVATE_FETCHED_PAGES_KEY: page(CAPTURE["first_party_article"]["text"])}
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("discarded investigation must not spend a profile lookup")
+    monkeypatch.setattr(scorer, "investigate_company_evidence", investigation)
+    monkeypatch.setattr(scorer, "fetch_structured_linkedin_company_size", forbidden)
+    result = asyncio.run(scorer._run_targeted_company_evidence_investigation(
+        company=company(), icp=icp(), verdict=verdict(None, ""),
+        investigation_targets=("headcount",), icp_attribute="", icp_stage="",
+        verified_identity={}, verified_transport_domain="zagbio.com",
+        structured_employee_size_evidence=None, structured_public_company_evidence=None,
+        employee_size_conflict=False, company_quality=False, structured_profile_invocation_cache={},
+    ))
+    assert result[2] == {}

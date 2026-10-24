@@ -452,7 +452,7 @@ def _firecrawl_response(
 def _generic_http_raw_html_response(
     route: MinerScoreRoute, body: bytes,
 ) -> tuple[int, dict[str, str], bytes, str]:
-    """Require the exact public GET receipt before exposing its source HTML."""
+    """Require the exact public GET receipt before exposing HTML or JSON."""
 
     try:
         document = json.loads(bytes(body).decode("utf-8"))
@@ -515,6 +515,24 @@ def _generic_http_raw_html_response(
     if len(content_types) != 1:
         raise CompatibilityResponseError("invalid_generic_html_content_type")
     content_type = content_types[0].split(";", 1)[0].strip().casefold()
+    if content_type == "application/json":
+        # rawV2 preserves parsed JSON as structured data. Recreate its JSON
+        # body for callers that use response.json(), after the same native
+        # status and public-URL checks as HTML. Ambiguous raw strings are not
+        # a parsed JSON receipt. Broker size/privacy/accounting checks still
+        # apply to the adapted response.
+        value = data.get("data")
+        if not isinstance(value, (Mapping, list)):
+            raise CompatibilityResponseError("invalid_generic_json_body")
+        encoded = _json_bytes(value)
+        if len(encoded) > operations.OPERATIONS[route.requested_operation_id].max_response_bytes:
+            # The legacy operation's text sanitizer truncates HTML. A JSON
+            # document must instead remain whole or fail closed.
+            raise CompatibilityResponseError("generic_json_body_too_large")
+        return (
+            status, {"content-type": "application/json; charset=utf-8"},
+            encoded, final_url,
+        )
     if content_type not in {"text/html", "application/xhtml+xml"}:
         raise CompatibilityResponseError("invalid_generic_html_content_type")
     html = data.get("data")

@@ -25,6 +25,17 @@ from gateway.utils.subnet_epoch_archive import (
     validate_cutover_anchor_from_archive,
 )
 
+
+class HistoricalEpochUnavailable(SubnetEpochError):
+    """The caller asked for an epoch other than the current settlement epoch.
+
+    This is a client-correctable condition, not a gateway or chain failure: the
+    gateway only serves the current epoch and keeps no persisted boundary
+    ledger. It is a dedicated subclass so the API layer can answer 404 while
+    every other ``SubnetEpochError`` still surfaces as a server error.
+    """
+
+
 BITTENSOR_BLOCK_TIME_SECONDS = 12
 
 # Network for epoch tracking (from environment variable)
@@ -564,7 +575,7 @@ async def get_epoch_info_async(epoch_id: int) -> dict:
     snapshot = await get_current_subnet_epoch_snapshot_async(finalized=True)
     current_epoch = _settlement_epoch_id(snapshot)
     if int(epoch_id) != current_epoch:
-        raise SubnetEpochError(
+        raise HistoricalEpochUnavailable(
             "historical epoch details require the persisted boundary ledger"
         )
     return get_current_epoch_info_from_snapshot(snapshot)

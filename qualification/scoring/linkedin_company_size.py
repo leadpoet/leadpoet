@@ -521,20 +521,53 @@ def project_structured_linkedin_company_identity(
         company_id = raw_company_id
     else:
         company_id = ""
+    identity_name = name
+    identity_source_field = STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+    name_matches = _company_name(name) == _company_name(expected_company_name)
+    if not name_matches:
+        # One numeric main profile can publish a short display name and open
+        # its own description with its full legal self-name. This is not a
+        # search for customer/partner names elsewhere in provider prose.
+        description = element.get("description")
+        self_name = re.match(
+            r"([A-Za-z0-9][A-Za-z0-9 .,'&()\-]{0,199}?)[ \t]+is[ \t]+([^\r\n]{1,300})",
+            description,
+        ) if isinstance(description, str) else None
+        universal_name = element.get("universalName")
+        if (
+            website_matches
+            and company_id.isascii()
+            and self_name
+            and name.isascii()
+            and self_name[1].casefold().startswith(name.casefold() + " ")
+            and _company_name(self_name[1]) == _company_name(expected_company_name)
+            and isinstance(universal_name, str)
+            and universal_name.isascii()
+            and universal_name == returned_slug
+            and re.match(r"(?:an?|the)[ \t]+[A-Za-z0-9]", self_name[2], re.I)
+            and not re.search(
+                r"\b(?:customers?|partners?|clients?|competitors?|subsidiar(?:y|ies)|division|"
+                r"not|never|allegedly|quoted|mentioned)\b",
+                self_name[2][:120], re.I,
+            )
+        ):
+            identity_name = self_name[1]
+            identity_source_field = "description.leading_legal_name"
+            name_matches = True
     if (
         not requested_slug.isdigit()
         or company_id != requested_slug
         or not observed_slug
         or observed_slug.isdigit()
         or returned_profile != observed_profile
-        or _company_name(name) != _company_name(expected_company_name)
+        or not name_matches
         or not _company_name(expected_company_name)
     ):
         return None
     evidence = {
-        "name": name,
+        "name": identity_name,
         "provider": STRUCTURED_PROFILE_PROVIDER,
-        "source_field": STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
+        "source_field": identity_source_field,
         "url": returned_profile,
         "website": f"https://{domain}/",
         "company_id": company_id,

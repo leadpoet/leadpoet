@@ -5998,6 +5998,7 @@ class ArenaService:
                 signal_index=signal_index,
                 verified_company_identity=request.get("verified_company_identity"),
                 verified_funding_stage_context=request.get("verified_funding_stage_context"),
+                verified_source_pages=request.get("verified_source_pages"),
                 round_id=str(run["round_id"]),
                 network_name=str(round_row.get("arena_network_name") or ""),
                 netuid=int(round_row.get("arena_netuid") or 0),

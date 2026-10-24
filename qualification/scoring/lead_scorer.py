@@ -400,8 +400,8 @@ _VENTURE_STAGE_STATEMENT_PATTERNS = {
     for stage, label in _VENTURE_SERIES_STAGE_LABELS.items()
 }
 _PUBLIC_EXCHANGE_TICKER_LOCATOR = (
-    r"\(\s*(?i:nasdaq|nyse|asx|tsx)"
-    r"(?:\s*,\s*(?i:nasdaq|nyse|asx|tsx))*"
+    r"\(\s*(?i:nasdaq(?:/(?:gs|gm|cm))?|nyse|asx|tsx)"
+    r"(?:\s*,\s*(?i:nasdaq(?:/(?:gs|gm|cm))?|nyse|asx|tsx))*"
     r"\s*:\s*[A-Z][A-Z0-9.-]{0,9}\s*\)"
 )
 _PUBLIC_COMPANY_ALIAS_RE = re.compile(
@@ -412,7 +412,8 @@ _PUBLIC_COMPANY_ALIAS_RE = re.compile(
     r'“(?!(?i:[^”\r\n]{0,80}\b(?:formerly|previously|not|never|'
     r'no\s+longer|planned|proposed|expected)\b))'
     r'[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*(?:\s+[A-Za-z0-9][A-Za-z0-9&,.’\'+/-]*){0,7}”)'
-    r'(?:\s+or\s+the\s+(?:"Company"|“Company”))?\)\s+'
+    r'(?:(?:\s*,\s*|\s+or\s+)(?:the\s+)?(?:"Company"|“Company”|"we"|“we”)'
+    r'|\s+the\s+(?:"Company"|“Company”)){0,2}\)\s+'
     rf'(?={_PUBLIC_EXCHANGE_TICKER_LOCATOR})'
 )
 _PUBLIC_STAGE_PROOF_PATTERNS = (
@@ -6063,7 +6064,10 @@ def _investigator_identity_context(
         }
         and all(isinstance(value, str) for value in evidence.values())
         and evidence.get("provider") == STRUCTURED_PROFILE_PROVIDER
-        and evidence.get("source_field") == STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD
+        and evidence.get("source_field") in {
+            STRUCTURED_PROFILE_IDENTITY_SOURCE_FIELD,
+            "description.leading_legal_name",
+        }
         and evidence.get("company_id") == homepage_slug
         and _strict_linkedin_company_profile_url(evidence.get("requested_url"))
         and linkedin_company_page_slug(evidence.get("requested_url")) == homepage_slug

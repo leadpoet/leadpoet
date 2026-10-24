@@ -1271,12 +1271,18 @@ def _normalized_span(value: Any) -> str:
     return _surface_span(value).casefold()
 
 
+def _quote_match_surface(value: str) -> str:
+    # Treat a terminal plural/name possessive as typography only. Keep internal
+    # apostrophes, words, numeric tokens and the shared semantic surface intact.
+    return re.sub(r"(?<!\w)([^\W\d_]+s)['\u2019](?=\s|$)", r"\1", value)
+
+
 def _quote_occurs(quote: Any, fetched_text: str) -> bool:
     normalized_quote = _normalized_span(quote)
     return bool(
         8 <= len(normalized_quote) <= 2000
-        and normalized_quote in _normalized_span(
-            _visible_quote_surface(fetched_text)
+        and _quote_match_surface(normalized_quote) in _quote_match_surface(
+            _normalized_span(_visible_quote_surface(fetched_text))
         )
     )
 
@@ -2046,6 +2052,8 @@ def _quote_supports_sec_equity_listing(
         text,
     ):
         return False
+    # A bare NASDAQ cell ends the quoted row or precedes the next SEC heading;
+    # it must not admit a different venue such as Nasdaq Private Market.
     return bool(re.search(
         r"securities\s+registered\s+pursuant\s+to\s+section\s+12\s*\(b\)"
         r".{0,100}title\s+of\s+each\s+class"
@@ -2055,7 +2063,8 @@ def _quote_supports_sec_equity_listing(
         r"(?:common\s+(?:stock|shares)|ordinary\s+shares)"
         r"[^;]{0,100}?\s+[a-z][a-z0-9.-]{0,9}\s+(?:the\s+)?"
         r"(?:nasdaq\s+(?:stock\s+market|global\s+(?:select\s+)?market|"
-        r"capital\s+market)|new\s+york\s+stock\s+exchange)\b",
+        r"capital\s+market)|nasdaq(?=\s*[.;]?\s*(?:$|"
+        r"indicate\s+by\s+check\s+mark\b))|new\s+york\s+stock\s+exchange)\b",
         text,
     ))
 
@@ -4119,6 +4128,27 @@ async def investigate_company_evidence(
                                 url, fetched_final_urls.get(url, ""), text,
                                 identity_anchor,
                             )
+                            or (
+                                # A private server projection is not a full
+                                # profile body, but can bind the same HQ fact.
+                                _strict_linkedin_company_profile_url(
+                                    fetched_final_urls.get(url, "")
+                                ) == _strict_linkedin_company_profile_url(url)
+                                and _bound_structured_headquarters_finding(
+                                    {
+                                        "evidence_url": url,
+                                        "evidence_quote": text,
+                                        "observed_country": bounded_prior_observations.get(
+                                            "observed_hq_country"
+                                        ),
+                                        "observed_state": bounded_prior_observations.get(
+                                            "observed_hq_state"
+                                        ),
+                                    },
+                                    structured_headquarters_evidence,
+                                    identity_anchor,
+                                )
+                            )
                             for url, text in fetched_pages.items()
                         )
                     )
@@ -4913,7 +4943,7 @@ async def investigate_company_evidence(
                     for target, finding in claims.items():
                         submitted = submitted_findings.get(target, {})
                         if (
-                            scoped_correction_active
+                            (scoped_correction_active or correction_turn)
                             and submitted.get("status") == "UNPROVEN"
                             and finding.get("status") == "UNPROVEN"
                             and isinstance(submitted.get("evidence_url"), str)
@@ -4921,10 +4951,11 @@ async def investigate_company_evidence(
                             and finding.get("evidence_url") == ""
                             and finding.get("evidence_quote") == ""
                         ):
-                            # The existing final submit-only correction already
-                            # exhausted repair. Keep the parser's negative finding
-                            # with unused citations cleared; never clear a failed
-                            # VERIFIED/CONTRADICTED proof or ordinary correction.
+                            # After the existing final repair, keep an explicit
+                            # negative with unused citations cleared, even when
+                            # no unrelated positive finding was retained. Never
+                            # clear failed VERIFIED/CONTRADICTED proof or skip an
+                            # ordinary correction and its discovery checks.
                             continue
                         reason = _submitted_finding_rejection(submitted, finding)
                         if not reason:

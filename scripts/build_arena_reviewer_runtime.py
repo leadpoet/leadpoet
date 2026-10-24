@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
 GRADER_FILE = "qualification/scoring/company_evidence_investigator.py"
 VERIFICATION_FILE = "qualification/scoring/company_verification.py"
 FINALITY_FILE = "qualification/scoring/lead_scorer.py"
+ARCHIVE_FILE = "qualification/scoring/intent_verification_three_stage.py"
 BOUND_IDENTITY_FILES = (
     VERIFICATION_FILE,
     "qualification/scoring/company_fit_decision.py",
@@ -151,6 +152,7 @@ def extract_frozen_sources(
     identity_schema_repair: bool = False,
     structured_homepage_numeric_alias: bool = False,
     bound_homepage_legal_alias: bool = False,
+    archive_snapshot_https: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -165,6 +167,8 @@ def extract_frozen_sources(
             names += (VERIFICATION_FILE,)
         if bound_homepage_legal_alias:
             names += BOUND_IDENTITY_FILES
+        if archive_snapshot_https:
+            names += (ARCHIVE_FILE,)
         for name in dict.fromkeys(names):
             path = destination / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,12 +190,16 @@ def expected_overlay(
     identity_schema_repair: bool = False,
     structured_homepage_numeric_alias: bool = False,
     bound_homepage_legal_alias: bool = False,
+    archive_snapshot_https: bool = False,
+    numeric_profile_legal_self_name: bool = False,
     single_tool_protocol_repair: bool = False,
     rejected_final_packet: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
 
+    if numeric_profile_legal_self_name and not bound_homepage_legal_alias:
+        raise CompositionError("numeric self-name requires the reviewed legal alias repair")
     expected = {GRADER_FILE, *ENTRYPOINT_FILES}
     if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
@@ -202,6 +210,8 @@ def expected_overlay(
         expected.add(VERIFICATION_FILE)
     if bound_homepage_legal_alias:
         expected.update(BOUND_IDENTITY_FILES)
+    if archive_snapshot_https:
+        expected.add(ARCHIVE_FILE)
     if set(original) != expected:
         raise CompositionError("frozen operational sources are incomplete")
     files = {GRADER_FILE: convert_admission_seam(original[GRADER_FILE])}
@@ -261,6 +271,16 @@ def expected_overlay(
         files.update(convert_bound_homepage_legal_alias_files(
             {name: files[name] for name in names},
         ))
+    if numeric_profile_legal_self_name:
+        from scripts.arena_reviewer_structured_homepage_alias_seam import (
+            SELF_NAME_CHANGES, convert_numeric_profile_self_name_files,
+        )
+        files.update(convert_numeric_profile_self_name_files(
+            {name: files[name] for name in SELF_NAME_CHANGES},
+        ))
+    if archive_snapshot_https:
+        from scripts.arena_reviewer_archive_https_seam import convert_archive_https_seam
+        files[ARCHIVE_FILE] = convert_archive_https_seam(original[ARCHIVE_FILE])
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -319,7 +339,17 @@ def main() -> int:
         "--bound-homepage-legal-alias", action="store_true",
         help="carry exact first-party legal/brand identity through frozen source; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--numeric-profile-legal-self-name", action="store_true",
+        help="retain only an exact numeric main profile's leading legal self-name; requires the existing legal alias repair",
+    )
+    parser.add_argument(
+        "--archive-snapshot-https", action="store_true",
+        help="use HTTPS for an exact source-bound Wayback snapshot locator; use the same option for --verify-image",
+    )
     args = parser.parse_args()
+    if args.numeric_profile_legal_self_name and not args.bound_homepage_legal_alias:
+        raise CompositionError("numeric self-name requires the reviewed legal alias repair")
     match = re.fullmatch(r"([a-zA-Z0-9./_:-]+)@(sha256:[0-9a-f]{64})", args.grading_image)
     if not match:
         raise CompositionError("grading image must be pinned by digest")
@@ -346,6 +376,8 @@ def main() -> int:
                if args.structured_homepage_numeric_alias else {}),
             **({"bound_homepage_legal_alias": True}
                if args.bound_homepage_legal_alias else {}),
+            **({"archive_snapshot_https": True}
+               if args.archive_snapshot_https else {}),
             **({"authenticated_page_refusal": True}
                if args.authenticated_page_refusal else {}),
         )
@@ -359,8 +391,10 @@ def main() -> int:
             identity_schema_repair=args.identity_schema_repair,
             structured_homepage_numeric_alias=args.structured_homepage_numeric_alias,
             bound_homepage_legal_alias=args.bound_homepage_legal_alias,
+            numeric_profile_legal_self_name=args.numeric_profile_legal_self_name,
             single_tool_protocol_repair=args.single_tool_protocol_repair,
             rejected_final_packet=args.rejected_final_packet,
+            archive_snapshot_https=args.archive_snapshot_https,
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
@@ -373,6 +407,8 @@ def main() -> int:
             + ("-identity-schema-repair" if args.identity_schema_repair else "")
             + ("-structured-homepage-alias" if args.structured_homepage_numeric_alias else "")
             + ("-bound-homepage-legal-alias" if args.bound_homepage_legal_alias else "")
+            + ("-numeric-legal-self-name" if args.numeric_profile_legal_self_name else "")
+            + ("-archive-https" if args.archive_snapshot_https else "")
             + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
             + ("-rejected-final-packet" if args.rejected_final_packet else "")
         )
@@ -431,6 +467,12 @@ def main() -> int:
         if args.bound_homepage_legal_alias:
             from scripts.arena_reviewer_bound_homepage_alias_seam import CORRECTION_ID as BOUND_HOMEPAGE_ALIAS_CORRECTION_ID
             corrections.append(BOUND_HOMEPAGE_ALIAS_CORRECTION_ID)
+        if args.numeric_profile_legal_self_name:
+            from scripts.arena_reviewer_structured_homepage_alias_seam import SELF_NAME_CORRECTION_ID
+            corrections.append(SELF_NAME_CORRECTION_ID)
+        if args.archive_snapshot_https:
+            from scripts.arena_reviewer_archive_https_seam import CORRECTION_ID as ARCHIVE_HTTPS_CORRECTION_ID
+            corrections.append(ARCHIVE_HTTPS_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,

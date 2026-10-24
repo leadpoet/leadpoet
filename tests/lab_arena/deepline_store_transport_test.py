@@ -7,7 +7,8 @@ import pytest
 
 from lab_arena.store import (
     ArenaStore, ArenaStoreError, ArenaStoreUnavailable,
-    BULK_ROUND_RPC_READ_TIMEOUT_SECONDS, PostgrestTransport,
+    BULK_ROUND_RPC_READ_TIMEOUT_SECONDS, PUBLICATION_RPC_READ_TIMEOUT_SECONDS,
+    PostgrestTransport,
 )
 
 
@@ -19,7 +20,11 @@ from lab_arena.store import (
         ("lab_arena_open_scoring_v2", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
         ("lab_arena_open_scoring_v3", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
         ("lab_arena_record_run_scores", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
-        ("lab_arena_transition_round", {"p_expected_status": "scored", "p_next_status": "published"}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_expire_leases", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_close_stage", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_close_scoring", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_cancel_round", {}, BULK_ROUND_RPC_READ_TIMEOUT_SECONDS),
+        ("lab_arena_transition_round", {"p_expected_status": "scored", "p_next_status": "published"}, PUBLICATION_RPC_READ_TIMEOUT_SECONDS),
         ("lab_arena_whoami", {}, 8.0),
         ("lab_arena_transition_round", {"p_expected_status": "stage2", "p_next_status": "scoring"}, 8.0),
     ],
@@ -46,6 +51,8 @@ def test_round_rpc_read_timeout_preserves_other_timeouts(function, params, expec
 @pytest.mark.parametrize("function", [
     "lab_arena_open_scoring", "lab_arena_open_scoring_v2", "lab_arena_open_scoring_v3",
     "lab_arena_record_run_scores",
+    "lab_arena_expire_leases",
+    "lab_arena_close_stage", "lab_arena_close_scoring", "lab_arena_cancel_round",
 ])
 @pytest.mark.parametrize("failure", ["read_timeout", "http_503"])
 def test_scoring_rpc_response_failure_never_replays_post(function, failure):
@@ -66,6 +73,27 @@ def test_scoring_rpc_response_failure_never_replays_post(function, failure):
         store.rpc(function, {})
     assert len(requests) == 1
     store.close()
+
+
+@pytest.mark.parametrize("function", ["lab_arena_expire_leases", "lab_arena_close_stage",
+                                      "lab_arena_close_scoring", "lab_arena_cancel_round"])
+def test_bulk_terminalization_lock_timeout_remains_a_confirmed_rollback_without_replay(function):
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(500, json={"code": "55P03", "message": "lock timeout"})
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        transport = PostgrestTransport(
+            "https://db.example", service_key="sb_secret_test", http_client=client,
+        )
+        with pytest.raises(ArenaStoreUnavailable) as caught:
+            transport.rpc(function, {"p_round_id": "round"})
+
+    assert caught.value.transaction_rolled_back is True
+    assert caught.value.store_error["code"] == "55P03"
+    assert len(requests) == 1
 
 
 def test_keyed_reconciliation_uses_v2_and_legacy_uses_v1():

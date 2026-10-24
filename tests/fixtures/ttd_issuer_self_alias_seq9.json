@@ -1,0 +1,228 @@
+{
+  "provenance": {
+    "native_call_identity": "sha256:02f4849d94d7a42c85c6b07b943fd9e836b4c707bb6c9b8ccacfc9242c25739c",
+    "findings_source": "original seq9 tool arguments, unchanged",
+    "source_pages": "exact captured model-visible company pages, unchanged",
+    "held_size_receipt_source": "same company/ICP saved score:2 company-fit receipt; not original score:1 complete replay",
+    "scope": "company fit only; no intent or full lead outcome claim"
+  },
+  "company_locator": {
+    "linkedin": "https://www.linkedin.com/company/the-trade-desk/",
+    "name": "The Trade Desk",
+    "website": "http://www.thetradedesk.com/"
+  },
+  "prior_observations": {
+    "employee_size_evidence_quote": "",
+    "employee_size_evidence_url": "",
+    "geography_evidence_quote": "The Trade Desk headquarters: Ventura, California, United States. (harvestapi_get_company locations.headquarter=true)",
+    "geography_evidence_url": "https://www.linkedin.com/company/the-trade-desk",
+    "geography_matches": true,
+    "industry_activity_role": "supplier_operator",
+    "industry_evidence_quote": "our independent media buying platform designed for the open internet.",
+    "industry_evidence_url": "https://www.linkedin.com/company/the-trade-desk",
+    "industry_matches": true,
+    "observed_company_linkedin": "https://www.linkedin.com/company/the-trade-desk",
+    "observed_company_name": "The Trade Desk, Inc.",
+    "observed_company_stage": "Public",
+    "observed_company_website": "thetradedesk.com",
+    "observed_employee_count": null,
+    "observed_hq_country": "United States",
+    "observed_hq_state": "California",
+    "observed_industry": "technology, information and internet",
+    "observed_subindustry": "programmatic advertising technology",
+    "required_attribute_evidence_quote": "Through its self-service, cloud-based platform, ad buyers can create, manage, and optimize digital advertising campaigns across ad formats and devices.",
+    "required_attribute_evidence_url": "https://www.thetradedesk.com/press-room/the-trade-desk-reports-second-quarter-2026-financial-results",
+    "stage_evidence_quote": "Public Company · Founded 2009 · 1001-5000 employees · 267462 followers",
+    "stage_evidence_url": "https://www.linkedin.com/company/the-trade-desk",
+    "submitted_source_hints": [
+      {
+        "text": "| Class A Common Stock, par value $0.000001 per share | | TTD | | The Nasdaq Stock Market LLC |",
+        "url": "https://www.sec.gov/Archives/edgar/data/1671933/000167193326000055/ttd-20260504.htm"
+      },
+      {
+        "text": "On August 27, 2026, The Trade Desk launched Kokai Zuma, a new release of its Kokai advertising platform with agentic AI capabilities and simplified measurement.",
+        "url": "https://investors.thetradedesk.com/news-and-events/news/news-details/2026/The-Trade-Desk-Introduces-Kokai-Zuma-the-Latest-Release-of-Kokai/default.aspx"
+      },
+      {
+        "text": "Introduced in 2023, Kokai is The Trade Desk’s platform for planning, buying and measuring advertising across the open internet.",
+        "url": "https://investors.thetradedesk.com/news-and-events/news/news-details/2026/The-Trade-Desk-Introduces-Kokai-Zuma-the-Latest-Release-of-Kokai/default.aspx"
+      }
+    ],
+    "submitted_source_urls": [
+      "https://www.thetradedesk.com/",
+      "https://www.thetradedesk.com/press-room/the-trade-desk-reports-second-quarter-2026-financial-results",
+      "https://www.linkedin.com/company/the-trade-desk",
+      "https://www.sec.gov/Archives/edgar/data/1671933/000167193326000055/ttd-20260504.htm",
+      "https://investors.thetradedesk.com/news-and-events/news/news-details/2026/The-Trade-Desk-Introduces-Kokai-Zuma-the-Latest-Release-of-Kokai/default.aspx"
+    ],
+    "untrusted_company_stage_evidence": [
+      {
+        "quote": "| Class A Common Stock, par value $0.000001 per share | | TTD | | The Nasdaq Stock Market LLC |",
+        "url": "https://www.sec.gov/Archives/edgar/data/1671933/000167193326000055/ttd-20260504.htm"
+      }
+    ]
+  },
+  "verified_homepage_identity": {
+    "linkedin_company_slug": "the-trade-desk",
+    "normalized_name": "thetradedesk",
+    "registrable_dns_domain": "thetradedesk.com"
+  },
+  "findings": [
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "The leading demand-side platform for data-driven advertising Reach relevant audiences on the open internet, drive growth, and prove your impact.",
+      "evidence_url": "https://www.thetradedesk.com/our-demand-side-platform",
+      "new_domain": "thetradedesk.com",
+      "new_name": "The Trade Desk",
+      "observed_country": "United States",
+      "observed_industry": "Digital advertising technology and media buying",
+      "observed_state": "California",
+      "observed_subindustry": "Demand-side programmatic advertising platform",
+      "observed_value": null,
+      "old_domain": "thetradedesk.com",
+      "old_name": "The Trade Desk",
+      "ownership": null,
+      "reason": "The company's platform page describes its own demand-side platform for data-driven advertising, which directly supports its operation of a programmatic advertising platform.",
+      "shared_linkedin_slug": "the-trade-desk",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "",
+      "supporting_evidence_url_2": "",
+      "target": "industry"
+    },
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "The Trade Desk, Inc. (“The Trade Desk,” the “Company” or “we”) (NASDAQ: TTD), a provider of a global technology platform for buyers of advertising,",
+      "evidence_url": "https://www.thetradedesk.com/press-room/the-trade-desk-reports-second-quarter-2026-financial-results",
+      "new_domain": "thetradedesk.com",
+      "new_name": "The Trade Desk",
+      "observed_country": "United States",
+      "observed_industry": "",
+      "observed_state": "California",
+      "observed_subindustry": "",
+      "observed_value": "Public",
+      "old_domain": "thetradedesk.com",
+      "old_name": "The Trade Desk",
+      "ownership": null,
+      "reason": "The company's August 2026 financial-results announcement identifies The Trade Desk as NASDAQ: TTD, and the current-stage discovery exposed no later completed delisting or take-private event.",
+      "shared_linkedin_slug": "the-trade-desk",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "",
+      "supporting_evidence_url_2": "",
+      "target": "stage"
+    },
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "The Trade Desk, Inc. (“The Trade Desk,” the “Company” or “we”) (NASDAQ: TTD), a provider of a global technology platform for buyers of advertising,",
+      "evidence_url": "https://www.thetradedesk.com/press-room/the-trade-desk-reports-second-quarter-2026-financial-results",
+      "new_domain": "thetradedesk.com",
+      "new_name": "The Trade Desk",
+      "observed_country": "United States",
+      "observed_industry": "",
+      "observed_state": "California",
+      "observed_subindustry": "",
+      "observed_value": null,
+      "old_domain": "thetradedesk.com",
+      "old_name": "The Trade Desk",
+      "ownership": null,
+      "reason": "The issuer announcement proves the public-exchange component. Its platform page describes a demand-side advertising platform, identifies brands and agencies as its users, and invites them to begin using it, supporting the platform-sale component.",
+      "shared_linkedin_slug": "the-trade-desk",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "The leading demand-side platform for data-driven advertising Reach relevant audiences on the open internet, drive growth, and prove your impact.",
+      "supporting_evidence_quote_2": "Trusted by the world’s biggest brands and agencies.",
+      "supporting_evidence_url_1": "https://www.thetradedesk.com/our-demand-side-platform",
+      "supporting_evidence_url_2": "https://www.thetradedesk.com/our-demand-side-platform",
+      "target": "required_attribute"
+    }
+  ],
+  "pages": {
+    "https://www.thetradedesk.com/our-demand-side-platform": {
+      "text": "Our Demand Side Platform (DSP) | The Trade Desk Skip to content Home Our Platform The leading demand-side platform for data-driven advertising Reach relevant audiences on the open internet, drive growth, and prove your impact. Get started One platform. Endless possibilities. Advanced data-driven tools to help you plan, execute, and measure your programmatic advertising campaigns, so you can maximize the value of every single impression — all within a simple self-serve experience. Audience-first, data-driven targeting Identify your most valuable customers and discover the best ways to reach them and others like them using first- and third-party data and our durable identity framework. Trusted by the world’s biggest brands and agencies. Because we don’t own media. We just help you buy it better. Objective and unbiased Because we don’t own or operate media, we can help you objectively prioritize inventory that drives better performance for your campaign Open and interoperable Choose your preferred solutions from the industry’s largest marketplace of data, measurement, brand safety, and inventory providers. Transparent and flexible Get full visibility and more control over your campaigns, your data, and where your ads are placed, with the flexibility to adjust strategies in real time to meet your unique goals. Don’t just take our word for it. See how our innovative platform and leadership are being recognized across the industry. 2025 Gartner Peer Insights “Voice of the Customer” AdTech report Read report The Trade Desk recognized in Gartner’s 2023 Ad Tech Guide Read report The Trade Desk has been recognized as the leader in Frost & Sullivan’s Frost Radar™️: Demand-Side Platforms 2025 Read report 2025 Gartner Peer Insights “Voice of the Customer” AdTech report Read report The Trade Desk recognized in Gartner’s 2023 Ad Tech Guide Read report The Trade Desk has been recognized as the leader in Frost & Sullivan’s Frost Radar™️: Demand-Side Platforms 2025 Read report 2025 Gartner Peer Insights “Voice of the Customer” AdTech report Read report We innovate so you can grow Discover what sets us apart from other media buying platforms. Omnichannel at scale We make it easier to unify your media buying across channels in a single platform. We have scaled access to the best ad inventory on the open internet, giving you more opportunities to connect with your customer while they’re consuming their favorite content. Learn more Connected TV Identity solutions Artificial intelligence Retail data Data and measurement Custom solutions Case studies Our Platform How major brands saw success with Kokai See how brands across industries are using Kokai to improve campaign efficiency, reach more relevant audiences, and drive stronger full-funnel performance. % lower cost per unique household % lower CPC % lower CPA* Ready to take your digital advertising approach further? We are. Reach out to us to find the right solution to start using our platform. First name: * Last name: * Work email: * Job title: * Company name: * Phone number: * Country: * United States United Kingdom Afghanistan Albania Algeria American Samoa Andorra Angola Anguilla Antarctica Antigua and Barbuda Argentina Armenia Aruba Australia Austria Azerbaijan Bahamas Bahrain Bangladesh Barbados Belarus Belgium Belize Benin Bermuda Bhutan Bolivia Bonaire Sint Eustatius and Saba Bosnia and Herzegovina Botswana Bouvet Island Brazil British Indian Ocean Territory Brunei Bulgaria Burkina Faso Burundi Cambodia Cameroon Canada Cape Verde Cayman Islands Central African Republic Chad Chile China Christmas Island Colombia Comoros Cook Islands Costa Rica Croatia Curacao Cyprus Czech Republic Democratic Republic of the Congo Denmark Djibouti Dominica Dominican Republic Ecuador Egypt El Salvador Equatorial Guinea Eritrea Estonia Ethiopia Falkland Islands Faroe Islands Fiji Finland France French Guiana French Southern Territories Gabon Gambia Georgia Germany Ghana Gibraltar Greece Greenland Grenada Guatemala Guernsey Guinea Guinea Bissau Guyana Haiti Heard Island and McDonald Islands Holy See Honduras Hong Kong Hungary Iceland India Indonesia Iraq Ireland Isle of Man Israel Italy Ivory Coast Jamaica Japan Jersey Jordan Kazakhstan Kenya Kiribati Korea Kuwait Kyrgyzstan Lao Peoples Democratic Republic Latvia Lebanon Lesotho Liberia Libya Liechtenstein Lithuania Luxembourg Macao Macedonia Madagascar Malawi Malaysia Maldives Mali Malta Marshall Islands Mauritania Mauritius Mayotte Mexico Micronesia Moldova Monaco Mongolia Montenegro Montserrat Morocco Mozambique Myanmar Namibia Nauru Nepal Netherlands New Zealand Nicaragua Niger Nigeria Niue Norfolk Island Norway Oman Pakistan Palau Palestine Panama Papua New Guinea Paraguay Peru Philippines Pitcairn Island Poland Portugal Qatar Reunion Romania Russia Rwanda Saint Barthelemy Saint Helena Saint Kitts and Nevis Saint Lucia Saint Pierre and Miquelon Saint Vincent and Grenadines Samoa Sao Tome and Principe Saudi Arabia Senegal Serbia Seychelles Sierra Leone Singapore Slovakia Slovenia Solomon Islands Somalia South Africa South Georgia and South Sandwich Islands South Sudan Spain Sri Lanka Suriname Svalbard and Jan Mayen Islands Swaziland Sweden Switzerland Syrian Arab Republic Taiwan Tajikistan Tanzania Thailand Togo Tokelau Tonga Trinidad and Tobago Tunisia Turkey Turkmenistan Turks and Caicos Islands Tuvalu Uganda Ukraine United Arab Emirates Uruguay Uzbekistan Vanuatu Venezuela Vietnam Virgin Islands Wallis and Futuna Islands Western Sahara Yemen Zambia Zimbabwe Area of interest: * Advertising on The Trade Desk platform Data Partnership with The Trade Desk Publishing or Inventory on The Trade Desk Unified ID Solution Ventura OS Streaming Walmart DSP Other Company type: * Ad Network Agency Brand/Direct Advertiser CDP/DMP Cleanroom Consultancy Data Supplier DSP Martech Platform Marketplace Quality Vendor Measurement Partner OEM Publisher SSP Other Message: * * By checking here, you acknowledge our Privacy Policy and agree to receive marketing communications about our products and services. You may opt out anytime. Submit There was a problem loading this form, please try again later. Get the most out of our platform with The Resource Desk The Resource Desk Resources Our platform See how bulk edits affect scale before you commit Resources Connected TV Pause ads are here, signaling the next evolution of CTV Resources Our platform Webinar: Is your audio strategy missing a beat? Cancel Select a Language Save English English (UK) 中文（简体） 中文（繁體） 日本語 한국어 Deutsch Français Español [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] https://www.thetradedesk.com/our-demand-side-platform#main-content https://www.thetradedesk.com/ https://www.thetradedesk.com/contact-us https://www.gartner.com/reprints/?id=1-2MO0Y3PU&ct=260106&st=sb https://www.thetradedesk.com/resources/the-trade-desk-recognized-in-gartners-2023-ad-tech-guide https://assets.thetradedesk.com/assets/documents/Demand-Side-Platforms-2025-The-Trade-Desk.pdf https://www.thetradedesk.com/our-demand-side-platform/omnichannel-advertising https://www.thetradedesk.com/resources/how-major-brands-saw-success-with-kokai https://www.thetradedesk.com/us/website-privacy-policy https://www.thetradedesk.com/resources https://www.thetradedesk.com/resources/see-how-bulk-edits-affect-scale-before-you-commit https://www.thetradedesk.com/resources/pause-ads-are-here-signaling-the-next-evolution-of-ctv https://www.thetradedesk.com/resources/webinar-is-your-audio-strategy-missing-a-beat",
+      "final_url": "https://www.thetradedesk.com/our-demand-side-platform"
+    },
+    "https://www.thetradedesk.com/press-room/the-trade-desk-reports-second-quarter-2026-financial-results": {
+      "text": "Business Wire: The Trade Desk Reports Second Quarter 2026 Financial Results | The Trade Desk Skip to content Home The Trade Desk Reports Second Quarter 2026 Financial Results August 06, 2026 LOS ANGELES – (BUSINESS WIRE)– The Trade Desk, Inc. (“The Trade Desk,” the “Company” or “we”) (NASDAQ: TTD), a provider of a global technology platform for buyers of advertising, today announced financial results for its second quarter ended June 30, 2026. “This quarter did not meet the standard we set for ourselves, but it has reinforced our belief that we are focused on the right opportunities for the future,” said Jeff Green, Co-Founder and CEO of The Trade Desk. “Marketers are navigating a complex environment, but complexity increases the value of decisioning, measurement and AI. We have a clear understanding of the factors that impacted our performance, and we are taking decisive action to strengthen our execution, upgrade our platform, and sharpen our focus on the areas where we can create the greatest value. While there is work ahead, I am confident our actions will help marketers drive better business outcomes and support the shift of media budgets toward the open internet.” Second Quarter 2026 Financial Highlights: The following table summarizes the Company’s unaudited consolidated financial results for the three and six months ended June 30, 2026 and 2025 ($ in millions, except per share amounts): Three Months Ended June 30, Six Months Ended June 30, 2026 2025 2026 2025 GAAP Results Revenue $ 715 $ 694 $ 1,404 $ 1,310 Increase in revenue year over year 3 % 19 % 7 % 22 % Net income $ 64 $ 90 $ 104 $ 141 Net income margin 9 % 13 % 7 % 11 % GAAP diluted earnings per share $ 0.14 $ 0.18 $ 0.22 $ 0.28 Non-GAAP Results Adjusted EBITDA $ 241 $ 271 $ 447 $ 479 Adjusted EBITDA margin 34 % 39 % 32 % 37 % Non-GAAP net income $ 158 $ 203 $ 292 $ 368 Non-GAAP diluted earnings per share $ 0.34 $ 0.41 $ 0.62 $ 0.74 Second Quarter and Recent Business Highlights: Strong Customer Retention: Customer retention remained over 95% during the second quarter, as it has for over a decade. New Innovation and Partnership Announcements: Dentsu named The Trade Desk as the first DSP partner for its new end-to-end retail data offering from New Stream Media. The Trade Desk expanded its commerce media ecosystem through integrations with leading travel, hospitality and mobility including Book​ing​.com, Agoda, Kayak, Priceline, Marriott, Uber and United Airlines, helping advertisers activate high-intent commerce and travel signals and unify campaign activation, measurement and optimization across the open internet. Databricks named The Trade Desk a launch partner for CustomerLake, connecting first-party data and agentic AI directly to media execution across the open internet. Adobe and The Trade Desk forged a new integration connecting paid media exposure data directly to first-party profiles in Adobe Real-Time CDP. Connected TV (CTV): The Trade Desk offers advertisers access to premium inventory across major networks and streaming services around the world. Netflix joined The Trade Desk’s Sellers and Publishers 500+, enabling advertiser access to Netflix’s premier streaming environment automatically through the company’s scaled inventory marketplace. Samsung Ads opened its premium home screen inventory to programmatic buyers, with The Trade Desk named among the first platforms granted access, giving advertisers a unified view of creative and measurement performance. Strengthened Executive Leadership and Governance: The Trade Desk recently appointed Nate Olmstead as Chief Financial Officer, Sarah Gavin as Chief Marketing Officer and EVP, Kristi Argyilan as Chief Commercial Officer and EVP, Ron Lamprecht as Chief Business Development Officer and SVP, and Vinny Rinaldi as Vice President of Client Strategy & Growth, further strengthening the company’s leadership across finance, marketing, commercial strategy, data partnerships and strategic partnerships. The Company also added advertising, AI, and global scaling expertise to its Board of Directors, through the appointments of Penry Price and David Haddad to its board of directors. Share Repurchases: The Company used approximately $78 million of cash to repurchase its Class A common stock in the second quarter of 2026. As of June 30, 2026, the Company had $269 million available and authorized for repurchases. Industry Recognition: Wall Street Journal’s Best Companies for the Future, 2026 Newsweek’s America’s Greatest Workplaces, 2026 Newsweek’s America’s Greatest Workplaces for Entry Level, 2026 QKS SPARK Matrix, Leader — Ad Tech Platforms, 2026 Financial Guidance: Third Quarter 2026 outlook summary: Revenue at least $650 million Adjusted EBITDA of approximately $160 million The Company has not provided an outlook for GAAP net income or reconciliation of Adjusted EBITDA guidance to net income, the closest corresponding U.S. GAAP measure, because net income outlook is not available without unreasonable efforts on a forward-looking basis due to the variability and complexity with respect to the charges included in the calculation of this GAAP measure; in particular, the measures and effects of our stock-based compensation expense that are directly impacted by unpredictable fluctuations in our share price. The Company expects the variability of the above charges could have a significant and potentially unpredictable impact on our future U.S. GAAP financial results. Use of Non-GAAP Financial Information Included within this press release are the non-GAAP financial measures of Adjusted EBITDA, Adjusted EBITDA margin, Non-GAAP net income and Non-GAAP diluted earnings per share (“EPS”) that supplement the Condensed Consolidated Statements of Operations of the Company prepared under generally accepted accounting principles (“GAAP”). Adjusted EBITDA is net income before depreciation and amortization expense; stock-based compensation expense; interest income, net; and provision for income taxes. Adjusted EBITDA margin is Adjusted EBITDA divided by revenue, and Adjusted EBITDA margin’s closest corresponding U.S. GAAP measure is net income margin, which is GAAP net income divided by revenue. Non-GAAP net income excludes charges and the related income tax effects for stock-based compensation. Tax rates on the tax-deductible portions of the stock-based compensation expense approximating 25% to 30% have been used in the computation of non-GAAP net income and non-GAAP diluted EPS. Reconciliations of GAAP to non-GAAP amounts for the periods presented herein are provided in schedules accompanying this release and should be considered together with the Condensed Consolidated Statements of Operations. These non-GAAP measures are not meant as a substitute for GAAP, but are included solely for informational and comparative purposes. The Company’s management believes that this information can assist investors in evaluating the Company’s profitability, operational trends and financial performance. Management believes these non-GAAP measures allow investors to evaluate the Company’s financial performance using some of the same measures as management and securities analysts. However, the non-GAAP financial measures should not be considered in isolation of, as a replacement for, or as superior to corresponding, similarly captioned, GAAP measures and may be different from non-GAAP financial measures used by other companies. Second Quarter 2026 Financial Results Webcast and Conference Call Details When: August 6, 2026 at 2:00 P.M. Pacific Time (5:00 P.M. Eastern Time). Webcast: A live webcast of the call can be accessed from the Investor Relations section of The Trade Desk’s website at http://​investors​.thetrad​edesk​.com. Following the call, a replay will be available on the Company’s website. Dial-in: To access the call via telephone in North America, please dial 877−545−0320. For callers outside the United States, please dial +1 – 973-528‑0002. Participants should reference the conference call ID code “515323” after dialing in. Audio replay: An audio replay of the call will be available beginning about two hours after the call. To listen to the replay in the United States, please dial 877−481−4010 (replay code: 54293). Outside the United States, please dial +1 – 919-882‑2331 (replay code: 54293). The audio replay will be available via telephone until August 13, 2026. The Trade Desk, Inc. uses its Investor Relations website ( http://​investors​.thetrad​edesk​.com ), its X feed (@TheTradeDesk), LinkedIn page ( https://​www​.linkedin​.com/​c​o​m​p​a​n​y​/​t​h​e​-​t​r​a​d​e​-desk ), Facebook page ( https://​www​.face​book​.com/​T​h​e​T​r​a​d​eDesk ) and Jeff Green’s LinkedIn profile ( https://​www​.linkedin​.com/​i​n​/​j​e​f​f​t​green ) as a means of disclosing information about the Company and for complying with its disclosure obligations under Regulation FD. The information that is posted through these channels may be deemed material. Accordingly, investors should monitor these channels in addition to The Trade Desk’s press releases, SEC filings, public conference calls and webcasts. About The Trade Desk The Trade Desk ™ is a technology company that empowers buyers of advertising. Through its self-service, cloud-based platform, ad buyers can create, manage, and optimize digital advertising campaigns across ad formats and devices. Integrations with major data, inventory, and publisher partners ensure maximum reach and decisioning capabilities, and enterprise APIs enable custom development on top of the platform. Headquartered in Ventura, CA, The Trade Desk has offices across North America, Europe and Asia Pacific. To learn more, visit thetrad​edesk​.com or follow us on Facebook, X, LinkedIn and YouTube. Forward-Looking Statements This press release contains “forward-looking statements” within the meaning of the Private Securities Litigation Reform Act of 1995. These statements relate to expectations concerning matters that (a) are not historical facts, (b) predict or forecast future events or results, or (c) embody assumptions that may prove to have been inaccurate, including statements relating to industry and market trends, the Company’s growth and financial targets, such as revenue and Adjusted EBITDA. When words such as “believe,” “expect,” “anticipate,” “will,” “outlook” or similar expressions are used, the Company is making forward-looking statements. Although the Company believes that the expectations reflected in such forward-looking statements are reasonable, it cannot give readers any assurance that such expectations will prove correct. These forward-looking statements involve risks, uncertainties and assumptions, including those related to the Company’s ability to maintain and grow its client base and revenue through its platform and related offerings, which makes it difficult to evaluate the Company’s business and prospects, the market for programmatic advertising developing slower or differently than the Company’s expectations, the demands and expectations of clients and the ability to attract and retain clients. The actual results may differ materially from those anticipated in the forward-looking statements as a result of numerous factors, many of which are beyond the control of the Company. These are disclosed in the Company’s reports filed from time to time with the Securities and Exchange Commission, including its most recent Form 10‑K and any subsequent filings on Forms 10‑Q or 8‑K, available at www​.sec​.gov. Readers are urged not to place undue reliance on these forward-looking statements, which speak only as of the date of this press release. The Company does not intend to update any forward-looking statement contained in this press release to reflect events or circumstances arising after the date hereof. THE TRADE DESK, INC. CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS (Amounts in thousands, except per share amounts) (Unaudited) Three Months Ended June 30, Six Months Ended June 30, 2026 2025 2026 2025 Revenue $ 715,057 $ 694,039 $ 1,403,914 $ 1,310,060 Operating expenses (1): Platform operations 184,333 150,980 366,303 293,819 Sales and marketing 174,404 161,131 346,583 313,874 Technology and development 140,742 134,251 283,462 266,653 General and administrative 114,001 130,900 239,342 264,485 Total operating expenses 613,480 577,262 1,235,690 1,138,831 Income from operations 101,577 116,777 168,224 171,229 Other expense (income): Total other income, net (11,514 ) (16,424 ) (23,825 ) (37,741 ) Income before income taxes 113,091 133,201 192,049 208,970 Provision for income taxes 48,697 43,072 87,658 68,163 Net income $ 64,394 $ 90,129 $ 104,391 $ 140,807 Earnings per share: Basic $ 0.14 $ 0.18 $ 0.22 $ 0.29 Diluted $ 0.14 $ 0.18 $ 0.22 $ 0.28 Weighted-average shares outstanding: Basic 468,359 490,631 471,494 492,767 Diluted 469,948 495,776 473,397 499,340 ____________________ (1) Includes stock-based compensation expense as follows: THE TRADE DESK, INC. STOCK-BASED COMPENSATION EXPENSE (Amounts in thousands) (Unaudited) Three Months Ended June 30, Six Months Ended June 30, 2026 2025 2026 2025 Platform operations $ 8,816 $ 9,083 $ 17,214 $ 18,300 Sales and marketing 30,645 30,368 57,663 59,304 Technology and development 43,138 42,800 83,921 83,781 General and administrative (1) 26,957 46,634 59,804 95,753 Total $ 109,556 $ 128,885 $ 218,602 $ 257,138 ____________________ (1) Includes stock-based compensation expense relating to a long-term CEO performance grant of $19 million for the three months ended June 30, 2025, as well as $5 million and $43 million for the six months ended June 30, 2026 and 2025, respectively. There was no stock-based compensation expense relating to a long-term CEO performance grant in the three months ended June 30, 2026. THE TRADE DESK, INC. CONDENSED CONSOLIDATED BALANCE SHEETS (Amounts in thousands) (Unaudited) As of June 30, 2026 As of December 31, 2025 ASSETS Current assets: Cash and cash equivalents $ 1,122,979 $ 658,175 Short-term investments, net 362,354 644,882 Accounts receivable, net 3,200,824 3,770,194 Prepaid expenses and other current assets 129,670 187,753 Total current assets 4,815,827 5,261,004 Property and equipment, net 455,151 396,819 Operating lease assets 335,228 342,042 Deferred income taxes 55,700 55,700 Other assets, non-current 102,540 97,655 Total assets $ 5,764,446 $ 6,153,220 LIABILITIES AND STOCKHOLDERS’ EQUITY Current liabilities: Accounts payable $ 2,562,580 $ 3,007,651 Accrued expenses and other current liabilities 150,174 181,991 Operating lease liabilities 80,922 76,355 Total current liabilities 2,793,676 3,265,997 Operating lease liabilities, non-current 353,188 359,975 Other liabilities, non-current 43,230 42,857 Total liabilities 3,190,094 3,668,829 Stockholders’ equity: Preferred stock — — Common stock — — Additional paid-in capital 3,293,840 3,075,303 Accumulated deficit (719,488 ) (590,912 ) Total stockholders’ equity 2,574,352 2,484,391 Total liabilities and stockholders’ equity $ 5,764,446 $ 6,153,220 THE TRADE DESK, INC. CONDENSED CONSOLIDATED STATEMENTS OF CASH FLOWS (Amounts in thousands) (Unaudited) Six Months Ended June 30, 2026 2025 OPERATING ACTIVITIES: Net income $ 104,391 $ 140,807 Adjustments to reconcile net income to net cash provided by operating activities: Depreciation and amortization expense 61,571 50,689 Stock-based compensation expense 218,602 257,138 Noncash lease expense 38,057 34,253 Provision for expected credit losses on accounts receivable 4,290 1,177 Gain on sale of property and equipment (13,772 ) — Other 4,850 (13,899 ) Changes in operating assets and liabilities: Accounts receivable 548,109 80,033 Prepaid expenses and other current and non-current assets 59,754 (18,281 ) Accounts payable (427,941 ) (19,839 ) Accrued expenses and other current and non-current liabilities (16,828 ) (24,081 ) Operating lease liabilities (35,684 ) (31,551 ) Net cash provided by operating activities 545,399 456,446 INVESTING ACTIVITIES: Purchases of investments (238,872 ) (577,834 ) Sales of investments 112,060 — Maturities of investments 409,583 346,120 Purchases of property and equipment (125,966 ) (104,352 ) Proceeds from sale of property and equipment 15,513 — Capitalized software development costs (7,399 ) (5,739 ) Business acquisition — (4,350 ) Net cash provided by (used in) investing activities 164,919 (346,155 ) FINANCING ACTIVITIES: Repurchases of Class A common stock (241,331 ) (647,093 ) Proceeds from exercise of stock options 4,706 14,085 Proceeds from employee stock purchase plan 11,929 32,450 Taxes paid relating to net settlement of restricted stock (20,818 ) (57,048 ) Proceeds from short-term borrowings — 74,239 Net cash used in financing activities (245,514 ) (583,367 ) Increase (decrease) in cash and cash equivalents 464,804 (473,076 ) Cash and cash equivalents — Beginning of period 658,175 1,369,463 Cash and cash equivalents — End of period $ 1,122,979 $ 896,387 Non-GAAP Financial Metrics (Amounts in thousands, except per share amounts) (Unaudited) The following tables show the Company’s non-GAAP financial metrics reconciled to the comparable GAAP financial metrics included in this release. Three Months Ended June 30, Six Months Ended June 30, 2026 2025 2026 2025 Net income $ 64,394 $ 90,129 $ 104,391 $ 140,807 Add back (deduct): Depreciation and amortization expense 30,140 26,704 61,571 50,689 Stock-based compensation expense 109,556 128,885 218,602 257,138 Interest income, net (11,508 ) (18,035 ) (24,877 ) (38,167 ) Provision for income taxes 48,697 43,072 87,658 68,163 Adjusted EBITDA $ 241,279 $ 270,755 $ 447,345 $ 478,630 Three Months Ended June 30, Six Months Ended June 30, 2026 2025 2026 2025 GAAP net income $ 64,394 $ 90,129 $ 104,391 $ 140,807 Add back (deduct): Stock-based compensation expense 109,556 128,885 218,602 257,138 Adjustment for income taxes (16,396 ) (15,940 ) (31,218 ) (29,878 ) Non-GAAP net income $ 157,554 $ 203,074 $ 291,775 $ 368,067 GAAP diluted earnings per share $ 0.14 $ 0.18 $ 0.22 $ 0.28 GAAP weighted-average shares outstanding — diluted 469,948 49",
+      "final_url": "https://www.thetradedesk.com/press-room/the-trade-desk-reports-second-quarter-2026-financial-results"
+    }
+  },
+  "icp": {
+    "icp_id": "icp_20261023_007",
+    "intent_signal": "Launched a new advertising product or major platform capability in the last 12 months, per a press release, product page, or changelog",
+    "required_attribute": "Sells a programmatic advertising or ad measurement platform to brands or agencies and trades on a public stock exchange",
+    "prompt": "Find companies meeting every company requirement. Industry: Advertising; Sub-industry: Programmatic Advertising Technology; Country: United States; Headquarters geography: United States, West Coast; Company stage: Public; Allowed employee size: 201-500, 501-1,000, 1,001-5,000, 5,001-10,000, 10,001+; Product/service requirement: Operates a demand-side advertising platform that brands and agencies use to plan, buy, and measure digital ads across connected TV and other channels; Required attribute: Sells a programmatic advertising or ad measurement platform to brands or agencies and trades on a public stock exchange\n\nIntent qualification:\nRequired primary intent (365 days): Launched a new advertising product or major platform capability in the last 12 months, per a press release, product page, or changelog\nOptional bonus intent (365 days): Announced a strategic partnership with a publisher, streaming service, or data provider in the last 12 months, per a press release\nThese intent requirements govern qualification. The primary intent is required; an optional bonus cannot replace it.",
+    "intent_signals": [
+      "Launched a new advertising product or major platform capability in the last 12 months, per a press release, product page, or changelog",
+      "Announced a strategic partnership with a publisher, streaming service, or data provider in the last 12 months, per a press release"
+    ],
+    "country": "United States",
+    "intent_category": "PRODUCT_LAUNCH",
+    "employee_count": [
+      "201-500",
+      "501-1,000",
+      "1,001-5,000",
+      "5,001-10,000",
+      "10,001+"
+    ],
+    "product_service": "Operates a demand-side advertising platform that brands and agencies use to plan, buy, and measure digital ads across connected TV and other channels",
+    "industry": "Advertising",
+    "max_companies": 5,
+    "intent_max_age_days": 365,
+    "geography": "United States, West Coast",
+    "excluded_companies": [
+      "pubmatic.com"
+    ],
+    "bonus_intents": [
+      {
+        "intent_category": "PARTNERSHIP",
+        "intent_max_age_days": 365,
+        "intent_signal": "Announced a strategic partnership with a publisher, streaming service, or data provider in the last 12 months, per a press release"
+      }
+    ],
+    "company_stage": "Public",
+    "sub_industry": "Programmatic Advertising Technology",
+    "icp_position": 6,
+    "baseline_score": null
+  },
+  "company": {
+    "company_linkedin": "https://www.linkedin.com/company/the-trade-desk/",
+    "company_name": "The Trade Desk",
+    "company_stage": "Public",
+    "company_stage_evidence": [
+      {
+        "quote": "| Class A Common Stock, par value $0.000001 per share | | TTD | | The Nasdaq Stock Market LLC |",
+        "url": "https://www.sec.gov/Archives/edgar/data/1671933/000167193326000055/ttd-20260504.htm"
+      }
+    ],
+    "company_website": "http://www.thetradedesk.com/",
+    "country": "United States of America",
+    "employee_count": "1,001-5,000",
+    "industry": "Advertising",
+    "intent_details": "On August 27, 2026, The Trade Desk launched Kokai Zuma, a new release of its Kokai advertising platform with agentic AI capabilities and simplified measurement. Because this request looks for programmatic Advertising Technology companies that launched a new advertising product or major platform capability in the last 12 months, this activity may make The Trade Desk a timely match.",
+    "intent_signals": [
+      {
+        "date": "2026-08-27",
+        "description": "On August 27, 2026, The Trade Desk launched Kokai Zuma, a new release of its Kokai advertising platform with agentic AI capabilities and simplified measurement.",
+        "matched_icp_signal": 0,
+        "url": "https://investors.thetradedesk.com/news-and-events/news/news-details/2026/The-Trade-Desk-Introduces-Kokai-Zuma-the-Latest-Release-of-Kokai/default.aspx"
+      }
+    ],
+    "required_attribute": {
+      "evidence_quote": "Introduced in 2023, Kokai is The Trade Desk’s platform for planning, buying and measuring advertising across the open internet.",
+      "evidence_url": "https://investors.thetradedesk.com/news-and-events/news/news-details/2026/The-Trade-Desk-Introduces-Kokai-Zuma-the-Latest-Release-of-Kokai/default.aspx",
+      "explanation": "The company sells a programmatic advertising platform to advertising buyers: its official release describes Kokai as its platform for planning, buying and measuring advertising across the open internet, while its SEC filing confirms the public TTD listing.",
+      "passed": true,
+      "text": "Sells a programmatic advertising or ad measurement platform to brands or agencies and trades on a public stock exchange"
+    },
+    "state": "CA"
+  },
+  "structured_employee_size_evidence": {
+    "employee_count": "1,001-5,000",
+    "provider": "harvestapi_get_company",
+    "source_field": "employeeCountRange",
+    "url": "https://www.linkedin.com/company/the-trade-desk",
+    "website": "https://thetradedesk.com/"
+  }
+}

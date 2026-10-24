@@ -233,7 +233,7 @@ def test_bulk_round_rpc_waits_for_database_without_changing_other_deadlines(bulk
         else:
             store.transition_round("arena-2026-09-30", "scored", "published", {})
         store.transition_round("arena-2026-09-30", "stage2_judged", "scored", {})
-        transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-2026-09-30"})
+        transport.rpc("lab_arena_whoami", {})
         assert transport.select("lab_arena_rounds") == []
         assert client.timeout == timeout
     assert requests[0].extensions["timeout"] == {
@@ -260,7 +260,7 @@ def test_closed_provider_selector_extends_only_its_read_deadline():
         assert store.next_closed_provider_reconciliation(
             mode="live", network_name="finney", netuid=71
         ) == {"status": "none"}
-        transport.rpc("lab_arena_cancel_round", {"p_round_id": "arena-closed"})
+        transport.rpc("lab_arena_whoami", {})
         assert client.timeout == timeout
 
     assert requests[0].extensions["timeout"] == {
@@ -296,22 +296,27 @@ def test_submission_costs_extends_only_its_read_deadline():
     assert requests[1].extensions["timeout"] == timeout.as_dict()
 
 
-@pytest.mark.parametrize(("function", "timeout_setting"), [
-    ("lab_arena_submission_costs", "SUBMISSION_COSTS_READ_TIMEOUT_SECONDS"),
-    ("lab_arena_next_closed_provider_reconciliation_v1", "CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS"),
-    ("lab_arena_open_scoring", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
-    ("lab_arena_open_scoring_v2", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
-    ("lab_arena_open_scoring_v3", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
-    ("lab_arena_record_run_scores", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS"),
+@pytest.mark.parametrize(("function", "timeout_setting", "closing_stage"), [
+    ("lab_arena_submission_costs", "SUBMISSION_COSTS_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_next_closed_provider_reconciliation_v1", "CLOSED_PROVIDER_RECONCILIATION_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_open_scoring", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_open_scoring_v2", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_open_scoring_v3", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_record_run_scores", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_expire_leases", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_close_stage", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_close_scoring", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_cancel_round", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 2),
+    ("lab_arena_close_stage", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 1),
+    ("lab_arena_close_scoring", "BULK_ROUND_RPC_READ_TIMEOUT_SECONDS", 1),
 ])
-def test_scoped_rpc_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch, function, timeout_setting):
+def test_scoped_rpc_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch, function, timeout_setting, closing_stage):
     # Shortened deadlines exercise the real HTTP read clock without a long test.
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            requests.append(self.path)
-            self.rfile.read(int(self.headers["Content-Length"]))
+            requests.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
             time.sleep(0.25)
             body = b'{"status":"none"}'
             self.send_response(200)
@@ -334,15 +339,24 @@ def test_scoped_rpc_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch,
             "http://127.0.0.1:%d" % server.server_port,
             service_key="sb_secret_test", timeout_seconds=0.1,
         )
+        store = ArenaStore(transport)
+        if function == "lab_arena_close_scoring":
+            operation = lambda: store.close_scoring("arena-2026-10-24", closing_stage)
+        elif function == "lab_arena_close_stage":
+            operation = lambda: store.close_stage("arena-2026-10-24", closing_stage)
+        elif function == "lab_arena_cancel_round":
+            operation = lambda: store.cancel_round("arena-2026-10-24", "test")
+        else:
+            operation = lambda: transport.rpc(function, {})
         try:
-            assert transport.rpc(function, {}) == {"status": "none"}
+            assert operation() == {"status": "none"}
             with pytest.raises(ArenaStoreUnavailable) as ordinary:
-                transport.rpc("lab_arena_cancel_round", {})
+                transport.rpc("lab_arena_whoami", {})
             assert isinstance(ordinary.value.__cause__, httpx.ReadTimeout)
 
             monkeypatch.setattr(arena_store, timeout_setting, 0.1)
             with pytest.raises(ArenaStoreUnavailable) as closed:
-                transport.rpc(function, {})
+                operation()
             assert isinstance(closed.value.__cause__, httpx.ReadTimeout)
         finally:
             transport.close()
@@ -350,6 +364,15 @@ def test_scoped_rpc_waits_for_slow_read_and_does_not_replay_timeout(monkeypatch,
             thread.join(timeout=2)
 
     assert len(requests) == 3
+    if function in {"lab_arena_close_stage", "lab_arena_close_scoring"}:
+        expected = ("/rest/v1/rpc/" + function,
+                    {"p_round_id": "arena-2026-10-24", "p_stage": closing_stage})
+        assert requests[0] == requests[2] == expected
+    elif function == "lab_arena_cancel_round":
+        assert requests[0] == requests[2] == (
+            "/rest/v1/rpc/" + function,
+            {"p_round_id": "arena-2026-10-24", "p_reason": "test"})
+    assert requests[1] == ("/rest/v1/rpc/lab_arena_whoami", {})
 
 
 @pytest.mark.parametrize("error_type", [httpx.ReadTimeout, httpx.ReadError])

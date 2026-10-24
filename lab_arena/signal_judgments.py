@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 from lab_arena import company_judgments, contracts
 from qualification.scoring.signal_judgment_cache import reusable_terminal_judgment
@@ -42,6 +42,7 @@ def build_scope(
     verified_company_identity: Mapping[str, Any],
     verified_funding_stage_context: list[Any], round_id: str, network_name: str,
     netuid: int, scorer_image_digest: str, scorer_image_reference: str,
+    verified_source_pages: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Hash one effective signal; sibling submitted signals never enter its key."""
 
@@ -91,6 +92,10 @@ def build_scope(
                     context_urls.append(url)
         if len(context_urls) > 12:
             raise SignalJudgmentError("funding context is too large")
+    if verified_source_pages is not None and not isinstance(verified_source_pages, Mapping):
+        raise SignalJudgmentError("retained source pages must be a mapping")
+    retained_context = ({"verified_source_pages": _copy(verified_source_pages)}
+                        if verified_source_pages else {})
     input_doc = {
         "schema_version": "leadpoet.lab_arena.signal_judgment_input.v1",
         "buyer_requirements": buyer,
@@ -98,6 +103,7 @@ def build_scope(
         "signal": signal,
         "verified_company_identity": _copy(verified_company_identity),
         "verified_funding_stage_context": _copy(verified_funding_stage_context),
+        **retained_context,
         "scorer_policy": _copy(policy),
     }
     input_hash = _hash(input_doc)
@@ -112,6 +118,7 @@ def build_scope(
         "signal_input_hash": input_hash,
         "verified_company_identity": _copy(verified_company_identity),
         "verified_funding_stage_context": _copy(verified_funding_stage_context),
+        **retained_context,
         "expected_urls": [str(signal.get("url") or "")],
         "expected_context_urls": context_urls,
         "expected_index": matched_index,

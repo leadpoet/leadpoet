@@ -476,7 +476,7 @@ Existing rounds without this field keep 100%; no historical configuration was
 rewritten. Complete ICPs remain subject to the existing strict raw/receipt/route
 checks, and incomplete ICPs stay outside the strict dataset. Confirmed monetary
 costs still control admission; the PR no longer adds pending or uncertain holds.
-The PR migrations now occupy 564–568, after main's 563.
+The final PR migrations occupy 565–570, after main's 564. Earlier test checkpoints below predate that final numbering.
 
 Current reproducible checks:
 
@@ -565,3 +565,49 @@ The E2E runner now requires both stored capture gates as well as strict record
 coverage. A sufficient record count cannot hide invalid source or receipt proof.
 Checkpoint tests also verify matching PostgreSQL dump tools and preserve the
 snapshot before an interrupted readable export.
+
+
+## Final integration checks on current main
+
+The final code checkpoint is `77f6ffe61`, including main `914ee3c32` and its
+baseline-deadline migration 564. PR migrations are 565–570 in numeric order.
+Internal SQL guard markers remain unchanged because they identify the exact
+patch contents. A regression check detects duplicate numbers in the new tail;
+it reproduced two migration-564 files before renumbering.
+
+Checks on the merged checkout passed:
+
+- 254 capture/export/eligibility, E2E acceptance/checkpoint, and real PostgreSQL
+  coverage/publication/schema checks.
+- 40 PostgreSQL migration checks for the $6 cap, review results, champion
+  adoption, catalog binding, and publication eligibility.
+- 92 protocol, completed-call replay, saved-provider probe, frozen-round,
+  coverage, source-review, and telemetry checks.
+- The separate migration-number regression, Python compilation and
+  `git diff --check` passed.
+
+These checks use local PostgreSQL and saved provider artifacts. They do not
+activate the policy or change production. The prior GitHub Actions run
+40161447073 reached its 60-minute timeout; there is still no complete green CI
+run. Earlier main/PR comparisons found common suite failures, as documented
+above. This PR remains a draft, and no merge or deployment is authorized.
+
+
+The final pinned offline readback used clean exporter commit
+`77f6ffe61686250a339781243e6de06c8210cce7`, the unchanged resume-04 dump and all
+758 saved objects. It made zero provider calls. It confirmed 35 candidate and
+44 baseline strict records; 9/10 and 10/10 complete selected research ICPs;
+20 score output hashes and exact score input bindings; 148 unchanged selected
+provider calls; 84/84 model acknowledgements; and 7,581 readable trace events.
+All 20 raw aggregate completeness values remain unchanged. Both separate 80%
+capture assessments pass, while the saved 100% publication remains unchanged.
+
+One old private scorer checker assumed equal breakdown and supplied-judgment
+counts. The actual accepted zero-score intrinsic-skip case has one breakdown,
+zero supplied company judgments and one verifier receipt. The production output
+validator accepts it, and independent checks verified its exact input/output
+hashes. The final private evidence checker reports no comparison errors. Its
+legacy `ready_for_final_review=false` still requires all ten candidate ICPs;
+it is not the new frozen 80% gate. No checker flag was changed to claim that the
+original 100% run passed. The final 80% evidence is an offline assessment plus
+separate real-PostgreSQL publication tests, not a fresh paid 80% round.

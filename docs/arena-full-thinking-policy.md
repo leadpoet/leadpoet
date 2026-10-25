@@ -58,7 +58,7 @@ exposes full thinking. New routes require the same evidence and tests.
 | Requirement | Implemented behavior / required proof |
 | --- | --- |
 | Existing source review | In future full-thinking rounds, the existing paid full-source review also checks reachable model-directed research. Python, custom tools, harnesses, and fixed safety/budget scaffolding remain allowed. Fixed extraction workflows and ignored/post-hoc model calls do not satisfy the requirement. Ambiguous control remains unverified. Store the assessment against the exact source archive and review policy. |
-| Champion data eligibility | After execution, ordinary code reads the selected accepted runs from durable storage. Require complete linked raw evidence and readable full-thinking text on the approved route. A missing or stale source assessment, missing export, truncation, or wrong route prevents champion eligibility; it does not cancel the round or change the measured score. No extra LLM call reviews runtime traces. |
+| Champion data eligibility | After execution, ordinary code reads the selected accepted runs from durable storage. Require complete selected research evidence and readable full-thinking text on the approved route, with exact judge inputs and a verified output/score binding. Raw whole-export completeness remains a separate audit: an attributed judge-only response redaction or unresolved judge charge does not erase exact research data. Missing selected evidence, a stale source assessment, truncation, or a wrong route prevents champion eligibility; it does not cancel the round or change the measured score. No extra LLM call reviews runtime traces. |
 | Central collection | Apply policy before hashing, capture, and budget admission to all execution model calls. Miner, baseline, and subagent calls share the same gateway. Judges retain their policy. |
 | Exact routes | Freeze the reviewed registry in each new round. Pin provider and version expectations. Reject unsupported routes before dispatch. Record returned route mismatches without stopping scoring; exclude them from strict exports. |
 | Tool and JSON continuity | Preserve reasoning fields, signatures, opaque continuation state, tool IDs, ordering, and caller schemas in the live conversation. Validate two tool continuations and strict JSON. Never insert thinking into a JSON answer. |
@@ -69,6 +69,13 @@ exposes full thinking. New routes require the same evidence and tests.
 | $6 cap | Set future execution admission and cost eligibility to $6 per ICP for both miners and baseline. Admission includes actual settled charges plus pending or uncertain holds under the existing database lock. Settlement releases unused room. Historical $4 behavior stays unchanged. |
 | Round continuity | No capture failure or missing text cancels a round or stops publication. Missing activation prerequisites create an ordinary round with a visible `not_ready` reason. No live catalog request is needed to create the round. |
 | Safe activation | Default off. Require a compatible baseline route and a tested immutable baseline source plus digest before activation. Apply only to future unopened rounds. |
+
+The selected research check is shared by champion capture eligibility and strict
+thinking exports. It retains the raw export's completeness and privacy flags.
+Any permitted judge-only gap is listed in the training record's source reference.
+Selected execution requests, observations, receipts, thinking, output, and costs
+must still pass their exactness checks. A literal `[REDACTED]` in an unchanged
+provider response is source text; an actual capture redaction is an evidence gap.
 
 The output allowance is a tested total-token envelope. An effort setting is not
 a hard thinking-token budget and cannot guarantee a final answer fits. Truncated

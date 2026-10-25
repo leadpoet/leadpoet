@@ -1,5 +1,46 @@
 # Draft PR verification — 2026-10-23
 
+## Resumed verification — selected research and literal markers
+
+The October 24 resumed audit found two false exclusions in the strict data path.
+First, an unrelated judge response redaction or unresolved judge charge could
+exclude an otherwise exact research trajectory. Champion eligibility, strict
+thinking export, and readiness now share one selected-research check. It requires
+exact research inputs, observations, receipts, outputs, costs, and their binding
+to the accepted judge input and output. The original whole-export completeness
+and privacy flags remain unchanged. Permitted judge-only gaps are disclosed in
+each strict record. Selected research gaps still reject eligibility.
+
+Second, literal `[REDACTED]` text supplied by a provider was treated as evidence
+that capture had removed a secret. The checks now use capture provenance and
+hashes. The sanitizer also keeps complete, already-redacted values byte-exact.
+Real credentials attached to marker text are still removed. Independent checks
+covered 17 attached-marker credential forms and six safe standalone controls.
+Readable thinking and summaries retain unchanged marker text; actual capture
+redactions still exclude strict thinking and champion eligibility.
+
+The new positive regression cases failed before their respective fixes. The
+resumed focused capture, export, readiness, and eligibility run passed 296 tests.
+The real PostgreSQL publication, promotion/next-baseline, schema-tail, $6 limit,
+policy-off protocol, and completed-call replay checks passed 37 tests. A later
+independent check of literal thinking text and real redaction rejection passed
+154 focused tests. These test counts overlap and are not a unique total.
+
+A fresh paid candidate-and-baseline run uses a clean frozen checkout and the
+Reflection route. It remains separate from the older DeepSeek evidence below.
+Its final outcome must be read from the recorded end-to-end result; the unit
+checks in this section do not establish live end-to-end success.
+
+Independent CI comparison checked PR run `40151558411` at `f3443cc4e` against
+main run `40153179357` at `2b6c490a0`. Both hit the 60-minute limit near 35% of
+the suite. All 225 failures observed in that PR run also failed in the main run;
+137 cases reached only in the PR run passed. Three representative failures
+reproduced on both code lines, including a legacy database fixture that stops
+before migration 474 but calls a function introduced there. No PR-specific
+failure was observed in the tests that ran. This does not establish complete CI
+readiness: the remaining tests were not reached. The relevant publication and
+current-schema cases were run separately in the local PostgreSQL checks above.
+
 Scope: [implementation policy](arena-full-thinking-policy.md). The base was
 `origin/main` at `09bc088ea`. The implementation is isolated from the user's dirty
 checkout. No merge, deployment, restart, production SQL, round mutation, or model

@@ -189,8 +189,9 @@ _CREDENTIAL_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Broker-internal only: the observed Firecrawl envelope was 5,271,155 bytes.
 # The requested Scrapingdog-compatible response keeps its existing 2 MiB cap.
 _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
-# Completed key lookups include the original Firecrawl response envelope.
-_DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES = _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES + 16_384
+# Billing-only key lookups include the saved response envelope. Keep the
+# scorer's accepted Firecrawl envelope at 16 MiB; this bounded GET can be larger.
+_DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES = 32 * 1024 * 1024
 # Documented post-mortem billing identity:
 # https://openrouter.ai/docs/guides/features/router-metadata#error-responses
 _OPENROUTER_GENERATION_HEADER = "x-generation-id"

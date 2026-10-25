@@ -2300,6 +2300,90 @@ def test_routed_firecrawl_settles_large_envelope_and_returns_bounded_html(
     }
 
 
+def test_oversized_firecrawl_keyed_billing_lookup_recovers_exact_charge_without_post():
+    """A billing GET may inspect a larger saved envelope than the scorer accepts."""
+    key = "arena:" + "a" * 64
+    request_id = "iad1::oversized-firecrawl-billing"
+    saved = {"job_id": request_id, "status": "completed",
+             "result": {"data": {"rawHtml": "<html>public source</html>"}}}
+    by_key = {"executionRecovery": {"idempotencyKey": key, "state": "completed"},
+              "requestId": request_id, "toolId": "firecrawl_scrape",
+              "responseStatus": 200, "response": saved, "padding": ""}
+    encoded = json.dumps(by_key, separators=(",", ":")).encode()
+    by_key["padding"] = "x" * (21_215_011 - len(encoded))
+    encoded = json.dumps(by_key, separators=(",", ":")).encode()
+    assert len(encoded) == 21_215_011
+    billing = deepline_history(deepline_history_entry(
+        request_id, "firecrawl_scrape", 0.02, provider="firecrawl"))
+    billing["recent"]["request_id"] = request_id
+    billing["recent"]["entries"][0].update(id="usage-oversized-firecrawl",
+                                           charge_finality="final")
+
+    class BoundedGetOnly:
+        def __init__(self):
+            self.routes = []
+
+        def send(self, **kwargs):
+            assert kwargs["method"] == "GET"
+            if kwargs["url"].startswith(br.DEEPLINE_EXECUTION_BY_KEY_URL):
+                self.routes.append("by_key")
+                if len(encoded) > kwargs["max_response_bytes"]:
+                    raise br.ProviderTransportError("bounded keyed lookup")
+                return br.ProviderResponse(
+                    200, {"x-deepline-idempotency-supported": "true"}, encoded)
+            assert kwargs["url"].startswith(br.DEEPLINE_EXACT_BILLING_URL)
+            assert parse_qs(urlparse(kwargs["url"]).query)["request_id"] == [request_id]
+            self.routes.append("exact_bill")
+            return br.ProviderResponse(200, {}, json.dumps(billing).encode())
+
+    transport = BoundedGetOnly()
+    recovered_id, cost = br._deepline_exact_readback(
+        transport=transport, secret="offline-key", request_id=None,
+        execution_key=key, operation="firecrawl_scrape", provider="firecrawl",
+        operation_aliases=("scrape",), reconciliation_deadline=time.monotonic() + 10,
+        poll=False, lookup_max_response_bytes=br._DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES)
+    assert recovered_id == request_id
+    assert cost is not None and cost.microusd == 2000
+    assert transport.routes == ["by_key", "exact_bill"]
+
+
+@pytest.mark.parametrize("too_large,wrong_key", [(True, False), (False, True)])
+def test_oversized_firecrawl_billing_lookup_fails_closed(too_large, wrong_key):
+    key = "arena:" + "a" * 64
+    by_key = {"executionRecovery": {
+        "idempotencyKey": "arena:" + "b" * 64 if wrong_key else key,
+        "state": "completed"},
+        "requestId": "iad1::oversized-firecrawl-billing",
+        "toolId": "firecrawl_scrape", "responseStatus": 200, "padding": ""}
+    target_bytes = (32 * 1024 * 1024 + 1) if too_large else 21_215_011
+    base = json.dumps(by_key, separators=(",", ":")).encode()
+    by_key["padding"] = "x" * (target_bytes - len(base))
+    encoded = json.dumps(by_key, separators=(",", ":")).encode()
+    assert len(encoded) == target_bytes
+
+    class BoundedGetOnly:
+        def __init__(self):
+            self.routes = []
+
+        def send(self, **kwargs):
+            assert kwargs["method"] == "GET"
+            assert kwargs["url"].startswith(br.DEEPLINE_EXECUTION_BY_KEY_URL)
+            self.routes.append("by_key")
+            if len(encoded) > kwargs["max_response_bytes"]:
+                raise br.ProviderTransportError("bounded keyed lookup")
+            return br.ProviderResponse(
+                200, {"x-deepline-idempotency-supported": "true"}, encoded)
+
+    transport = BoundedGetOnly()
+    recovered_id, cost = br._deepline_exact_readback(
+        transport=transport, secret="offline-key", request_id=None,
+        execution_key=key, operation="firecrawl_scrape", provider="firecrawl",
+        operation_aliases=("scrape",), reconciliation_deadline=time.monotonic() + 10,
+        poll=False, lookup_max_response_bytes=br._DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES)
+    assert recovered_id is None and cost is None
+    assert transport.routes == ["by_key"]
+
+
 @pytest.mark.parametrize(
     "provider_body",
     (b"<html>ordinary provider content</html>", b'{"text":"\\ud800"}'),

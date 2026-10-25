@@ -238,7 +238,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         # Clean URL secrets before a credential match can remove its scheme.
         # These existing token matchers must see text across URL boundaries.
         text = _URL_RE.sub(clean_url, text)
-        text = trajectory._BEARER_RE.sub("[REDACTED]", text)
+        text = trajectory._redact_auth_schemes(text)
         text = trajectory._BARE_API_KEY_RE.sub("[REDACTED]", text)
         if not _URL_RE.search(text):
             return redact(text)

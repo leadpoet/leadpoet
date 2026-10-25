@@ -8,6 +8,7 @@ active lease.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import math
 import re
@@ -32,6 +33,9 @@ _SENSITIVE_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
+_AUTH_HEADER_PREFIX_RE = re.compile(
+    r"(?i)\b(?:proxy[-_ ]?authorization|authorization)\s*[:=]\s*['\"]?\s*$"
+)
 _KEY_VALUE_RE = re.compile(
     r"(?i)\b(api[-_ ]?key|authorization|password|secret|access[-_ ]?token|"
     r"refresh[-_ ]?token|lease[-_ ]?token)\s*[:=]\s*([^\s,;]{4,})"
@@ -66,6 +70,25 @@ class TrajectoryError(ValueError):
     """One trajectory event violated the bounded private contract."""
 
 
+def _redact_auth_schemes(text: str) -> str:
+    """Keep ordinary Basic prose while masking credentials and auth headers."""
+
+    def replace(match: re.Match[str]) -> str:
+        scheme, token = match.group().split(None, 1)
+        if scheme.lower() == "basic" and token.isalpha():
+            try:
+                decoded = base64.b64decode(token, validate=True)
+            except (ValueError, binascii.Error):
+                decoded = b""
+            if (b":" not in decoded
+                    and not _AUTH_HEADER_PREFIX_RE.search(text[:match.start()])
+                    and not text[match.end():].startswith("://")):
+                return match.group()
+        return "[REDACTED]"
+
+    return _BEARER_RE.sub(replace, text)
+
+
 def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = True) -> str:
     """Redact exact known secrets and common credential forms from one stream."""
 
@@ -84,7 +107,7 @@ def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = T
         ),
         text,
     )
-    text = _BEARER_RE.sub("[REDACTED]", text)
+    text = _redact_auth_schemes(text)
     text = _KEY_VALUE_RE.sub(lambda match: "%s=[REDACTED]" % match.group(1), text)
     text = _BARE_API_KEY_RE.sub("[REDACTED]", text)
     return text

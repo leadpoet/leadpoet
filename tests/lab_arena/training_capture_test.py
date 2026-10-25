@@ -181,6 +181,37 @@ def test_public_url_mask_does_not_create_a_false_bearer_credential(label):
     assert capture.sanitize_training_value(value) == (value, [])
 
 
+@pytest.mark.parametrize("sentence", [
+    "Basic information about the company is public.",
+    "The Basic requirements are listed in the report.",
+    "A basic understanding of the market helps the reader.",
+])
+def test_public_basic_prose_is_not_a_credential(sentence):
+    assert trajectory.redact_text(sentence) == sentence
+    assert capture.sanitize_training_value(sentence) == (sentence, [])
+
+
+def test_real_auth_and_signed_url_still_redact_around_basic_prose():
+    value = ("Basic information is public. "
+             "Authorization: Basic dXNlcjpwYXNz "
+             "Bearer opaque-bearer-secret "
+             "https://example.test/file?X-Amz-Signature=private-signature")
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert cleaned.startswith("Basic information is public. ")
+    assert reasons == ["credential"]
+    for secret in ("dXNlcjpwYXNz", "opaque-bearer-secret", "private-signature"):
+        assert secret not in cleaned
+    assert capture.sanitize_training_value(cleaned) == (cleaned, [])
+
+
+def test_explicit_auth_header_redacts_nonstandard_basic_token():
+    value = "Authorization: Basic opaquealphabetictoken"
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert reasons == ["credential"]
+    assert "opaquealphabetictoken" not in cleaned
+    assert "opaquealphabetictoken" not in trajectory.redact_text(value)
+
+
 @pytest.mark.parametrize("prefix", ["sk-01234567890", "sk-or-v1-abc12345", "Bearer abc", "Basic abc"])
 @pytest.mark.parametrize("tail", [
     "example.com/path", "example.com/path?token=private-value#;fragment",

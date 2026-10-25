@@ -27,11 +27,8 @@ from lab_arena.proxy_workers import (
     VerifiedProxyWorker,
     VerifiedProxyWorkerInventory,
 )
-from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
-)
 from tests.lab_arena.successful_call_cost_round_test import CostHarness
+from tests.lab_arena.test_integrity_round import IntegrityHarness
 from tests.lab_arena.test_lab_arena_service_round import _start_round, keypair
 
 
@@ -49,7 +46,26 @@ def bounded_socket_shutdown_poll(monkeypatch):
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    # Current full-flow coverage needs the deployed claim and scoring helpers.
+    # Reuse the descendant builder without changing historical migration tests.
+    # Providers, verified exits and the sandbox boundary remain controlled here.
+    from tests.lab_arena import company_judgment_validation_projection548_postgres_test as current_schema
+
+    generator = current_schema.database.__wrapped__()
+    db = next(generator)
+    try:
+        with db[0].connect(**db[1]) as connection, connection.cursor() as cursor:
+            for migration in (
+                "548-lab-arena-company-judgment-validation-projection.sql",
+                "551-lab-arena-expire-leases-shared-round-lock.sql",
+                "552-lab-arena-expiry-recovery-candidate-locks.sql",
+                "564-lab-arena-baseline-deadline-transition.sql",
+                "572-lab-arena-concurrent-baseline-judging.sql",
+            ):
+                cursor.execute((Path(__file__).parents[2] / "scripts" / migration).read_text())
+        yield db
+    finally:
+        generator.close()
 
 
 def _proxy_pool(process_capacity: int) -> ProxyWorkerPool:
@@ -82,6 +98,8 @@ def _register_external_validator(harness: CostHarness, label: str):
     harness.chain.permits[key.ss58_address] = True
     harness.chain.stakes[key.ss58_address] = 100_000.0
     harness.chain.active[key.ss58_address] = False
+    if key.ss58_address not in harness.runner_keys:
+        harness.runner_keys.append(key.ss58_address)
     return key
 
 
@@ -372,7 +390,10 @@ def _run_published_case(
     sequential: bool,
 ) -> tuple[dict, int, int, str, list[dict]]:
     root.mkdir(parents=True, exist_ok=True)
-    harness = CostHarness(
+    class IntegrityCostHarness(CostHarness, IntegrityHarness):
+        """Keep controlled paid transport with the current scoring contract."""
+
+    harness = IntegrityCostHarness(
         connect,
         root,
         challengers=["ParallelCandidate"],
@@ -382,6 +403,7 @@ def _run_published_case(
         harness.service.config.defaults,
         runner_slot_ceiling=local_capacity,
         parallel_twenty_icp_execution=True,
+        integrity_from="2000-01-01T00:00:00Z",
     )
     participants = _start_round(harness, day=day, epoch=epoch)
     assert participants == 2
@@ -494,12 +516,18 @@ def _run_published_case(
 
 
 def test_real_parallel_runtime_matches_sequential_score_publication_and_cost(
-    database, tmp_path
+    database, tmp_path, monkeypatch
 ):
     """Ten and twenty workers preserve all outputs, scores, costs, and retry isolation."""
 
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
+    from tests.lab_arena import test_lab_arena_service_round as fixtures
+    from tests.lab_arena.baseline_scored_first_postgres_test import _baseline_first_judge
+
+    # Current publication requires scope-bound accepted judges. Keep the
+    # deterministic scorer controlled while using real integrity/cache paths.
+    monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
     sequential, sequential_high_water, calls, _expired, _runs = _run_published_case(
         connect,
         tmp_path / "sequential",

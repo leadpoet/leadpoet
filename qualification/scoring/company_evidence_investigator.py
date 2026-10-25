@@ -732,7 +732,22 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "old_domain": {"type": "string"},
                                 "new_domain": {"type": "string"},
                                 "shared_linkedin_slug": {"type": "string"},
-                                "reason": {"type": "string"},
+                                "reason": {
+                                    "type": "string",
+                                    **({"description": (
+                                        "For industry, account for the full requested_product_service, "
+                                        "not only the broad industry or required_attribute. Identify "
+                                        "which mandatory capabilities, channels and shared qualifiers "
+                                        "are proved or missing. Preserve explicit AND/OR; examples "
+                                        "introduced by 'such as' are illustrative. An OR in "
+                                        "required_attribute cannot remove a product/service AND. "
+                                        "Use all loaded company-bound evidence; capabilities may be "
+                                        "proved across pages and need not use identical marketing "
+                                        "wording or appear in one quote. Keep each citation exact and "
+                                        "continuous. If a mandatory capability is unproved, industry "
+                                        "is UNPROVEN even if the separate attribute is proved."
+                                    )} if "industry" in requested_targets else {}),
+                                },
                             },
                             "required": [
                                 "target", "status", "observed_value",

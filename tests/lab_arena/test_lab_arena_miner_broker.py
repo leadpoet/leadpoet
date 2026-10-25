@@ -415,7 +415,11 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     terminal = ledger.calls[result.call["call_identity"]]["terminal"]
     assert set(terminal) == {
         "status", "headers", "body_b64", "call_succeeded", "provider_cost",
+        "transport_elapsed_ms", "timing_scope",
     }
+    assert type(terminal["transport_elapsed_ms"]) is int
+    assert 0 <= terminal["transport_elapsed_ms"] <= 3_600_000
+    assert terminal["timing_scope"] == "initial_provider_transport_send"
     assert terminal["call_succeeded"] is True
     assert terminal["provider_cost"] == {
         "basis": "deepline_billing_credits_charged_x_0.10_usd",
@@ -437,6 +441,7 @@ def test_miner_score_scrape_preserves_only_the_validated_final_url_on_replay():
     )
     assert replay.headers[operations.TRUSTED_RESPONSE_URL_HEADER] == final_url
     assert replay.call["idempotent"] is True
+    assert ledger.calls[result.call["call_identity"]]["terminal"] == terminal
     assert [call["method"] for call in transport.sent] == ["POST"]
 
 

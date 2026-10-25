@@ -457,6 +457,20 @@ def _next_message(body, turn, operation_id, spec):
     return response, []
 
 
+def _legacy_chat_diagnostic_continuation(continuation):
+    """Keep tool history while using the policy-off Chat request shape."""
+    projected = copy.deepcopy(continuation)
+    for message in projected:
+        if message.get("role") == "assistant":
+            for field in ("reasoning", "reasoning_content", "reasoning_details", "refusal"):
+                message.pop(field, None)
+            if message.get("content") is None:
+                message["content"] = ""
+            for call in message.get("tool_calls") or []:
+                call.pop("index", None)
+    return projected
+
+
 def _valid_final(value, expected):
     return (isinstance(value, dict) and set(value) == set(expected)
             and value["company"] == expected["company"]
@@ -731,6 +745,8 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                 reserved_uncertain -= per_call
                 spent += cost
             _, continuation = _next_message(result.body, turn, operation_id, spec)
+            if mode == "summary_diagnostic" and operation_id == "openrouter.chat":
+                continuation = _legacy_chat_diagnostic_continuation(continuation)
             messages.extend(continuation)
         protocol_complete = len(outcomes) == 3 and all(
             row["status"] == 200 and row["outcome"] == "settled" for row in outcomes)

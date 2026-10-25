@@ -192,8 +192,30 @@ def test_summary_only_candidate_stays_diagnostic(tmp_path):
     assert all(json.loads(item["body"])["provider"]["only"] == [candidate["provider"]]
                and json.loads(item["body"])["provider"]["allow_fallbacks"] is False
                for item in transport.sent)
+    assert len(transport.sent) == 3
+    for sent in transport.sent[1:]:
+        history = json.loads(sent["body"])["messages"]
+        assert any(item["role"] == "tool" for item in history)
+        assert any(item["role"] == "assistant" and item.get("tool_calls") for item in history)
+        assert all(not ({"reasoning", "reasoning_content", "reasoning_details", "refusal"}
+                        & item.keys()) for item in history if item["role"] == "assistant")
     export = json.loads((tmp_path / "evidence/diagnostic-export.json").read_text())
     assert all("reasoning_capture" not in call for call in export["provider_calls"])
+
+
+def test_summary_diagnostic_history_projection_preserves_tool_identity():
+    continuation = [{"role": "assistant", "content": None,
+                     "reasoning_details": [{"type": "reasoning.summary", "summary": "brief"}],
+                     "tool_calls": [{"id": "call-1", "index": 0, "type": "function",
+                                     "function": {"name": "lookup_evidence", "arguments": "{}"}}]},
+                    {"role": "tool", "tool_call_id": "call-1", "content": "evidence"}]
+    projected = harness._legacy_chat_diagnostic_continuation(continuation)
+    assert projected == [{"role": "assistant", "content": "",
+                          "tool_calls": [{"id": "call-1", "type": "function",
+                                          "function": {"name": "lookup_evidence", "arguments": "{}"}}]},
+                         continuation[1]]
+    assert continuation[0]["reasoning_details"]
+    assert continuation[0]["content"] is None
 
 
 def test_responses_summary_only_candidate_stays_diagnostic(tmp_path):

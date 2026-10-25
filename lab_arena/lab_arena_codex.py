@@ -270,8 +270,7 @@ def _dispatch(
     status = response.get("status")
     if type(status) is not int or not 100 <= status <= 599:
         raise CodexRuntimeError("invalid worker status")
-    body = base64.b64decode(response["body_b64"], validate=True)
-    return status, body
+    return status, base64.b64decode(response["body_b64"], validate=True)
 
 
 def _chunk_tool_output_text(parameters: dict[str, Any]) -> dict[str, Any]:

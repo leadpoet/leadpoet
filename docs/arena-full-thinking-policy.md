@@ -101,7 +101,12 @@ must still have at least one admissible full-thinking training target.
 A verified failed provider attempt has no training target and does not enter
 the token numerator or denominator. A verified truncated reply also loses only
 its own target and is excluded from both token counts. Other independently
-reconstructable calls can remain. If no full target survives, the ICP is
+reconstructable calls can remain. The new policy also omits a tool-call target
+when its verified output usage exactly reaches its requested cap and its JSON
+arguments end unfinished at EOF, even if the provider labels it completed. The
+report labels this inference; it never repairs the JSON or waives other evidence
+checks. Raw exposed text remains saved and separate from usable-target counts.
+If no full target survives, the ICP is
 incomplete. An ICP above its frozen missing-token limit is also incomplete.
 At least **80%** of selected ICPs must be complete, rounded up. An incomplete
 ICP contributes no strict training records; its measured score still counts.
@@ -166,11 +171,11 @@ user has accepted this tradeoff.
 - Only the exact DeepSeek/Fireworks Responses route is approved. The existing
   broker uses completed upstream responses; this PR does not add arbitrary
   upstream streaming support. Existing buffered Codex SSE behavior is preserved.
-  Provider-side Responses web search remains unapproved. Local native tests used
-  an installed Codex version rather than the exact requested TYCHE runtime, and
-  did not complete a scored or published workflow. Ten observed native calls
-  exposed full text with 1,759 reported reasoning tokens and no observed missing
-  text; that small sample does not validate the 1% setting or prove readiness.
+  Provider-side Responses web search remains unapproved. The latest native test
+  uses TYCHE's exact Codex 0.154.0 version, with the substitutions listed in the
+  verification report. It does not prove a scored or published TYCHE workflow.
+  Observed native token coverage supports keeping the provisional 1% setting;
+  the small sample does not establish the best threshold or production readiness.
 - Keeping ZDR worked for all seven approved routes. Relaxing retention does not
   turn provider-withheld thinking into readable text. No privacy relaxation is
   included.

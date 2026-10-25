@@ -97,6 +97,11 @@ jobs:
             tests/lab_arena/training_capture_test.py \
             tests/lab_arena/trajectory_test.py \
             tests/lab_arena/training_steps_test.py \
+            tests/lab_arena/training_host_result_test.py \
+            tests/lab_arena/training_call_semantics_test.py \
+            tests/lab_arena/training_related_host_result_test.py \
+            tests/lab_arena/training_cap_eof_test.py \
+            tests/lab_arena/full_thinking_continuation_limit_test.py \
             tests/lab_arena/training_eligibility_test.py \
             tests/lab_arena/training_mixed_thinking_coverage_test.py \
             tests/lab_arena/training_storage_availability_test.py \

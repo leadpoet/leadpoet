@@ -187,6 +187,7 @@ def validate_coverage(
     citation_rejection: Callable[[str, str], str | None],
     product_plan: TrustedProductPlan | None = None,
     whole_criterion_status: str | None = None,
+    rejected_citation_sink: list[dict] | None = None,
 ) -> ValidatedProductCoverage:
     raw = _decode(raw)
     if not plan_matches(product_plan, criterion):
@@ -221,6 +222,9 @@ def validate_coverage(
             rejection = citation_rejection(binding["url"], binding["quote"])
             if rejection:
                 reasons.append(rejection)
+                if rejected_citation_sink is not None:
+                    rejected_citation_sink.append({"claim_id": key, **dict(binding), "reason": rejection,
+                                                   "submitted_status": claim["status"]})
             else:
                 evidence.append(dict(binding))
         if status in {"VERIFIED", "CONTRADICTED"} and not evidence:

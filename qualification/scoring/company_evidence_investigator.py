@@ -1203,6 +1203,14 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
                     document.pop(key, None)
                 break
         if not removed:
+            coverage = document.get("product_coverage")
+            repairs = coverage.get("untrusted_citation_repairs") if isinstance(coverage, dict) else None
+            if isinstance(repairs, list) and repairs:
+                # Drop an optional suggestion whole; never turn a contiguous
+                # candidate into a partial quote or trim frozen obligations.
+                repairs.pop()
+                removed = True
+        if not removed:
             break
     if len(encode()) > message_limit:
         raise ValueError("investigation_message_metadata_too_large")
@@ -1371,6 +1379,92 @@ def _source_context_for_quote(quote: str, fetched_text: str) -> str:
         REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS
         + REJECTED_QUOTE_CONTEXT_AFTER_CHARACTERS
     )]
+
+
+def _untrusted_contiguous_quote_candidate(
+    quote: str, fetched_text: str, identity_names: set[str],
+) -> str:
+    """Suggest original page text only; never an identity or activity decision."""
+    page = _visible_quote_surface(fetched_text)
+    if not _quote_occurs(quote, page):
+        return ""
+    parts = _surface_span(quote).split()
+    if not parts:
+        return ""
+    quote_spans = list(re.finditer(r"\s+".join(re.escape(p) for p in parts), page, re.I))[:32]
+    if not quote_spans:
+        return ""
+    words = list(re.finditer(r"[^\W_]+", page))
+    names = {name for name in identity_names if 2 <= len(name) <= 200}
+    longest = max(map(len, names), default=0)
+    name_spans = []
+    for start in range(len(words)):
+        key = ""
+        for end in range(start, len(words)):
+            if end > start and not re.fullmatch(
+                r"[\s&\-\u2010-\u2015]+",
+                page[words[end - 1].end():words[end].start()],
+            ):
+                break
+            key += words[end].group().casefold()
+            if len(key) > longest:
+                break
+            if key in names:
+                name_spans.append((words[start].start(), words[end].end()))
+    best = None
+    for span in quote_spans:
+        for name_start, name_end in name_spans:
+            start, end = min(span.start(), name_start), max(span.end(), name_end)
+            if end - start <= 2000:
+                candidate = (end - start, start, end)
+                if best is None or candidate < best:
+                    best = candidate
+    if best is None:
+        return ""
+    _, start, end = best
+    return page[start:end]
+
+
+def _untrusted_product_citation_repairs(
+    rejected: Sequence[Mapping[str, Any]], *, fetched_pages: Mapping[str, str],
+    fetched_final_urls: Optional[Mapping[str, str]], first_party_domains: set[str],
+    identity_names: set[str],
+) -> list[dict[str, Any]]:
+    """At most three bounded suggestions, outside the validated proof object."""
+    contexts = []
+    for binding in rejected:
+        url = _safe_https_url(binding.get("url"))
+        final_url = (fetched_final_urls or {}).get(url, "")
+        domain = _registrable_domain(url)
+        page = fetched_pages.get(url, "")
+        if (not page or domain not in first_party_domains
+                or _registrable_domain(final_url) != domain):
+            continue
+        quote = str(binding.get("quote") or "")
+        reason = str(binding.get("reason") or "")
+        if reason != "source quote did not identify the investigated company":
+            continue
+        candidate = _untrusted_contiguous_quote_candidate(quote, page, identity_names)
+        if not candidate:
+            continue
+        contexts.append({
+            "claim_id": str(binding.get("claim_id") or "")[:32], "source_url": url[:2000],
+            "rejection": reason[:300], "untrusted_source_context": _source_context_for_quote(quote, page)[:800],
+            "untrusted_suggested_quote": candidate,
+            "instruction": "Context only, not proof. Rejudge company, product and supplier/customer/parent role; "
+                           "submit an exact quote only if the original criterion is supported. Normal guards still apply.",
+        })
+        if len(contexts) == 3:
+            break
+    return contexts
+
+
+def _strip_untrusted_product_feedback(claims: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Keep correction hints out of the validated result packet."""
+    for finding in claims.values():
+        finding.pop("untrusted_product_citation_repairs", None)
+        finding.pop("product_positive_citation_rejected", None)
+    return claims
 
 
 def _registrable_domain(value: Any) -> str:
@@ -3791,11 +3885,13 @@ def _validated_findings(
                     checked.get("reason") or "product citation was not admitted"
                 )
 
+            rejected_product_citations: list[dict[str, Any]] = []
             try:
                 coverage = validate_coverage(
                     raw.get("product_coverage"), criterion=requested_product_service,
                     citation_rejection=reject_product_citation,
                     product_plan=product_plan, whole_criterion_status=raw.get("status"),
+                    rejected_citation_sink=rejected_product_citations,
                 )
                 finding["product_coverage"] = coverage
                 if finding["status"] == "VERIFIED" and coverage["status"] != "VERIFIED":
@@ -3804,6 +3900,16 @@ def _validated_findings(
                 finding["product_coverage_error"] = str(exc)
                 if finding["status"] == "VERIFIED":
                     finding.update(status="UNPROVEN", reason=str(exc)[:300])
+            if rejected_product_citations:
+                finding["untrusted_product_citation_repairs"] = _untrusted_product_citation_repairs(
+                    rejected_product_citations, fetched_pages=fetched_pages,
+                    fetched_final_urls=fetched_final_urls, first_party_domains=first_party_domains,
+                    identity_names=attribution_names,
+                )
+                finding["product_positive_citation_rejected"] = any(
+                    binding["submitted_status"] in {"VERIFIED", "CONTRADICTED"}
+                    for binding in rejected_product_citations
+                )
             if finding["status"] == "UNPROVEN":
                 finding.update(evidence_url="", evidence_quote="", observed_industry="",
                                observed_subindustry="", activity_role="unresolved")
@@ -3870,6 +3976,9 @@ def _submitted_finding_rejection(
     submitted: Mapping[str, Any], finding: Mapping[str, Any]
 ) -> Optional[str]:
     status = submitted.get("status")
+    if (status == "UNPROVEN" and finding.get("target") == "industry"
+            and finding.get("product_positive_citation_rejected")):
+        return "positive product clause citation failed source validation"
     if (finding.get("target") == "industry"
             and isinstance(finding.get("product_coverage_error"), str)
             and finding["product_coverage_error"]):
@@ -4798,7 +4907,7 @@ async def investigate_company_evidence(
                     diagnostic, ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
                 )
                 return {
-                    "claims": claims,
+                    "claims": _strip_untrusted_product_feedback(claims),
                     "_completed_submit": False,
                     # Only a previously validated stage can carry this
                     # server-only receipt across an interrupted correction.
@@ -5705,16 +5814,18 @@ async def investigate_company_evidence(
                             "rejected_findings": rejected,
                             **({"product_coverage": {
                                 "plan_id": product_plan.plan_id if product_plan else "",
-                                "requirements": product_plan.nodes if product_plan else [],
+                                "allowed_claim_ids": [node["id"] for node in product_plan.nodes
+                                                      if node["op"] == "leaf"] if product_plan else [],
                                 "unresolved_ids": (product_coverage or {}).get("unresolved_ids", []),
                                 "unresolved_clauses": [
                                     {"id": node["id"], "requirement": (requested_product_service
                                         if node["id"] == "p0" and (product_coverage or {}).get("whole_criterion_gap")
-                                        else node["text"])}
+                                        else node["text"])[:200]}
                                     for node in (product_coverage or {}).get("nodes", [])
                                     if node["id"] in (product_coverage or {}).get("unresolved_ids", [])
                                 ],
                                 "citation_issues": (product_coverage or {}).get("citation_issues", {}),
+                                "untrusted_citation_repairs": industry_finding.get("untrusted_product_citation_repairs", []),
                                 "error": str(industry_finding.get("product_coverage_error", ""))[:300],
                             }} if (product_plan is not None
                                    or industry_finding.get("product_coverage_error")) else {}),
@@ -6075,7 +6186,7 @@ async def investigate_company_evidence(
                         if failure_reason:
                             _record_failure(diagnostic, failure_reason)
                         return {
-                            "claims": claims,
+                            "claims": _strip_untrusted_product_feedback(claims),
                             "_completed_submit": not failure_reason,
                             "_checked_source_provenance": (
                                 checked_source_provenance(

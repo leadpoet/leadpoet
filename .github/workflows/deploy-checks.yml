@@ -98,10 +98,13 @@ jobs:
             tests/lab_arena/trajectory_test.py \
             tests/lab_arena/training_steps_test.py \
             tests/lab_arena/training_eligibility_test.py \
+            tests/lab_arena/training_mixed_thinking_coverage_test.py \
+            tests/lab_arena/training_storage_availability_test.py \
             tests/lab_arena/training_thinking_test.py \
             tests/lab_arena/training_eligibility_publication_test.py \
             tests/lab_arena/public_dashboard_cost_policy_test.py \
             tests/lab_arena/typed_investigator_fallback_test.py \
+            tests/lab_arena/exa_contents_outer_status_test.py \
             tests/test_investigator_source_access_denied.py \
             tests/test_arena_reviewer_source_access_seam.py \
             tests/test_arena_reviewer_source_blocked_seam.py \

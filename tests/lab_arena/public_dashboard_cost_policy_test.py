@@ -213,6 +213,22 @@ def test_training_coverage_failure_retains_reason_and_public_counts():
     assert "must not publish" not in str(baseline)
 
 
+
+def test_training_output_read_gap_remains_visible_at_historical_full_coverage():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    ranking["training_data_eligibility"] = {
+        "eligible": False, "reasons": ["accepted_output_unavailable"],
+        "capture": {"eligible": False, "reasons": ["accepted_output_unavailable"],
+                    "counts": {"complete_runs": 9, "incomplete_runs": 1,
+                               "minimum_coverage_percent": 100}},
+    }
+    result = public_dashboard.round_summary(row)["baseline"]["training_data_eligibility"]
+    assert result["reasons"] == ["accepted_output_unavailable"]
+    assert result["capture"]["reasons"] == ["accepted_output_unavailable"]
+
+
 def test_new_policy_projection_rejects_incomplete_successful_call_counters():
     row = _published_row(policy=True)
     ranking = row["publication_doc"]["final_ranking"][0]

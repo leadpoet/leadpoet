@@ -18,7 +18,7 @@ from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,
 )
 from tests.lab_arena.test_integrity_round import IntegrityHarness
-from tests.lab_arena.training_eligibility_test import captured_example, _unsettled_selected_call
+from tests.lab_arena.training_eligibility_test import captured_example, _unsettled_selected_call, refresh_response_links
 from tests.lab_arena.training_steps_test import seal
 from tests.lab_arena.test_lab_arena_service_round import daily_icps
 
@@ -38,14 +38,18 @@ def _rename_run(value, run_id):
 
 
 @pytest.mark.parametrize("missing,expected_eligible,gap", [
-    (2, True, "missing"), (3, False, "missing"),
+    (2, False, "missing"), (3, False, "missing"),
     (2, True, "unsettled"), (3, False, "unsettled"),
     (2, False, "integrity"),
+    (2, True, "mixed_thinking"), (3, False, "mixed_thinking"),
 ])
 def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
     database, tmp_path, monkeypatch, missing, expected_eligible, gap,
 ):
     psycopg2, dsn = database
+    # Each parameter owns a fresh database, so it must own its object store too.
+    # The next round within this case still shares the same stored evidence.
+    monkeypatch.setattr(fixtures, "shared_objects_root", lambda *_: tmp_path / "objects")
     harness = IntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
                                challengers=["Miner0", "Miner1"], runners=["alpha"])
     harness.service.config.defaults = replace(
@@ -119,6 +123,14 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
             "sha256": source_hash if source_hash else contracts.hash_bytes(b"frozen baseline"),
             "hash_origin": "recorded_archive_hash" if source_hash else "computed_from_frozen_object",
         }
+        if run_id in omitted and gap == "mixed_thinking":
+            example["provider_calls"][0]["response"]["choices"][0]["finish_reason"] = "length"
+            refresh_response_links(example, 0)
+            for index in (1, 2):
+                message = example["provider_calls"][index]["response"]["choices"][0]["message"]
+                for field in ("reasoning", "reasoning_content", "reasoning_details"):
+                    message.pop(field, None)
+                refresh_response_links(example, index)
         seal(example)
         return _unsettled_selected_call(example) if run_id in omitted and gap == "unsettled" else example
 
@@ -262,7 +274,7 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
     ranking = {harness.flavors[item["submission_id"]]: item
                for item in saved["publication_doc"]["final_ranking"]}
     assert all(item["final_score"] is not None for item in ranking.values())
-    if gap == "integrity":
+    if gap in {"integrity", "missing"}:
         assert ranking["Miner0"]["training_data_eligibility"]["reasons"] == ["training_evidence_check_failed"]
     else:
         assert ranking["Miner0"]["training_data_eligibility"]["capture"]["counts"]["complete_runs"] == 10 - missing

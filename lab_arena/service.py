@@ -913,6 +913,7 @@ class _PublicationReads:
     icps: Optional[Sequence[Mapping[str, Any]]] = None
     judges_by_stage: Dict[int, Dict[str, Mapping[str, Any]]] = field(default_factory=dict)
     outputs_by_ref: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    raw_outputs_by_ref: Dict[str, bytes] = field(default_factory=dict)
     qualified_by_submission: Dict[str, Dict[int, int]] = field(default_factory=dict)
     costs_by_position: Dict[Tuple[str, int], Dict[str, Any]] = field(default_factory=dict)
 
@@ -936,6 +937,10 @@ class _PublicationReads:
             except (UnicodeDecodeError, ValueError) as exc:
                 raise OutputInvalid("accepted output is not valid JSON") from exc
             self.outputs_by_ref[ref] = validate_output_document(document)
+            # Retain the exact bytes already verified during this publication
+            # attempt. Training export can revalidate them if a later read
+            # finds the immutable object temporarily unavailable.
+            self.raw_outputs_by_ref[ref] = raw
         return self.outputs_by_ref[ref]
 
     def qualified_counts(self, submission_id: str, positions: Sequence[int]) -> Dict[int, int]:
@@ -4859,6 +4864,7 @@ class ArenaService:
     def _submission_training_eligibility(
         self, round_row: Mapping[str, Any], submission_id: str,
         runs: Sequence[Mapping[str, Any]],
+        *, publication_reads: Optional[_PublicationReads] = None,
     ) -> Dict[str, Any]:
         """Read persisted evidence only. A capture failure cannot cancel a round."""
         try:
@@ -4875,19 +4881,29 @@ class ArenaService:
                 return {"eligible": False, "reasons": ["selected_execution_coverage_incomplete"],
                         "source_review": source}
             examples = {}
+            unavailable_outputs = {}
             for position in sorted(positions):
                 run_id = str(selected[position]["run_id"])
-                try:
-                    examples[run_id] = training_reader.export_run(self._store, self._objects, run_id)
-                except FileNotFoundError:
-                    # Only an absent artifact is a coverage gap. Integrity and
-                    # unexpected reader errors must fail this entrant's data
-                    # check through the outer handler, without stopping publication.
-                    examples[run_id] = None
+                output_ref = "arena/%s/outputs/%s.json" % (round_row["round_id"], run_id)
+                fallback = {}
+                if publication_reads is not None and output_ref in publication_reads.outputs_by_ref:
+                    cached = publication_reads.raw_outputs_by_ref.get(output_ref)
+                    if cached is not None:
+                        fallback[output_ref] = cached
+                read_view = training_reader.AvailabilityReadView(self._objects, fallback)
+                # A whole-export exception cannot prove which artifact failed
+                # or whether another identity or receipt was invalid. Only a
+                # completed export with one typed output read failure can use
+                # the coverage allowance below.
+                examples[run_id] = training_reader.export_run(self._store, read_view, run_id)
+                if read_view.unavailable in ({output_ref: "missing"},
+                                             {output_ref: "transient"}):
+                    unavailable_outputs[run_id] = output_ref
             capture = training_eligibility.assess_capture(
                 submission, examples, list(examples), enabled=True,
                 minimum_coverage_percent=training_coverage.percent_from_configuration(
                     round_row.get("configuration_doc") or {}),
+                unavailable_outputs=unavailable_outputs,
             )
             return {"eligible": source["eligible"] and capture["eligible"],
                     "reasons": sorted(set(source["reasons"] + capture["reasons"])),
@@ -4999,6 +5015,7 @@ class ArenaService:
                 submission_id = str(entry["submission_id"])
                 training = self._submission_training_eligibility(
                     round_row, submission_id, publication_reads.runs,
+                    publication_reads=publication_reads,
                 )
                 eligibility[submission_id]["training_data_eligibility"] = training
                 if not training["eligible"]:

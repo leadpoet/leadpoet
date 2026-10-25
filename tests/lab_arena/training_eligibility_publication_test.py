@@ -18,7 +18,7 @@ BASELINE_ID = "baseline-2026-10-13"
 
 
 @pytest.mark.parametrize("error,eligible", [
-    (FileNotFoundError("missing object"), True),
+    (FileNotFoundError("missing object"), False),
     (training_reader.ExportError("execution_output_hash_mismatch"), False),
     (training_reader.ExportError("ledger_membership_mismatch"), False),
     (ValueError("malformed stored evidence"), False),

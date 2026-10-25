@@ -179,7 +179,7 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
 
     # The service's raw export reader is tested separately. Supply controlled
     # evidence outcomes here and exercise its decision plus actual SQL write.
-    def training(_round, submission_id, _runs):
+    def training(_round, submission_id, _runs, **_kwargs):
         return _training(harness.flavors[submission_id] == "Miner1")
 
     monkeypatch.setattr(harness.service, "_submission_training_eligibility", training)

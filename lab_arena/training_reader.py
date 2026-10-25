@@ -2,9 +2,77 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
 from lab_arena.training_export import ExportError, _select_judge, assemble_example
+
+
+class AvailabilityReadView:
+    """Bounded read view for training evidence; never changes stored objects."""
+
+    def __init__(self, objects, verified_fallback=None):
+        self.objects = objects
+        self.verified_fallback = verified_fallback or {}
+        self.unavailable = {}
+
+    def _fallback(self, ref, limit, reason):
+        cached = self.verified_fallback.get(ref)
+        if cached is None:
+            return None
+        if len(cached) > limit:
+            return None
+        self.unavailable[ref] = reason
+        return cached
+
+    @staticmethod
+    def _retryable(error):
+        # Botocore retries internally too, but a final timeout or retryable
+        # service response can still clear on one fresh read at publication.
+        from botocore.exceptions import (ConnectTimeoutError, ConnectionClosedError,
+                                        EndpointConnectionError, ReadTimeoutError)
+        if isinstance(error, (ConnectTimeoutError, ConnectionClosedError,
+                              EndpointConnectionError, ReadTimeoutError)):
+            return True
+        response = getattr(error, "response", None)
+        if not isinstance(response, Mapping):
+            return False
+        code = (response.get("Error") or {}).get("Code")
+        status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+        return code in {"RequestTimeout", "RequestTimeoutException", "SlowDown", "InternalError", "ServiceUnavailable"} or status in {429, 500, 502, 503, 504}
+
+    def get_bounded(self, ref, limit):
+        for attempt in range(2):
+            try:
+                optional = getattr(self.objects, "get_optional_bounded", None)
+                value = optional(ref, limit) if callable(optional) else self.objects.get_bounded(ref, limit)
+                if value is None:
+                    cached = self._fallback(ref, limit, "missing")
+                    if cached is not None:
+                        return cached
+                    raise FileNotFoundError("training evidence object is absent")
+                self.unavailable.pop(ref, None)
+                return value
+            except FileNotFoundError:
+                cached = self._fallback(ref, limit, "missing")
+                if cached is not None:
+                    return cached
+                raise
+            except Exception as exc:
+                if self._retryable(exc):
+                    if attempt == 0:
+                        continue
+                    cached = self._fallback(ref, limit, "transient")
+                    if cached is not None:
+                        return cached
+                raise
+        raise AssertionError("unreachable")
+
+    def get_optional_bounded(self, ref, limit):
+        try:
+            return self.get_bounded(ref, limit)
+        except FileNotFoundError:
+            return None
 
 
 def _ledger(store, run_id):

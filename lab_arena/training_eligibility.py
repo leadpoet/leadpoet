@@ -92,16 +92,19 @@ def _all_model_routes_verified(example, run_id):
         return False
 
 
-def _only_benign_empty_thinking(example, run_id):
+def _only_benign_thinking_gaps(example, run_id):
+    """Verified omissions and length stops share one incomplete ICP budget."""
     calls = [call for call in example.get("provider_calls") or []
              if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
     registry = (example.get("configuration") or {}).get("reasoning_route_registry")
     try:
         states = [training_thinking.attempt_coverage(call, example.get("role", "miner"), registry)
                   for call in calls]
-        return bool(states) and any(state["returned"] == "requested_empty" for state in states) and all(
+        return bool(states) and any(state["returned"] in {"requested_empty", "truncated"}
+                                    for state in states) and all(
             state["route_reviewed"] and state["provider_route_verified"]
-            and state["returned"] in {"requested_empty", "full_thinking"} for state in states)
+            and state["returned"] in {"requested_empty", "truncated", "full_thinking"}
+            for state in states)
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
 
@@ -357,7 +360,8 @@ def _selected_privacy_cascade_verified(example, run_id):
 
 def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | None],
                    selected_run_ids: Sequence[str], *, enabled: bool,
-                   minimum_coverage_percent: int = 100) -> dict:
+                   minimum_coverage_percent: int = 100,
+                   unavailable_outputs: Mapping[str, str] | None = None) -> dict:
     """Check each selected final execute run against its persisted raw export.
 
     A missing export or malformed record is an ineligible result, never an
@@ -478,20 +482,36 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
         except (KeyError, IndexError, TypeError, ValueError, AttributeError):
             run_reasons.append("selected_run_evidence_invalid")
         finally:
+            unavailable_ref = (unavailable_outputs or {}).get(run_id)
+            if unavailable_ref is not None:
+                identity = example.get("output_identity") or {}
+                output = example.get("output")
+                if (unavailable_ref == "arena/%s/outputs/%s.json" % (example.get("round_id"), run_id)
+                        and identity.get("ref") == unavailable_ref
+                        and isinstance(output, Mapping)
+                        and isinstance(identity.get("document_hash"), str)
+                        and contracts.SHA256_RE.fullmatch(identity["document_hash"]) is not None):
+                    # The complete export was checked against the exact bytes
+                    # retained by this publication attempt. Availability is
+                    # a separate one-ICP coverage gap, never a raw export edit.
+                    run_reasons.append("accepted_output_unavailable")
+                else:
+                    run_reasons.append("selected_run_evidence_invalid")
             if run_reasons:
                 counts["incomplete_runs"] += 1
                 if minimum_coverage_percent == 100:
                     reasons.extend(run_reasons)
                 else:
-                    soft = {"provider_response_truncated"}
-                    if ("provider_response_truncated" in run_reasons
-                            and set(run_reasons) <= {"provider_response_truncated", "full_thinking_call_missing"}):
-                        # Every selected model reply without full thinking was
-                        # proven to end at the provider's length limit above.
-                        soft.add("full_thinking_call_missing")
-                    soft |= ({"full_thinking_unavailable", "full_thinking_call_missing"}
-                            if _only_benign_empty_thinking(example, run_id) else set())
-                    if run_reasons == ["trajectory_evidence_incomplete"]:
+                    # The loop above still proves each candidate or exact
+                    # length stop. Mixed verified gaps consume the same ICP;
+                    # route, receipt and other evidence failures remain hard.
+                    soft = ({"provider_response_truncated", "full_thinking_unavailable",
+                             "full_thinking_call_missing"}
+                            if _only_benign_thinking_gaps(example, run_id) else set())
+                    if unavailable_ref is not None:
+                        soft.add("accepted_output_unavailable")
+                    if set(run_reasons) - {"accepted_output_unavailable"} == {
+                            "trajectory_evidence_incomplete"}:
                         proof_reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])
                         if (proof_reasons and proof_reasons <= {"response_privacy_nonexact"}
                                 and _documented_selected_privacy_gap(example, run_id)

@@ -199,6 +199,9 @@ def test_empty_product_or_stage_only_keeps_unforced_first_turn(
         del headers
         requests.append(payload)
         assert payload["tool_choice"] == "required"
+        assert [message for message in payload["messages"] if message["role"] == "system"] == [
+            {"role": "system", "content": investigator._SYSTEM_PROMPT},
+        ]
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": "negative", "type": "function",
             "function": {"name": "submit_findings", "arguments": json.dumps({

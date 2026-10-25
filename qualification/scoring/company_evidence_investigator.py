@@ -630,6 +630,15 @@ current value is proven. UNPROVEN means the evidence is absent, ambiguous,
 stale, scoped incorrectly, or conflicting.
 """
 
+_PRODUCT_JOINT_EVIDENCE_SUFFIX = (
+    "For industry product coverage, a leaf may use up to three exact fetched URL/quote bindings. "
+    "Read complementary evidence together when the pages clearly concern the same company "
+    "and the same offering or platform, identified consistently across pages. Do not require "
+    "one quote to repeat every part of the leaf. Do not combine unrelated products, "
+    "customer-owned capabilities, or hypothetical facts. Every mandatory condition and "
+    "source/identity check still applies."
+)
+
 _PRODUCT_COVERAGE_INSTRUCTIONS = """
 For industry with nonempty requested_product_service, return product_coverage as
 compact JSON TEXT containing exactly plan_id and claims; otherwise use null.
@@ -5247,6 +5256,11 @@ async def investigate_company_evidence(
                         ),
                         "messages": [
                             {"role": "system", "content": _SYSTEM_PROMPT},
+                            # The base prompt nearly fills the broker's per-message limit.
+                            *(
+                                [{"role": "system", "content": _PRODUCT_JOINT_EVIDENCE_SUFFIX}]
+                                if product_review_requested else []
+                            ),
                             *messages,
                         ],
                         "tools": [

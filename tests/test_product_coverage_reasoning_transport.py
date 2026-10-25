@@ -10,6 +10,16 @@ from qualification.scoring import company_evidence_investigator as inv
 from tests.test_product_coverage import CRITERION, URL, QUOTE, finding, matrix
 
 
+JOINT_EVIDENCE_SUFFIX = (
+    "For industry product coverage, a leaf may use up to three exact fetched URL/quote bindings. "
+    "Read complementary evidence together when the pages clearly concern the same company "
+    "and the same offering or platform, identified consistently across pages. Do not require "
+    "one quote to repeat every part of the leaf. Do not combine unrelated products, "
+    "customer-owned capabilities, or hypothetical facts. Every mandatory condition and "
+    "source/identity check still applies."
+)
+
+
 @pytest.mark.parametrize("positive,product", [(True, True), (True, False), (False, True), (False, False)])
 @pytest.mark.parametrize("exhausted", [False, True])
 def test_effort_survives_real_transport_and_generic_output_length_retry(
@@ -42,7 +52,8 @@ def test_effort_survives_real_transport_and_generic_output_length_retry(
 
         def post(self, url, *, headers, json):
             assert url == "https://openrouter.ai/api/v1/chat/completions"
-            validate_operation_request("openrouter.chat", json)
+            normalized = validate_operation_request("openrouter.chat", json)
+            assert normalized["messages"] == json["messages"]
             self.requests.append(json)
             if exhausted and len(self.requests) == 1:
                 return Response({"choices": [{"finish_reason": "length", "message": {"content": None}}],
@@ -71,10 +82,16 @@ def test_effort_survives_real_transport_and_generic_output_length_retry(
         prefetched_pages={URL: {"final_url": URL, "text": QUOTE}},
     ))
 
-    assert result["_completed_submit"] is True
+    assert result.get("_completed_submit") is True, result
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert len(session.requests) == (2 if exhausted else 1)
     for index, request in enumerate(session.requests):
+        assert request["messages"][0] == {"role": "system", "content": inv._SYSTEM_PROMPT}
+        if product:
+            assert request["messages"][1] == {"role": "system", "content": JOINT_EVIDENCE_SUFFIX}
+            assert sum(message["role"] == "system" for message in request["messages"]) == 2
+        else:
+            assert sum(message["role"] == "system" for message in request["messages"]) == 1
         assert request["tool_choice"] == "required"  # Ordinary turn, including generic retry.
         ordinary_product = positive and product and index == 0
         assert request["max_tokens"] == (4096 if ordinary_product else 3000)

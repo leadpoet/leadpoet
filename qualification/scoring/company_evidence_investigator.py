@@ -1317,6 +1317,16 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
                 # candidate into a partial quote or trim frozen obligations.
                 repairs.pop()
                 removed = True
+            elif isinstance(coverage, dict):
+                rejected_citations = coverage.get("rejected_citations")
+                if isinstance(rejected_citations, list):
+                    for binding in reversed(rejected_citations):
+                        if isinstance(binding, dict) and "untrusted_source_context" in binding:
+                            # Context is optional. Keep the failed slot, URL and
+                            # reason intact so correction remains actionable.
+                            binding.pop("untrusted_source_context")
+                            removed = True
+                            break
         if not removed:
             break
     if len(encode()) > message_limit:
@@ -4062,11 +4072,24 @@ def _validated_findings(
                         quote_field = f"supporting_evidence_quote_{slot}" if slot else "evidence_quote"
                         if (raw.get(url_field) == binding["url"]
                                 and raw.get(quote_field) == binding["quote"]):
-                            rejections.append({
+                            rejection = {
                                 "binding_index": slot,
                                 "url": str(binding["url"])[:2000],
                                 "reason": str(binding["reason"])[:300],
-                            })
+                            }
+                            # Quote recovery must use the failed binding's
+                            # actual page, including a supporting citation.
+                            # This is correction context only; a new submission
+                            # must still pass every normal evidence check.
+                            page = fetched_pages.get(binding["url"], "")
+                            if page and binding["reason"] in {
+                                "submitted quote was not present in fetched source",
+                                "submitted quote contains a prohibited ellipsis instead of one continuous fetched-page span",
+                            }:
+                                rejection["untrusted_source_context"] = (
+                                    _source_context_for_quote(binding["quote"], page)[:2000]
+                                )
+                            rejections.append(rejection)
                             break
                 finding["untrusted_product_citation_rejections"] = rejections
                 finding["untrusted_product_citation_repairs"] = _untrusted_product_citation_repairs(

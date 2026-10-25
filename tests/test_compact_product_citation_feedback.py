@@ -174,3 +174,94 @@ def test_model_receives_rejected_support_and_must_resubmit_valid_evidence(monkey
         assert result.get("_completed_submit") is not True
         assert finding["status"] == "UNPROVEN"
         assert not coverage_matches(finding.get("product_coverage"), CRITERION)
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_spliced_support_feedback_uses_the_rejected_page_and_requires_resubmission(monkeypatch, repair):
+    first = "Acme supplies scheduling workflows for hospital systems."
+    middle = "Acme also manages its internal payroll application."
+    last = "Acme connects hospital appointment workflows to clinic records."
+    support_page = first + " " + middle + " " + last
+    pages = {PRIMARY: PAGES[PRIMARY], SUPPORT: support_page}
+    raw = raw_finding(first_support=False, bad_url=SUPPORT, bad_quote=first + " " + last)
+    original = copy.deepcopy(raw)
+    assert not inv._quote_occurs(raw["supporting_evidence_quote_2"], support_page)
+    first_rejection = validate(raw, pages=pages)[FEEDBACK_KEY][0]
+    assert first in first_rejection.get("untrusted_source_context", "")
+    assert middle in first_rejection["untrusted_source_context"]
+    requests = []
+
+    async def post(_session, _url, *, headers, payload):
+        requests.append(payload)
+        finding = raw
+        if len(requests) > 1:
+            feedback = json.loads(payload["messages"][-1]["content"])
+            rejected = feedback["product_coverage"]["rejected_citations"][0]
+            assert rejected["binding_index"] == 2
+            assert rejected["url"] == SUPPORT
+            assert rejected["reason"] == "submitted quote was not present in fetched source"
+            context = rejected.get("untrusted_source_context", "")
+            assert first in context and middle in context and last in context
+            assert PRIMARY_QUOTE not in context
+            assert len(context) <= 2000
+            if repair:
+                finding = {**raw, "supporting_evidence_quote_2": support_page}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function", "function": {
+                "name": "submit_findings", "arguments": json.dumps({"findings": [finding]}),
+            },
+        }]}}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
+    monkeypatch.setenv("EXA_API_KEY", "offline-test")
+    monkeypatch.setattr(inv, "_post_json", post)
+    monkeypatch.setattr(inv, "MAX_REASONING_TURNS", 2)
+    result = asyncio.run(inv.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",), requested_industry="Software",
+        requested_product_service=CRITERION,
+        prior_observations={"submitted_source_urls": list(pages)},
+        verified_homepage_identity={"normalized_name": "Acme",
+                                    "registrable_dns_domain": "acme.example"},
+        prefetched_pages={url: {"final_url": url, "text": text} for url, text in pages.items()},
+    ))
+    assert raw == original
+    finding = result["claims"]["industry"]
+    assert FEEDBACK_KEY not in finding
+    assert "untrusted_source_context" not in json.dumps(finding.get("product_coverage"))
+    if repair:
+        assert result.get("_completed_submit") is True
+        assert finding["status"] == "VERIFIED"
+        assert coverage_matches(finding["product_coverage"], CRITERION)
+    else:
+        assert result.get("_completed_submit") is not True
+        assert finding["status"] == "UNPROVEN"
+        assert not coverage_matches(finding.get("product_coverage"), CRITERION)
+
+
+def test_missing_support_page_has_no_fabricated_correction_context():
+    finding = validate(raw_finding(bad_url="https://acme.example/unfetched"))
+    assert finding["status"] == "UNPROVEN"
+    assert "untrusted_source_context" not in finding[FEEDBACK_KEY][0]
+
+
+def test_support_context_is_optional_under_message_pressure_but_rejection_is_preserved():
+    bindings = [{"binding_index": i, "url": f"https://acme.example/page-{i}",
+                 "reason": "submitted quote was not present in fetched source",
+                 "untrusted_source_context": "s" * 2000} for i in range(3)]
+    document = {"required_metadata": "m" * 27000, "product_coverage": {
+        "original_criterion": CRITERION, "rejected_citations": bindings}}
+    original = copy.deepcopy(document)
+    encoded = inv._bounded_message_json(document)
+    decoded = json.loads(encoded)
+    assert len(encoded) < inv.OPENROUTER_MAX_CONTENT_CHARS
+    assert decoded["required_metadata"] == document["required_metadata"]
+    assert decoded["product_coverage"]["original_criterion"] == CRITERION
+    retained = decoded["product_coverage"]["rejected_citations"]
+    assert len(retained) == 3
+    assert sum("untrusted_source_context" in row for row in retained) < 3
+    for expected, actual in zip(bindings, retained):
+        assert {k: actual[k] for k in ("binding_index", "url", "reason")} == {
+            k: expected[k] for k in ("binding_index", "url", "reason")}
+        assert actual.get("untrusted_source_context", "s" * 2000) == "s" * 2000
+    assert document == original

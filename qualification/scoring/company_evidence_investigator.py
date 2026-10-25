@@ -2476,7 +2476,9 @@ async def _get_or_compile_product_plan(
                     "tool_choice": {"type": "function", "function": {"name": "submit_product_plan"}},
                 },
             )
-            if status != 200 or not isinstance(body, Mapping) or body.get("error"):
+            if (status != 200 or not isinstance(body, Mapping)
+                    or body.get("error") or body.get("errors")
+                    or str(body.get("status") or "").casefold() in {"error", "failed", "failure"}):
                 raise CoverageError("planner provider unavailable")
             choices = body.get("choices")
             if not isinstance(choices, list) or len(choices) != 1:

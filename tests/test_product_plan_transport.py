@@ -14,6 +14,7 @@ from qualification.scoring import product_coverage as pc
 @pytest.mark.parametrize("mode,attempts,accepted", [
     ("repair", 2, True), ("invalid", 2, False),
     ("window_expired", 1, False), ("late_settlement", 1, True),
+    ("errors_envelope", 2, False), ("failed_envelope", 2, False),
 ])
 def test_planner_attempts_and_settlement_are_bounded_without_cancelling(monkeypatch, mode, attempts, accepted):
     pc._PLAN_CACHE.clear()
@@ -34,13 +35,18 @@ def test_planner_attempts_and_settlement_are_bounded_without_cancelling(monkeypa
         async def json(self):
             if mode in {"window_expired", "late_settlement"}:
                 clock.now = 45.0
-            valid = mode == "late_settlement" or (mode == "repair" and len(requests) == 2)
+            valid = mode in {"late_settlement", "errors_envelope", "failed_envelope"} or (mode == "repair" and len(requests) == 2)
             plan = ({"root": "model-root", "nodes": [{"id": "model-root", "op": "leaf",
                      "text": "Designs clinic software", "children": []}]} if valid else
                     {"root": "r", "nodes": []})
-            return {"choices": [{"message": {"tool_calls": [{"id": str(len(requests)),
+            body = {"choices": [{"message": {"tool_calls": [{"id": str(len(requests)),
                 "type": "function", "function": {"name": "submit_product_plan",
                     "arguments": json.dumps({"plan_json": json.dumps(plan)})}}]}}]}
+            if mode == "errors_envelope":
+                body["errors"] = [{"code": "provider_failed"}]
+            elif mode == "failed_envelope":
+                body["status"] = "failed"
+            return body
 
     class Session:
         def post(self, url, *, headers, json):

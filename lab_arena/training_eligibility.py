@@ -120,7 +120,12 @@ def _selected_cost_gap_verified(example, run_id):
     """Recognize an uncertain charge only after selected receipt proof survives."""
     proof = example.get("completeness") or {}
     reasons = set(proof.get("incomplete_reasons") or [])
-    allowed = {"provider_cost_unresolved", "response_privacy_nonexact"}
+    cost_snapshot_unavailable = ((example.get("competition_cost_eligibility") or {}).get("status")
+                                 == "unavailable")
+    call_allowed = {"provider_cost_unresolved", "response_privacy_nonexact"}
+    allowed = set(call_allowed)
+    if cost_snapshot_unavailable:
+        allowed.add("competition_cost_eligibility_unavailable")
     if "provider_cost_unresolved" not in reasons or not reasons <= allowed:
         return False
     dimensions = proof.get("dimensions") or {}
@@ -129,11 +134,17 @@ def _selected_cost_gap_verified(example, run_id):
             for name in ("context", "source_identity", "exact_inputs", "input_output_label"))
             or dimensions.get("costs") is not False
             or dimensions.get("research_process") is not False
-            or set(by_dimension.get("costs") or []) != {"provider_cost_unresolved"}
-            or set(by_dimension.get("research_process") or []) != reasons
+            or set(by_dimension.get("costs") or []) != (
+                {"provider_cost_unresolved", "competition_cost_eligibility_unavailable"}
+                if cost_snapshot_unavailable else {"provider_cost_unresolved"})
+            or set(by_dimension.get("research_process") or []) != (
+                reasons - {"competition_cost_eligibility_unavailable"})
+            or (cost_snapshot_unavailable !=
+                ("competition_cost_eligibility_unavailable" in reasons))
             or ("response_privacy_nonexact" in reasons
                 and not _documented_selected_privacy_gap(example, run_id))
-            or training_thinking._selected_input_output_binding(example) is None
+            or training_thinking._selected_input_output_binding(
+                example, allow_selected_cost_unavailable=cost_snapshot_unavailable) is None
             or not _all_model_routes_verified(example, run_id)):
         return False
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
@@ -150,7 +161,7 @@ def _selected_cost_gap_verified(example, run_id):
     try:
         for call in selected:
             gaps = set(call.get("evidence_gaps") or [])
-            if not gaps <= allowed:
+            if not gaps <= call_allowed:
                 return False
             if call in cost_calls and (
                 call.get("accounting_state") != "uncertain"

@@ -662,7 +662,9 @@ def _delivered_response(call: Mapping[str, Any], digest: str) -> Mapping[str, An
     return values[0]
 
 
-def _selected_input_output_binding(example: Mapping[str, Any]) -> set[str] | None:
+def _selected_input_output_binding(
+    example: Mapping[str, Any], *, allow_selected_cost_unavailable: bool = False,
+) -> set[str] | None:
     """Verify the accepted score, output hash, and both exact input snapshots."""
     run_id = example.get("run_id")
     score_id = example.get("score_run_id")
@@ -691,9 +693,19 @@ def _selected_input_output_binding(example: Mapping[str, Any]) -> set[str] | Non
             return None
     score_input = snapshots[score_id]["input"]
     if (score_input.get("scored_run_id") != run_id
-            or score_input.get("companies") != output.get("companies")
-            or (example.get("competition_cost_eligibility") or {}).get("status") != "available"):
+            or score_input.get("companies") != output.get("companies")):
         return None
+    cost = example.get("competition_cost_eligibility") or {}
+    if cost.get("status") != "available":
+        if (not allow_selected_cost_unavailable
+                or cost.get("status") != "unavailable"
+                or cost.get("reason") != "provider_cost_uncertain"
+                or cost.get("source_rpc") != "lab_arena_icp_cost_eligibility"
+                or cost.get("policy") != (example.get("configuration") or {}).get(
+                    "sourcing_cost_eligibility_policy")
+                or not isinstance(cost.get("observed_at"), str)
+                or not cost["observed_at"]):
+            return None
     return score_ids
 
 

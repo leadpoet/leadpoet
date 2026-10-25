@@ -492,14 +492,23 @@ def _unsettled_selected_call(example, *, privacy=False):
             "input": document, "input_sha256": contracts.document_hash(document),
             "privacy": {"redacted": False, "redactions": []},
         }
-    example["competition_cost_eligibility"] = {"status": "available", "eligible": True}
+    example["configuration"]["sourcing_cost_eligibility_policy"] = (
+        contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY)
+    example["competition_cost_eligibility"] = {
+        "status": "unavailable", "reason": "provider_cost_uncertain",
+        "source_rpc": "lab_arena_icp_cost_eligibility",
+        "policy": contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+        "observed_at": "2026-10-24T00:00:00Z",
+    }
+    reasons.append("competition_cost_eligibility_unavailable")
     example["completeness"] = {
         "complete": False, "incomplete_reasons": sorted(reasons),
         "dimensions": {"context": True, "source_identity": True, "exact_inputs": True,
                        "input_output_label": True, "costs": False, "research_process": False},
         "reasons_by_dimension": {"context": [], "source_identity": [], "exact_inputs": [],
-                                 "input_output_label": [], "costs": ["provider_cost_unresolved"],
-                                 "research_process": sorted(reasons)},
+                                 "input_output_label": [], "costs": sorted(
+                                     ["provider_cost_unresolved", "competition_cost_eligibility_unavailable"]),
+                                 "research_process": sorted(set(reasons) - {"competition_cost_eligibility_unavailable"})},
     }
     return seal(example)
 
@@ -519,6 +528,26 @@ def test_eighty_percent_tolerates_two_attributable_unsettled_calls(privacy):
     assert not splits["train"] and not splits["eval"]
     _unsettled_selected_call(examples["run-7"])
     assert "training_coverage_incomplete" in assess_ten(examples)["reasons"]
+
+
+@pytest.mark.parametrize("damage", [
+    lambda e: e["competition_cost_eligibility"].update(reason="quality_or_attempt_not_final"),
+    lambda e: e["competition_cost_eligibility"].update(source_rpc="untrusted_source"),
+    lambda e: e["competition_cost_eligibility"].update(policy="untrusted_policy"),
+    lambda e: e["competition_cost_eligibility"].update(observed_at=""),
+    lambda e: e["competition_cost_eligibility"].update(status="available"),
+    lambda e: e["completeness"]["reasons_by_dimension"]["costs"].remove(
+        "competition_cost_eligibility_unavailable"),
+    lambda e: e["provider_calls"][0]["evidence_gaps"].append(
+        "competition_cost_eligibility_unavailable"),
+])
+def test_unsettled_cost_snapshot_requires_exact_authority_and_proof(damage):
+    examples = ten_selected_examples()
+    damaged = _unsettled_selected_call(examples["run-9"])
+    damage(damaged)
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
+    assert training_thinking.selected_research_evidence(damaged) is None
 
 
 @pytest.mark.parametrize("damage", [

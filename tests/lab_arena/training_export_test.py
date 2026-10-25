@@ -915,7 +915,8 @@ def test_eligible_snapshot_is_distinct_from_actual_paid_cost():
     assert result["judgment"]["per_icp_score"] == 12.75
 
 
-def test_frozen_full_thinking_snapshot_uses_confirmed_cost_with_unsettled_call():
+@pytest.mark.parametrize("excluded", [None, 405_351])
+def test_frozen_full_thinking_snapshot_uses_confirmed_cost_with_unsettled_call(excluded):
     values = per_icp_cost_fixture()
     config = values["round_row"]["configuration_doc"]
     config.update(reasoning_capture_policy="full_generated_thinking_v1",
@@ -923,15 +924,23 @@ def test_frozen_full_thinking_snapshot_uses_confirmed_cost_with_unsettled_call()
                   sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
                   execution_icp_cap_microusd=6_000_000,
                   cost_per_company_microusd=6_000_000)
+    if excluded is not None:
+        config["infrastructure_retry_cost_policy"] = "trusted_infrastructure_v1"
 
     def reader(**identity):
-        observed = per_icp_cost_reader(spend=500_000, reason="eligible", flat=True)(**identity)
+        observed = per_icp_cost_reader(
+            spend=500_000, reason="eligible", flat=True, excluded=excluded)(**identity)
         snapshot = observed["eligibility"]
         snapshot.update(execution_icp_cap_microusd=6_000_000,
                         cost_per_company_cap_microusd=6_000_000,
                         eligibility_cap_microusd=6_000_000)
-        snapshot["execution"].update(success_unresolved_calls=1,
+        snapshot["execution"].update(settled_microusd=500_000 + (excluded or 0),
+                                     success_unresolved_calls=1,
                                      success_unresolved_microusd=700_000)
+        if excluded is not None:
+            snapshot["execution"].update(
+                competition_settled_microusd=500_000,
+                excluded_infrastructure_settled_microusd=excluded)
         return observed
 
     result = assemble_example(**values, cost_eligibility_reader=reader)
@@ -941,6 +950,16 @@ def test_frozen_full_thinking_snapshot_uses_confirmed_cost_with_unsettled_call()
     del config["training_minimum_icp_coverage_percent"]
     assert assemble_example(**values, cost_eligibility_reader=reader)[
         "competition_cost_eligibility"]["status"] == "unavailable"
+    if excluded is not None:
+        config["training_minimum_icp_coverage_percent"] = 80
+
+        def malformed(**identity):
+            observed = reader(**identity)
+            observed["eligibility"]["execution"]["excluded_infrastructure_settled_microusd"] -= 1
+            return observed
+
+        assert assemble_example(**values, cost_eligibility_reader=malformed)[
+            "competition_cost_eligibility"]["status"] == "unavailable"
 
 
 @pytest.mark.parametrize("flat", [False, True])

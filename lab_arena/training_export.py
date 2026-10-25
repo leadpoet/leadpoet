@@ -1014,6 +1014,18 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                     or successful != sum(execution[key] for key in split)):
                 raise ValueError("execution cost split is invalid")
             successful = execution["competition_successful_microusd"]
+        confirmed = execution.get("settled_microusd")
+        if confirmed_full_thinking_cost:
+            if type(confirmed) is not int or confirmed < 0:
+                raise ValueError("confirmed cost is invalid")
+            settled_split = ("competition_settled_microusd",
+                             "excluded_infrastructure_settled_microusd")
+            if any(key in execution for key in settled_split):
+                if (any(type(execution.get(key)) is not int or execution[key] < 0
+                        for key in settled_split)
+                        or confirmed != sum(execution[key] for key in settled_split)):
+                    raise ValueError("confirmed competition cost split is invalid")
+                confirmed = execution["competition_settled_microusd"]
         numbers = (
             "competition_sourcing_microusd", "execution_icp_cap_microusd",
             "cost_per_company_cap_microusd", "eligibility_cap_microusd",
@@ -1029,7 +1041,7 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                        for key in ("successful_microusd", "success_unresolved_microusd",
                                    "inflight_calls", "success_unresolved_calls"))
                 or snapshot["competition_sourcing_microusd"] != (
-                    successful if confirmed_full_thinking_cost else
+                    confirmed if confirmed_full_thinking_cost else
                     successful + execution["success_unresolved_microusd"])
                 or snapshot["execution_icp_cap_microusd"] != configuration.get("execution_icp_cap_microusd")
                 or snapshot["cost_per_company_cap_microusd"] != configuration.get("cost_per_company_microusd")

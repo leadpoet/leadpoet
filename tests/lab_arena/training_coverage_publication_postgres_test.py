@@ -219,22 +219,23 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
                                (harness.round_id,))
                 assert cursor.fetchone()[0] is (floor in (90, 100))
                 cursor.execute("ROLLBACK TO SAVEPOINT cost_policy_probe")
-            cursor.execute("SAVEPOINT confirmed_over_cap_probe")
-            cursor.execute(
-                "INSERT INTO public.lab_arena_ledger"
-                "(entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
-                "call_identity,provider,operation_id,funding_source,amount_microusd,"
-                "entry_doc,terminal_response) "
-                "SELECT 'settlement',miner_hotkey,round_id,submission_id,run_id,stage,"
-                "%s,'openrouter','openrouter.chat','host',6000001,'{}'::jsonb,%s::jsonb "
-                "FROM public.lab_arena_runs WHERE run_id=%s",
-                (contracts.hash_bytes((first["run_id"] + ':over-cap').encode()),
-                 json.dumps({"call_succeeded": True}), first["run_id"]),
-            )
-            cursor.execute("SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,0)",
-                           (harness.round_id, bad_id, first["icp_position"]))
-            assert cursor.fetchone()[0]["eligibility_reason"] == "execution_cap_exceeded"
-            cursor.execute("ROLLBACK TO SAVEPOINT confirmed_over_cap_probe")
+            for outcome in (True, None):
+                cursor.execute("SAVEPOINT confirmed_over_cap_probe")
+                cursor.execute(
+                    "INSERT INTO public.lab_arena_ledger"
+                    "(entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+                    "call_identity,provider,operation_id,funding_source,amount_microusd,"
+                    "entry_doc,terminal_response) "
+                    "SELECT 'settlement',miner_hotkey,round_id,submission_id,run_id,stage,"
+                    "%s,'openrouter','openrouter.chat','host',6000001,'{}'::jsonb,%s::jsonb "
+                    "FROM public.lab_arena_runs WHERE run_id=%s",
+                    (contracts.hash_bytes((first["run_id"] + ':over-cap').encode()),
+                     json.dumps({"call_succeeded": outcome}), first["run_id"]),
+                )
+                cursor.execute("SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,0)",
+                               (harness.round_id, bad_id, first["icp_position"]))
+                assert cursor.fetchone()[0]["eligibility_reason"] == "execution_cap_exceeded"
+                cursor.execute("ROLLBACK TO SAVEPOINT confirmed_over_cap_probe")
             cursor.execute("SAVEPOINT active_call_probe")
             cursor.execute(
                 "INSERT INTO public.lab_arena_ledger"

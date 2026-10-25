@@ -193,7 +193,21 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
             has_full = False
             for index, call in calls:
                 counts["model_calls"] += 1
-                candidate = training_steps._candidate(example, call)
+                try:
+                    candidate = training_steps._candidate(example, call)
+                except ValueError as exc:
+                    # _candidate checks the request, acknowledged receipt,
+                    # exact response hash, and privacy before parsing the
+                    # target. A provider's explicit length stop can therefore
+                    # consume one incomplete ICP without excusing bad proof.
+                    if minimum_coverage_percent < 100 and str(exc) == "response_not_complete":
+                        state = training_thinking.attempt_coverage(
+                            call, example.get("role", "miner"), registry)
+                        if (state["returned"] == "truncated" and state["route_reviewed"]
+                                and state["provider_route_verified"]):
+                            run_reasons.append("provider_response_truncated")
+                            continue
+                    raise
                 digest = candidate["source_refs"][0]["delivered_response_sha256"]
                 delivered = training_thinking._delivered_response(call, digest)
                 full_segments, status = training_thinking.full_text_segments(
@@ -222,7 +236,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 if minimum_coverage_percent == 100:
                     reasons.extend(run_reasons)
                 else:
-                    soft = ({"full_thinking_unavailable", "full_thinking_call_missing"}
+                    soft = {"provider_response_truncated"}
+                    soft |= ({"full_thinking_unavailable", "full_thinking_call_missing"}
                             if _only_benign_empty_thinking(example, run_id) else set())
                     if run_reasons == ["trajectory_evidence_incomplete"]:
                         proof_reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])

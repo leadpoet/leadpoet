@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from lab_arena import code_review, contracts, training_eligibility, training_thinking
+from lab_arena import code_review, contracts, training_eligibility, training_steps, training_thinking
 from tests.lab_arena.full_thinking_saved_probe_test import PROBES, _example
 from tests.lab_arena.training_steps_test import seal
 
@@ -402,6 +402,48 @@ def test_nine_of_ten_allow_one_empty_thinking_run():
     result = assess_ten(examples)
     assert result["eligible"] is True, result
     assert result["counts"]["complete_runs"] == 9
+
+
+def test_exact_truncated_provider_reply_counts_as_one_incomplete_icp():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    damaged["provider_calls"][2]["response"]["choices"][0]["finish_reason"] = "length"
+    refresh_response_links(damaged, 2)
+    seal(damaged)
+    result = assess_ten(examples)
+    assert result["eligible"] is True, result
+    assert result["counts"]["complete_runs"] == 9
+    assert result["counts"]["required_complete_runs"] == 8
+    strict, _ = training_thinking.build(
+        list(examples.values()), training_steps.Rules(production_rounds_only=False))
+    strict_runs = {ref["run_id"] for split in ("train", "eval")
+                   for record in strict[split] for ref in record["source_refs"]}
+    assert strict_runs == set(examples) - {"run-9"}
+    assert assess_ten(examples, percent=100)["eligible"] is False
+    examples["run-8"] = None
+    examples["run-7"] = None
+    assert "training_coverage_incomplete" in assess_ten(examples)["reasons"]
+
+
+def test_truncated_reply_with_wrong_route_remains_ineligible():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    damaged["provider_calls"][2]["response"]["choices"][0]["finish_reason"] = "length"
+    refresh_response_links(damaged, 2)
+    damaged["provider_calls"][2]["reasoning_capture"]["provider_route"] = "wrong-route"
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
+
+
+def test_truncated_reply_with_broken_receipt_remains_ineligible():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    damaged["provider_calls"][2]["response"]["choices"][0]["finish_reason"] = "length"
+    refresh_response_links(damaged, 2)
+    damaged["provider_calls"][2]["response_receipts"][0]["response_sha256"] = (
+        contracts.hash_bytes(b"different response"))
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
 
 
 def test_eighty_percent_does_not_accept_unproved_thinking_as_empty():

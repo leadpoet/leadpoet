@@ -21,10 +21,14 @@ PLAN_VERSION = "semantic-product-plan-v1"
 MAX_CACHED_PLANS = 64
 PLANNER_PROMPT = """Compile only the supplied original product/service criterion into a compact semantic checklist.
 Return submit_product_plan with plan_json containing exactly root and nodes.
-Each node has id, op (all, any, leaf), text (a concise semantic obligation), and children (IDs).
+Each node has id, op (all, any, leaf), text, and children (IDs).
+Leaf text is a required concise semantic obligation. ALL/ANY text is an optional display label
+that is ignored during evaluation; only leaves carry obligations. Every mandatory meaning from
+the original criterion must appear in evaluated leaf text, never only in ALL/ANY text.
 Use at most 24 nodes and depth 6. Use a flat ALL checklist unless genuine alternatives require ANY.
 Cover every independent mandatory capability, action verb, customer/market restriction and shared qualifier.
-Place shared qualifiers outside ANY or repeat their meaning in every complete alternative.
+Put shared qualifiers in a separate ALL leaf outside ANY, or repeat their meaning in the
+leaves of every complete alternative.
 Explicitly illustrative examples (such as/for example/e.g.) add no requirements unless explicitly mandatory. Interpret 'including' in context: it can introduce required capabilities and is never automatically optional.
 Preserve ANDs and ORs semantically, not by splitting every occurrence of a word. Do not add standalone-product, sale, deployment or benchmark conditions absent from the criterion.
 Obligations need not copy literal substrings or account for function words. Do not use company facts, sources, prior labels or qualification outcomes.
@@ -118,7 +122,8 @@ def validate_semantic_plan(raw: object, *, criterion: str, model: str) -> Truste
                 or not isinstance(node.get("id"), str) or not 1 <= len(node["id"]) <= 32
                 or node["id"] in indexed or not isinstance(node.get("op"), str)
                 or node["op"].lower() not in {"all", "any", "leaf"}
-                or not isinstance(node.get("text"), str) or not 1 <= len(node["text"].strip()) <= 1000
+                or not isinstance(node.get("text"), str) or len(node["text"].strip()) > 1000
+                or (node["op"].lower() == "leaf" and not node["text"].strip())
                 or not isinstance(node.get("children"), list)
                 or any(not isinstance(v, str) for v in node["children"])
                 or len(set(node["children"])) != len(node["children"])):

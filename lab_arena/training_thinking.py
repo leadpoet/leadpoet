@@ -232,6 +232,7 @@ def _route_observation(call: Mapping[str, Any]) -> Any:
 
 def _execution_model_call(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
     return (call.get("operation_id") in {"openrouter.chat", "openrouter.responses"}
+            and call.get("run_id") == example.get("run_id")
             and _role(example, call) in {"miner", "baseline"})
 
 

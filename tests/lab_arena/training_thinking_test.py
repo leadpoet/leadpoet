@@ -402,6 +402,38 @@ def test_judge_and_non_model_tool_do_not_disqualify_execution_trajectory():
     assert {row["role"] for row in manifest["coverage"]["attempts"]} == {"miner", "judge"}
 
 
+@pytest.mark.parametrize("role", ["miner", "baseline"])
+def test_failed_execution_before_accepted_retry_does_not_disqualify_selected_trajectory(role):
+    example = full_example()
+    example["role"] = role
+    failed = copy.deepcopy(example["provider_calls"][0])
+    failed.update(run_id="failed-run", call_identity="failed-call")
+    failed["response"]["choices"][0]["message"]["content"] = "Invalid company output"
+    example["provider_calls"].insert(0, failed)
+    example["attempts"] = [
+        {"run_id": "failed-run", "kind": "execute", "status": "failed",
+         "terminal_cause": "invalid_output"},
+        {"run_id": example["run_id"], "kind": "execute", "status": "accepted"},
+    ]
+
+    got, manifest = rows(example)
+    assert len(got) == 1
+    assert got[0]["source_refs"][0]["run_id"] == example["run_id"]
+    assert manifest["counts"]["exclusion_reasons"] == {}
+    assert len(manifest["coverage"]["attempts"]) == 2
+    assert manifest["coverage"]["trajectories"]["complete_full_thinking"] == 1
+    assert len(training_thinking.readable_trace(seal(example))["calls"]) == 2
+    assert example["provider_calls"][0]["run_id"] == "failed-run"
+
+    selected = example["provider_calls"][1]
+    selected["response"]["choices"][0]["message"].pop("reasoning_content")
+    selected["response_sha256"] = contracts.document_hash(selected["response"])
+    selected["response_receipts"][0]["response_sha256"] = selected["response_sha256"]
+    got, manifest = rows(example)
+    assert not got
+    assert manifest["counts"]["exclusion_reasons"] == {"trajectory_reasoning_ineligible": 1}
+
+
 def test_registry_and_actual_route_must_match_frozen_request():
     for mutation in ("registry", "observation", "missing_observation", "malformed_fields", "malformed_mode"):
         example = full_example()

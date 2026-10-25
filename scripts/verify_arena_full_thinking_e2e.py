@@ -268,6 +268,7 @@ def full_thinking_database():
                     "566-lab-arena-full-thinking-champion-baseline.sql",
                     "567-lab-arena-full-thinking-catalog-commit.sql",
                     "568-lab-arena-training-publication-eligibility.sql",
+                    "569-lab-arena-confirmed-full-thinking-final-cost.sql",
                 ):
                     cursor.execute((REPO / "scripts" / name).read_text())
         finally:

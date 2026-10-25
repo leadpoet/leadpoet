@@ -952,6 +952,11 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
     """
 
     policy = configuration.get("sourcing_cost_eligibility_policy")
+    coverage_percent = configuration.get("training_minimum_icp_coverage_percent")
+    confirmed_full_thinking_cost = (
+        configuration.get("reasoning_capture_policy") == "full_generated_thinking_v1"
+        and type(coverage_percent) is int and 1 <= coverage_percent <= 100
+    )
     unavailable = lambda reason: {"status": "unavailable", "reason": reason,
                                   "policy": policy if isinstance(policy, str) else None}
     if policy not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES:
@@ -1024,6 +1029,7 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                        for key in ("successful_microusd", "success_unresolved_microusd",
                                    "inflight_calls", "success_unresolved_calls"))
                 or snapshot["competition_sourcing_microusd"] != (
+                    successful if confirmed_full_thinking_cost else
                     successful + execution["success_unresolved_microusd"])
                 or snapshot["execution_icp_cap_microusd"] != configuration.get("execution_icp_cap_microusd")
                 or snapshot["cost_per_company_cap_microusd"] != configuration.get("cost_per_company_microusd")
@@ -1041,7 +1047,8 @@ def _competition_cost_snapshot(*, run, configuration, scored, related,
                 or snapshot["eligible"] != (
                     snapshot["competition_sourcing_microusd"]
                     <= snapshot["eligibility_cap_microusd"])
-                or execution["inflight_calls"] or execution["success_unresolved_calls"]):
+                or execution["inflight_calls"]
+                or (execution["success_unresolved_calls"] and not confirmed_full_thinking_cost)):
             raise ValueError("cost snapshot decision is not final")
         return {
             "status": "available", "scope": "export_time_per_icp_sourcing",

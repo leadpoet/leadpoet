@@ -150,6 +150,102 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
                            "cost_per_company_microusd": 6_000_000,
                            "execution_cap_microusd": 120_000_000,
                        }), harness.round_id))
+        if gap == "unsettled":
+            for run_id in sorted(omitted):
+                cursor.execute(
+                    "INSERT INTO public.lab_arena_ledger"
+                    "(entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+                    "call_identity,provider,operation_id,funding_source,amount_microusd,entry_doc) "
+                    "SELECT 'uncertain',miner_hotkey,round_id,submission_id,run_id,stage,"
+                    "%s,'openrouter','openrouter.chat','host',7000000,%s::jsonb "
+                    "FROM public.lab_arena_runs WHERE run_id=%s",
+                    (contracts.hash_bytes((run_id + ':unsettled').encode()),
+                     json.dumps({"call": {"call_succeeded": True}}), run_id),
+                )
+                assert cursor.rowcount == 1
+                cursor.execute(
+                    "SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,0)",
+                    (harness.round_id, bad_id,
+                     next(run["icp_position"] for run in selected[bad_id]
+                          if run["run_id"] == run_id)),
+                )
+                current = cursor.fetchone()[0]
+                assert current["execution"]["success_unresolved_calls"] >= 1
+                assert current["execution"]["success_unresolved_microusd"] >= 7_000_000
+                assert current["competition_sourcing_microusd"] < 6_000_000
+                assert current["eligibility_reason"] == "eligible", current
+            baseline_id = next(submission_id for submission_id, flavor in harness.flavors.items()
+                               if flavor == "PublicBaseline")
+            baseline_run = selected[baseline_id][0]
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger"
+                "(entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+                "call_identity,provider,operation_id,funding_source,amount_microusd,entry_doc) "
+                "SELECT 'uncertain',miner_hotkey,round_id,submission_id,run_id,stage,"
+                "%s,'openrouter','openrouter.chat','host',7000000,%s::jsonb "
+                "FROM public.lab_arena_runs WHERE run_id=%s",
+                (contracts.hash_bytes((baseline_run["run_id"] + ':unsettled').encode()),
+                 json.dumps({"call": {"call_succeeded": True}}), baseline_run["run_id"]),
+            )
+            assert cursor.rowcount == 1
+            cursor.execute("SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,0)",
+                           (harness.round_id, baseline_id, baseline_run["icp_position"]))
+            assert cursor.fetchone()[0]["eligibility_reason"] == "eligible"
+            cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)",
+                           (harness.round_id,))
+            assert cursor.fetchone()[0] is True
+            # Historical frozen full-thinking rounds without this setting keep
+            # the old uncertainty decision; a newly frozen 90% or 100% floor
+            # keeps confirmed-cost accounting.
+            first = selected[bad_id][-1]
+            for floor, reason in ((None, "provider_cost_uncertain"),
+                                  (90, "eligible"), (100, "eligible")):
+                cursor.execute("SAVEPOINT cost_policy_probe")
+                if floor is None:
+                    cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc="
+                                   "configuration_doc-'training_minimum_icp_coverage_percent' "
+                                   "WHERE round_id=%s", (harness.round_id,))
+                else:
+                    cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc="
+                                   "jsonb_set(configuration_doc,'{training_minimum_icp_coverage_percent}',%s::jsonb) "
+                                   "WHERE round_id=%s", (json.dumps(floor), harness.round_id))
+                cursor.execute("SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,0)",
+                               (harness.round_id, bad_id, first["icp_position"]))
+                assert cursor.fetchone()[0]["eligibility_reason"] == reason
+                cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)",
+                               (harness.round_id,))
+                assert cursor.fetchone()[0] is (floor is not None)
+                cursor.execute("ROLLBACK TO SAVEPOINT cost_policy_probe")
+            cursor.execute("SAVEPOINT confirmed_over_cap_probe")
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger"
+                "(entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+                "call_identity,provider,operation_id,funding_source,amount_microusd,"
+                "entry_doc,terminal_response) "
+                "SELECT 'settlement',miner_hotkey,round_id,submission_id,run_id,stage,"
+                "%s,'openrouter','openrouter.chat','host',6000001,'{}'::jsonb,%s::jsonb "
+                "FROM public.lab_arena_runs WHERE run_id=%s",
+                (contracts.hash_bytes((first["run_id"] + ':over-cap').encode()),
+                 json.dumps({"call_succeeded": True}), first["run_id"]),
+            )
+            cursor.execute("SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,0)",
+                           (harness.round_id, bad_id, first["icp_position"]))
+            assert cursor.fetchone()[0]["eligibility_reason"] == "execution_cap_exceeded"
+            cursor.execute("ROLLBACK TO SAVEPOINT confirmed_over_cap_probe")
+            cursor.execute("SAVEPOINT active_call_probe")
+            cursor.execute(
+                "INSERT INTO public.lab_arena_ledger"
+                "(entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,"
+                "call_identity,provider,operation_id,funding_source,amount_microusd,entry_doc) "
+                "SELECT 'dispatch',miner_hotkey,round_id,submission_id,run_id,stage,"
+                "%s,'openrouter','openrouter.chat','host',0,'{}'::jsonb "
+                "FROM public.lab_arena_runs WHERE run_id=%s",
+                (contracts.hash_bytes((first["run_id"] + ':active').encode()), first["run_id"]),
+            )
+            cursor.execute("SELECT public.lab_arena_icp_cost_eligibility(%s,%s,%s,0)",
+                           (harness.round_id, bad_id, first["icp_position"]))
+            assert cursor.fetchone()[0]["eligibility_reason"] == "provider_calls_inflight"
+            cursor.execute("ROLLBACK TO SAVEPOINT active_call_probe")
         cursor.execute("SET LOCAL session_replication_role=origin")
 
     outcome = harness.service.publish(harness.round_id)

@@ -915,6 +915,34 @@ def test_eligible_snapshot_is_distinct_from_actual_paid_cost():
     assert result["judgment"]["per_icp_score"] == 12.75
 
 
+def test_frozen_full_thinking_snapshot_uses_confirmed_cost_with_unsettled_call():
+    values = per_icp_cost_fixture()
+    config = values["round_row"]["configuration_doc"]
+    config.update(reasoning_capture_policy="full_generated_thinking_v1",
+                  training_minimum_icp_coverage_percent=80,
+                  sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+                  execution_icp_cap_microusd=6_000_000,
+                  cost_per_company_microusd=6_000_000)
+
+    def reader(**identity):
+        observed = per_icp_cost_reader(spend=500_000, reason="eligible", flat=True)(**identity)
+        snapshot = observed["eligibility"]
+        snapshot.update(execution_icp_cap_microusd=6_000_000,
+                        cost_per_company_cap_microusd=6_000_000,
+                        eligibility_cap_microusd=6_000_000)
+        snapshot["execution"].update(success_unresolved_calls=1,
+                                     success_unresolved_microusd=700_000)
+        return observed
+
+    result = assemble_example(**values, cost_eligibility_reader=reader)
+    assert result["competition_cost_eligibility"]["status"] == "available"
+    assert result["competition_cost_eligibility"]["eligible"] is True
+    assert result["competition_cost_eligibility"]["competition_sourcing_microusd"] == 500_000
+    del config["training_minimum_icp_coverage_percent"]
+    assert assemble_example(**values, cost_eligibility_reader=reader)[
+        "competition_cost_eligibility"]["status"] == "unavailable"
+
+
 @pytest.mark.parametrize("flat", [False, True])
 @pytest.mark.parametrize("excluded", [None, 0, 405_351])
 def test_cost_snapshot_uses_competition_successful_spend_and_preserves_raw_cost(flat, excluded):

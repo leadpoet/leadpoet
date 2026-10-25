@@ -176,7 +176,7 @@ def test_terms_prefetch_keeps_semantic_authority_and_fetch_budget(monkeypatch, c
     ))
     assert calls == [terms_url]
     assert result["usage"]["fetch_calls"] == 1
-    assert result["usage"]["fetch_calls"] <= investigator.MAX_FETCH_CALLS == 4
+    assert result["usage"]["fetch_calls"] <= investigator.MAX_PRODUCT_FETCH_CALLS == 5
     assert result["usage"]["search_calls"] <= investigator.MAX_SEARCH_CALLS == 2
     assert result["claims"]["required_attribute"]["status"] == (
         "VERIFIED" if commercial else "UNPROVEN"

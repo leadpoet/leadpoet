@@ -87,7 +87,7 @@ def test_combined_stage_product_searches_and_fetches_product_before_stage(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
-    monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", fetch_cap)
+    monkeypatch.setattr(investigator, "MAX_PRODUCT_FETCH_CALLS", fetch_cap)
     monkeypatch.setattr(investigator, "_post_json", native_product_post(model))
     monkeypatch.setattr(investigator, "_search_web", search)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
@@ -336,7 +336,7 @@ def test_one_remaining_fetch_is_reserved_for_stage(monkeypatch):
         fetches.append(url)
         return {"ok": True, "url": url, "final_url": url, "text": STAGE_QUOTE}
 
-    monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 1)
+    monkeypatch.setattr(investigator, "MAX_PRODUCT_FETCH_CALLS", 1)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     monkeypatch.setattr(investigator, "_post_json", native_product_post(model))

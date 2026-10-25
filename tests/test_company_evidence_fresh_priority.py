@@ -160,20 +160,24 @@ def test_fresh_locator_does_not_force_attribute_acceptance(monkeypatch):
     assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
 
 
-def test_server_terms_fetch_counts_against_four_call_cap(monkeypatch):
-    fresh = [HOME + f"fresh-{i}" for i in range(4)]
+def test_server_terms_fetch_counts_against_five_product_call_cap(monkeypatch):
+    fresh = [HOME + f"fresh-{i}" for i in range(5)]
     actions = [("fetch_page", {"url": url}) for url in fresh]
     actions.append(("submit_findings", {"findings": [
         _finding("stage", status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote=""),
         _finding("industry", status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote=""),
         _finding("required_attribute", status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote=""),
     ]}))
-    result, _, fetched, _, requests = run_case(monkeypatch, actions=actions)
-    assert fetched == [TERMS, *fresh[:3]]
-    assert result["usage"]["fetch_calls"] == 4
+    result, initial, fetched, _, requests = run_case(monkeypatch, actions=actions)
+    assert initial["investigation_limits"]["fetch_calls"] == 5
+    assert initial["investigation_limits"]["remaining_fetch_calls"] == 4
+    assert initial["investigation_limits"]["server_prefetch_fetch_calls"] == 1
+    assert fetched == [TERMS, *fresh[:4]]
+    assert result["usage"]["fetch_calls"] == 5
     assert json.loads(requests[-1]["messages"][-1]["content"])["error"] == "fetch_budget_exhausted"
-    assert (investigator.MAX_FETCH_CALLS, investigator.MAX_PAGE_CHARACTERS,
-            investigator.ADMISSION_DEADLINE_SECONDS) == (4, 24_000, 110.0)
+    assert (investigator.MAX_FETCH_CALLS, investigator.MAX_PRODUCT_FETCH_CALLS,
+            investigator.MAX_PAGE_CHARACTERS, investigator.ADMISSION_DEADLINE_SECONDS
+            ) == (4, 5, 24_000, 110.0)
 
 
 def test_terms_fetch_does_not_extend_admission_deadline(monkeypatch):

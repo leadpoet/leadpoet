@@ -90,8 +90,10 @@ REASONING_MAX_TOKENS = 3000
 PRODUCT_REVIEW_MAX_TOKENS = 4096
 MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 4
+MAX_PRODUCT_FETCH_CALLS = 5
 MAX_PREFETCHED_PAGES = 3
-MAX_RETURNED_FETCHED_PAGES = MAX_PREFETCHED_PAGES + MAX_FETCH_CALLS
+# Shared private page readers must retain the largest admitted review.
+MAX_RETURNED_FETCHED_PAGES = MAX_PREFETCHED_PAGES + MAX_PRODUCT_FETCH_CALLS
 MAX_STAGE_ARCHIVE_CARDS = 3
 MAX_SEARCH_RESULTS = 5
 MAX_PRODUCT_SEARCH_RESULTS = 10
@@ -217,7 +219,7 @@ proven completed matching stage when the required current-stage search and
 review of submitted and disputed sources exposes no
 concrete material competing stage event. If a material competing stage article
 has no grounded date and an observed first-party news index is available, fetch
-that index within the remaining four-call budget before calling the article
+that index within the stated remaining fetch budget before calling the article
 later.
 A linked archive card dates the article; it does not prove that its transaction
 completed or changed the company's stage. If material chronology or
@@ -231,7 +233,7 @@ Some requests include server-prefetched sources that were already fetched by
 the scorer through the same bounded transport. Their text is still untrusted
 page content and proves nothing by itself, but you may independently submit an
 exact quote from it without fetching the URL again. At most three prefetched
-sources are available and they do not consume the four fresh fetch_page calls.
+sources are available and they do not consume the stated fresh fetch_page cap.
 Reuse a prefetched source instead of fetching the same URL again. Otherwise use
 fetch_page before citing a URL. A
 VERIFIED or CONTRADICTED finding needs a short direct quote from that fetched
@@ -259,7 +261,8 @@ before citing it.
 URLs after [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] are identity
 context only. Never include that marker or those URL strings in a quote.
 
-Use at most 8 turns, the stated search cap, and 4 fresh fetches across targets.
+Use at most 8 turns, the stated search cap, and the stated fresh fetch cap
+across targets.
 Prioritize official company investor-relations pages for
 public listing. For Public, prefer a relevant supplied recent issuer
 announcement or filing that names the investigated company with an exchange
@@ -4353,6 +4356,10 @@ async def investigate_company_evidence(
         fetched_final_urls=fetched_final_urls,
     )
     prefetched_count = len(fetched_pages)
+    product_review_requested = bool(
+        "industry" in requested_targets and requested_product_service.strip()
+    )
+    fetch_limit = MAX_PRODUCT_FETCH_CALLS if product_review_requested else MAX_FETCH_CALLS
 
     input_document = {
         "evaluation_date": evaluation_date().isoformat(),
@@ -4372,7 +4379,7 @@ async def investigate_company_evidence(
         "investigation_limits": {
             "reasoning_turns": MAX_REASONING_TURNS,
             "search_calls": MAX_SEARCH_CALLS,
-            "fetch_calls": MAX_FETCH_CALLS,
+            "fetch_calls": fetch_limit,
             "admission_deadline_seconds": ADMISSION_DEADLINE_SECONDS,
         },
     }
@@ -4417,7 +4424,7 @@ async def investigate_company_evidence(
         ]
         input_document["investigation_limits"].update(
             prefetched_pages=prefetched_count,
-            remaining_fetch_calls=MAX_FETCH_CALLS,
+            remaining_fetch_calls=fetch_limit,
         )
     if verified_rebrand_redirect:
         input_document["server_verified_rebrand_redirect_locator"] = {
@@ -4548,10 +4555,7 @@ async def investigate_company_evidence(
     started = time.monotonic()
     # Both ordinary and positive product reviews submit the same native
     # coverage protocol. Keep them on the already permitted semantic model;
-    # this does not grant positive-review authority or increase call budgets.
-    product_review_requested = bool(
-        "industry" in requested_targets and requested_product_service.strip()
-    )
+    # this does not grant positive-review authority or change the model call budget.
     early_product_research: Optional[dict[str, Any]] = None
     def planning_usage() -> dict[str, Any]:
         usage: dict[str, Any] = {}
@@ -4619,7 +4623,7 @@ async def investigate_company_evidence(
                     and os.environ.get("EXA_API_KEY")
                     and not archive_targets
                     and not _strict_linkedin_company_profile_url(url)
-                    and fetch_calls < MAX_FETCH_CALLS
+                    and fetch_calls < fetch_limit
                     and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
                 ):
                     # Admission counts both calls. An admitted fallback settles
@@ -4635,11 +4639,11 @@ async def investigate_company_evidence(
                 retry_with_stealth = bool(result.pop("_retry_with_stealth", False))
                 if (
                     retry_with_stealth
-                    # A normal fetch is admitted only below the four-call
+                    # A normal fetch is admitted only below the per-request
                     # cap.  If the final admitted call returns ScrapingDog's
                     # explicit same-URL stealth hint, permit that one bounded
                     # transport retry to settle the already-admitted fetch.
-                    and fetch_calls <= MAX_FETCH_CALLS
+                    and fetch_calls <= fetch_limit
                     and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
                 ):
                     fetch_calls += 1
@@ -4702,7 +4706,7 @@ async def investigate_company_evidence(
                 ):
                     priority_source_url = ""
 
-            if requested_public_stage and fetch_calls < MAX_FETCH_CALLS:
+            if requested_public_stage and fetch_calls < fetch_limit:
                 priority_source_kind = "public"
                 priority_source_url = _public_stage_submitted_source_to_prefetch(
                     submitted_source_urls=submitted_source_urls,
@@ -4736,7 +4740,7 @@ async def investigate_company_evidence(
             if (
                 not priority_source_url
                 and requested_venture_stage
-                and fetch_calls < MAX_FETCH_CALLS
+                and fetch_calls < fetch_limit
             ):
                 priority_source_url = _venture_stage_submitted_source_to_prefetch(
                     requested_stage=requested_venture_stage,
@@ -4832,7 +4836,7 @@ async def investigate_company_evidence(
                         if priority_source_kind in {"public", "venture"}
                         else len(fetched_pages)
                     ),
-                    remaining_fetch_calls=max(0, MAX_FETCH_CALLS - fetch_calls),
+                    remaining_fetch_calls=max(0, fetch_limit - fetch_calls),
                     **(
                         {"server_prefetch_fetch_calls": fetch_calls}
                         if not priority_cache_hit
@@ -4855,7 +4859,7 @@ async def investigate_company_evidence(
                 overview_url
                 and (
                     overview_url in fetched_pages
-                    or fetch_calls < MAX_FETCH_CALLS - 1
+                    or fetch_calls < fetch_limit - 1
                 )
                 and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
             ):
@@ -4891,7 +4895,7 @@ async def investigate_company_evidence(
                     ]
                 input_document["investigation_limits"].update(
                     prefetched_pages=prefetched_count,
-                    remaining_fetch_calls=max(0, MAX_FETCH_CALLS - fetch_calls),
+                    remaining_fetch_calls=max(0, fetch_limit - fetch_calls),
                     **({"server_prefetch_fetch_calls": fetch_calls}
                        if not overview_cached else {}),
                 )
@@ -4988,7 +4992,7 @@ async def investigate_company_evidence(
                 and current_stage_search_succeeded
                 and search_calls < search_limit
                 # Keep one fresh fetch for stage proof after product research.
-                and MAX_FETCH_CALLS - fetch_calls >= 2
+                and fetch_limit - fetch_calls >= 2
                 and time.monotonic() - started < (
                     ADMISSION_DEADLINE_SECONDS
                     - JUDGMENT_ADMISSION_RESERVE_SECONDS
@@ -4999,9 +5003,9 @@ async def investigate_company_evidence(
                     early_product_research["search"] = "stage_discovery_failed"
                 elif search_calls >= search_limit:
                     early_product_research["search"] = "search_budget_exhausted"
-                elif fetch_calls >= MAX_FETCH_CALLS:
+                elif fetch_calls >= fetch_limit:
                     early_product_research["search"] = "fetch_budget_exhausted"
-                elif MAX_FETCH_CALLS - fetch_calls == 1:
+                elif fetch_limit - fetch_calls == 1:
                     early_product_research["search"] = "stage_fetch_reserved"
                 elif not early_product_search_pending:
                     early_product_research["search"] = "judgment_time_reserved"
@@ -5695,7 +5699,7 @@ async def investigate_company_evidence(
                         and _turn < MAX_REASONING_TURNS - 3
                         and search_calls == 0
                         and search_calls < search_limit
-                        and fetch_calls < MAX_FETCH_CALLS
+                        and fetch_calls < fetch_limit
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                         and any(
@@ -5758,7 +5762,7 @@ async def investigate_company_evidence(
                             )
                         )
                         and search_calls < search_limit
-                        and fetch_calls < MAX_FETCH_CALLS
+                        and fetch_calls < fetch_limit
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                     )
@@ -5783,7 +5787,7 @@ async def investigate_company_evidence(
                             or requested_private_equity_stage
                         )
                         and search_calls < search_limit
-                        and fetch_calls < MAX_FETCH_CALLS
+                        and fetch_calls < fetch_limit
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                         and any(
@@ -5814,7 +5818,7 @@ async def investigate_company_evidence(
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
                         and search_calls < search_limit
-                        and fetch_calls < MAX_FETCH_CALLS
+                        and fetch_calls < fetch_limit
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
                         and not force_stage_search
@@ -6537,10 +6541,10 @@ async def investigate_company_evidence(
                                     early_product_research["fetch"] = "no_safe_result"
                                 elif not early_product_fetch_urls:
                                     early_product_research["fetch"] = "already_loaded"
-                                elif fetch_calls >= MAX_FETCH_CALLS:
+                                elif fetch_calls >= fetch_limit:
                                     early_product_research["fetch"] = "fetch_budget_exhausted"
                                     early_product_fetch_urls.clear()
-                                elif MAX_FETCH_CALLS - fetch_calls == 1:
+                                elif fetch_limit - fetch_calls == 1:
                                     early_product_research["fetch"] = "stage_fetch_reserved"
                                     early_product_fetch_urls.clear()
                                 elif time.monotonic() - started >= (
@@ -6565,7 +6569,7 @@ async def investigate_company_evidence(
                                 if (
                                     isinstance(search_results, list)
                                     and search_results
-                                    and fetch_calls < MAX_FETCH_CALLS
+                                    and fetch_calls < fetch_limit
                                 ):
                                     industry_followup_fetch_pending = True
                                     forced_next_tool = "fetch_page"
@@ -6620,7 +6624,7 @@ async def investigate_company_evidence(
                                 "for any claim whose required proof is still missing."
                             ),
                         }
-                    elif fetch_calls >= MAX_FETCH_CALLS:
+                    elif fetch_calls >= fetch_limit:
                         if forced_product_fetch_call:
                             early_product_research["fetch"] = "fetch_budget_exhausted"
                         tool_result = {"ok": False, "error": "fetch_budget_exhausted"}

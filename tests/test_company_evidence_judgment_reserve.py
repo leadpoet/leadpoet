@@ -624,7 +624,7 @@ def test_reserved_submit_completes_validated_bounded_judgment(
         monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
     if research_exhausted:
         monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
-        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 0)
+        monkeypatch.setattr(investigator, "MAX_PRODUCT_FETCH_CALLS", 0)
     monkeypatch.setattr(investigator, "_search_web", fake_search)
     result = _run_industry(monkeypatch, fake_post, clock)
 

@@ -1554,7 +1554,7 @@ def test_investigator_hydrates_only_matching_failed_attribute_source():
 
 
 
-@pytest.mark.parametrize("page_count", [4, 7, 8])
+@pytest.mark.parametrize("page_count", [4, 7, 8, 9])
 def test_investigator_returned_page_bound_preserves_a_later_quoted_source(page_count):
     urls = [f"https://acme.example/source-{index}" for index in range(page_count)]
     quote = "Acme supplies a payments platform to businesses."
@@ -1564,7 +1564,7 @@ def test_investigator_returned_page_bound_preserves_a_later_quoted_source(page_c
     cache = {target: {"status": "source_unavailable", "final_url": "", "text": ""}}
     lead_scorer._hydrate_required_attribute_source_cache(cache, investigation)
     accepted = page_count <= investigator.MAX_RETURNED_FETCHED_PAGES
-    assert investigator.MAX_RETURNED_FETCHED_PAGES == 7
+    assert investigator.MAX_RETURNED_FETCHED_PAGES == 8
     assert (cache[target]["status"] == "fetched") is accepted
     if accepted:
         assert cache[target]["text"] == quote
@@ -12639,10 +12639,10 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     assert input_document["investigation_limits"] == {
         "reasoning_turns": 8,
         "search_calls": 2,
-        "fetch_calls": 4,
+        "fetch_calls": 5 if product_service else 4,
         "admission_deadline_seconds": 110.0,
         "prefetched_pages": 1,
-        "remaining_fetch_calls": 4,
+        "remaining_fetch_calls": 5 if product_service else 4,
     }
     if positive_semantic_review:
         assert input_document["untrusted_homepage_navigation_locators"] == [{
@@ -15670,7 +15670,7 @@ def test_failed_final_fetch_never_admits_an_unrelated_fifth_fetch(monkeypatch, h
 
 @pytest.mark.parametrize("fresh_cap", [3, 4])
 def test_fresh_fetch_cap_is_separate_from_three_prefetched_pages(monkeypatch, fresh_cap):
-    monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", fresh_cap)
+    monkeypatch.setattr(investigator, "MAX_PRODUCT_FETCH_CALLS", fresh_cap)
     prefetched = [f"https://acme.example/saved-{index}" for index in range(3)]
     fresh = [f"https://acme.example/fresh-{index}" for index in range(5)]
     requests = []

@@ -98,7 +98,7 @@ def test_partition_keeps_non_ascii_max_page_and_broker_request_bounds(monkeypatc
     assert all("界" * investigator.MAX_PAGE_CHARACTERS in content for content in sources)
 
 
-def test_seven_max_pages_fit_real_broker_full_history(monkeypatch):
+def test_eight_max_pages_fit_real_broker_full_history(monkeypatch):
     page_text = "🧪" * investigator.MAX_PAGE_CHARACTERS
     pages = {
         f"{BASE}/source-{index}": {
@@ -125,7 +125,7 @@ def test_seven_max_pages_fit_real_broker_full_history(monkeypatch):
     normalized = validate_operation_request("openrouter.chat", payload)
     assert normalized["messages"] == payload["messages"]
     assert len(payload["messages"]) <= 128
-    assert len(pages) + 4 == investigator.MAX_RETURNED_FETCHED_PAGES
+    assert len(pages) + investigator.MAX_PRODUCT_FETCH_CALLS == investigator.MAX_RETURNED_FETCHED_PAGES
 
 
 @pytest.mark.parametrize("final_url,admitted", [

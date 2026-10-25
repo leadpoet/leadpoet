@@ -1,3 +1,16 @@
+## Scoped production authorization: October 25 publication read performance
+
+On 2026-10-25 the user renewed the request to fix the confirmed duplicate
+immutable-evidence reads in publication preparation. Reuse the existing read
+cache only within each publication qualification call, with focused regression
+tests, independent review, safe push and merge, canonical deployment and live
+verification by the coordinating task. Preserve current authority validation,
+cache limits, scoring and cost rules, provider privacy and billing, submitted
+sources, accepted work, published October 25 results, rewards and weights.
+Do not replay publication, change the published outcome, add a global cache or
+concurrency, or infer that this preparation fix repairs the separate RPC delay.
+The coordinating task owns all production actions. Keep both guides identical.
+
 # Agent Instructions
 
 Applies to this repository. `AGENTS.md` and `CLAUDE.md` must remain byte-identical.

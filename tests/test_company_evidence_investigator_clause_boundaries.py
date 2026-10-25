@@ -72,8 +72,8 @@ def test_product_coverage_precedes_global_status_without_changing_fields(targets
     assert item["required"][:len(expected)] == expected
     if "industry" in targets:
         field = item["properties"]["product_coverage"]
-        assert field["type"] == ["string", "null"] and field["maxLength"] == 24000
-        assert "id, evidence, activity_role, status" in field["description"]
+        assert field["type"] == ["string", "null"] and field["maxLength"] == 16
+        assert "one explicit VERIFIED, CONTRADICTED or UNPROVEN judgment" in field["description"]
     else:
         assert "product_coverage" not in item["properties"]
 

@@ -7,27 +7,14 @@ import pytest
 
 from lab_arena.operations import validate_operation_request
 from qualification.scoring import company_evidence_investigator as inv
-from tests.test_product_coverage import CRITERION, URL, QUOTE, finding, matrix
+from tests.test_product_coverage import CRITERION, URL, QUOTE, finding
 
 
-JOINT_EVIDENCE_SUFFIX = (
-    "For industry product coverage, a leaf may use up to three exact fetched URL/quote bindings. "
-    "Read complementary evidence together for the same verified company and the qualifying "
-    "offering or connected company-supplied portfolio permitted by the criterion. Do not require "
-    "one quote to repeat every part of a leaf, or one product, platform, or contract for separate "
-    "required capabilities unless the criterion requires them to share that scope. Do not combine "
-    "disconnected offerings to invent a missing capability, or treat customer-owned capabilities "
-    "or hypothetical facts as the company's supplied activity. Every mandatory condition, "
-    "including shared market and use, and every source/identity check still applies. "
-    "For a missing product capability, prefer a safe first-party result whose discovery "
-    "highlight names that capability over a generic glossary or overview. Fetch the page; "
-    "discovery highlights are locators only, never proof."
-)
-
+JOINT_EVIDENCE_SUFFIX = inv._PRODUCT_JOINT_EVIDENCE_SUFFIX
 
 def test_joint_evidence_prompt_allows_portfolio_only_when_criterion_permits_it():
     assert "connected company-supplied portfolio permitted by the criterion" in JOINT_EVIDENCE_SUFFIX
-    assert "unless the criterion requires them to share that scope" in JOINT_EVIDENCE_SUFFIX
+    assert "unless the criterion requires that shared scope" in JOINT_EVIDENCE_SUFFIX
     assert "including shared market and use" in JOINT_EVIDENCE_SUFFIX
     assert "Do not combine disconnected offerings to invent a missing capability" in JOINT_EVIDENCE_SUFFIX
     assert "discovery highlights are locators only, never proof" in JOINT_EVIDENCE_SUFFIX
@@ -65,6 +52,7 @@ def test_effort_survives_real_transport_and_generic_output_length_retry(
 
         def post(self, url, *, headers, json):
             assert url == "https://openrouter.ai/api/v1/chat/completions"
+            assert "submit_product_plan" not in [t["function"]["name"] for t in json["tools"]]
             normalized = validate_operation_request("openrouter.chat", json)
             assert normalized["messages"] == json["messages"]
             self.requests.append(json)
@@ -72,7 +60,7 @@ def test_effort_survives_real_transport_and_generic_output_length_retry(
                 return Response({"choices": [{"finish_reason": "length", "message": {"content": None}}],
                                  "usage": {"completion_tokens": json["max_tokens"],
                                            "completion_tokens_details": {"reasoning_tokens": json["max_tokens"]}}})
-            raw = finding(jsonlib.dumps(matrix()) if product else None)
+            raw = finding("VERIFIED" if product else None)
             return Response({"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [{
                 "id": "submit", "type": "function", "function": {
                     "name": "submit_findings",
@@ -81,7 +69,6 @@ def test_effort_survives_real_transport_and_generic_output_length_retry(
             }]}}]})
 
     session = Session()
-    matrix()  # Isolate company transport; planner transport is tested separately.
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
     monkeypatch.setenv("EXA_API_KEY", "offline-test")
     monkeypatch.setattr(inv.aiohttp, "ClientSession", lambda **kwargs: session)
@@ -153,6 +140,7 @@ def test_per_request_budget_drives_repairs_and_final_admission(monkeypatch, mode
 
         def post(self, url, *, headers, json):
             validate_operation_request("openrouter.chat", json)
+            assert "submit_product_plan" not in [t["function"]["name"] for t in json["tools"]]
             requests.append(json)
             if len(requests) == 1 and mode in {"forced_final", "late_final"}:
                 message = {"tool_calls": [{"id": "search", "type": "function", "function": {
@@ -170,7 +158,7 @@ def test_per_request_budget_drives_repairs_and_final_admission(monkeypatch, mode
                 return Response({"choices": [{"finish_reason": "stop", "message": message}],
                                  "usage": {"completion_tokens": used_tokens}})
             else:
-                raw = finding(jsonlib.dumps(matrix()))
+                raw = finding("VERIFIED")
                 message = {"tool_calls": [{"id": "submit", "type": "function", "function": {
                     "name": "submit_findings", "arguments": jsonlib.dumps({"findings": [raw]}),
                 }}]}
@@ -186,7 +174,6 @@ def test_per_request_budget_drives_repairs_and_final_admission(monkeypatch, mode
     monkeypatch.setattr(inv.aiohttp, "ClientSession", lambda **kwargs: Session())
     monkeypatch.setattr(inv, "time", clock)
     monkeypatch.setattr(inv, "_search_web", search)
-    matrix()  # Precompile the native plan for company-only budget controls.
     result = asyncio.run(inv.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},
         targets=("industry",), requested_industry="Software", requested_product_service=CRITERION,

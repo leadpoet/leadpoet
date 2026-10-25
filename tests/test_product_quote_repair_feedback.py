@@ -6,7 +6,6 @@ import pytest
 
 from qualification.scoring import company_evidence_investigator as inv
 from qualification.scoring import product_coverage as pc
-from tests.product_coverage_fixtures import coverage, trusted_plan
 
 CRITERION = "Manufactures interior and exterior surfaces"
 URL = "https://acmeproducts.example/products"
@@ -23,22 +22,13 @@ HOME_PAGE = (
     "Acme Products supplies building surfaces through its operating brand Verda. "
     + HOME_QUOTE
 )
-NODES = [
-    {"id": "p0", "span": CRITERION, "op": "all", "children": ["p1", "p2", "p3"]},
-    {"id": "p1", "span": "Manufactures surfaces", "op": "leaf", "children": []},
-    {"id": "p2", "span": "Interior surfaces", "op": "leaf", "children": []},
-    {"id": "p3", "span": "Exterior surfaces", "op": "leaf", "children": []},
-]
 
 
-def raw_finding(quote=QUOTE, *, status="UNPROVEN", role="supplier_operator", url=URL):
-    wire = json.loads(coverage(CRITERION, url, quote, nodes=NODES))
-    for claim in wire["claims"]:
-        claim["activity_role"] = role
+def raw_finding(quote=QUOTE, *, status="VERIFIED", role="supplier_operator", url=URL):
     return {"target": "industry", "status": status, "observed_industry": "Surface manufacturing" if status == "VERIFIED" else "",
             "activity_role": role if status == "VERIFIED" else "unresolved",
             "evidence_url": url if status == "VERIFIED" else "", "evidence_quote": quote if status == "VERIFIED" else "",
-            "product_coverage": json.dumps(wire), "reason": "Rejudge the complete criterion from loaded sources."}
+            "product_coverage": status, "reason": "Rejudge the complete criterion from loaded sources."}
 
 
 def validated(raw, page=PAGE, *, url=URL, final_url=None):
@@ -46,7 +36,6 @@ def validated(raw, page=PAGE, *, url=URL, final_url=None):
         {"findings": [raw]}, targets=("industry",), fetched_pages={url: page},
         fetched_final_urls={url: final_url or url}, first_party_domains={"acmeproducts.example"},
         identity_names={"acmeproducts"}, requested_product_service=CRITERION,
-        product_plan=pc.get_cached_plan(CRITERION, model=inv.POSITIVE_SEMANTIC_REVIEW_MODEL),
         identity_anchor={"submitted_name": "Acme Products", "submitted_domain": "acmeproducts.example",
                          "observed_name": "Acme Products", "observed_domain": "acmeproducts.example"},
     )["industry"]
@@ -60,7 +49,6 @@ def cross_page_validated(raw, *, home_page=HOME_PAGE, home_url=HOME_URL,
         fetched_final_urls={BRAND_URL: BRAND_URL, home_url: home_final_url},
         first_party_domains={"acmeproducts.example"}, identity_names={"acmeproducts"},
         requested_product_service=CRITERION,
-        product_plan=pc.get_cached_plan(CRITERION, model=inv.POSITIVE_SEMANTIC_REVIEW_MODEL),
         identity_anchor={"submitted_name": "Acme Products", "submitted_domain": "acmeproducts.example",
                          "observed_name": "Acme Products", "observed_domain": "acmeproducts.example"},
     )["industry"]
@@ -70,16 +58,16 @@ def test_trademark_variant_finds_exact_contiguous_parent_brand_passage_on_loaded
     assert not inv._quote_occurs(BRAND_QUOTE, HOME_PAGE)
     first = cross_page_validated(raw_finding(BRAND_QUOTE, url=BRAND_URL))
     assert first["status"] == "UNPROVEN"
-    assert all(claim["status"] == "UNPROVEN" for claim in first["product_coverage"]["claims"])
+    assert not pc.coverage_matches(first.get("product_coverage"), CRITERION)
     repairs = first["untrusted_product_citation_repairs"]
-    assert len(repairs) == 3
+    assert len(repairs) == 1
     assert all(repair["source_url"] == HOME_URL for repair in repairs)
     candidate = repairs[0]["untrusted_suggested_quote"]
     assert HOME_QUOTE in repairs[0]["untrusted_source_context"]
     assert candidate in HOME_PAGE and "Acme Products" in candidate
     assert HOME_QUOTE in candidate and BRAND_QUOTE not in candidate
     assert len(candidate) <= 2000 and "not proof" in repairs[0]["instruction"]
-    assert candidate not in json.dumps(first["product_coverage"])
+    assert candidate not in json.dumps(first.get("product_coverage"))
 
     # The hint has no authority; only a fresh model submission can pass.
     repaired = cross_page_validated(raw_finding(candidate, status="VERIFIED", url=HOME_URL))
@@ -119,14 +107,14 @@ def test_short_common_trademark_quote_does_not_trigger_cross_page_hint():
 def test_candidate_is_exact_bounded_same_page_and_not_admitted_into_proof():
     result = validated(raw_finding())
     assert result["status"] == "UNPROVEN"
-    assert all(c["evidence"] == [] for c in result["product_coverage"]["claims"])
+    assert not pc.coverage_matches(result.get("product_coverage"), CRITERION)
     repairs = result["untrusted_product_citation_repairs"]
-    assert len(repairs) == 3
+    assert len(repairs) == 1
     for repair in repairs:
         candidate = repair["untrusted_suggested_quote"]
         assert candidate in PAGE and QUOTE in candidate and "Acme Products" in candidate
         assert len(candidate) <= 2000 and "not proof" in repair["instruction"]
-        assert candidate not in json.dumps(result["product_coverage"])
+        assert candidate not in json.dumps(result.get("product_coverage"))
     candidate = repairs[0]["untrusted_suggested_quote"]
     # Only a new model submission plus all normal validators can accept it.
     assert validated(raw_finding(candidate, status="VERIFIED"))["status"] == "VERIFIED"
@@ -149,7 +137,7 @@ def test_customer_or_parent_noise_is_not_automatic_supplier_proof(role):
     assert candidate in page  # Context can include unrelated activity.
     negative = validated(raw_finding(candidate, status="VERIFIED", role=role), page)
     assert negative["status"] == "UNPROVEN"
-    assert not pc.coverage_matches(negative["product_coverage"], CRITERION)
+    assert not pc.coverage_matches(negative.get("product_coverage"), CRITERION)
 
 
 @pytest.mark.parametrize("url,final_url", [
@@ -178,7 +166,7 @@ def test_optional_repair_contexts_are_dropped_whole_to_fit_existing_message_boun
                 "untrusted_source_context": "s" * 800, "instruction": "context only"}
                for i in range(3)]
     document = {"required_metadata": "m" * 25000,
-                "product_coverage": {"plan_id": "frozen", "untrusted_citation_repairs": repairs}}
+                "product_coverage": {"original_criterion": CRITERION, "untrusted_citation_repairs": repairs}}
     encoded = inv._bounded_message_json(document)
     decoded = json.loads(encoded)
     assert len(encoded) < 32000 and decoded["required_metadata"] == document["required_metadata"]
@@ -187,10 +175,9 @@ def test_optional_repair_contexts_are_dropped_whole_to_fit_existing_message_boun
     assert all(r["untrusted_suggested_quote"] == "q" * 2000 for r in retained)
 
 
-def test_global_unproven_positive_clause_rejections_get_context_and_bounded_rejudgment(monkeypatch):
+def test_rejected_whole_verdict_gets_untrusted_context_and_bounded_rejudgment(monkeypatch):
     requests, searches = [], []
     accept_repair = True
-    trusted_plan(CRITERION, NODES)
 
     async def post(_session, _url, *, headers, payload):
         from lab_arena.operations import validate_operation_request
@@ -204,9 +191,10 @@ def test_global_unproven_positive_clause_rejections_get_context_and_bounded_reju
             if turn == 3:
                 feedback = json.loads(payload["messages"][-1]["content"])
                 repairs = feedback["product_coverage"]["untrusted_citation_repairs"]
-                assert len(repairs) == 3
+                assert len(repairs) == 1
                 assert "requirements" not in feedback["product_coverage"]
-                assert feedback["product_coverage"]["allowed_claim_ids"] == ["p1", "p2", "p3"]
+                assert feedback["product_coverage"]["rejected_citations"][0]["binding_index"] == 0
+                assert feedback["product_coverage"]["original_criterion"] == CRITERION
                 candidate = repairs[0]["untrusted_suggested_quote"]
                 assert candidate in PAGE and "Acme Products" in candidate
                 if accept_repair:
@@ -225,6 +213,7 @@ def test_global_unproven_positive_clause_rejections_get_context_and_bounded_reju
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
     monkeypatch.setenv("EXA_API_KEY", "offline-test")
     monkeypatch.setattr(inv, "MAX_SEARCH_CALLS", 1)
+    monkeypatch.setattr(inv, "MAX_REASONING_TURNS", 3)
     monkeypatch.setattr(inv, "_post_json", post)
     monkeypatch.setattr(inv, "_search_web", search)
     monkeypatch.setattr(inv, "_fetch_page", forbidden_fetch)
@@ -252,5 +241,8 @@ def test_global_unproven_positive_clause_rejections_get_context_and_bounded_reju
                             "observed_company_website": "https://acmeproducts.example"},
         prefetched_pages={URL: {"final_url": URL, "text": PAGE}},
     ))
+    assert rejected_result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert rejected_result.get("_completed_submit") is not True
+    assert not pc.coverage_matches(rejected_result["claims"]["industry"].get("product_coverage"), CRITERION)
     assert "untrusted_product_citation_repairs" not in rejected_result["claims"]["industry"]
     assert "product_positive_citation_rejected" not in rejected_result["claims"]["industry"]

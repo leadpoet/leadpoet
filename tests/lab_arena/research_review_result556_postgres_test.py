@@ -29,7 +29,8 @@ def recovery_database():
     yield from database_with_lab_arena_migration(
         CURRENT_SERVICE_MIGRATIONS + (
             "492-lab-arena-review-provider-observations.sql",
-            "562-lab-arena-review-context-integrity-reason.sql", MIGRATION.name,
+            "562-lab-arena-review-context-integrity-reason.sql",
+            "563-lab-arena-review-source-digest-reason.sql", MIGRATION.name,
         )
     )
 
@@ -161,6 +162,29 @@ def test_unverified_assessment_finishes_and_settles(recovery_store, recovery_sup
     assert retried["code_review_attempts"] == 2
     assert [entry["entry_kind"] for entry in recovery_store.list_ledger(submission_id=submission)] == [
         "reservation", "dispatch", "settlement", "reservation", "dispatch",
+    ]
+
+
+def test_main_digest_failure_remains_permanent_after_research_migration(
+    recovery_store, recovery_superuser,
+):
+    submission, miner, token = _claim(recovery_store, recovery_superuser, "e25")
+    document = {
+        **code_review_policy.source_diagnostic("code_review_source_digest_mismatch"),
+        "model": code_review.DEFAULT_REVIEW_MODEL,
+        "file_count": 3,
+        "source_bytes": 1200,
+    }
+    assert recovery_store.finish_submission_review(
+        submission, miner, token, "error", document, 0,
+    )["status"] == "error"
+    row = recovery_store.get_submission(submission)
+    assert row["code_review_doc"]["error_code"] == "code_review_source_digest_mismatch"
+    assert row["code_review_doc"]["retryable"] is False
+    assert row["code_review_doc"]["cost_microusd"] == 0
+    assert not code_review_policy.review_retry_available(row)
+    assert [entry["entry_kind"] for entry in recovery_store.list_ledger(submission_id=submission)] == [
+        "reservation", "dispatch", "settlement",
     ]
 
 

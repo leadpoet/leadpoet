@@ -7,8 +7,8 @@ SET LOCAL statement_timeout='30s';
 DO $research_review556$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)';
-  v_preimage CONSTANT TEXT := 'f8b5171ec7584721ae879a66e450136967e63a91e7a80c03ea9fb97e2d15c1d8';
-  v_postimage CONSTANT TEXT := 'e3887c358b080b97ef784041c3edb219dd074001fff56407f61db5395099fd03';
+  v_preimage CONSTANT TEXT := '573ee0b15a4952e4d25e2943c79578e44993c5e8117d2fdcc2a208fbb623cba1';
+  v_postimage CONSTANT TEXT := '19c1b1f10e9967cac66681999473cb0e1863c8c29f25064fdfee9ccab87adb14';
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;

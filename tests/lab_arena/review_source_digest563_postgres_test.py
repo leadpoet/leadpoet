@@ -75,10 +75,13 @@ def test_digest_error_fails_before_migration_then_settles_same_claim(context):
     assert row["code_review_doc"]["cost_microusd"] == 0
 
 
-@pytest.mark.parametrize("code", sorted(code_review_policy.ERROR_CODES))
+@pytest.mark.parametrize("code", sorted(
+    code for code in code_review_policy.ERROR_CODES
+    if code != "code_review_research_unverified"
+))
 def test_every_canonical_error_code_persists_through_real_rpc(context, code):
     store, _ = context
-    assert len(code_review_policy.ERROR_CODES) == 45
+    assert len(code_review_policy.ERROR_CODES - {"code_review_research_unverified"}) == 45
     submission, miner, token = _claimed(store, code)
     document = _document(code)
     assert store.finish_submission_review(

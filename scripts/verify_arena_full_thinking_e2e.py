@@ -191,6 +191,7 @@ def full_thinking_database():
                     "554-lab-arena-funding-proof-throughput.sql",
                     "555-lab-arena-full-thinking-six-dollar-cap.sql",
                     "562-lab-arena-review-context-integrity-reason.sql",
+                    "563-lab-arena-review-source-digest-reason.sql",
                     "556-lab-arena-research-review-result.sql",
                     "557-lab-arena-closed-provider-scoped-candidates.sql",
                     "558-lab-arena-funding-proof-keyed-lookups.sql",

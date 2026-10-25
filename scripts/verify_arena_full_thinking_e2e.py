@@ -572,6 +572,45 @@ class FullThinkingHarness(PaidHarness):
         if any(item.get("error") for item in worker.completed):
             raise AssertionError("runner abandoned an assignment")
 
+    def advance_until(self, target: str, *, runners: int = 1,
+                      max_steps: int = 120) -> dict[str, Any]:
+        """Follow service-admitted score retries after a scoring window closes."""
+
+        result: dict[str, Any] = {}
+        for _ in range(max_steps):
+            status = self.status()
+            if status == target:
+                return result
+            if status in ("stage1", "stage1_scoring", "stage2", "stage2_scoring"):
+                self.run_stage_with_runners(runners)
+            elif status in ("stage1_judged", "stage2_judged"):
+                stage = int(status[5])
+                queued = self.service.store.list_runs(
+                    self.round_id, stage=stage, kind="score"
+                )
+                if any(run["status"] == "pending" for run in queued):
+                    self.run_stage_with_runners(runners)
+            if status == "stage1_scored":
+                self.clock.advance_to(self.schedule()["stage_2_start"])
+            result = self.service.advance_round(self.round_id)
+            if (status in ("stage1_judged", "stage2_judged")
+                    and result.get("status") == "retry"
+                    and result.get("reason") == "judge_incomplete"):
+                queued = self.service.store.list_runs(
+                    self.round_id, stage=int(status[5]), kind="score"
+                )
+                if not any(run["status"] in ("pending", "leased", "submitted")
+                           for run in queued):
+                    raise AssertionError("judge_incomplete has no queued score retry")
+                # PostgreSQL applies real-time backoff to score successors.
+                time.sleep(30)
+                continue
+            if result.get("status") in ("cancelled", "terminal", "retry", "stale"):
+                raise AssertionError((status, result))
+        raise AssertionError(
+            "round did not reach %s (at %s)" % (target, self.status())
+        )
+
 
 def _per_icp_observed(executions, scores, examples, icps):
     score_by_execution = {run["scored_run_id"]: run for run in scores}

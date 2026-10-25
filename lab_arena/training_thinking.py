@@ -54,7 +54,8 @@ def _policy(call: Mapping[str, Any], registry: Any = None) -> bool:
         frozen = reasoning_capture.validate_registry(registry)
     except (TypeError, ValueError, KeyError, AttributeError):
         return False
-    if contracts.document_hash(frozen).split(":", 1)[1] != annotation["registry_sha256"]:
+    if (contracts.document_hash(frozen).split(":", 1)[1] != annotation["registry_sha256"]
+            or not reasoning_capture.explicit_provider_matches(call.get("request") or {}, annotation.get("provider_route"))):
         return False
     matches = [entry for entry in frozen["approved_routes"]
                if entry["model_id"] == model and entry["api"] == operation

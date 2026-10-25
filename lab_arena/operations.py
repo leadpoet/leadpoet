@@ -2375,6 +2375,9 @@ def build_outbound_request(
                 )
             ):
                 raise OperationRequestError("invalid_request")
+            if allow_full_thinking and normalized.get("provider") is not None:
+                if normalized["provider"]["only"] != policy.get("only"):
+                    raise OperationRequestError("invalid_request")
             document["provider"] = policy
         document = _wrap_body(operation, normalized, document, deepline_catalog=deepline_catalog)
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")

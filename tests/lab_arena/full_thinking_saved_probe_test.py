@@ -51,8 +51,12 @@ def _example(probe):
         hashed = {"model": probe["model"], "turn": index}
         request_hash = contracts.document_hash(hashed)
         identity = "probe-call-%d" % index
+        admitted = copy.deepcopy(request_body)
+        # These saved diagnostic wires already contain the organizer's pin;
+        # it was never part of the admitted miner request or synthetic hash.
+        admitted.pop("provider", None)
         capture_doc = {"operation_id": "openrouter.chat", "request_hash": request_hash,
-                       "hashed_parameters": hashed, "admitted_parameters": request_body,
+                       "hashed_parameters": hashed, "admitted_parameters": admitted,
                        "effective_parameters": {"model": probe["model"]},
                        "reasoning_capture": annotation,
                        "outbound": {"method": "POST", "host": "openrouter.ai",

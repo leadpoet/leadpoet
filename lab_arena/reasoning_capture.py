@@ -214,6 +214,27 @@ def apply(operation_id: str, parameters: Mapping[str, Any], *, policy: Optional[
     return _apply_full(operation_id, parameters, registry)
 
 
+def explicit_provider_matches(request: Mapping[str, Any], provider_route: Any) -> bool:
+    """Bind explicit miner selection without changing selector-absent records."""
+    if not isinstance(request, Mapping):
+        return False
+    selections = []
+    for field in ("admitted_parameters", "hashed_parameters"):
+        parameters = request.get(field) or {}
+        preference = parameters.get("provider") if isinstance(parameters, Mapping) else None
+        selections.append((isinstance(preference, Mapping) and "only" in preference,
+                           preference.get("only") if isinstance(preference, Mapping) else None))
+    if not any(present for present, _ in selections):
+        return True
+    expected = [provider_route]
+    outbound = request.get("outbound") or {}
+    body = outbound.get("body") if isinstance(outbound, Mapping) else None
+    provider = body.get("provider") if isinstance(body, Mapping) else None
+    return (isinstance(provider_route, str) and bool(provider_route)
+            and all(present and isinstance(value, list) and value == expected for present, value in selections)
+            and isinstance(provider, Mapping) and provider.get("only") == expected)
+
+
 def route_observation(response: Any, annotation: Mapping[str, Any]) -> Dict[str, Any]:
     """Record actual route fields without mistaking a pin for provider proof."""
     document = response if isinstance(response, Mapping) else {}

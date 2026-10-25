@@ -164,7 +164,14 @@ def test_actual_returned_provider_must_still_match_the_selected_frozen_row():
     annotation = call['reasoning_capture']
     annotation.update(provider_route=alternative['provider'], provider_name=alternative['provider_name'],
         probe_id=alternative['evidence']['probe_id'], registry_sha256=contracts.document_hash(frozen).split(':')[1])
-    # The unchanged saved provider observation still identifies the old row.
+    # Bind the explicit request to the alternate row. The unchanged saved
+    # provider observation still identifies the old provider and must fail.
+    request_doc = call['request']
+    request_doc['admitted_parameters']['provider'] = {'only': [alternative['provider']]}
+    request_doc['hashed_parameters']['provider'] = {'only': [alternative['provider']]}
+    request_doc['outbound']['body']['provider']['only'] = [alternative['provider']]
+    request_doc['request_hash'] = call['request_hash'] = contracts.document_hash(request_doc['hashed_parameters'])
+    request_doc['outbound']['body_sha256'] = contracts.document_hash(request_doc['outbound']['body'])
     assert training_thinking._policy(call, frozen)
     assert not training_thinking.attempt_coverage(call, 'miner', frozen)['provider_route_verified']
     annotation['provider_route'] = 'not/approved'
@@ -262,3 +269,51 @@ def test_provider_selection_is_per_request_without_implicit_sticky_state_or_fall
     assert json.loads(transport.sent[1]['body'])['provider']['only'] == ['example/verified']
     assert first.call['call_identity'] != second.call['call_identity']
     assert all(json.loads(row['body'])['provider']['allow_fallbacks'] is False for row in transport.sent)
+
+
+@pytest.mark.parametrize('damage', ['admitted_only', 'hashed_only', 'admitted_hash_disagree',
+                                   'both_disagree_annotation', 'outbound_disagree', 'outbound_missing'])
+def test_saved_explicit_selector_is_bound_to_request_annotation_and_wire(damage):
+    from tests.lab_arena.training_host_result_test import without_client_callbacks
+    from tests.lab_arena.training_eligibility_test import submission
+    from tests.lab_arena.training_steps_test import seal
+    from lab_arena import training_eligibility, training_steps
+    example = without_client_callbacks()
+    call = example['provider_calls'][0]
+    request_doc = call['request']
+    expected = call['reasoning_capture']['provider_route']
+    request_doc['admitted_parameters']['provider'] = {'only': [expected]}
+    request_doc['hashed_parameters']['provider'] = {'only': [expected]}
+    request_doc['outbound']['body']['provider']['only'] = [expected]
+    if damage == 'admitted_only': request_doc['hashed_parameters'].pop('provider')
+    elif damage == 'hashed_only': request_doc['admitted_parameters'].pop('provider')
+    elif damage == 'admitted_hash_disagree': request_doc['admitted_parameters']['provider']['only'] = ['not/the/annotation']
+    elif damage == 'both_disagree_annotation':
+        request_doc['admitted_parameters']['provider']['only'] = ['not/the/annotation']
+        request_doc['hashed_parameters']['provider']['only'] = ['not/the/annotation']
+    elif damage == 'outbound_disagree': request_doc['outbound']['body']['provider']['only'] = ['not/the/annotation']
+    else: request_doc['outbound']['body']['provider'].pop('only')
+    request_doc['request_hash'] = call['request_hash'] = contracts.document_hash(request_doc['hashed_parameters'])
+    request_doc['outbound']['body_sha256'] = contracts.document_hash(request_doc['outbound']['body'])
+    seal(example)
+    assert not training_thinking._policy(call, example['configuration']['reasoning_route_registry'])
+    with pytest.raises(ValueError): training_steps._candidate(example, call)
+    assert not training_eligibility.assess_capture(submission(), {'run': example}, ['run'], enabled=True)['eligible']
+
+
+def test_direct_builder_rejects_a_selected_provider_different_from_its_host_pin():
+    with pytest.raises(operations.OperationError):
+        operations.build_outbound_request('openrouter.chat', request(provider='example/alternative'),
+            allow_full_thinking=True, openrouter_provider_policy={
+                'data_collection': 'deny', 'zdr': True, 'allow_fallbacks': False,
+                'only': ['example/verified'], 'require_parameters': True,
+                'max_price': {'prompt': 1, 'completion': 1, 'request': 0}})
+
+
+@pytest.mark.parametrize('annotation', [True, ['malformed'], 'malformed', 7])
+def test_generic_legacy_candidate_does_not_crash_on_non_mapping_optional_annotation(annotation):
+    from lab_arena import training_steps
+    from tests.lab_arena.training_steps_test import fixture, seal
+    example = fixture()
+    example['provider_calls'][0]['reasoning_capture'] = annotation
+    assert training_steps._candidate(seal(example), example['provider_calls'][0])

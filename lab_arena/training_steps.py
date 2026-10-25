@@ -12,9 +12,10 @@ import base64
 import json
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
-from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset, training_coverage
+from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset, training_coverage, reasoning_capture
 
 SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_dataset.v1'
 RECORD_SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_candidate.v1'
@@ -454,6 +455,10 @@ def _candidate(example, call):
     op = call.get('operation_id')
     _require(call.get('provider') == 'openrouter' and op in {'openrouter.chat', 'openrouter.responses'}, 'operation_unsupported')
     request = call.get('request') or {}
+    annotation = call.get('reasoning_capture') or {}
+    if isinstance(annotation, Mapping) and annotation.get('policy') == reasoning_capture.POLICY:
+        _require(reasoning_capture.explicit_provider_matches(request, annotation.get('provider_route')),
+                 'request_provider_route_mismatch')
     _require(not (call.get('request_capture') or {}).get('redacted') and _exact(request), 'request_privacy_nonexact')
     _require(request.get('operation_id') == op and request.get('request_hash') == call.get('request_hash')
              and isinstance(request.get('hashed_parameters'), dict)

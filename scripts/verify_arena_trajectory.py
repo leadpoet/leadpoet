@@ -209,8 +209,7 @@ def _run(args: argparse.Namespace) -> int:
             or lease.get("submission_id") != args.expect_submission_id
         ):
             raise VerificationError("claimed lease does not match the requested execution")
-        envelope = runner._executor.execute(lease, str(lease["lease_token"]), lease["icp"])
-        complete = runner._complete_with_retries(envelope)
+        complete = runner._execute_and_complete(lease)
         result = {
             "schema_version": SCHEMA, "round_id": args.round_id,
             "run_id": lease["run_id"], "submission_id": lease["submission_id"],

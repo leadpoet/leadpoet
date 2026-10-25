@@ -8,6 +8,7 @@ import pytest
 
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import native_product_post
 
 
 RAPID7_PRODUCT_URL = "https://rapid7.com/products/insightcloudsec/"
@@ -616,7 +617,7 @@ def test_stage_quote_correction_keeps_untrusted_industry_source_context(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post_json))
     monkeypatch.setattr(
         investigator,
         "_search_web",

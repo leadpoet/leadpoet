@@ -3,6 +3,7 @@ import json
 
 import pytest
 from qualification.scoring import company_evidence_investigator as inv
+from tests.product_coverage_fixtures import native_product_post
 from tests.test_company_evidence_judgment_reserve import (
     _Clock,
     _finding,
@@ -31,17 +32,17 @@ def stage(status="VERIFIED", missing=False):
     return f
 
 
-def run(monkeypatch, post, search, targets):
+def run(monkeypatch, post, search, targets, *, fetch=None):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     monkeypatch.setenv("EXA_API_KEY", "test")
     monkeypatch.setattr(inv, "time", _Clock())
-    monkeypatch.setattr(inv, "_post_json", post)
+    monkeypatch.setattr(inv, "_post_json", native_product_post(post))
     monkeypatch.setattr(inv, "_search_web", search)
 
     async def no_fetch(*args, **kwargs):
         raise AssertionError("no fresh fetch needed")
 
-    monkeypatch.setattr(inv, "_fetch_page", no_fetch)
+    monkeypatch.setattr(inv, "_fetch_page", fetch or no_fetch)
     return asyncio.run(
         inv.investigate_company_evidence(
             company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -120,11 +121,11 @@ def test_mixed_missing_stage_and_fabricated_industry_keep_distinct_feedback(
 
     async def search(session, query, **kwargs):
         searches.append(query)
-        return {"results": []}
+        return {"results": [{"url": URL}]}
 
     async def post(session, url, *, headers, payload):
         requests.append(payload)
-        assert len(requests) <= 2
+        assert len(requests) <= 4
         if len(requests) == 1:
             return 200, _response(
                 "submit_findings",
@@ -134,6 +135,15 @@ def test_mixed_missing_stage_and_fabricated_industry_keep_distinct_feedback(
                         _finding(quote="Acme manufactures passenger aircraft."),
                     ]
                 },
+            )
+        if len(requests) == 3:
+            assert payload["tool_choice"] == {
+                "type": "function", "function": {"name": "fetch_page"},
+            }
+            return 200, _response("fetch_page", {"url": URL}, call=3)
+        if len(requests) == 4:
+            return 200, _response(
+                "submit_findings", {"findings": [stage(), _finding()]}, call=4,
             )
         feedback = json.loads(
             next(
@@ -153,12 +163,21 @@ def test_mixed_missing_stage_and_fabricated_industry_keep_distinct_feedback(
         )
         assert "No passage was rejected for those findings" in feedback["instruction"]
         assert "Never repeat a rejected quote." in feedback["instruction"]
-        return 200, _response(
-            "submit_findings", {"findings": [stage(), _finding()]}, call=2
-        )
+        if len(requests) == 2:
+            assert payload["tool_choice"] == {
+                "type": "function", "function": {"name": "search_web"},
+            }
+            return 200, _response(
+                "search_web", {"query": "Acme enrollment software for universities"}, call=2,
+            )
+        raise AssertionError("unexpected investigator turn")
 
-    result = run(monkeypatch, post, search, ("stage", "industry"))
-    assert len(requests) == 2 and len(searches) == 1
+    async def fetch(session, url):
+        assert url == URL
+        return {"ok": True, "url": URL, "final_url": URL, "text": QUOTE}
+
+    result = run(monkeypatch, post, search, ("stage", "industry"), fetch=fetch)
+    assert len(requests) == 4 and len(searches) == 2
     assert result["_completed_submit"] is True
     assert (
         result["claims"]["stage"]["status"]

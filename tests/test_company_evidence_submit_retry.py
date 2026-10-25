@@ -8,6 +8,7 @@ import pytest
 
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import native_product_post, trusted_plan
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
@@ -81,9 +82,11 @@ def _reasoning_exhausted_without_tool_call():
 
 
 def _run(monkeypatch, post_json, *, positive_semantic_review: bool = True):
+    # These tests control the investigator turn clock, not planner admission.
+    trusted_plan("Enrollment software for universities")
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(post_json))
     return asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("industry",),

@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import native_product_post
 from tests.test_company_evidence_judgment_reserve import (
     QUOTE, URL, _Clock, _finding, _response,
 )
@@ -13,7 +14,7 @@ from tests.test_company_evidence_judgment_reserve import (
 def _investigate(monkeypatch, post, clock, *, loaded=True, positive=False):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(post))
     monkeypatch.setattr(investigator, "time", clock)
     return asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},

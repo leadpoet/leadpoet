@@ -73,7 +73,11 @@ def _response(name: str, arguments: dict[str, object] | str, *, call: int = 1):
 
 
 def _run_industry(monkeypatch, post_json, clock: _Clock, **kwargs):
-    coverage("Enrollment software for universities", URL, QUOTE)
+    requested_product_service = kwargs.pop(
+        "requested_product_service", "Enrollment software for universities",
+    )
+    if requested_product_service:
+        coverage(requested_product_service, URL, QUOTE)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", post_json)
@@ -83,7 +87,7 @@ def _run_industry(monkeypatch, post_json, clock: _Clock, **kwargs):
         targets=("industry",),
         requested_industry="Education",
         requested_subindustry="Higher education services",
-        requested_product_service="Enrollment software for universities",
+        requested_product_service=requested_product_service,
         prior_observations={"submitted_source_urls": [URL]},
         verified_homepage_identity={
             "normalized_name": "acme",

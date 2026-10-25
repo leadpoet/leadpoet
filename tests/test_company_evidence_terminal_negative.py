@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import native_product_post
 
 
 URL = "https://acme.example/platform"
@@ -111,7 +112,7 @@ def _run(monkeypatch, *, final="negative", mixed=False, stage_failure=False,
             return 503, {"error": "offline provider failure"}
         return 200, _response("submit_findings", {"findings": findings}, turn)
 
-    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(post))
     monkeypatch.setattr(investigator, "_search_web", search)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
     result = asyncio.run(investigator.investigate_company_evidence(

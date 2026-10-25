@@ -21,6 +21,7 @@ from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import company_verification
 from qualification.scoring import lead_scorer
 from qualification.scoring import verification_helpers
+from tests.product_coverage_fixtures import native_product_post, validated_industry_finding
 from qualification.scoring.company_evidence_investigator import (
     _quote_proves_rebrand_continuity,
     _validated_homepage_rebrand_redirect,
@@ -600,7 +601,7 @@ def test_stage_gap_gets_one_targeted_investigation(monkeypatch):
     result = asyncio.run(
         lead_scorer._llm_reverify_company(
             _company().model_copy(update={"company_stage": "Public"}),
-            _icp(company_stage="Public"),
+            _icp(product_service="", company_stage="Public"),
             require_company_fit_dimensions=True,
             evidence_investigator=True,
         )
@@ -705,7 +706,7 @@ def test_submitted_later_round_hint_reopens_matching_stage(monkeypatch):
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
         company,
-        _icp(company_stage="Series A"),
+        _icp(product_service="", company_stage="Series A"),
         require_company_fit_dimensions=True,
         evidence_investigator=True,
     ))
@@ -902,7 +903,7 @@ def test_saved_mirantis_acquisition_hint_reopens_full_match(monkeypatch):
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
         _mirantis_with_submitted_signal(submitted_url),
-        _icp(company_stage="Series B"),
+        _icp(product_service="", company_stage="Series B"),
         require_company_fit_dimensions=True,
         evidence_investigator=True,
     ))
@@ -986,7 +987,7 @@ def test_failed_submitted_acquisition_fetch_cannot_retain_old_stage(monkeypatch)
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
         _mirantis_with_submitted_signal(submitted_url),
-        _icp(company_stage="Series B"),
+        _icp(product_service="", company_stage="Series B"),
         require_company_fit_dimensions=True,
         evidence_investigator=True,
     ))
@@ -1077,7 +1078,7 @@ def test_fetched_planned_acquisition_preserves_validated_series_b(monkeypatch):
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
         _mirantis_with_submitted_signal(submitted_url),
-        _icp(company_stage="Series B"),
+        _icp(product_service="", company_stage="Series B"),
         require_company_fit_dimensions=True,
         evidence_investigator=True,
     ))
@@ -1336,7 +1337,7 @@ def test_doctronic_submitted_later_round_uses_validated_fetch(
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
         company,
-        _icp(company_stage="Series A"),
+        _icp(product_service="", company_stage="Series A"),
         require_company_fit_dimensions=True,
         evidence_investigator=True,
     ))
@@ -1492,7 +1493,7 @@ def test_matching_venture_stage_checks_current_chronology(
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
         company.model_copy(update={"company_stage": requested_stage}),
-        _icp(company_stage=requested_stage),
+        _icp(product_service="", company_stage=requested_stage),
         require_company_fit_dimensions=True,
         evidence_investigator=True,
     ))
@@ -2395,7 +2396,7 @@ def test_schema_repair_does_not_get_a_second_targeted_investigation(monkeypatch)
     result = asyncio.run(
         lead_scorer._llm_reverify_company(
             _company().model_copy(update={"company_stage": "Public"}),
-            _icp(company_stage="Public"),
+            _icp(product_service="", company_stage="Public"),
             require_company_fit_dimensions=True,
             evidence_investigator=True,
         )
@@ -2449,6 +2450,8 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
         "software systems. Jev is currently available in early access for "
         "select developers."
     )
+    product_url = "https://typesafe.ai/product"
+    product_quote = "TypeSafe AI supplies developer software for AI workflows."
     stage_finding = _finding(
         "stage",
         observed_value="Seed",
@@ -2493,24 +2496,22 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
     async def bounded_investigation(*, targets, **_kwargs):
         investigation_calls.append(tuple(targets))
         assert targets == ("stage", "required_attribute", "industry")
-        assert set(targets) == {"stage", "industry", "required_attribute"}
+        industry = validated_industry_finding(
+            _finding(
+                "industry", observed_value="Developer AI software platform",
+                observed_industry="Software", observed_subindustry="SaaS",
+                activity_role="supplier_operator", evidence_url=product_url,
+                evidence_quote=product_quote,
+            ), "software", fetched_pages={product_url: product_quote},
+            fetched_final_urls={product_url: product_url},
+            first_party_domains={"typesafe.ai"}, identity_names={"typesafeai"},
+            identity_anchor={"submitted_domain": "typesafe.ai",
+                             "observed_domain": "typesafe.ai"},
+        )
         return {
             "claims": {
                 "stage": stage_finding,
-                "industry": _finding(
-                    "industry",
-                    observed_value="Developer AI software platform",
-                    observed_industry="Software",
-                    observed_subindustry="SaaS",
-                    activity_role="supplier_operator",
-                    evidence_url=requested_source_url,
-                    evidence_quote=(
-                        "TypeSafe is building a new class of intelligence "
-                        "designed to give developers reliable, efficient "
-                        "intelligence they can integrate directly into "
-                        "software systems."
-                    ),
-                ),
+                "industry": industry,
                 "required_attribute": _attribute_finding(
                     "VERIFIED" if "..." not in repaired_quote else "UNPROVEN",
                     url=requested_source_url,
@@ -2528,7 +2529,8 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
                 requested_source_url: {
                     "final_url": cited_source_url,
                     "text": source_text,
-                }
+                },
+                product_url: {"final_url": product_url, "text": product_quote},
             },
         }
 
@@ -2700,7 +2702,7 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
         return {
             "claims": {
                 "stage": stage,
-                "industry": _finding(
+                "industry": validated_industry_finding(_finding(
                     "industry",
                     status=(
                         "VERIFIED" if repair_proves_required_function else "UNPROVEN"
@@ -2712,8 +2714,12 @@ def test_crowdstrike_stage_industry_source_can_repair_required_attribute(
                     ),
                     activity_role="supplier_operator",
                     evidence_url=(source_url if repair_proves_required_function else ""),
-                    evidence_quote=(attribute_quote if repair_proves_required_function else ""),
-                ),
+                    evidence_quote=(source_text if repair_proves_required_function else ""),
+                ), icp.product_service, fetched_pages={source_url: source_text},
+                    first_party_domains={"crowdstrike.com"},
+                    identity_names={"crowdstrike"},
+                    identity_anchor={"submitted_domain": "crowdstrike.com",
+                                     "observed_domain": "crowdstrike.com"}),
                 "required_attribute": _attribute_finding(
                     "VERIFIED" if repair_proves_required_function else "UNPROVEN",
                     url=source_url,
@@ -2984,6 +2990,23 @@ def _finding(target: str, **overrides):
     return finding
 
 
+def _student_plan_industry(url, quote):
+    criterion = "student planning software used by schools"
+    return validated_industry_finding(
+        _finding(
+            "industry", observed_value="school planning software",
+            observed_industry="Education",
+            observed_subindustry="school planning software",
+            activity_role="supplier_operator",
+            evidence_url=url, evidence_quote=quote,
+        ),
+        criterion, fetched_pages={url: quote},
+        first_party_domains={"acme.example"}, identity_names={"acme"},
+        identity_anchor={"submitted_domain": "acme.example",
+                         "observed_domain": "acme.example"},
+    )
+
+
 def _completed_unproven_investigation(target):
     return {
         "gate": "company_evidence_investigation",
@@ -3153,8 +3176,34 @@ def test_completed_unproven_stale_stage_keeps_valid_scoring_sibling(
 
     async def bounded(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("stage",)
+        # The stale third-party industry citation is reopened alongside stage.
+        assert targets == ("stage", "industry")
         receipt = _completed_unproven_investigation("stage")
+        industry_url = "https://acme.example/about"
+        industry_quote = "Acme Commercial Advisors supplies SaaS software."
+        validated = investigator._validated_findings(
+            {"findings": [
+                receipt["claims"]["stage"],
+                _finding(
+                    "industry", observed_value="SaaS software",
+                    observed_industry="Software", observed_subindustry="SaaS",
+                    activity_role="supplier_operator",
+                    evidence_url=industry_url, evidence_quote=industry_quote,
+                ),
+            ]},
+            targets=targets,
+            fetched_pages={industry_url: industry_quote},
+            fetched_final_urls={industry_url: industry_url},
+            first_party_domains={"acme.example"},
+            identity_names={"acmecommercialadvisors"},
+            identity_anchor={
+                "submitted_domain": "acme.example",
+                "observed_domain": "acme.example",
+            },
+        )
+        assert validated is not None
+        receipt["targets"] = list(targets)
+        receipt["claims"] = validated
         if source_http_status is not None:
             receipt["usage"]["fetch_outcomes"] = [
                 investigator._fetch_outcome(
@@ -3218,7 +3267,7 @@ def test_completed_unproven_stale_stage_keeps_valid_scoring_sibling(
         "company_linkedin": "https://www.linkedin.com/company/good-company",
     }
     kwargs = {
-        "icp": _icp(company_stage="Private Equity", intent_signals=[
+        "icp": _icp(product_service="", company_stage="Private Equity", intent_signals=[
             "Announced a completed funding event",
         ]).model_dump(mode="json"),
         "companies": [submitted, good], "scorer": scorer,
@@ -3297,7 +3346,7 @@ def _attribute_finding(
         ("alternate_unsupported_attribute", COMPANY_FIT_UNAVAILABLE),
         ("alternate_unfetched", COMPANY_FIT_UNAVAILABLE),
         ("alternate_invalid_url", COMPANY_FIT_UNAVAILABLE),
-        ("wrong_company", COMPANY_FIT_MISMATCH),
+        ("wrong_company", COMPANY_FIT_UNAVAILABLE),
         ("quote_absent", COMPANY_FIT_UNAVAILABLE),
         ("still_blocked", COMPANY_FIT_UNAVAILABLE),
         ("unfetched_positive", COMPANY_FIT_UNAVAILABLE),
@@ -3325,6 +3374,10 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
         "funding to around $200 million as we enter a new stage of growth, "
         "deploying our AI agents across more of the mission-critical work "
         "enterprises can't afford to get wrong."
+    )
+    product_url = "https://www.happyrobot.ai/platform"
+    product_quote = (
+        "HappyRobot sells a commercial AI platform for model-driven workflows."
     )
     wrong_company_quote = (
         "OtherCo lets customers deploy its own AI agents in production."
@@ -3469,7 +3522,7 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
         resolved = semantic_verified or semantic_contradicted
         result = {
             "claims": {
-                "industry": _finding(
+                "industry": validated_industry_finding(_finding(
                     "industry",
                     status=(
                         "VERIFIED"
@@ -3499,9 +3552,17 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
                         if semantic_contradicted
                         else "unresolved"
                     ),
-                    evidence_url=claim_url if resolved else "",
-                    evidence_quote=page_text if resolved else "",
-                ),
+                    evidence_url=product_url if semantic_verified else claim_url if resolved else "",
+                    evidence_quote=product_quote if semantic_verified else page_text if resolved else "",
+                ), icp.product_service,
+                    fetched_pages={
+                        **({product_url: product_quote} if semantic_verified else {}),
+                        **({claim_url: page_text} if page_text else {}),
+                    },
+                    first_party_domains={"happyrobot.ai"},
+                    identity_names={"happyrobot"},
+                    identity_anchor={"submitted_domain": "happyrobot.ai",
+                                     "observed_domain": "happyrobot.ai"}),
                 "required_attribute": _attribute_finding(
                     "VERIFIED" if semantic_verified else "UNPROVEN",
                     url=claim_url,
@@ -3514,6 +3575,10 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
         if page_text and investigator_mode != "alternate_unfetched":
             result[investigator.PRIVATE_FETCHED_PAGES_KEY] = {
                 claim_url: {"final_url": claim_url, "text": page_text}
+            }
+        if semantic_verified:
+            result.setdefault(investigator.PRIVATE_FETCHED_PAGES_KEY, {})[product_url] = {
+                "final_url": product_url, "text": product_quote,
             }
         return result
 
@@ -3550,8 +3615,6 @@ def test_happyrobot_blocked_attribute_source_recovers_through_full_fit_path(
     assert result.details["company_fit_dimensions"]["industry"] == (
         COMPANY_FIT_MATCH
         if investigator_mode in {"supported", "alternate_supported"}
-        else COMPANY_FIT_MISMATCH
-        if investigator_mode == "wrong_company"
         else COMPANY_FIT_UNAVAILABLE
     )
     assert result.details["required_attribute_decision"] == (
@@ -3685,7 +3748,7 @@ def test_grounded_attribute_gets_one_semantic_investigator_review(
 
     result = asyncio.run(lead_scorer._verify_company_fit(
         _company(),
-        _icp(required_attribute=(
+        _icp(product_service="", required_attribute=(
             "Sells recurring software subscriptions for production AI workflows."
         )),
         0.0,
@@ -4149,7 +4212,7 @@ def test_company_geography_repair_uses_bounded_current_contact_source(
     monkeypatch.setattr(investigator, "_post_json", judge)
     monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={"results": []}))
     result = asyncio.run(lead_scorer._llm_reverify_company(
-        company, _icp(geography="United States, West Coast"),
+        company, _icp(product_service="", geography="United States, West Coast"),
         require_company_fit_dimensions=True,
         verified_homepage_identity=homepage_identity,
         verified_homepage_navigation_locators=(
@@ -4198,7 +4261,7 @@ def test_explicit_profile_or_company_hq_survives_silent_or_regional_company_page
     monkeypatch.setattr(lead_scorer, "_refresh_linkedin_employee_size_observation", keep_observation)
     monkeypatch.setattr(lead_scorer, "investigate_company_evidence", must_not_investigate)
     result = asyncio.run(lead_scorer._llm_reverify_company(
-        _company(), _icp(geography="United States, West Coast"),
+        _company(), _icp(product_service="", geography="United States, West Coast"),
         require_company_fit_dimensions=True, company_quality=True,
         evidence_investigator=True,
         verified_homepage_pages={"https://acme.example": {
@@ -4552,7 +4615,7 @@ def test_retained_rapid7_shape_reaches_unnamed_industry_attribution(
     fetch = AsyncMock()
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post))
     monkeypatch.setattr(investigator, "_search_web", search)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
 
@@ -7756,7 +7819,7 @@ def test_cross_domain_rebrand_locator_flows_through_bounded_investigator(
 
     result = asyncio.run(lead_scorer._llm_reverify_company(
         company,
-        _icp(),
+        _icp(product_service=""),
         require_company_fit_dimensions=True,
         verified_homepage_identity=homepage,
         verified_homepage_pages={
@@ -8325,7 +8388,7 @@ def test_legacy_western_union_alias_uses_real_investigator_and_cached_size(
         name="The Western Union Company", website="https://westernunion.com/",
         linkedin="",
     ).model_copy(update={"employee_count": "5,001-10,000"})
-    icp = _icp(employee_count="5,001-10,000")
+    icp = _icp(product_service="", employee_count="5,001-10,000")
     profile_url = "https://www.linkedin.com/company/western-union"
     source_url = (
         "https://ir.westernunion.com/news/archived-press-releases/"
@@ -9687,6 +9750,17 @@ def test_schema_repair_reconciles_bounded_industry_decision(
             ),
             reason="bounded industry decision",
         )
+        finding = validated_industry_finding(
+            finding, icp.product_service,
+            fetched_pages={
+                "https://acme.example/firewall":
+                "Acme sells customer-operated web application firewall controls. "
+                "Acme uses firewall controls only for its internal compliance."
+            },
+            first_party_domains={"acme.example"}, identity_names={"acme"},
+            identity_anchor={"submitted_domain": "acme.example",
+                             "observed_domain": "acme.example"},
+        )
         return {
             "claims": {
                 "industry": finding,
@@ -9821,6 +9895,13 @@ def test_flam_industry_review_requires_separate_attribute_judgment(
         activity_role="supplier_operator",
         evidence_url=flicks_url,
         evidence_quote=flicks_quote,
+    )
+    finding = validated_industry_finding(
+        finding, icp.product_service, fetched_pages={flicks_url: flicks_quote},
+        fetched_final_urls={flicks_url: flicks_final_url},
+        first_party_domains={"flamapp.ai"}, identity_names={"flam"},
+        identity_anchor={"submitted_domain": "flamapp.ai",
+                         "observed_domain": "flamapp.ai"},
     )
     calls = {"provider": 0, "investigator": 0, "direct_fetch": 0}
 
@@ -10019,12 +10100,11 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
     )
     finding = _finding(
         "industry",
-        observed_value="K-12 education software",
+        status="UNPROVEN", observed_value=None,
         observed_industry="Education",
         observed_subindustry="K-12 software provider",
-        activity_role="supplier_operator",
-        evidence_url=growth_url,
-        evidence_quote=growth_quote,
+        activity_role="unresolved", evidence_url="", evidence_quote="",
+        reason="The loaded source does not establish the required subscription platform.",
     )
     provider_calls = []
 
@@ -10097,7 +10177,7 @@ def test_oct01_abre_sector_proof_does_not_imply_recurring_subscription(
     ))
 
     assert provider_calls == ["lead_scorer_reverify"]
-    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_UNAVAILABLE
     assert result.details["required_attribute_decision"] == COMPANY_FIT_UNAVAILABLE
     assert result.decision == COMPANY_FIT_UNAVAILABLE
 
@@ -10166,11 +10246,11 @@ def test_oct01_edvisorly_homepage_platform_quote_does_not_prove_recurring_sale(
         return {
             "claims": {
                 "industry": _finding(
-                    "industry", observed_industry="Education",
+                    "industry", status="UNPROVEN", observed_value=None,
+                    observed_industry="Education",
                     observed_subindustry="higher-education enrollment software",
-                    activity_role="supplier_operator",
-                    evidence_url=university_url,
-                    evidence_quote=university_quote,
+                    activity_role="unresolved", evidence_url="", evidence_quote="",
+                    reason="The loaded page does not establish a subscription platform.",
                 ),
                 "required_attribute": _attribute_finding(),
                 "stage": _finding(
@@ -10213,7 +10293,7 @@ def test_oct01_edvisorly_homepage_platform_quote_does_not_prove_recurring_sale(
         company_quality=True, evidence_investigator=True,
     ))
     assert calls == ["lead_scorer_reverify"]
-    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_MATCH
+    assert result.details["dimension_decisions"]["industry"] == COMPANY_FIT_UNAVAILABLE
     assert result.details["dimension_decisions"]["stage"] == COMPANY_FIT_UNAVAILABLE
     assert result.details["required_attribute_decision"] == COMPANY_FIT_UNAVAILABLE
     assert result.decision == COMPANY_FIT_UNAVAILABLE
@@ -10446,6 +10526,8 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
 
     async def bounded_investigation(*, targets, **_kwargs):
         assert targets == ("stage", "industry", "required_attribute")
+        platform_url = "https://www.sentinelone.com/platform/"
+        platform_quote = "SentinelOne provides an AI-powered endpoint security platform."
         stage = _finding(
             "stage",
             observed_value="Public",
@@ -10455,18 +10537,19 @@ def test_sentinelone_style_industry_repair_preserves_valid_public_stage(
         return {
             "claims": {
                 "stage": stage,
-                "industry": _finding(
+                "industry": validated_industry_finding(_finding(
                     "industry",
                     observed_value="Endpoint security",
                     observed_industry="Cybersecurity",
                     observed_subindustry="Endpoint security",
                     activity_role="supplier_operator",
-                    evidence_url="https://www.sentinelone.com/platform/",
-                    evidence_quote=(
-                        "SentinelOne provides an AI-powered endpoint security "
-                        "platform."
-                    ),
-                ),
+                    evidence_url=platform_url,
+                    evidence_quote=platform_quote,
+                ), icp.product_service, fetched_pages={platform_url: platform_quote},
+                    first_party_domains={"sentinelone.com"},
+                    identity_names={"sentinelone"},
+                    identity_anchor={"submitted_domain": "sentinelone.com",
+                                     "observed_domain": "sentinelone.com"}),
                 "required_attribute": _attribute_finding(
                     "VERIFIED" if repair_attribute else "UNPROVEN",
                     url="https://www.sentinelone.com/platform/",
@@ -12145,7 +12228,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "evaluation_date", lambda: date(2026, 9, 18))
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post_json))
     monkeypatch.setattr(
         investigator, "_search_web", AsyncMock(return_value={"results": []})
     )
@@ -12191,7 +12274,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
     system_prompt = " ".join(requests[0]["messages"][0]["content"].split())
     assert "prior positive labels as untrusted hypotheses" in system_prompt
     assert "supplier_operator role establishes" in system_prompt
-    assert "required-attribute judgment and source proof" in system_prompt
+    assert "The independent required-attribute check must still prove its own conditions" in system_prompt
     assert "Do not convert an explicit BOTH, ALL, or separately required capability" in system_prompt
     assert "capabilities or customer sectors" in system_prompt
     assert "the explicit OR determines the required capability: prove one allowed alternative" in system_prompt
@@ -12335,7 +12418,7 @@ def test_paid_technical_management_platform_semantic_boundaries(
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
     monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 0)
-    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post))
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={
@@ -12412,7 +12495,7 @@ def test_current_vendor_deployments_plus_product_support_ultrasight_sale(monkeyp
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
     monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 0)
-    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post))
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "UltraSight", "website": "https://ultrasight.com"},
@@ -12496,7 +12579,7 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post_json))
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -12525,7 +12608,11 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     assert len(routed_requests) == 1
     assert requests[0]["model"] == expected_model
     normalized, outbound_body = routed_requests[0]
-    assert normalized["max_tokens"] == requests[0]["max_tokens"] == 3000
+    expected_tokens = (
+        investigator.PRODUCT_REVIEW_MAX_TOKENS
+        if positive_semantic_review else investigator.REASONING_MAX_TOKENS
+    )
+    assert normalized["max_tokens"] == requests[0]["max_tokens"] == expected_tokens
     assert normalized["max_tokens"] <= (
         arena_operations.OPENROUTER_MAX_OUTPUT_TOKENS
     )
@@ -13051,7 +13138,7 @@ def test_fetch_tool_result_is_bounded_without_truncating_stored_evidence(monkeyp
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post_json))
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
 
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -13119,7 +13206,7 @@ def test_multiple_prefetched_pages_fit_initial_message_and_keep_exact_quotes(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post_json))
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -13763,7 +13850,7 @@ def test_curated_armada_relationship_rejection_forces_targeted_research(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post_json))
     monkeypatch.setattr(investigator, "_search_web", fake_search)
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
 
@@ -14976,7 +15063,7 @@ def test_multitarget_retrieval_allocates_after_current_stage_review(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
-    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post))
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
     monkeypatch.setattr(
         investigator,
@@ -15592,7 +15679,7 @@ def test_fresh_fetch_cap_is_separate_from_three_prefetched_pages(monkeypatch, fr
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
-    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post))
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
     monkeypatch.setattr(
         investigator, "_search_web", AsyncMock(return_value={"results": []})
@@ -16123,14 +16210,30 @@ def test_targeted_stage_classification_through_lab_scorer(
 
     async def bounded_investigation(*, diagnostic, **kwargs):
         calls["investigator"] += 1
-        assert kwargs["targets"] == ("stage",)
+        assert kwargs["targets"] == ("stage", "industry")
+        industry_url = "https://acme.example/platform"
+        industry_quote = "Acme supplies SaaS software to customers."
+        industry = investigator._validated_findings(
+            {"findings": [_finding(
+                "industry", observed_value="SaaS software",
+                observed_industry="Software", observed_subindustry="SaaS",
+                activity_role="supplier_operator", evidence_url=industry_url,
+                evidence_quote=industry_quote,
+            )]},
+            targets=("industry",), fetched_pages={industry_url: industry_quote},
+            fetched_final_urls={industry_url: industry_url},
+            first_party_domains={"acme.example"}, identity_names={"acme"},
+            identity_anchor={"submitted_domain": "acme.example",
+                             "observed_domain": "acme.example"},
+        )
+        assert industry is not None
         if investigation_failure:
             diagnostic[VERIFIER_FAILURE_REASON_KEY] = investigation_failure
             return {
                 "claims": {"stage": _finding(
                     "stage", status="UNPROVEN", observed_value="",
                     evidence_url="", evidence_quote="",
-                )},
+                ), "industry": industry["industry"]},
                 "_completed_submit": False,
                 "failure_reason": investigation_failure,
             }
@@ -16143,7 +16246,8 @@ def test_targeted_stage_classification_through_lab_scorer(
                     evidence_url="",
                     evidence_quote="",
                     reason="No current listing proof was found.",
-                )
+                ),
+                "industry": industry["industry"],
             },
             "_completed_submit": True,
             "failure_reason": "",
@@ -16174,6 +16278,7 @@ def test_targeted_stage_classification_through_lab_scorer(
         assert "fit_summary" not in company
         assert "intent_details" in company
     icp = _icp(
+        product_service="",
         company_stage="Public",
         intent_signals=["Announced a completed funding event"],
     ).model_dump(mode="json")
@@ -16278,14 +16383,7 @@ def test_reviewed_recurring_attribute_controls_arena_score(
         calls["investigator"] += 1
         assert kwargs["targets"] == ("industry", "required_attribute")
         claims = {
-            "industry": _finding(
-                "industry", observed_value="school planning software",
-                observed_industry="Education",
-                observed_subindustry="school planning software",
-                activity_role="supplier_operator",
-                evidence_url=product_url,
-                evidence_quote=product_quote,
-            ),
+            "industry": _student_plan_industry(product_url, product_quote),
             "required_attribute": _attribute_finding(
                 "VERIFIED" if recurring_proved else "UNPROVEN",
                 url=terms_url, quote=terms_quote,
@@ -16425,13 +16523,7 @@ def test_time_interrupted_review_recovers_on_second_scoring_attempt(monkeypatch)
         interrupted = calls["investigator"] == 1
         return {
             "claims": {
-                "industry": _finding(
-                    "industry", observed_value="school planning software",
-                    observed_industry="Education",
-                    observed_subindustry="school planning software",
-                    activity_role="supplier_operator",
-                    evidence_url=product_url, evidence_quote=product_quote,
-                ),
+                "industry": _student_plan_industry(product_url, product_quote),
                 "required_attribute": _attribute_finding(
                     "UNPROVEN" if interrupted else "VERIFIED",
                     url=product_url, quote=product_quote,
@@ -16683,7 +16775,7 @@ def test_real_reserve_completed_judgment_and_faults_through_arena_score(
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-key")
-    monkeypatch.setattr(investigator, "_post_json", model)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(model))
     monkeypatch.setattr(investigator, "_search_web", search)
     monkeypatch.setattr(investigator, "_fetch_page", investigator_fetch)
     monkeypatch.setattr(investigator, "_fetch_exa_exact_page", fallback)
@@ -16816,7 +16908,7 @@ def test_unproven_alias_completion_and_fault_classification_through_lab_scorer(
 
     async def bounded_investigation(*, targets, **_kwargs):
         calls["investigator"] += 1
-        assert targets == ("stage", "rebrand")
+        assert targets == ("stage", "rebrand", "industry")
         stage_finding = (
             _finding("stage", status="UNPROVEN", observed_value=None,
                      evidence_url="", evidence_quote="")
@@ -16840,7 +16932,13 @@ def test_unproven_alias_completion_and_fault_classification_through_lab_scorer(
                         "The same-domain names could not be bound to one legal "
                         "issuer."
                     ),
-                )
+                ),
+                "industry": _finding(
+                    "industry", status="UNPROVEN", observed_value=None,
+                    activity_role="unresolved", evidence_url="",
+                    evidence_quote="",
+                    reason="The saved source did not bind banking to this company.",
+                ),
             },
             "failure_reason": "",
             "_completed_submit": review_state != "incomplete",

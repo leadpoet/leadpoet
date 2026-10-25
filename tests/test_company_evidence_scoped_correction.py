@@ -8,6 +8,7 @@ import pytest
 
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import native_product_post, validated_industry_finding
 
 
 PRODUCT_URL = "https://rapid7.com/products/insightcloudsec/"
@@ -110,7 +111,7 @@ def _run_scoped_correction(
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", max_turns)
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post_json))
     monkeypatch.setattr(investigator, "_search_web", fake_search)
 
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -202,9 +203,8 @@ def test_submit_only_correction_scopes_and_merges_valid_pending_target(monkeypat
     assert scope["correction_targets"] == ["stage"]
     assert "server retained unrelated findings" in scope["instruction"]
     assert result["claims"]["stage"]["status"] == "VERIFIED"
-    assert result["claims"]["industry"] == investigator._validated_findings(
-        {"findings": [_industry_finding()]},
-        targets=("industry",),
+    assert result["claims"]["industry"] == validated_industry_finding(
+        _industry_finding(), "Security software and services",
         fetched_pages={PRODUCT_URL: PRODUCT_QUOTE},
         fetched_final_urls={PRODUCT_URL: PRODUCT_URL},
         first_party_domains={"rapid7.com"},
@@ -220,7 +220,7 @@ def test_submit_only_correction_scopes_and_merges_valid_pending_target(monkeypat
             "verified_domain": "rapid7.com",
             "verified_linkedin_slug": "rapid7",
         },
-    )["industry"]
+    )
 
 
 def test_malformed_then_unproven_corrections_do_not_erase_valid_industry(
@@ -559,10 +559,8 @@ def test_scoped_correction_rejects_unrelated_extra_target(monkeypatch):
     )
 
     assert len(requests) == 2
-    assert result == {
-        "claims": {},
-        "failure_reason": investigator.MALFORMED_RESPONSE_FAILURE_REASON,
-    }
+    assert result["claims"] == {}
+    assert result["failure_reason"] == investigator.MALFORMED_RESPONSE_FAILURE_REASON
 
 
 @pytest.mark.parametrize(

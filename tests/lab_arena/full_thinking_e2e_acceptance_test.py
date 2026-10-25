@@ -46,3 +46,27 @@ def test_ancillary_judge_gap_keeps_raw_incomplete_without_failing_selected_proof
     baseline = participant()
     candidate[2][0].update(complete=False, selected_research_complete=True)
     e2e._require_strict_exports(candidate, baseline)
+
+
+def test_frozen_eighty_percent_accepts_two_strict_gaps_and_reports_coverage():
+    candidate, baseline = participant(), participant()
+    candidate[2][-1].update(records=0, selected_research_complete=False)
+    candidate[3]["train"].pop()
+    coverage = e2e._require_strict_exports(candidate, baseline, minimum_coverage_percent=80)
+    assert coverage["candidate"] == {"complete_icps": 9, "required_icps": 8,
+                                     "total_icps": 10, "minimum_coverage_percent": 80}
+    assert coverage["baseline"]["complete_icps"] == 10
+    candidate[2][-2].update(records=0, selected_research_complete=False)
+    candidate[3]["train"].pop()
+    coverage = e2e._require_strict_exports(candidate, baseline, minimum_coverage_percent=80)
+    assert coverage["candidate"]["complete_icps"] == 8
+    candidate[2][-3].update(records=0, selected_research_complete=False)
+    with pytest.raises(AssertionError, match="candidate: complete strict training record coverage 7/10"):
+        e2e._require_strict_exports(candidate, baseline, minimum_coverage_percent=80)
+
+
+def test_frozen_eighty_percent_still_requires_all_real_scores():
+    candidate, baseline = participant(), participant()
+    candidate[1].pop()
+    with pytest.raises(AssertionError, match="ten accepted executions and linked real scores"):
+        e2e._require_strict_exports(candidate, baseline, minimum_coverage_percent=80)

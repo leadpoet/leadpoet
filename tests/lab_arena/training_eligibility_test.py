@@ -44,6 +44,27 @@ def capture(example, row=None):
     return training_eligibility.assess_capture(row, {"run": example}, ["run"], enabled=True)
 
 
+def ten_selected_examples():
+    """Distinct sealed run identities with the same valid fixture evidence."""
+    def rename(value, run_id):
+        if isinstance(value, dict):
+            return {run_id if key == "run" else key: rename(item, run_id)
+                    for key, item in value.items()}
+        if isinstance(value, list):
+            return [rename(item, run_id) for item in value]
+        return run_id if value == "run" else value
+
+    original = captured_example()
+    return {f"run-{position}": seal(rename(copy.deepcopy(original), f"run-{position}"))
+            for position in range(10)}
+
+
+def assess_ten(examples, *, percent=80):
+    return training_eligibility.assess_capture(
+        submission(), examples, list(examples), enabled=True,
+        minimum_coverage_percent=percent)
+
+
 def refresh_response_links(example, index):
     call = example["provider_calls"][index]
     response = call["response"]
@@ -54,13 +75,13 @@ def refresh_response_links(example, index):
     receipt = call["response_receipts"][0]
     receipt.update(response_sha256=response_hash, wire_body_sha256=wire_hash,
                    wire_body_bytes=len(wire))
-    payload = example["worker_observation_artifacts"]["run"]["payload"]
+    payload = example["worker_observation_artifacts"][example["run_id"]]["payload"]
     for row in payload["response_receipts"] + payload["agent_observations"]:
         if row.get("call_identity") == call["call_identity"] or (row.get("data") or {}).get("call_identity") == call["call_identity"]:
             data = row.get("data", row)
             data.update(body_sha256=wire_hash, body_bytes=len(wire))
     payload_hash = contracts.document_hash(payload)
-    example["worker_observation_artifacts"]["run"]["payload_sha256"] = payload_hash
+    example["worker_observation_artifacts"][example["run_id"]]["payload_sha256"] = payload_hash
     for item in example["provider_calls"]:
         if "response_provenance" not in item:
             continue
@@ -327,6 +348,60 @@ def test_missing_selected_run_cannot_be_replaced_by_another_export():
     assert result["eligible"] is False
     assert "selected_run_export_missing" in result["reasons"]
     assert result["counts"]["checked_runs"] == 1
+
+
+def test_nine_of_ten_exact_runs_allow_one_private_or_missing_export():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    damaged["completeness"].update(complete=False, incomplete_reasons=["response_privacy_nonexact"])
+    damaged["provider_calls"][0]["response_privacy_redactions"] = ["credential"]
+    seal(damaged)
+    result = assess_ten(examples)
+    assert result["eligible"] is True, result
+    assert result["counts"]["complete_runs"] == 9
+    assert result["counts"]["required_complete_runs"] == 8
+    examples["run-8"] = None
+    result = assess_ten(examples)
+    assert result["eligible"] is True, result
+    assert result["counts"]["complete_runs"] == 8
+    examples["run-7"] = None
+    result = assess_ten(examples)
+    assert result["eligible"] is False
+    assert "training_coverage_incomplete" in result["reasons"]
+
+
+def test_nine_of_ten_keeps_route_tamper_a_hard_failure():
+    examples = ten_selected_examples()
+    examples["run-9"]["provider_calls"][2]["reasoning_capture"]["provider_route"] = "wrong-route"
+    seal(examples["run-9"])
+    result = assess_ten(examples)
+    assert result["eligible"] is False
+    assert "full_thinking_route_unverified" in result["reasons"]
+
+
+def test_privacy_gap_cannot_hide_wrong_route_at_eighty_percent():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    damaged["completeness"].update(complete=False, incomplete_reasons=["response_privacy_nonexact"])
+    damaged["provider_calls"][0]["response_privacy_redactions"] = ["credential"]
+    damaged["provider_calls"][2]["reasoning_capture"]["provider_route"] = "wrong-route"
+    seal(damaged)
+    result = assess_ten(examples)
+    assert result["eligible"] is False
+    assert "trajectory_evidence_incomplete" in result["reasons"]
+
+
+def test_nine_of_ten_allow_one_empty_thinking_run():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    for index in (1, 2):
+        message = damaged["provider_calls"][index]["response"]["choices"][0]["message"]
+        for field in ("reasoning", "reasoning_content", "reasoning_details"):
+            message.pop(field, None)
+        refresh_response_links(damaged, index)
+    result = assess_ten(examples)
+    assert result["eligible"] is True, result
+    assert result["counts"]["complete_runs"] == 9
 
 
 def test_readable_projection_must_retain_paths_to_raw_provider_text(monkeypatch):

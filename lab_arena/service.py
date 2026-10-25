@@ -21,7 +21,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations, training_eligibility, training_reader
+from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations, training_coverage, training_eligibility, training_reader
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, reasoning_capture, signal_judgments, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
@@ -664,6 +664,7 @@ class RoundDefaults:
     intent_details_from: Optional[str] = None
     # Opt-in for future intake windows only; existing rounds keep their policy.
     reasoning_capture_from: Optional[str] = None
+    training_minimum_icp_coverage_percent: int = training_coverage.NEW_ROUND_PERCENT
     # Operator declaration for the tested baseline archive. The fetched
     # archive must match before baseline admission in a full-thinking round.
     reasoning_baseline_source_sha256: Optional[str] = None
@@ -1662,6 +1663,7 @@ class ArenaService:
                 unready_reason = "flat_policy_required"
             if unready_reason is None:
                 document["reasoning_capture_policy"] = reasoning_capture.POLICY
+                document[training_coverage.SETTING] = defaults.training_minimum_icp_coverage_percent
                 document["reasoning_route_registry"] = registry
                 document["reasoning_baseline_source_sha256"] = baseline_digest
                 document["baseline_source_url"] = defaults.reasoning_baseline_source_url
@@ -4883,6 +4885,8 @@ class ArenaService:
                     examples[run_id] = None
             capture = training_eligibility.assess_capture(
                 submission, examples, list(examples), enabled=True,
+                minimum_coverage_percent=training_coverage.percent_from_configuration(
+                    round_row.get("configuration_doc") or {}),
             )
             return {"eligible": source["eligible"] and capture["eligible"],
                     "reasons": sorted(set(source["reasons"] + capture["reasons"])),
@@ -8088,7 +8092,8 @@ class ArenaService:
             **({"company_quality_policy": quality_policy.POLICY} if quality_policy.enabled(configuration) else {}),
             **({"company_judgment_policy": company_judgments.POLICY} if configuration.get("company_judgment_policy") else {}),
             **({"intent_details_policy": intent_details_policy.POLICY} if intent_details_policy.enabled(configuration) else {}),
-            **({"reasoning_capture_policy": configuration["reasoning_capture_policy"]}
+            **({"reasoning_capture_policy": configuration["reasoning_capture_policy"],
+                training_coverage.SETTING: training_coverage.percent_from_configuration(configuration)}
                if reasoning_capture.enabled(configuration) else {}),
             **({"reasoning_activation_status": configuration["reasoning_activation_status"],
                 "reasoning_activation_reason": configuration["reasoning_activation_reason"]}

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from lab_arena import code_review, contracts, reasoning_capture, training_export, training_steps, training_thinking
+from lab_arena import code_review, contracts, reasoning_capture, training_coverage, training_export, training_steps, training_thinking
 
 
 def _result(reasons, **counts):
@@ -78,8 +78,33 @@ def _readable_full_segments(example, report, call_index, delivered, segments):
     return True
 
 
+def _all_model_routes_verified(example, run_id):
+    calls = [call for call in example.get("provider_calls") or []
+             if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
+    if not calls:
+        return False
+    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    try:
+        return all((state := training_thinking.attempt_coverage(
+            call, example.get("role", "miner"), registry))["route_reviewed"]
+            and state["provider_route_verified"] for call in calls)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
+def _documented_selected_privacy_gap(example, run_id):
+    return any(
+        call.get("run_id") == run_id and (
+            (call.get("request_capture") or {}).get("redacted") is True
+            or "credential" in (call.get("response_privacy_redactions") or [])
+            or any("credential" in (receipt.get("privacy_redactions") or [])
+                   for receipt in call.get("response_receipts") or []))
+        for call in example.get("provider_calls") or [])
+
+
 def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | None],
-                   selected_run_ids: Sequence[str], *, enabled: bool) -> dict:
+                   selected_run_ids: Sequence[str], *, enabled: bool,
+                   minimum_coverage_percent: int = 100) -> dict:
     """Check each selected final execute run against its persisted raw export.
 
     A missing export or malformed record is an ineligible result, never an
@@ -89,8 +114,12 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
     if not enabled:
         return _result([], enabled=0)
     selected = list(selected_run_ids)
+    required = (training_coverage.required_count(len(selected), minimum_coverage_percent)
+                if selected else 0)
     counts = {"enabled": 1, "selected_runs": len(selected), "checked_runs": 0,
-              "model_calls": 0, "full_thinking_calls": 0, "tool_only_empty_calls": 0}
+              "model_calls": 0, "full_thinking_calls": 0, "tool_only_empty_calls": 0,
+              "required_complete_runs": required, "complete_runs": 0,
+              "incomplete_runs": 0, "minimum_coverage_percent": minimum_coverage_percent}
     reasons = []
     if not selected or len(set(selected)) != len(selected) or any(not isinstance(item, str) or not item for item in selected):
         return _result(["selected_runs_invalid"], **counts)
@@ -100,9 +129,13 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
             (not isinstance(source_digest, str) or contracts.SHA256_RE.fullmatch(source_digest) is None)):
         reasons.append("source_archive_hash_missing")
     for run_id in selected:
+        run_reasons = []
         example = examples_by_run.get(run_id)
         if not isinstance(example, Mapping):
-            reasons.append("selected_run_export_missing")
+            run_reasons.append("selected_run_export_missing")
+            counts["incomplete_runs"] += 1
+            if minimum_coverage_percent == 100:
+                reasons.extend(run_reasons)
             continue
         counts["checked_runs"] += 1
         try:
@@ -121,26 +154,26 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                             and contracts.SHA256_RE.fullmatch(source["sha256"]) is not None
                             and (source["sha256"] == source_digest or baseline_source_ok))
                     or (example.get("configuration") or {}).get("reasoning_capture_policy") != reasoning_capture.POLICY):
-                reasons.append("selected_run_identity_unverified")
+                run_reasons.append("selected_run_identity_unverified")
                 continue
             ancillary_gaps = training_thinking.selected_research_evidence(example)
             if ancillary_gaps is None:
-                reasons.append("trajectory_evidence_incomplete")
+                run_reasons.append("trajectory_evidence_incomplete")
                 continue
             if (not isinstance(example.get("output"), Mapping)
                     or not isinstance(example.get("input_snapshots"), Mapping)
                     or run_id not in example["input_snapshots"]):
-                reasons.append("input_or_output_unavailable")
+                run_reasons.append("input_or_output_unavailable")
                 continue
             report = training_thinking.readable_trace(example)
             if (report.get("projection_truncated") is not False
                     or not set(report.get("capture_gaps") or []) <= ancillary_gaps):
-                reasons.append("readable_trace_incomplete")
+                run_reasons.append("readable_trace_incomplete")
                 continue
             calls = [(index, call) for index, call in enumerate(example.get("provider_calls") or [])
                      if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
             if not calls:
-                reasons.append("execution_model_call_missing")
+                run_reasons.append("execution_model_call_missing")
                 continue
             registry = (example.get("configuration") or {}).get("reasoning_route_registry")
             has_full = False
@@ -153,22 +186,43 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     {**call, "response": delivered, "response_sha256": digest},
                     example["role"], registry)
                 if not status["route_reviewed"] or not status["provider_route_verified"]:
-                    reasons.append("full_thinking_route_unverified")
+                    run_reasons.append("full_thinking_route_unverified")
                     continue
                 if full_segments:
                     if not _readable_full_segments(example, report, index, delivered, full_segments):
-                        reasons.append("readable_full_thinking_unverified")
+                        run_reasons.append("readable_full_thinking_unverified")
                     else:
                         counts["full_thinking_calls"] += 1
                         has_full = True
                 elif training_thinking.verified_tool_only_empty(call, delivered, status):
                     counts["tool_only_empty_calls"] += 1
                 else:
-                    reasons.append("full_thinking_unavailable")
+                    run_reasons.append("full_thinking_unavailable")
             if not has_full:
-                reasons.append("full_thinking_call_missing")
+                run_reasons.append("full_thinking_call_missing")
         except (KeyError, IndexError, TypeError, ValueError, AttributeError):
-            reasons.append("selected_run_evidence_invalid")
+            run_reasons.append("selected_run_evidence_invalid")
+        finally:
+            if run_reasons:
+                counts["incomplete_runs"] += 1
+                if minimum_coverage_percent == 100:
+                    reasons.extend(run_reasons)
+                else:
+                    soft = {"full_thinking_unavailable", "full_thinking_call_missing"}
+                    if run_reasons == ["trajectory_evidence_incomplete"]:
+                        proof_reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])
+                        if (proof_reasons and proof_reasons <= {"response_privacy_nonexact"}
+                                and _documented_selected_privacy_gap(example, run_id)
+                                and _all_model_routes_verified(example, run_id)):
+                            soft.add("trajectory_evidence_incomplete")
+                    reasons.extend(reason for reason in run_reasons if reason not in soft)
+            else:
+                counts["complete_runs"] += 1
+    if minimum_coverage_percent < 100 and counts["complete_runs"] < required:
+        reasons.append("training_coverage_incomplete")
+    if minimum_coverage_percent == 100:
+        for key in ("required_complete_runs", "complete_runs", "incomplete_runs", "minimum_coverage_percent"):
+            counts.pop(key)
     return _result(reasons, **counts)
 
 

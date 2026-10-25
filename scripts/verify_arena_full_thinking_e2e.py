@@ -33,7 +33,7 @@ if str(REPO) not in sys.path:
 
 from lab_arena import (
     broker, code_review, contracts, deepline_catalog, integrity, reasoning_capture, runtime, scoring,
-    shim, source_bundle, training_capture, training_reader, training_thinking, runtime_version,
+    shim, source_bundle, training_capture, training_coverage, training_reader, training_thinking, runtime_version,
 )
 from tests.lab_arena.champion_funding_paid_e2e_test import (
     Evidence, LocalEntrypointRuntime, PaidHarness, _capture_database_snapshot,
@@ -638,8 +638,10 @@ def _per_icp_observed(executions, scores, examples, icps):
     return per_icp
 
 
-def _require_strict_exports(candidate, baseline):
-    """Accept ten linked selected-research records for each participant."""
+def _require_strict_exports(candidate, baseline, *, minimum_coverage_percent=100):
+    """Require the frozen fraction of ICPs to have exact selected-research records."""
+    required = training_coverage.required_count(BENCHMARK_COUNT, minimum_coverage_percent)
+    coverage = {}
     for role, (executions, scores, per_icp, splits) in (
             ("candidate", candidate), ("baseline", baseline)):
         if (len(executions) != BENCHMARK_COUNT or len(scores) != BENCHMARK_COUNT
@@ -648,11 +650,16 @@ def _require_strict_exports(candidate, baseline):
             raise AssertionError(f"{role}: ten accepted executions and linked real scores are required")
         if {item["icp_position"] for item in per_icp} != set(range(BENCHMARK_COUNT)):
             raise AssertionError(f"{role}: execution ICP positions are incomplete")
-        if any(item["records"] < 1 or item.get("selected_research_complete") is not True
-               for item in per_icp):
-            raise AssertionError(f"{role}: every ICP requires a complete strict training record")
-        if len(splits["train"]) + len(splits["eval"]) < BENCHMARK_COUNT:
-            raise AssertionError(f"{role}: combined strict dataset has fewer than ten records")
+        complete = sum(item["records"] >= 1 and item.get("selected_research_complete") is True
+                       for item in per_icp)
+        coverage[role] = {"complete_icps": complete, "required_icps": required,
+                          "total_icps": BENCHMARK_COUNT, "minimum_coverage_percent": minimum_coverage_percent}
+        if complete < required:
+            raise AssertionError(f"{role}: complete strict training record coverage {complete}/{BENCHMARK_COUNT} is below {required}")
+        if len(splits["train"]) + len(splits["eval"]) < required:
+            threshold = "ten" if required == 10 else str(required)
+            raise AssertionError(f"{role}: combined strict dataset has fewer than {threshold} records")
+    return coverage
 
 
 def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
@@ -841,9 +848,11 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
                      submission_id=submission_id, per_icp=per_icp)
         evidence.add("baseline_per_icp_observed", round_id=row["round_id"],
                      submission_id=baseline["submission_id"], per_icp=baseline_per_icp)
-        _require_strict_exports(
+        strict_coverage = _require_strict_exports(
             (executions, scores, per_icp, combined),
-            (baseline_executions, baseline_scores, baseline_per_icp, baseline_splits))
+            (baseline_executions, baseline_scores, baseline_per_icp, baseline_splits),
+            minimum_coverage_percent=training_coverage.percent_from_configuration(config))
+        evidence.add("strict_training_coverage", round_id=row["round_id"], coverage=strict_coverage)
         combined_count = len(combined["train"]) + len(combined["eval"])
         publication = row.get("publication_doc") or {}
         aggregate = next((item for item in publication.get("final_ranking") or []

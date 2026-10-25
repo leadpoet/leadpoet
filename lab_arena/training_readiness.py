@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
-from lab_arena import contracts, training_dataset, training_steps, training_thinking
+from lab_arena import contracts, training_coverage, training_dataset, training_steps, training_thinking
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_readiness.v1"
 _DIMENSIONS = ("context", "source_identity", "exact_inputs", "input_output_label", "costs", "research_process")
@@ -112,6 +112,37 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
     steps, step_manifest = training_steps.build(valid, training_steps.Rules(production_rounds_only=production_rounds_only))
     thinking_splits, thinking_manifest = training_thinking.build(
         valid, training_steps.Rules(production_rounds_only=production_rounds_only))
+    strict_runs = {ref.get("run_id") for split in ("train", "eval")
+                   for record in thinking_splits[split] for ref in record.get("source_refs") or []}
+    coverage_groups = defaultdict(list)
+    for example in valid:
+        key = (example.get("round_id"), example.get("submission_id"))
+        coverage_groups[key].append(example)
+    coverage = []
+    for (round_id, submission_id), group in sorted(coverage_groups.items(), key=lambda item: str(item[0])):
+        config = group[0].get("configuration") or {}
+        try:
+            total = contracts.benchmark_icp_count(config)
+            percent = training_coverage.percent_from_configuration(config)
+            required = training_coverage.required_count(total, percent)
+            consistent = all(
+                contracts.benchmark_icp_count(item.get("configuration") or {}) == total
+                and training_coverage.percent_from_configuration(item.get("configuration") or {}) == percent
+                for item in group)
+        except (ValueError, contracts.ArenaContractError):
+            total, percent, required, consistent = None, None, None, False
+        positions = {item.get("icp_position") for item in group if type(item.get("icp_position")) is int}
+        strict_positions = {item.get("icp_position") for item in group
+                            if item.get("run_id") in strict_runs and type(item.get("icp_position")) is int
+                            and total is not None and 0 <= item["icp_position"] < total}
+        coverage.append({"round_id": round_id, "submission_id": submission_id,
+                         "provided_icps": len(positions), "strict_icps": len(strict_positions),
+                         "total_icps": total, "required_icps": required,
+                         "minimum_coverage_percent": percent,
+                         "supplied_inventory_complete": bool(consistent and total is not None
+                                                             and positions == set(range(total))),
+                         "strict_coverage_met_in_supplied_inventory": bool(
+                             consistent and required is not None and len(strict_positions) >= required)})
     report = {
         "schema_version": SCHEMA_VERSION,
         "scope": "supplied_exports_only_not_a_full_production_inventory",
@@ -136,7 +167,8 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                         "analysis_records": len(steps["analysis"]),
                         "manifest": step_manifest},
         "full_thinking": {"candidate_records": len(thinking_splits["train"]) + len(thinking_splits["eval"]),
-                          "manifest": thinking_manifest},
+                          "manifest": thinking_manifest, "coverage": coverage,
+                          "coverage_scope": "supplied_exports_only_not_champion_eligibility"},
         "readiness": {"human_label_review": "not_proved_by_storage",
                       "agent_action_quality": "unreviewed",
                       "training_permission": dict(training_dataset.TRAINING_PERMISSION),

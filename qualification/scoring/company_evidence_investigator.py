@@ -2518,7 +2518,11 @@ async def _fetch_exa_exact_page(
                 and isinstance(error, Mapping)
                 and type(error.get("httpStatusCode")) is int
                 and error["httpStatusCode"] in {401, 403, 404, 410}
-                and error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
+                and (
+                    error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
+                    or (error["httpStatusCode"] == 404
+                        and error.get("tag") == "CRAWL_NOT_FOUND")
+                )
             ):
                 return {"ok": False, "error": {
                     401: "source_access_denied", 403: "source_access_denied",

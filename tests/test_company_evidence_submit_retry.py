@@ -113,45 +113,63 @@ class _Clock:
 
 
 @pytest.mark.parametrize("search_limit", [1, 2])
-def test_time_forced_unproven_with_unused_research_is_incomplete(
-    monkeypatch, search_limit,
+@pytest.mark.parametrize("required_research", [False, True], ids=["ordinary", "required"])
+def test_reserve_denial_marks_only_unfinished_required_research_incomplete(
+    monkeypatch, search_limit, required_research,
 ):
     clock = _Clock()
     monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", search_limit)
     monkeypatch.setattr(
         investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
     )
-    requests = []
+    requests, searches = [], []
+    negative = _finding(
+        status="UNPROVEN", observed_value="", observed_industry="",
+        observed_subindustry="", activity_role="unresolved",
+        evidence_url="", evidence_quote="", reason="Full product proof is missing.",
+    )
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
         if len(requests) == 1:
+            # A voluntary search creates no pending obligation. An unresolved
+            # product submission instead causes the host to require research.
+            if required_research:
+                return 200, _tool_response(
+                    "submit_findings", json.dumps({"findings": [negative]}),
+                )
             return 200, _tool_response(
-                "search_web", json.dumps({"query": "Acme enrollment proof"})
+                "search_web", json.dumps({"query": "Acme enrollment proof"}),
             )
         if len(requests) == 2:
             clock.now = (
                 investigator.ADMISSION_DEADLINE_SECONDS
                 - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS + 1
             )
+            if required_research:
+                assert payload["tool_choice"]["function"]["name"] == "search_web"
+                return 200, _tool_response(
+                    "search_web", json.dumps({"query": "Acme missing product proof"}),
+                )
             return 200, _tool_response(
-                "fetch_page", json.dumps({"url": "https://acme.example/news"})
+                "fetch_page", json.dumps({"url": "https://acme.example/news"}),
             )
         return 200, _tool_response(
-            "submit_findings", json.dumps({"findings": [_finding(
-                status="UNPROVEN", observed_value="", observed_industry="",
-                observed_subindustry="", activity_role="unresolved",
-                evidence_url="", evidence_quote="", reason="No proof loaded.",
-            )]})
+            "submit_findings", json.dumps({"findings": [negative]}),
         )
 
-    async def fake_search(_session, _query, *, key, max_results=5):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
+        searches.append(query)
         clock.now = 50.0
         return {"results": []}
 
+    async def forbid_fetch(*_args, **_kwargs):
+        pytest.fail("reserve-denied fetch must not dispatch")
+
     monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", forbid_fetch)
     result = _run(monkeypatch, fake_post_json)
 
     assert len(requests) == 3
@@ -161,12 +179,16 @@ def test_time_forced_unproven_with_unused_research_is_incomplete(
     assert json.loads(requests[2]["messages"][-1]["content"])["error"] == (
         "judgment_time_reserved"
     )
-    assert result["usage"]["search_calls"] == 1
+    assert searches == ([] if required_research else ["Acme enrollment proof"])
+    assert result["usage"]["search_calls"] == int(not required_research)
     assert result["usage"]["fetch_calls"] == 0
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result.get("_completed_submit") is not True
+    assert result["claims"]["industry"]["evidence_quote"] == ""
+    assert result["claims"]["industry"]["evidence_url"] == ""
+    assert result["_completed_submit"] is not required_research
     assert result["failure_reason"] == (
         investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+        if required_research else ""
     )
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] == QUOTE
 
@@ -686,9 +708,27 @@ def test_late_repair_still_rejects_fabricated_quote(monkeypatch):
             )]}),
         )
 
+    async def forbid_research(*_args, **_kwargs):
+        pytest.fail("quote correction must not dispatch new research")
+
+    monkeypatch.setattr(investigator, "_search_web", forbid_research)
+    monkeypatch.setattr(investigator, "_fetch_page", forbid_research)
     result = _run(monkeypatch, fake_post_json)
-    assert len(requests) == 2
-    assert result["claims"]["industry"]["status"] != "VERIFIED"
+    assert result.get("_completed_submit") is not True
+    assert result.get("claims", {}).get("industry", {}).get("status") != "VERIFIED"
+    # Serialization repair can be followed by one existing final citation
+    # correction. Both remain submit-only and validate the exact source text.
+    assert len(requests) == 3
+    for request in requests[1:]:
+        assert request["tool_choice"]["function"]["name"] == "submit_findings"
+    assert [tool["function"]["name"] for tool in requests[2]["tools"]] == [
+        "submit_findings",
+    ]
+    feedback = json.loads(requests[2]["messages"][-1]["content"])
+    assert feedback["error"] == "deterministic_evidence_validation_failed"
+    assert feedback["rejected_findings"][0]["reason"] == (
+        "submitted quote was not present in fetched source"
+    )
 
 
 @pytest.mark.parametrize("case", ["other_tool", "semantic_correction", "transient"])
@@ -697,9 +737,10 @@ def test_late_grace_does_not_admit_other_work(monkeypatch, case):
     monkeypatch.setattr(
         investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
     )
-    requests = []
+    requests, research_dispatches = [], []
 
     async def forbid_late_research(*_args, **_kwargs):
+        research_dispatches.append((_args, _kwargs))
         raise AssertionError("late research must not be admitted")
 
     monkeypatch.setattr(investigator, "_search_web", forbid_late_research)
@@ -723,7 +764,16 @@ def test_late_grace_does_not_admit_other_work(monkeypatch, case):
         )
 
     result = _run(monkeypatch, fake_post_json)
-    assert len(requests) == 1
+    assert research_dispatches == []
+    assert len(requests) == (2 if case == "other_tool" else 1)
+    if case == "other_tool":
+        # The host offers a final judgment, but must not execute either
+        # research request when the model ignores that submit-only schema.
+        assert requests[1]["tool_choice"]["function"]["name"] == "submit_findings"
+        assert [tool["function"]["name"] for tool in requests[1]["tools"]] == [
+            "submit_findings",
+        ]
+    assert result.get("_completed_submit") is not True
     assert result["claims"].get("industry", {}).get("status") != "VERIFIED"
 
 

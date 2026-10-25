@@ -11,6 +11,7 @@ import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import company_verification as verification
+from tests.product_coverage_fixtures import initial_investigation_content, native_product_post
 
 
 def _locators(html, domain="acme.example"):
@@ -156,7 +157,7 @@ def test_terms_prefetch_keeps_semantic_authority_and_fetch_budget(monkeypatch, c
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
-    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(post))
     monkeypatch.setattr(investigator, "_search_web", AsyncMock(return_value={"results": []}))
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -175,12 +176,18 @@ def test_terms_prefetch_keeps_semantic_authority_and_fetch_budget(monkeypatch, c
     ))
     assert calls == [terms_url]
     assert result["usage"]["fetch_calls"] == 1
-    assert result["usage"]["fetch_calls"] <= investigator.MAX_FETCH_CALLS == 3
+    assert result["usage"]["fetch_calls"] <= investigator.MAX_FETCH_CALLS == 4
     assert result["usage"]["search_calls"] <= investigator.MAX_SEARCH_CALLS == 2
     assert result["claims"]["required_attribute"]["status"] == (
         "VERIFIED" if commercial else "UNPROVEN"
     )
-    document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    assert result["_completed_submit"] is True
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["evidence_quote"] == product_quote
+    attribute = result["claims"]["required_attribute"]
+    assert attribute["evidence_quote"] == (terms_quote if commercial else "")
+    assert attribute["evidence_url"] == (terms_url if commercial else "")
+    document = json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
     assert document["server_priority_submitted_source"]["url"] == terms_url
 
 

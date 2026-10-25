@@ -12534,15 +12534,18 @@ def test_current_vendor_deployments_plus_product_support_ultrasight_sale(monkeyp
 
 
 @pytest.mark.parametrize(
-    ("positive_semantic_review", "expected_model"),
+    ("positive_semantic_review", "product_service", "expected_model"),
     [
-        (False, investigator.INVESTIGATOR_MODEL),
-        (True, investigator.POSITIVE_SEMANTIC_REVIEW_MODEL),
+        (False, "", investigator.INVESTIGATOR_MODEL),
+        (True, "", investigator.POSITIVE_SEMANTIC_REVIEW_MODEL),
+        (False, "Enrollment software for universities", investigator.POSITIVE_SEMANTIC_REVIEW_MODEL),
+        (True, "Enrollment software for universities", investigator.POSITIVE_SEMANTIC_REVIEW_MODEL),
     ],
 )
 def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     monkeypatch,
     positive_semantic_review,
+    product_service,
     expected_model,
 ):
     url = "https://acme.example/platform"
@@ -12588,7 +12591,7 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
         targets=("industry",),
         requested_industry="Education",
         requested_subindustry="Higher education services",
-        requested_product_service="Enrollment software for universities",
+        requested_product_service=product_service,
         positive_semantic_review=positive_semantic_review,
         prior_observations={"submitted_source_urls": [url]},
         verified_homepage_identity={
@@ -12609,10 +12612,12 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     assert len(requests) == 1
     assert len(routed_requests) == 1
     assert requests[0]["model"] == expected_model
+    if product_service and not positive_semantic_review:
+        assert requests[0]["reasoning"] == {"effort": "low"}
     normalized, outbound_body = routed_requests[0]
     expected_tokens = (
         investigator.PRODUCT_REVIEW_MAX_TOKENS
-        if positive_semantic_review else investigator.REASONING_MAX_TOKENS
+        if positive_semantic_review and product_service else investigator.REASONING_MAX_TOKENS
     )
     assert normalized["max_tokens"] == requests[0]["max_tokens"] == expected_tokens
     assert normalized["max_tokens"] <= (
@@ -13020,7 +13025,8 @@ def test_homepage_navigation_metadata_cannot_exceed_message_bound():
     assert document["untrusted_homepage_navigation_locators"][0] == locators[0]
 
 
-def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatch):
+@pytest.mark.parametrize("product_service", ["", "Unused product criterion"])
+def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatch, product_service):
     url = "https://acme.example/investors"
     quote = "Acme common stock is listed on NASDAQ under ticker ACME."
     reasoning_requests = []
@@ -13066,6 +13072,7 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("stage",),
         requested_stage="Public",
+        requested_product_service=product_service,
     ))
 
     assert result["claims"]["stage"]["status"] == "VERIFIED"

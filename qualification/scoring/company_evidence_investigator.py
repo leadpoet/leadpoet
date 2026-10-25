@@ -4505,6 +4505,12 @@ async def investigate_company_evidence(
     }
 
     started = time.monotonic()
+    # Both ordinary and positive product reviews submit the same native
+    # coverage protocol. Keep them on the already permitted semantic model;
+    # this does not grant positive-review authority or increase call budgets.
+    product_review_requested = bool(
+        "industry" in requested_targets and requested_product_service.strip()
+    )
     product_plan: Optional[TrustedProductPlan] = None
     product_plan_receipt: dict[str, Any] = {"outcome": "not_required", "attempts": [], "cache_hit": False}
     def planning_usage() -> dict[str, Any]:
@@ -5146,7 +5152,7 @@ async def investigate_company_evidence(
                     payload={
                         "model": (
                             POSITIVE_SEMANTIC_REVIEW_MODEL
-                            if positive_semantic_review
+                            if positive_semantic_review or product_review_requested
                             else INVESTIGATOR_MODEL
                         ),
                         "messages": [
@@ -5201,7 +5207,8 @@ async def investigate_company_evidence(
                                     or required_tool == "submit_findings"
                                 )
                             )
-                            else {}
+                            else ({"reasoning": {"effort": "low"}}
+                                  if product_review_requested else {})
                         ),
                     },
                     started=started,

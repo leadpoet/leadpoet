@@ -9,6 +9,7 @@ shared failed attribute-source review, identity schema-repair reachability and
 rejected-final-packet completion and structured numeric-homepage alias
 repairs to frozen source. A separate exact-source option repairs explicit
 first-party legal/brand identity and same-origin Organization URL resolution.
+Another normalizes the existing typed LinkedIn source-blocked diagnostic.
 No option imports today's complete grading implementation.
 """
 from __future__ import annotations
@@ -194,6 +195,7 @@ def expected_overlay(
     numeric_profile_legal_self_name: bool = False,
     single_tool_protocol_repair: bool = False,
     rejected_final_packet: bool = False,
+    source_blocked_alias: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
@@ -232,6 +234,9 @@ def expected_overlay(
         )
         files[GRADER_FILE] = convert_source_access_seam(files[GRADER_FILE])
         files[FINALITY_FILE] = convert_source_access_finality_seam(files[FINALITY_FILE])
+    if source_blocked_alias:
+        from scripts.arena_reviewer_source_blocked_seam import convert_source_blocked_seam
+        files[GRADER_FILE] = convert_source_blocked_seam(files[GRADER_FILE])
     if pending_final_correction:
         from scripts.arena_reviewer_budget_seam import convert_budget_seam
         files[GRADER_FILE] = convert_budget_seam(files[GRADER_FILE])
@@ -302,6 +307,10 @@ def main() -> int:
     parser.add_argument(
         "--source-access-denied", action="store_true",
         help="apply the exact-source access-denial correction; use the same option for --verify-image",
+    )
+    parser.add_argument(
+        "--source-blocked-alias", action="store_true",
+        help="normalize the typed LinkedIn source diagnostic to existing source-access finality; use the same option for --verify-image",
     )
     parser.add_argument(
         "--pending-final-correction", action="store_true",
@@ -395,11 +404,13 @@ def main() -> int:
             single_tool_protocol_repair=args.single_tool_protocol_repair,
             rejected_final_packet=args.rejected_final_packet,
             archive_snapshot_https=args.archive_snapshot_https,
+            **({"source_blocked_alias": True} if args.source_blocked_alias else {}),
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
             + ("-negative-finality" if args.complete_negative_finality else "")
             + ("-source-access" if args.source_access_denied else "")
+            + ("-source-blocked-alias" if args.source_blocked_alias else "")
             + ("-pending-final-correction" if args.pending_final_correction else "")
             + ("-attribute-source-recovery" if args.failed_attribute_source_recovery else "")
             + ("-refusal" if args.authenticated_page_refusal else "")
@@ -440,6 +451,9 @@ def main() -> int:
         if args.source_access_denied:
             from scripts.arena_reviewer_source_access_seam import CORRECTION_ID as SOURCE_ACCESS_CORRECTION_ID
             corrections.append(SOURCE_ACCESS_CORRECTION_ID)
+        if args.source_blocked_alias:
+            from scripts.arena_reviewer_source_blocked_seam import CORRECTION_ID as SOURCE_BLOCKED_CORRECTION_ID
+            corrections.append(SOURCE_BLOCKED_CORRECTION_ID)
         if args.pending_final_correction:
             from scripts.arena_reviewer_budget_seam import CORRECTION_ID as BUDGET_CORRECTION_ID
             corrections.append(BUDGET_CORRECTION_ID)

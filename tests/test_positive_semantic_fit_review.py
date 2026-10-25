@@ -8,6 +8,8 @@ from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring import lead_scorer
 from qualification.scoring.product_coverage import validate_coverage
 from tests.product_coverage_fixtures import coverage
+from qualification.scoring.product_coverage import get_cached_plan
+from qualification.scoring.company_evidence_investigator import POSITIVE_SEMANTIC_REVIEW_MODEL
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
@@ -149,6 +151,8 @@ def _finding(target: str, **overrides):
         values["product_coverage"] = validate_coverage(
             coverage(criterion, values["evidence_url"], values["evidence_quote"], nodes=nodes),
             criterion=criterion, citation_rejection=lambda url, quote: None,
+            product_plan=get_cached_plan(criterion, model=POSITIVE_SEMANTIC_REVIEW_MODEL),
+            whole_criterion_status="VERIFIED",
         )
     return values
 

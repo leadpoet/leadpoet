@@ -57,6 +57,7 @@ def test_effort_survives_real_transport_and_generic_output_length_retry(
             }]}}]})
 
     session = Session()
+    matrix()  # Isolate company transport; planner transport is tested separately.
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
     monkeypatch.setenv("EXA_API_KEY", "offline-test")
     monkeypatch.setattr(inv.aiohttp, "ClientSession", lambda **kwargs: session)
@@ -155,6 +156,7 @@ def test_per_request_budget_drives_repairs_and_final_admission(monkeypatch, mode
     monkeypatch.setattr(inv.aiohttp, "ClientSession", lambda **kwargs: Session())
     monkeypatch.setattr(inv, "time", clock)
     monkeypatch.setattr(inv, "_search_web", search)
+    matrix()  # Precompile the native plan for company-only budget controls.
     result = asyncio.run(inv.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},
         targets=("industry",), requested_industry="Software", requested_product_service=CRITERION,

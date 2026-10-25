@@ -1,6 +1,7 @@
 """Source/role controls; model semantic interpretation needs live comparison."""
 from qualification.scoring import company_evidence_investigator as inv
 from qualification.scoring.product_coverage import coverage_matches
+from qualification.scoring.product_coverage import get_cached_plan
 from tests.product_coverage_fixtures import coverage
 
 
@@ -22,6 +23,7 @@ def validate(quote, role):
         {"findings": [raw]}, targets=("industry",), fetched_pages={URL: quote},
         fetched_final_urls={URL: URL}, first_party_domains={"orbit.example"},
         identity_names={"orbitproducts"}, requested_product_service=CRITERION,
+        product_plan=get_cached_plan(CRITERION, model=inv.POSITIVE_SEMANTIC_REVIEW_MODEL),
         identity_anchor={"submitted_name": "Orbit Products", "submitted_domain": "orbit.example",
                          "observed_domain": "orbit.example", "verified_domain": "orbit.example"},
     )["industry"]

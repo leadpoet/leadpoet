@@ -73,6 +73,7 @@ def _response(name: str, arguments: dict[str, object] | str, *, call: int = 1):
 
 
 def _run_industry(monkeypatch, post_json, clock: _Clock, **kwargs):
+    coverage("Enrollment software for universities", URL, QUOTE)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", post_json)
@@ -199,6 +200,7 @@ def test_freshly_fetched_evidence_is_judged_after_late_search_is_withheld(
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
     monkeypatch.setattr(investigator, "_search_web", fail_search)
     monkeypatch.setattr(investigator, "time", clock)
+    coverage("Enrollment software for universities", URL, QUOTE)
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("industry",),
@@ -525,7 +527,7 @@ def test_inner_deadline_final_submit_retains_usage(monkeypatch, late_tool):
     assert provider_calls == []
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
     assert len(requests) == 2
-    assert result["usage"] == {
+    assert {k: v for k, v in result["usage"].items() if k != "product_plan"} == {
         "reasoning_turns": 2,
         "search_calls": 0,
         "fetch_calls": 0,
@@ -599,6 +601,8 @@ def test_reserved_submit_completes_validated_bounded_judgment(
             return 200, _response(
                 "search_web", {"query": "Acme enrollment software"}, call=1,
             )
+        if payload.get("tool_choice") == {"type": "function", "function": {"name": "search_web"}}:
+            return 200, _response("search_web", {"query": "Acme enrollment software"}, call=len(requests))
         return 200, _response(
             "submit_findings",
             {"findings": [_finding(status=finding_status)]},
@@ -622,13 +626,15 @@ def test_reserved_submit_completes_validated_bounded_judgment(
     monkeypatch.setattr(investigator, "_search_web", fake_search)
     result = _run_industry(monkeypatch, fake_post, clock)
 
-    assert len(requests) == 2
+    whole_gap_followup = (not reserve_time and finding_status == "UNPROVEN"
+                          and not reasoning_turn_cap and not research_exhausted)
+    assert len(requests) == (4 if whole_gap_followup else 2)
     assert result["claims"]["industry"]["status"] == finding_status
     # A complete validated UNPROVEN submission is an honest bounded judgment;
     # unused research capacity does not turn it into an infrastructure failure.
     assert result["_completed_submit"] is True
     assert result["failure_reason"] == ""
-    assert result["usage"]["search_calls"] == 1
+    assert result["usage"]["search_calls"] == (2 if whole_gap_followup else 1)
     assert result["usage"]["fetch_calls"] == 0
 
 

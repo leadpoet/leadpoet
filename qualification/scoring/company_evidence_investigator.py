@@ -35,7 +35,8 @@ from qualification.scoring.company_fit_decision import (
 )
 from qualification.scoring.checked_sources import checked_source_provenance
 from qualification.scoring.product_coverage import (
-    CoverageError, ValidatedProductCoverage, compile_plan,
+    CoverageError, ValidatedProductCoverage, TrustedProductPlan,
+    PLANNER_PROMPT, get_cached_plan, validate_semantic_plan, _store_trusted_plan,
     response_schema as product_coverage_schema,
     validate_coverage,
 )
@@ -85,6 +86,9 @@ MAX_REASONING_TURNS = 8
 MAX_INCOMPLETE_SUBMIT_RETRIES = 1
 REASONING_MAX_TOKENS = 3000
 PRODUCT_REVIEW_MAX_TOKENS = 4096
+MAX_PRODUCT_PLAN_ATTEMPTS = 2
+PRODUCT_PLAN_WINDOW_SECONDS = 30.0
+PRODUCT_PLAN_FAILURE_REASON = "product_plan_unavailable"
 MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 4
 MAX_PREFETCHED_PAGES = 3
@@ -277,8 +281,8 @@ prove the fact, use at least one targeted search before returning UNPROVEN when
 search budget remains. An unavailable page does not prove the fact absent.
 
 For industry, first resolve the requested capability using this precedence:
-For "such as" or "including", examples are not a closed list unless explicitly
-mandatory. Preserve the governing category, qualifiers, and ANDs.
+Illustrations (such as/e.g.) add no requirements unless mandatory;
+"including" can require items. Preserve category, qualifiers and ANDs.
 industry and sub-industry labels name sector categories. When a broad label
 joins capabilities or customer sectors with "and", but the product/service
 criterion explicitly lists those capabilities or sectors as OR alternatives,
@@ -622,44 +626,22 @@ stale, scoped incorrectly, or conflicting.
 """
 
 _PRODUCT_COVERAGE_INSTRUCTIONS = """
-For an industry finding with nonempty requested_product_service, return
-product_coverage as compact JSON TEXT in this same submit_findings response;
-otherwise use null. The decoded object has exactly nodes and claims arrays.
-Its nodes are a bounded flat logical tree with unique dense IDs p0, p1, etc.;
-the array may use any order. Each node belongs to one parent, except root p0.
-Each node has id, span (an exact unique continuous substring of the ORIGINAL
-requested_product_service), op (all, any, leaf, example), and children (IDs).
-p0 spans the complete original product criterion. Decompose independent
-mandatory capabilities and shared supplier, customer and channel qualifiers;
-do not hide a compound criterion in one root leaf. ALL requires every child;
-ANY requires one complete alternative and cannot waive shared qualifiers.
-Put shared qualifiers outside alternatives in enclosing ALL nodes. A compound
-name or phrase is not automatically a separate product: interpret the original
-meaning, not just individual words. Examples explicitly introduced by such as,
-for example or e.g. use example nodes and no claims. The marker may start the
-example span or immediately precede it; an example must stop before
-trailing relative clauses, customer restrictions or supply-channel qualifiers.
-All text must belong to a node; gaps may contain only punctuation and logical
-or example connectors. Do not add criteria, standalone-product requirements or
-conditions from required_attribute. Return each leaf ID exactly once in claims,
-with up to three evidence URL/quote bindings, activity_role and status. Write
-claim fields in order: id, evidence, activity_role, status. Collect
-exact loaded-source quotes before deciding the role and status. Output order
-does not change field meaning. Each VERIFIED leaf requires supplier/operator
-proof. Use all loaded company-bound
-pages; several clauses may cite the same exact quote, and a clause may use
-several pages. A source need not use the criterion's exact marketing wording.
-Before UNPROVEN, scan ALL loaded sources for each leaf, including product,
-technical, jobs and operating-brand passages. Missing from a lead summary is
-not missing from fetched evidence. Adjudicate leaf quotes/statuses first, then
-derive industry status from the tree: VERIFIED requires a VERIFIED aggregate,
-not merely proof of a broad company activity. For an UNPROVEN aggregate, use
-industry UNPROVEN with empty global evidence URL/quote; retain clause evidence.
-Keep nonempty locked_nodes unchanged in repair feedback; repair only listed
-clause evidence/statuses. Without a locked tree, correct the reported tree error.
-Search only unresolved mandatory clause IDs
-using the remaining existing research allowance. A missing clause is UNPROVEN,
-not CONTRADICTED. Keep the response compact within the existing token budget.
+For industry with nonempty requested_product_service, return product_coverage as
+compact JSON TEXT containing exactly plan_id and claims; otherwise use null.
+Use server_frozen_product_plan unchanged. Never return, replace or
+recompile nodes. Return each leaf ID exactly once and no other ID in claims.
+Each claim has id, evidence (up to three exact URL/quote bindings), activity_role
+and status. Write fields in order: id, evidence, activity_role, status. Use all loaded company-bound
+sources, including technical, jobs and explicitly bound operating-brand facts.
+Supplier/operator proof and all normal source/quote/entity checks still apply.
+Evaluate the FULL original product criterion as well as the semantic checklist;
+if the checklist omits a condition, conflicts with the criterion, or any mandatory
+condition lacks proof, industry is UNPROVEN. A broad company activity is not a
+whole-criterion match. Industry VERIFIED requires the whole criterion and the
+frozen leaf logic both proven. Global UNPROVEN has empty global URL/quote, but
+retain valid per-clause evidence. Search unresolved obligations only within the
+existing remaining research allowance, preserving useful query operators and
+synonyms. Never infer absence from silence or add requirements not requested.
 """
 
 
@@ -2436,6 +2418,91 @@ async def _post_json(
     return await post_json(session, url, headers=headers, payload=payload)
 
 
+async def _get_or_compile_product_plan(
+    session: aiohttp.ClientSession, *, criterion: str,
+    headers: Mapping[str, str], started: float,
+) -> tuple[Optional[TrustedProductPlan], dict[str, Any]]:
+    """Criterion-only, at most two attempts; trusted process reuse, no persistence.
+
+    Concurrent misses can compile separately. The planning window consumes the
+    existing investigation admission clock, not additional company research.
+    """
+    import hashlib
+    from qualification.scoring.product_coverage import PLAN_VERSION
+
+    receipt: dict[str, Any] = {
+        "criterion_sha256": hashlib.sha256(criterion.encode()).hexdigest(),
+        "version": PLAN_VERSION, "model": POSITIVE_SEMANTIC_REVIEW_MODEL,
+        "prompt_sha256": hashlib.sha256(PLANNER_PROMPT.encode()).hexdigest(),
+        "cache_hit": False, "attempts": [], "outcome": "unavailable",
+        "phase": "product_plan", "failure_reason": PRODUCT_PLAN_FAILURE_REASON,
+    }
+    cached = get_cached_plan(criterion, model=POSITIVE_SEMANTIC_REVIEW_MODEL)
+    if cached is not None:
+        receipt.update(cache_hit=True, outcome="accepted", plan_id=cached.plan_id, failure_reason="")
+        return cached, receipt
+    content = json.dumps({"requested_product_service": criterion}, ensure_ascii=False)
+    if not criterion.strip() or len(content) > 32000:
+        receipt["error"] = "original criterion exceeds planner input bounds"
+        return None, receipt
+    deadline = min(started + ADMISSION_DEADLINE_SECONDS,
+                   time.monotonic() + PRODUCT_PLAN_WINDOW_SECONDS)
+    error = ""
+    for attempt in range(MAX_PRODUCT_PLAN_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        messages = [{"role": "system", "content": PLANNER_PROMPT},
+                    {"role": "user", "content": content}]
+        if error:
+            messages.append({"role": "user", "content": "Correct the prior structural error: " + error[:300]})
+        observation: dict[str, Any] = {"attempt": attempt + 1, "accepted": False}
+        receipt["attempts"].append(observation)
+        try:
+            # Admission is bounded, but an admitted paid request must settle
+            # under the existing transport timeout so billing is retained.
+            status, body = await _post_json(
+                session, "https://openrouter.ai/api/v1/chat/completions", headers=headers,
+                payload={
+                    "model": POSITIVE_SEMANTIC_REVIEW_MODEL, "messages": messages,
+                    "max_tokens": PRODUCT_REVIEW_MAX_TOKENS, "reasoning": {"effort": "medium"},
+                    "temperature": 0.0, "parallel_tool_calls": False,
+                    "tools": [{"type": "function", "function": {
+                        "name": "submit_product_plan", "description": "Submit criterion-only semantic obligations.",
+                        "strict": True, "parameters": {"type": "object", "additionalProperties": False,
+                            "properties": {"plan_json": {"type": "string", "maxLength": 24000}},
+                            "required": ["plan_json"]},
+                    }}],
+                    "tool_choice": {"type": "function", "function": {"name": "submit_product_plan"}},
+                },
+            )
+            if status != 200 or not isinstance(body, Mapping) or body.get("error"):
+                raise CoverageError("planner provider unavailable")
+            choices = body.get("choices")
+            if not isinstance(choices, list) or len(choices) != 1:
+                raise CoverageError("planner response requires one choice")
+            calls = choices[0].get("message", {}).get("tool_calls")
+            if not isinstance(calls, list) or len(calls) != 1:
+                raise CoverageError("planner response requires one tool call")
+            function = calls[0].get("function", {})
+            arguments = json.loads(function.get("arguments") or "{}")
+            if (function.get("name") != "submit_product_plan" or not isinstance(arguments, Mapping)
+                    or set(arguments) != {"plan_json"} or not isinstance(arguments["plan_json"], str)):
+                raise CoverageError("planner tool contract invalid")
+            plan = validate_semantic_plan(arguments["plan_json"], criterion=criterion,
+                                          model=POSITIVE_SEMANTIC_REVIEW_MODEL)
+            _store_trusted_plan(plan)
+            observation.update(accepted=True, plan_id=plan.plan_id)
+            receipt.update(outcome="accepted", plan_id=plan.plan_id, failure_reason="")
+            return plan, receipt
+        except (CoverageError, ValueError, TypeError, KeyError, IndexError, AttributeError, RuntimeError,
+                asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            error = str(exc)[:300] or type(exc).__name__
+            observation["error"] = error
+    receipt["error"] = error or "planner admission window exhausted"
+    return None, receipt
+
+
 async def _post_openrouter_json(
     session: aiohttp.ClientSession,
     url: str,
@@ -3080,7 +3147,7 @@ def _validated_findings(
     identity_anchor: Optional[Mapping[str, Any]] = None,
     requested_stage: str = "",
     requested_product_service: str = "",
-    locked_product_nodes: Optional[list[dict[str, Any]]] = None,
+    product_plan: Optional[TrustedProductPlan] = None,
     priority_headquarters_url: str = "",
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
 ) -> Optional[dict[str, dict[str, Any]]]:
@@ -3723,13 +3790,10 @@ def _validated_findings(
                 )
 
             try:
-                finding["product_coverage_nodes"] = compile_plan(
-                    requested_product_service, raw.get("product_coverage"),
-                )
                 coverage = validate_coverage(
                     raw.get("product_coverage"), criterion=requested_product_service,
                     citation_rejection=reject_product_citation,
-                    locked_nodes=locked_product_nodes,
+                    product_plan=product_plan, whole_criterion_status=raw.get("status"),
                 )
                 finding["product_coverage"] = coverage
                 if finding["status"] == "VERIFIED" and coverage["status"] != "VERIFIED":
@@ -4262,6 +4326,16 @@ async def investigate_company_evidence(
     }
 
     started = time.monotonic()
+    product_plan: Optional[TrustedProductPlan] = None
+    product_plan_receipt: dict[str, Any] = {"outcome": "not_required", "attempts": [], "cache_hit": False}
+    def planning_usage() -> dict[str, Any]:
+        return {"product_plan": product_plan_receipt} if product_plan_receipt["outcome"] != "not_required" else {}
+
+    def failed_result(reason: str) -> dict[str, Any]:
+        result: dict[str, Any] = {"claims": {}, "failure_reason": reason}
+        if planning_usage():
+            result["usage"] = planning_usage()
+        return result
     def retained_fetched_pages() -> dict[str, dict[str, str]]:
         return {
             url: {"final_url": fetched_final_urls[url], "text": text}
@@ -4271,6 +4345,24 @@ async def investigate_company_evidence(
     timeout = aiohttp.ClientTimeout(total=BROKER_SETTLEMENT_TIMEOUT_SECONDS)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
+            if "industry" in requested_targets and requested_product_service.strip():
+                product_plan, product_plan_receipt = await _get_or_compile_product_plan(
+                    session, criterion=requested_product_service,
+                    headers={"Authorization": f"Bearer {openrouter_key}", "Content-Type": "application/json"},
+                    started=started,
+                )
+                if product_plan is None:
+                    _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
+                    return {
+                        "claims": {}, "_completed_submit": False,
+                        # Retain the existing typed infrastructure retry path;
+                        # the host receipt distinguishes the planning phase.
+                        "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON,
+                        "product_plan_failure_reason": PRODUCT_PLAN_FAILURE_REASON,
+                        "usage": {"reasoning_turns": 0, "search_calls": 0, "fetch_calls": 0,
+                                  "product_plan": product_plan_receipt},
+                        PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages(),
+                    }
             async def fetch_fresh_page(url: str) -> dict[str, Any]:
                 nonlocal fetch_calls
                 fetch_calls += 1
@@ -4647,6 +4739,15 @@ async def investigate_company_evidence(
                     ),
                 ),
             }]
+            if product_plan is not None:
+                # Obligation text is immutable policy, never an evidence text
+                # budget candidate. Preserve the original evidence allocation.
+                messages.append({"role": "user", "content": json.dumps({
+                    "server_frozen_product_plan": {
+                        "criterion_sha256": product_plan_receipt["criterion_sha256"],
+                        "plan_id": product_plan.plan_id, "nodes": product_plan.nodes,
+                    },
+                }, ensure_ascii=False, separators=(",", ":"))})
             final_correction_pending = False
             forced_next_tool = ""
             forced_stage_search_pending = False
@@ -4660,7 +4761,6 @@ async def investigate_company_evidence(
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
             industry_followup_pending = False
-            locked_product_nodes = None
             product_coverage = None
             industry_previously_proven = False
             industry_followup_search_completed = False
@@ -4710,7 +4810,7 @@ async def investigate_company_evidence(
                         ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
                     ),
                     "usage": {
-                        "reasoning_turns": reasoning_turns,
+                        "reasoning_turns": reasoning_turns, **planning_usage(),
                         "search_calls": search_calls,
                         "fetch_calls": fetch_calls,
                         "prefetched_pages": prefetched_count,
@@ -5175,7 +5275,7 @@ async def investigate_company_evidence(
                         identity_anchor=identity_anchor,
                         requested_stage=normalized_requested_stage,
                         requested_product_service=requested_product_service,
-                        locked_product_nodes=locked_product_nodes,
+                        product_plan=product_plan,
                         structured_headquarters_evidence=structured_headquarters_evidence,
                         priority_headquarters_url=(
                             _priority_headquarters_navigation_source(
@@ -5231,8 +5331,6 @@ async def investigate_company_evidence(
                         if isinstance(item, Mapping)
                     }
                     product_coverage = (claims.get("industry") or {}).get("product_coverage")
-                    if locked_product_nodes is None and (claims.get("industry") or {}).get("product_coverage_nodes"):
-                        locked_product_nodes = copy.deepcopy(claims["industry"]["product_coverage_nodes"])
                     rejected = []
                     for target, finding in claims.items():
                         submitted = submitted_findings.get(target, {})
@@ -5604,17 +5702,19 @@ async def investigate_company_evidence(
                             "error": "deterministic_evidence_validation_failed",
                             "rejected_findings": rejected,
                             **({"product_coverage": {
-                                "locked_nodes": [{key: node[key] for key in ("id", "span", "op", "children")}
-                                                 for node in (locked_product_nodes or [])],
+                                "plan_id": product_plan.plan_id if product_plan else "",
+                                "requirements": product_plan.nodes if product_plan else [],
                                 "unresolved_ids": (product_coverage or {}).get("unresolved_ids", []),
                                 "unresolved_clauses": [
-                                    {"id": node["id"], "span": node["span"]}
+                                    {"id": node["id"], "requirement": (requested_product_service
+                                        if node["id"] == "p0" and (product_coverage or {}).get("whole_criterion_gap")
+                                        else node["text"])}
                                     for node in (product_coverage or {}).get("nodes", [])
                                     if node["id"] in (product_coverage or {}).get("unresolved_ids", [])
                                 ],
                                 "citation_issues": (product_coverage or {}).get("citation_issues", {}),
                                 "error": str(industry_finding.get("product_coverage_error", ""))[:300],
-                            }} if (locked_product_nodes is not None
+                            }} if (product_plan is not None
                                    or industry_finding.get("product_coverage_error")) else {}),
                             **(
                                 {
@@ -5993,7 +6093,7 @@ async def investigate_company_evidence(
                             ),
                             "failure_reason": failure_reason,
                             "usage": {
-                                "reasoning_turns": _turn + 1,
+                                "reasoning_turns": _turn + 1, **planning_usage(),
                                 "search_calls": search_calls,
                                 "fetch_calls": fetch_calls,
                                 "prefetched_pages": prefetched_count,
@@ -6124,13 +6224,13 @@ async def investigate_company_evidence(
                 ])
     except (aiohttp.ClientError, RuntimeError, TimeoutError, asyncio.TimeoutError):
         _record_failure(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}
+        return failed_result(PROVIDER_ERROR_FAILURE_REASON)
     except (TypeError, ValueError, KeyError, IndexError):
         _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}
+        return failed_result(MALFORMED_RESPONSE_FAILURE_REASON)
     except Exception:  # noqa: BLE001
         _record_failure(diagnostic, UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
-        return {"claims": {}, "failure_reason": UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON}
+        return failed_result(UNEXPECTED_VERIFIER_ERROR_FAILURE_REASON)
 
     _record_failure(diagnostic, MALFORMED_RESPONSE_FAILURE_REASON)
-    return {"claims": {}, "failure_reason": MALFORMED_RESPONSE_FAILURE_REASON}
+    return failed_result(MALFORMED_RESPONSE_FAILURE_REASON)

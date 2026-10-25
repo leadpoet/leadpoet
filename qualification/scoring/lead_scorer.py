@@ -9275,8 +9275,8 @@ def _final_product_coverage_result(
     Raw provider/miner JSON has no host authority. This gate adds no research
     or retry and does not change the legacy investigator-disabled policy.
     """
-    criterion = str(icp.product_service or "").strip()
-    if not enabled or not criterion:
+    criterion = str(icp.product_service or "")
+    if not enabled or not criterion.strip():
         return result
     details = result.details if isinstance(result.details, Mapping) else {}
     dimensions = dict(details.get("dimension_decisions") or {})

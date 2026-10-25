@@ -124,6 +124,7 @@ def test_missing_metadata_does_not_bypass_evidence_or_role_checks(
 def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
     monkeypatch, repair, attribute_quote_rejected,
 ):
+    coverage(PRODUCT, URL, QUOTE)
     clock = _Clock()
     requests = []
     retained = {

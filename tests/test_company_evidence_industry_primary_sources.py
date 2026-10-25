@@ -110,7 +110,7 @@ def test_first_party_path_is_preserved():
 def test_prompt_separates_examples_and_missing_capability_research():
     prompt = " ".join(inv._SYSTEM_PROMPT.split())
     assert "such as" in prompt
-    assert "examples are not a closed list" in prompt
+    assert "Illustrations (such as/e.g.) add no requirements unless mandatory" in prompt
     assert "missing capability or shared qualifier" in prompt
     assert "product, solution, documentation, or customer-case page" in prompt
 
@@ -120,6 +120,7 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
     queries = []
     url = "https://nitra.com/solutions/scheduling"
     criterion = "A practice platform providing patient scheduling."
+    coverage(criterion, url, QUOTE)
 
     async def post(_session, _url, *, headers, payload):
         del headers

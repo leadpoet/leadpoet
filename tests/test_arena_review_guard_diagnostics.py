@@ -52,12 +52,12 @@ def run_two_review_cycles(monkeypatch, *, fail_at=None, error=None, guard_presen
     monkeypatch.setattr(entrypoint.signal, "signal", lambda *a: None)
 
     def rpc(function, params):
-        assert function == "lab_arena_restart_guard_state_v1" and params == {}
+        assert function == "lab_arena_review_guard_state_v1" and params == {}
         reads.append(function)
         if len(reads) == fail_at:
             raise error
         return {} if malformed else {
-            "schema_version": "leadpoet.lab_arena.restart_guard_state.v1",
+            "schema_version": "leadpoet.lab_arena.review_guard_state.v1",
             "guard_present": guard_present,
         }
 
@@ -85,7 +85,7 @@ def run_two_review_cycles(monkeypatch, *, fail_at=None, error=None, guard_presen
 def test_guard_failure_exports_safe_diagnostics_and_worker_recovers(monkeypatch, capsys, nested, diagnostics):
     error = ArenaStoreUnavailable(
         "private-response credential=never-export", operation="rpc",
-        resource="lab_arena_restart_guard_state_v1", **diagnostics,
+        resource="lab_arena_review_guard_state_v1", **diagnostics,
     )
     spans, reads, reviews, callbacks = run_two_review_cycles(
         monkeypatch, fail_at=2 if nested else 1, error=error, nested=nested,
@@ -98,7 +98,7 @@ def test_guard_failure_exports_safe_diagnostics_and_worker_recovers(monkeypatch,
     assert span.start_time <= span.end_time
     assert span.attributes["arena.error_type"] == "ArenaStoreUnavailable"
     assert span.attributes["arena.store_operation"] == "rpc"
-    assert span.attributes["arena.store_resource"] == "lab_arena_restart_guard_state_v1"
+    assert span.attributes["arena.store_resource"] == "lab_arena_review_guard_state_v1"
     for key, value in diagnostics.items():
         assert span.attributes["arena.store_" + key] == value
     assert len(reviews) == (2 if nested else 1)

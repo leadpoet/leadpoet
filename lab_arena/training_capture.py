@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -62,6 +63,38 @@ class CaptureError(ValueError):
     """Request evidence was not complete or did not pass integrity checks."""
 
 
+def retryable_storage_error(error: Exception) -> bool:
+    """Recognize transport availability failures, never missing/denied objects."""
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        from botocore.exceptions import (
+            ConnectTimeoutError, ConnectionClosedError, EndpointConnectionError,
+            ReadTimeoutError, ResponseStreamingError,
+        )
+    except ImportError:
+        # Local embedded stores do not require the optional S3 client SDK.
+        transport_errors = ()
+    else:
+        transport_errors = (ConnectTimeoutError, ConnectionClosedError,
+                            EndpointConnectionError, ReadTimeoutError, ResponseStreamingError)
+    if isinstance(error, transport_errors):
+        return True
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return False
+    detail = response.get("Error")
+    metadata = response.get("ResponseMetadata")
+    code = detail.get("Code") if isinstance(detail, Mapping) else None
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, Mapping) else None
+    if (type(status) is int and status in {401, 403, 404}) or (
+            isinstance(code, str) and code in {"NoSuchKey", "NotFound", "AccessDenied"}):
+        return False
+    return ((isinstance(code, str) and code in {
+        "RequestTimeout", "RequestTimeoutException", "SlowDown", "InternalError", "ServiceUnavailable",
+    }) or (type(status) is int and status in {429, 500, 502, 503, 504}))
+
+
 @dataclass(frozen=True)
 class PreparedRequest:
     """In-memory evidence; a reference is not proof that a write succeeded."""
@@ -71,11 +104,21 @@ class PreparedRequest:
     objects: Any
 
     def persist(self) -> bool:
-        try:
-            self.objects.put(self.pointer["ref"], self.compressed)
-            return True
-        except Exception:
+        ref = self.pointer.get("ref")
+        if not isinstance(ref, str) or not ref:
             return False
+        for attempt in range(2):
+            try:
+                self.objects.put(ref, self.compressed)
+                return True
+            except Exception as exc:
+                if attempt == 0 and retryable_storage_error(exc):
+                    # The immutable ref and prepared bytes are identical even
+                    # if the first write committed before its response timed out.
+                    time.sleep(0.05)
+                    continue
+                return False
+        return False
 
 
 def unavailable(reason: str = "capture_failed") -> dict[str, Any]:
@@ -133,6 +176,34 @@ def readable_reasoning_content_path(path: tuple[str, ...]) -> bool:
         return True  # A raw provider response, before it enters an example.
     return (len(path) >= 6 and path[0] == "provider_calls" and path[1].isdigit()
             and "response" in path[2:-3] and "request" not in path[2:-3])
+
+
+def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: Any) -> bool:
+    """Keep plain assistant replay text only in a known Chat request message."""
+    if not isinstance(item, Mapping) or item.get("role") != "assistant" or not isinstance(root, Mapping):
+        return False
+    if len(path) >= 4 and path[-2] == "messages" and path[-1].isdigit():
+        prefix = path[:-2]
+    else:
+        return False
+    def projection(parts: tuple[str, ...]) -> bool:
+        return parts == ("outbound", "body") or len(parts) == 1 and parts[0] in _PARAMETER_KEYS
+
+    if not projection(prefix):
+        if (len(prefix) < 4 or prefix[0] != "provider_calls" or not prefix[1].isdigit()
+                or prefix[2] != "request" or not projection(prefix[3:])):
+            return False
+        calls = root.get("provider_calls")
+        if not isinstance(calls, list) or int(prefix[1]) >= len(calls):
+            return False
+        call = calls[int(prefix[1])]
+        operation = call.get("operation_id") if isinstance(call, Mapping) else None
+        request = call.get("request") if isinstance(call, Mapping) else None
+        if not isinstance(request, Mapping) or request.get("operation_id") != operation:
+            return False
+    else:
+        operation = root.get("operation_id")
+    return operation == "openrouter.chat"
 
 
 def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_config: bool,
@@ -272,7 +343,8 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 normalized = key.lower().replace("-", "_")
                 safe_config = (
                     normalized == "reasoning"
-                    and request_config_path(path)
+                    and (request_config_path(path)
+                         or item.get("object") == "response" and isinstance(item.get("output"), list))
                     and isinstance(child, Mapping)
                     and set(child) <= _CONFIG_KEYS
                     and all(isinstance(v, (str, bool, int)) or v is None for v in child.values())
@@ -287,6 +359,9 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 ) and not empty_credential:
                     result[key] = "[REDACTED]"
                     reasons.add("credential")
+                elif (normalized == "reasoning_content" and isinstance(child, str)
+                      and approved_history_reasoning_content(value, path, item)):
+                    result[key] = clean(child, (*path, key))
                 elif opaque_reasoning_field(normalized, child, item_kind, safe_config, path):
                     if empty_value(child):
                         result[key] = child

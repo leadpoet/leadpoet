@@ -112,6 +112,32 @@ _COST_REASONS = frozenset(
         "cost_per_company_exceeded",
     }
 )
+_FINAL_ELIGIBILITY_REASONS = _COST_REASONS | {"training_data_incomplete"}
+_TRAINING_REASONS = frozenset({
+    "source_review_not_passed", "source_archive_hash_missing",
+    "model_directed_source_unverified", "submission_evidence_missing",
+    "selected_execution_coverage_incomplete", "training_evidence_check_failed",
+    "selected_runs_invalid", "selected_run_export_missing",
+    "selected_run_identity_unverified", "trajectory_evidence_incomplete",
+    "input_or_output_unavailable", "readable_trace_incomplete",
+    "execution_model_call_missing", "full_thinking_route_unverified",
+    "readable_full_thinking_unverified", "full_thinking_unavailable",
+    "full_thinking_call_missing", "selected_run_evidence_invalid",
+    "training_coverage_incomplete", "provider_response_truncated", "accepted_output_unavailable",
+    "missing_reasoning_share_exceeded", "selected_artifact_temporarily_unavailable",
+})
+_TRAINING_COUNT_KEYS = {
+    "source_review": frozenset({"enabled", "reviewed"}),
+    "capture": frozenset({
+        "enabled", "selected_runs", "checked_runs", "model_calls",
+        "full_thinking_calls", "tool_only_empty_calls",
+        "required_complete_runs", "complete_runs", "incomplete_runs",
+        "minimum_coverage_percent",
+        "completed_untruncated_verified_reasoning_tokens", "missing_reasoning_tokens",
+        "missing_reasoning_calls", "unknown_reasoning_usage_calls", "truncated_model_calls",
+        "verified_failed_model_attempts", "maximum_missing_reasoning_percent",
+    }),
+}
 _COST_COUNTER_KEYS = (
     "settled_microusd",
     "reserved_or_uncertain_microusd",
@@ -238,6 +264,39 @@ def _cost_bucket(
     return projected
 
 
+def _training_eligibility_projection(ranking: Mapping[str, Any]) -> dict:
+    """Show bounded gate outcomes only; never publish review or trace records."""
+
+    def project(value: Any, *, section: Optional[str] = None) -> Optional[dict]:
+        if not isinstance(value, Mapping) or not isinstance(value.get("eligible"), bool):
+            return None
+        reasons = value.get("reasons")
+        if (not isinstance(reasons, list) or len(reasons) > len(_TRAINING_REASONS)
+                or any(not isinstance(reason, str) or reason not in _TRAINING_REASONS
+                       for reason in reasons)):
+            return None
+        result = {"eligible": value["eligible"], "reasons": sorted(set(reasons))}
+        if section is not None and isinstance(value.get("counts"), Mapping):
+            counts = value["counts"]
+            allowed = _TRAINING_COUNT_KEYS[section]
+            projected = {key: _safe_integer(counts[key]) for key in allowed if key in counts}
+            if any(number is None for number in projected.values()):
+                return None
+            result["counts"] = projected
+        return result
+
+    raw = ranking.get("training_data_eligibility")
+    result = project(raw)
+    if result is None:
+        return {}
+    for section in ("source_review", "capture"):
+        if section in raw:
+            nested = project(raw[section], section=section)
+            if nested is not None:
+                result[section] = nested
+    return {"training_data_eligibility": result}
+
+
 def _cost_projection(
     ranking: Mapping[str, Any], *, sourcing_cost_eligibility_policy: Any = None,
     configuration: Optional[Mapping[str, Any]] = None,
@@ -246,7 +305,8 @@ def _cost_projection(
 
     eligible = ranking.get("eligible")
     reason = ranking.get("eligibility_reason")
-    if not isinstance(eligible, bool) or reason not in _COST_REASONS:
+    if (not isinstance(eligible, bool) or reason not in _FINAL_ELIGIBILITY_REASONS
+            or (reason == "training_data_incomplete" and eligible)):
         return {}
     summary = ranking.get("cost_summary")
     if summary is None and (
@@ -257,6 +317,7 @@ def _cost_projection(
             "cost_summary": None,
             "eligible": eligible,
             "eligibility_reason": str(reason),
+            **_training_eligibility_projection(ranking),
             **({"status": ranking["evaluation_status"], "score_status": "not_evaluated",
                 "evaluation_reason": ranking["evaluation_reason"]}
                 if (reason == "execution_incomplete" and not eligible
@@ -334,6 +395,7 @@ def _cost_projection(
             "cost_summary": projected_summary,
             "eligible": eligible,
             "eligibility_reason": str(reason),
+            **_training_eligibility_projection(ranking),
         }
     scalar_keys = (
         "returned_company_count",
@@ -375,6 +437,7 @@ def _cost_projection(
         "cost_summary": projected_summary,
         "eligible": eligible,
         "eligibility_reason": str(reason),
+        **_training_eligibility_projection(ranking),
     }
 
 

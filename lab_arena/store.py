@@ -116,6 +116,19 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_after_entry_id", "bigint"),
     ),
     "lab_arena_freeze_champion_funding": (("p_round_id", "text"),),
+    "lab_arena_latest_promoted_champion_v1": (
+        ("p_network_name", "text"), ("p_netuid", "integer"),
+    ),
+    "lab_arena_freeze_full_thinking_baseline_v1": (
+        ("p_round_id", "text"),
+        ("p_expected_promotion_round_id", "text"),
+        ("p_expected_winner_submission_id", "text"),
+        ("p_expected_commit", "text"),
+        ("p_expected_source_url", "text"),
+        ("p_expected_source_sha256", "text"),
+        ("p_source_url", "text"),
+        ("p_source_sha256", "text"),
+    ),
     "lab_arena_provider_funding": (("p_run_id", "text"), ("p_provider", "text")),
     "lab_arena_run_quota_snapshot_v1": (
         ("p_run_id", "text"),
@@ -1178,6 +1191,25 @@ class ArenaStore:
             "lab_arena_freeze_champion_funding", {"p_round_id": round_id}
         ), "freeze_champion_funding")
 
+    def freeze_full_thinking_baseline(
+        self, round_id: str, *, expected_promotion_round_id: Optional[str],
+        expected_winner_submission_id: Optional[str], expected_commit: Optional[str],
+        expected_source_url: str, expected_source_sha256: str,
+        source_url: str, source_sha256: str,
+    ) -> Dict[str, Any]:
+        return _require_mapping(self._transport.rpc(
+            "lab_arena_freeze_full_thinking_baseline_v1", {
+                "p_round_id": round_id,
+                "p_expected_promotion_round_id": expected_promotion_round_id,
+                "p_expected_winner_submission_id": expected_winner_submission_id,
+                "p_expected_commit": expected_commit,
+                "p_expected_source_url": expected_source_url,
+                "p_expected_source_sha256": expected_source_sha256,
+                "p_source_url": source_url,
+                "p_source_sha256": source_sha256,
+            },
+        ), "freeze_full_thinking_baseline")
+
     def provider_funding(self, run_id: str, provider: str) -> Dict[str, Any]:
         """Read the run's immutable payer, including historical billing calls."""
         return _require_mapping(self._transport.rpc(
@@ -1702,6 +1734,18 @@ class ArenaStore:
             columns="round_id,publication_doc,promotion_doc,published_at,created_at",
         )
         return rows
+
+    def latest_promoted_champion(
+        self, *, network_name: str, netuid: int
+    ) -> Optional[Dict[str, Any]]:
+        """Use the same completed winner ordering as champion funding."""
+        result = self._transport.rpc(
+            "lab_arena_latest_promoted_champion_v1",
+            {"p_network_name": str(network_name), "p_netuid": int(netuid)},
+        )
+        return None if result is None else _require_mapping(
+            result, "latest_promoted_champion"
+        )
 
     def get_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)

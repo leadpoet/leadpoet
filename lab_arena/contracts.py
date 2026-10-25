@@ -250,6 +250,7 @@ PER_ICP_POLICY_BUDGET_STOP_REASONS = frozenset(
 )
 PER_ICP_EXECUTION_CAP_MICROUSD = 4_000_000
 PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD = 800_000
+FULL_THINKING_PER_ICP_CAP_MICROUSD = 6_000_000
 SIGNING_KEY_DOCUMENT_SCHEMA_VERSION = "leadpoet.lab_arena.signing_key.v1"
 JSON_SAFE_INTEGER_MAX = 9_007_199_254_740_991
 
@@ -922,6 +923,19 @@ ROUND_CONFIGURATION_FIELDS = (
     ),
     F("infrastructure_retry_cost_policy", "str", required=False,
       choices=(INFRASTRUCTURE_RETRY_COST_POLICY,)),
+    # Agent model calls reason and return readable reasoning. Absence keeps
+    # every historical round's provider requests unchanged.
+    F("reasoning_capture_policy", "str", required=False,
+      choices=("full_generated_thinking_v1",)),
+    F("training_minimum_icp_coverage_percent", "int", required=False,
+      minimum=1, maximum=100),
+    F("training_maximum_missing_reasoning_percent", "int", required=False,
+      minimum=0, maximum=100),
+    F("reasoning_route_registry", "object", required=False),
+    F("reasoning_baseline_source_sha256", "sha256", required=False),
+    F("reasoning_activation_status", "str", required=False, choices=("not_ready",)),
+    F("reasoning_activation_reason", "str", required=False,
+      choices=("registry_unavailable", "baseline_unready", "flat_policy_required")),
     F("scoring_cap_microusd", "int", minimum=1),
     F("scorer_image_digest", "sha256"),
     F("scorer_image_reference", "str", minimum=1, maximum=512),
@@ -990,14 +1004,17 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     ):
         if not is_integrity:
             raise ArenaContractError("per-ICP cost policy requires integrity receipts")
+        full_thinking = config.get("reasoning_capture_policy") == "full_generated_thinking_v1"
+        expected_icp_cap = (FULL_THINKING_PER_ICP_CAP_MICROUSD if full_thinking
+                            else PER_ICP_EXECUTION_CAP_MICROUSD)
         expected_company_cap = (
-            PER_ICP_EXECUTION_CAP_MICROUSD
-            if config["sourcing_cost_eligibility_policy"] == FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
+            expected_icp_cap if config["sourcing_cost_eligibility_policy"]
+            == FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
             else PER_ICP_QUALIFIED_PAIR_CAP_MICROUSD
         )
         if (
             config.get("execution_icp_cap_microusd")
-            != PER_ICP_EXECUTION_CAP_MICROUSD
+            != expected_icp_cap
             or config.get("cost_per_company_microusd")
             != expected_company_cap
         ):
@@ -1005,6 +1022,63 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
     if (config.get("infrastructure_retry_cost_policy") is not None
         and config.get("sourcing_cost_eligibility_policy") not in PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
         raise ArenaContractError("infrastructure retry cost policy requires per-ICP costs")
+    capture_policy = config.get("reasoning_capture_policy")
+    if "training_maximum_missing_reasoning_percent" in config:
+        from lab_arena import training_coverage
+        try:
+            training_coverage.missing_reasoning_percent_from_configuration(config)
+        except ValueError as exc:
+            raise ArenaContractError("invalid missing reasoning token allowance") from exc
+        if capture_policy != "full_generated_thinking_v1":
+            raise ArenaContractError("missing reasoning allowance requires full thinking policy")
+    if "training_minimum_icp_coverage_percent" in config:
+        from lab_arena import training_coverage
+        try:
+            training_coverage.percent_from_configuration(config)
+        except ValueError as exc:
+            raise ArenaContractError("invalid training ICP coverage floor") from exc
+        if capture_policy != "full_generated_thinking_v1":
+            raise ArenaContractError("training ICP coverage requires full thinking policy")
+    if ("reasoning_activation_status" in config) != ("reasoning_activation_reason" in config):
+        raise ArenaContractError("reasoning activation status and reason are frozen together")
+    if "reasoning_activation_status" in config and (
+        config["reasoning_activation_status"] != "not_ready"
+        or config["reasoning_activation_reason"] not in (
+            "registry_unavailable", "baseline_unready", "flat_policy_required")
+    ):
+        raise ArenaContractError("invalid reasoning activation status")
+    if "reasoning_activation_status" in config and capture_policy is not None:
+        raise ArenaContractError("active full thinking cannot be marked not ready")
+    if "reasoning_capture_policy" in config and capture_policy != "full_generated_thinking_v1":
+        raise ArenaContractError("invalid full thinking policy")
+    if capture_policy == "full_generated_thinking_v1":
+        if ("reasoning_route_registry" not in config
+            or "reasoning_baseline_source_sha256" not in config):
+            raise ArenaContractError("full thinking policy requires a frozen route registry")
+        if (not isinstance(config["reasoning_baseline_source_sha256"], str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", config["reasoning_baseline_source_sha256"]) is None):
+            raise ArenaContractError("full thinking requires a baseline source digest")
+        if re.fullmatch(
+            r"https://github\.com/leadpoet/leadpoet-sales-agent/archive/[0-9a-f]{40}\.tar\.gz",
+            config["baseline_source_url"],
+        ) is None:
+            raise ArenaContractError("full thinking requires a pinned baseline source URL")
+        if config.get("sourcing_cost_eligibility_policy") != FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY:
+            raise ArenaContractError("full thinking requires flat per-ICP cost policy")
+        if config.get("execution_cap_microusd") != (
+            FULL_THINKING_PER_ICP_CAP_MICROUSD * benchmark_icp_count(config)
+        ):
+            raise ArenaContractError("full thinking requires the fixed total execution cap")
+        from lab_arena import reasoning_capture
+        try:
+            registry = reasoning_capture.validate_registry(config["reasoning_route_registry"])
+            if not registry["approved_routes"] or registry["baseline_route"] is None:
+                raise ValueError("no approved baseline route")
+        except ValueError as exc:
+            raise ArenaContractError("invalid full thinking route registry") from exc
+    elif ("reasoning_route_registry" in config
+          or "reasoning_baseline_source_sha256" in config):
+        raise ArenaContractError("reasoning policy and route metadata must be frozen together")
     if (
         "benchmark_disclosure_policy" in config
         and config["benchmark_disclosure_policy"] is None

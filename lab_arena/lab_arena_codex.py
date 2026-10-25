@@ -270,7 +270,26 @@ def _dispatch(
     status = response.get("status")
     if type(status) is not int or not 100 <= status <= 599:
         raise CodexRuntimeError("invalid worker status")
-    return status, base64.b64decode(response["body_b64"], validate=True)
+    body = base64.b64decode(response["body_b64"], validate=True)
+    # The bridge reads the worker socket directly, outside the HTTP capture
+    # adapters. A full read must report its exact bytes before SSE translation.
+    # Missing capture support cannot change an already paid provider result.
+    if os.environ.get("LAB_ARENA_WORKER_SOCKET") == socket_path:
+        headers = response.get("headers")
+        identity = headers.get("x-leadpoet-call-identity") if isinstance(headers, dict) else None
+        if isinstance(identity, str):
+            try:
+                if __package__:
+                    from . import lab_arena_checkpoint as checkpoint
+                else:
+                    import lab_arena_checkpoint as checkpoint
+                checkpoint.record_response_received(
+                    call_identity=identity, status=status, body=body,
+                    _retry_ambiguous=True,
+                )
+            except Exception:
+                pass  # The missing receipt remains a visible training evidence gap.
+    return status, body
 
 
 def _chunk_tool_output_text(parameters: dict[str, Any]) -> dict[str, Any]:

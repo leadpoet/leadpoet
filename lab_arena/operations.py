@@ -1050,15 +1050,31 @@ _OPERATION_LIST = (
                 max_length=OPENROUTER_MAX_MESSAGES,
                 fields={
                     "role": FieldSpec("str", required=True, choices=("system", "developer", "user", "assistant", "tool")),
-                    "content": FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS),
+                    "content": FieldSpec("any"),
                     "name": FieldSpec("str", min_length=1, max_length=128),
                     "tool_call_id": FieldSpec("str", min_length=1, max_length=256),
+                    # Echo provider-returned reasoning on assistant turns so
+                    # signatures and tool continuity survive the next call.
+                    "reasoning": FieldSpec("any"),
+                    "reasoning_content": FieldSpec("any"),
+                    "refusal": FieldSpec("any"),
+                    "reasoning_details": FieldSpec("list[object]", max_length=64, fields={
+                        "type": FieldSpec("str", required=True, choices=("reasoning.text", "reasoning.summary", "reasoning.encrypted")),
+                        "text": FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS),
+                        "summary": FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS),
+                        "data": FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS),
+                        "signature": FieldSpec("any"),
+                        "id": FieldSpec("any"),
+                        "format": FieldSpec("str", max_length=128),
+                        "index": FieldSpec("int", minimum=0),
+                    }),
                     "tool_calls": FieldSpec(
                         "list[object]",
                         max_length=64,
                         fields={
                             "id": FieldSpec("str", required=True, min_length=1, max_length=256),
                             "type": FieldSpec("str", required=True, choices=("function",)),
+                            "index": FieldSpec("int", minimum=0),
                             "function": FieldSpec(
                                 "object",
                                 required=True,
@@ -1084,7 +1100,7 @@ _OPERATION_LIST = (
             "reasoning": FieldSpec("object"),
             "reasoning_effort": FieldSpec("str", min_length=1, max_length=32),
             "temperature": FieldSpec("float", minimum=0, maximum=2),
-            "max_tokens": FieldSpec("int", minimum=1, maximum=OPENROUTER_MAX_OUTPUT_TOKENS),
+            "max_tokens": FieldSpec("int", minimum=1, maximum=OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS),
             "top_p": FieldSpec("float", minimum=0, maximum=1),
             "stop": FieldSpec("list[str]", max_length=4, item=FieldSpec("str", min_length=1, max_length=64)),
             "seed": FieldSpec("int", minimum=-(2 ** 31), maximum=2 ** 31 - 1),
@@ -1522,7 +1538,8 @@ def _drop_superseded_fields(operation: Operation, parameters: Mapping[str, Any])
     return remaining
 
 
-def validate_operation_request(operation_id: str, parameters: Any, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+def validate_operation_request(operation_id: str, parameters: Any, *, deepline_catalog: Optional[Mapping[str, Any]] = None,
+                               allow_full_thinking: bool = False) -> Dict[str, Any]:
     """Validate and normalize ``parameters`` for one operation.
 
     Unknown fields, forbidden names, wrong types, out-of-range values, and
@@ -1543,6 +1560,22 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
         raise OperationRequestError("request_too_large")
     parameters = _drop_superseded_fields(operation, parameters)
     request_fields = operation.request_fields
+    if operation_id == "openrouter.chat" and not allow_full_thinking:
+        # Existing rounds must retain the exact Chat schema and normalized
+        # request hash they used before full-thinking protocol replay.
+        message_spec = request_fields["messages"]
+        assert message_spec.fields is not None
+        message_fields = dict(message_spec.fields)
+        message_fields["content"] = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
+        for name in ("reasoning", "reasoning_content", "reasoning_details", "refusal"):
+            message_fields.pop(name)
+        call_spec = message_fields["tool_calls"]
+        assert call_spec.fields is not None
+        call_fields = dict(call_spec.fields)
+        call_fields.pop("index")
+        message_fields["tool_calls"] = dataclasses.replace(call_spec, fields=call_fields)
+        request_fields = dict(request_fields,
+                              messages=dataclasses.replace(message_spec, fields=message_fields))
     if operation_id.startswith("deepline.tools.") and deepline_catalog is None:
         raise OperationRequestError("no_matching_operation")
     if operation_id in {"deepline.execute", "deepline.tools.get"} and deepline_catalog is not None:
@@ -1552,6 +1585,9 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
         except catalog.CatalogError as exc:
             raise OperationRequestError("invalid_request") from exc
     normalized = _validate_object(request_fields, parameters, "$", forbidden=operation.forbidden_names, limits=limits)
+    if (operation_id == "openrouter.chat" and not allow_full_thinking
+            and normalized.get("max_tokens", 0) > OPENROUTER_MAX_OUTPUT_TOKENS):
+        raise OperationRequestError("invalid_field", "$.max_tokens")
     for name, default in operation.defaults.items():
         if name not in normalized:
             normalized[name] = _deep_copy_json(default)
@@ -1565,7 +1601,41 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
                    for name in ("query", "categories", "search_terms")):
             raise OperationRequestError("invalid_field")
     if operation_id == "openrouter.responses":
-        _validate_responses(normalized)
+        _validate_responses(normalized, allow_full_thinking=allow_full_thinking)
+    if operation_id == "openrouter.chat" and allow_full_thinking:
+        # Generic object validation omits JSON nulls. A returned assistant
+        # tool turn may carry them, and replay must keep the provider's shape.
+        for original, message in zip(parameters["messages"], normalized["messages"]):
+            if isinstance(original, Mapping):
+                for field in ("content", "reasoning", "reasoning_content", "refusal"):
+                    if field in original and original[field] is None:
+                        message[field] = None
+                for source, detail in zip(original.get("reasoning_details") or (),
+                                          message.get("reasoning_details") or ()):
+                    if isinstance(source, Mapping):
+                        for field in ("id", "signature"):
+                            if field in source and source[field] is None:
+                                detail[field] = None
+        for index, message in enumerate(normalized["messages"]):
+            content = message.get("content")
+            if not ((isinstance(content, str) and len(content) <= OPENROUTER_MAX_CONTENT_CHARS)
+                    or (content is None and message["role"] == "assistant" and message.get("tool_calls"))
+                    or ("content" not in message and message["role"] == "assistant" and message.get("tool_calls"))):
+                raise OperationRequestError("invalid_field", "$.messages[%d].content" % index)
+            history = any(key in message for key in ("reasoning", "reasoning_content", "reasoning_details"))
+            if history and message["role"] != "assistant":
+                raise OperationRequestError("invalid_field", "$.messages[%d].reasoning" % index)
+            for field in ("reasoning", "reasoning_content", "refusal"):
+                if field in message and message[field] is not None and (
+                        not isinstance(message[field], str) or len(message[field]) > OPENROUTER_MAX_CONTENT_CHARS):
+                    raise OperationRequestError("invalid_field", "$.messages[%d].%s" % (index, field))
+            for detail in message.get("reasoning_details", []):
+                required = {"reasoning.text": "text", "reasoning.summary": "summary", "reasoning.encrypted": "data"}[detail["type"]]
+                if required not in detail or any(key in detail for key in ({"text", "summary", "data"} - {required})):
+                    raise OperationRequestError("invalid_field", "$.messages[%d].reasoning_details" % index)
+                if any(detail.get(key) is not None and (not isinstance(detail[key], str) or len(detail[key]) > 256)
+                       for key in ("id", "signature")):
+                    raise OperationRequestError("invalid_field", "$.messages[%d].reasoning_details" % index)
     if operation.deepline_tool and deepline_catalog is not None:
         from lab_arena import deepline_catalog as catalog
         try:
@@ -1610,7 +1680,7 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
     return normalized
 
 
-def _validate_responses(parameters: Mapping[str, Any]) -> None:
+def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: bool = False) -> None:
     """Stateless text, local tools, and one bounded hosted web-search tool."""
 
     text = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
@@ -1629,6 +1699,11 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
             "action": FieldSpec("object", required=True),
         },
     }
+
+    if allow_full_thinking:
+        # Preserve the opaque provider tag only for the new protocol. Existing
+        # rounds retain the previous release's accepted schema and request hash.
+        item_fields["reasoning"]["format"] = FieldSpec("str", min_length=1, max_length=128)
 
     local_tool_fields = {"type": FieldSpec("str", required=True, choices=("function", "custom")), "name": identifier, "description": text}
 
@@ -1800,11 +1875,19 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
         if not isinstance(value, list) or len(value) > OPENROUTER_MAX_MESSAGES:
             raise OperationRequestError("invalid_field", "$.input.content")
         for part in value:
-            normalized_part = _validate_object({
+            fields = {
                 "type": FieldSpec("str", required=True, choices=(("summary_text", "reasoning_text") if reasoning else ("input_text", "output_text"))),
                 "text": dataclasses.replace(text, required=True),
                 "annotations": FieldSpec("any"),
-            }, part, "$.input.content")
+            }
+            if allow_full_thinking and isinstance(part, Mapping) and part.get("type") == "output_text":
+                # Providers include this empty transport field even when no
+                # token probabilities were requested. Preserve replay shape.
+                fields["logprobs"] = FieldSpec("list[object]", max_length=OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS,
+                    fields={"token": text, "logprob": FieldSpec("float"),
+                            "bytes": FieldSpec("any"), "top_logprobs": FieldSpec("list[object]", max_length=20,
+                                fields={"token": text, "logprob": FieldSpec("float"), "bytes": FieldSpec("any")})})
+            normalized_part = _validate_object(fields, part, "$.input.content", limits=_RESPONSES_STRUCTURE_LIMITS)
             if "annotations" in normalized_part:
                 citation_annotations(normalized_part["annotations"])
 
@@ -1968,6 +2051,7 @@ def match_request(
     headers: Optional[Mapping[str, Any]],
     *,
     deepline_catalog: Optional[Mapping[str, Any]] = None,
+    allow_full_thinking: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     """Map one client request to ``(operation_id, normalized_parameters)``.
 
@@ -2028,7 +2112,10 @@ def match_request(
             if name in parameters:
                 raise OperationRequestError("invalid_query")
             parameters[name] = value
-    return operation.operation_id, validate_operation_request(operation.operation_id, parameters, deepline_catalog=deepline_catalog)
+    return operation.operation_id, validate_operation_request(
+        operation.operation_id, parameters, deepline_catalog=deepline_catalog,
+        allow_full_thinking=allow_full_thinking,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2072,12 +2159,78 @@ def _query_value(value: Any) -> str:
     raise OperationRequestError("invalid_field")
 
 
+def _explicit_responses_open_maps(document: Dict[str, Any]) -> bool:
+    """Make only simple native open-map defaults explicit on a copied wire.
+
+    References, composition and unevaluated rules can make annotations affect
+    validation. Leave those schemas intact. Never walk example/default data.
+    https://json-schema.org/understanding-json-schema/reference/object#additionalproperties
+    """
+    unsupported = {
+        "$ref", "$dynamicRef", "$recursiveRef", "$defs", "definitions",
+        "allOf", "anyOf", "oneOf", "not", "if", "then", "else",
+        "unevaluatedProperties", "unevaluatedItems", "patternProperties",
+        "dependentSchemas", "dependencies", "propertyNames", "contains",
+        "prefixItems", "additionalItems", "contentSchema",
+    }
+
+    def children(schema):
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            yield from properties.values()
+        items = schema.get("items")
+        if isinstance(items, (dict, bool)):
+            yield items
+        elif isinstance(items, list):
+            yield from items
+
+    def simple(schema):
+        if isinstance(schema, bool):
+            return True
+        if not isinstance(schema, dict) or unsupported.intersection(schema):
+            return False
+        extra = schema.get("additionalProperties")
+        return (all(simple(child) for child in children(schema))
+                and (not isinstance(extra, dict) or simple(extra)))
+
+    def expand(schema):
+        if not isinstance(schema, dict):
+            return False
+        changed = False
+        if (schema.get("type") == "object" and schema.get("properties") == {}
+                and "additionalProperties" not in schema):
+            schema["additionalProperties"] = True
+            changed = True
+        for child in children(schema):
+            changed |= expand(child)
+        return changed
+
+    def tools(values):
+        changed = False
+        for tool in values:
+            if tool.get("type") == "namespace":
+                changed |= tools(tool["tools"])
+            elif tool.get("type") == "function" and tool.get("strict") is not True:
+                schema = tool.get("parameters")
+                if isinstance(schema, dict) and simple(schema):
+                    changed |= expand(schema)
+        return changed
+
+    changed = tools(document.get("tools", []))
+    if isinstance(document.get("input"), list):
+        for item in document["input"]:
+            if item.get("type") == "additional_tools":
+                changed |= tools(item["tools"])
+    return changed
+
+
 def build_outbound_request(
     operation_id: str,
     parameters: Any,
     *,
     openrouter_provider_policy: Optional[Mapping[str, Any]] = None,
     deepline_catalog: Optional[Mapping[str, Any]] = None,
+    allow_full_thinking: bool = False,
 ) -> OutboundRequest:
     """Build the credential-free outbound request from validated parameters.
 
@@ -2089,7 +2242,11 @@ def build_outbound_request(
     """
 
     operation = _operation(operation_id)
-    normalized = validate_operation_request(operation_id, parameters, deepline_catalog=deepline_catalog)
+    normalized = validate_operation_request(operation_id, parameters, deepline_catalog=deepline_catalog,
+                                            allow_full_thinking=allow_full_thinking)
+    if allow_full_thinking and (operation_id not in {"openrouter.chat", "openrouter.responses"}
+                                or openrouter_provider_policy is None):
+        raise OperationRequestError("invalid_request")
     path = operation.outbound_path or _render_path(operation, normalized)
     host = operation.outbound_host or operation.host
     target = OutboundTarget(operation.method, "https", host, 443, path)
@@ -2097,8 +2254,22 @@ def build_outbound_request(
     if operation.parameter_location == "body":
         document = {name: value for name, value in normalized.items() if name not in operation.path_fields}
         document.update(_deep_copy_json(operation.fixed_params))
+        schema_expanded = False
+        if allow_full_thinking and operation_id == "openrouter.responses":
+            # Admission/hash/capture parameters remain the caller's originals.
+            # Only this outbound copy receives the equivalent open-map default.
+            document = _deep_copy_json(document)
+            schema_expanded = _explicit_responses_open_maps(document)
+        if (allow_full_thinking and operation_id == "openrouter.responses"
+                and document.get("parallel_tool_calls") is True):
+            # The conventional default permits parallel calls; it does not
+            # require them. Explicit true can exclude otherwise capable pinned
+            # endpoints under require_parameters. Keep the caller's original
+            # intent in hashed/captured parameters and preserve explicit false.
+            # https://openrouter.ai/docs/api_reference/parameters#parallel-tool-calls
+            document.pop("parallel_tool_calls")
         if openrouter_provider_policy is not None:
-            if operation_id != "openrouter.responses" or not isinstance(
+            if operation_id not in {"openrouter.chat", "openrouter.responses"} or not isinstance(
                 operation.fixed_params.get("provider"), Mapping
             ):
                 raise OperationRequestError("invalid_request")
@@ -2110,11 +2281,24 @@ def build_outbound_request(
                 policy_fields | {"order"},
                 policy_fields | {"only"},
             )
+            exact_full_route = (
+                allow_full_thinking
+                and isinstance(policy, dict)
+                and set(policy) == policy_fields | {"only", "require_parameters"}
+                and isinstance(policy.get("only"), list)
+                and len(policy["only"]) == 1
+                and isinstance(policy["only"][0], str)
+                and re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", policy["only"][0]) is not None
+                and policy.get("allow_fallbacks") is False
+                and policy.get("require_parameters") is True
+            )
             if (
                 not isinstance(policy, dict)
-                or set(policy) not in policy_shapes
+                or (set(policy) not in policy_shapes and not exact_full_route)
+                or (allow_full_thinking and not exact_full_route)
                 or (
                     set(policy) != policy_fields
+                    and not exact_full_route
                     and (
                         normalized.get("model") not in {
                             "openai/gpt-5.6-luna",
@@ -2129,6 +2313,7 @@ def build_outbound_request(
                 )
                 or policy.get("data_collection") != "deny"
                 or policy.get("zdr") is not True
+                or (operation_id == "openrouter.chat" and not exact_full_route)
                 or type(policy.get("allow_fallbacks")) is not bool
                 or not isinstance(policy.get("max_price"), dict)
                 or set(policy["max_price"]) != price_fields
@@ -2143,6 +2328,13 @@ def build_outbound_request(
             document["provider"] = policy
         document = _wrap_body(operation, normalized, document, deepline_catalog=deepline_catalog)
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if schema_expanded:
+            try:
+                contracts.check_strict_document(document, _RESPONSES_STRUCTURE_LIMITS)
+            except contracts.ArenaContractError as exc:
+                raise OperationRequestError("invalid_request") from exc
+            if len(body) > operation.max_request_bytes:
+                raise OperationRequestError("request_too_large")
         return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential, operation.outbound_headers)
     query: Dict[str, str] = {name: _query_value(value) for name, value in normalized.items()}
     for name, value in operation.fixed_params.items():

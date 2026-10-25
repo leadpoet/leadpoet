@@ -58,11 +58,29 @@ def _broker_document(case):
                 "statusCode": target_status,
             },
         }}}
-        status, headers, body, final_url = (
-            scoring_provider_compat.adapt_response_with_trusted_url(
-                route, status=200, headers={}, body=json.dumps(envelope).encode()
+        if case in {"target403", "target502"}:
+            # Firecrawl's target infrastructure response authorizes one
+            # bounded generic HTTP fallback; it is not a terminal page body.
+            with pytest.raises(scoring_provider_compat.CompatibilityResponseError,
+                               match="firecrawl_source_content_unavailable") as failure:
+                scoring_provider_compat.adapt_response_with_trusted_url(
+                    route, status=200, headers={}, body=json.dumps(envelope).encode())
+            assert failure.value.trusted_response_url == URL_VALUE
+            route = scoring_provider_compat.route_for(
+                kind="score", funding_source="miner_key", round_id="arena-2026-10-15",
+                operation_id=operation, parameters={"url": URL_VALUE},
+                source_content_fallback=True, source_content_response_url=URL_VALUE,
             )
-        )
+            assert route.adapter == "generic_http_raw_html"
+            envelope = {"status": "completed", "toolResponse": {"view": "rawV2", "rawV2": {
+                "provider": "generic_http", "operation": "generic_http_request",
+                "method": "GET", "requested_url": URL_VALUE, "final_url": URL_VALUE,
+                "status_code": target_status, "ok": False, "headers": {}, "data": "Target error",
+            }}}
+        status, headers, body, final_url = scoring_provider_compat.adapt_response_with_trusted_url(
+            route, status=200, headers={}, body=json.dumps(envelope).encode())
+        if case in {"target403", "target502"}:
+            assert (status, body, final_url) == (502, b"", URL_VALUE)
         status, headers, body = operations.sanitize_response(
             operation, status, headers, body, parameters={"url": URL_VALUE}
         )

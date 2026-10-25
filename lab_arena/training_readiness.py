@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import Any, Iterable, Mapping
 
-from lab_arena import contracts, training_dataset, training_steps
+from lab_arena import contracts, training_coverage, training_dataset, training_steps, training_thinking
 
 SCHEMA_VERSION = "leadpoet.lab_arena.training_readiness.v1"
 _DIMENSIONS = ("context", "source_identity", "exact_inputs", "input_output_label", "costs", "research_process")
@@ -43,13 +43,15 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
         valid.append(next(iter(versions.values())))
 
     dimensions, gaps, call_gaps, calls, recorder_counts = Counter(), Counter(), Counter(), Counter(), Counter()
-    recorder_runs, recorder_missing, complete, cohorts = 0, 0, 0, defaultdict(list)
+    recorder_runs, recorder_missing, complete, selected_research_complete, cohorts = 0, 0, 0, 0, defaultdict(list)
     sources = []
     for example in valid:
         proof = example.get("completeness") or {}
         dimensions_for_run = {name: (proof.get("dimensions") or {}).get(name) is True for name in _DIMENSIONS}
         complete_for_run = (proof.get("complete") is True and all(dimensions_for_run.values())
                             and not proof.get("incomplete_reasons"))
+        selected_gaps = training_thinking.selected_research_evidence(example)
+        selected_research_complete += selected_gaps is not None
         for name in _DIMENSIONS:
             dimensions[name] += dimensions_for_run[name]
         complete += complete_for_run
@@ -91,6 +93,8 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                                     "status": "complete" if complete_for_run else "incomplete" if proof else "unverified",
                                     "dimensions": dimensions_for_run,
                                     "incomplete_reasons": sorted(set(proof.get("incomplete_reasons") or [])),
+                                    "selected_research_complete": selected_gaps is not None,
+                                    "ancillary_judge_gaps": sorted(selected_gaps) if selected_gaps is not None else [],
                                     "recorder_buffer_complete": recorder_complete,
                                     "response_receipts": receipts}})
         config = example.get("configuration") or {}
@@ -106,6 +110,39 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                               "selection": manifest["counts"],
                               "evaluation_checks": manifest.get("evaluation_checks", {})})
     steps, step_manifest = training_steps.build(valid, training_steps.Rules(production_rounds_only=production_rounds_only))
+    thinking_splits, thinking_manifest = training_thinking.build(
+        valid, training_steps.Rules(production_rounds_only=production_rounds_only))
+    strict_runs = {ref.get("run_id") for split in ("train", "eval")
+                   for record in thinking_splits[split] for ref in record.get("source_refs") or []}
+    coverage_groups = defaultdict(list)
+    for example in valid:
+        key = (example.get("round_id"), example.get("submission_id"))
+        coverage_groups[key].append(example)
+    coverage = []
+    for (round_id, submission_id), group in sorted(coverage_groups.items(), key=lambda item: str(item[0])):
+        config = group[0].get("configuration") or {}
+        try:
+            total = contracts.benchmark_icp_count(config)
+            percent = training_coverage.percent_from_configuration(config)
+            required = training_coverage.required_count(total, percent)
+            consistent = all(
+                contracts.benchmark_icp_count(item.get("configuration") or {}) == total
+                and training_coverage.percent_from_configuration(item.get("configuration") or {}) == percent
+                for item in group)
+        except (ValueError, contracts.ArenaContractError):
+            total, percent, required, consistent = None, None, None, False
+        positions = {item.get("icp_position") for item in group if type(item.get("icp_position")) is int}
+        strict_positions = {item.get("icp_position") for item in group
+                            if item.get("run_id") in strict_runs and type(item.get("icp_position")) is int
+                            and total is not None and 0 <= item["icp_position"] < total}
+        coverage.append({"round_id": round_id, "submission_id": submission_id,
+                         "provided_icps": len(positions), "strict_icps": len(strict_positions),
+                         "total_icps": total, "required_icps": required,
+                         "minimum_coverage_percent": percent,
+                         "supplied_inventory_complete": bool(consistent and total is not None
+                                                             and positions == set(range(total))),
+                         "strict_coverage_met_in_supplied_inventory": bool(
+                             consistent and required is not None and len(strict_positions) >= required)})
     report = {
         "schema_version": SCHEMA_VERSION,
         "scope": "supplied_exports_only_not_a_full_production_inventory",
@@ -114,6 +151,7 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
         "excluded_exports": dict(sorted(rejected.items())),
         "sources": sources,
         "capture": {"executions_passing_all_export_dimensions": complete,
+                    "selected_research_complete": selected_research_complete,
                     "passing_dimensions": {name: dimensions[name] for name in _DIMENSIONS},
                     "execution_gap_counts": dict(sorted(gaps.items())),
                     "execution_calls": dict(sorted(calls.items())),
@@ -128,6 +166,9 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
         "agent_steps": {"candidate_records": len(steps["train"]) + len(steps["eval"]),
                         "analysis_records": len(steps["analysis"]),
                         "manifest": step_manifest},
+        "full_thinking": {"candidate_records": len(thinking_splits["train"]) + len(thinking_splits["eval"]),
+                          "manifest": thinking_manifest, "coverage": coverage,
+                          "coverage_scope": "supplied_exports_only_not_champion_eligibility"},
         "readiness": {"human_label_review": "not_proved_by_storage",
                       "agent_action_quality": "unreviewed",
                       "training_permission": dict(training_dataset.TRAINING_PERMISSION),

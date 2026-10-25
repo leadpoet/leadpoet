@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Write a private, strictly verified Arena generated-thinking dataset."""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from lab_arena import contracts, training_steps, training_thinking
+from scripts.prepare_arena_training_dataset import _examples, _write_private
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--examples", type=Path, nargs="+", required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--eval-percent", type=int, default=20)
+    parser.add_argument("--seed", default=training_steps.Rules.seed)
+    parser.add_argument("--include-nonproduction-rounds", action="store_true")
+    args = parser.parse_args(argv)
+    created = False
+    try:
+        rules = training_steps.Rules(args.eval_percent, args.seed, not args.include_nonproduction_rounds)
+        splits, manifest = training_thinking.build(_examples(args.examples), rules)
+        args.output.mkdir(mode=0o700)
+        created = True
+        for name, rows in splits.items():
+            _write_private(args.output / (name + ".jsonl"),
+                           "".join(contracts.canonical_json(row) + "\n" for row in rows))
+        _write_private(args.output / "manifest.json", contracts.canonical_json(manifest) + "\n")
+    except Exception:
+        if created:
+            with contextlib.suppress(OSError):
+                for name in ("train.jsonl", "eval.jsonl", "analysis.jsonl", "manifest.json"):
+                    (args.output / name).unlink(missing_ok=True)
+                args.output.rmdir()
+        print("Arena full-thinking dataset failed: invalid_input_or_output", file=sys.stderr)
+        return 1
+    print(json.dumps({"dataset_version": manifest["dataset_version"], "counts": manifest["counts"],
+                      "training_permission": manifest["training_permission"]["status"]}, sort_keys=True))
+    return 0 if splits["train"] or splits["eval"] else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

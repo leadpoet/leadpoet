@@ -105,6 +105,7 @@ def test_marker_absent_round_retains_historical_cost_projection_shape():
     baseline = public_dashboard.round_summary(_published_row(policy=False))["baseline"]
 
     cost = baseline["cost_summary"]
+    assert "training_data_eligibility" not in baseline
     assert set(cost) == {
         "returned_company_count",
         "execution_cap_microusd",
@@ -128,6 +129,135 @@ def test_marker_absent_round_retains_historical_cost_projection_shape():
         "provider",
         *(expected_bucket_keys - {"providers"}),
     }
+
+
+def test_training_eligibility_projects_only_fixed_reasons_and_counts():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    ranking["training_data_eligibility"] = {
+        "eligible": False,
+        "reasons": ["full_thinking_call_missing", "source_review_not_passed"],
+        "source_review": {
+            "eligible": False,
+            "reasons": ["source_review_not_passed"],
+            "counts": {"enabled": 1, "reviewed": 0, "private_count": 999},
+            "reviewer_excerpt": "private source text",
+        },
+        "capture": {
+            "eligible": False,
+            "reasons": ["full_thinking_call_missing"],
+            "counts": {"enabled": 1, "selected_runs": 20, "checked_runs": 19,
+                       "model_calls": 40, "full_thinking_calls": 0,
+                       "tool_only_empty_calls": 1},
+            "raw_trace": "private reasoning text",
+        },
+        "metadata": {"private": "do not publish"},
+    }
+
+    baseline = public_dashboard.round_summary(row)["baseline"]
+
+    assert baseline["eligible"] is False
+    assert baseline["eligibility_reason"] == "training_data_incomplete"
+    assert baseline["training_data_eligibility"] == {
+        "eligible": False,
+        "reasons": ["full_thinking_call_missing", "source_review_not_passed"],
+        "source_review": {
+            "eligible": False,
+            "reasons": ["source_review_not_passed"],
+            "counts": {"enabled": 1, "reviewed": 0},
+        },
+        "capture": {
+            "eligible": False,
+            "reasons": ["full_thinking_call_missing"],
+            "counts": {"enabled": 1, "selected_runs": 20, "checked_runs": 19,
+                       "model_calls": 40, "full_thinking_calls": 0,
+                       "tool_only_empty_calls": 1},
+        },
+    }
+    assert "private source text" not in str(baseline)
+    assert "private reasoning text" not in str(baseline)
+
+
+def test_training_eligibility_drops_unrecognized_reason_text():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    ranking["training_data_eligibility"] = {
+        "eligible": False,
+        "reasons": ["raw secret: should never publish"],
+    }
+
+    baseline = public_dashboard.round_summary(row)["baseline"]
+
+    assert baseline["eligibility_reason"] == "training_data_incomplete"
+    assert "training_data_eligibility" not in baseline
+
+
+def test_training_coverage_failure_retains_reason_and_public_counts():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    counts = {"enabled": 1, "selected_runs": 10, "checked_runs": 10,
+              "complete_runs": 7, "incomplete_runs": 3,
+              "required_complete_runs": 8, "minimum_coverage_percent": 80}
+    ranking["training_data_eligibility"] = {
+        "eligible": False, "reasons": ["training_coverage_incomplete"],
+        "capture": {"eligible": False, "reasons": ["training_coverage_incomplete"],
+                    "counts": {**counts, "private_detail": "must not publish"}},
+    }
+    baseline = public_dashboard.round_summary(row)["baseline"]
+    gate = baseline["training_data_eligibility"]
+    assert gate["reasons"] == ["training_coverage_incomplete"]
+    assert gate["capture"]["counts"] == counts
+    assert "must not publish" not in str(baseline)
+
+
+
+def test_training_output_read_gap_remains_visible_at_historical_full_coverage():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    ranking["training_data_eligibility"] = {
+        "eligible": False, "reasons": ["accepted_output_unavailable"],
+        "capture": {"eligible": False, "reasons": ["accepted_output_unavailable"],
+                    "counts": {"complete_runs": 9, "incomplete_runs": 1,
+                               "minimum_coverage_percent": 100}},
+    }
+    result = public_dashboard.round_summary(row)["baseline"]["training_data_eligibility"]
+    assert result["reasons"] == ["accepted_output_unavailable"]
+    assert result["capture"]["reasons"] == ["accepted_output_unavailable"]
+
+
+@pytest.mark.parametrize("reason", [
+    "missing_reasoning_share_exceeded", "selected_artifact_temporarily_unavailable",
+])
+def test_training_token_coverage_and_storage_failures_remain_public_without_run_details(reason):
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    counts = {
+        "complete_runs": 7, "incomplete_runs": 3, "minimum_coverage_percent": 80,
+        "completed_untruncated_verified_reasoning_tokens": 10000,
+        "missing_reasoning_tokens": 101, "missing_reasoning_calls": 2,
+        "unknown_reasoning_usage_calls": 1, "truncated_model_calls": 3,
+        "verified_failed_model_attempts": 4, "maximum_missing_reasoning_percent": 1,
+    }
+    ranking["training_data_eligibility"] = {
+        "eligible": False, "reasons": [reason],
+        "capture": {"eligible": False, "reasons": [reason], "counts": {
+            **counts, "reasoning_by_run": [{"run_id": "private-run-id"}],
+            "private_detail": "private trace content",
+        }},
+    }
+
+    baseline = public_dashboard.round_summary(row)["baseline"]
+    result = baseline["training_data_eligibility"]
+    assert result["reasons"] == [reason]
+    assert result["capture"]["reasons"] == [reason]
+    assert result["capture"]["counts"] == counts
+    assert "private-run-id" not in str(baseline)
+    assert "private trace content" not in str(baseline)
 
 
 def test_new_policy_projection_rejects_incomplete_successful_call_counters():

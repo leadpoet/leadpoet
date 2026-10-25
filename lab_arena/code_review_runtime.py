@@ -8,7 +8,10 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry
+from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry, reasoning_capture, training_coverage
+
+
+_ROUND_NOT_PROVIDED = object()
 
 
 class SubmissionCodeReviewer:
@@ -89,7 +92,19 @@ class SubmissionCodeReviewer:
             pass
         return result
 
-    def review(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+    def review_with_frozen_round(
+        self, row: Mapping[str, Any], round_row: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Reuse the exact round already read and checked by ArenaService.
+
+        This internal entry point receives service state, never submission
+        annotations. Standalone review still reads its authoritative round.
+        """
+        return self.review(row, _frozen_round=round_row)
+
+    def review(
+        self, row: Mapping[str, Any], *, _frozen_round: Any = _ROUND_NOT_PROVIDED,
+    ) -> Mapping[str, Any]:
         state = row.get("code_review_status")
         if state in ("passed", "rejected"):
             return {"status": "existing", "code_review_status": state}
@@ -112,7 +127,23 @@ class SubmissionCodeReviewer:
         preparation_error = None
         exact_duplicate = False
         reservation = 0
+        research_control = False
         try:
+            round_row = _frozen_round
+            if round_row is _ROUND_NOT_PROVIDED:
+                get_round = getattr(self._store, "get_round", None)
+                if callable(get_round):
+                    round_row = get_round(str(row["round_id"]))
+            if round_row is not _ROUND_NOT_PROVIDED:
+                if (not isinstance(round_row, Mapping)
+                        or not isinstance(round_row.get("configuration_doc"), Mapping)
+                        or (_frozen_round is not _ROUND_NOT_PROVIDED
+                            and round_row.get("round_id") != row["round_id"])
+                        or round_row.get("round_id", row["round_id"]) != row["round_id"]):
+                    raise ValueError("round configuration unavailable")
+                configuration = round_row["configuration_doc"]
+                research_control = reasoning_capture.enabled(configuration)
+                training_coverage.missing_reasoning_percent_from_configuration(configuration)
             payload = self._objects.get_bounded(
                 str(row["source_ref"]), source_bundle.MAX_SOURCE_ARCHIVE_BYTES
             )
@@ -120,7 +151,7 @@ class SubmissionCodeReviewer:
                 raise code_review.CodeReviewError("code_review_source_size_mismatch")
             # First validate the full archive, even when a local duplicate can
             # skip the paid review. Persisted digests bind rows to object bytes.
-            prepared = code_review.prepare_request(payload)
+            prepared = code_review.prepare_request(payload, research_control=research_control)
             if (self._similarity_references_for is not None or row.get("source_archive_sha256")
                     or row.get("source_normalized_sha256")):
                 candidate = submission_similarity.inspect_archive(payload)
@@ -173,7 +204,8 @@ class SubmissionCodeReviewer:
                             contexts.append(context)
                 if contexts and not exact_duplicate:
                     prepared = code_review.prepare_request(
-                        payload, similarity_contexts=tuple(contexts)
+                        payload, similarity_contexts=tuple(contexts),
+                        research_control=research_control,
                     )
             if not exact_duplicate:
                 reservation = broker.max_openrouter_cost_microusd(
@@ -328,6 +360,17 @@ class SubmissionCodeReviewer:
                             "categories": sorted({item["category"] for item in result.findings}),
                         }
                         status = "passed" if result.passed else "rejected"
+                        if research_control:
+                            document["research_control"] = dict(result.research_control)
+                            classification = result.research_control["classification"]
+                            if classification == "workflow" and status == "passed":
+                                status = "rejected"
+                                document.update({"passed": False, "verdict": "reject"})
+                            elif classification == "unverified" and status == "passed":
+                                status = "error"
+                                document.update(code_review_policy.diagnostic(
+                                    "code_review_research_unverified", retryable=True
+                                ))
                     elif (
                         response.status == 403
                         and broker._openrouter_request_policy_refusal(response)

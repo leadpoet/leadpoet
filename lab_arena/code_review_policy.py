@@ -54,6 +54,8 @@ RESPONSE_ERROR_REASONS = frozenset({
     "verdict_findings", "finding_keys", "finding_classification",
     "finding_evidence", "finding_evidence_mismatch", "finding_explanation",
     "context_integrity",
+    "research_keys", "research_binding", "research_classification",
+    "research_evidence", "research_evidence_mismatch", "research_limitations",
 })
 
 ERROR_CODES = frozenset({
@@ -72,6 +74,7 @@ ERROR_CODES = frozenset({
     "code_review_round_closed",
     "code_review_submission_ineligible",
     "review_response_invalid",
+    "code_review_research_unverified",
 })
 
 

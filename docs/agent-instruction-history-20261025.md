@@ -1,3 +1,16 @@
+## Scoped production authorization: concurrent baseline judging
+
+On 2026-10-25 the user authorized miner execution alongside baseline judging
+for the current and future Arena rounds. The new early execution gate requires
+accepted execution at every frozen baseline position. Preserve the existing
+post-deadline recovery paths and all final scoring gates. Preserve active baseline
+judges, retries, accepted work, frozen inputs and models, budgets and deadlines.
+Complete legitimate baseline scoring still gates publication, promotion,
+incentives and weights. This includes narrow general source changes, an
+idempotent migration, focused PostgreSQL regressions, safe push and merge,
+canonical deployment and live verification. The coordinating task owns all
+production actions. Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 25 Arena full cycle
 
 On 2026-10-24 the user authorized monitoring the complete October 25 Arena

@@ -123,12 +123,15 @@ _TRAINING_REASONS = frozenset({
     "execution_model_call_missing", "full_thinking_route_unverified",
     "readable_full_thinking_unverified", "full_thinking_unavailable",
     "full_thinking_call_missing", "selected_run_evidence_invalid",
+    "training_coverage_incomplete", "provider_response_truncated",
 })
 _TRAINING_COUNT_KEYS = {
     "source_review": frozenset({"enabled", "reviewed"}),
     "capture": frozenset({
         "enabled", "selected_runs", "checked_runs", "model_calls",
         "full_thinking_calls", "tool_only_empty_calls",
+        "required_complete_runs", "complete_runs", "incomplete_runs",
+        "minimum_coverage_percent",
     }),
 }
 _COST_COUNTER_KEYS = (

@@ -40,6 +40,7 @@ def _rename_run(value, run_id):
 @pytest.mark.parametrize("missing,expected_eligible,gap", [
     (2, True, "missing"), (3, False, "missing"),
     (2, True, "unsettled"), (3, False, "unsettled"),
+    (2, False, "integrity"),
 ])
 def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
     database, tmp_path, monkeypatch, missing, expected_eligible, gap,
@@ -104,6 +105,8 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
     def export(_store, _objects, run_id):
         if run_id in omitted and gap == "missing":
             raise FileNotFoundError("synthetic missing training export")
+        if run_id in omitted and gap == "integrity":
+            raise training_reader.ExportError("execution_output_hash_mismatch")
         submission_id = next(sub for sub, runs in selected.items()
                              if any(run["run_id"] == run_id for run in runs))
         submission = harness.service.store.get_submission(submission_id)
@@ -117,7 +120,7 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
             "hash_origin": "recorded_archive_hash" if source_hash else "computed_from_frozen_object",
         }
         seal(example)
-        return _unsettled_selected_call(example) if run_id in omitted else example
+        return _unsettled_selected_call(example) if run_id in omitted and gap == "unsettled" else example
 
     monkeypatch.setattr(training_reader, "export_run", export)
     with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
@@ -259,7 +262,10 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
     ranking = {harness.flavors[item["submission_id"]]: item
                for item in saved["publication_doc"]["final_ranking"]}
     assert all(item["final_score"] is not None for item in ranking.values())
-    assert ranking["Miner0"]["training_data_eligibility"]["capture"]["counts"]["complete_runs"] == 10 - missing
+    if gap == "integrity":
+        assert ranking["Miner0"]["training_data_eligibility"]["reasons"] == ["training_evidence_check_failed"]
+    else:
+        assert ranking["Miner0"]["training_data_eligibility"]["capture"]["counts"]["complete_runs"] == 10 - missing
     assert ranking["Miner0"]["eligible"] is expected_eligible, ranking["Miner0"]["training_data_eligibility"]
     assert ranking["Miner1"]["eligible"] is True
     if not expected_eligible:
@@ -326,7 +332,7 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
         next_config = harness.service.create_round(
             harness.clock.now + timedelta(days=1),
             round_id="arena-2099-10-23-cov%d%s" % (
-                missing, "u" if gap == "unsettled" else "m"),
+                missing, gap[0]),
         )
         harness.round_id = next_config["round_id"]
         harness.clock.advance_to(harness.schedule()["submission_cutoff"])

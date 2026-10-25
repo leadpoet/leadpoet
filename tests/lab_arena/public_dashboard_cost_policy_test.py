@@ -194,6 +194,25 @@ def test_training_eligibility_drops_unrecognized_reason_text():
     assert "training_data_eligibility" not in baseline
 
 
+def test_training_coverage_failure_retains_reason_and_public_counts():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    counts = {"enabled": 1, "selected_runs": 10, "checked_runs": 10,
+              "complete_runs": 7, "incomplete_runs": 3,
+              "required_complete_runs": 8, "minimum_coverage_percent": 80}
+    ranking["training_data_eligibility"] = {
+        "eligible": False, "reasons": ["training_coverage_incomplete"],
+        "capture": {"eligible": False, "reasons": ["training_coverage_incomplete"],
+                    "counts": {**counts, "private_detail": "must not publish"}},
+    }
+    baseline = public_dashboard.round_summary(row)["baseline"]
+    gate = baseline["training_data_eligibility"]
+    assert gate["reasons"] == ["training_coverage_incomplete"]
+    assert gate["capture"]["counts"] == counts
+    assert "must not publish" not in str(baseline)
+
+
 def test_new_policy_projection_rejects_incomplete_successful_call_counters():
     row = _published_row(policy=True)
     ranking = row["publication_doc"]["final_ranking"][0]

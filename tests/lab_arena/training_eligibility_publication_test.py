@@ -10,10 +10,41 @@ import pytest
 from lab_arena import contracts, service, training_reader
 from tests.lab_arena.complete_baseline_final_authority_test import fixture as baseline_fixture
 from tests.lab_arena.training_eligibility_test import SOURCE_HASH, captured_example, submission
+from tests.lab_arena.training_eligibility_test import ten_selected_examples
 from tests.lab_arena.training_steps_test import seal
 
 ROUND_ID = "arena-2026-10-13"
 BASELINE_ID = "baseline-2026-10-13"
+
+
+@pytest.mark.parametrize("error,eligible", [
+    (FileNotFoundError("missing object"), True),
+    (training_reader.ExportError("execution_output_hash_mismatch"), False),
+    (training_reader.ExportError("ledger_membership_mismatch"), False),
+    (ValueError("malformed stored evidence"), False),
+    (RuntimeError("unexpected reader failure"), False),
+])
+def test_coverage_floor_never_excuses_export_integrity_errors(monkeypatch, error, eligible):
+    examples = ten_selected_examples()
+    row = {"configuration_doc": {"stage_1_icp_count": 5, "stage_2_icp_count": 5,
+                                "training_minimum_icp_coverage_percent": 80}}
+    obj = SimpleNamespace(
+        _store=SimpleNamespace(get_submission=lambda _: submission()), _objects=object(),
+        _is_daily_baseline=lambda *_: False,
+        _selected_accepted_execution_runs=lambda *_: {
+            position: {"run_id": run_id} for position, run_id in enumerate(examples)},
+    )
+
+    def export(_store, _objects, run_id):
+        if run_id == "run-9":
+            raise error
+        return examples[run_id]
+
+    monkeypatch.setattr(training_reader, "export_run", export)
+    result = service.ArenaService._submission_training_eligibility(obj, row, "sub", [])
+    assert result["eligible"] is eligible
+    if not eligible:
+        assert result["reasons"] == ["training_evidence_check_failed"]
 
 
 def _replace_exact(value, old, new):

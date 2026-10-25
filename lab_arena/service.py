@@ -4879,9 +4879,10 @@ class ArenaService:
                 run_id = str(selected[position]["run_id"])
                 try:
                     examples[run_id] = training_reader.export_run(self._store, self._objects, run_id)
-                except Exception:
-                    # Raw evidence reads can fail independently of accepted scores.
-                    # Keep the reason explicit; never reinterpret a missing trace as misconduct.
+                except FileNotFoundError:
+                    # Only an absent artifact is a coverage gap. Integrity and
+                    # unexpected reader errors must fail this entrant's data
+                    # check through the outer handler, without stopping publication.
                     examples[run_id] = None
             capture = training_eligibility.assess_capture(
                 submission, examples, list(examples), enabled=True,

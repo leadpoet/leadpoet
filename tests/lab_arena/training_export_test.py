@@ -793,7 +793,10 @@ def test_execution_hash_uses_canonical_parsed_document_not_transport_whitespace(
     values["objects"].put(OUTPUT_REF, json.dumps(document, indent=4).encode())
     result = assemble_example(**values)
     assert result["completeness"]["complete"]
-    assert result["output_identity"] == {"ref": OUTPUT_REF, "document_hash": digest, "recorded_hash_present": True}
+    assert result["output_identity"] == {
+        "ref": OUTPUT_REF, "document_hash": digest,
+        "normalized_document_hash": digest, "recorded_hash_present": True,
+    }
 
 
 @pytest.mark.parametrize("absent_hash", [None, ""])
@@ -1241,3 +1244,34 @@ def test_export_keeps_request_reasoning_policy_metadata_without_duplicating_text
     call = example["provider_calls"][0]
     assert call["reasoning_capture"] == annotation
     assert "readable_reasoning" not in call
+
+
+@pytest.mark.parametrize("location", ["terminal", "entry", "call"])
+def test_rollback_safe_observations_preserve_exported_metadata_without_false_upstream_gap(location):
+    values = fixture()
+    add_call(values, status="uncertain" if location != "terminal" else "settlement")
+    row = values["ledger_rows"][-1]
+    observations = {"transport_elapsed_ms": 41, "timing_scope": "initial_provider_transport_send"}
+    target = (row["terminal_response"] if location == "terminal" else row["entry_doc"]
+              if location == "entry" else row["entry_doc"].setdefault("call", {}))
+    br._retain_broker_observations(target, observations)
+    result = assemble_example(**values)
+    call = result["provider_calls"][0]
+    if location == "terminal":
+        metadata = call["response_receipts"][-1]["metadata"]
+    else:
+        metadata = call["lifecycle"][-1]["accounting"]
+        if location == "call":
+            metadata = metadata["call"]
+    assert all(metadata[key] == value for key, value in observations.items())
+    assert "upstream_response_receipts" not in call
+    assert "upstream_response_capture_unavailable" not in result["completeness"]["incomplete_reasons"]
+
+
+def test_rollback_safe_metadata_cannot_smuggle_response_authority_into_export():
+    values = fixture()
+    add_call(values)
+    values["ledger_rows"][-1]["terminal_response"]["upstream_response_receipt"] = {
+        "broker_observations": {"status": 200, "body_b64": "e30="}}
+    with pytest.raises(ExportError, match="broker_observation_invalid"):
+        assemble_example(**values)

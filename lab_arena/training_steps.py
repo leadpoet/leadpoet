@@ -1,6 +1,6 @@
 """Offline observed next-response candidates. No trajectory or action-quality claim.
 
-Only self-contained text/function chat and Responses calls are supported. A
+Only self-contained text and local-tool chat/Responses calls are supported. A
 positive run result or HTTP status never makes an observed action correct.
 Explicit retrieval markers are excluded. Provider-internal retrieval without
 visible markers cannot be proved absent from the retained response.
@@ -13,7 +13,7 @@ import re
 from collections import Counter
 from dataclasses import asdict, dataclass
 
-from lab_arena import contracts, integrity, training_capture, training_export, training_dataset
+from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset
 
 SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_dataset.v1'
 RECORD_SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_candidate.v1'
@@ -38,6 +38,20 @@ def _require(condition, reason):
 
 
 def _exact(value, *, response=False):
+    def comparable(item):
+        if isinstance(item, dict):
+            return {key: comparable(child) for key, child in item.items()
+                    if not (item.get('type') == 'reasoning'
+                            and ((key in {'summary', 'content', 'text'}
+                                  and (child is None or child == '' or child == []))
+                                 or key == 'encrypted_content' and child is None))}
+        if isinstance(item, list):
+            return [comparable(child) for child in item]
+        return item
+
+    # Empty native optional fields contain no private bytes. Compare their
+    # privacy projection without rewriting the retained request or response.
+    value = comparable(value)
     if response and isinstance(value, dict):
         value = copy.deepcopy(value)
         for choice in value.get('choices', []) if isinstance(value.get('choices'), list) else []:
@@ -114,36 +128,61 @@ def _chat_messages(messages, *, allow_reasoning_history=False):
     _require(not pending, 'tool_context_unresolved')
 
 
-def _responses_input(value):
+def _responses_input(value, *, tools=(), allow_reasoning_history=False):
+    # Reuse the paid boundary's closed native schema. Keep the original values;
+    # this validation must never normalize or rewrite captured request bytes.
+    try:
+        operations.validate_operation_request('openrouter.responses', {
+            'model': 'training/input', 'input': value, 'tools': list(tools),
+        }, allow_full_thinking=allow_reasoning_history)
+    except operations.OperationError as exc:
+        raise ValueError('input_shape_unsupported') from exc
     if isinstance(value, str):
         return
-    _require(isinstance(value, list) and value, 'input_shape_unsupported')
-    pending = set()
+    pending = {}
     for item in value:
-        _require(isinstance(item, dict), 'input_shape_unsupported')
         kind = item.get('type', 'message')
         if kind == 'message':
-            _require(not pending and set(item) <= {'type', 'role', 'content'}
-                     and item.get('role') in {'system', 'developer', 'user', 'assistant'}, 'input_shape_unsupported')
-            content = item.get('content')
-            _require(isinstance(content, (str, list)), 'input_shape_unsupported')
+            _require(not pending, 'tool_context_unresolved')
+            content = item['content']
             if isinstance(content, list):
-                _require(all(isinstance(part, dict) and set(part) <= {'type', 'text'}
-                             and part.get('type') in {'input_text', 'output_text'}
-                             and isinstance(part.get('text'), str) for part in content), 'input_shape_unsupported')
-        elif kind == 'function_call':
-            _require(set(item) <= {'type', 'call_id', 'name', 'arguments', 'id', 'status'}
-                     and all(isinstance(item.get(k), str) for k in ('call_id', 'name', 'arguments'))
-                     and item['call_id'] and item['name'] and _arguments(item['arguments'])
-                     and item['call_id'] not in pending, 'tool_context_unresolved')
-            pending.add(item['call_id'])
-        elif kind == 'function_call_output':
-            _require(set(item) <= {'type', 'call_id', 'output'} and item.get('call_id') in pending
-                     and isinstance(item.get('output'), str), 'tool_context_unresolved')
-            pending.remove(item['call_id'])
-        else:
-            raise ValueError('input_shape_unsupported')
+                _require(not any(part.get('annotations') for part in content), 'retrieval_context_unsupported')
+        elif kind in {'function_call', 'custom_tool_call'}:
+            _require(item['call_id'] not in pending, 'tool_context_unresolved')
+            if kind == 'function_call':
+                _require(_arguments(item['arguments']), 'tool_context_unresolved')
+            pending[item['call_id']] = kind
+        elif kind in {'function_call_output', 'custom_tool_call_output'}:
+            expected = 'function_call' if kind == 'function_call_output' else 'custom_tool_call'
+            _require(pending.get(item['call_id']) == expected, 'tool_context_unresolved')
+            pending.pop(item['call_id'])
+        elif kind == 'reasoning':
+            _require(allow_reasoning_history and _exact(item), 'reasoning_history_unsupported')
+        elif kind != 'additional_tools':
+            raise ValueError('retrieval_context_unsupported')
     _require(not pending, 'tool_context_unresolved')
+
+
+def _response_tool_definitions(body):
+    """Resolve exact local declarations, including native additional tools."""
+    declared = {}
+
+    def collect(tools, namespace=None):
+        for tool in tools:
+            if tool['type'] == 'namespace':
+                collect(tool['tools'], tool['name'])
+                continue
+            _require(tool['type'] in {'function', 'custom'}, 'hosted_tool_unsupported')
+            key = (namespace, tool['name'])
+            _require(key not in declared or declared[key] == tool, 'tool_definition_unsupported')
+            declared[key] = tool
+
+    collect(body.get('tools', []))
+    if isinstance(body.get('input'), list):
+        for item in body['input']:
+            if item.get('type') == 'additional_tools':
+                collect(item['tools'])
+    return declared
 
 
 def _target(body, response, operation, *, allow_reasoning_history=False):
@@ -179,7 +218,8 @@ def _target(body, response, operation, *, allow_reasoning_history=False):
             _require(choice['finish_reason'] == 'stop' and isinstance(msg.get('content'), str)
                      and bool(msg['content']), 'assistant_shape_unsupported')
         return msg, reasoning
-    _responses_input(body.get('input'))
+    _responses_input(body.get('input'), tools=body.get('tools', []),
+                     allow_reasoning_history=allow_reasoning_history)
     _require(response.get('status') == 'completed' and not response.get('error')
              and not response.get('incomplete_details'), 'response_not_complete')
     output = response.get('output')
@@ -189,7 +229,13 @@ def _target(body, response, operation, *, allow_reasoning_history=False):
         _require(isinstance(item, dict), 'response_shape_unsupported')
         kind = item.get('type')
         if kind == 'reasoning':
-            _require(set(item) <= {'id', 'type', 'summary', 'content', 'text', 'status'}, 'reasoning_shape_unsupported')
+            _require(set(item) <= ({'id', 'type', 'summary', 'content', 'text', 'status'}
+                                      | ({'format'} if allow_reasoning_history else set())), 'reasoning_shape_unsupported')
+            _require('format' not in item or isinstance(item['format'], str)
+                     and 1 <= len(item['format']) <= 128, 'reasoning_shape_unsupported')
+            _require('id' not in item or isinstance(item['id'], str) and 1 <= len(item['id']) <= 256,
+                     'reasoning_shape_unsupported')
+            _require(item.get('status') in (None, 'completed'), 'response_not_complete')
             summary = item.get('summary', [])
             _require(isinstance(summary, list) and all(isinstance(part, dict)
                      and set(part) == {'type', 'text'} and part['type'] == 'summary_text'
@@ -204,24 +250,46 @@ def _target(body, response, operation, *, allow_reasoning_history=False):
                 _require(isinstance(item['text'], str), 'reasoning_shape_unsupported')
                 reasoning.append({'type': 'reasoning_text', 'text': item['text']})
         elif kind == 'message':
-            _require(set(item) <= {'id', 'type', 'status', 'role', 'content'}
+            _require(set(item) <= {'id', 'type', 'status', 'role', 'content', 'phase'}
                      and item.get('role') == 'assistant' and item.get('status') == 'completed'
                      and isinstance(item.get('content'), list) and item['content'], 'assistant_shape_unsupported')
-            _require(all(isinstance(part, dict) and set(part) <= {'type', 'text', 'annotations'}
+            _require(item.get('phase') in (None, 'commentary', 'final_answer'), 'assistant_shape_unsupported')
+            _require(all(isinstance(part, dict) and set(part) <= {'type', 'text', 'annotations', 'logprobs'}
                          and part.get('type') == 'output_text' and isinstance(part.get('text'), str)
                          and not part.get('annotations') for part in item['content']), 'assistant_shape_unsupported')
+            try:
+                operations.validate_operation_request('openrouter.responses', {
+                    'model': body['model'], 'input': [item],
+                }, allow_full_thinking=allow_reasoning_history)
+            except operations.OperationError as exc:
+                raise ValueError('assistant_shape_unsupported') from exc
             target.append(copy.deepcopy(item))
-        elif kind == 'function_call':
-            _require(set(item) <= {'id', 'type', 'status', 'call_id', 'name', 'arguments'}
-                     and item.get('status') == 'completed'
-                     and all(isinstance(item.get(k), str) and item[k] for k in ('call_id', 'name', 'arguments'))
-                     and _arguments(item['arguments']), 'tool_call_shape_unsupported')
+        elif kind in {'function_call', 'custom_tool_call'}:
+            try:
+                # A target may have no output yet; schema validation is separate
+                # from the closed input-history pairing check above.
+                operations.validate_operation_request('openrouter.responses', {
+                    'model': body['model'], 'input': [item],
+                }, allow_full_thinking=allow_reasoning_history)
+            except operations.OperationError as exc:
+                raise ValueError('tool_call_shape_unsupported') from exc
+            _require(item.get('status') == 'completed'
+                     and (kind != 'function_call' or _arguments(item['arguments'])),
+                     'tool_call_shape_unsupported')
             target.append(copy.deepcopy(item))
         else:
             raise ValueError('response_shape_unsupported')
-    _require(bool(target) and (len(target) == 1 or all(item['type'] == 'function_call' for item in target)), 'response_choice_ambiguous')
-    _require(len({item['call_id'] for item in target if item['type'] == 'function_call'})
-             == sum(item['type'] == 'function_call' for item in target), 'tool_call_shape_unsupported')
+    call_kinds = {'function_call', 'custom_tool_call'}
+    messages = [item for item in target if item['type'] == 'message']
+    calls = [item for item in target if item['type'] in call_kinds]
+    # A completed turn may state its next action and issue local tool calls.
+    # Preserve their wire order. Two answer messages, or a final-answer message
+    # combined with calls, do not establish one unambiguous next action.
+    _require(bool(target) and len(messages) <= 1
+             and not (calls and any(item.get('phase') == 'final_answer' for item in messages)),
+             'response_choice_ambiguous')
+    _require(len({item['call_id'] for item in target if item['type'] in call_kinds})
+             == sum(item['type'] in call_kinds for item in target), 'tool_call_shape_unsupported')
     return target, reasoning
 
 
@@ -249,7 +317,9 @@ def _candidate(example, call):
              and body.get('web_search_options') is None and body.get('n', 1) == 1, 'request_continuation_or_stream_unsupported')
     _require('instructions' not in body or isinstance(body['instructions'], str), 'input_shape_unsupported')
     tools = body.get('tools', [])
-    _require(isinstance(tools, list) and all(isinstance(tool, dict) and tool.get('type') == 'function' for tool in tools), 'hosted_tool_unsupported')
+    _require(isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools), 'hosted_tool_unsupported')
+    if op == 'openrouter.chat':
+        _require(all(tool.get('type') == 'function' for tool in tools), 'hosted_tool_unsupported')
     provenance = call.get('response_provenance') or {}
     _require(provenance.get('agent_receipt') == 'reported_exact_body_received'
              and provenance.get('delivery_to_worker') == 'socket_written', 'agent_read_unverified')
@@ -302,18 +372,26 @@ def _candidate(example, call):
                     and annotation.get('reviewed_route') is True)
     target, reasoning = _target(body, responses[0], op,
                                 allow_reasoning_history=full_history)
-    definitions = [(tool.get('function') or {}) if op == 'openrouter.chat' else tool for tool in tools]
-    _require(all(isinstance(fn, dict) and isinstance(fn.get('name'), str) and fn['name']
-                 and isinstance(fn.get('parameters', {}), dict) for fn in definitions), 'tool_definition_unsupported')
-    declared = {fn['name'] for fn in definitions}
-    _require(len(declared) == len(definitions), 'tool_definition_unsupported')
-    emitted = [item['function']['name'] for item in target.get('tool_calls', [])] if isinstance(target, dict) else [item['name'] for item in target if item['type'] == 'function_call']
-    _require(all(name in declared for name in emitted), 'undeclared_tool_call')
+    if op == 'openrouter.chat':
+        definitions = [(tool.get('function') or {}) for tool in tools]
+        _require(all(isinstance(fn, dict) and isinstance(fn.get('name'), str) and fn['name']
+                     and isinstance(fn.get('parameters', {}), dict) for fn in definitions), 'tool_definition_unsupported')
+        declared = {fn['name'] for fn in definitions}
+        _require(len(declared) == len(definitions), 'tool_definition_unsupported')
+        _require(all(item['function']['name'] in declared for item in target.get('tool_calls', [])), 'undeclared_tool_call')
+    else:
+        declared = _response_tool_definitions(body)
+        _require(all((item.get('namespace'), item['name']) in declared
+                     and declared[(item.get('namespace'), item['name'])]['type'] == (
+                         'function' if item['type'] == 'function_call' else 'custom')
+                     for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
     return {'schema_version': RECORD_SCHEMA_VERSION, 'format': op, 'input': copy.deepcopy(body),
             'target': target,
             'quality': {'status': 'unreviewed', 'correct_action': 'not_established'},
             'source_refs': [{'example_hash': example['example_hash'], 'run_id': call['run_id'],
                              'call_identity': call['call_identity'], 'teacher_reasoning_metadata': reasoning,
+                             **({'target_source_paths': [['output', index] for index, item in enumerate(responses[0]['output'])
+                                  if item.get('type') != 'reasoning']} if op == 'openrouter.responses' else {}),
                              'delivered_response_sha256': contracts.document_hash(responses[0]),
                              'response_projection': {'opaque_reasoning_omitted': any('hidden_reasoning' in (r.get('privacy_redactions') or []) for r in matches), 'exact_provider_replay': not any(r.get('privacy_redactions') for r in matches)}, 'attempt': example.get('attempt'),
                              'round_id': example.get('round_id'), 'model': body['model'],

@@ -78,7 +78,8 @@ def test_committed_registry_approves_only_reviewed_routes():
 def test_new_route_evidence_preserves_real_tool_history_and_final_schema(model_id):
     """Replay committed live evidence; neither metadata nor a model family grants admission."""
     from scripts.verify_arena_live_capture import _valid_final, assistant_history
-    registry = rc.load_registry()
+    from tests.lab_arena.full_thinking_saved_probe_test import historical_registry
+    registry = historical_registry()
     route = next(r for r in registry["approved_routes"] if r["model_id"] == model_id)
     raw = (EVIDENCE_DIR / LIVE_CAPTURE_FILES[model_id]).read_bytes()
     proof = json.loads(raw)
@@ -121,14 +122,15 @@ def test_new_route_evidence_preserves_real_tool_history_and_final_schema(model_i
                 assert previous_message in sent["messages"]
                 tool_id = previous_message["tool_calls"][0]["id"]
                 assert sent["messages"][-1]["tool_call_id"] == tool_id
-            observation = store.calls[result.call["call_identity"]]["terminal"]["reasoning_route_observation"]
+            observation = br.broker_observations(store.calls[result.call["call_identity"]]["terminal"])["reasoning_route_observation"]
             assert observation["status"] == "matched"
             previous_message = assistant_history(response["choices"][0]["message"])
 
 
 @pytest.mark.parametrize("model_id", PROBE_FILES)
 def test_committed_price_bound_probe_replays_through_broker(model_id):
-    registry = rc.load_registry()
+    from tests.lab_arena.full_thinking_saved_probe_test import historical_registry
+    registry = historical_registry()
     route = next(route for route in registry["approved_routes"] if route["model_id"] == model_id)
     evidence_path = EVIDENCE_DIR / PROBE_FILES[model_id]
     raw = evidence_path.read_bytes()
@@ -207,7 +209,7 @@ def test_committed_price_bound_probe_replays_through_broker(model_id):
             pricing, normalized, max_output_tokens=normalized["max_tokens"])
         annotation = ledger["call_doc"]["reasoning_capture"]
         assert annotation["probe_manifest_sha256"] == route["evidence"]["probe_manifest_sha256"]
-        observation = ledger["terminal"]["reasoning_route_observation"]
+        observation = br.broker_observations(ledger["terminal"])["reasoning_route_observation"]
         assert observation["status"] == "matched"
         assert observation["response_model"] == model_id
         assert observation["response_provider_name"] == route["provider_name"]
@@ -346,7 +348,7 @@ def test_full_policy_binds_frozen_route_hash_cost_and_zdr_without_fallback():
                   **registry["approved_routes"][0]["price_ceiling"])
     assert store.calls[result.call["call_identity"]]["amount"] == br._max_openrouter_cost_for_pricing(
         priced, expected, max_output_tokens=expected["max_tokens"])
-    assert store.calls[result.call["call_identity"]]["terminal"]["reasoning_route_observation"]["status"] == "unverified"
+    assert br.broker_observations(store.calls[result.call["call_identity"]]["terminal"])["reasoning_route_observation"]["status"] == "unverified"
 
 
 def test_exact_full_route_requires_provider_parameter_enforcement():
@@ -399,5 +401,5 @@ def test_broker_settlement_records_actual_selected_route_evidence():
     result, store, _ = _execute(context, response=(200, body))
     assert result.status == 200
     terminal = store.calls[result.call["call_identity"]]["terminal"]
-    assert terminal["reasoning_route_observation"]["status"] == "matched"
-    assert terminal["reasoning_route_observation"]["selected_endpoint_model"] == "openai/gpt-4o-mini-20261023"
+    assert br.broker_observations(terminal)["reasoning_route_observation"]["status"] == "matched"
+    assert br.broker_observations(terminal)["reasoning_route_observation"]["selected_endpoint_model"] == "openai/gpt-4o-mini-20261023"

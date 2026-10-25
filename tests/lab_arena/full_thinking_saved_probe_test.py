@@ -13,6 +13,12 @@ from tests.lab_arena.training_steps_test import fixture, seal
 PROBES = sorted((Path(__file__).parents[2] / "docs/evidence/full-thinking").glob("*price-bound.json"))
 
 
+def historical_registry():
+    """Replay immutable probes with their original frozen 8192-token policy."""
+    supplemental = Path(__file__).parents[2] / "docs/evidence/full-thinking/chat-output-cap-32768-20261025.json"
+    return reasoning_capture.validate_registry(json.loads(supplemental.read_text())["original_registry"])
+
+
 class Objects:
     def __init__(self):
         self.values = {}
@@ -33,7 +39,7 @@ def _example(probe):
     selected = [row for row in response["openrouter_metadata"]["endpoints"]["available"]
                 if row.get("selected") is True]
     assert len(selected) == 1
-    registry = reasoning_capture.load_registry()
+    registry = historical_registry()
     route = next(row for row in registry["approved_routes"] if row["model_id"] == probe["model"])
     _, annotation = reasoning_capture.apply("openrouter.chat", {"model": probe["model"]},
                                               policy=reasoning_capture.POLICY, registry=registry)

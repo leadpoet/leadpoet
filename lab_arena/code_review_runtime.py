@@ -8,7 +8,10 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
-from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry
+from lab_arena import broker, code_review, code_review_policy, contracts, operations, source_bundle, submission_similarity, telemetry, reasoning_capture, training_coverage
+
+
+_ROUND_NOT_PROVIDED = object()
 
 
 class SubmissionCodeReviewer:
@@ -89,7 +92,19 @@ class SubmissionCodeReviewer:
             pass
         return result
 
-    def review(self, row: Mapping[str, Any]) -> Mapping[str, Any]:
+    def review_with_frozen_round(
+        self, row: Mapping[str, Any], round_row: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        """Reuse the exact round already read and checked by ArenaService.
+
+        This internal entry point receives service state, never submission
+        annotations. Standalone review still reads its authoritative round.
+        """
+        return self.review(row, _frozen_round=round_row)
+
+    def review(
+        self, row: Mapping[str, Any], *, _frozen_round: Any = _ROUND_NOT_PROVIDED,
+    ) -> Mapping[str, Any]:
         state = row.get("code_review_status")
         if state in ("passed", "rejected"):
             return {"status": "existing", "code_review_status": state}
@@ -114,15 +129,21 @@ class SubmissionCodeReviewer:
         reservation = 0
         research_control = False
         try:
-            get_round = getattr(self._store, "get_round", None)
-            if callable(get_round):
-                round_row = get_round(str(row["round_id"]))
-                if not isinstance(round_row, Mapping) or not isinstance(round_row.get("configuration_doc"), Mapping):
+            round_row = _frozen_round
+            if round_row is _ROUND_NOT_PROVIDED:
+                get_round = getattr(self._store, "get_round", None)
+                if callable(get_round):
+                    round_row = get_round(str(row["round_id"]))
+            if round_row is not _ROUND_NOT_PROVIDED:
+                if (not isinstance(round_row, Mapping)
+                        or not isinstance(round_row.get("configuration_doc"), Mapping)
+                        or (_frozen_round is not _ROUND_NOT_PROVIDED
+                            and round_row.get("round_id") != row["round_id"])
+                        or round_row.get("round_id", row["round_id"]) != row["round_id"]):
                     raise ValueError("round configuration unavailable")
-                research_control = (
-                    round_row["configuration_doc"].get("reasoning_capture_policy")
-                    == "full_generated_thinking_v1"
-                )
+                configuration = round_row["configuration_doc"]
+                research_control = reasoning_capture.enabled(configuration)
+                training_coverage.missing_reasoning_percent_from_configuration(configuration)
             payload = self._objects.get_bounded(
                 str(row["source_ref"]), source_bundle.MAX_SOURCE_ARCHIVE_BYTES
             )

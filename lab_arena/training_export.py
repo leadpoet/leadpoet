@@ -513,10 +513,18 @@ def _call_order(call, run_order):
         return value if type(value) is int and value >= 0 else 2 ** 63
     return (run_order.get(call["run_id"], 2 ** 63),
             numeric(call.get("action_sequence")), numeric(call.get("provider_attempt", 1)),
-            call["reservation_entry_id"], call["call_identity"])
+            numeric(call.get("reservation_entry_id", call.get("refusal_entry_id"))), call["call_identity"])
 
 
 def _calls(rows, run_ids, objects, run_order):
+    from lab_arena.broker import BrokerError, broker_observations
+
+    def observations(document):
+        try:
+            return broker_observations(document)
+        except BrokerError as exc:
+            raise ExportError("broker_observation_invalid") from exc
+
     grouped, calls, reasons = {}, [], set()
     if len({row.get("entry_id") for row in rows}) != len(rows):
         raise ExportError("duplicate_ledger_entry")
@@ -535,17 +543,26 @@ def _calls(rows, run_ids, objects, run_order):
         dispatches = [row for row in entries if row.get("entry_kind") == "dispatch"]
         terminals = [row for row in entries if row.get("entry_kind") in
                      {"settlement", "uncertain", "recovery", "refusal"}]
-        if len(reserves) != 1 or len(dispatches) > 1:
+        standalone_refusal = (not reserves and not dispatches and len(entries) == 1
+                              and entries[0].get("entry_kind") == "refusal"
+                              and entries[0].get("amount_microusd") == 0
+                              and (entries[0].get("entry_doc") or {}).get("reason")
+                                  in {"per_icp_quota", "stage_quota", "money_cap"}
+                              and isinstance((entries[0].get("entry_doc") or {}).get("call"), Mapping))
+        if not standalone_refusal and (len(reserves) != 1 or len(dispatches) > 1):
             reasons.add("ambiguous_call_lifecycle")
             continue
-        reserve = reserves[0]
+        reserve = entries[0] if standalone_refusal else reserves[0]
         if any(any(row.get(key) != reserve.get(key) for key in
                    ("run_id", "round_id", "submission_id", "provider", "operation_id")) for row in entries):
             raise ExportError("ledger_membership_mismatch")
-        entry = reserve.get("entry_doc") or {}
+        entry = ((reserve.get("entry_doc") or {}).get("call") if standalone_refusal
+                 else reserve.get("entry_doc")) or {}
         call = {"call_identity": identity, "run_id": reserve["run_id"],
                 "provider": reserve.get("provider"), "operation_id": reserve.get("operation_id"),
-                "funding_source": reserve.get("funding_source"), "reservation_entry_id": reserve["entry_id"],
+                "funding_source": reserve.get("funding_source"),
+                **({"refusal_entry_id": reserve["entry_id"], "refusal_receipt": copy.deepcopy(reserve)}
+                   if standalone_refusal else {"reservation_entry_id": reserve["entry_id"]}),
                 **{key: entry[key] for key in ("base_call_identity", "provider_attempt", "action_sequence", "request_hash") if key in entry}}
         if isinstance(entry.get("reasoning_capture"), Mapping):
             call["reasoning_capture"] = copy.deepcopy(entry["reasoning_capture"])
@@ -560,6 +577,10 @@ def _calls(rows, run_ids, objects, run_order):
                         or (row.get("entry_doc") or {}).get("upstream_response_receipt"))
             if not captured:
                 continue
+            if isinstance(captured, Mapping) and "broker_observations" in captured:
+                observations({"upstream_response_receipt": captured})
+                if set(captured) == {"broker_observations"}:
+                    continue  # Timing/route evidence does not claim an upstream body exists.
             if isinstance(captured, Mapping) and captured.get("status") == "unavailable":
                 if captured.get("reason") in {"response_capture_failed", "response_size_limit"}:
                     call["upstream_response_capture"] = {"status": "unavailable", "reason": captured["reason"]}
@@ -628,13 +649,19 @@ def _calls(rows, run_ids, objects, run_order):
                         ("entry_id", "entry_kind", "created_at", "funding_source", "amount_microusd") if key in row}
             metadata["accounting"] = {key: copy.deepcopy(value) for key, value in (row.get("entry_doc") or {}).items()
                                       if key in accounting_fields}
+            metadata["accounting"].update({key: copy.deepcopy(value) for key, value in
+                observations(row.get("entry_doc") or {}).items() if key in accounting_fields})
             recorded_call = (row.get("entry_doc") or {}).get("call")
             if isinstance(recorded_call, Mapping):
                 call_accounting = {key: copy.deepcopy(value) for key, value in recorded_call.items() if key in accounting_fields}
+                call_accounting.update({key: copy.deepcopy(value) for key, value in
+                    observations(recorded_call).items() if key in accounting_fields})
                 if call_accounting:
                     metadata["accounting"]["call"] = call_accounting
             call["lifecycle"].append(metadata)
         call["response_receipts"] = []
+        if standalone_refusal:
+            terminals = []  # Admission denial has no provider terminal or generation.
         latest_id = max((int(row["entry_id"]) for row in terminals), default=None)
         latest_terminal = next((row.get("terminal_response") or {} for row in terminals if row["entry_id"] == latest_id), {})
         latest_response, latest_redactions, latest_digest = None, [], None
@@ -650,6 +677,7 @@ def _calls(rows, run_ids, objects, run_order):
                        "created_at": row.get("created_at"),
                        "metadata": {key: copy.deepcopy(value) for key, value in terminal.items()
                                     if key not in {"body_b64", "upstream_response_receipt"}}}
+            receipt["metadata"].update(copy.deepcopy(observations(terminal)))
             try:
                 response, redactions = _response_value(terminal, reserve.get("provider"))
                 wire_body = base64.b64decode(terminal["body_b64"], validate=True)
@@ -687,7 +715,11 @@ def _calls(rows, run_ids, objects, run_order):
         except Exception:
             call.pop("request", None)
             call_reasons.add("full_request_unavailable")
-        if not terminals:
+        if standalone_refusal:
+            call["accounting_state"] = "refusal"
+            call["actual_microusd"] = 0
+            call["response_provenance"]["source"] = "stored_admission_refusal"
+        elif not terminals:
             call_reasons.add("provider_call_inflight")
         else:
             # A later recovery can settle a previous uncertain entry. The
@@ -833,7 +865,8 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True)
         acknowledged.add(data["call_identity"])
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid
-                    if type(call.get("response_status")) is int and
+                    if call.get("accounting_state") == "refusal" or
+                    type(call.get("response_status")) is int and
                     (200 <= call["response_status"] < 300 or call["call_identity"] in linked)}
         if expected - acknowledged:
             errors.add("agent_response_receipts_unverified")
@@ -1171,8 +1204,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
         if run.get("status") != "accepted" or run.get("terminal_cause") != "accepted":
             raise ExportError("execution_not_accepted")
         example["output"] = output
-        example["output_identity"] = {"ref": expected_output_ref, "document_hash": output_hash,
-                                      "recorded_hash_present": recorded_hash not in (None, "")}
+        example["output_identity"] = {
+            "ref": expected_output_ref, "document_hash": output_hash,
+            "normalized_document_hash": contracts.document_hash(output),
+            "recorded_hash_present": recorded_hash not in (None, ""),
+        }
     except ExportError as exc:
         output = None
         reasons["input_output_label"].add(str(exc))

@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
@@ -62,6 +63,38 @@ class CaptureError(ValueError):
     """Request evidence was not complete or did not pass integrity checks."""
 
 
+def retryable_storage_error(error: Exception) -> bool:
+    """Recognize transport availability failures, never missing/denied objects."""
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        from botocore.exceptions import (
+            ConnectTimeoutError, ConnectionClosedError, EndpointConnectionError,
+            ReadTimeoutError, ResponseStreamingError,
+        )
+    except ImportError:
+        # Local embedded stores do not require the optional S3 client SDK.
+        transport_errors = ()
+    else:
+        transport_errors = (ConnectTimeoutError, ConnectionClosedError,
+                            EndpointConnectionError, ReadTimeoutError, ResponseStreamingError)
+    if isinstance(error, transport_errors):
+        return True
+    response = getattr(error, "response", None)
+    if not isinstance(response, Mapping):
+        return False
+    detail = response.get("Error")
+    metadata = response.get("ResponseMetadata")
+    code = detail.get("Code") if isinstance(detail, Mapping) else None
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, Mapping) else None
+    if (type(status) is int and status in {401, 403, 404}) or (
+            isinstance(code, str) and code in {"NoSuchKey", "NotFound", "AccessDenied"}):
+        return False
+    return ((isinstance(code, str) and code in {
+        "RequestTimeout", "RequestTimeoutException", "SlowDown", "InternalError", "ServiceUnavailable",
+    }) or (type(status) is int and status in {429, 500, 502, 503, 504}))
+
+
 @dataclass(frozen=True)
 class PreparedRequest:
     """In-memory evidence; a reference is not proof that a write succeeded."""
@@ -71,11 +104,21 @@ class PreparedRequest:
     objects: Any
 
     def persist(self) -> bool:
-        try:
-            self.objects.put(self.pointer["ref"], self.compressed)
-            return True
-        except Exception:
+        ref = self.pointer.get("ref")
+        if not isinstance(ref, str) or not ref:
             return False
+        for attempt in range(2):
+            try:
+                self.objects.put(ref, self.compressed)
+                return True
+            except Exception as exc:
+                if attempt == 0 and retryable_storage_error(exc):
+                    # The immutable ref and prepared bytes are identical even
+                    # if the first write committed before its response timed out.
+                    time.sleep(0.05)
+                    continue
+                return False
+        return False
 
 
 def unavailable(reason: str = "capture_failed") -> dict[str, Any]:
@@ -300,7 +343,8 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 normalized = key.lower().replace("-", "_")
                 safe_config = (
                     normalized == "reasoning"
-                    and request_config_path(path)
+                    and (request_config_path(path)
+                         or item.get("object") == "response" and isinstance(item.get("output"), list))
                     and isinstance(child, Mapping)
                     and set(child) <= _CONFIG_KEYS
                     and all(isinstance(v, (str, bool, int)) or v is None for v in child.values())

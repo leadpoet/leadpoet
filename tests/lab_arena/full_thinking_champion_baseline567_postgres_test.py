@@ -39,6 +39,68 @@ def database():
         fixture.close()
 
 
+@pytest.mark.parametrize("create_grant", ["absent", "direct", "public"])
+def test_migration_replays_without_retaining_schema_create(create_grant):
+    # The release role can create and transfer functions, but its NOSUPERUSER
+    # owner role deliberately has no general schema CREATE permission.
+    fixture = prior.database.__wrapped__()
+    db = next(fixture)
+    try:
+        with db[0].connect(**db[1]) as connection:
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                for name in (
+                    "539-lab-arena-held-recovery-provider-admission.sql",
+                    "565-lab-arena-full-thinking-six-dollar-cap.sql",
+                ):
+                    cursor.execute((SCRIPTS / name).read_text())
+                cursor.execute("CREATE ROLE full_thinking567_migrator NOLOGIN NOSUPERUSER INHERIT")
+                cursor.execute("GRANT lab_arena_owner TO full_thinking567_migrator")
+                cursor.execute("ALTER SCHEMA public OWNER TO full_thinking567_migrator")
+                cursor.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC,lab_arena_owner")
+                if create_grant == "direct":
+                    cursor.execute("GRANT CREATE ON SCHEMA public TO lab_arena_owner WITH GRANT OPTION")
+                elif create_grant == "public":
+                    cursor.execute("GRANT CREATE ON SCHEMA public TO PUBLIC")
+                cursor.execute("SELECT nspacl FROM pg_namespace WHERE nspname='public'")
+                acl = cursor.fetchone()[0]
+                cursor.execute("SET ROLE full_thinking567_migrator")
+                cursor.execute("SELECT rolsuper,has_schema_privilege('lab_arena_owner','public','CREATE') "
+                               "FROM pg_roles WHERE rolname=current_user")
+                assert cursor.fetchone() == (False, create_grant != "absent")
+                for _ in range(2):
+                    cursor.execute(MIGRATION.read_text())
+                    cursor.execute("SELECT nspacl FROM pg_namespace WHERE nspname='public'")
+                    assert cursor.fetchone()[0] == acl
+                cursor.execute("RESET ROLE")
+                test_baseline_freeze_rpc_is_service_only(db)
+    finally:
+        fixture.close()
+
+
+def test_source_guard_failure_rolls_back_temporary_schema_grant(database):
+    with database[0].connect(**database[1]) as connection:
+        connection.autocommit = True
+        with connection.cursor() as cursor:
+            cursor.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC,lab_arena_owner")
+            cursor.execute("SELECT nspacl FROM pg_namespace WHERE nspname='public'")
+            acl = cursor.fetchone()[0]
+            cursor.execute("SELECT pg_get_functiondef('public.lab_arena_rounds_write_once_v1()'::regprocedure)")
+            original = cursor.fetchone()[0]
+            try:
+                cursor.execute(original.replace("BEGIN\n", "BEGIN\n  NULL;\n", 1))
+                with pytest.raises(database[0].Error, match="source guard preimage differs"):
+                    cursor.execute(MIGRATION.read_text())
+                cursor.execute("ROLLBACK")
+                cursor.execute("SELECT nspacl FROM pg_namespace WHERE nspname='public'")
+                assert cursor.fetchone()[0] == acl
+                cursor.execute("SELECT has_schema_privilege('lab_arena_owner','public','CREATE')")
+                assert cursor.fetchone() == (False,)
+            finally:
+                cursor.execute("ROLLBACK")
+                cursor.execute(original)
+
+
 def test_baseline_freeze_rpc_is_service_only(database):
     psycopg, dsn = database
     with psycopg.connect(**dsn) as connection, connection.cursor() as cursor:

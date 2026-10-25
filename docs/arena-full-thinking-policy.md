@@ -15,24 +15,36 @@ or a guarantee that the text explains every internal computation.
 Country of origin and open/closed weights do not decide admission. Actual route
 behavior does. Catalog capability flags alone do not grant approval.
 
-## Initial compatibility-approved whitelist
+## Reviewed route registry
 
-The runtime source is `lab_arena/reasoning_models.json`. All six entries use Chat Completions, `exclude: false`, an 8,192-token output
-limit, ZDR, no provider fallback, and a route price bound. Five use `effort: high`;
-Gemma uses its supported `enabled: true` mode. Exact modes live in the registry.
+The runtime source is `lab_arena/reasoning_models.json`. It contains seven exact
+model/API routes: six Chat Completions routes and DeepSeek through Fireworks on
+Responses. All use ZDR, no provider fallback, and a route price bound. Chat calls
+use `exclude: false`; Responses uses its typed `reasoning_text` output. GPT-OSS
+keeps 8,192 output tokens. The other reviewed routes use 32,768. Gemma uses
+`enabled: true`; the other routes use `effort: high`.
 
-| Model ID | Exact provider selector | Tested result |
-| --- | --- | --- |
-| `openai/gpt-oss-120b` | `deepinfra/bf16` | Generated text, two tool continuations, strict JSON |
-| `mistralai/mistral-large-4-0` | `mistral/zdr` | Generated text on final turn, two tool continuations, strict JSON |
-| `deepseek/deepseek-v4.1-flash-1017` | `fireworks` | Generated text, two tool continuations, strict JSON |
-| `openai/gpt-oss-20b` | `deepinfra/bf16` | Generated text, two tool continuations, strict JSON |
-| `reflection/beam-1.0-501b-a23b` | `nebius/fp8` | Generated text, two tool continuations, strict JSON |
-| `google/gemma-4-31b-it` | `coreweave/fp4` | Generated text, two tool continuations, strict JSON |
+| Model ID | API | Exact provider selector | Output allowance |
+| --- | --- | --- | --- |
+| `openai/gpt-oss-120b` | Chat | `deepinfra/bf16` | 8,192 |
+| `mistralai/mistral-large-4-0` | Chat | `mistral/zdr` | 32,768 |
+| `deepseek/deepseek-v4.1-flash-1017` | Chat | `fireworks` | 32,768 |
+| `openai/gpt-oss-20b` | Chat | `deepinfra/bf16` | 8,192 |
+| `reflection/beam-1.0-501b-a23b` | Chat | `nebius/fp8` | 32,768 |
+| `google/gemma-4-31b-it` | Chat | `coreweave/fp4` | 32,768 |
+| `deepseek/deepseek-v4.1-flash-1017` | Responses | `fireworks` | 32,768 |
 
 The evidence files in `docs/evidence/full-thinking/` contain only synthetic test
-inputs and exact responses. Their SHA-256 hashes are frozen in the registry.
-The tests validate returned model and selected endpoint version/provider metadata.
+inputs and exact responses. Original 8,192-token evidence stays unchanged and
+replays with its original frozen registry. The four larger caps bind the
+supplemental [32,768-token capture manifest](evidence/full-thinking/chat-output-cap-32768-20261025.json)
+by SHA-256 in the current registry. It retains exact requests, responses, wire
+bytes, local PostgreSQL readback, and worker/SDK receipts. The tests validate
+returned model and selected endpoint version/provider metadata. The separate
+[Responses route manifest](evidence/full-thinking/deepseek-fireworks-responses-20261025.json)
+retains three synthetic Responses turns, typed full text, two function
+continuations, final strict JSON, and exact wire/readable/receipt proof. No
+private native-agent prompts are included.
 The requested provider selector is recorded separately: returned metadata does
 not independently expose its quantization suffix.
 
@@ -58,7 +70,7 @@ exposes full thinking. New routes require the same evidence and tests.
 | Requirement | Implemented behavior / required proof |
 | --- | --- |
 | Existing source review | In future full-thinking rounds, the existing paid full-source review also checks reachable model-directed research. Python, custom tools, harnesses, and fixed safety/budget scaffolding remain allowed. Fixed extraction workflows and ignored/post-hoc model calls do not satisfy the requirement. Ambiguous control remains unverified. Store the assessment against the exact source archive and review policy. |
-| Champion data eligibility | After execution, ordinary code reads the selected accepted runs from durable storage. Require complete selected research evidence and readable full-thinking text on the approved route, with exact judge inputs and a verified output/score binding. Raw whole-export completeness remains a separate audit: an attributed judge-only response redaction or unresolved judge charge does not erase exact research data. New rounds require at least 80% of ICPs to have complete selected research evidence. Verified provider omissions, length truncation, and documented privacy exclusions consume incomplete ICPs; these ICPs stay out of strict training exports while all measured scores still count. A stale source assessment, wrong route, or invalid provenance remains a hard failure. Ineligibility does not cancel the round or change the measured score. No extra LLM call reviews runtime traces. |
+| Champion data eligibility | Read the selected accepted runs from durable storage. Apply the frozen per-ICP missing-token rule and 80% ICP coverage floor below. Require exact source review, route, retained context, receipt, output/score and accounting proof. Verified incomplete ICPs stay out of strict training while all measured scores still count. Wrong routes and integrity failures remain hard. Ineligibility does not cancel the round or change its measured score. No extra LLM call reviews runtime traces. |
 | Central collection | Apply policy before hashing, capture, and budget admission to all execution model calls. Miner, baseline, and subagent calls share the same gateway. Judges retain their policy. |
 | Exact routes | Freeze the reviewed registry in each new round. Pin provider and version expectations. Reject unsupported routes before dispatch. Record returned route mismatches without stopping scoring; exclude them from strict exports. |
 | Tool and JSON continuity | Preserve reasoning fields, signatures, opaque continuation state, tool IDs, ordering, and caller schemas in the live conversation. Validate two tool continuations and strict JSON. Never insert thinking into a JSON answer. |
@@ -70,6 +82,36 @@ exposes full thinking. New routes require the same evidence and tests.
 | Round continuity | No capture failure or missing text cancels a round or stops publication. Missing activation prerequisites create an ordinary round with a visible `not_ready` reason. No live catalog request is needed to create the round. |
 | Safe activation | Default off. Require a compatible baseline route and a tested immutable baseline source plus digest before activation. Apply only to future unopened rounds. |
 
+## Frozen token and ICP rules
+
+Future full-thinking rounds freeze
+`training_maximum_missing_reasoning_percent`, provisionally **1%**. This is a
+configurable policy choice, not an empirically established optimum. For each
+ICP, divide positive reported reasoning tokens on completed, untruncated,
+verified calls without admissible full text by all reported reasoning tokens on
+completed, untruncated, verified calls in that ICP. The comparison uses integer
+arithmetic. Summary-only or opaque-only replies can consume this allowance;
+unapproved readable fields, wrong routes, and bad hashes or receipts cannot.
+
+Explicitly reported zero reasoning tokens prove a no-thinking completed turn,
+including a note plus a tool call or a direct answer. Missing usage is unknown,
+not zero. An unproved no-text call makes the ICP incomplete. Each complete ICP
+must still have at least one admissible full-thinking training target.
+
+A verified failed provider attempt has no training target and does not enter
+the token numerator or denominator. A verified truncated reply also loses only
+its own target and is excluded from both token counts. Other independently
+reconstructable calls can remain. If no full target survives, the ICP is
+incomplete. An ICP above its frozen missing-token limit is also incomplete.
+At least **80%** of selected ICPs must be complete, rounded up. An incomplete
+ICP contributes no strict training records; its measured score still counts.
+
+These rules are selected by the presence of the frozen setting. An explicit
+`0` uses the new call rules with zero missing-token tolerance. A historical
+round without the setting keeps its original behavior, including its limited
+unknown-usage tool-only compatibility; a live default cannot rewrite that round.
+Exact failed-attempt omissions also apply only to rounds with the new setting.
+
 The selected research check is shared by champion capture eligibility and strict
 thinking exports. It retains the raw export's completeness and privacy flags.
 Any permitted judge-only gap is listed in the training record's source reference.
@@ -78,9 +120,16 @@ must still pass their exactness checks. A literal `[REDACTED]` in an unchanged
 provider response is source text; an actual capture redaction is an evidence gap.
 
 The output allowance is a tested total-token envelope. An effort setting is not
-a hard thinking-token budget and cannot guarantee a final answer fits. Truncated
-responses are explicitly excluded from the strict dataset. Runtime and answer
-quality may change; the user has accepted this tradeoff.
+a hard thinking-token budget and cannot guarantee a final answer fits. The
+32,768-token checks used three short synthetic calls per route, two tool
+continuations, and a negative qualification from conflicting evidence. They
+prove acceptance of the requested envelope and exact capture; they do not
+exhaust 32,768 output tokens or prove full ICP quality. Both GPT-OSS cap probes
+were blocked by the account's ignored DeepInfra route, so their limits remain
+8,192. The separate Responses proof uses the same short conflicting-evidence
+scenario and does not exhaust the allowance. Truncated responses are excluded
+from training targets. Runtime and answer quality may change; the
+user has accepted this tradeoff.
 
 ## Limits and release gates
 
@@ -97,11 +146,15 @@ quality may change; the user has accepted this tradeoff.
   keeps its tested bootstrap source while retaining that champion as payer.
   This also covers a round opened before the previous round's promotion.
   Frozen rounds do not change their baseline snapshot.
-- No native Responses route is approved yet. The existing broker uses completed
-  upstream responses; this PR does not add arbitrary upstream streaming support.
-  Existing buffered Codex SSE behavior is preserved, but does not make a Codex
-  model eligible. Hosted Responses web search remains unapproved.
-- Keeping ZDR worked for all six approved routes. Relaxing retention does not
+- Only the exact DeepSeek/Fireworks Responses route is approved. The existing
+  broker uses completed upstream responses; this PR does not add arbitrary
+  upstream streaming support. Existing buffered Codex SSE behavior is preserved.
+  Provider-side Responses web search remains unapproved. Local native tests used
+  an installed Codex version rather than the exact requested TYCHE runtime, and
+  did not complete a scored or published workflow. Ten observed native calls
+  exposed full text with 1,759 reported reasoning tokens and no observed missing
+  text; that small sample does not validate the 1% setting or prove readiness.
+- Keeping ZDR worked for all seven approved routes. Relaxing retention does not
   turn provider-withheld thinking into readable text. No privacy relaxation is
   included.
 - A provider can return no thinking on an individual successful call. Such calls
@@ -112,20 +165,20 @@ quality may change; the user has accepted this tradeoff.
   run, or production readiness. Before activation, run representative ICPs,
   verify stored/exported artifacts and publication, and review latency, spend,
   failure rates, and output quality. No production claim is made in this PR.
-- Apply current main through `564-lab-arena-baseline-deadline-transition.sql`,
-  including review migrations 562 and 563. Apply this PR's exact committed
-  migrations `565-lab-arena-full-thinking-six-dollar-cap.sql`,
+- Apply the exact combined migration tail in numeric order through
+  `573-lab-arena-closed-provider-eligible-run-materialization.sql` before activation.
+  This PR's migrations are `565-lab-arena-full-thinking-six-dollar-cap.sql`,
   `566-lab-arena-research-review-result.sql`,
   `567-lab-arena-full-thinking-champion-baseline.sql`,
   `568-lab-arena-full-thinking-catalog-commit.sql`,
   `569-lab-arena-training-publication-eligibility.sql`, and
-  `570-lab-arena-confirmed-full-thinking-final-cost.sql` through the normal release
-  workflow before activation. They check source hashes and database privileges,
-  preserve unrelated behavior, and are idempotent. Current main also includes
-  `571-lab-arena-closed-failed-score-host-recovery.sql`; the combined migration
-  order is checked in local PostgreSQL.
-  The research review migration extends main's exact review function and
-  preserves both context-integrity and source-digest handling.
+  `570-lab-arena-confirmed-full-thinking-final-cost.sql`. Main also includes
+  `571-lab-arena-closed-failed-score-host-recovery.sql`,
+  `572-lab-arena-concurrent-baseline-judging.sql`, and migration 573 above.
+  Preserve earlier review migrations 562 and 563 and baseline-deadline migration
+  564. Use the normal release workflow and retain the source-hash, privilege and
+  idempotency checks. The research-review migration preserves both main's
+  context-integrity and source-digest handling.
 
 ## Reproducible checks
 

@@ -5,13 +5,15 @@ annotation establishes route semantics; returned text alone never does.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import json
 import re
 from collections import Counter, defaultdict
 from typing import Any, Mapping
 
-from lab_arena import contracts, reasoning_capture, training_capture, training_dataset, training_export, training_steps
+from lab_arena import contracts, operations, reasoning_capture, training_capture, training_coverage, training_dataset, training_export, training_steps
 
 SCHEMA_VERSION = "leadpoet.lab_arena.full_thinking_dataset.v1"
 RECORD_SCHEMA_VERSION = "leadpoet.lab_arena.full_thinking_step.v1"
@@ -81,6 +83,11 @@ def _observation_matches(observation: Any, annotation: Any) -> bool:
                 "response_provider_name": annotation.get("provider_name"),
                 "selected_endpoint_model": annotation.get("model_version"),
                 "selected_endpoint_provider_name": annotation.get("provider_name")}
+    # Responses can omit the redundant top-level provider. The selected
+    # endpoint still has to prove both the exact model and provider identity.
+    if (annotation.get("api") == "openrouter.responses"
+            and observation.get("response_provider_name") is None):
+        expected.pop("response_provider_name")
     return (observation.get("status") == "matched" and
             all(isinstance(value, str) and value and observation.get(key) == value
                 for key, value in expected.items()))
@@ -111,19 +118,56 @@ def full_text_segments(call: Mapping[str, Any], role: str, registry: Any = None)
     return full, status
 
 
-def verified_tool_only_empty(call: Mapping[str, Any], delivered: Mapping[str, Any], status: Mapping[str, Any]) -> bool:
+def verified_no_thinking(call: Mapping[str, Any], delivered: Mapping[str, Any], status: Mapping[str, Any]) -> bool:
+    """Admit an explicit zero-token completed turn without inventing thinking.
+
+    A tool call, a note plus a tool call, and a direct answer use the same
+    rule. Missing usage is unknown; positive billed reasoning without text
+    is a capture gap. Summaries and opaque evidence do not prove zero work.
+    The caller still verifies the exact delivered request and response.
+    """
     if (not status["route_reviewed"] or not status["provider_route_verified"]
-            or status["storage"] != "saved" or status["returned"] != "requested_empty"):
+            or status["storage"] != "saved" or status["returned"] != "requested_empty"
+            or status["tokens_reported"] != 0
+            or status["segment_count"] or status["contains_summary"] or status["contains_opaque"]):
+        return False
+    if call.get("operation_id") == "openrouter.chat":
+        choices = delivered.get("choices") or []
+        return (len(choices) == 1 and isinstance(choices[0], Mapping)
+                and choices[0].get("finish_reason") in {"stop", "tool_calls"})
+    return call.get("operation_id") == "openrouter.responses" and delivered.get("status") == "completed"
+
+
+def verified_missing_thinking(status: Mapping[str, Any]) -> bool:
+    """Positive reported reasoning with no proved full text, never a target."""
+    return (status["route_reviewed"] and status["provider_route_verified"]
+            and status["storage"] == "saved"
+            and status["returned"] in {"missing_thinking", "summary", "opaque"}
+            and type(status["tokens_reported"]) is int and status["tokens_reported"] > 0)
+
+
+def verified_tool_only_empty(call: Mapping[str, Any], delivered: Mapping[str, Any], status: Mapping[str, Any]) -> bool:
+    """Keep the historical unknown-usage tool-only exception explicit.
+
+    Unknown usage remains unknown. Only the prior tool-only shape retains its
+    compatibility admission; a note or direct answer needs reported zero.
+    Positive billed reasoning without text never uses the exception.
+    """
+    if verified_no_thinking(call, delivered, status):
+        return True
+    if (not status["route_reviewed"] or not status["provider_route_verified"]
+            or status["storage"] != "saved" or status["returned"] != "requested_empty"
+            or status["tokens_reported"] is not None):
         return False
     if call.get("operation_id") == "openrouter.chat":
         choices = delivered.get("choices") or []
         return (len(choices) == 1 and choices[0].get("finish_reason") == "tool_calls"
-                and bool((choices[0].get("message") or {}).get("tool_calls")))
-    if call.get("operation_id") == "openrouter.responses":
-        output = delivered.get("output") or []
-        return bool(output) and any(item.get("type") == "function_call" for item in output) and not any(
-            item.get("type") == "message" for item in output)
-    return False
+                and bool((choices[0].get("message") or {}).get("tool_calls"))
+                and not (choices[0].get("message") or {}).get("content"))
+    output = delivered.get("output") or []
+    return (call.get("operation_id") == "openrouter.responses" and bool(output)
+            and any(item.get("type") == "function_call" for item in output)
+            and not any(item.get("type") == "message" for item in output))
 
 
 def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
@@ -282,9 +326,11 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
     details = details if isinstance(details, Mapping) else {}
     output_details = usage.get("output_tokens_details")
     output_details = output_details if isinstance(output_details, Mapping) else {}
-    tokens = next((value for value in (usage.get("reasoning_tokens"), details.get("reasoning_tokens"),
-                                      output_details.get("reasoning_tokens"))
-                   if type(value) is int and value >= 0), None)
+    reported = [value for value in (usage.get("reasoning_tokens"), details.get("reasoning_tokens"),
+                                   output_details.get("reasoning_tokens"))
+                if type(value) is int and value >= 0]
+    # A conflicting zero field cannot conceal positively billed reasoning.
+    tokens = max(reported) if reported else None
     capture_reason = (call.get("upstream_response_capture") or {}).get("reason")
     storage = ("saved" if isinstance(response, Mapping) else
                "storage_failed" if capture_reason == "response_capture_failed" else
@@ -312,6 +358,8 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
         content_class = "full_thinking" if route_verified and not contains_opaque else "unproved_text"
     elif contains_opaque:
         content_class = "opaque"
+    elif tokens is not None and tokens > 0:
+        content_class = "missing_thinking"
     else:
         content_class = "requested_empty" if request_state == "requested" else request_state
     return {"run_id": call.get("run_id"), "call_identity": call.get("call_identity"),
@@ -326,6 +374,199 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
             "tokens_reported": tokens, "segment_count": len(segments),
             "contains_summary": summary, "contains_opaque": contains_opaque,
             "redactions": sorted(redactions)}
+
+
+def _ignored_provider_failure(response, request_body, annotation) -> bool:
+    """Prove the observed account-policy routing failure, not arbitrary 404s."""
+    error = response.get("error") or {}
+    metadata = error.get("metadata") or {}
+    routing = response.get("openrouter_metadata") or {}
+    provider = request_body.get("provider") or {}
+    funnel = metadata.get("routing_funnel")
+    endpoints = (routing.get("endpoints") or {}).get("available")
+    if (type(error.get("code")) is not int or error["code"] != 404
+            or not isinstance(error.get("message"), str)
+            or not error["message"].startswith("All providers have been ignored.")
+            or metadata.get("failed_routing_step") != "Filter by Ignored Providers"
+            or provider.get("only") != [annotation.get("provider_route")]
+            or provider.get("allow_fallbacks") is not False
+            or routing.get("requested") != annotation.get("model_id")
+            or routing.get("strategy") != "direct"
+            or not isinstance(funnel, list) or not funnel
+            or not isinstance(endpoints, list) or not endpoints
+            or any(not isinstance(row, Mapping) or row.get("selected") is not False for row in endpoints)):
+        return False
+    allowed = [row for row in funnel if isinstance(row, Mapping)
+               and row.get("step") == "Filter by Allowed Providers"]
+    target = [row for row in endpoints if row.get("model") == annotation.get("model_version")
+              and row.get("provider") == annotation.get("provider_name")]
+    return (len(allowed) == 1 and funnel[-1] == allowed[0]
+            and type(allowed[0].get("endpoint_count")) is int and allowed[0]["endpoint_count"] == 1
+            and allowed[0].get("reason") == "not in your request's provider.only preference"
+            and len(target) == 1)
+
+
+def _bound_admission_refusal(example, call) -> bool:
+    """Prove one zero-charge SQL admission denial; it has no provider output."""
+    configuration = example.get("configuration") or {}
+    row = call.get("refusal_receipt") or {}
+    doc = row.get("entry_doc") or {}
+    saved = doc.get("call") or {}
+    lifecycle = call.get("lifecycle") or []
+    return (training_coverage.MISSING_REASONING_SETTING in configuration
+            and configuration.get("reasoning_capture_policy") == reasoning_capture.POLICY
+            and call.get("accounting_state") == "refusal"
+            and type(call.get("actual_microusd")) is int and call["actual_microusd"] == 0
+            and call.get("reservation_entry_id") is None
+            and call.get("terminal_entry_id") is None
+            and not call.get("response_receipts") and not call.get("upstream_response_receipts")
+            and not any(key in call for key in ("response", "response_sha256", "provider_cost"))
+            and row.get("entry_kind") == "refusal"
+            and type(row.get("entry_id")) is int and row["entry_id"] == call.get("refusal_entry_id")
+            and type(row.get("amount_microusd")) is int and row["amount_microusd"] == 0
+            and doc.get("reason") in {"per_icp_quota", "stage_quota", "money_cap"}
+            and type(doc.get("requested_microusd")) is int and doc["requested_microusd"] >= 0
+            and not row.get("terminal_response")
+            and all(row.get(key) == call.get(key) for key in
+                    ("run_id", "call_identity", "operation_id", "provider", "funding_source"))
+            and row.get("round_id") == example.get("round_id")
+            and row.get("submission_id") == example.get("submission_id")
+            and all(saved.get(key) == call.get(key) for key in
+                    ("request_hash", "base_call_identity", "provider_attempt", "action_sequence", "reasoning_capture"))
+            and saved.get("request_capture") == call.get("request_capture")
+            and isinstance(saved.get("base_call_identity"), str)
+            and type(saved.get("action_sequence")) is int and saved["action_sequence"] >= 0
+            and type(saved.get("provider_attempt")) is int and saved["provider_attempt"] >= 1
+            and len(lifecycle) == 1 and lifecycle[0].get("entry_kind") == "refusal"
+            and lifecycle[0].get("entry_id") == row["entry_id"]
+            and lifecycle[0].get("amount_microusd") == 0)
+
+
+def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
+    """Prove a delivered retryable error without making it a model target.
+
+    Provider errors need no observed generation route: no generation is
+    claimed. The reviewed request, saved failure bytes, host write and agent
+    read must agree. Unsettled billing remains a separate eligibility gate.
+    """
+    try:
+        run_id = example["run_id"]
+        admission_refusal = call.get("accounting_state") == "refusal"
+        if admission_refusal:
+            if not _bound_admission_refusal(example, call):
+                return False
+            try:
+                admitted = operations.validate_operation_request(
+                    call.get("operation_id"), (call.get("request") or {}).get("admitted_parameters"),
+                    allow_full_thinking=True)
+            except operations.OperationError:
+                return False
+            if admitted.get("model") != (((call.get("request") or {}).get("outbound") or {}).get("body") or {}).get("model"):
+                return False
+        operation = call.get("operation_id")
+        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        request = call.get("request") or {}
+        outbound = request.get("outbound") or {}
+        body = outbound.get("body")
+        if (call.get("run_id") != run_id or call.get("provider") != "openrouter"
+                or operation not in reasoning_capture.OPERATIONS
+                or not _policy(call, registry)
+                or (call.get("request_capture") or {}).get("redacted")
+                or not training_steps._exact(request)
+                or request.get("operation_id") != operation
+                or request.get("request_hash") != call.get("request_hash")
+                or not isinstance(request.get("hashed_parameters"), Mapping)
+                or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
+                or not isinstance(body, Mapping)
+                or contracts.document_hash(body) != outbound.get("body_sha256")
+                or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
+                or outbound.get("path") != ("/api/v1/responses" if operation.endswith("responses")
+                                              else "/api/v1/chat/completions")
+                or (request.get("effective_parameters") or {}).get("model") != body.get("model")
+                or not set(call.get("evidence_gaps") or []) <= {"provider_cost_unresolved"}
+                or set((example.get("completeness") or {}).get("incomplete_reasons") or []) & {
+                    "worker_response_receipt_link_invalid", "agent_response_receipt_link_invalid",
+                    "agent_dependency_link_invalid", "runtime_input_context_mismatch"}):
+            return False
+        provenance = call.get("response_provenance") or {}
+        artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+        payload = artifact.get("payload") or {}
+        payload_hash = contracts.document_hash(payload)
+        worker_ref = provenance.get("worker_receipt_ref") or {}
+        if (artifact.get("payload_sha256") != payload_hash
+                or provenance.get("agent_receipt") != "reported_exact_body_received"
+                or provenance.get("delivery_to_worker") != "socket_written"
+                or worker_ref.get("run_id") != run_id
+                or worker_ref.get("payload_sha256") != payload_hash):
+            return False
+        writes = [row for row in payload.get("response_receipts") or []
+                  if row.get("ordinal") == worker_ref.get("ordinal")]
+        if len(writes) != 1:
+            return False
+        write = writes[0]
+        status = write.get("status")
+        if (type(status) is not int or status not in ({402} if admission_refusal else {404, 429, 502, 503, 504})
+                or write.get("write_state") != "socket_written"
+                or write.get("operation_id") != operation
+                or write.get("action_sequence") != call.get("action_sequence")
+                or write.get("call_identity") != call.get("call_identity")
+                or type(write.get("body_bytes")) is not int or write["body_bytes"] < 0
+                or not isinstance(write.get("body_sha256"), str)
+                or contracts.SHA256_RE.fullmatch(write["body_sha256"]) is None):
+            return False
+        refs = provenance.get("agent_receipt_refs") or []
+        reads = [row for row in payload.get("agent_observations") or []
+                 if row.get("kind") == "response_received" and any(
+                     ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                     and ref.get("payload_sha256") == payload_hash for ref in refs)]
+        if (not reads or any((row.get("privacy") or {}).get("redacted") is not False
+                            or any((row.get("data") or {}).get(key) != write.get(key)
+                                   for key in ("call_identity", "status", "body_sha256", "body_bytes"))
+                            for row in reads)):
+            return False
+        failure_bodies = []
+        for receipt in call.get("response_receipts") or []:
+            if (receipt.get("entry_id") not in (provenance.get("worker_received_receipt_entry_ids") or [])
+                    or (receipt.get("metadata") or {}).get("status") != status
+                    or receipt.get("wire_body_sha256") != write["body_sha256"]
+                    or receipt.get("wire_body_bytes") != write["body_bytes"]):
+                continue
+            if receipt.get("privacy_redactions") or receipt.get("response_unavailable"):
+                return False
+            failure_bodies.append(_delivered_response(call, receipt["response_sha256"]))
+        if not failure_bodies:
+            ref = provenance.get("worker_error_observation_ref") or {}
+            if (provenance.get("worker_error_body_acknowledged") is not True
+                    or ref.get("run_id") != run_id or ref.get("payload_sha256") != payload_hash
+                    or any(receipt.get("wire_body_sha256") for receipt in call.get("response_receipts") or [])):
+                return False
+            observations = [row for row in payload.get("observations") or []
+                            if row.get("ordinal") == ref.get("ordinal")]
+            if len(observations) != 1:
+                return False
+            observed = observations[0]
+            response = (observed.get("outcome") or {}).get("response") or {}
+            raw = base64.b64decode(response["body_b64"], validate=True)
+            if ((observed.get("privacy") or {}).get("redacted") is not False
+                    or any(observed.get(key) != call.get(key)
+                           for key in ("call_identity", "operation_id", "action_sequence"))
+                    or response.get("status") != status or len(raw) != write["body_bytes"]
+                    or contracts.hash_bytes(raw) != write["body_sha256"]):
+                return False
+            if admission_refusal and (observed.get("request") or {}).get("admitted_parameters") != request.get("admitted_parameters"):
+                return False
+            failure_bodies.append(json.loads(raw))
+        if admission_refusal:
+            return (provenance.get("worker_body_source") == "worker_error_observation"
+                    and bool(failure_bodies)
+                    and all(value == {"error": {"code": "budget_refused"}} for value in failure_bodies))
+        return all(isinstance(value, Mapping) and bool(value.get("error"))
+                   and not value.get("choices") and not value.get("output")
+                   and (status != 404 or _ignored_provider_failure(
+                       value, body, call.get("reasoning_capture") or {}))
+                   for value in failure_bodies)
+    except (KeyError, TypeError, ValueError, AttributeError, binascii.Error):
+        return False
 
 
 def _role(example: Mapping[str, Any], call: Mapping[str, Any]) -> str:
@@ -353,7 +594,15 @@ def coverage(examples) -> dict:
         seen.add(source)
         bad = False
         has_text = False
-        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        configuration = example.get("configuration") or {}
+        registry = configuration.get("reasoning_route_registry")
+        new_policy = training_coverage.MISSING_REASONING_SETTING in configuration
+        try:
+            maximum_missing = training_coverage.missing_reasoning_percent_from_configuration(configuration)
+        except (ValueError, TypeError, AttributeError):
+            maximum_missing = 0
+            bad = True
+        total_reasoning_tokens = missing_reasoning_tokens = 0
         for call in example.get("provider_calls") or []:
             row = attempt_coverage(call, _role(example, call), registry)
             full, _ = full_text_segments(call, _role(example, call), registry)
@@ -367,8 +616,29 @@ def coverage(examples) -> dict:
             has_text |= execution_model and bool(full)
             full_text_calls += execution_model and bool(full)
             full_round = (example.get("configuration") or {}).get("reasoning_capture_policy") == POLICY
+            failed = new_policy and verified_failed_attempt(example, call)
+            omitted_truncation = False
+            if new_policy and execution_model and row["returned"] == "truncated":
+                try:
+                    training_steps._candidate(example, call)
+                except ValueError as exc:
+                    omitted_truncation = (str(exc) == "response_not_complete"
+                                          and row["route_reviewed"] and row["provider_route_verified"])
+                except (TypeError, KeyError, AttributeError):
+                    pass  # The malformed attempt remains disqualifying below.
+            if (execution_model and new_policy and row["route_reviewed"] and row["provider_route_verified"]
+                    and row["returned"] not in {"truncated", "interrupted", "redacted"}
+                    and row["tokens_reported"] is not None and not failed):
+                total_reasoning_tokens += row["tokens_reported"]
+                if not full and verified_missing_thinking(row):
+                    missing_reasoning_tokens += row["tokens_reported"]
+            empty = (verified_no_thinking(call, call.get("response") or {}, row) if new_policy
+                     else verified_tool_only_empty(call, call.get("response") or {}, row))
             bad |= (execution_model and (row["requested"] or full_round) and
-                    not (full or verified_tool_only_empty(call, call.get("response") or {}, row)))
+                    not (full or empty or failed or omitted_truncation
+                         or new_policy and verified_missing_thinking(row)))
+        if new_policy:
+            bad |= missing_reasoning_tokens * 100 > total_reasoning_tokens * maximum_missing
         trajectories["ineligible"] += bad
         trajectories["with_full_thinking"] += has_text
         trajectories["eligible_without_disqualifying_capture"] += not bad
@@ -662,6 +932,22 @@ def _delivered_response(call: Mapping[str, Any], digest: str) -> Mapping[str, An
     return values[0]
 
 
+def verified_output_projection(example: Mapping[str, Any]) -> bool:
+    """Bind the normalized export while retaining the stored document hash.
+
+    New exports record both identities. Old exports can prove only an output
+    whose normalized projection has the same document hash as the stored JSON.
+    """
+    output = example.get("output")
+    identity = example.get("output_identity") or {}
+    stored_hash = identity.get("document_hash")
+    projected_hash = identity.get("normalized_document_hash", stored_hash)
+    return (isinstance(output, Mapping)
+            and isinstance(stored_hash, str) and contracts.SHA256_RE.fullmatch(stored_hash) is not None
+            and isinstance(projected_hash, str) and contracts.SHA256_RE.fullmatch(projected_hash) is not None
+            and projected_hash == contracts.document_hash(output))
+
+
 def _selected_input_output_binding(
     example: Mapping[str, Any], *, allow_selected_cost_unavailable: bool = False,
 ) -> set[str] | None:
@@ -675,7 +961,7 @@ def _selected_input_output_binding(
     if (not isinstance(run_id, str) or not isinstance(score_id, str)
             or not isinstance(output, Mapping) or not isinstance(judgment, Mapping)
             or type(judgment.get("per_icp_score")) not in (int, float)
-            or output_identity.get("document_hash") != contracts.document_hash(output)):
+            or not verified_output_projection(example)):
         return None
     attempts = example.get("attempts") or []
     score_runs = [row for row in attempts if row.get("run_id") == score_id
@@ -773,6 +1059,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -
             return None
         if call.get("run_id") != run_id:
             continue
+        if call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call):
+            continue
         provenance = call.get("response_provenance") or {}
         request = call.get("request") or {}
         response = call.get("response")
@@ -840,7 +1128,8 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
     or target, provided the score input and published label are still bound.
     """
     selected_id = example.get("run_id")
-    if any(isinstance(call, Mapping) and call.get("run_id") == selected_id and (
+    if any(isinstance(call, Mapping) and call.get("run_id") == selected_id
+            and not (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call)) and (
             "provider_cost_unresolved" in (call.get("evidence_gaps") or [])
             or ("accounting_state" in call and call.get("accounting_state") != "settlement")
             or ("actual_microusd" in call and type(call.get("actual_microusd")) is not int))
@@ -891,6 +1180,8 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
         elif call_reasons:
             return None
         if call.get("run_id") == run_id:
+            if call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call):
+                continue
             redactions = set(call.get("response_privacy_redactions") or [])
             model = call.get("operation_id") in reasoning_capture.OPERATIONS
             permitted = {"hidden_reasoning"} if model else set()
@@ -941,21 +1232,55 @@ def build(examples, rules: training_steps.Rules | None = None):
                                       response_sha256=ref["delivered_response_sha256"])
                 registry = (example.get("configuration") or {}).get("reasoning_route_registry")
                 trajectory_valid = True
+                new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
+                try:
+                    maximum_missing = training_coverage.missing_reasoning_percent_from_configuration(
+                        example.get("configuration") or {})
+                except (TypeError, ValueError, AttributeError):
+                    reasons["frozen_reasoning_policy_invalid"] += 1
+                    continue
+                total_reasoning_tokens = missing_reasoning_tokens = 0
                 for row in example.get("provider_calls") or []:
                     if not _execution_model_call(example, row):
+                        continue
+                    if new_policy and verified_failed_attempt(example, row):
                         continue
                     try:
                         linked = training_steps._candidate(example, row)["source_refs"][0]
                         response = _delivered_response(row, linked["delivered_response_sha256"])
-                    except (ValueError, TypeError, KeyError, AttributeError):
+                    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                        # _candidate reaches this finish check only after exact
+                        # request, agent read, response hash and privacy proof.
+                        # Keep other independently reconstructable targets.
+                        if (new_policy and isinstance(exc, ValueError)
+                                and str(exc) == "response_not_complete"):
+                            try:
+                                state = attempt_coverage(row, _role(example, row), registry)
+                            except (ValueError, TypeError, KeyError, AttributeError):
+                                trajectory_valid = False
+                                break
+                            if (state["returned"] == "truncated" and state["route_reviewed"]
+                                    and state["provider_route_verified"]):
+                                continue
                         trajectory_valid = False
                         break
                     checked = dict(row, response=response,
                                    response_sha256=linked["delivered_response_sha256"])
                     full, state = full_text_segments(checked, _role(example, row), registry)
-                    if not full and not verified_tool_only_empty(row, response, state):
+                    if (state["route_reviewed"] and state["provider_route_verified"]
+                            and state["tokens_reported"] is not None):
+                        total_reasoning_tokens += state["tokens_reported"]
+                        if not full and verified_missing_thinking(state):
+                            missing_reasoning_tokens += state["tokens_reported"]
+                    if (not full and not (verified_no_thinking(row, response, state) if new_policy
+                                          else verified_tool_only_empty(row, response, state))
+                            and not (new_policy and verified_missing_thinking(state))):
                         trajectory_valid = False
                         break
+                if (new_policy
+                        and missing_reasoning_tokens * 100 > total_reasoning_tokens * maximum_missing):
+                    reasons["missing_reasoning_share_exceeded"] += 1
+                    continue
                 if not trajectory_valid:
                     reasons["trajectory_reasoning_ineligible"] += 1
                     continue

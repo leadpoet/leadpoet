@@ -232,6 +232,10 @@ def route_observation(response: Any, annotation: Mapping[str, Any]) -> Dict[str,
               ("response_provider_name", "expected_provider_name"),
               ("selected_endpoint_model", "expected_model_version"),
               ("selected_endpoint_provider_name", "expected_provider_name"))
+    # OpenRouter Responses identifies its provider in selected endpoint
+    # metadata; its Chat-only top-level provider field can be absent.
+    if annotation.get("api") == "openrouter.responses" and document.get("provider") is None:
+        checks = tuple(pair for pair in checks if pair[0] != "response_provider_name")
     values = [observed[key] for key, _ in checks]
     observed["status"] = ("unverified" if any(value is None for value in values)
                           else "matched" if all(observed[key] == observed[expected] for key, expected in checks)

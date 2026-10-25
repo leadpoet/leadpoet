@@ -1601,7 +1601,7 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
                    for name in ("query", "categories", "search_terms")):
             raise OperationRequestError("invalid_field")
     if operation_id == "openrouter.responses":
-        _validate_responses(normalized)
+        _validate_responses(normalized, allow_full_thinking=allow_full_thinking)
     if operation_id == "openrouter.chat" and allow_full_thinking:
         # Generic object validation omits JSON nulls. A returned assistant
         # tool turn may carry them, and replay must keep the provider's shape.
@@ -1680,7 +1680,7 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
     return normalized
 
 
-def _validate_responses(parameters: Mapping[str, Any]) -> None:
+def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: bool = False) -> None:
     """Stateless text, local tools, and one bounded hosted web-search tool."""
 
     text = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
@@ -1693,16 +1693,17 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
         "custom_tool_call": {"call_id": identifier, "name": identifier, "namespace": dataclasses.replace(identifier, required=False), "input": dataclasses.replace(text, required=True), "status": status},
         "custom_tool_call_output": {"call_id": identifier, "output": FieldSpec("any", required=True)},
         "additional_tools": {"role": FieldSpec("str", required=True, choices=("developer",)), "tools": FieldSpec("any", required=True)},
-        "reasoning": {"summary": FieldSpec("any"), "encrypted_content": FieldSpec("str", max_length=128_000), "content": FieldSpec("any"), "status": status,
-                      # OpenRouter's Azure Responses route returns an opaque
-                      # format tag with the encrypted item. Stateless replay
-                      # must retain it with the signed/opaque content and ID.
-                      "format": FieldSpec("str", min_length=1, max_length=128)},
+        "reasoning": {"summary": FieldSpec("any"), "encrypted_content": FieldSpec("str", max_length=128_000), "content": FieldSpec("any"), "status": status},
         "web_search_call": {
             "status": status,
             "action": FieldSpec("object", required=True),
         },
     }
+
+    if allow_full_thinking:
+        # Preserve the opaque provider tag only for the new protocol. Existing
+        # rounds retain the previous release's accepted schema and request hash.
+        item_fields["reasoning"]["format"] = FieldSpec("str", min_length=1, max_length=128)
 
     local_tool_fields = {"type": FieldSpec("str", required=True, choices=("function", "custom")), "name": identifier, "description": text}
 
@@ -1874,11 +1875,19 @@ def _validate_responses(parameters: Mapping[str, Any]) -> None:
         if not isinstance(value, list) or len(value) > OPENROUTER_MAX_MESSAGES:
             raise OperationRequestError("invalid_field", "$.input.content")
         for part in value:
-            normalized_part = _validate_object({
+            fields = {
                 "type": FieldSpec("str", required=True, choices=(("summary_text", "reasoning_text") if reasoning else ("input_text", "output_text"))),
                 "text": dataclasses.replace(text, required=True),
                 "annotations": FieldSpec("any"),
-            }, part, "$.input.content")
+            }
+            if allow_full_thinking and isinstance(part, Mapping) and part.get("type") == "output_text":
+                # Providers include this empty transport field even when no
+                # token probabilities were requested. Preserve replay shape.
+                fields["logprobs"] = FieldSpec("list[object]", max_length=OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS,
+                    fields={"token": text, "logprob": FieldSpec("float"),
+                            "bytes": FieldSpec("any"), "top_logprobs": FieldSpec("list[object]", max_length=20,
+                                fields={"token": text, "logprob": FieldSpec("float"), "bytes": FieldSpec("any")})})
+            normalized_part = _validate_object(fields, part, "$.input.content", limits=_RESPONSES_STRUCTURE_LIMITS)
             if "annotations" in normalized_part:
                 citation_annotations(normalized_part["annotations"])
 
@@ -2150,6 +2159,71 @@ def _query_value(value: Any) -> str:
     raise OperationRequestError("invalid_field")
 
 
+def _explicit_responses_open_maps(document: Dict[str, Any]) -> bool:
+    """Make only simple native open-map defaults explicit on a copied wire.
+
+    References, composition and unevaluated rules can make annotations affect
+    validation. Leave those schemas intact. Never walk example/default data.
+    https://json-schema.org/understanding-json-schema/reference/object#additionalproperties
+    """
+    unsupported = {
+        "$ref", "$dynamicRef", "$recursiveRef", "$defs", "definitions",
+        "allOf", "anyOf", "oneOf", "not", "if", "then", "else",
+        "unevaluatedProperties", "unevaluatedItems", "patternProperties",
+        "dependentSchemas", "dependencies", "propertyNames", "contains",
+        "prefixItems", "additionalItems", "contentSchema",
+    }
+
+    def children(schema):
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            yield from properties.values()
+        items = schema.get("items")
+        if isinstance(items, (dict, bool)):
+            yield items
+        elif isinstance(items, list):
+            yield from items
+
+    def simple(schema):
+        if isinstance(schema, bool):
+            return True
+        if not isinstance(schema, dict) or unsupported.intersection(schema):
+            return False
+        extra = schema.get("additionalProperties")
+        return (all(simple(child) for child in children(schema))
+                and (not isinstance(extra, dict) or simple(extra)))
+
+    def expand(schema):
+        if not isinstance(schema, dict):
+            return False
+        changed = False
+        if (schema.get("type") == "object" and schema.get("properties") == {}
+                and "additionalProperties" not in schema):
+            schema["additionalProperties"] = True
+            changed = True
+        for child in children(schema):
+            changed |= expand(child)
+        return changed
+
+    def tools(values):
+        changed = False
+        for tool in values:
+            if tool.get("type") == "namespace":
+                changed |= tools(tool["tools"])
+            elif tool.get("type") == "function" and tool.get("strict") is not True:
+                schema = tool.get("parameters")
+                if isinstance(schema, dict) and simple(schema):
+                    changed |= expand(schema)
+        return changed
+
+    changed = tools(document.get("tools", []))
+    if isinstance(document.get("input"), list):
+        for item in document["input"]:
+            if item.get("type") == "additional_tools":
+                changed |= tools(item["tools"])
+    return changed
+
+
 def build_outbound_request(
     operation_id: str,
     parameters: Any,
@@ -2180,6 +2254,20 @@ def build_outbound_request(
     if operation.parameter_location == "body":
         document = {name: value for name, value in normalized.items() if name not in operation.path_fields}
         document.update(_deep_copy_json(operation.fixed_params))
+        schema_expanded = False
+        if allow_full_thinking and operation_id == "openrouter.responses":
+            # Admission/hash/capture parameters remain the caller's originals.
+            # Only this outbound copy receives the equivalent open-map default.
+            document = _deep_copy_json(document)
+            schema_expanded = _explicit_responses_open_maps(document)
+        if (allow_full_thinking and operation_id == "openrouter.responses"
+                and document.get("parallel_tool_calls") is True):
+            # The conventional default permits parallel calls; it does not
+            # require them. Explicit true can exclude otherwise capable pinned
+            # endpoints under require_parameters. Keep the caller's original
+            # intent in hashed/captured parameters and preserve explicit false.
+            # https://openrouter.ai/docs/api_reference/parameters#parallel-tool-calls
+            document.pop("parallel_tool_calls")
         if openrouter_provider_policy is not None:
             if operation_id not in {"openrouter.chat", "openrouter.responses"} or not isinstance(
                 operation.fixed_params.get("provider"), Mapping
@@ -2240,6 +2328,13 @@ def build_outbound_request(
             document["provider"] = policy
         document = _wrap_body(operation, normalized, document, deepline_catalog=deepline_catalog)
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if schema_expanded:
+            try:
+                contracts.check_strict_document(document, _RESPONSES_STRUCTURE_LIMITS)
+            except contracts.ArenaContractError as exc:
+                raise OperationRequestError("invalid_request") from exc
+            if len(body) > operation.max_request_bytes:
+                raise OperationRequestError("request_too_large")
         return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential, operation.outbound_headers)
     query: Dict[str, str] = {name: _query_value(value) for name, value in normalized.items()}
     for name, value in operation.fixed_params.items():

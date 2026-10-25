@@ -4,6 +4,20 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '30s';
 
+-- Transferring the new functions requires CREATE for the target owner even
+-- when the release role is already its member. Restore the exact schema ACL.
+CREATE TEMP TABLE arena567_acl ON COMMIT DROP AS
+SELECT nspacl AS acl,
+  has_schema_privilege('lab_arena_owner','public','CREATE') AS had_create
+FROM pg_namespace WHERE nspname='public';
+DO $grant567$
+BEGIN
+  IF NOT (SELECT had_create FROM pg_temp.arena567_acl) THEN
+    GRANT CREATE ON SCHEMA public TO lab_arena_owner;
+  END IF;
+END;
+$grant567$;
+
 CREATE INDEX IF NOT EXISTS lab_arena_rounds_promoted_champion_idx
   ON public.lab_arena_rounds (
     arena_network_name, arena_netuid, baseline_promoted_at DESC, round_id DESC
@@ -248,5 +262,17 @@ REVOKE ALL ON FUNCTION public.lab_arena_freeze_full_thinking_baseline_v1(
   FROM PUBLIC, anon, authenticated, service_role, lab_arena_service;
 GRANT EXECUTE ON FUNCTION public.lab_arena_freeze_full_thinking_baseline_v1(
   TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT,TEXT) TO lab_arena_service;
+
+DO $restore567$
+BEGIN
+  IF NOT (SELECT had_create FROM pg_temp.arena567_acl) THEN
+    REVOKE CREATE ON SCHEMA public FROM lab_arena_owner;
+  END IF;
+  IF (SELECT nspacl FROM pg_namespace WHERE nspname='public') IS DISTINCT FROM
+      (SELECT acl FROM pg_temp.arena567_acl) THEN
+    RAISE EXCEPTION 'full-thinking baseline schema ACL changed' USING ERRCODE = '42501';
+  END IF;
+END;
+$restore567$;
 
 COMMIT;

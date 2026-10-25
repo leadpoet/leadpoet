@@ -292,6 +292,16 @@ def _training_coverage_from_environment() -> int:
         raise ServiceError("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT must be an integer within 1..100", 500) from None
 
 
+def _missing_reasoning_from_environment() -> int:
+    raw = os.environ.get("LAB_ARENA_TRAINING_MAXIMUM_MISSING_REASONING_PERCENT", "").strip()
+    try:
+        value = int(raw) if raw else training_coverage.NEW_MISSING_REASONING_PERCENT
+        return training_coverage.missing_reasoning_percent_from_configuration(
+            {training_coverage.MISSING_REASONING_SETTING: value})
+    except ValueError:
+        raise ServiceError("LAB_ARENA_TRAINING_MAXIMUM_MISSING_REASONING_PERCENT must be an integer within 0..100", 500) from None
+
+
 def _rewards_enabled_from_environment() -> bool:
     """Freeze LAB_ARENA_REWARDS_ENABLED into each new live round."""
 
@@ -552,6 +562,7 @@ def build_service_from_environment(mode: str):
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
         reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
         training_minimum_icp_coverage_percent=_training_coverage_from_environment(),
+        training_maximum_missing_reasoning_percent=_missing_reasoning_from_environment(),
         reasoning_baseline_source_sha256=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256") or None,
         reasoning_baseline_source_url=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_URL") or None,
         benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,

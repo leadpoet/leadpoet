@@ -636,11 +636,14 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
     socket_api = None
     socket_state = None
     previous_socket = os.environ.get(shim.WORKER_SOCKET_ENV)
+    previous_policy = os.environ.get(shim.REASONING_POLICY_ENV)
     if worker_socket:
         if backend.run is None:
             raise ValueError("disposable_run_missing")
         lease = dict(backend.run)
         lease["kind"] = "execute"
+        if context.reasoning_capture_policy is not None:
+            lease["reasoning_capture_policy"] = context.reasoning_capture_policy
         socket_state = runner.RunState(lease=lease, lease_token="capture-probe-local-socket")
         socket_api = BrokerSocketApi(broker, context)
         socket_dir = Path(tempfile.mkdtemp(prefix="ar-probe-", dir="/tmp"))
@@ -655,6 +658,8 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
         socket_server._responses_rate_limit_delay = lambda call, retry: None
         socket_server.start()
         os.environ[shim.WORKER_SOCKET_ENV] = str(socket_dir / "w.sock")
+        if context.reasoning_capture_policy is not None:
+            os.environ[shim.REASONING_POLICY_ENV] = context.reasoning_capture_policy
     messages = copy.deepcopy(spec["initial"])
     spent = Decimal(0)
     reserved_uncertain = Decimal(0)
@@ -677,6 +682,14 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                                             route, responses_compat=diagnostic_responses_compat))
                            if mode == "summary_diagnostic" else nullcontext())
             original_build = operations.build_outbound_request
+            original_validate = operations.validate_operation_request
+
+            def diagnostic_validate(selected_operation, parameters, **kwargs):
+                # Keep new continuation shapes local to this isolated probe.
+                # Production rounds with no capture policy retain main's schema.
+                if selected_operation == operation_id:
+                    kwargs["allow_full_thinking"] = True
+                return original_validate(selected_operation, parameters, **kwargs)
 
             def diagnostic_build(selected_operation, parameters, **kwargs):
                 # The operation validator only accepts a single exact pin when
@@ -704,7 +717,10 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
             build_scope = (patch.object(operations, "build_outbound_request",
                                         side_effect=diagnostic_build)
                            if mode == "summary_diagnostic" else nullcontext())
-            with route_scope, build_scope:
+            validation_scope = (patch.object(operations, "validate_operation_request",
+                                             side_effect=diagnostic_validate)
+                                if mode == "summary_diagnostic" else nullcontext())
+            with route_scope, build_scope, validation_scope:
                 parameters = _parameters(
                     model, messages, turn, operation_id, mode, route,
                     diagnostic_tool_choice_auto=diagnostic_tool_choice_auto,
@@ -766,6 +782,10 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                 os.environ.pop(shim.WORKER_SOCKET_ENV, None)
             else:
                 os.environ[shim.WORKER_SOCKET_ENV] = previous_socket
+            if previous_policy is None:
+                os.environ.pop(shim.REASONING_POLICY_ENV, None)
+            else:
+                os.environ[shim.REASONING_POLICY_ENV] = previous_policy
             shutil.rmtree(socket_dir)
             try:
                 payload = socket_state.worker_observations.document()

@@ -234,7 +234,9 @@ def test_responses_summary_only_candidate_stays_diagnostic(tmp_path):
         metadata["endpoints"]["available"] = [
             dict(item, model=candidate["model_version"])
             for item in metadata["endpoints"]["available"]]
-        output = [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "brief"}]}]
+        output = [{"type": "reasoning", "format": "azure-openai-responses-v1",
+                   "encrypted_content": "opaque-dummy-token",
+                   "summary": [{"type": "summary_text", "text": "brief"}]}]
         if turn < 2:
             output.append({"type": "function_call", "call_id": f"call-{turn}",
                            "name": "lookup_evidence",

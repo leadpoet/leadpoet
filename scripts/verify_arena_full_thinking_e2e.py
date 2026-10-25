@@ -217,8 +217,8 @@ def _capture_private_ledger(harness: "FullThinkingHarness", report: Path,
                  sha256=contracts.hash_bytes(encoded))
 
 
-def full_thinking_database():
-    """Disposable current authority through the full-thinking source freeze."""
+def full_thinking_database(*, production_order: bool = True):
+    """Disposable current mainline and full-thinking PostgreSQL authority."""
     # The 538 fixture carries the 517 write-once trigger and scorer history.
     # It omits several independently tested mainline branches. Apply their
     # exact guarded migrations before the post-538 tail; the dated 542-546
@@ -230,7 +230,7 @@ def full_thinking_database():
         connection.autocommit = True  # Mainline concurrent index migrations require it.
         try:
             with connection.cursor() as cursor:
-                for name in (
+                migrations = (
                     "462-lab-arena-deepline-native-settlement-binding.sql",
                     "505-lab-arena-execute-reconciliation-run-scope.sql",
                     "506-lab-arena-closed-reconciliation-eligible-run-scope.sql",
@@ -271,7 +271,15 @@ def full_thinking_database():
                     "569-lab-arena-training-publication-eligibility.sql",
                     "570-lab-arena-confirmed-full-thinking-final-cost.sql",
                     "571-lab-arena-closed-failed-score-host-recovery.sql",
-                ):
+                    "572-lab-arena-concurrent-baseline-judging.sql",
+                    "573-lab-arena-closed-provider-eligible-run-materialization.sql",
+                )
+                if production_order:
+                    # Production already has main's 571-573. Verify the PR
+                    # against that authority, while tests also cover numeric order.
+                    pr_tail = tuple(name for name in migrations if 565 <= int(name[:3]) <= 570)
+                    migrations = tuple(name for name in migrations if name not in pr_tail) + pr_tail
+                for name in migrations:
                     cursor.execute((REPO / "scripts" / name).read_text())
         finally:
             connection.close()
@@ -950,7 +958,9 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
                 harness.service.store.get_submission(identity),
                 {item["run_id"]: item for item in records},
                 [item["run_id"] for item in records], enabled=True,
-                minimum_coverage_percent=minimum_coverage)
+                minimum_coverage_percent=minimum_coverage,
+                maximum_missing_reasoning_percent=(
+                    training_coverage.missing_reasoning_percent_from_configuration(config)))
         evidence.add("stored_capture_eligibility", round_id=row["round_id"], roles=capture_reports)
         strict_coverage = _require_strict_exports(
             (executions, scores, per_icp, combined),

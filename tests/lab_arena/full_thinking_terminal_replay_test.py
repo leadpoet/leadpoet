@@ -37,7 +37,7 @@ def _settled_call(*, matched=False):
     first = instance.execute(context, **arguments)
     assert first.status == 200
     terminal = store.calls[first.call["call_identity"]]["terminal"]
-    assert "reasoning_route_observation" in terminal
+    assert "reasoning_route_observation" in br.broker_observations(terminal)
     return instance, store, transport, context, arguments, first, terminal
 
 
@@ -46,7 +46,7 @@ def test_full_thinking_settlement_replays_exact_response_without_second_provider
     instance, store, transport, context, arguments, first, terminal = _settled_call(
         matched=matched
     )
-    assert terminal["reasoning_route_observation"]["status"] == (
+    assert br.broker_observations(terminal)["reasoning_route_observation"]["status"] == (
         "matched" if matched else "unverified"
     )
     before = deepcopy(terminal)
@@ -72,7 +72,7 @@ def test_full_thinking_settlement_replays_exact_response_without_second_provider
 ])
 def test_replay_rejects_malformed_reasoning_route_observation(change):
     instance, store, transport, context, arguments, first, terminal = _settled_call()
-    change(terminal["reasoning_route_observation"])
+    change(br.broker_observations(terminal)["reasoning_route_observation"])
 
     with pytest.raises(br.BrokerError, match="broker_unavailable"):
         br._decode_terminal(terminal)
@@ -85,7 +85,7 @@ def test_replay_rejects_malformed_reasoning_route_observation(change):
 
 def test_legacy_terminal_without_observation_still_replays():
     instance, store, transport, context, arguments, first, terminal = _settled_call()
-    terminal.pop("reasoning_route_observation")
+    terminal["upstream_response_receipt"]["broker_observations"].pop("reasoning_route_observation")
 
     replay = instance.execute(context, **arguments)
 

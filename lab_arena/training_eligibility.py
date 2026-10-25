@@ -85,26 +85,35 @@ def _all_model_routes_verified(example, run_id):
         return False
     registry = (example.get("configuration") or {}).get("reasoning_route_registry")
     try:
-        return all((state := training_thinking.attempt_coverage(
-            call, example.get("role", "miner"), registry))["route_reviewed"]
-            and state["provider_route_verified"] for call in calls)
+        new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
+        return all(new_policy and training_thinking.verified_failed_attempt(example, call) or (
+            (state := training_thinking.attempt_coverage(
+                call, example.get("role", "miner"), registry))["route_reviewed"]
+            and state["provider_route_verified"]) for call in calls)
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
 
 
-def _only_benign_thinking_gaps(example, run_id):
+def _only_benign_thinking_gaps(example, run_id, *, new_policy=False):
     """Verified omissions and length stops share one incomplete ICP budget."""
     calls = [call for call in example.get("provider_calls") or []
              if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
     registry = (example.get("configuration") or {}).get("reasoning_route_registry")
     try:
-        states = [training_thinking.attempt_coverage(call, example.get("role", "miner"), registry)
-                  for call in calls]
-        return bool(states) and any(state["returned"] in {"requested_empty", "truncated"}
-                                    for state in states) and all(
+        checked = [training_thinking.full_text_segments(call, example.get("role", "miner"), registry)
+                   for call in calls if not (new_policy and training_thinking.verified_failed_attempt(example, call))]
+        # An execution with only verified failed calls has no training target.
+        # It consumes an incomplete ICP, while every failed receipt stays proven.
+        if not checked:
+            return bool(calls)
+        # Coverage labels preserve ancillary summaries and removed opaque state.
+        # Admission uses the proven segments instead of those display labels.
+        return any(state["returned"] in {"requested_empty", "truncated", "missing_thinking", "summary", "opaque"}
+                                     and not full for full, state in checked) and all(
             state["route_reviewed"] and state["provider_route_verified"]
-            and state["returned"] in {"requested_empty", "truncated", "full_thinking"}
-            for state in states)
+            and (full or state["returned"] in {"requested_empty", "truncated", "missing_thinking"}
+                 or new_policy and training_thinking.verified_missing_thinking(state))
+            for full, state in checked)
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
 
@@ -119,10 +128,19 @@ def _documented_selected_privacy_gap(example, run_id):
         for call in example.get("provider_calls") or [])
 
 
-def _selected_cost_gap_verified(example, run_id):
-    """Recognize an uncertain charge only after selected receipt proof survives."""
+def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
+    """Recognize an uncertain charge only after selected receipt proof survives.
+
+    Only the separately proved source-timeout path can supply the missing
+    source dimension. All input/output and provider evidence remains required.
+    """
     proof = example.get("completeness") or {}
-    reasons = set(proof.get("incomplete_reasons") or [])
+    source_reasons = {"source_unverified"} if unavailable_source else set()
+    new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
+    stored_reasons = set(proof.get("incomplete_reasons") or [])
+    if not source_reasons <= stored_reasons:
+        return False
+    reasons = stored_reasons - source_reasons
     cost_snapshot_unavailable = ((example.get("competition_cost_eligibility") or {}).get("status")
                                  == "unavailable")
     call_allowed = {"provider_cost_unresolved", "response_privacy_nonexact"}
@@ -134,7 +152,9 @@ def _selected_cost_gap_verified(example, run_id):
     dimensions = proof.get("dimensions") or {}
     by_dimension = proof.get("reasons_by_dimension") or {}
     if (any(dimensions.get(name) is not True or by_dimension.get(name) != []
-            for name in ("context", "source_identity", "exact_inputs", "input_output_label"))
+            for name in ("context", "exact_inputs", "input_output_label"))
+            or dimensions.get("source_identity") is not (not source_reasons)
+            or set(by_dimension.get("source_identity") or []) != source_reasons
             or dimensions.get("costs") is not False
             or dimensions.get("research_process") is not False
             or set(by_dimension.get("costs") or []) != (
@@ -172,7 +192,8 @@ def _selected_cost_gap_verified(example, run_id):
                 or type(call.get("terminal_entry_id")) is not int
                 or call["terminal_entry_id"] < 1):
                 return False
-            if call.get("operation_id") in reasoning_capture.OPERATIONS:
+            if (call.get("operation_id") in reasoning_capture.OPERATIONS
+                    and not (new_policy and training_thinking.verified_failed_attempt(example, call))):
                 try:
                     training_steps._candidate(example, call)
                 except ValueError as exc:
@@ -296,6 +317,8 @@ def _selected_privacy_cascade_verified(example, run_id):
             return False
         for call in selected:
             gaps = set(call.get("evidence_gaps") or [])
+            if call.get("accounting_state") == "refusal" and training_thinking.verified_failed_attempt(example, call):
+                continue
             if call.get("accounting_state") != "settlement" or type(call.get("actual_microusd")) is not int:
                 return False
             if call.get("operation_id") in reasoning_capture.OPERATIONS:
@@ -358,10 +381,172 @@ def _selected_privacy_cascade_verified(example, run_id):
     return True
 
 
+def _transient_artifact_gap_verified(example, submission, artifacts):
+    """Bind retryable object gaps without excusing any retained evidence error.
+
+    The service supplies only saved references which exhausted retryable
+    storage reads. Missing objects, access denial and malformed bytes never
+    produce this marker. The completed export still checks all other paths.
+    """
+    if not isinstance(artifacts, Mapping) or not artifacts or not set(artifacts) <= {
+            "source", "benchmark", "input", "judge_input", "judge_output"}:
+        return False
+    try:
+        run_id, round_id = example["run_id"], example["round_id"]
+        if any(not isinstance(ref, str) or not ref for ref in artifacts.values()):
+            return False
+        attempts = {row["run_id"]: row for row in example.get("attempts") or []}
+        expected = {name: set() for name in (
+            "context", "source_identity", "exact_inputs", "input_output_label", "costs", "research_process")}
+        missing_inputs = set()
+        if "source" in artifacts:
+            if (artifacts["source"] != "arena/%s/sources/%s.tar.gz" % (round_id, submission["submission_id"])
+                    or example.get("source") is not None):
+                return False
+            expected["source_identity"].add("source_unverified")
+        if "benchmark" in artifacts:
+            if example.get("icp") is not None:
+                return False
+            expected["context"].add("frozen_icp_unavailable")
+            expected["input_output_label"].add("frozen_context_unverified")
+        for kind in ("input", "judge_input"):
+            if kind not in artifacts:
+                continue
+            matching = [key for key, row in attempts.items()
+                        if artifacts[kind] == "private/arena-training/runs/%s/leases/%s/input.json.gz" % (
+                            key, row.get("lease_generation"))
+                        and ((kind == "input" and key == run_id and row.get("kind") == "execute")
+                             or (kind == "judge_input" and row.get("kind") == "score"))]
+            if len(matching) != 1 or matching[0] in (example.get("input_snapshots") or {}):
+                return False
+            missing_inputs.add(matching[0])
+            expected["exact_inputs"].add("runtime_input_snapshot_missing")
+            expected["research_process"].add("runtime_input_snapshot_missing")
+        if "judge_output" in artifacts:
+            if (example.get("judgment") is not None or example.get("score_run_id") is not None
+                    or not any(row.get("kind") == "score" and row.get("status") == "accepted"
+                               and artifacts["judge_output"] == "arena/%s/outputs/%s.json" % (round_id, key)
+                               for key, row in attempts.items())):
+                return False
+            expected["input_output_label"].add("judge_evidence_unverified")
+            expected["research_process"].add("judge_evidence_unverified")
+        proof = example.get("completeness") or {}
+        by_dimension = proof.get("reasons_by_dimension") or {}
+        dimensions = proof.get("dimensions") or {}
+        reasons = set().union(*expected.values())
+        # Source bytes can be unavailable at the same time that a selected
+        # provider bill is unsettled. Prove the source marker above, then
+        # reuse the exact cost/receipt verifier without rewriting raw proof.
+        # Missing input or judgment evidence cannot use this exception.
+        if "credential" in ((example.get("privacy") or {}).get("context_redactions") or []):
+            return False
+        if (set(artifacts) == {"source"} and proof.get("complete") is False
+                and all(not call.get("evidence_gaps") for call in example.get("provider_calls") or []
+                        if call.get("run_id") != run_id)
+                and _selected_cost_gap_verified(example, run_id, unavailable_source=True)):
+            return True
+        if (proof.get("complete") is not False or set(proof.get("incomplete_reasons") or []) != reasons
+                or any(set(by_dimension.get(key) or []) != value
+                       or dimensions.get(key) is not (not value) for key, value in expected.items())
+                or "credential" in ((example.get("privacy") or {}).get("context_redactions") or [])):
+            return False
+        output = example.get("output")
+        if not training_thinking.verified_output_projection(example):
+            return False
+        snapshots = example.get("input_snapshots") or {}
+        if run_id not in snapshots and run_id not in missing_inputs:
+            return False
+        for snapshot in snapshots.values():
+            document = snapshot.get("input")
+            if (not isinstance(document, Mapping)
+                    or snapshot.get("input_sha256") != contracts.document_hash(document)
+                    or (snapshot.get("privacy") or {}).get("redacted") is not False):
+                return False
+        # Every retained provider call still has to prove its own exact data.
+        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        for call in example.get("provider_calls") or []:
+            if call.get("evidence_gaps"):
+                return False
+            if call.get("run_id") != run_id:
+                continue
+            if call.get("accounting_state") == "refusal" and training_thinking.verified_failed_attempt(example, call):
+                continue
+            if (call.get("accounting_state") != "settlement"
+                    or type(call.get("actual_microusd")) is not int):
+                return False
+            if call.get("operation_id") in reasoning_capture.OPERATIONS:
+                if (training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
+                        and training_thinking.verified_failed_attempt(example, call)):
+                    continue
+                try:
+                    training_steps._candidate(example, call)
+                except ValueError as exc:
+                    state = training_thinking.attempt_coverage(call, example.get("role", "miner"), registry)
+                    if (str(exc) != "response_not_complete" or state["returned"] != "truncated"
+                            or not state["route_reviewed"] or not state["provider_route_verified"]):
+                        return False
+            else:
+                # The exporter validated the graph. Recheck retained request and
+                # response hashes so an availability marker cannot hide tamper.
+                request = call.get("request") or {}
+                response = call.get("response")
+                if (request.get("operation_id") != call.get("operation_id")
+                        or request.get("request_hash") != call.get("request_hash")
+                        or not isinstance(request.get("hashed_parameters"), Mapping)
+                        or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
+                        or not isinstance(response, Mapping)
+                        or contracts.document_hash(response) != call.get("response_sha256")
+                        or (call.get("request_capture") or {}).get("redacted")
+                        or call.get("response_privacy_redactions")):
+                    return False
+                artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+                payload = artifact.get("payload") or {}
+                payload_hash = contracts.document_hash(payload)
+                provenance = call.get("response_provenance") or {}
+                worker_ref = provenance.get("worker_receipt_ref") or {}
+                if (artifact.get("payload_sha256") != payload_hash
+                        or provenance.get("agent_receipt") != "reported_exact_body_received"
+                        or provenance.get("delivery_to_worker") != "socket_written"
+                        or worker_ref.get("run_id") != run_id
+                        or worker_ref.get("payload_sha256") != payload_hash):
+                    return False
+                writes = [row for row in payload.get("response_receipts") or []
+                          if row.get("ordinal") == worker_ref.get("ordinal")
+                          and row.get("call_identity") == call.get("call_identity")
+                          and row.get("operation_id") == call.get("operation_id")
+                          and row.get("action_sequence") == call.get("action_sequence")
+                          and row.get("write_state") == "socket_written"]
+                refs = provenance.get("agent_receipt_refs") or []
+                reads = [row for row in payload.get("agent_observations") or []
+                         if row.get("kind") == "response_received" and any(
+                             ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                             and ref.get("payload_sha256") == payload_hash for ref in refs)]
+                receipts = [row for row in call.get("response_receipts") or []
+                            if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
+                            and row.get("response_sha256") == call.get("response_sha256")
+                            and not row.get("privacy_redactions")]
+                if (len(writes) != 1 or not reads or not receipts
+                        or any((row.get("privacy") or {}).get("redacted") is not False for row in reads)
+                        or not all(any(
+                            (read.get("data") or {}).get("call_identity") == call.get("call_identity")
+                            and (read.get("data") or {}).get("status") == (receipt.get("metadata") or {}).get("status")
+                            and all((read.get("data") or {}).get(key) == writes[0].get(key)
+                                    for key in ("status", "body_sha256", "body_bytes"))
+                            and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
+                            and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
+                            for receipt in receipts) for read in reads)):
+                    return False
+        return True
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | None],
                    selected_run_ids: Sequence[str], *, enabled: bool,
                    minimum_coverage_percent: int = 100,
-                   unavailable_outputs: Mapping[str, str] | None = None) -> dict:
+                   maximum_missing_reasoning_percent: int = 0,
+                   unavailable_outputs: Mapping[str, str] | None = None,
+                   unavailable_artifacts: Mapping[str, Mapping[str, str]] | None = None) -> dict:
     """Check each selected final execute run against its persisted raw export.
 
     A missing export or malformed record is an ineligible result, never an
@@ -370,6 +555,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
     """
     if not enabled:
         return _result([], enabled=0)
+    if type(maximum_missing_reasoning_percent) is not int or not 0 <= maximum_missing_reasoning_percent <= 100:
+        raise ValueError("invalid_maximum_missing_reasoning_percent")
     selected = list(selected_run_ids)
     required = (training_coverage.required_count(len(selected), minimum_coverage_percent)
                 if selected else 0)
@@ -377,6 +564,12 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
               "model_calls": 0, "full_thinking_calls": 0, "tool_only_empty_calls": 0,
               "required_complete_runs": required, "complete_runs": 0,
               "incomplete_runs": 0, "minimum_coverage_percent": minimum_coverage_percent}
+    reasoning_totals = {"completed_untruncated_verified_reasoning_tokens": 0,
+                        "missing_reasoning_tokens": 0, "missing_reasoning_calls": 0,
+                        "unknown_reasoning_usage_calls": 0, "truncated_model_calls": 0,
+                        "verified_failed_model_attempts": 0}
+    reasoning_by_run = []
+    policy_stats_enabled = False
     reasons = []
     if not selected or len(set(selected)) != len(selected) or any(not isinstance(item, str) or not item for item in selected):
         return _result(["selected_runs_invalid"], **counts)
@@ -387,6 +580,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
         reasons.append("source_archive_hash_missing")
     for run_id in selected:
         run_reasons = []
+        reasoning_counts = {key: 0 for key in reasoning_totals}
         example = examples_by_run.get(run_id)
         if not isinstance(example, Mapping):
             run_reasons.append("selected_run_export_missing")
@@ -395,6 +589,11 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 reasons.extend(run_reasons)
             continue
         counts["checked_runs"] += 1
+        new_policy = (isinstance(example.get("configuration"), Mapping)
+                      and training_coverage.MISSING_REASONING_SETTING in example["configuration"])
+        policy_stats_enabled |= new_policy
+        transient_verified = _transient_artifact_gap_verified(
+            example, submission, (unavailable_artifacts or {}).get(run_id))
         try:
             source = example.get("source") or {}
             baseline_source_ok = (baseline and source_digest in (None, "")
@@ -407,27 +606,35 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     or example.get("run_id") != run_id
                     or example.get("submission_id") != submission.get("submission_id")
                     or example.get("role") != ("baseline" if baseline else "miner")
-                    or not (isinstance(source.get("sha256"), str)
-                            and contracts.SHA256_RE.fullmatch(source["sha256"]) is not None
-                            and (source["sha256"] == source_digest or baseline_source_ok))
-                    or (example.get("configuration") or {}).get("reasoning_capture_policy") != reasoning_capture.POLICY):
+                    or not ((isinstance(source.get("sha256"), str)
+                             and contracts.SHA256_RE.fullmatch(source["sha256"]) is not None
+                             and (source["sha256"] == source_digest or baseline_source_ok))
+                            or transient_verified and "source" in (unavailable_artifacts or {}).get(run_id, {}))
+                    or (example.get("configuration") or {}).get("reasoning_capture_policy") != reasoning_capture.POLICY
+                    or training_coverage.missing_reasoning_percent_from_configuration(
+                        example.get("configuration") or {}) != maximum_missing_reasoning_percent):
                 run_reasons.append("selected_run_identity_unverified")
                 continue
             # A self-contradictory completeness flag cannot hide an unsettled
             # selected call. The narrow 80% verifier below must prove it.
-            if any(call.get("run_id") == run_id and (
+            if any(call.get("run_id") == run_id
+                    and not (new_policy and call.get("accounting_state") == "refusal"
+                             and training_thinking.verified_failed_attempt(example, call)) and (
                     call.get("accounting_state") != "settlement"
                     or type(call.get("actual_microusd")) is not int)
                     for call in example.get("provider_calls") or []):
                 run_reasons.append("trajectory_evidence_incomplete")
                 continue
             ancillary_gaps = training_thinking.selected_research_evidence(example)
+            if transient_verified:
+                ancillary_gaps = frozenset((example.get("completeness") or {}).get("incomplete_reasons") or [])
+                run_reasons.append("selected_artifact_temporarily_unavailable")
             if ancillary_gaps is None:
                 run_reasons.append("trajectory_evidence_incomplete")
                 continue
             if (not isinstance(example.get("output"), Mapping)
                     or not isinstance(example.get("input_snapshots"), Mapping)
-                    or run_id not in example["input_snapshots"]):
+                    or run_id not in example["input_snapshots"] and not transient_verified):
                 run_reasons.append("input_or_output_unavailable")
                 continue
             report = training_thinking.readable_trace(example)
@@ -444,6 +651,9 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
             has_full = False
             for index, call in calls:
                 counts["model_calls"] += 1
+                if new_policy and training_thinking.verified_failed_attempt(example, call):
+                    reasoning_counts["verified_failed_model_attempts"] += 1
+                    continue
                 try:
                     candidate = training_steps._candidate(example, call)
                 except ValueError as exc:
@@ -451,12 +661,14 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     # exact response hash, and privacy before parsing the
                     # target. A provider's explicit length stop can therefore
                     # consume one incomplete ICP without excusing bad proof.
-                    if minimum_coverage_percent < 100 and str(exc) == "response_not_complete":
+                    if str(exc) == "response_not_complete":
                         state = training_thinking.attempt_coverage(
                             call, example.get("role", "miner"), registry)
                         if (state["returned"] == "truncated" and state["route_reviewed"]
                                 and state["provider_route_verified"]):
-                            run_reasons.append("provider_response_truncated")
+                            reasoning_counts["truncated_model_calls"] += 1
+                            if not new_policy:
+                                run_reasons.append("provider_response_truncated")
                             continue
                     raise
                 digest = candidate["source_refs"][0]["delivered_response_sha256"]
@@ -467,14 +679,24 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 if not status["route_reviewed"] or not status["provider_route_verified"]:
                     run_reasons.append("full_thinking_route_unverified")
                     continue
+                tokens = status["tokens_reported"]
+                if tokens is None:
+                    reasoning_counts["unknown_reasoning_usage_calls"] += 1
+                else:
+                    reasoning_counts["completed_untruncated_verified_reasoning_tokens"] += tokens
                 if full_segments:
                     if not _readable_full_segments(example, report, index, delivered, full_segments):
                         run_reasons.append("readable_full_thinking_unverified")
                     else:
                         counts["full_thinking_calls"] += 1
                         has_full = True
-                elif training_thinking.verified_tool_only_empty(call, delivered, status):
+                elif (training_thinking.verified_no_thinking(call, delivered, status)
+                      if new_policy else
+                      training_thinking.verified_tool_only_empty(call, delivered, status)):
                     counts["tool_only_empty_calls"] += 1
+                elif new_policy and training_thinking.verified_missing_thinking(status):
+                    reasoning_counts["missing_reasoning_calls"] += 1
+                    reasoning_counts["missing_reasoning_tokens"] += tokens
                 else:
                     run_reasons.append("full_thinking_unavailable")
             if not has_full:
@@ -482,6 +704,14 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
         except (KeyError, IndexError, TypeError, ValueError, AttributeError):
             run_reasons.append("selected_run_evidence_invalid")
         finally:
+            if new_policy:
+                reasoning_by_run.append({"run_id": run_id, **reasoning_counts})
+                for key, value in reasoning_counts.items():
+                    reasoning_totals[key] += value
+                if (reasoning_counts["missing_reasoning_tokens"] * 100
+                        > reasoning_counts["completed_untruncated_verified_reasoning_tokens"]
+                        * maximum_missing_reasoning_percent):
+                    run_reasons.append("missing_reasoning_share_exceeded")
             unavailable_ref = (unavailable_outputs or {}).get(run_id)
             if unavailable_ref is not None:
                 identity = example.get("output_identity") or {}
@@ -506,10 +736,17 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     # length stop. Mixed verified gaps consume the same ICP;
                     # route, receipt and other evidence failures remain hard.
                     soft = ({"provider_response_truncated", "full_thinking_unavailable",
-                             "full_thinking_call_missing"}
-                            if _only_benign_thinking_gaps(example, run_id) else set())
+                             "full_thinking_call_missing", "missing_reasoning_share_exceeded"}
+                            if _only_benign_thinking_gaps(
+                                example, run_id, new_policy=new_policy)
+                            else set())
                     if unavailable_ref is not None:
                         soft.add("accepted_output_unavailable")
+                    if transient_verified:
+                        soft.add("selected_artifact_temporarily_unavailable")
+                        # A composed source/cost proof already checked every
+                        # retained input, route and receipt before this gate.
+                        soft.add("trajectory_evidence_incomplete")
                     if set(run_reasons) - {"accepted_output_unavailable"} == {
                             "trajectory_evidence_incomplete"}:
                         proof_reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])
@@ -524,6 +761,10 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     reasons.extend(reason for reason in run_reasons if reason not in soft)
             else:
                 counts["complete_runs"] += 1
+    if policy_stats_enabled:
+        counts.update(reasoning_totals)
+        counts["maximum_missing_reasoning_percent"] = maximum_missing_reasoning_percent
+        counts["reasoning_by_run"] = reasoning_by_run
     if minimum_coverage_percent < 100 and counts["complete_runs"] < required:
         reasons.append("training_coverage_incomplete")
     if minimum_coverage_percent == 100:

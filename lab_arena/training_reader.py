@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime, timezone
+import time
 
 from lab_arena.training_export import ExportError, _select_judge, assemble_example
 
@@ -15,6 +15,8 @@ class AvailabilityReadView:
         self.objects = objects
         self.verified_fallback = verified_fallback or {}
         self.unavailable = {}
+        self.transient_failures: dict[str, str] = {}
+        self.artifact_refs: dict[str, str] = {}
 
     def _fallback(self, ref, limit, reason):
         cached = self.verified_fallback.get(ref)
@@ -27,21 +29,11 @@ class AvailabilityReadView:
 
     @staticmethod
     def _retryable(error):
-        # Botocore retries internally too, but a final timeout or retryable
-        # service response can still clear on one fresh read at publication.
-        from botocore.exceptions import (ConnectTimeoutError, ConnectionClosedError,
-                                        EndpointConnectionError, ReadTimeoutError)
-        if isinstance(error, (ConnectTimeoutError, ConnectionClosedError,
-                              EndpointConnectionError, ReadTimeoutError)):
-            return True
-        response = getattr(error, "response", None)
-        if not isinstance(response, Mapping):
-            return False
-        code = (response.get("Error") or {}).get("Code")
-        status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
-        return code in {"RequestTimeout", "RequestTimeoutException", "SlowDown", "InternalError", "ServiceUnavailable"} or status in {429, 500, 502, 503, 504}
+        from lab_arena.training_capture import retryable_storage_error
+        return retryable_storage_error(error)
 
     def get_bounded(self, ref, limit):
+        self.transient_failures.pop(ref, None)
         for attempt in range(2):
             try:
                 optional = getattr(self.objects, "get_optional_bounded", None)
@@ -61,7 +53,9 @@ class AvailabilityReadView:
             except Exception as exc:
                 if self._retryable(exc):
                     if attempt == 0:
+                        time.sleep(0.05)
                         continue
+                    self.transient_failures[ref] = "transient"
                     cached = self._fallback(ref, limit, "transient")
                     if cached is not None:
                         return cached
@@ -118,9 +112,26 @@ def export_run(store, objects, run_id):
             cached = store.get_company_judgment(*identity)
             if cached is not None:
                 company_rows[identity] = cached
+    judge = _select_judge(execution, runs, scoring_generation_floor=generation_floor)
+    if isinstance(objects, AvailabilityReadView):
+        from lab_arena.training_input import object_ref
+
+        def input_ref(row):
+            try:
+                return object_ref(row["run_id"], row.get("lease_generation"))
+            except ValueError:
+                # Assembly still validates invalid saved input identities.
+                return None
+
+        refs = {"source": submission.get("source_ref"),
+                "benchmark": round_row.get("benchmark_ref"),
+                "input": input_ref(execution)}
+        if judge is not None:
+            refs.update(judge_output=judge.get("output_ref"), judge_input=input_ref(judge))
+        objects.artifact_refs = {kind: ref for kind, ref in refs.items()
+                                 if isinstance(ref, str) and ref}
     signal_uses, signal_rows, signal_source_ledger = [], {}, []
     if ((round_row.get("configuration_doc") or {}).get("scorer_policy") or {}).get("signal_judgment_policy") == "signal_judgment_v1":
-        judge = _select_judge(execution, runs, scoring_generation_floor=generation_floor)
         if judge is not None:
             origin_ids = {row["source_score_run_id"] for row in company_rows.values()}
             for score_id in sorted({judge["run_id"]} | origin_ids):

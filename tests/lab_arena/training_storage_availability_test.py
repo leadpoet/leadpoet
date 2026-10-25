@@ -114,6 +114,7 @@ def test_cached_exact_bytes_preserve_normal_export_proof(tmp_path):
     assert view.unavailable == {ref: "missing"}
     assert example["output_identity"]["document_hash"] == contracts.document_hash(json.loads(raw))
     assert example["output_identity"]["document_hash"] != contracts.document_hash(example["output"])
+    assert example["output_identity"]["normalized_document_hash"] == contracts.document_hash(example["output"])
 
     bad_values = copy.deepcopy({key: value for key, value in values.items() if key != "objects"})
     bad_values["runs"][0]["output_hash"] = contracts.document_hash({"other": "output"})
@@ -265,3 +266,283 @@ def test_cached_output_gap_composes_with_existing_soft_proof(gap):
         minimum_coverage_percent=80, unavailable_outputs={run_id: ref})
     assert result["eligible"] is True, result
     assert result["counts"]["complete_runs"] == 9
+
+
+@pytest.mark.parametrize("artifact", ["source", "benchmark", "judge", "input", "judge_input"])
+@pytest.mark.parametrize("tamper", [False, True])
+@pytest.mark.parametrize("normalized", [False, True])
+def test_real_s3_export_tracks_exhausted_artifact_timeout(artifact, tamper, normalized):
+    from lab_arena.training_input import object_ref
+    from tests.lab_arena.training_export_test import fixture
+
+    values = fixture()
+    judge = values["runs"][1]
+    old_ref = judge["output_ref"]
+    judge["output_ref"] = "arena/%s/outputs/%s.json" % (judge["round_id"], judge["run_id"])
+    values["objects"].values[judge["output_ref"]] = values["objects"].values.pop(old_ref)
+    refs = {"source": values["submission_row"]["source_ref"],
+            "benchmark": values["round_row"]["benchmark_ref"],
+            "judge": values["runs"][1]["output_ref"],
+            "input": object_ref(values["run_id"], 1),
+            "judge_input": object_ref(judge["run_id"], 1)}
+    failed_ref = refs[artifact]
+    execution = values["runs"][0]
+    output_ref = execution["output_ref"]
+    output = json.loads(values["objects"].values[output_ref])
+    if normalized:
+        output["companies"][0]["company_name"] = "  Acme  "
+        values["objects"].values[output_ref] = contracts.canonical_json(output).encode()
+    execution["output_hash"] = contracts.document_hash(output)
+    if tamper:
+        if artifact == "judge":
+            # Output rejection would skip the judge read. Corrupt a different
+            # retained input so both failures are actually observed.
+            values["objects"].values[refs["input"]] = b"invalid compressed input"
+        else:
+            output["companies"][0]["company_name"] = "Tampered company"
+            values["objects"].values[output_ref] = contracts.canonical_json(output).encode()
+
+    class FixtureS3Client:
+        def get_object(self, *, Bucket, Key):
+            if Key == failed_ref:
+                raise ReadTimeoutError(endpoint_url="https://objects.example.test")
+            if Key not in values["objects"].values:
+                raise s3_error("NoSuchKey", 404)
+            raw = values["objects"].values[Key]
+            return {"Body": io.BytesIO(raw), "ContentLength": len(raw)}
+
+    view = training_reader.AvailabilityReadView(S3ObjectStore("test", client=FixtureS3Client()))
+    store = SimpleNamespace(
+        get_run=lambda run_id: next(row for row in values["runs"] if row["run_id"] == run_id),
+        get_round=lambda _: values["round_row"], get_submission=lambda _: values["submission_row"],
+        list_runs=lambda _: values["runs"], list_ledger=lambda **_: [],
+        icp_cost_eligibility=lambda **_: {"eligible": True},
+    )
+    example = training_reader.export_run(store, view, values["run_id"])
+    assert getattr(view, "transient_failures", {}) == {failed_ref: "transient"}
+    kind = {"judge": "judge_output"}.get(artifact, artifact)
+    assert view.artifact_refs[kind] == failed_ref
+    assert training_eligibility._transient_artifact_gap_verified(
+        example, values["submission_row"], {kind: failed_ref}) is (not tamper), example["completeness"]
+    expected = {"source": "source_unverified", "benchmark": "frozen_icp_unavailable",
+                "judge": "judge_evidence_unverified", "input": "runtime_input_snapshot_missing",
+                "judge_input": "runtime_input_snapshot_missing"}
+    if not tamper:
+        identity = example["output_identity"]
+        assert identity["document_hash"] == execution["output_hash"]
+        assert identity["normalized_document_hash"] == contracts.document_hash(example["output"])
+        assert (identity["document_hash"] != identity["normalized_document_hash"]) is normalized
+        assert expected[artifact] in example["completeness"]["incomplete_reasons"]
+    else:
+        reason = ("runtime_input_snapshot_missing" if artifact == "judge"
+                  else "execution_output_hash_mismatch")
+        assert reason in example["completeness"]["incomplete_reasons"]
+
+
+def test_real_s3_capture_retries_same_bytes_after_committed_write_timeout(monkeypatch):
+    from lab_arena import training_capture
+
+    pauses = []
+    monkeypatch.setattr(training_capture, "time", SimpleNamespace(sleep=pauses.append), raising=False)
+
+    class PutClient:
+        def __init__(self):
+            self.values = {}
+            self.puts = []
+
+        def put_object(self, *, Bucket, Key, Body, **kwargs):
+            self.puts.append((Key, Body))
+            assert kwargs["IfNoneMatch"] == "*"
+            if Key in self.values:
+                raise s3_error("PreconditionFailed", 412)
+            self.values[Key] = Body
+            raise ReadTimeoutError(endpoint_url="https://objects.example.test")
+
+        def get_object(self, *, Bucket, Key):
+            return {"Body": io.BytesIO(self.values[Key])}
+
+    client = PutClient()
+    objects = S3ObjectStore("test", client=client)
+    pointer = training_capture.RequestCapture(objects)({"safe": "request", "api_key": "private-key"})
+    assert pointer["status"] == "stored"
+    assert len(client.puts) == 2 and client.puts[0] == client.puts[1]
+    assert pauses == [0.05]
+    assert pointer["redactions"] == ["credential"]
+    assert "private-key" not in json.dumps(training_capture.read_request(objects, pointer))
+
+
+@pytest.mark.parametrize("fault,attempts", [
+    (ReadTimeoutError(endpoint_url="https://objects.example.test"), 2),
+    (s3_error("AccessDenied", 403), 1),
+])
+def test_capture_write_exhaustion_and_denial_stay_explicit(monkeypatch, fault, attempts):
+    from lab_arena import training_capture
+
+    pauses = []
+    monkeypatch.setattr(training_capture, "time", SimpleNamespace(sleep=pauses.append), raising=False)
+
+    class PutClient:
+        calls = 0
+
+        def put_object(self, **kwargs):
+            self.calls += 1
+            raise fault
+
+    client = PutClient()
+    result = training_capture.RequestCapture(S3ObjectStore("test", client=client))({"safe": "request"})
+    assert result == training_capture.unavailable()
+    assert client.calls == attempts
+    assert pauses == ([0.05] if attempts == 2 else [])
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_streaming_body_error_is_retried_and_tracked(monkeypatch, recovers):
+    from botocore.exceptions import ResponseStreamingError
+
+    pauses = []
+    monkeypatch.setattr(training_reader, "time", SimpleNamespace(sleep=pauses.append))
+
+    class StreamingClient:
+        calls = 0
+        closed = 0
+
+        def get_object(self, **kwargs):
+            self.calls += 1
+            fail = not recovers or self.calls == 1
+            client = self
+
+            class Body:
+                def read(self, _limit):
+                    if fail:
+                        raise ResponseStreamingError(error="connection interrupted")
+                    return b"saved output"
+
+                def close(self):
+                    client.closed += 1
+
+            return {"Body": Body(), "ContentLength": 12}
+
+    client = StreamingClient()
+    view = training_reader.AvailabilityReadView(S3ObjectStore("test", client=client))
+    if recovers:
+        assert view.get_bounded(REF, 100) == b"saved output"
+        assert view.transient_failures == {}
+    else:
+        with pytest.raises(ResponseStreamingError):
+            view.get_bounded(REF, 100)
+        assert view.transient_failures == {REF: "transient"}
+    assert client.calls == client.closed == 2
+    assert pauses == [0.05]
+
+
+def test_transient_marker_clears_after_a_later_successful_read():
+    client = S3Client([ReadTimeoutError(endpoint_url="https://objects.example.test")
+                       for _ in range(2)])
+    view = training_reader.AvailabilityReadView(S3ObjectStore("test", client=client))
+    with pytest.raises(ReadTimeoutError):
+        view.get_bounded(REF, 100)
+    assert view.transient_failures == {REF: "transient"}
+    assert view.get_bounded(REF, 100) == b"saved output"
+    assert view.transient_failures == {}
+
+
+@pytest.mark.parametrize("fault", ["timeout", "missing", "denied"])
+def test_service_passes_only_completed_export_transient_refs(monkeypatch, fault):
+    from lab_arena import training_input
+    from tests.lab_arena.training_export_test import fixture
+
+    values = fixture()
+    row = values["round_row"]
+    row["configuration_doc"].update(stage_1_icp_count=1, stage_2_icp_count=1)
+    benchmark = json.loads(values["objects"].values[row["benchmark_ref"]])
+    benchmark["icps"] = benchmark["icps"][:2]
+    values["objects"].values[row["benchmark_ref"]] = contracts.canonical_json(benchmark).encode()
+    original_execute, original_judge = values["runs"]
+    second_execute = {**copy.deepcopy(original_execute), "run_id": "execute:2",
+                      "assignment_id": "execute-second", "icp_position": 1,
+                      "output_ref": "arena/%s/outputs/execute:2.json" % row["round_id"]}
+    second_judge = {**copy.deepcopy(original_judge), "run_id": "judge:2",
+                    "assignment_id": "judge-second", "icp_position": 1,
+                    "scored_run_id": second_execute["run_id"], "output_ref": "second-judge-output"}
+    for original, second in ((original_execute, second_execute), (original_judge, second_judge)):
+        values["objects"].values[second["output_ref"]] = values["objects"].values[original["output_ref"]]
+        snapshot = training_input.read_input(values["objects"], original["run_id"], original["kind"],
+                                             1, original["claim_request_hash"])
+        document = snapshot["input"]
+        if second["kind"] == "score":
+            document["scored_run_id"] = second_execute["run_id"]
+        _, raw = training_input.build_snapshot(second["run_id"], second["kind"], document,
+            lease_generation=1, claim_request_hash=second["claim_request_hash"])
+        values["objects"].values[training_input.object_ref(second["run_id"], 1)] = raw
+    values["runs"].extend((second_execute, second_judge))
+    target = training_input.object_ref(original_execute["run_id"], 1)
+
+    class Client:
+        def get_object(self, *, Bucket, Key):
+            if Key == target:
+                if fault == "timeout":
+                    raise ReadTimeoutError(endpoint_url="https://objects.example.test")
+                raise s3_error("NoSuchKey" if fault == "missing" else "AccessDenied",
+                               404 if fault == "missing" else 403)
+            if Key not in values["objects"].values:
+                raise s3_error("NoSuchKey", 404)
+            raw = values["objects"].values[Key]
+            return {"Body": io.BytesIO(raw), "ContentLength": len(raw)}
+
+    store = SimpleNamespace(
+        get_run=lambda identity: next(run for run in values["runs"] if run["run_id"] == identity),
+        get_round=lambda _: row, get_submission=lambda _: values["submission_row"],
+        list_runs=lambda _: values["runs"], list_ledger=lambda **_: [],
+        icp_cost_eligibility=lambda **_: {"eligible": True},
+    )
+    observed = []
+    assess = training_eligibility.assess_capture
+
+    def record(*args, **kwargs):
+        observed.append(kwargs["unavailable_artifacts"])
+        return assess(*args, **kwargs)
+
+    monkeypatch.setattr(training_eligibility, "assess_capture", record)
+    service = SimpleNamespace(
+        _store=store, _objects=S3ObjectStore("test", client=Client()),
+        _is_daily_baseline=lambda *_: False,
+        _selected_accepted_execution_runs=ArenaService._selected_accepted_execution_runs,
+    )
+    outcome = ArenaService._submission_training_eligibility(
+        service, row, values["submission_row"]["submission_id"], [original_execute, second_execute])
+    expected = {original_execute["run_id"]: {"input": target}} if fault == "timeout" else {}
+    assert observed == [expected]
+    # This no-provider fixture proves handoff, not full-thinking admission.
+    assert outcome["eligible"] is False
+    assert "capture" in outcome and "training_evidence_check_failed" not in outcome["reasons"]
+
+
+def test_service_eligibility_failure_logs_only_safe_diagnostics(monkeypatch, caplog):
+    from lab_arena import service as service_module
+
+    examples = ten_selected_examples()
+    row = {"round_id": "private-round-identity", "configuration_doc": {
+        "stage_1_icp_count": 5, "stage_2_icp_count": 5}}
+    identity = "private-submission-identity"
+    service = SimpleNamespace(
+        _store=SimpleNamespace(get_submission=lambda _: submission()), _objects=object(),
+        _is_daily_baseline=lambda *_: False,
+        _selected_accepted_execution_runs=lambda *_: {
+            position: {"run_id": run_id} for position, run_id in enumerate(examples)},
+    )
+
+    def fail(*_args):
+        raise RuntimeError("private-provider-key https://private-endpoint.example/object")
+
+    monkeypatch.setattr(training_reader, "export_run", fail)
+    with caplog.at_level("WARNING", logger=service_module.__name__):
+        outcome = ArenaService._submission_training_eligibility(service, row, identity, [])
+    assert outcome == {"eligible": False, "reasons": ["training_evidence_check_failed"]}
+    message = caplog.text
+    assert "arena_training_evidence_check_failed" in message
+    assert "RuntimeError" in message
+    assert contracts.hash_bytes(row["round_id"].encode()) in message
+    assert contracts.hash_bytes(identity.encode()) in message
+    for private in (row["round_id"], identity, "private-provider-key", "private-endpoint"):
+        assert private not in message
+    assert all(record.exc_info is None for record in caplog.records)

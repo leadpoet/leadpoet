@@ -665,6 +665,7 @@ class RoundDefaults:
     # Opt-in for future intake windows only; existing rounds keep their policy.
     reasoning_capture_from: Optional[str] = None
     training_minimum_icp_coverage_percent: int = training_coverage.NEW_ROUND_PERCENT
+    training_maximum_missing_reasoning_percent: int = training_coverage.NEW_MISSING_REASONING_PERCENT
     # Operator declaration for the tested baseline archive. The fetched
     # archive must match before baseline admission in a full-thinking round.
     reasoning_baseline_source_sha256: Optional[str] = None
@@ -1669,6 +1670,7 @@ class ArenaService:
             if unready_reason is None:
                 document["reasoning_capture_policy"] = reasoning_capture.POLICY
                 document[training_coverage.SETTING] = defaults.training_minimum_icp_coverage_percent
+                document[training_coverage.MISSING_REASONING_SETTING] = defaults.training_maximum_missing_reasoning_percent
                 document["reasoning_route_registry"] = registry
                 document["reasoning_baseline_source_sha256"] = baseline_digest
                 document["baseline_source_url"] = defaults.reasoning_baseline_source_url
@@ -2178,12 +2180,16 @@ class ArenaService:
                 for row in self._store.list_submissions(round_row["round_id"], status=status):
                     if self._is_daily_baseline(row, round_row) or row.get("code_review_status") in ("passed", "rejected"):
                         continue
-                    candidates.append(row)
-        def review_if_active(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+                    candidates.append((row, round_row))
+        def review_if_active(candidate) -> Optional[Dict[str, Any]]:
             # A queued task has not reserved review spend yet. TERM or the
             # restart guard can defer it while the four active calls finish.
             if should_continue is not None and not should_continue():
                 return None
+            row, round_row = candidate
+            review_in_round = getattr(reviewer, "review_with_frozen_round", None)
+            if callable(review_in_round):
+                return review_in_round(row, round_row)
             return reviewer.review(row)
 
         with ThreadPoolExecutor(max_workers=4, thread_name_prefix="arena-code-review") as pool:
@@ -4889,6 +4895,7 @@ class ArenaService:
                         "source_review": source}
             examples = {}
             unavailable_outputs = {}
+            unavailable_artifacts = {}
             for position in sorted(positions):
                 run_id = str(selected[position]["run_id"])
                 output_ref = "arena/%s/outputs/%s.json" % (round_row["round_id"], run_id)
@@ -4900,9 +4907,12 @@ class ArenaService:
                 read_view = training_reader.AvailabilityReadView(self._objects, fallback)
                 # A whole-export exception cannot prove which artifact failed
                 # or whether another identity or receipt was invalid. Only a
-                # completed export with one typed output read failure can use
-                # the coverage allowance below.
+                # completed export can use the narrow typed availability checks.
                 examples[run_id] = training_reader.export_run(self._store, read_view, run_id)
+                transient_artifacts = {kind: ref for kind, ref in read_view.artifact_refs.items()
+                                       if read_view.transient_failures.get(ref) == "transient"}
+                if transient_artifacts:
+                    unavailable_artifacts[run_id] = transient_artifacts
                 if read_view.unavailable in ({output_ref: "missing"},
                                              {output_ref: "transient"}):
                     unavailable_outputs[run_id] = output_ref
@@ -4910,12 +4920,25 @@ class ArenaService:
                 submission, examples, list(examples), enabled=True,
                 minimum_coverage_percent=training_coverage.percent_from_configuration(
                     round_row.get("configuration_doc") or {}),
+                maximum_missing_reasoning_percent=(
+                    training_coverage.missing_reasoning_percent_from_configuration(
+                        round_row.get("configuration_doc") or {})),
                 unavailable_outputs=unavailable_outputs,
+                unavailable_artifacts=unavailable_artifacts,
             )
             return {"eligible": source["eligible"] and capture["eligible"],
                     "reasons": sorted(set(source["reasons"] + capture["reasons"])),
                     "source_review": source, "capture": capture}
-        except Exception:
+        except Exception as exc:
+            # Keep diagnostics useful without exposing stored data, object refs,
+            # provider exception text or tracebacks. Identity hashes are bounded.
+            round_id = round_row.get("round_id")
+            logger.warning(
+                "arena_training_evidence_check_failed round_id_hash=%s submission_id_hash=%s error_class=%s",
+                contracts.hash_bytes(round_id.encode("utf-8", "replace")) if isinstance(round_id, str) else "unavailable",
+                contracts.hash_bytes(submission_id.encode("utf-8", "replace")) if isinstance(submission_id, str) else "unavailable",
+                type(exc).__name__[:64],
+            )
             # The data check affects eligibility only, not publication availability.
             return {"eligible": False, "reasons": ["training_evidence_check_failed"]}
 
@@ -8119,7 +8142,8 @@ class ArenaService:
             **({"company_judgment_policy": company_judgments.POLICY} if configuration.get("company_judgment_policy") else {}),
             **({"intent_details_policy": intent_details_policy.POLICY} if intent_details_policy.enabled(configuration) else {}),
             **({"reasoning_capture_policy": configuration["reasoning_capture_policy"],
-                training_coverage.SETTING: training_coverage.percent_from_configuration(configuration)}
+                training_coverage.SETTING: training_coverage.percent_from_configuration(configuration),
+                training_coverage.MISSING_REASONING_SETTING: training_coverage.missing_reasoning_percent_from_configuration(configuration)}
                if reasoning_capture.enabled(configuration) else {}),
             **({"reasoning_activation_status": configuration["reasoning_activation_status"],
                 "reasoning_activation_reason": configuration["reasoning_activation_reason"]}

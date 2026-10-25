@@ -2281,6 +2281,9 @@ def _retain_upstream_response_receipt(
     try:
         # Default whitespace and ASCII escaping conservatively bound JSONB text.
         for candidate_receipt in (receipt, {"status": "unavailable", "reason": "response_size_limit"}):
+            observations = broker_observations(document)
+            if observations:
+                candidate_receipt = dict(candidate_receipt, broker_observations=observations)
             candidate = dict(document, upstream_response_receipt=candidate_receipt)
             if len(json.dumps(candidate).encode("utf-8")) <= 4 * 1024 * 1024:
                 document["upstream_response_receipt"] = candidate_receipt
@@ -2815,6 +2818,44 @@ def _has_successful_terminal_response(document: Any) -> bool:
     )
 
 
+def broker_observations(document: Mapping[str, Any]) -> Dict[str, Any]:
+    """Read bounded private evidence without changing the response contract.
+
+    Legacy draft records stored these fields at the terminal's top level. New
+    records use the private receipt envelope that the previous release accepts.
+    Neither location can supply response bytes or accounting authority.
+    """
+    fields = {"transport_elapsed_ms", "timing_scope", "reasoning_route_observation"}
+    receipt = document.get("upstream_response_receipt")
+    nested = receipt.get("broker_observations", {}) if isinstance(receipt, Mapping) else {}
+    if not isinstance(nested, Mapping) or not set(nested) <= fields:
+        raise BrokerError("broker_unavailable")
+    result = dict(nested)
+    for field in fields & set(document):
+        if field in result and (
+            type(result[field]) is not type(document[field]) or result[field] != document[field]
+        ):
+            raise BrokerError("broker_unavailable")
+        result[field] = document[field]
+    if ("transport_elapsed_ms" in result or "timing_scope" in result) and (
+        type(result.get("transport_elapsed_ms")) is not int
+        or not 0 <= result["transport_elapsed_ms"] <= 3_600_000
+        or result.get("timing_scope") != "initial_provider_transport_send"
+    ):
+        raise BrokerError("broker_unavailable")
+    if ("reasoning_route_observation" in result
+            and not reasoning_capture.valid_route_observation(result["reasoning_route_observation"])):
+        raise BrokerError("broker_unavailable")
+    return result
+
+
+def _retain_broker_observations(document: Dict[str, Any], observations: Mapping[str, Any]) -> None:
+    receipt = document.get("upstream_response_receipt")
+    receipt = dict(receipt) if isinstance(receipt, Mapping) else {}
+    receipt["broker_observations"] = dict(broker_observations(document), **observations)
+    document["upstream_response_receipt"] = receipt
+
+
 def _decode_terminal(
     document: Any,
     *,
@@ -2840,16 +2881,7 @@ def _decode_terminal(
     }
     if not isinstance(document, Mapping) or not required <= set(document) <= allowed:
         raise BrokerError("broker_unavailable")
-    if "reasoning_route_observation" in document and not reasoning_capture.valid_route_observation(
-        document["reasoning_route_observation"]
-    ):
-        raise BrokerError("broker_unavailable")
-    if ("transport_elapsed_ms" in document or "timing_scope" in document) and (
-        type(document.get("transport_elapsed_ms")) is not int
-        or not 0 <= document["transport_elapsed_ms"] <= 3_600_000
-        or document.get("timing_scope") != "initial_provider_transport_send"
-    ):
-        raise BrokerError("broker_unavailable")
+    broker_observations(document)  # Validate both the legacy and rollback-safe evidence shapes.
     compatibility_failure_code = document.get("compatibility_failure_code")
     if "compatibility_failure_code" in document and (
         not isinstance(compatibility_failure_code, str)
@@ -5139,19 +5171,26 @@ class Broker:
             return _error_result("broker_unavailable", summary)
         if status == "stale":
             return _error_result("lease_stale", summary)
-        if prepared_capture is not None and status == "reserved":
+        if prepared_capture is not None and (status == "reserved" or (
+                status == "refused" and reasoning_annotation is not None
+                and reasoning_annotation.get("policy") == reasoning_capture.POLICY)):
             try:
-                capture_authorized = reserved.get("idempotent") is False
+                capture_authorized = status == "reserved" and reserved.get("idempotent") is False
                 if not capture_authorized:
                     # Replays can repair a missing blob only when the exact
                     # existing receipt references the prepared content.
                     rows = self._store.list_ledger(call_identity=call_identity, limit=64)
                     capture_authorized = any(
-                        row.get("entry_kind") == "reservation"
+                        row.get("entry_kind") == ("refusal" if status == "refused" else "reservation")
                         and row.get("run_id") == context.run_id
                         and row.get("call_identity") == call_identity
                         and isinstance(row.get("entry_doc"), Mapping)
-                        and row["entry_doc"].get("request_capture") == request_capture
+                        and (row["entry_doc"].get("call", {}) if status == "refused"
+                             else row["entry_doc"]).get("request_capture") == request_capture
+                        and (status != "refused" or (
+                            row.get("amount_microusd") == 0
+                            and row["entry_doc"].get("reason") in {"per_icp_quota", "stage_quota", "money_cap"}
+                            and row["entry_doc"]["call"].get("request_hash") == request_hash))
                         for row in rows if isinstance(row, Mapping)
                     )
                 if capture_authorized:
@@ -5662,8 +5701,10 @@ class Broker:
 
         def retain_transport_timing(document: Dict[str, Any]) -> None:
             if transport_elapsed_ms is not None:
-                document["transport_elapsed_ms"] = transport_elapsed_ms
-                document["timing_scope"] = "initial_provider_transport_send"
+                _retain_broker_observations(document, {
+                    "transport_elapsed_ms": transport_elapsed_ms,
+                    "timing_scope": "initial_provider_transport_send",
+                })
 
         try:
             url, headers = inject_credential(outbound, secret)
@@ -6398,9 +6439,10 @@ class Broker:
                         )
                     )
                 if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
-                    uncertain_doc["reasoning_route_observation"] = reasoning_capture.route_observation(
-                        raw_document, reasoning_annotation,
-                    )
+                    _retain_broker_observations(uncertain_doc, {
+                        "reasoning_route_observation": reasoning_capture.route_observation(
+                            raw_document, reasoning_annotation),
+                    })
                 retain_transport_timing(uncertain_doc)
                 retain_upstream_response(uncertain_doc)
                 uncertain_state = self._persist_provider_accounting(self._store.mark_uncertain,
@@ -6550,9 +6592,10 @@ class Broker:
             )
             retain_transport_timing(terminal)
             if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
-                terminal["reasoning_route_observation"] = reasoning_capture.route_observation(
-                    raw_document, reasoning_annotation,
-                )
+                _retain_broker_observations(terminal, {
+                    "reasoning_route_observation": reasoning_capture.route_observation(
+                        raw_document, reasoning_annotation),
+                })
             if deepline_lost_response:
                 terminal["deepline_response_missing"] = True
                 terminal["deepline_response_missing_reason"] = "transport_failure"

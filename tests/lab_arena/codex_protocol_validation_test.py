@@ -401,14 +401,19 @@ def test_azure_reasoning_format_survives_stateless_tool_continuation():
     params = {"model": "openai/gpt-5.6-luna", "input": [
         {"role": "user", "content": "Check the company."}, reasoning, call, output],
         "max_output_tokens": 2048}
-    normalized = operations.validate_operation_request("openrouter.responses", params)
+    with pytest.raises(operations.OperationRequestError):
+        operations.validate_operation_request("openrouter.responses", params)
+    normalized = operations.validate_operation_request("openrouter.responses", params, allow_full_thinking=True)
     assert normalized["input"][1:] == [reasoning, call, output]
     assert '"format":"azure-openai-responses-v1"' in operations.build_outbound_request(
-        "openrouter.responses", params).body.decode()
+        "openrouter.responses", params, allow_full_thinking=True,
+        openrouter_provider_policy={"data_collection": "deny", "zdr": True,
+            "allow_fallbacks": False, "only": ["azure/us"], "require_parameters": True,
+            "max_price": {"prompt": 1, "completion": 1, "request": 0}}).body.decode()
     for invalid in ("", "x" * 129, 42):
         changed = dict(params, input=[params["input"][0], dict(reasoning, format=invalid), call, output])
         with pytest.raises(operations.OperationRequestError):
-            operations.validate_operation_request("openrouter.responses", changed)
+            operations.validate_operation_request("openrouter.responses", changed, allow_full_thinking=True)
 
 
 def test_codex_tool_output_chunk_limit_matches_operation_contract():
@@ -475,3 +480,16 @@ def test_codex_worker_frame_cap_still_rejects_chunked_tool_output():
     codex._chunk_tool_output_text(params)
     with pytest.raises(codex.CodexRuntimeError, match="request too large"):
         codex._dispatch("/not-used", params)
+
+
+def test_policy_off_rejects_new_reasoning_format_before_reservation_or_provider_send():
+    from tests.lab_arena import test_lab_arena_broker as bt
+    instance, store, transport = bt.make_broker()
+    result = instance.execute(bt.CONTEXT, operation_id="openrouter.responses",
+        parameters={"model": bt.CHAT["model"], "input": [
+            {"type": "reasoning", "format": "azure-openai-responses-v1",
+             "summary": [], "encrypted_content": "opaque-dummy"},
+            {"role": "user", "content": "Continue."}]},
+        action_sequence=0, timeout_ms=30000)
+    assert result.call["error_code"] == "invalid_request"
+    assert store.calls == {} and store.log == [] and transport.sent == []

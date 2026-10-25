@@ -1,5 +1,55 @@
 # Draft PR verification — 2026-10-23
 
+## October 25 Responses route and current policy
+
+The seventh reviewed route is DeepSeek through Fireworks on Responses, with a
+32,768-token allowance and full text in `output.content.reasoning_text`. The
+[public synthetic manifest](evidence/full-thinking/deepseek-fireworks-responses-20261025.json)
+contains only the three-turn synthetic test: two function continuations, strict
+negative JSON qualification, exact provider wire bodies, PostgreSQL readback,
+and local worker/SDK receipts. All three saved calls pass the strict exact
+next-response target validator. Empty summary-array normalization is explicit;
+the original wire bodies retain those arrays.
+
+Separate private native checks accepted the actual request parameters after the
+unsupported default parallel flag was omitted, and saved ten installed-Codex
+responses with readable text and 1,759 reported reasoning tokens. Those checks
+have no observed missing text, but the full native workflow stopped at the local
+ten-call fixture limit, used MCP substitutions, lacks exact TYCHE runtime
+parity, and has unresolved full-worker linkage/scoring proof. It is not a strict
+complete training run, scored/publication run, activation, or readiness claim.
+No private native prompts or local paths enter the public manifest.
+
+The provisional missing-token ceiling is **1% per ICP**, using reported tokens
+from completed, untruncated, verified calls. It is configurable and frozen; it
+is not a measured optimum. Explicit zero-token turns are distinct from unknown
+usage. Proven failures and truncations lose only their own training targets;
+ICPs with no surviving full target or above the ceiling are incomplete. The
+**80% ICP floor** remains. Explicit frozen `0` selects the new zero-tolerance
+rules; an absent setting retains historical behavior. Current release checks
+must include PR migrations **565–570** and main's **571–573** in numeric order;
+dated verification entries below retain their original checkpoint context.
+
+## October 25 output-envelope supplement
+
+The current registry raises only Mistral, DeepSeek through Fireworks, Reflection,
+and Gemma to 32,768 output tokens. The supplemental
+[synthetic capture manifest](evidence/full-thinking/chat-output-cap-32768-20261025.json)
+binds each real request, provider response and wire body to disposable PostgreSQL
+ledger readback and the local worker socket/SDK read acknowledgement. Replaying
+these captures through the current broker preserves the requests, full readable
+text, two tool continuations, and final negative JSON qualification from
+conflicting evidence. Mistral's zero-token tool turns remain zero-thinking turns.
+
+These were short calls with a 32,768-token allowance, not requests that exhausted
+the allowance or full ICP quality tests. The manifest preserves the original
+reports' `route_probe_passed: false` flag and states the narrower cap, continuation
+and capture checks it proves. It does not claim production activation or a new
+Responses route. GPT-OSS 120b and 20b remain at 8,192: their new cap probes hit the
+account's ignored DeepInfra route. Original evidence files stay byte-identical;
+historical replay uses their original frozen 8,192-token registry.
+
+
 ## Resumed verification — selected research and literal markers
 
 The October 24 resumed audit found two false exclusions in the strict data path.

@@ -229,6 +229,37 @@ def test_training_output_read_gap_remains_visible_at_historical_full_coverage():
     assert result["capture"]["reasons"] == ["accepted_output_unavailable"]
 
 
+@pytest.mark.parametrize("reason", [
+    "missing_reasoning_share_exceeded", "selected_artifact_temporarily_unavailable",
+])
+def test_training_token_coverage_and_storage_failures_remain_public_without_run_details(reason):
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    ranking.update(eligible=False, eligibility_reason="training_data_incomplete")
+    counts = {
+        "complete_runs": 7, "incomplete_runs": 3, "minimum_coverage_percent": 80,
+        "completed_untruncated_verified_reasoning_tokens": 10000,
+        "missing_reasoning_tokens": 101, "missing_reasoning_calls": 2,
+        "unknown_reasoning_usage_calls": 1, "truncated_model_calls": 3,
+        "verified_failed_model_attempts": 4, "maximum_missing_reasoning_percent": 1,
+    }
+    ranking["training_data_eligibility"] = {
+        "eligible": False, "reasons": [reason],
+        "capture": {"eligible": False, "reasons": [reason], "counts": {
+            **counts, "reasoning_by_run": [{"run_id": "private-run-id"}],
+            "private_detail": "private trace content",
+        }},
+    }
+
+    baseline = public_dashboard.round_summary(row)["baseline"]
+    result = baseline["training_data_eligibility"]
+    assert result["reasons"] == [reason]
+    assert result["capture"]["reasons"] == [reason]
+    assert result["capture"]["counts"] == counts
+    assert "private-run-id" not in str(baseline)
+    assert "private trace content" not in str(baseline)
+
+
 def test_new_policy_projection_rejects_incomplete_successful_call_counters():
     row = _published_row(policy=True)
     ranking = row["publication_doc"]["final_ranking"][0]

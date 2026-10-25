@@ -355,6 +355,41 @@ def test_new_round_freezes_eighty_percent_coverage_and_publishes_it():
     assert config["training_minimum_icp_coverage_percent"] == 80
     assert ArenaService._public_round_output_policy(config)["training_minimum_icp_coverage_percent"] == 80
     assert contracts.validate_round_configuration(json.loads(json.dumps(config))) == config
+    assert config["training_maximum_missing_reasoning_percent"] == 1
+    assert ArenaService._public_round_output_policy(config)["training_maximum_missing_reasoning_percent"] == 1
+
+
+def test_missing_reasoning_allowance_is_frozen_and_legacy_absence_is_zero():
+    service = opted_in()
+    service._config.defaults.training_maximum_missing_reasoning_percent = 2
+    config = service.create_round(OPEN)
+    assert config["training_maximum_missing_reasoning_percent"] == 2
+    service._config.defaults.training_maximum_missing_reasoning_percent = 1
+    service._store.create_round = lambda *_args: {"status": "existing"}
+    service._round = lambda _round_id: {"configuration_doc": deepcopy(config)}
+    assert service.create_round(OPEN)["training_maximum_missing_reasoning_percent"] == 2
+    legacy = dict(config)
+    del legacy["training_maximum_missing_reasoning_percent"]
+    assert "training_maximum_missing_reasoning_percent" not in contracts.validate_round_configuration(legacy)
+    assert ArenaService._public_round_output_policy(legacy)["training_maximum_missing_reasoning_percent"] == 0
+
+
+@pytest.mark.parametrize("value", [None, True, False, "1", 1.0, -1, 101])
+def test_missing_reasoning_allowance_rejects_invalid_values(value):
+    config = opted_in().create_round(OPEN)
+    config["training_maximum_missing_reasoning_percent"] = value
+    with pytest.raises(contracts.ArenaContractError):
+        contracts.validate_round_configuration(config)
+
+
+def test_missing_reasoning_allowance_cannot_be_attached_to_policy_off_round():
+    service = opted_in()
+    service._config.defaults.reasoning_capture_from = "2026-11-01T00:00:00Z"
+    config = service.create_round(OPEN)
+    assert "training_maximum_missing_reasoning_percent" not in config
+    config["training_maximum_missing_reasoning_percent"] = 1
+    with pytest.raises(contracts.ArenaContractError):
+        contracts.validate_round_configuration(config)
 
 
 def test_coverage_override_is_frozen_and_legacy_absence_stays_absent():

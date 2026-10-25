@@ -235,6 +235,126 @@ def _selected_cost_gap_verified(example, run_id):
     return True
 
 
+def _selected_privacy_cascade_verified(example, run_id):
+    """Count a documented redaction as an incomplete ICP, never exact training."""
+    proof = example.get("completeness") or {}
+    reasons = set(proof.get("incomplete_reasons") or [])
+    allowed = {"context_privacy_nonexact", "request_privacy_nonexact", "response_privacy_nonexact"}
+    by_dimension = proof.get("reasons_by_dimension") or {}
+    dimensions = proof.get("dimensions") or {}
+    if (not reasons or not reasons <= allowed
+            or not {"request_privacy_nonexact", "response_privacy_nonexact"} & reasons
+            or any(dimensions.get(name) is not True or by_dimension.get(name) != []
+                   for name in ("context", "source_identity", "exact_inputs", "input_output_label", "costs"))
+            or dimensions.get("research_process") is not False
+            or set(by_dimension.get("research_process") or []) != reasons
+            or ("context_privacy_nonexact" in reasons) !=
+               ("credential" in ((example.get("privacy") or {}).get("context_redactions") or []))
+            or training_thinking._selected_input_output_binding(example) is None
+            or not _all_model_routes_verified(example, run_id)):
+        return False
+    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+    payload = artifact.get("payload") or {}
+    if (payload.get("complete") is not True
+            or artifact.get("payload_sha256") != contracts.document_hash(payload)
+            or any((row.get("privacy") or {}).get("redacted") is not False
+                   for field in ("observations", "agent_observations")
+                   for row in payload.get(field) or [])):
+        return False
+    selected = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
+    selected_privacy = set()
+    attributed = set()
+    try:
+        for call in example.get("provider_calls") or []:
+            gaps = set(call.get("evidence_gaps") or [])
+            if call.get("run_id") == run_id:
+                if not gaps <= allowed - {"context_privacy_nonexact"}:
+                    return False
+                selected_privacy.update(gaps)
+            elif gaps:
+                if (not any(row.get("run_id") == call.get("run_id") and row.get("kind") == "score"
+                            for row in example.get("attempts") or [])
+                        or not gaps <= allowed - {"context_privacy_nonexact"}):
+                    return False
+            if "request_privacy_nonexact" in gaps:
+                capture = call.get("request_capture") or {}
+                if (capture.get("redacted") is not True
+                        or "credential" not in (capture.get("redactions") or [])):
+                    return False
+            if "response_privacy_nonexact" in gaps and not (
+                    "credential" in (call.get("response_privacy_redactions") or [])
+                    and (call.get("run_id") != run_id or any(
+                        "credential" in (row.get("privacy_redactions") or [])
+                        for row in call.get("response_receipts") or []))):
+                return False
+            attributed.update(gaps)
+        if not selected_privacy or attributed | (
+                {"context_privacy_nonexact"} if "context_privacy_nonexact" in reasons else set()) != reasons:
+            return False
+        for call in selected:
+            gaps = set(call.get("evidence_gaps") or [])
+            if call.get("accounting_state") != "settlement" or type(call.get("actual_microusd")) is not int:
+                return False
+            if call.get("operation_id") in reasoning_capture.OPERATIONS:
+                try:
+                    training_steps._candidate(example, call)
+                except ValueError as exc:
+                    if str(exc) not in gaps:
+                        return False
+            request = call.get("request") or {}
+            response = call.get("response")
+            provenance = call.get("response_provenance") or {}
+            capture = call.get("request_capture") or {}
+            redacted_request = "request_privacy_nonexact" in gaps
+            if (not isinstance(request, Mapping)
+                    or request.get("operation_id") != call.get("operation_id")
+                    or (request.get("effective_operation_id") is not None
+                        and request["effective_operation_id"] != call.get("operation_id"))
+                    or request.get("request_hash") != call.get("request_hash")
+                    or (not redacted_request and (not isinstance(request.get("hashed_parameters"), Mapping)
+                        or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")))
+                    or (redacted_request and ((request.get("privacy") or {}).get("redacted") is not True
+                        or capture.get("status") not in {"stored", "referenced"}
+                        or not isinstance(capture.get("sha256"), str) or not capture["sha256"]
+                        or not isinstance(capture.get("ref"), str) or not capture["ref"]))
+                    or (not redacted_request and capture.get("redacted") is True)
+                    or not isinstance(response, Mapping)
+                    or contracts.document_hash(response) != call.get("response_sha256")
+                    or provenance.get("agent_receipt") != "reported_exact_body_received"
+                    or provenance.get("selected_response_acknowledged") is not True
+                    or provenance.get("delivery_to_worker") != "socket_written"):
+                return False
+            worker_ref = provenance.get("worker_receipt_ref") or {}
+            if (worker_ref.get("run_id") != run_id
+                    or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
+                return False
+            writes = [row for row in payload.get("response_receipts") or []
+                      if row.get("ordinal") == worker_ref.get("ordinal")
+                      and row.get("call_identity") == call.get("call_identity")
+                      and row.get("operation_id") == call.get("operation_id")
+                      and row.get("action_sequence") == call.get("action_sequence")
+                      and row.get("write_state") == "socket_written"]
+            refs = provenance.get("agent_receipt_refs") or []
+            reads = [row for row in payload.get("agent_observations") or []
+                     if row.get("kind") == "response_received"
+                     and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                             and ref.get("payload_sha256") == artifact["payload_sha256"] for ref in refs)]
+            receipts = [row for row in call.get("response_receipts") or []
+                        if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
+                        and row.get("response_sha256") == call.get("response_sha256")]
+            if (len(writes) != 1 or not reads or not receipts
+                    or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
+                               and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
+                               and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
+                               and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
+                               and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
+                               for read in reads for receipt in receipts)):
+                return False
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+    return True
+
+
 def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | None],
                    selected_run_ids: Sequence[str], *, enabled: bool,
                    minimum_coverage_percent: int = 100) -> dict:
@@ -373,6 +493,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                                 and _all_model_routes_verified(example, run_id)):
                             soft.add("trajectory_evidence_incomplete")
                         if _selected_cost_gap_verified(example, run_id):
+                            soft.add("trajectory_evidence_incomplete")
+                        if _selected_privacy_cascade_verified(example, run_id):
                             soft.add("trajectory_evidence_incomplete")
                     reasons.extend(reason for reason in run_reasons if reason not in soft)
             else:

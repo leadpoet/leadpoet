@@ -727,7 +727,7 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
     reasons = set(proof.get("incomplete_reasons") or [])
     if proof.get("complete") is True and not reasons:
         return frozenset()
-    allowed = {"response_privacy_nonexact", "provider_cost_unresolved"}
+    allowed = {"request_privacy_nonexact", "response_privacy_nonexact", "provider_cost_unresolved"}
     if not reasons or not reasons <= allowed:
         return None
     dimensions = proof.get("dimensions") or {}
@@ -757,6 +757,10 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
         call_reasons = set(call.get("evidence_gaps") or [])
         if call.get("run_id") in score_ids:
             if not call_reasons <= allowed:
+                return None
+            if ("request_privacy_nonexact" in call_reasons
+                    and ((call.get("request_capture") or {}).get("redacted") is not True
+                         or "credential" not in ((call.get("request_capture") or {}).get("redactions") or []))):
                 return None
             attributed.update(call_reasons)
         elif call_reasons:

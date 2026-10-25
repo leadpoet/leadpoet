@@ -147,6 +147,33 @@ def test_judge_only_privacy_or_uncertain_cost_does_not_erase_selected_thinking(c
     }
 
 
+def test_judge_only_request_and_response_privacy_preserves_selected_thinking():
+    example = judge_only_gap_example()
+    judge_call = example["provider_calls"][-1]
+    judge_call["evidence_gaps"] = ["request_privacy_nonexact", "response_privacy_nonexact"]
+    judge_call["request_capture"] = {"redacted": True, "redactions": ["credential"]}
+    example["completeness"]["incomplete_reasons"] = ["request_privacy_nonexact", "response_privacy_nonexact"]
+    example["completeness"]["reasons_by_dimension"]["research_process"] = list(
+        example["completeness"]["incomplete_reasons"])
+    seal(example)
+    assert example["privacy"]["exact_replay"] is False
+    assert capture(example)["eligible"] is True
+    splits, _ = training_thinking.build([example])
+    assert len(splits["train"]) + len(splits["eval"]) == 2
+
+
+def test_judge_request_privacy_marker_without_redacted_request_is_rejected():
+    example = judge_only_gap_example()
+    judge_call = example["provider_calls"][-1]
+    judge_call["evidence_gaps"] = ["request_privacy_nonexact", "response_privacy_nonexact"]
+    example["completeness"]["incomplete_reasons"] = list(judge_call["evidence_gaps"])
+    example["completeness"]["reasons_by_dimension"]["research_process"] = list(judge_call["evidence_gaps"])
+    seal(example)
+    assert capture(example)["eligible"] is False
+    splits, _ = training_thinking.build([example])
+    assert not splits["train"] and not splits["eval"]
+
+
 def test_failed_judge_attempt_privacy_is_attributed_without_hiding_other_runs():
     example = judge_only_gap_example()
     example["attempts"].append({"run_id": "failed-score", "kind": "score", "status": "failed"})
@@ -388,6 +415,66 @@ def test_privacy_gap_cannot_hide_wrong_route_at_eighty_percent():
     damaged["provider_calls"][0]["response_receipts"][0]["privacy_redactions"] = ["credential"]
     damaged["provider_calls"][2]["reasoning_capture"]["provider_route"] = "wrong-route"
     seal(damaged)
+    result = assess_ten(examples)
+    assert result["eligible"] is False
+    assert "trajectory_evidence_incomplete" in result["reasons"]
+
+
+def selected_privacy_cascade_example():
+    example = judge_only_gap_example()
+    for call in example["provider_calls"]:
+        if call.get("run_id") == "run":
+            call["response_provenance"]["selected_response_acknowledged"] = True
+    first, second = example["provider_calls"][:2]
+    first["response_privacy_redactions"] = ["credential"]
+    first["response_receipts"][0]["privacy_redactions"] = ["credential"]
+    first["evidence_gaps"] = ["response_privacy_nonexact"]
+    second["request_capture"].update(redacted=True, redactions=["credential"])
+    second["request"]["privacy"] = {"redacted": True, "redactions": ["credential"]}
+    second["request"]["hashed_parameters"] = {"message": "[redacted:credential]"}
+    second["evidence_gaps"] = ["request_privacy_nonexact"]
+    reasons = ["context_privacy_nonexact", "request_privacy_nonexact", "response_privacy_nonexact"]
+    example["privacy"]["context_redactions"] = ["credential"]
+    example["completeness"]["incomplete_reasons"] = reasons
+    example["completeness"]["reasons_by_dimension"]["research_process"] = reasons
+    return seal(example)
+
+
+def test_eighty_percent_counts_documented_selected_privacy_cascade_as_incomplete():
+    examples = ten_selected_examples()
+    examples.pop("run-9")
+    damaged = selected_privacy_cascade_example()
+    examples["run"] = damaged
+    assert training_thinking.selected_research_evidence(damaged) is None
+    splits, _ = training_thinking.build([damaged])
+    assert not splits["train"] and not splits["eval"]
+    result = assess_ten(examples)
+    assert result["eligible"] is True, result
+    assert result["counts"]["complete_runs"] == 9
+    assert result["counts"]["incomplete_runs"] == 1
+
+
+@pytest.mark.parametrize("damage", [
+    lambda e: e["provider_calls"][1]["request_capture"].update(redacted=False),
+    lambda e: e["provider_calls"][1]["request_capture"].update(redactions=[]),
+    lambda e: e["provider_calls"][0]["response_receipts"][0].update(privacy_redactions=[]),
+    lambda e: e["provider_calls"][0]["response_provenance"].update(agent_receipt="not_reported"),
+    lambda e: e["provider_calls"][0]["response_provenance"].update(selected_response_acknowledged=False),
+    lambda e: e["provider_calls"][1]["request"].update(effective_operation_id="wrong.operation"),
+    lambda e: e["provider_calls"][2]["reasoning_capture"].update(provider_route="wrong-route"),
+    lambda e: e["worker_observation_artifacts"]["run"].update(payload_sha256="0" * 64),
+    lambda e: e["output_identity"].update(document_hash="0" * 64),
+    lambda e: e["input_snapshots"]["score"].update(input_sha256="0" * 64),
+    lambda e: e["input_snapshots"]["score"]["input"].update(scored_run_id="other"),
+    lambda e: e["provider_calls"][0]["response_receipts"][0].update(wire_body_sha256="0" * 64),
+    lambda e: e["completeness"]["incomplete_reasons"].append("worker_observation_link_invalid"),
+])
+def test_selected_privacy_cascade_cannot_hide_broken_proof(damage):
+    examples = ten_selected_examples()
+    examples.pop("run-9")
+    damaged = selected_privacy_cascade_example()
+    damage(damaged)
+    examples["run"] = seal(damaged)
     result = assess_ten(examples)
     assert result["eligible"] is False
     assert "trajectory_evidence_incomplete" in result["reasons"]

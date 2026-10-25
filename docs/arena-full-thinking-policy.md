@@ -66,7 +66,7 @@ exposes full thinking. New routes require the same evidence and tests.
 | Linked evidence | Reuse task/ICP, prompts, tools, page observations, receipts, final output, and judgment links. Retain model/route/settings, source version, retries, cost, and runtime. Missing or unsupported evidence remains an explicit gap. |
 | Dataset quality | Reuse secret removal, failure distinctions, deduplication, held-out companies, source references, dataset versions, and existing training-permission status. Labels still require evaluation before training. |
 | Honest counts | Separate miner/baseline/judge calls, saved text, and complete trajectories. Report empty, summary-only, opaque, truncated, unavailable, failed capture, and unproved routes separately. No invented historical backfill. |
-| $6 cap | Set future execution admission and cost eligibility to $6 per ICP for both miners and baseline. Admission includes actual settled charges plus pending or uncertain holds under the existing database lock. Settlement releases unused room. Historical $4 behavior stays unchanged. |
+| $6 cap | Set future execution admission and cost eligibility to $6 per ICP for both miners and baseline. Current-policy admission uses confirmed competition cost, without pending or uncertain monetary holds. Historical $4 behavior stays unchanged. |
 | Round continuity | No capture failure or missing text cancels a round or stops publication. Missing activation prerequisites create an ordinary round with a visible `not_ready` reason. No live catalog request is needed to create the round. |
 | Safe activation | Default off. Require a compatible baseline route and a tested immutable baseline source plus digest before activation. Apply only to future unopened rounds. |
 
@@ -112,17 +112,17 @@ quality may change; the user has accepted this tradeoff.
   run, or production readiness. Before activation, run representative ICPs,
   verify stored/exported artifacts and publication, and review latency, spend,
   failure rates, and output quality. No production claim is made in this PR.
-- Apply exact committed migrations `555-lab-arena-full-thinking-six-dollar-cap.sql`,
-  `556-lab-arena-research-review-result.sql`,
-  `561-lab-arena-full-thinking-champion-baseline.sql`,
-  `562-lab-arena-full-thinking-catalog-commit.sql`, and
-  `563-lab-arena-training-publication-eligibility.sql` through the normal release workflow before activation. They check source hashes
-  and database privileges, preserve unrelated behavior, and are idempotent.
-  Apply current main's `562-lab-arena-review-context-integrity-reason.sql`, then
-  `563-lab-arena-review-source-digest-reason.sql`, **before** this PR's
-  `556-lab-arena-research-review-result.sql`. The latter extends that exact
-  function version and preserves both context-integrity and source-digest handling.
-  Migration prefixes alone do not define the order of these independent branches.
+- Apply current main's `562-lab-arena-review-context-integrity-reason.sql`, then
+  `563-lab-arena-review-source-digest-reason.sql`. Apply this PR's exact committed
+  migrations `564-lab-arena-full-thinking-six-dollar-cap.sql`,
+  `565-lab-arena-research-review-result.sql`,
+  `566-lab-arena-full-thinking-champion-baseline.sql`,
+  `567-lab-arena-full-thinking-catalog-commit.sql`, and
+  `568-lab-arena-training-publication-eligibility.sql` through the normal release
+  workflow before activation. They check source hashes and database privileges,
+  preserve unrelated behavior, and are idempotent.
+  The research review migration extends main's exact review function and
+  preserves both context-integrity and source-digest handling.
 
 ## Reproducible checks
 

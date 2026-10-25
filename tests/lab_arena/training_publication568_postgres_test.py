@@ -21,7 +21,7 @@ from tests.lab_arena.flat_per_icp_cost500_postgres_test import (
 from scripts.verify_arena_full_thinking_e2e import full_thinking_database
 
 MIGRATION = (Path(__file__).resolve().parents[2] /
-             "scripts/563-lab-arena-training-publication-eligibility.sql")
+             "scripts/568-lab-arena-training-publication-eligibility.sql")
 GUARD = "public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)"
 
 

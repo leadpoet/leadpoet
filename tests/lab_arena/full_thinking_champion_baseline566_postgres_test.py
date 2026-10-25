@@ -17,7 +17,7 @@ from tests.lab_arena.test_lab_arena_promotion_git import git, repository, source
 from tests.lab_arena.test_lab_arena_reward_migration_postgres import BASELINE, MINER_A
 
 
-MIGRATION = Path(__file__).parents[2] / "scripts/561-lab-arena-full-thinking-champion-baseline.sql"
+MIGRATION = Path(__file__).parents[2] / "scripts/566-lab-arena-full-thinking-champion-baseline.sql"
 SCRIPTS = MIGRATION.parent
 
 
@@ -29,7 +29,7 @@ def database():
         with db[0].connect(**db[1]) as connection, connection.cursor() as cursor:
             for name in (
                 "539-lab-arena-held-recovery-provider-admission.sql",
-                "555-lab-arena-full-thinking-six-dollar-cap.sql",
+                "564-lab-arena-full-thinking-six-dollar-cap.sql",
             ):
                 cursor.execute((SCRIPTS / name).read_text())
             cursor.execute(MIGRATION.read_text())

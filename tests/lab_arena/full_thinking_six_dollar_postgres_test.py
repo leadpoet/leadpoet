@@ -10,7 +10,7 @@ from tests.lab_arena import flat_per_icp_cost500_postgres_test as flat
 
 
 ROOT = Path(__file__).parents[2]
-MIGRATION = ROOT / "scripts/555-lab-arena-full-thinking-six-dollar-cap.sql"
+MIGRATION = ROOT / "scripts/564-lab-arena-full-thinking-six-dollar-cap.sql"
 prior = flat.prior
 infra = flat.infra
 
@@ -90,7 +90,7 @@ def test_full_round_successful_cost_overrun_is_ineligible_but_actual_bill_is_kep
         assert infra.state(conn)["settled_microusd"] == 6_000_001
 
 
-def test_failed_bill_consumes_admission_without_changing_successful_cost(database):
+def test_confirmed_failed_bill_consumes_admission_without_changing_successful_cost(database):
     with database[0].connect(**database[1]) as conn:
         seed(conn)
         lease = prior.claim(conn)
@@ -116,7 +116,7 @@ def test_retry_and_tool_calls_share_cap_after_prior_model_failure(database):
         assert infra.eligible(conn, 0)["competition_sourcing_microusd"] == 6_000_000
 
 
-def test_concurrent_reservations_hold_budget_and_release_unused_estimate(database):
+def test_concurrent_reservations_have_no_pending_monetary_hold(database):
     with database[0].connect(**database[1]) as conn:
         seed(conn)
         lease = prior.claim(conn)
@@ -133,32 +133,25 @@ def test_concurrent_reservations_hold_budget_and_release_unused_estimate(databas
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(reserve, ("2", "3")))
-    assert sorted(result["status"] for result in results) == ["budget_busy", "reserved"]
-    assert next(result for result in results if result["status"] == "budget_busy")["reason"] == "provider_calls_inflight"
-    admitted = "2" if results[0]["status"] == "reserved" else "3"
-    waiting = "3" if admitted == "2" else "2"
+    assert [result["status"] for result in results] == ["reserved", "reserved"]
+    assert [result["amount_microusd"] for result in results] == [0, 0]
     with database[0].connect(**database[1]) as conn:
         state = infra.state(conn)
-        assert state["inflight_calls"] == 1
-        assert state["reserved_or_uncertain_microusd"] == 1_500_000
-        assert infra.eligible(conn, 5)["eligible"] is False
+        assert state["inflight_calls"] == 2
+        assert state["reserved_or_uncertain_microusd"] == 0
+        assert infra.eligible(conn, 5)["eligibility_reason"] == "provider_calls_inflight"
         assert prior.rpc(conn, "lab_arena_mark_dispatched(%s,%s,%s)",
                          (lease["run_id"], "sha256:" + "a" * 64,
-                          "sha256:" + admitted * 64))["status"] == "dispatched"
+                          "sha256:" + "2" * 64))["status"] == "dispatched"
         assert prior.rpc(conn, "lab_arena_settle_call(%s,%s,%s,%s,%s::jsonb,4500)",
                          (lease["run_id"], "sha256:" + "a" * 64,
-                          "sha256:" + admitted * 64, 500_000,
+                          "sha256:" + "2" * 64, 500_000,
                           json.dumps({"status": 200, "call_succeeded": True})))["status"] == "settled"
         assert infra.state(conn)["reserved_or_uncertain_microusd"] == 0
-        retry = prior.rpc(conn, "lab_arena_reserve_call(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,4500)",
-                          (lease["run_id"], "sha256:" + "a" * 64,
-                           "sha256:" + waiting * 64, "openrouter.chat", "openrouter",
-                           "miner_key", 1_500_000, json.dumps({})))
-        assert retry["status"] == "reserved"
-        assert infra.state(conn)["reserved_or_uncertain_microusd"] == 1_500_000
+        assert infra.eligible(conn, 5)["competition_sourcing_microusd"] == 4_500_000
 
 
-def test_parallel_holds_fit_below_cap(database):
+def test_parallel_current_policy_calls_keep_zero_monetary_reservation(database):
     with database[0].connect(**database[1]) as conn:
         seed(conn)
         lease = prior.claim(conn)
@@ -177,23 +170,24 @@ def test_parallel_holds_fit_below_cap(database):
         results = list(pool.map(reserve, ("2", "3")))
     assert [result["status"] for result in results] == ["reserved", "reserved"]
     with database[0].connect(**database[1]) as conn:
-        assert infra.state(conn)["reserved_or_uncertain_microusd"] == 3_000_000
+        assert infra.state(conn)["reserved_or_uncertain_microusd"] == 0
 
 
-def test_dynamic_tool_holds_remaining_budget_and_unknown_bill_stays_held(database):
+def test_dynamic_tool_and_uncertain_bill_do_not_hold_budget(database):
     with database[0].connect(**database[1]) as conn:
         seed(conn)
         lease = prior.claim(conn)
         assert prior.pay(conn, lease, amount=4_000_000)["status"] == "settled"
         reserved = prior.reserve(conn, lease, call="2")
         assert reserved["status"] == "reserved"
-        assert reserved["amount_microusd"] == 2_000_000
-        assert infra.state(conn)["reserved_or_uncertain_microusd"] == 2_000_000
-        blocked = prior.rpc(conn, "lab_arena_reserve_call(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,4500)",
+        assert reserved["amount_microusd"] == 0
+        assert infra.state(conn)["reserved_or_uncertain_microusd"] == 0
+        next_call = prior.rpc(conn, "lab_arena_reserve_call(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,4500)",
                             (lease["run_id"], "sha256:" + "a" * 64,
                              "sha256:" + "3" * 64, "openrouter.chat", "openrouter",
                              "miner_key", 1_000_000, json.dumps({})))
-        assert (blocked["status"], blocked["reason"]) == ("budget_busy", "provider_calls_inflight")
+        assert next_call["status"] == "reserved"
+        assert next_call["amount_microusd"] == 0
         assert prior.rpc(conn, "lab_arena_mark_dispatched(%s,%s,%s)",
                          (lease["run_id"], "sha256:" + "a" * 64,
                           "sha256:" + "2" * 64))["status"] == "dispatched"
@@ -203,12 +197,13 @@ def test_dynamic_tool_holds_remaining_budget_and_unknown_bill_stays_held(databas
                                json.dumps({"reason": "missing_provider_cost", "call_succeeded": True,
                                            "provider_status": 200})))
         assert uncertain["status"] == "uncertain"
-        assert infra.state(conn)["reserved_or_uncertain_microusd"] == 2_000_000
-        blocked = prior.rpc(conn, "lab_arena_reserve_call(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,4500)",
+        assert infra.state(conn)["reserved_or_uncertain_microusd"] == 0
+        after_uncertain = prior.rpc(conn, "lab_arena_reserve_call(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,4500)",
                             (lease["run_id"], "sha256:" + "a" * 64,
-                             "sha256:" + "3" * 64, "openrouter.chat", "openrouter",
+                             "sha256:" + "4" * 64, "openrouter.chat", "openrouter",
                              "miner_key", 1_000_000, json.dumps({})))
-        assert (blocked["status"], blocked["reason"]) == ("budget_busy", "provider_cost_uncertain")
+        assert after_uncertain["status"] == "reserved"
+        assert after_uncertain["amount_microusd"] == 0
 
 
 def test_trusted_free_tool_keeps_zero_cost_path_at_full_cap(database):
@@ -224,7 +219,7 @@ def test_trusted_free_tool_keeps_zero_cost_path_at_full_cap(database):
         assert result["amount_microusd"] == 0
 
 
-def test_host_loss_bill_still_consumes_full_thinking_execution_admission(database):
+def test_proved_host_loss_bill_does_not_consume_competition_admission(database):
     with database[0].connect(**database[1]) as conn:
         seed(conn)
         prior.host_loss(conn, amount=4_000_000)
@@ -234,5 +229,5 @@ def test_host_loss_bill_still_consumes_full_thinking_execution_admission(databas
         assert state["competition_settled_microusd"] == 0
         reserved = prior.reserve(conn, retry, token="b", call="f")
         assert reserved["status"] == "reserved"
-        assert reserved["amount_microusd"] == 2_000_000
+        assert reserved["amount_microusd"] == 0
         assert infra.eligible(conn, 0)["competition_sourcing_microusd"] == 0

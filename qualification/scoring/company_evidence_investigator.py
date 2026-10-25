@@ -5108,10 +5108,11 @@ async def investigate_company_evidence(
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
             industry_followup_pending = False
-            reserve_denied_research = False
+            required_industry_research_denied = False
             product_coverage = None
             industry_previously_proven = False
             industry_followup_search_completed = False
+            industry_followup_fetch_pending = False
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
             public_stage_unproven_rereviewed = False
@@ -5279,6 +5280,10 @@ async def investigate_company_evidence(
                 forced_product_fetch_call = bool(
                     required_tool == "fetch_page"
                     and early_product_fetch_urls
+                )
+                forced_industry_fetch_call = bool(
+                    required_tool == "fetch_page"
+                    and industry_followup_fetch_pending
                 )
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending
@@ -6455,9 +6460,11 @@ async def investigate_company_evidence(
                         # incomplete; that projection is not a valid negative.
                         if rejected and not failure_reason:
                             failure_reason = MALFORMED_RESPONSE_FAILURE_REASON
-                        if (reserve_denied_research and not failure_reason
-                                and any(finding.get("status") == "UNPROVEN"
-                                        for finding in claims.values())):
+                        # Ordinary model-selected research may be refused for
+                        # time without invalidating a complete negative packet.
+                        if (required_industry_research_denied and not failure_reason
+                                and (claims.get("industry") or {}).get("status")
+                                == "UNPROVEN"):
                             failure_reason = ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
                         # A complete validated judgment may finish UNPROVEN
                         # within bounded research. Missing submissions and
@@ -6509,7 +6516,9 @@ async def investigate_company_evidence(
                     ):
                         if forced_product_search_call:
                             early_product_research["search"] = "judgment_time_reserved"
-                        reserve_denied_research = True
+                        required_industry_research_denied |= bool(
+                            forced_industry_search_call or forced_product_search_call
+                        )
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,
@@ -6604,8 +6613,11 @@ async def investigate_company_evidence(
                                     and search_results
                                     and fetch_calls < MAX_FETCH_CALLS
                                 ):
+                                    industry_followup_fetch_pending = True
                                     forced_next_tool = "fetch_page"
                 elif name == "fetch_page":
+                    if forced_industry_fetch_call:
+                        industry_followup_fetch_pending = False
                     elapsed = time.monotonic() - started
                     safe_url = _safe_https_url(
                         arguments.get("url")
@@ -6641,7 +6653,9 @@ async def investigate_company_evidence(
                     ):
                         if forced_product_fetch_call:
                             early_product_research["fetch"] = "judgment_time_reserved"
-                        reserve_denied_research = True
+                        required_industry_research_denied |= bool(
+                            forced_industry_fetch_call or forced_product_fetch_call
+                        )
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,

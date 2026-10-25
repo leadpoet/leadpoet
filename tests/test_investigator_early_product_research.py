@@ -253,6 +253,56 @@ def test_judgment_reserve_suppresses_early_product_research(monkeypatch):
     assert result["usage"]["early_product_research"]["search"] == "judgment_time_reserved"
 
 
+def test_denied_server_required_product_search_keeps_unproven_industry_incomplete(
+    monkeypatch,
+):
+    now = [0.0]
+    requests = []
+    trusted_plan(PRODUCT_CRITERION)
+
+    async def model(_session, _url, *, headers, payload):
+        del headers
+        requests.append(payload)
+        if len(requests) == 1:
+            assert payload["tool_choice"]["function"]["name"] == "search_web"
+            now[0] = (
+                investigator.ADMISSION_DEADLINE_SECONDS
+                - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS + 1
+            )
+            name, arguments = "search_web", {"query": "Acme managed cloud platform"}
+        else:
+            assert payload["tool_choice"]["function"]["name"] == "submit_findings"
+            name, arguments = "submit_findings", {"findings": [
+                _finding("stage", status="UNPROVEN"),
+                _finding("industry", status="UNPROVEN"),
+            ]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def search(_session, query, *, key):
+        del key
+        assert "latest funding round" in query
+        return {"results": [{"url": STAGE_URL}]}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
+    monkeypatch.setenv("EXA_API_KEY", "offline-test")
+    monkeypatch.setattr(
+        investigator, "time", SimpleNamespace(monotonic=lambda: now[0]),
+    )
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(model))
+    monkeypatch.setattr(investigator, "_search_web", search)
+
+    result = asyncio.run(_investigate())
+
+    assert len(requests) == 2
+    assert result["usage"]["early_product_research"]["search"] == "judgment_time_reserved"
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+
+
 def test_one_remaining_fetch_is_reserved_for_stage(monkeypatch):
     actions = [
         ("fetch_page", {"url": STAGE_URL}),

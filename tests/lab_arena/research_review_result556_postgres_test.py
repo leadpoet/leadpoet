@@ -28,7 +28,8 @@ MANIFEST_HASH = "sha256:" + "b" * 64
 def recovery_database():
     yield from database_with_lab_arena_migration(
         CURRENT_SERVICE_MIGRATIONS + (
-            "492-lab-arena-review-provider-observations.sql", MIGRATION.name,
+            "492-lab-arena-review-provider-observations.sql",
+            "562-lab-arena-review-context-integrity-reason.sql", MIGRATION.name,
         )
     )
 
@@ -257,20 +258,31 @@ def test_legacy_round_rejects_research_field_but_keeps_old_pass(recovery_store, 
     assert "research_control" not in recovery_store.get_submission(submission)["code_review_doc"]
 
 
-def test_new_parser_reason_settles_existing_failure_contract(recovery_store, recovery_superuser):
-    submission, miner, token = _claim(recovery_store, recovery_superuser, "e21")
+@pytest.mark.parametrize("suffix,reason", [
+    ("e21", "context_integrity"),
+    ("e1b", "research_binding"),
+    ("e1c", "research_classification"),
+    ("e1d", "research_evidence"),
+    ("e1e", "research_evidence_mismatch"),
+    ("e1f", "research_keys"),
+    ("e22", "research_limitations"),
+])
+def test_new_parser_reason_settles_existing_failure_contract(
+    recovery_store, recovery_superuser, suffix, reason,
+):
+    submission, miner, token = _claim(recovery_store, recovery_superuser, suffix)
     document = {
         "model": code_review.DEFAULT_REVIEW_MODEL,
         "file_count": 3,
         "source_bytes": 1200,
         "error_code": "review_response_invalid",
-        "error_reason": "research_evidence_mismatch",
+        "error_reason": reason,
     }
     assert recovery_store.finish_submission_review(
         submission, miner, token, "error", document, None,
     )["status"] == "error"
     row = recovery_store.get_submission(submission)
-    assert row["code_review_doc"]["error_reason"] == "research_evidence_mismatch"
+    assert row["code_review_doc"]["error_reason"] == reason
     assert row["code_review_doc"]["cost_status"] == "uncertain"
     assert recovery_store.list_ledger(submission_id=submission)[-1]["entry_kind"] == "uncertain"
 

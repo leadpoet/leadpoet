@@ -7,8 +7,8 @@ SET LOCAL statement_timeout='30s';
 DO $research_review556$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)';
-  v_preimage CONSTANT TEXT := '7db9233a48f24be3cf2fa61572546774cccefc1d69d95af2ad3c5dc10bea8083';
-  v_postimage CONSTANT TEXT := 'ff26bac4c0d08183378c9aa0d8a2fa7e07f461ee3c3ac2a22ed2068455971e74';
+  v_preimage CONSTANT TEXT := 'f8b5171ec7584721ae879a66e450136967e63a91e7a80c03ea9fb97e2d15c1d8';
+  v_postimage CONSTANT TEXT := 'e3887c358b080b97ef784041c3edb219dd074001fff56407f61db5395099fd03';
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;
@@ -66,8 +66,10 @@ BEGIN$new556a$;
     RAISE EXCEPTION 'Arena review556 retryable anchor differs' USING ERRCODE='55000'; END IF;
   v_updated:=pg_catalog.replace(v_updated,v_old,v_new);
 
-  v_old:=$old556c$'finding_evidence_mismatch', 'finding_explanation'$old556c$;
+  v_old:=$old556c$'finding_evidence_mismatch', 'finding_explanation',
+             'context_integrity'$old556c$;
   v_new:=$new556c$'finding_evidence_mismatch', 'finding_explanation',
+             'context_integrity',
              'research_keys', 'research_binding', 'research_classification',
              'research_evidence', 'research_evidence_mismatch',
              'research_limitations'$new556c$;

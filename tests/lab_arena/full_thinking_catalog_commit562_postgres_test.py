@@ -33,6 +33,7 @@ def database():
             for name in (
                 "539-lab-arena-held-recovery-provider-admission.sql",
                 "555-lab-arena-full-thinking-six-dollar-cap.sql",
+                "562-lab-arena-review-context-integrity-reason.sql",
                 "556-lab-arena-research-review-result.sql",
                 "561-lab-arena-full-thinking-champion-baseline.sql",
             ):

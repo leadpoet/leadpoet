@@ -130,7 +130,7 @@ from scripts import run_lab_arena_service as entrypoint
 service = SimpleNamespace(
     startup_checks=lambda: {"database_identity": {"current_user": "service_role"}},
     _store=SimpleNamespace(_transport=SimpleNamespace(rpc=lambda *_: {
-        "schema_version": "leadpoet.lab_arena.restart_guard_state.v1", "guard_present": False,
+        "schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False,
     })),
     _config=SimpleNamespace(defaults=SimpleNamespace(daily_cutoff_hour_utc=0)),
     review_pending_submissions=lambda **_: print("ARENA_TEST_REVIEW", flush=True),
@@ -229,7 +229,7 @@ from scripts import run_lab_arena_service as entrypoint
 service = SimpleNamespace(
     startup_checks=lambda: {"database_identity": {"current_user": "service_role"}},
     _store=SimpleNamespace(_transport=SimpleNamespace(rpc=lambda *_: {
-        "schema_version": "leadpoet.lab_arena.restart_guard_state.v1", "guard_present": False,
+        "schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False,
     })),
     _config=SimpleNamespace(defaults=SimpleNamespace(daily_cutoff_hour_utc=0)),
     review_pending_submissions=lambda **_: None,

@@ -657,13 +657,23 @@ normal source, identity, role and quote checks. Explain in reason how the
 company's own supplied activity meets EVERY mandatory capability, action,
 customer/market restriction and shared scope. If any condition lacks proof,
 return UNPROVEN. A broad company activity is not a whole-criterion match.
+For design/develop criteria, company-bound functional/performance facts may
+jointly establish intended use, target customers and unquantified performance/cost
+benefits by reasonable inference. Do not turn a descriptive intended-use clause
+in a design/develop criterion into an extra shipment or named-customer requirement.
+Do not add shipments, named deployments, public prices or benchmarks unless requested.
+Still prove every core capability and customer/market restriction; compatibility,
+enabling technology or adjacent products cannot fill a missing capability.
+Explicit manufacture, sale, actual-use, deployment or milestone conditions need
+corresponding facts; never invent them.
 Search one weakest unresolved mandatory condition or small related group per
 query with company and useful synonyms; do not concatenate the full criterion
 or illustrative examples. Prefer a specific first-party product, docs or case
 page from navigation/search over a general overview or demo. After replacing
 a rejected citation, rejudge the complete criterion; never upgrade automatically.
 For a missing customer or user type, seek first-party sector solutions or customer
-stories that show actual use; do not re-bundle already established capabilities.
+stories at the proof level the criterion requests; require actual use only when
+the criterion requires it. Do not re-bundle already established capabilities.
 Fetch a selected page; discovery highlights alone are not proof.
 Never infer absence from silence or add requirements not requested.
 """

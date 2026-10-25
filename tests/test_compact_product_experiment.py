@@ -61,6 +61,17 @@ def test_native_whole_verdict_uses_two_independently_bound_quotes():
     assert not coverage_matches(proof, CRITERION + " for hospitals")
 
 
+def test_missing_industry_observation_keeps_precise_correction_reason():
+    raw = _finding()
+    raw["observed_industry"] = ""
+    finding = _validate(raw)
+    assert finding["status"] == "UNPROVEN"
+    assert finding["reason"] == inv.MISSING_INDUSTRY_OBSERVATION_REASON
+    assert finding["product_coverage_error"] == inv.MISSING_INDUSTRY_OBSERVATION_REASON
+    assert not coverage_matches(finding.get("product_coverage"), CRITERION)
+    assert not finding.get("product_positive_citation_rejected")
+
+
 @pytest.mark.parametrize("case", [
     "unknown_source", "quote_absent", "other_entity", "redirected_final",
     "redirected_primary", "partial_pair", "customer_role", "missing_verdict",

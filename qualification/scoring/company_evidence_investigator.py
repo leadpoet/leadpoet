@@ -3956,7 +3956,10 @@ def _validated_findings(
                     rejected_citation_sink=rejected_product_citations,
                 )
                 if raw.get("status") == "VERIFIED" and finding["status"] != "VERIFIED":
-                    raise CoverageError("primary industry citation failed source validation")
+                    # Keep the actual failed check actionable. Missing industry
+                    # metadata can reject an otherwise valid source citation.
+                    raise CoverageError(str(finding.get("reason") or
+                                            "primary industry citation failed source validation"))
                 finding["product_coverage"] = coverage
                 if raw.get("status") == "VERIFIED":
                     finding["supporting_evidence"] = coverage["evidence"][1:]

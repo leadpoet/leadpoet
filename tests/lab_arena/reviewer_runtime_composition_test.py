@@ -13,6 +13,9 @@ from scripts import build_arena_reviewer_runtime as composer
 from scripts.build_arena_reviewer_runtime import (
     CompositionError, verify_image_configuration, verify_overlay,
 )
+from tests.lab_arena.reviewer_rejected_final_packet_seam_test import (
+    frozen_reviewer_source, sources as frozen_reviewer_sources,
+)
 ROOT = composer.ROOT
 
 
@@ -135,6 +138,7 @@ def test_source_access_correction_is_explicit_and_composes(negative_finality):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
     }
+    original[builder.GRADER_FILE] = frozen_reviewer_source(original[builder.GRADER_FILE])
     # Model a frozen pre-correction image without depending on Git history.
     for name, deltas in ((builder.GRADER_FILE, INVESTIGATOR_DELTAS),
                          (builder.FINALITY_FILE, FINALITY_DELTAS)):
@@ -175,6 +179,7 @@ def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    original[builder.GRADER_FILE] = frozen_reviewer_source(original[builder.GRADER_FILE])
     # Reproduce the original frozen loop; do not import current grading behavior.
     assert original[builder.GRADER_FILE].count(_NEW.encode()) == 1
     original[builder.GRADER_FILE] = original[builder.GRADER_FILE].replace(
@@ -201,6 +206,29 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
         convert_investigation_finality_seam,
     )
     corrected = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+    # This historical fixture predates the compact product coverage decorator.
+    # Remove only its exact function binding before reconstructing old bytes.
+    decorated = b'@_final_product_coverage_gate\nasync def _llm_reverify_company('
+    assert corrected.count(decorated) == 1
+    corrected = corrected.replace(
+        decorated, b'async def _llm_reverify_company(', 1,
+    )
+    # In the historical layout this exact helper directly preceded the verifier;
+    # compact-only helper definitions were added between them later.
+    before = ast.parse(corrected)
+    verifier = b'async def _llm_reverify_company('
+    assert corrected.count(HELPER.encode()) == corrected.count(verifier) == 1
+    corrected = corrected.replace(HELPER.encode(), b'', 1).replace(
+        verifier, HELPER.encode() + verifier, 1,
+    )
+    after = ast.parse(corrected)
+    definitions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    assert sorted(ast.dump(node) for node in before.body if isinstance(node, definitions)) == sorted(
+        ast.dump(node) for node in after.body if isinstance(node, definitions)
+    )
+    assert [ast.dump(node) for node in before.body if not isinstance(node, definitions)] == [
+        ast.dump(node) for node in after.body if not isinstance(node, definitions)
+    ]
     original = corrected.replace(HELPER.encode(), b'', 1).replace(
         WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
     )
@@ -214,6 +242,7 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
                               if name == 'scorer_entrypoint.py' else name)).read_bytes()
         for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
     }
+    sources[builder.GRADER_FILE] = frozen_reviewer_source(sources[builder.GRADER_FILE])
     sources[builder.FINALITY_FILE] = original
     prior = builder.expected_overlay(sources, complete_negative_finality=True)
     repaired = builder.expected_overlay(
@@ -335,11 +364,9 @@ def test_completed_investigation_correction_rejects_shadowed_helper_binding(
 
 
 def _numeric_alias_sources():
-    sources = {
-        name: (ROOT / ('lab_arena/scorer_entrypoint.py'
-                       if name == 'scorer_entrypoint.py' else name)).read_bytes()
-        for name in (composer.GRADER_FILE, composer.FINALITY_FILE, *composer.ENTRYPOINT_FILES)
-    }
+    # This converter targets the historical reviewer contract. The shared
+    # fixture retains native compact behavior in a separate test arm.
+    sources = frozen_reviewer_sources(identity_schema_repair=True)
 
     from scripts.arena_reviewer_structured_homepage_alias_seam import SELF_NAME_CHANGES
     # This fixture represents the prior approved correction, before the new

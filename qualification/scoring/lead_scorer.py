@@ -7059,7 +7059,7 @@ def _has_explicitly_unproven_fit_dimensions(
             outcome.get("ok") is False
             and outcome.get("error_class") not in {
                 "provider_request_refused", "source_not_found", "source_gone",
-                "source_access_denied",
+                "source_access_denied", "unsupported_source",
             }
         )
         source_hash = outcome.get("url_sha256")

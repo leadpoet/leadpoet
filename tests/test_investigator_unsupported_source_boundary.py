@@ -165,4 +165,73 @@ def test_native_tool_loop_continues_after_unsupported_source(monkeypatch, altern
         assert product in pages
     else:
         assert result["claims"]["industry"]["status"] == "UNPROVEN"
-        assert result.get("failure_reason") == "provider_error"
+        assert result["failure_reason"] == ""
+        assert result["_completed_submit"] is True
+
+
+@pytest.mark.parametrize("status,body,malformed_positive,expected_failure", [
+    (415, UNSUPPORTED, False, ""),
+    (415, UNSUPPORTED, True, "malformed_response"),
+    (415, b'{"error":{"code":"provider_error"}}', False, "provider_error"),
+    (503, UNSUPPORTED, False, "provider_error"),
+])
+def test_terminal_refusal_classification_preserves_submission_and_provider_gates(
+        monkeypatch, status, body, malformed_positive, expected_failure):
+    from qualification.scoring import lead_scorer
+    from tests.test_company_evidence_investigator import _finding
+
+    fetched = False
+
+    async def model(_session, url, *, headers, payload):
+        nonlocal fetched
+        if url == "https://api.exa.ai/search":
+            return 200, {"results": []}
+        choice = payload.get("tool_choice")
+        forced = choice.get("function", {}).get("name") if isinstance(choice, dict) else None
+        if forced == "search_web":
+            name, arguments = "search_web", {"query": "Acme commercial software"}
+        elif not fetched:
+            fetched = True
+            name, arguments = "fetch_page", {"url": SOURCE}
+        else:
+            name, arguments = "submit_findings", {"findings": [_finding(
+                "industry", status="VERIFIED" if malformed_positive else "UNPROVEN",
+                observed_value="", observed_industry="Software",
+                activity_role="supplier_operator" if malformed_positive else "unresolved",
+                evidence_url=SOURCE if malformed_positive else "",
+                evidence_quote="Acme supplies commercial software." if malformed_positive else "",
+            )]}
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": "offline-call", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }]}}]}
+
+    async def failed_fallback(*_args, **_kwargs):
+        return {"ok": False, "error": "http_503"}
+
+    for name in ("OPENROUTER_API_KEY", "EXA_API_KEY", "SCRAPINGDOG_API_KEY"):
+        monkeypatch.setenv(name, "offline-placeholder")
+    monkeypatch.setattr(investigator.aiohttp, "ClientSession",
+                        lambda **_kwargs: Session(status, body))
+    monkeypatch.setattr(investigator, "_post_json", model)
+    monkeypatch.setattr(investigator, "_fetch_exa_exact_page", failed_fallback)
+    result = asyncio.run(investigator.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example"},
+        targets=("industry",), requested_industry="Software",
+        verified_homepage_identity={"normalized_name": "Acme",
+                                    "registrable_dns_domain": "acme.example"}))
+    assert result["failure_reason"] == expected_failure
+    assert bool(result.get("_completed_submit")) is (not expected_failure)
+    assert SOURCE not in result.get(investigator.PRIVATE_FETCHED_PAGES_KEY, {})
+    if not expected_failure:
+        assert result["claims"]["industry"]["status"] == "UNPROVEN"
+        assert result["claims"]["industry"]["evidence_url"] == ""
+        assert result["claims"]["industry"]["evidence_quote"] == ""
+
+    receipt = {"gate": "company_evidence_investigation",
+               "completed_submitted_findings": result.get("_completed_submit") is True,
+               "failure_reason": result["failure_reason"], "targets": ["industry"],
+               "claims": result["claims"], "usage": result.get("usage", {})}
+    receipt = json.loads(json.dumps(receipt))
+    assert lead_scorer._has_explicitly_unproven_fit_dimensions(
+        {}, ("industry",), investigation_receipt=receipt) is (not expected_failure)

@@ -17785,7 +17785,8 @@ def test_saved_soneil_count_unit_findings_preserve_identity_binding():
     ("research_turn", 3, True),
     ("research_expired", 2, False),
     ("research_second_empty", 3, False),
-    ("turn_budget", 2, False),
+    ("turn_budget", 3, True),
+    ("nonpositive_turn_budget", 2, False),
     ("expired", 2, False),
     ("second_empty", 3, False),
     ("second_arguments", 3, False),
@@ -17871,14 +17872,14 @@ def test_empty_output_exhausted_submit_shares_one_serialization_repair(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
-    if mode == "turn_budget":
+    if mode in {"turn_budget", "nonpositive_turn_budget"}:
         monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
     monkeypatch.setattr(investigator, "time", clock)
     monkeypatch.setattr(investigator, "_post_json", post)
     monkeypatch.setattr(investigator, "_search_web", search)
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example", "linkedin": url},
-        targets=("headcount",), positive_semantic_review=True,
+        targets=("headcount",), positive_semantic_review=mode != "nonpositive_turn_budget",
         requested_employee_buckets=["51-200"],
         prior_observations={"submitted_source_urls": [url]},
         prefetched_pages={url: {"text": quote, "final_url": url}},

@@ -5420,12 +5420,20 @@ async def investigate_company_evidence(
                 submit_only_response = bool(
                     force_submit or required_tool == "submit_findings"
                 )
+                final_ordinary_submit_response = bool(
+                    positive_semantic_review
+                    and submit_only_response
+                    and _turn == MAX_REASONING_TURNS - 1
+                )
                 if (
                     isinstance(empty_tool_message, Mapping)
                     and empty_tool_message.get("tool_calls") in (None, [])
                     and empty_tool_message.get("content") in (None, "")
                     and not correction_turn
-                    and _turn + 1 < MAX_REASONING_TURNS
+                    and (
+                        _turn + 1 < MAX_REASONING_TURNS
+                        or final_ordinary_submit_response
+                    )
                     and incomplete_submit_retries < MAX_INCOMPLETE_SUBMIT_RETRIES
                     and time.monotonic() - started < (
                         ADMISSION_DEADLINE_SECONDS
@@ -5442,6 +5450,8 @@ async def investigate_company_evidence(
                     # tool call starts. Share the existing serialization retry;
                     # do not invent a tool call or expand research bounds.
                     incomplete_submit_retries += 1
+                    if final_ordinary_submit_response:
+                        final_correction_pending = True
                     output_budget_retry_pending = True
                     forced_next_tool = (
                         "submit_findings" if submit_only_response else required_tool
@@ -5548,7 +5558,7 @@ async def investigate_company_evidence(
                     retry_incomplete_submit = bool(
                         name == "submit_findings"
                         and not correction_turn
-                        and ordinary_turn_remains
+                        and (ordinary_turn_remains or final_ordinary_submit_response)
                         and incomplete_submit_retries
                         < MAX_INCOMPLETE_SUBMIT_RETRIES
                         and time.monotonic() - started < (
@@ -5564,6 +5574,8 @@ async def investigate_company_evidence(
                     )
                     if retry_incomplete_submit:
                         incomplete_submit_retries += 1
+                        if final_ordinary_submit_response:
+                            final_correction_pending = True
                         output_budget_retry_pending = True
                         forced_next_tool = "submit_findings"
                         incomplete_submit_retry_pending = True

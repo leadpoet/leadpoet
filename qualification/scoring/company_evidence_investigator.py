@@ -6279,11 +6279,19 @@ async def investigate_company_evidence(
                         }
                     elif force_public_stage_rereview:
                         public_stage_unproven_rereviewed = True
-                        scoped_correction_targets = ("stage",)
+                        open_required_attribute = bool(
+                            "required_attribute" in requested_targets
+                            and (claims.get("required_attribute") or {}).get("status")
+                            == "UNPROVEN"
+                        )
+                        scoped_correction_targets = (
+                            ("stage", "required_attribute")
+                            if open_required_attribute else ("stage",)
+                        )
                         scoped_correction_preserved = {
                             target: dict(finding)
                             for target, finding in claims.items()
-                            if target != "stage"
+                            if target not in scoped_correction_targets
                         }
                         forced_next_tool = "submit_findings"
                         tool_result = {
@@ -6311,8 +6319,16 @@ async def investigate_company_evidence(
                                 "Do not search or fetch. VERIFIED or CONTRADICTED still needs "
                                 "one exact continuous quote from its fetched URL and must pass "
                                 "the unchanged deterministic validator. The server retained "
-                                "unrelated validated findings. Submit one complete finding "
-                                "for stage only."
+                                "unrelated validated findings. "
+                                + (
+                                    "Re-evaluate the complete requested attribute from "
+                                    "the loaded company-bound sources. Public-stage proof "
+                                    "alone does not prove its other mandatory conditions. "
+                                    "Submit one complete finding each for stage and "
+                                    "required_attribute."
+                                    if open_required_attribute else
+                                    "Submit one complete finding for stage only."
+                                )
                             ),
                         }
                     elif unproven_without_search:

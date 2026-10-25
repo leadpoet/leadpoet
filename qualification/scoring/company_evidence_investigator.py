@@ -645,6 +645,12 @@ with status, activity_role, and up to three evidence URL/quote bindings. Each
 VERIFIED leaf requires supplier/operator proof. Use all loaded company-bound
 pages; several clauses may cite the same exact quote, and a clause may use
 several pages. A source need not use the criterion's exact marketing wording.
+Before UNPROVEN, scan ALL loaded sources for each leaf, including product,
+technical, jobs and operating-brand passages. Missing from a lead summary is
+not missing from fetched evidence. Adjudicate leaf quotes/statuses first, then
+derive industry status from the tree: VERIFIED requires a VERIFIED aggregate,
+not merely proof of a broad company activity. For an UNPROVEN aggregate, use
+industry UNPROVEN with empty global evidence URL/quote; retain clause evidence.
 Keep nonempty locked_nodes unchanged in repair feedback; repair only listed
 clause evidence/statuses. Without a locked tree, correct the reported tree error.
 Search only unresolved mandatory clause IDs
@@ -5114,14 +5120,23 @@ async def investigate_company_evidence(
                         and search_domain not in normalized_query
                     ):
                         raise ValueError("reasoning_forced_tool_arguments_malformed")
-                if forced_industry_search_call and isinstance(product_coverage, ValidatedProductCoverage):
-                    unresolved = set(product_coverage.get("unresolved_ids") or ())
-                    terms = [node["span"] for node in product_coverage["nodes"]
-                             if node["id"] in unresolved]
-                    # One existing search action, now targeted by host-owned
-                    # unresolved spans rather than a truncated prose reason.
-                    query = " ".join([search_name or search_domain, *terms])[:500]
-                    if query.strip():
+                if forced_industry_search_call:
+                    normalized_query = _normalized_span(arguments["query"])
+                    name_anchor = bool(search_name and re.search(
+                        r"(?<![\w.-])" + re.escape(_normalized_span(search_name)) + r"(?![\w.-])",
+                        normalized_query,
+                    ))
+                    domain_anchor = bool(search_domain and re.search(
+                        r"(?<![a-z0-9-])" + re.escape(search_domain) + r"(?![a-z0-9.-])",
+                        normalized_query,
+                    ))
+                    if not (name_anchor or domain_anchor):
+                        # Preserve model-selected operators and synonyms. Only
+                        # add the existing company anchor when it is absent.
+                        anchor = search_name or search_domain
+                        if not anchor:
+                            raise ValueError("reasoning_forced_tool_arguments_malformed")
+                        query = (anchor + " " + arguments["query"])[:500]
                         arguments = {"query": query}
                         canonical_call = {**canonical_call, "function": {
                             **canonical_call["function"], "arguments": json.dumps(arguments),
@@ -5572,6 +5587,11 @@ async def investigate_company_evidence(
                                 "locked_nodes": [{key: node[key] for key in ("id", "span", "op", "children")}
                                                  for node in (locked_product_nodes or [])],
                                 "unresolved_ids": (product_coverage or {}).get("unresolved_ids", []),
+                                "unresolved_clauses": [
+                                    {"id": node["id"], "span": node["span"]}
+                                    for node in (product_coverage or {}).get("nodes", [])
+                                    if node["id"] in (product_coverage or {}).get("unresolved_ids", [])
+                                ],
                                 "citation_issues": (product_coverage or {}).get("citation_issues", {}),
                                 "error": str(industry_finding.get("product_coverage_error", ""))[:300],
                             }} if (locked_product_nodes is not None

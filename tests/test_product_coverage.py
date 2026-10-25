@@ -74,6 +74,31 @@ def test_repair_cannot_change_the_compiled_tree():
         validate(raw, locked_nodes=locked)
 
 
+def test_exact_function_word_gap_diagnostic_without_automatic_semantic_repair():
+    text = "A B2B platform that teams use to manage tickets and conversations"
+    raw = {"nodes": [node(0, text, "all", ["p1", "p2", "p3"]),
+                     node(1, "A B2B platform"), node(2, "teams use to manage tickets"),
+                     node(3, "conversations")], "claims": [claim(i) for i in (1, 2, 3)]}
+    with pytest.raises(CoverageError) as error:
+        validate(raw, text)
+    assert "node p0" in str(error.value) and "' that '" in str(error.value)
+    assert len(str(error.value)) <= 300
+    assert raw["nodes"][2]["span"] == "teams use to manage tickets"
+    raw["nodes"][2]["span"] = "that teams use to manage tickets"
+    assert validate(raw, text)["status"] == "VERIFIED"
+
+
+def test_overlap_diagnostic_identifies_parent_child_and_conflicting_boundary():
+    raw = matrix()
+    raw["nodes"][3]["span"] = "voice and workflow software"
+    with pytest.raises(CoverageError) as error:
+        validate(raw)
+    message = str(error.value)
+    assert "node p0" in message and "child p3" in message
+    assert "after p2" in message and "span [" in message
+    assert len(message) <= 300
+
+
 def test_node_permutation_has_one_stable_plan_lock_and_hash():
     raw = matrix()
     original = validate(raw)
@@ -274,7 +299,18 @@ def test_unrelated_projection_preserves_proof_and_final_wrapper_covers_early_ret
 
 
 @pytest.mark.parametrize("resolved", [True, False])
-def test_existing_loop_targets_missing_ids_with_unchanged_call_limits(monkeypatch, resolved):
+@pytest.mark.parametrize("query,expected_query", [
+    ("site:acme.example workflow orchestration", "site:acme.example workflow orchestration"),
+    ("ACME workflow orchestration", "ACME workflow orchestration"),
+    ("workflow orchestration", "Acme workflow orchestration"),
+    ("AcmeOther workflow orchestration", "Acme AcmeOther workflow orchestration"),
+    ("site:notacme.example workflow", "Acme site:notacme.example workflow"),
+    ("site:acme.example.evil workflow", "Acme site:acme.example.evil workflow"),
+    ("site:www.acme.example workflow", "site:www.acme.example workflow"),
+])
+def test_existing_loop_targets_missing_ids_with_unchanged_call_limits(
+    monkeypatch, resolved, query, expected_query,
+):
     requests, queries = [], []
     partial = matrix()
     partial["claims"][2] = claim(3, "UNPROVEN")
@@ -286,8 +322,14 @@ def test_existing_loop_targets_missing_ids_with_unchanged_call_limits(monkeypatc
         validate_operation_request("openrouter.chat", payload)
         requests.append(payload)
         turn = len(requests)
-        if turn in (1, 3):
+        if turn == 1:
             name, arguments = "search_web", {"query": "Acme generic software"}
+        elif turn == 3:
+            feedback = json.loads(payload["messages"][-1]["content"])
+            assert feedback["product_coverage"]["unresolved_clauses"] == [
+                {"id": "p3", "span": "workflow software"},
+            ]
+            name, arguments = "search_web", {"query": query}
         elif turn == 4:
             name, arguments = "fetch_page", {"url": SECOND}
         else:
@@ -325,7 +367,7 @@ def test_existing_loop_targets_missing_ids_with_unchanged_call_limits(monkeypatc
         "VERIFIED" if resolved else "UNPROVEN"
     ), (output, len(requests), queries)
     assert output["_completed_submit"] is True
-    assert queries == ["Acme generic software", "Acme workflow software"]
+    assert queries == ["Acme generic software", expected_query]
     assert output["usage"]["search_calls"] == 2
     assert output["usage"]["fetch_calls"] == 1
     assert output["usage"]["reasoning_turns"] == 5
@@ -337,11 +379,20 @@ def test_existing_loop_targets_missing_ids_with_unchanged_call_limits(monkeypatc
     assert "Acme provides voice software for clinics." in str(request_document["prefetched_sources"])
 
 
-@pytest.mark.parametrize("negative_after_search,repair_valid", [(False, True), (True, True), (True, False)])
+@pytest.mark.parametrize("negative_after_search,repair_valid,malformed_plan", [
+    (False, True, "root"), (True, True, "root"), (True, False, "root"), (True, True, "gap"),
+])
 def test_initial_invalid_plan_feedback_can_repair_without_a_locked_tree(
-    monkeypatch, negative_after_search, repair_valid,
+    monkeypatch, negative_after_search, repair_valid, malformed_plan,
 ):
     requests = []
+
+    def invalid():
+        if malformed_plan == "root":
+            return {"nodes": [node(0, CRITERION)], "claims": [claim(0)]}
+        raw = matrix()
+        raw["nodes"][0]["children"].remove("p4")
+        return raw
 
     async def post(_session, _url, *, headers, payload):
         from lab_arena.operations import validate_operation_request
@@ -354,16 +405,21 @@ def test_initial_invalid_plan_feedback_can_repair_without_a_locked_tree(
                 },
             }]}}]}
         if len(requests) == (2 if negative_after_search else 1):
-            coverage = {"nodes": [node(0, CRITERION)], "claims": [claim(0)]}
+            coverage = invalid()
         else:
             feedback = next(json.loads(m["content"]) for m in reversed(payload["messages"])
                             if m.get("role") == "tool")
             assert feedback["product_coverage"]["locked_nodes"] == []
-            assert feedback["product_coverage"]["error"] == (
-                "compound product criterion requires explicit requirement structure"
-            )
+            if malformed_plan == "root":
+                assert feedback["product_coverage"]["error"] == (
+                    "compound product criterion requires explicit requirement structure"
+                )
+            else:
+                error = feedback["product_coverage"]["error"]
+                assert "node p0" in error and "' for clinics'" in error
+                assert "retain the complete gap in an adjacent child span" in error
             assert len(feedback["product_coverage"]["error"]) <= 300
-            coverage = matrix() if repair_valid else {"nodes": [node(0, CRITERION)], "claims": [claim(0)]}
+            coverage = matrix() if repair_valid else invalid()
         raw = finding(json.dumps(coverage))
         if negative_after_search and (len(requests) == 2 or not repair_valid):
             raw.update(status="UNPROVEN", activity_role="unresolved", observed_industry="",

@@ -89,7 +89,7 @@ def _plan(criterion: str, nodes: object) -> list[dict]:
 
     def visit(key: str, depth: int) -> None:
         if key not in indexed or key in seen or depth > MAX_DEPTH:
-            raise CoverageError("missing, repeated or cyclic product requirement node")
+            raise CoverageError(f"missing, repeated, cyclic or over-depth product node {key[:32]}")
         seen.add(key)
         node = indexed[key]
         children = node["children"]
@@ -107,20 +107,33 @@ def _plan(criterion: str, nodes: object) -> list[dict]:
             raise CoverageError("product operator requires at least two children")
         cursor = node["start"]
         gaps = []
+        previous_child = None
         for child_id in children:
             if child_id not in indexed:
-                raise CoverageError("missing product requirement node")
+                raise CoverageError(f"product node {key} references missing child {child_id[:32]}")
             child = indexed[child_id]
             if child["start"] < cursor or child["end"] > node["end"]:
-                raise CoverageError("overlapping or out-of-order product requirement spans")
+                raise CoverageError(
+                    f"product node {key}: child {child_id} span [{child['start']},{child['end']}) "
+                    f"overlaps/out of order after {previous_child or 'parent start'} at {cursor}, "
+                    f"or exceeds parent [{node['start']},{node['end']})"
+                )
             gaps.append(criterion[cursor:child["start"]])
             cursor = child["end"]
+            previous_child = child_id
             visit(child_id, depth + 1)
         gaps.append(criterion[cursor:node["end"]])
         connector = " ".join(gaps)
         residual = re.sub(r"\b(?:and|or|both|either|all|of|such as|for example)\b|e\.g\.", "", connector, flags=re.I)
         if re.search(r"\w", residual):
-            raise CoverageError("product tree omitted requirement text or a shared qualifier")
+            gap = next((gap for gap in gaps if re.search(r"\w", re.sub(
+                r"\b(?:and|or|both|either|all|of|such as|for example)\b|e\.g\.",
+                "", gap, flags=re.I,
+            ))), connector)
+            raise CoverageError(
+                f"product node {key} omitted criterion gap {gap[:120]!r}; "
+                "retain the complete gap in an adjacent child span without changing scope"
+            )
         if node["op"] == "any":
             if not re.search(r"\bor\b|\beither\b|/", connector, re.I) or re.search(r"\band\b|\bboth\b|\ball\b", connector, re.I):
                 raise CoverageError("product OR conflicts with original connectors")

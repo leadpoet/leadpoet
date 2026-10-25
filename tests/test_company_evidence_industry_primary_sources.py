@@ -165,7 +165,7 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
         verified_homepage_identity={"normalized_name": "Nitra", "registrable_dns_domain": "nitra.com"},
     ))
     assert result["claims"]["industry"]["status"] == "VERIFIED"
-    assert queries == ["Nitra healthcare software", "Nitra " + criterion]
+    assert queries == ["Nitra healthcare software", "Nitra patient scheduling"]
     assert result["usage"]["search_calls"] == 2
     assert result["usage"]["fetch_calls"] == 1
     assert result["usage"]["reasoning_turns"] == 5

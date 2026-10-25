@@ -863,7 +863,11 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
         elif not latest_acknowledged:
             errors.add("agent_selected_response_unacknowledged")
         acknowledged.add(data["call_identity"])
-    if not require_client_ack and {call["call_identity"] for call in paid} - set(linked):
+    # The caller sets this flag only for the selected accepted execution.
+    # Related judge attempts may stop before delivery; every present link
+    # still passes the unconditional identity and byte checks above.
+    if (not require_client_ack and require_completed_phases
+            and {call["call_identity"] for call in paid} - set(linked)):
         errors.add("worker_response_receipt_link_invalid")
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid

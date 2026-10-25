@@ -6484,7 +6484,7 @@ async def investigate_company_evidence(
                                 outcome["ok"] is False
                                 and outcome["error_class"] not in {
                                     "provider_request_refused", "source_not_found",
-                                    "source_gone", "source_access_denied", "unsupported_source",
+                                    "source_gone", "source_access_denied",
                                 }
                             )
                         unresolved_source = bool(

@@ -58,7 +58,13 @@ def run_case(monkeypatch, *, stage_cached=True, geography=False, pricing=False,
     if geography:
         findings.append(_finding("geography", status="UNPROVEN", observed_value=None,
                                  evidence_url="", evidence_quote=""))
-    actions = actions or [("submit_findings", {"findings": findings})]
+    actions = list(actions or [("submit_findings", {"findings": findings})])
+    if not expire_after_fetch:
+        # Current combined stage/product review allocates one early product
+        # search. Empty results leave these priority and cap checks unchanged.
+        actions.insert(0, ("search_web", {
+            "query": "Acme security platform customers",
+        }))
 
     async def post(_session, _url, *, headers, payload):
         name, args = actions[len(requests)]
@@ -112,7 +118,7 @@ def test_cached_series_b_and_homepage_admit_terms_with_pricing_preferred(monkeyp
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
     assert result["usage"]["fetch_calls"] == 1
-    assert len(queries) == 1 and initial["server_current_stage_discovery"]["ok"] is True
+    assert len(queries) == 2 and initial["server_current_stage_discovery"]["ok"] is True
 
 
 def test_cached_disputed_stage_remains_loaded_and_current_search_required(monkeypatch):
@@ -121,7 +127,7 @@ def test_cached_disputed_stage_remains_loaded_and_current_search_required(monkey
     assert any(page == {"url": STAGE, "text": STAGE_QUOTE}
                for page in initial["prefetched_sources"])
     assert initial["prior_observations"]["stage_dispute_urls"] == [STAGE]
-    assert len(queries) == 1
+    assert len(queries) == 2
     assert result["claims"]["stage"]["status"] == "VERIFIED"
 
 
@@ -131,7 +137,7 @@ def test_fresh_stage_or_headquarters_preserves_existing_priority(monkeypatch, ge
                                               attribute_proven=False)
     assert fetched == [expected]
     assert initial["server_priority_submitted_source"]["url"] == expected
-    assert len(queries) == 1
+    assert len(queries) == 2
 
 
 @pytest.mark.parametrize("third_cached,terms", [(False, False), (True, True)])
@@ -143,7 +149,7 @@ def test_no_admissible_fresh_source_keeps_cached_stage_marker(monkeypatch, third
     assert initial["server_priority_submitted_source"]["cache_hit"] is True
     assert result["usage"]["fetch_calls"] == 0
     assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
-    assert len(queries) == 1
+    assert len(queries) == 2
 
 
 def test_fresh_locator_does_not_force_attribute_acceptance(monkeypatch):

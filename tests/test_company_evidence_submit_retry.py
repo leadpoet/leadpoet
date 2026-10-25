@@ -249,7 +249,7 @@ def test_voluntary_unproven_after_search_stays_complete(monkeypatch):
 
 
 @pytest.mark.parametrize("positive_semantic_review", [False, True])
-def test_normal_reasoning_request_keeps_existing_provider_default(
+def test_normal_reasoning_request_uses_pinned_product_model(
     monkeypatch, positive_semantic_review,
 ):
     routed = []
@@ -279,14 +279,17 @@ def test_normal_reasoning_request_keeps_existing_provider_default(
         if positive_semantic_review else investigator.REASONING_MAX_TOKENS
     )
     assert payload["max_tokens"] == normalized["max_tokens"] == expected_tokens
+    assert payload["model"] == normalized["model"] == (
+        investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
+    )
     if positive_semantic_review:
         assert payload["reasoning"] == normalized["reasoning"] == outbound["reasoning"] == {
             "effort": "medium",
         }
     else:
-        assert "reasoning" not in payload
-        assert "reasoning" not in normalized
-        assert "reasoning" not in outbound
+        assert payload["reasoning"] == normalized["reasoning"] == outbound["reasoning"] == {
+            "effort": "low",
+        }
 
 
 @pytest.mark.parametrize("response_exhausted", [False, True])

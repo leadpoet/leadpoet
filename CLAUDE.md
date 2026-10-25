@@ -6,7 +6,8 @@ previously passed pairs. This includes narrow shared scorer and investigator
 changes, independent source research, regression tests, protected read-only
 request capture, isolated organizer-funded provider tests, safe push and merge,
 and canonical deployment with live verification after the accuracy and safety
-checks pass. Keep cumulative OpenRouter test spend below $15. Preserve exact
+checks pass. The user raised the cumulative test limits on 2026-10-25 to
+$20 OpenRouter and $65 across all providers. Preserve exact
 frozen ICP requirements, identity and supplier-role checks, unrelated scoring,
 provider accounting, credentials, accepted historical judgments, published
 results, rewards, weights and concurrent work. Do not tune company exceptions,

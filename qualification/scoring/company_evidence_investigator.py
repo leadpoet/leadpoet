@@ -4513,8 +4513,14 @@ async def investigate_company_evidence(
     )
     product_plan: Optional[TrustedProductPlan] = None
     product_plan_receipt: dict[str, Any] = {"outcome": "not_required", "attempts": [], "cache_hit": False}
+    early_product_research: Optional[dict[str, Any]] = None
     def planning_usage() -> dict[str, Any]:
-        return {"product_plan": product_plan_receipt} if product_plan_receipt["outcome"] != "not_required" else {}
+        usage: dict[str, Any] = {}
+        if product_plan_receipt["outcome"] != "not_required":
+            usage["product_plan"] = product_plan_receipt
+        if early_product_research is not None:
+            usage["early_product_research"] = dict(early_product_research)
+        return usage
 
     def failed_result(reason: str) -> dict[str, Any]:
         result: dict[str, Any] = {"claims": {}, "failure_reason": reason}
@@ -4944,8 +4950,53 @@ async def investigate_company_evidence(
                         "plan_id": product_plan.plan_id, "nodes": product_plan.nodes,
                     },
                 }, ensure_ascii=False, separators=(",", ":"))})
+            combined_stage_product = bool(
+                required_current_stage_query
+                and positive_semantic_review
+                and "industry" in requested_targets
+                and requested_product_service.strip()
+                and product_plan is not None
+            )
+            if combined_stage_product:
+                early_product_research = {
+                    "search": "not_attempted", "fetch": "not_attempted",
+                    "safe_result_count": 0,
+                }
+            early_product_search_pending = bool(
+                combined_stage_product
+                and current_stage_search_succeeded
+                and search_calls < search_limit
+                and fetch_calls < MAX_FETCH_CALLS
+                and time.monotonic() - started < (
+                    ADMISSION_DEADLINE_SECONDS
+                    - JUDGMENT_ADMISSION_RESERVE_SECONDS
+                )
+            )
+            if early_product_research is not None:
+                if not current_stage_search_succeeded:
+                    early_product_research["search"] = "stage_discovery_failed"
+                elif search_calls >= search_limit:
+                    early_product_research["search"] = "search_budget_exhausted"
+                elif fetch_calls >= MAX_FETCH_CALLS:
+                    early_product_research["search"] = "fetch_budget_exhausted"
+                elif not early_product_search_pending:
+                    early_product_research["search"] = "judgment_time_reserved"
+            if early_product_search_pending:
+                messages.append({"role": "user", "content": (
+                    "The required current-stage discovery is already loaded. "
+                    "Use the next search_web call for one mandatory product-plan "
+                    "leaf or small related group that needs proof. Include the "
+                    "company name and useful synonyms; do not concatenate the "
+                    "full criterion or examples. Search results are locators only. "
+                    "Then fetch one useful first-party product, docs, or case "
+                    "page if a safe result is available. Continue the stage review "
+                    "after this bounded product research."
+                )})
             final_correction_pending = False
-            forced_next_tool = ""
+            forced_next_tool = (
+                "search_web" if early_product_search_pending else ""
+            )
+            early_product_fetch_urls: set[str] = set()
             forced_stage_search_pending = False
             incomplete_submit_retries = 0
             incomplete_submit_retry_pending = False
@@ -5071,6 +5122,11 @@ async def investigate_company_evidence(
                     # Any required proof that is still missing remains
                     # UNPROVEN under the unchanged deterministic validators.
                     required_tool = "submit_findings"
+                    if early_product_research is not None:
+                        if early_product_search_pending:
+                            early_product_research["search"] = "judgment_time_reserved"
+                        elif early_product_fetch_urls:
+                            early_product_research["fetch"] = "judgment_time_reserved"
                 force_submit = bool(
                     judgment_reserve_active
                     or turn_forced_submit
@@ -5115,6 +5171,14 @@ async def investigate_company_evidence(
                     required_tool == "search_web"
                     and industry_followup_pending
                     and not forced_stage_search_pending
+                )
+                forced_product_search_call = bool(
+                    required_tool == "search_web"
+                    and early_product_search_pending
+                )
+                forced_product_fetch_call = bool(
+                    required_tool == "fetch_page"
+                    and early_product_fetch_urls
                 )
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending
@@ -5438,7 +5502,7 @@ async def investigate_company_evidence(
                         and search_domain not in normalized_query
                     ):
                         raise ValueError("reasoning_forced_tool_arguments_malformed")
-                if forced_industry_search_call:
+                if forced_industry_search_call or forced_product_search_call:
                     normalized_query = _normalized_span(arguments["query"])
                     name_anchor = bool(search_name and re.search(
                         r"(?<![\w.-])" + re.escape(_normalized_span(search_name)) + r"(?![\w.-])",
@@ -6315,11 +6379,15 @@ async def investigate_company_evidence(
                             PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages(),
                         }
                 elif name == "search_web":
+                    if forced_product_search_call:
+                        early_product_search_pending = False
                     elapsed = time.monotonic() - started
                     if (
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
                     ):
+                        if forced_product_search_call:
+                            early_product_research["search"] = "judgment_time_reserved"
                         reserve_denied_research = True
                         forced_next_tool = "submit_findings"
                         tool_result = {
@@ -6332,6 +6400,8 @@ async def investigate_company_evidence(
                             ),
                         }
                     elif search_calls >= search_limit:
+                        if forced_product_search_call:
+                            early_product_research["search"] = "search_budget_exhausted"
                         tool_result = {"ok": False, "error": "search_budget_exhausted"}
                     else:
                         query = arguments.get("query") if isinstance(arguments, Mapping) else None
@@ -6339,9 +6409,62 @@ async def investigate_company_evidence(
                             tool_result = {"ok": False, "error": "invalid_query"}
                         else:
                             search_calls += 1
-                            tool_result = await _search_web(
-                                session, query.strip(), key=exa_key
-                            )
+                            if forced_product_search_call:
+                                early_product_research["search"] = "admitted"
+                            try:
+                                tool_result = await _search_web(
+                                    session, query.strip(), key=exa_key
+                                )
+                            except (
+                                aiohttp.ClientError, RuntimeError, TimeoutError,
+                                asyncio.TimeoutError, ValueError,
+                            ):
+                                if forced_product_search_call:
+                                    early_product_research["search"] = "provider_error"
+                                raise
+                            if forced_product_search_call:
+                                early_product_research["search"] = "completed"
+                                results = (
+                                    tool_result.get("results")
+                                    if isinstance(tool_result, Mapping) else None
+                                )
+                                safe_results: set[str] = set()
+                                for item in (
+                                    results[:MAX_SEARCH_RESULTS]
+                                    if isinstance(results, list) else ()
+                                ):
+                                    safe_url = _safe_https_url(
+                                        item.get("url") if isinstance(item, Mapping)
+                                        else None
+                                    )
+                                    if safe_url:
+                                        try:
+                                            public_http_url(safe_url)
+                                        except ValueError:
+                                            continue
+                                        safe_results.add(safe_url)
+                                early_product_research["safe_result_count"] = len(
+                                    safe_results
+                                )
+                                early_product_fetch_urls = (
+                                    safe_results - fetched_pages.keys()
+                                )
+                                if not safe_results:
+                                    early_product_research["fetch"] = "no_safe_result"
+                                elif not early_product_fetch_urls:
+                                    early_product_research["fetch"] = "already_loaded"
+                                elif fetch_calls >= MAX_FETCH_CALLS:
+                                    early_product_research["fetch"] = "fetch_budget_exhausted"
+                                    early_product_fetch_urls.clear()
+                                elif time.monotonic() - started >= (
+                                    ADMISSION_DEADLINE_SECONDS
+                                    - JUDGMENT_ADMISSION_RESERVE_SECONDS
+                                ):
+                                    early_product_research["fetch"] = "judgment_time_reserved"
+                                    early_product_fetch_urls.clear()
+                                else:
+                                    early_product_research["fetch"] = "required"
+                                    forced_next_tool = "fetch_page"
                             if forced_stage_search_call:
                                 current_stage_search_succeeded = True
                                 required_stage_discovery_failure_reason = ""
@@ -6365,7 +6488,21 @@ async def investigate_company_evidence(
                         if isinstance(arguments, Mapping)
                         else None
                     )
-                    if safe_url in fetched_pages:
+                    if (
+                        forced_product_fetch_call
+                        and safe_url not in early_product_fetch_urls
+                    ):
+                        early_product_research["fetch"] = "rejected_url"
+                        tool_result = {
+                            "ok": False, "error": "product_search_result_url_required",
+                            "instruction": (
+                                "Fetch a safe URL from the product search results "
+                                "before citing it."
+                            ),
+                        }
+                    elif safe_url in fetched_pages:
+                        if forced_product_fetch_call:
+                            early_product_research["fetch"] = "already_loaded"
                         tool_result = {
                             "ok": True,
                             "url": safe_url,
@@ -6378,6 +6515,8 @@ async def investigate_company_evidence(
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
                     ):
+                        if forced_product_fetch_call:
+                            early_product_research["fetch"] = "judgment_time_reserved"
                         reserve_denied_research = True
                         forced_next_tool = "submit_findings"
                         tool_result = {
@@ -6390,9 +6529,15 @@ async def investigate_company_evidence(
                             ),
                         }
                     elif fetch_calls >= MAX_FETCH_CALLS:
+                        if forced_product_fetch_call:
+                            early_product_research["fetch"] = "fetch_budget_exhausted"
                         tool_result = {"ok": False, "error": "fetch_budget_exhausted"}
                     else:
                         tool_result = await fetch_fresh_page(str(safe_url or ""))
+                        if forced_product_fetch_call:
+                            early_product_research["fetch"] = (
+                                "loaded" if tool_result.get("ok") else "failed"
+                            )
                         if tool_result.get("ok"):
                             fetched_pages[str(tool_result["url"])] = str(
                                 tool_result["text"]
@@ -6410,6 +6555,8 @@ async def investigate_company_evidence(
                                 for key, value in tool_result.items()
                                 if key != "final_url"
                             }
+                    if forced_product_fetch_call:
+                        early_product_fetch_urls.clear()
                 else:
                     raise ValueError("reasoning_tool_unknown")
                 admission.tool_settled(

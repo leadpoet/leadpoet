@@ -15031,6 +15031,7 @@ def test_multitarget_retrieval_allocates_after_current_stage_review(
         prior_observations["stage_dispute_urls"] = [stage_url]
 
     actions = [
+        ("search_web", {"query": "Acme cloud security identity protection software"}),
         ("fetch_page", {"url": product_url}),
         ("submit_findings", {"findings": [
             _finding(
@@ -15055,6 +15056,15 @@ def test_multitarget_retrieval_allocates_after_current_stage_review(
     requests = []
     fetched_urls = []
     search_results = [{"url": stage_url}] if stage_conflict else []
+    search_queries = []
+
+    async def fake_search(_session, query, *, key):
+        del key
+        search_queries.append(query)
+        return {"results": (
+            search_results if len(search_queries) == 1
+            else [{"url": product_url}]
+        )}
 
     async def fake_post(_session, _url, *, headers, payload):
         del headers
@@ -15074,11 +15084,7 @@ def test_multitarget_retrieval_allocates_after_current_stage_review(
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post))
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
-    monkeypatch.setattr(
-        investigator,
-        "_search_web",
-        AsyncMock(return_value={"results": search_results}),
-    )
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
 
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -15108,10 +15114,11 @@ def test_multitarget_retrieval_allocates_after_current_stage_review(
     assert result["claims"]["stage"]["observed_value"] == stage_value
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert _core_usage(result["usage"]) == {
-        "reasoning_turns": 2,
-        "search_calls": 1,
+        "reasoning_turns": 3,
+        "search_calls": 2,
         "fetch_calls": len(expected_fetches),
     }
+    assert search_queries[1] == actions[0][1]["query"]
     input_document = json.loads(
         requests[0]["messages"][1]["content"].split("\n", 1)[1]
     )

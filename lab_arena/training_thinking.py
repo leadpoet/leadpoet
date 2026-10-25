@@ -669,6 +669,13 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
     private provider response is not part of the accepted agent's prior context
     or target, provided the score input and published label are still bound.
     """
+    selected_id = example.get("run_id")
+    if any(isinstance(call, Mapping) and call.get("run_id") == selected_id and (
+            "provider_cost_unresolved" in (call.get("evidence_gaps") or [])
+            or ("accounting_state" in call and call.get("accounting_state") != "settlement")
+            or ("actual_microusd" in call and type(call.get("actual_microusd")) is not int))
+            for call in example.get("provider_calls") or []):
+        return None
     proof = example.get("completeness") or {}
     reasons = set(proof.get("incomplete_reasons") or [])
     if proof.get("complete") is True and not reasons:

@@ -355,6 +355,7 @@ def test_nine_of_ten_exact_runs_allow_one_private_or_missing_export():
     damaged = examples["run-9"]
     damaged["completeness"].update(complete=False, incomplete_reasons=["response_privacy_nonexact"])
     damaged["provider_calls"][0]["response_privacy_redactions"] = ["credential"]
+    damaged["provider_calls"][0]["response_receipts"][0]["privacy_redactions"] = ["credential"]
     seal(damaged)
     result = assess_ten(examples)
     assert result["eligible"] is True, result
@@ -384,6 +385,7 @@ def test_privacy_gap_cannot_hide_wrong_route_at_eighty_percent():
     damaged = examples["run-9"]
     damaged["completeness"].update(complete=False, incomplete_reasons=["response_privacy_nonexact"])
     damaged["provider_calls"][0]["response_privacy_redactions"] = ["credential"]
+    damaged["provider_calls"][0]["response_receipts"][0]["privacy_redactions"] = ["credential"]
     damaged["provider_calls"][2]["reasoning_capture"]["provider_route"] = "wrong-route"
     seal(damaged)
     result = assess_ten(examples)
@@ -455,6 +457,102 @@ def test_eighty_percent_does_not_accept_unproved_thinking_as_empty():
     result = assess_ten(examples)
     assert result["eligible"] is False
     assert "full_thinking_unavailable" in result["reasons"]
+
+
+def _unsettled_selected_call(example, *, privacy=False):
+    call = example["provider_calls"][0]
+    call["accounting_state"] = "uncertain"
+    call["actual_microusd"] = None
+    call["evidence_gaps"] = ["provider_cost_unresolved"]
+    reasons = ["provider_cost_unresolved"]
+    if privacy:
+        call["response_privacy_redactions"] = ["credential"]
+        call["response_receipts"][0]["privacy_redactions"] = ["credential"]
+        call["evidence_gaps"].append("response_privacy_nonexact")
+        reasons.append("response_privacy_nonexact")
+    artifact = example["worker_observation_artifacts"][example["run_id"]]
+    artifact["payload"]["complete"] = True
+    artifact["payload_sha256"] = contracts.document_hash(artifact["payload"])
+    for item in example["provider_calls"]:
+        provenance = item.get("response_provenance") or {}
+        if provenance.get("worker_receipt_ref"):
+            provenance["worker_receipt_ref"]["payload_sha256"] = artifact["payload_sha256"]
+        for ref in provenance.get("agent_receipt_refs") or []:
+            ref["payload_sha256"] = artifact["payload_sha256"]
+    example["completeness"] = {
+        "complete": False, "incomplete_reasons": sorted(reasons),
+        "dimensions": {"context": True, "source_identity": True, "exact_inputs": True,
+                       "input_output_label": True, "costs": False, "research_process": False},
+        "reasons_by_dimension": {"context": [], "source_identity": [], "exact_inputs": [],
+                                 "input_output_label": [], "costs": ["provider_cost_unresolved"],
+                                 "research_process": sorted(reasons)},
+    }
+    return seal(example)
+
+
+@pytest.mark.parametrize("privacy", [False, True])
+def test_eighty_percent_tolerates_two_attributable_unsettled_calls(privacy):
+    examples = ten_selected_examples()
+    for run_id in ("run-8", "run-9"):
+        _unsettled_selected_call(examples[run_id], privacy=privacy)
+    result = assess_ten(examples)
+    assert result["eligible"] is True, result
+    assert result["counts"]["complete_runs"] == 8
+    assert result["counts"]["incomplete_runs"] == 2
+    assert assess_ten(examples, percent=100)["eligible"] is False
+    assert training_thinking.selected_research_evidence(examples["run-8"]) is None
+    splits, _ = training_thinking.build([examples["run-8"]])
+    assert not splits["train"] and not splits["eval"]
+    _unsettled_selected_call(examples["run-7"])
+    assert "training_coverage_incomplete" in assess_ten(examples)["reasons"]
+
+
+@pytest.mark.parametrize("damage", [
+    lambda e: e["provider_calls"][0].update(accounting_state="dispatch"),
+    lambda e: e["provider_calls"][0].update(actual_microusd=1),
+    lambda e: e["provider_calls"][0]["response_provenance"].update(agent_receipt="not_reported"),
+    lambda e: e["provider_calls"][0]["reasoning_capture"].update(provider_route="wrong-route"),
+    lambda e: e["provider_calls"][0]["request"].update(operation_id="exa.search"),
+    lambda e: e["provider_calls"][0]["response_receipts"][0].update(wire_body_sha256="sha256:" + "0" * 64),
+])
+def test_unsettled_cost_cannot_mask_invalid_accounting_or_provenance(damage):
+    examples = ten_selected_examples()
+    damaged = _unsettled_selected_call(examples["run-9"])
+    damage(damaged)
+    seal(damaged)
+    result = assess_ten(examples)
+    assert result["eligible"] is False, result
+
+
+def test_unsettled_cost_with_unsubstantiated_privacy_label_is_hard_failure():
+    examples = ten_selected_examples()
+    damaged = _unsettled_selected_call(examples["run-9"], privacy=True)
+    damaged["provider_calls"][0]["response_receipts"][0]["privacy_redactions"] = []
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
+
+
+def test_unsettled_cost_cannot_hide_behind_complete_flag():
+    examples = ten_selected_examples()
+    damaged = _unsettled_selected_call(examples["run-9"])
+    damaged["completeness"] = {"complete": True, "incomplete_reasons": []}
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
+    assert training_thinking.selected_research_evidence(damaged) is None
+    splits, _ = training_thinking.build([damaged])
+    assert not splits["train"] and not splits["eval"]
+
+
+def test_unsettled_cost_and_exact_length_stop_count_one_incomplete_icp():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    damaged["provider_calls"][0]["response"]["choices"][0]["finish_reason"] = "length"
+    refresh_response_links(damaged, 0)
+    _unsettled_selected_call(damaged)
+    result = assess_ten(examples)
+    assert result["eligible"] is True, result
+    assert result["counts"]["complete_runs"] == 9
+    assert result["counts"]["incomplete_runs"] == 1
 
 
 def test_readable_projection_must_retain_paths_to_raw_provider_text(monkeypatch):

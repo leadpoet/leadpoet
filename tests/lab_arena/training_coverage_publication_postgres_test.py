@@ -18,7 +18,7 @@ from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,
 )
 from tests.lab_arena.test_integrity_round import IntegrityHarness
-from tests.lab_arena.training_eligibility_test import captured_example
+from tests.lab_arena.training_eligibility_test import captured_example, _unsettled_selected_call
 from tests.lab_arena.training_steps_test import seal
 from tests.lab_arena.test_lab_arena_service_round import daily_icps
 
@@ -37,9 +37,12 @@ def _rename_run(value, run_id):
     return run_id if value == "run" else value
 
 
-@pytest.mark.parametrize("missing,expected_eligible", [(2, True), (3, False)])
+@pytest.mark.parametrize("missing,expected_eligible,gap", [
+    (2, True, "missing"), (3, False, "missing"),
+    (2, True, "unsettled"), (3, False, "unsettled"),
+])
 def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
-    database, tmp_path, monkeypatch, missing, expected_eligible,
+    database, tmp_path, monkeypatch, missing, expected_eligible, gap,
 ):
     psycopg2, dsn = database
     harness = IntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
@@ -99,7 +102,7 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
     omitted = {run["run_id"] for run in selected[bad_id][-missing:]}
 
     def export(_store, _objects, run_id):
-        if run_id in omitted:
+        if run_id in omitted and gap == "missing":
             raise FileNotFoundError("synthetic missing training export")
         submission_id = next(sub for sub, runs in selected.items()
                              if any(run["run_id"] == run_id for run in runs))
@@ -113,7 +116,8 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
             "sha256": source_hash if source_hash else contracts.hash_bytes(b"frozen baseline"),
             "hash_origin": "recorded_archive_hash" if source_hash else "computed_from_frozen_object",
         }
-        return seal(example)
+        seal(example)
+        return _unsettled_selected_call(example) if run_id in omitted else example
 
     monkeypatch.setattr(training_reader, "export_run", export)
     with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:

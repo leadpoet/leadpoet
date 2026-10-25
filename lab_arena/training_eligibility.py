@@ -110,10 +110,119 @@ def _documented_selected_privacy_gap(example, run_id):
     return any(
         call.get("run_id") == run_id and (
             (call.get("request_capture") or {}).get("redacted") is True
-            or "credential" in (call.get("response_privacy_redactions") or [])
-            or any("credential" in (receipt.get("privacy_redactions") or [])
-                   for receipt in call.get("response_receipts") or []))
+            or ("credential" in (call.get("response_privacy_redactions") or [])
+                and any("credential" in (receipt.get("privacy_redactions") or [])
+                        for receipt in call.get("response_receipts") or [])))
         for call in example.get("provider_calls") or [])
+
+
+def _selected_cost_gap_verified(example, run_id):
+    """Recognize an uncertain charge only after selected receipt proof survives."""
+    proof = example.get("completeness") or {}
+    reasons = set(proof.get("incomplete_reasons") or [])
+    allowed = {"provider_cost_unresolved", "response_privacy_nonexact"}
+    if "provider_cost_unresolved" not in reasons or not reasons <= allowed:
+        return False
+    dimensions = proof.get("dimensions") or {}
+    by_dimension = proof.get("reasons_by_dimension") or {}
+    if (any(dimensions.get(name) is not True or by_dimension.get(name) != []
+            for name in ("context", "source_identity", "exact_inputs", "input_output_label"))
+            or dimensions.get("costs") is not False
+            or dimensions.get("research_process") is not False
+            or set(by_dimension.get("costs") or []) != {"provider_cost_unresolved"}
+            or set(by_dimension.get("research_process") or []) != reasons
+            or ("response_privacy_nonexact" in reasons
+                and not _documented_selected_privacy_gap(example, run_id))
+            or not _all_model_routes_verified(example, run_id)):
+        return False
+    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+    payload = artifact.get("payload") or {}
+    if (payload.get("complete") is not True
+            or artifact.get("payload_sha256") != contracts.document_hash(payload)):
+        return False
+    selected = [call for call in example.get("provider_calls") or []
+                if call.get("run_id") == run_id]
+    cost_calls = [call for call in selected
+                  if "provider_cost_unresolved" in (call.get("evidence_gaps") or [])]
+    if not cost_calls:
+        return False
+    try:
+        for call in selected:
+            gaps = set(call.get("evidence_gaps") or [])
+            if not gaps <= allowed:
+                return False
+            if call in cost_calls and (
+                call.get("accounting_state") != "uncertain"
+                or call.get("actual_microusd") is not None
+                or type(call.get("terminal_entry_id")) is not int
+                or call["terminal_entry_id"] < 1):
+                return False
+            if call.get("operation_id") in reasoning_capture.OPERATIONS:
+                try:
+                    training_steps._candidate(example, call)
+                except ValueError as exc:
+                    privacy_gap = (str(exc) == "response_privacy_nonexact"
+                                   and "response_privacy_nonexact" in reasons)
+                    truncated = False
+                    if str(exc) == "response_not_complete":
+                        state = training_thinking.attempt_coverage(
+                            call, example.get("role", "miner"),
+                            (example.get("configuration") or {}).get("reasoning_route_registry"))
+                        truncated = (state["returned"] == "truncated"
+                                     and state["route_reviewed"] and state["provider_route_verified"])
+                    if not privacy_gap and not truncated:
+                        return False
+            if call not in cost_calls and not gaps:
+                continue
+            request = call.get("request") or {}
+            provenance = call.get("response_provenance") or {}
+            response = call.get("response")
+            if (not isinstance(request, Mapping)
+                    or request.get("operation_id") != call.get("operation_id")
+                    or request.get("request_hash") != call.get("request_hash")
+                    or not isinstance(request.get("hashed_parameters"), Mapping)
+                    or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
+                    or not isinstance(response, Mapping)
+                    or contracts.document_hash(response) != call.get("response_sha256")
+                    or ("credential" in (call.get("response_privacy_redactions") or [])
+                        and "response_privacy_nonexact" not in reasons)
+                    or (any("credential" in (receipt.get("privacy_redactions") or [])
+                            for receipt in call.get("response_receipts") or [])
+                        and "response_privacy_nonexact" not in reasons)
+                    or provenance.get("agent_receipt") != "reported_exact_body_received"
+                    or provenance.get("delivery_to_worker") != "socket_written"):
+                return False
+            worker_ref = provenance.get("worker_receipt_ref") or {}
+            if (worker_ref.get("run_id") != run_id
+                    or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
+                return False
+            writes = [row for row in payload.get("response_receipts") or []
+                      if row.get("ordinal") == worker_ref.get("ordinal")
+                      and row.get("call_identity") == call.get("call_identity")
+                      and row.get("operation_id") == call.get("operation_id")
+                      and row.get("action_sequence") == call.get("action_sequence")
+                      and row.get("write_state") == "socket_written"]
+            refs = provenance.get("agent_receipt_refs") or []
+            reads = [row for row in payload.get("agent_observations") or []
+                     if row.get("kind") == "response_received"
+                     and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                             and ref.get("payload_sha256") == artifact["payload_sha256"]
+                             for ref in refs)]
+            receipts = [row for row in call.get("response_receipts") or []
+                        if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
+                        and row.get("response_sha256") == call.get("response_sha256")]
+            if (len(writes) != 1 or not reads or not receipts
+                    or any((row.get("privacy") or {}).get("redacted") is True for row in reads)
+                    or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
+                               and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
+                               and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
+                               and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
+                               and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
+                               for read in reads for receipt in receipts)):
+                return False
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+    return True
 
 
 def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | None],
@@ -169,6 +278,14 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                             and (source["sha256"] == source_digest or baseline_source_ok))
                     or (example.get("configuration") or {}).get("reasoning_capture_policy") != reasoning_capture.POLICY):
                 run_reasons.append("selected_run_identity_unverified")
+                continue
+            # A self-contradictory completeness flag cannot hide an unsettled
+            # selected call. The narrow 80% verifier below must prove it.
+            if any(call.get("run_id") == run_id and (
+                    call.get("accounting_state") != "settlement"
+                    or type(call.get("actual_microusd")) is not int)
+                    for call in example.get("provider_calls") or []):
+                run_reasons.append("trajectory_evidence_incomplete")
                 continue
             ancillary_gaps = training_thinking.selected_research_evidence(example)
             if ancillary_gaps is None:
@@ -244,6 +361,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                         if (proof_reasons and proof_reasons <= {"response_privacy_nonexact"}
                                 and _documented_selected_privacy_gap(example, run_id)
                                 and _all_model_routes_verified(example, run_id)):
+                            soft.add("trajectory_evidence_incomplete")
+                        if _selected_cost_gap_verified(example, run_id):
                             soft.add("trajectory_evidence_incomplete")
                     reasons.extend(reason for reason in run_reasons if reason not in soft)
             else:

@@ -33,7 +33,10 @@ from qualification.competition_models import public_http_url
 from qualification.scoring.company_fit_decision import (
     _company_name, verified_homepage_brand_name,
 )
-from qualification.scoring.checked_sources import checked_source_provenance
+from qualification.scoring.checked_sources import (
+    MAX_SEARCH_LOCATOR_EXCERPT_CHARS,
+    checked_source_provenance,
+)
 from qualification.scoring.product_coverage import (
     CoverageError, ValidatedProductCoverage, TrustedProductPlan,
     PLANNER_PROMPT, get_cached_plan, validate_semantic_plan, _store_trusted_plan,
@@ -2706,11 +2709,17 @@ async def _search_web(
     *,
     key: str,
 ) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "query": query[:500], "type": "auto", "numResults": MAX_SEARCH_RESULTS,
+        # Exa's bounded highlights help select a page. They are never added to
+        # fetched_pages, which remains the only source of citation text.
+        "contents": {"highlights": {"maxCharacters": MAX_SEARCH_LOCATOR_EXCERPT_CHARS}},
+    }
     status, body = await _post_json(
         session,
         "https://api.exa.ai/search",
         headers={"x-api-key": key, "Content-Type": "application/json"},
-        payload={"query": query[:500], "type": "auto", "numResults": MAX_SEARCH_RESULTS},
+        payload=payload,
     )
     if status != 200:
         raise RuntimeError("search_provider_unavailable")
@@ -2728,12 +2737,26 @@ async def _search_web(
         url = _safe_https_url(item.get("url") or item.get("id"))
         if not url:
             continue
+        try:
+            public_http_url(url)
+        except ValueError:
+            continue
         # Search publication metadata can date a republication instead of the
         # transaction. Keep discovery to locators; fetched text owns chronology.
-        locators.append({
+        locator = {
             "url": url,
             "title": str(item.get("title") or "")[:300],
-        })
+        }
+        highlights = item.get("highlights")
+        if isinstance(highlights, list):
+            first = next((value for value in highlights if isinstance(value, str) and value.strip()), "")
+            excerpt = " ".join(re.sub(
+                r"[\x00-\x1f\x7f]", " ",
+                first[:MAX_SEARCH_LOCATOR_EXCERPT_CHARS],
+            ).split())
+            if excerpt:
+                locator["discovery_excerpt"] = excerpt[:MAX_SEARCH_LOCATOR_EXCERPT_CHARS]
+        locators.append(locator)
     return {"results": locators, "notice": "discovery_only_not_evidence"}
 
 

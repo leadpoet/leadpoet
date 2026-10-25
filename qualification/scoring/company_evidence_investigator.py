@@ -84,6 +84,7 @@ POSITIVE_SEMANTIC_REVIEW_MODEL = "openai/gpt-6-luna"
 MAX_REASONING_TURNS = 8
 MAX_INCOMPLETE_SUBMIT_RETRIES = 1
 REASONING_MAX_TOKENS = 3000
+PRODUCT_REVIEW_MAX_TOKENS = 4096
 MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 4
 MAX_PREFETCHED_PAGES = 3
@@ -4650,6 +4651,7 @@ async def investigate_company_evidence(
             forced_stage_search_pending = False
             incomplete_submit_retries = 0
             incomplete_submit_retry_pending = False
+            output_budget_retry_pending = False
             admission = ReviewerAdmission(
                 admission_seconds=ADMISSION_DEADLINE_SECONDS,
                 judgment_reserve_seconds=JUDGMENT_ADMISSION_RESERVE_SECONDS,
@@ -4821,6 +4823,8 @@ async def investigate_company_evidence(
                     and required_tool == "submit_findings"
                 )
                 incomplete_submit_retry_pending = False
+                output_budget_retry_request = output_budget_retry_pending
+                output_budget_retry_pending = False
                 if (
                     serialization_retry_request
                     and positive_semantic_review
@@ -4830,6 +4834,16 @@ async def investigate_company_evidence(
                     )
                 ):
                     raise ValueError("reasoning_tool_arguments_malformed")
+                ordinary_product_review = bool(
+                    positive_semantic_review
+                    and "industry" in requested_targets
+                    and requested_product_service.strip()
+                    and not (force_submit or required_tool == "submit_findings"
+                             or serialization_retry_request or output_budget_retry_request)
+                )
+                request_max_tokens = (
+                    PRODUCT_REVIEW_MAX_TOKENS if ordinary_product_review else REASONING_MAX_TOKENS
+                )
                 status, body = await _post_openrouter_json(
                     session,
                     "https://openrouter.ai/api/v1/chat/completions",
@@ -4879,15 +4893,15 @@ async def investigate_company_evidence(
                         ),
                         "parallel_tool_calls": False,
                         "temperature": 0.0,
-                        "max_tokens": REASONING_MAX_TOKENS,
+                        "max_tokens": request_max_tokens,
                         **(
-                            {"reasoning": {"effort": "low"}}
+                            {"reasoning": {"effort": "medium" if ordinary_product_review else "low"}}
                             if (
                                 positive_semantic_review
                                 and (
-                                    # Product matrices need serialization room
-                                    # on ordinary turns and generic length retries,
-                                    # within the unchanged total output budget.
+                                    # Ordinary product reviews use bounded medium
+                                    # reasoning; final/serialization/retry turns
+                                    # retain low effort and the 3,000-token cap.
                                     ("industry" in requested_targets
                                      and requested_product_service.strip())
                                     or serialization_retry_request
@@ -4937,13 +4951,14 @@ async def investigate_company_evidence(
                         )
                     )
                     and _response_exhausted_output_budget(
-                        body, max_tokens=REASONING_MAX_TOKENS
+                        body, max_tokens=request_max_tokens
                     )
                 ):
                     # Output exhaustion can consume the whole reply before a
                     # tool call starts. Share the existing serialization retry;
                     # do not invent a tool call or expand research bounds.
                     incomplete_submit_retries += 1
+                    output_budget_retry_pending = True
                     forced_next_tool = (
                         "submit_findings" if submit_only_response else required_tool
                     )
@@ -5060,11 +5075,12 @@ async def investigate_company_evidence(
                             )
                         )
                         and _response_exhausted_output_budget(
-                            body, max_tokens=REASONING_MAX_TOKENS
+                            body, max_tokens=request_max_tokens
                         )
                     )
                     if retry_incomplete_submit:
                         incomplete_submit_retries += 1
+                        output_budget_retry_pending = True
                         forced_next_tool = "submit_findings"
                         incomplete_submit_retry_pending = True
                         assistant_message: dict[str, Any] = {

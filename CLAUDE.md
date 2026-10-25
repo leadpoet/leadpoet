@@ -2303,6 +2303,8 @@ The user explicitly authorized `$overnight-rebenchmark-validation` on 2026-09-09
 18. Routine handoff: run `git diff --check`; run `python3 -m py_compile` for touched Python files; for Pydantic changes, round-trip JSON; for scoring changes, scan for silent exception sentinels. Ask before adding production dependencies.
 19. When OnePatch is authorized, use fresh, sufficiently broad continuous queries with overlap and keep unresolved production blockers and deadlines active across checks until direct production evidence clears them.
 
+20. Keep changes focused. Before editing, identify affected behavior and failure risks. Verify the actual outcome and preserved behavior with relevant checks. Use independent review for high-risk changes; passing tests alone does not prove correctness.
+
 ## Scoped execution deadline authorization, 2026-09-21
 
 The user authorized a 45-to-60-minute per-ICP execution increase, including

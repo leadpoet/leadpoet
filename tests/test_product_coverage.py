@@ -79,6 +79,33 @@ def test_bound_split_page_evidence_and_wrong_entity_or_role():
     assert actual_validate(raw, {URL: QUOTE})["status"] == "UNPROVEN"
 
 
+@pytest.mark.parametrize("case", ["bound", "unbound", "wrong_quote", "customer", "missing_clause"])
+def test_native_joint_quotes_keep_company_role_and_whole_criterion_gates(case):
+    raw = matrix()
+    raw["claims"][1]["evidence"] = [
+        {"url": URL, "quote": QUOTE},
+        {"url": SECOND, "quote": SECOND_QUOTE},
+    ]
+    pages = {URL: QUOTE, SECOND: SECOND_QUOTE}
+    if case == "unbound":
+        raw["claims"][1]["evidence"][1]["url"] = "https://unbound.example/product"
+        pages["https://unbound.example/product"] = SECOND_QUOTE
+    elif case == "wrong_quote":
+        raw["claims"][1]["evidence"][1]["quote"] = "A quote absent from the fetched page."
+    elif case == "customer":
+        raw["claims"][1]["activity_role"] = "customer_user"
+    elif case == "missing_clause":
+        raw["claims"][2].update(status="UNPROVEN", evidence=[])
+
+    validated = actual_validate(raw, pages)
+    if case == "bound":
+        assert validated["status"] == "VERIFIED"
+        assert pc.coverage_matches(validated["product_coverage"], CRITERION)
+    else:
+        assert validated["status"] == "UNPROVEN"
+        assert validated["evidence_url"] == validated["evidence_quote"] == ""
+
+
 def result(proof=None):
     return scorer.company_fit_match("original positive", details={
         "dimension_decisions": {"industry": "match", "employee_size": "match", "geography": "match"},

@@ -12,12 +12,21 @@ from tests.test_product_coverage import CRITERION, URL, QUOTE, finding, matrix
 
 JOINT_EVIDENCE_SUFFIX = (
     "For industry product coverage, a leaf may use up to three exact fetched URL/quote bindings. "
-    "Read complementary evidence together when the pages clearly concern the same company "
-    "and the same offering or platform, identified consistently across pages. Do not require "
-    "one quote to repeat every part of the leaf. Do not combine unrelated products, "
-    "customer-owned capabilities, or hypothetical facts. Every mandatory condition and "
-    "source/identity check still applies."
+    "Read complementary evidence together for the same verified company and the qualifying "
+    "offering or connected company-supplied portfolio permitted by the criterion. Do not require "
+    "one quote to repeat every part of a leaf, or one product, platform, or contract for separate "
+    "required capabilities unless the criterion requires them to share that scope. Do not combine "
+    "disconnected offerings to invent a missing capability, or treat customer-owned capabilities "
+    "or hypothetical facts as the company's supplied activity. Every mandatory condition, "
+    "including shared market and use, and every source/identity check still applies."
 )
+
+
+def test_joint_evidence_prompt_allows_portfolio_only_when_criterion_permits_it():
+    assert "connected company-supplied portfolio permitted by the criterion" in JOINT_EVIDENCE_SUFFIX
+    assert "unless the criterion requires them to share that scope" in JOINT_EVIDENCE_SUFFIX
+    assert "including shared market and use" in JOINT_EVIDENCE_SUFFIX
+    assert "Do not combine disconnected offerings to invent a missing capability" in JOINT_EVIDENCE_SUFFIX
 
 
 @pytest.mark.parametrize("positive,product", [(True, True), (True, False), (False, True), (False, False)])

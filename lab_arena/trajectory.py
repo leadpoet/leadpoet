@@ -108,7 +108,16 @@ def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = T
         text,
     )
     text = _redact_auth_schemes(text)
-    text = _KEY_VALUE_RE.sub(lambda match: "%s=[REDACTED]" % match.group(1), text)
+    def redact_key_value(match: re.Match[str]) -> str:
+        # A provider may already supply this literal marker in a public
+        # example. Reformatting its separator would falsely mark exact
+        # training evidence as credential-filtered. A longer value still
+        # contains material that must be removed.
+        if match.group(2) in ("[REDACTED]", '"[REDACTED]"', "'[REDACTED]'"):
+            return match.group(0)
+        return "%s=[REDACTED]" % match.group(1)
+
+    text = _KEY_VALUE_RE.sub(redact_key_value, text)
     text = _BARE_API_KEY_RE.sub("[REDACTED]", text)
     return text
 

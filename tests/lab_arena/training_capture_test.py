@@ -212,6 +212,33 @@ def test_explicit_auth_header_redacts_nonstandard_basic_token():
     assert "opaquealphabetictoken" not in trajectory.redact_text(value)
 
 
+@pytest.mark.parametrize("key", ["Authorization", "authorization", "AUTHORIZATION"])
+@pytest.mark.parametrize("marker", ["[REDACTED]", "\"[REDACTED]\"", "'[REDACTED]'"])
+def test_already_redacted_auth_example_keeps_exact_source_text(key, marker):
+    value = f"Public source example: {key}: {marker} continues."
+    assert trajectory.redact_text(value) == value
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
+def test_quoted_auth_key_with_literal_marker_is_unchanged():
+    value = '{"Authorization": "[REDACTED]"}'
+    assert trajectory.redact_text(value) == value
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
+@pytest.mark.parametrize("value", [
+    "Authorization: [REDACTED]suffix",
+    "Authorization: [REDACTED]/real-token",
+    "Authorization: actual-private-value",
+    '"Authorization": "actual-private-value"',
+])
+def test_auth_example_with_remaining_value_still_redacts(value):
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert cleaned != value and reasons == ["credential"]
+    assert "suffix" not in cleaned and "real-token" not in cleaned
+    assert "actual-private-value" not in cleaned
+
+
 @pytest.mark.parametrize("prefix", ["sk-01234567890", "sk-or-v1-abc12345", "Bearer abc", "Basic abc"])
 @pytest.mark.parametrize("tail", [
     "example.com/path", "example.com/path?token=private-value#;fragment",

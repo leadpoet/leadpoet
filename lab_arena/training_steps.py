@@ -96,9 +96,12 @@ def _tool_calls(calls, *, argument_validator=_arguments):
                  and bool(fn['name']) and argument_validator(fn['arguments']), 'tool_call_shape_unsupported')
 
 
-def _chat_messages(messages, *, allow_reasoning_history=False):
+def _chat_messages(messages, *, allow_reasoning_history=False, allow_tool_error_history=False, tools=()):
     _require(isinstance(messages, list) and messages, 'input_shape_unsupported')
     pending = set()
+    seen, malformed_ids = set(), set()
+    declared = [(tool.get('function') or {}).get('name') for tool in tools
+                if isinstance(tool, dict) and tool.get('type') == 'function']
     for msg in messages:
         allowed = {'role', 'content', 'name', 'tool_call_id', 'tool_calls'}
         if allow_reasoning_history:
@@ -119,17 +122,32 @@ def _chat_messages(messages, *, allow_reasoning_history=False):
                 'reasoning_history_unsupported')
         if msg['role'] == 'tool':
             _require(msg.get('tool_call_id') in pending, 'tool_context_unresolved')
+            if allow_tool_error_history and msg['tool_call_id'] in malformed_ids:
+                _require(isinstance(msg.get('content'), str), 'tool_context_unresolved')
             pending.remove(msg['tool_call_id'])
         else:
             _require(not pending, 'tool_context_unresolved')
             if msg.get('tool_calls'):
                 _require(msg['role'] == 'assistant', 'tool_context_unresolved')
-                _tool_calls(msg['tool_calls'])
+                # A prior failed call is inert input text. Only its paired
+                # result closes the history; generated targets stay JSON-only.
+                _tool_calls(msg['tool_calls'], argument_validator=(
+                    lambda value: isinstance(value, str)) if allow_tool_error_history else _arguments)
+                for item in msg['tool_calls']:
+                    identifier, function = item['id'], item['function']
+                    malformed = not _arguments(function['arguments'])
+                    if allow_tool_error_history:
+                        _require(identifier not in malformed_ids, 'tool_context_unresolved')
+                        if malformed:
+                            _require(identifier not in seen and function['name'] in declared,
+                                     'tool_context_unresolved')
+                            malformed_ids.add(identifier)
+                    seen.add(identifier)
                 pending = {item['id'] for item in msg['tool_calls']}
     _require(not pending, 'tool_context_unresolved')
 
 
-def _responses_input(value, *, tools=(), allow_reasoning_history=False):
+def _responses_input(value, *, tools=(), allow_reasoning_history=False, allow_tool_error_history=False):
     # Reuse the paid boundary's closed native schema. Keep the original values;
     # this validation must never normalize or rewrite captured request bytes.
     try:
@@ -141,6 +159,9 @@ def _responses_input(value, *, tools=(), allow_reasoning_history=False):
     if isinstance(value, str):
         return
     pending = {}
+    seen, malformed_ids = set(), set()
+    declared = (_response_tool_definitions({'input': value, 'tools': list(tools)})
+                if allow_tool_error_history else {})
     for item in value:
         kind = item.get('type', 'message')
         if kind == 'message':
@@ -150,8 +171,17 @@ def _responses_input(value, *, tools=(), allow_reasoning_history=False):
                 _require(not any(part.get('annotations') for part in content), 'retrieval_context_unsupported')
         elif kind in {'function_call', 'custom_tool_call'}:
             _require(item['call_id'] not in pending, 'tool_context_unresolved')
-            if kind == 'function_call':
-                _require(_arguments(item['arguments']), 'tool_context_unresolved')
+            if allow_tool_error_history:
+                _require(item['call_id'] not in malformed_ids, 'tool_context_unresolved')
+            # Preserve prior failed-call text only inside a closed local-tool
+            # exchange. This never changes the generated target validator.
+            if kind == 'function_call' and not _arguments(item['arguments']):
+                _require(allow_tool_error_history and item['call_id'] not in seen,
+                         'tool_context_unresolved')
+                declaration = declared.get((item.get('namespace'), item['name'])) or {}
+                _require(declaration.get('type') == 'function', 'tool_context_unresolved')
+                malformed_ids.add(item['call_id'])
+            seen.add(item['call_id'])
             pending[item['call_id']] = kind
         elif kind in {'function_call_output', 'custom_tool_call_output'}:
             expected = 'function_call' if kind == 'function_call_output' else 'custom_tool_call'
@@ -186,13 +216,14 @@ def _response_tool_definitions(body):
     return declared
 
 
-def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments):
+def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
     reasoning = []
     if operation == 'openrouter.chat':
-        _chat_messages(body.get('messages'), allow_reasoning_history=allow_reasoning_history)
+        _chat_messages(body.get('messages'), allow_reasoning_history=allow_reasoning_history,
+                       allow_tool_error_history=allow_tool_error_history, tools=body.get('tools', []))
         choices = response.get('choices')
         _require(isinstance(choices, list) and len(choices) == 1, 'response_choice_ambiguous')
         choice = choices[0]
@@ -220,7 +251,8 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
                      and bool(msg['content']), 'assistant_shape_unsupported')
         return msg, reasoning
     _responses_input(body.get('input'), tools=body.get('tools', []),
-                     allow_reasoning_history=allow_reasoning_history)
+                     allow_reasoning_history=allow_reasoning_history,
+                     allow_tool_error_history=allow_tool_error_history)
     _require(response.get('status') == 'completed' and not response.get('error')
              and not response.get('incomplete_details'), 'response_not_complete')
     output = response.get('output')
@@ -501,7 +533,9 @@ def _candidate(example, call):
                     and annotation.get('requested') is True
                     and annotation.get('reviewed_route') is True)
     target, reasoning = _target(body, responses[0], op,
-                                allow_reasoning_history=full_history)
+                                allow_reasoning_history=full_history,
+                                allow_tool_error_history=training_coverage.uses_host_result_evidence(
+                                    example.get('configuration') or {}))
     _validate_target_tools(body, target, op)
     return {'schema_version': RECORD_SCHEMA_VERSION, 'format': op, 'input': copy.deepcopy(body),
             'target': target,

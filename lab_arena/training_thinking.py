@@ -640,7 +640,8 @@ def verified_cap_truncated_target(example, call) -> bool:
         # This validates the unchanged raw target's remaining shape only. It
         # never returns a training candidate or inserts missing JSON syntax.
         target, _ = training_steps._target(body, response, operation,
-            allow_reasoning_history=True, argument_validator=argument_shape)
+            allow_reasoning_history=True, argument_validator=argument_shape,
+            allow_tool_error_history=True)
         training_steps._validate_target_tools(body, target, operation)
         return bool(unfinished)
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):

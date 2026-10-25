@@ -2,7 +2,9 @@ import copy
 import json
 import os
 
-from lab_arena import contracts, training_capture, training_export, training_thinking
+import pytest
+
+from lab_arena import contracts, training_capture, training_export, training_steps, training_thinking
 from scripts.prepare_arena_full_thinking_dataset import main
 from tests.lab_arena.training_steps_test import fixture, response_fixture, seal
 
@@ -301,6 +303,70 @@ def test_legitimate_tool_only_empty_turn_does_not_disqualify_later_text():
     report = training_thinking.coverage([seal(example)])
     assert report["returned_classes"] == {"requested_empty": 1, "full_thinking": 1}
     assert report["trajectories"]["eligible_without_disqualifying_capture"] == 1
+
+
+def test_null_refusal_in_assistant_tool_continuation_keeps_strict_trajectory():
+    example = full_example()
+    first = example["provider_calls"][0]
+    final = copy.deepcopy(first)
+    first_message = first["response"]["choices"][0]["message"]
+    first_message.update(content=None, refusal=None, tool_calls=[{
+        "id": "lookup-1", "type": "function",
+        "function": {"name": "lookup", "arguments": "{}"}}])
+    first["response"]["choices"][0]["finish_reason"] = "tool_calls"
+    first["response_sha256"] = contracts.document_hash(first["response"])
+    first["response_receipts"][0]["response_sha256"] = first["response_sha256"]
+    first_body = first["request"]["outbound"]["body"]
+    first_body["tools"] = [{"type": "function", "function": {
+        "name": "lookup", "parameters": {"type": "object"}}}]
+    first["request"]["outbound"]["body_sha256"] = contracts.document_hash(first_body)
+
+    final.update(call_identity="call-2", action_sequence=1, terminal_entry_id=6)
+    final_body = final["request"]["outbound"]["body"]
+    final_body["messages"] = [copy.deepcopy(first_body["messages"][0]),
+                              copy.deepcopy(first_message),
+                              {"role": "tool", "tool_call_id": "lookup-1", "content": "Observed page"}]
+    final_body["tools"] = copy.deepcopy(first_body["tools"])
+    final["request"]["outbound"]["body_sha256"] = contracts.document_hash(final_body)
+    final["response_receipts"][0].update(entry_id=6, response_ref={"field": "response", "entry_id": 6})
+    final["response_provenance"]["worker_received_receipt_entry_ids"] = [6]
+    final["response_provenance"]["worker_receipt_ref"]["ordinal"] = 2
+    final["response_provenance"]["agent_receipt_refs"][0]["id"] = "ack-2"
+    example["provider_calls"].append(final)
+
+    artifact = example["worker_observation_artifacts"]["run"]
+    first_data = artifact["payload"]["agent_observations"][0]["data"]
+    first_data["body_sha256"] = contracts.document_hash(first["response"])
+    first["response_receipts"][0]["wire_body_sha256"] = first_data["body_sha256"]
+    artifact["payload"]["response_receipts"][0]["body_sha256"] = first_data["body_sha256"]
+    second_data = dict(first_data, call_identity="call-2",
+                       body_sha256=contracts.document_hash(final["response"]))
+    final["response_receipts"][0]["wire_body_sha256"] = second_data["body_sha256"]
+    artifact["payload"]["agent_observations"].append({
+        "kind": "response_received", "id": "ack-2",
+        "privacy": {"redacted": False}, "data": second_data})
+    artifact["payload"]["response_receipts"].append(dict(
+        second_data, ordinal=2, write_state="socket_written",
+        operation_id="openrouter.chat", action_sequence=1))
+    artifact["payload_sha256"] = contracts.document_hash(artifact["payload"])
+    for call in (first, final):
+        for ref in call["response_provenance"]["agent_receipt_refs"] + [call["response_provenance"]["worker_receipt_ref"]]:
+            ref["payload_sha256"] = artifact["payload_sha256"]
+
+    got, manifest = rows(example)
+    assert len(got) == 2
+    assert manifest["counts"]["exclusion_reasons"] == {}
+    assert any(row["input"]["messages"][1].get("refusal") is None
+               and "refusal" in row["input"]["messages"][1] for row in got)
+    for invalid in ("No", False):
+        bad = copy.deepcopy(final_body["messages"])
+        bad[1]["refusal"] = invalid
+        with pytest.raises(ValueError, match="input_shape_unsupported"):
+            training_steps._chat_messages(bad, allow_reasoning_history=True)
+    bad = copy.deepcopy(final_body["messages"])
+    bad[1]["role"] = "user"
+    with pytest.raises(ValueError):
+        training_steps._chat_messages(bad, allow_reasoning_history=True)
 
 
 def test_role_counts_do_not_merge_judge_and_baseline():

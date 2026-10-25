@@ -86,10 +86,12 @@ def _chat_messages(messages, *, allow_reasoning_history=False):
     for msg in messages:
         allowed = {'role', 'content', 'name', 'tool_call_id', 'tool_calls'}
         if allow_reasoning_history:
-            allowed |= {'reasoning', 'reasoning_content', 'reasoning_details'}
+            allowed |= {'reasoning', 'reasoning_content', 'reasoning_details', 'refusal'}
         _require(isinstance(msg, dict) and set(msg) <= allowed
                  and msg.get('role') in {'system', 'developer', 'user', 'assistant', 'tool'}
                  and (isinstance(msg.get('content'), str) or msg.get('content') is None), 'input_shape_unsupported')
+        _require('refusal' not in msg or msg['role'] == 'assistant' and msg['refusal'] is None,
+                 'input_shape_unsupported')
         if any(field in msg for field in ('reasoning', 'reasoning_content', 'reasoning_details')):
             _require(allow_reasoning_history and msg['role'] == 'assistant', 'reasoning_history_unsupported')
             for field in ('reasoning', 'reasoning_content'):

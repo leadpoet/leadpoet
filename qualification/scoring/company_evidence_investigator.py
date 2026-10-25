@@ -2498,10 +2498,37 @@ async def _fetch_exa_exact_page(
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return {"ok": False, "error": "contents_provider_unavailable"}
     if status != 200:
-        return {"ok": False, "error": f"http_{status}"}
+        # Plain http_404/http_410 identify primary-page absence downstream.
+        # An outer Exa API error proves no such fact about the target URL.
+        return {"ok": False, "error": (
+            f"contents_http_{status}" if status in {404, 410}
+            else f"http_{status}"
+        )}
     if not isinstance(body, Mapping) or body.get("error") or body.get("errors"):
         return {"ok": False, "error": "contents_provider_error"}
     statuses = body.get("statuses")
+    # A confirmed crawl absence must name this exact target. An unbound
+    # broker error or a failed Exa request remains a provider fault.
+    if (isinstance(statuses, list) and len(statuses) == 1
+            and isinstance(statuses[0], Mapping) and body.get("results") == []):
+        source = statuses[0]
+        error = source.get("error")
+        if (
+            source.get("id") == canonical_url
+            and source.get("status") == "error"
+            and isinstance(error, Mapping)
+            and type(error.get("httpStatusCode")) is int
+            and error["httpStatusCode"] in {404, 410}
+            and (
+                error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
+                or (error["httpStatusCode"] == 404
+                    and error.get("tag") == "CRAWL_NOT_FOUND")
+            )
+        ):
+            return {"ok": False, "error": (
+                "source_not_found" if error["httpStatusCode"] == 404
+                else "source_gone"
+            )}
     if statuses is not None:
         if not isinstance(statuses, list) or any(
             not isinstance(item, Mapping) for item in statuses
@@ -2567,6 +2594,8 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
         "provider_request_refused", "provider_diagnostic_body",
         "source_access_denied",
     }:
+        error_class = raw_error
+    elif raw_error in {"source_not_found", "source_gone"}:
         error_class = raw_error
     else:
         error_class = "fetch_failed"
@@ -4062,15 +4091,20 @@ async def investigate_company_evidence(
                     primary_timeout = exc
                     result = {"ok": False, "error": "timeout"}
                 except _ArenaProviderFetchError as exc:
-                    if exc.broker_status not in (502, 503):
+                    if exc.broker_status not in (404, 502, 503):
                         raise
                     # Preserve the failed fetch so the existing bounded,
                     # exact-URL fallback can recover it without trusting its body.
-                    result = {"ok": False, "error": f"http_{exc.broker_status}"}
+                    # An unbound broker 404 is not proof that the target is absent.
+                    result = {"ok": False, "error": (
+                        "broker_http_404" if exc.broker_status == 404
+                        else f"http_{exc.broker_status}"
+                    )}
                 fetch_outcomes.append(_fetch_outcome(url, result))
                 if (
                     result.get("error") in {
-                        "http_502", "http_503", "timeout", "provider_diagnostic_body",
+                        "broker_http_404", "http_502", "http_503", "timeout",
+                        "provider_diagnostic_body",
                         "provider_request_refused",
                     }
                     and not result.get("ok")

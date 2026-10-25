@@ -46,13 +46,22 @@ _AUTHORIZATION_VALUE_RE = re.compile(
     r"(?i)(\b(?:authorization|proxy[-_]authorization)\s*[:=]\s*)"
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|(?:(?:basic|bearer)\s+)?[^\s,;\"']+)"
 )
+_ATTACHED_AUTH_MARKER_RE = re.compile(
+    r"(?i)\b(?:bearer|basic)\s+(?:\\*[\"'])?"
+    r"(?:\[REDACTED\]|%5BREDACTED%5D)"
+    r"(?P<suffix>(?:\\(?!\\*[\"'])|[^\s\"'\\])*)"
+)
 _KEY_VALUE_RE = re.compile(
-    r"(?i)\b(api[-_ ]?key|(?:proxy[-_])?authorization|password|secret|access[-_ ]?token|"
+    r"(?i)\b(api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|"
     r"refresh[-_ ]?token|lease[-_ ]?token)\s*[:=]\s*((?:basic|bearer)\s+[^\s,;]+|[^\s,;]{4,})"
 )
 _QUOTED_KEY_VALUE_RE = re.compile(
-    r"(?i)([\"'](?:api[-_ ]?key|(?:proxy[-_])?authorization|password|secret|access[-_ ]?token|"
+    r"(?i)([\"'](?:api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|"
     r"refresh[-_ ]?token|lease[-_ ]?token)[\"']\s*:\s*)([\"'])([^\"']{1,})([\"'])"
+)
+_ESCAPED_QUOTED_KEY_VALUE_RE = re.compile(
+    r'(?i)((?:\\+["\'])(?:api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|'
+    r'refresh[-_ ]?token|lease[-_ ]?token)(?:\\+["\'])\s*:\s*)(\\+["\'])([^"\'\\]{1,})(\\+["\'])'
 )
 _BARE_API_KEY_RE = re.compile(
     r"\b(?:sk-or-v1-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,})\b"
@@ -87,7 +96,14 @@ def redact_auth_schemes(text: str) -> str:
     # previous conservative Basic mask, including after escaped quotes/slashes.
     private_context = _QUOTED_SENSITIVE_CONTEXT_RE.search(text) is not None
     text = _QUOTED_SENSITIVE_VALUE_RE.sub(lambda match: match[1] + "[REDACTED]", text)
-    text = _AUTHORIZATION_VALUE_RE.sub(lambda match: match[1] + "[REDACTED]", text)
+
+    def redact_authorization_value(match: re.Match[str]) -> str:
+        value = match[0][len(match[1]):]
+        if value in ("[REDACTED]", '"[REDACTED]"', "'[REDACTED]'"):
+            return match[0]
+        return match[1] + "[REDACTED]"
+
+    text = _AUTHORIZATION_VALUE_RE.sub(redact_authorization_value, text)
     text = _BEARER_RE.sub("[REDACTED]", text)
     if private_context:
         text = _PRIVATE_BASIC_RE.sub("[REDACTED]", text)
@@ -130,8 +146,28 @@ def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = T
         ),
         text,
     )
+    text = _ESCAPED_QUOTED_KEY_VALUE_RE.sub(
+        lambda match: match.group(0) if match.group(3) == "[REDACTED]"
+        else "%s%s[REDACTED]%s" % (
+            match.group(1), match.group(2), match.group(4)
+        ),
+        text,
+    )
+    text = _ATTACHED_AUTH_MARKER_RE.sub(
+        lambda match: "[REDACTED]" if match.group("suffix") else match.group(0),
+        text,
+    )
     text = redact_auth_schemes(text)
-    text = _KEY_VALUE_RE.sub(lambda match: "%s=[REDACTED]" % match.group(1), text)
+    def redact_key_value(match: re.Match[str]) -> str:
+        # A provider may already supply this literal marker in a public
+        # example. Reformatting its separator would falsely mark exact
+        # training evidence as credential-filtered. A longer value still
+        # contains material that must be removed.
+        if match.group(2) in ("[REDACTED]", '"[REDACTED]"', "'[REDACTED]'"):
+            return match.group(0)
+        return "%s=[REDACTED]" % match.group(1)
+
+    text = _KEY_VALUE_RE.sub(redact_key_value, text)
     text = _BARE_API_KEY_RE.sub("[REDACTED]", text)
     return text
 

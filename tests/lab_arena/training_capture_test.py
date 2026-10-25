@@ -181,6 +181,121 @@ def test_public_url_mask_does_not_create_a_false_bearer_credential(label):
     assert capture.sanitize_training_value(value) == (value, [])
 
 
+@pytest.mark.parametrize("sentence", [
+    "Basic information about the company is public.",
+    "The Basic requirements are listed in the report.",
+    "A basic understanding of the market helps the reader.",
+])
+def test_public_basic_prose_is_not_a_credential(sentence):
+    assert trajectory.redact_text(sentence) == sentence
+    assert capture.sanitize_training_value(sentence) == (sentence, [])
+
+
+@pytest.mark.parametrize("plain", [b"user:secret", b"user:se"])
+def test_unpadded_basic_credential_in_free_text_is_redacted(tmp_path, plain):
+    token = base64.b64encode(plain).decode("ascii").rstrip("=")
+    assert token.isalpha() and len(token) % 4 in (2, 3)
+    value = "A note contains Basic " + token + " in free text."
+    assert token not in trajectory.redact_text(value)
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert token not in cleaned
+    assert reasons == ["credential"]
+    event = trajectory.event("runtime.stdout", {"text": value})
+    assert token not in event["content"]["text"]
+    document = _document()
+    document["admitted_parameters"]["messages"][0]["content"] = value
+    objects = LocalObjectStore(tmp_path)
+    pointer = capture.RequestCapture(objects)(document)
+    assert pointer["redacted"] is True
+    assert "credential" in pointer["redactions"]
+    assert token not in json.dumps(capture.read_request(objects, pointer))
+
+
+def test_real_auth_and_signed_url_still_redact_around_basic_prose():
+    value = ("Basic information is public. "
+             "Authorization: Basic dXNlcjpwYXNz "
+             "Bearer opaque-bearer-secret "
+             "https://example.test/file?X-Amz-Signature=private-signature")
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert cleaned.startswith("Basic information is public. ")
+    assert reasons == ["credential"]
+    for secret in ("dXNlcjpwYXNz", "opaque-bearer-secret", "private-signature"):
+        assert secret not in cleaned
+    assert capture.sanitize_training_value(cleaned) == (cleaned, [])
+
+
+def test_explicit_auth_header_redacts_nonstandard_basic_token():
+    value = "Authorization: Basic opaquealphabetictoken"
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert reasons == ["credential"]
+    assert "opaquealphabetictoken" not in cleaned
+    assert "opaquealphabetictoken" not in trajectory.redact_text(value)
+
+
+@pytest.mark.parametrize("key", ["Authorization", "authorization", "AUTHORIZATION"])
+@pytest.mark.parametrize("marker", ["[REDACTED]", "\"[REDACTED]\"", "'[REDACTED]'"])
+def test_already_redacted_auth_example_keeps_exact_source_text(key, marker):
+    value = f"Public source example: {key}: {marker} continues."
+    assert trajectory.redact_text(value) == value
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
+def test_quoted_auth_key_with_literal_marker_is_unchanged():
+    value = '{"Authorization": "[REDACTED]"}'
+    assert trajectory.redact_text(value) == value
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
+@pytest.mark.parametrize("value", [
+    "Authorization: [REDACTED]suffix",
+    "Authorization: [REDACTED]/real-token",
+    "Authorization: actual-private-value",
+    '"Authorization": "actual-private-value"',
+])
+def test_auth_example_with_remaining_value_still_redacts(value):
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert cleaned != value and reasons == ["credential"]
+    assert "suffix" not in cleaned and "real-token" not in cleaned
+    assert "actual-private-value" not in cleaned
+
+
+@pytest.mark.parametrize("value", [
+    "Bearer [REDACTED]suffix",
+    "Basic [REDACTED]suffix",
+    'Bearer "[REDACTED]suffix"',
+    "Basic '[REDACTED]suffix'",
+    "Bearer [REDACTED]/real-token",
+    "Bearer [REDACTED].synthetic-tail",
+    "Bearer [REDACTED]:synthetic-tail",
+    "Bearer [REDACTED]%2Fsynthetic-tail",
+    "Bearer %5BREDACTED%5Dsynthetic-tail",
+    "Basic %5BREDACTED%5Dsynthetic-tail",
+    'Bearer \\"[REDACTED]synthetic-tail\\"',
+    '{\\"Authorization\\":\\"[REDACTED]suffix\\"}',
+    '{\\\\"Authorization\\\\":\\\\"[REDACTED]suffix\\\\"}',
+    '"Proxy-Authorization": "[REDACTED]suffix"',
+])
+def test_attached_auth_marker_does_not_pass_as_exact(value):
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert cleaned != value and reasons == ["credential"]
+    assert "suffix" not in cleaned and "real-token" not in cleaned
+    assert "synthetic-tail" not in cleaned
+
+
+@pytest.mark.parametrize("value", [
+    "Bearer [REDACTED]",
+    "Basic [REDACTED]",
+    "Bearer %5BREDACTED%5D",
+    "Basic %5BREDACTED%5D",
+    'Bearer \\"[REDACTED]\\"',
+    '{\\"Authorization\\":\\"[REDACTED]\\"}',
+    '{\\\\"Authorization\\\\":\\\\"[REDACTED]\\\\"}',
+    '"Proxy-Authorization": "[REDACTED]"',
+])
+def test_standalone_auth_marker_keeps_exact_source(value):
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
 @pytest.mark.parametrize("prefix", ["sk-01234567890", "sk-or-v1-abc12345", "Bearer abc", "Basic abc"])
 @pytest.mark.parametrize("tail", [
     "example.com/path", "example.com/path?token=private-value#;fragment",
@@ -302,6 +417,30 @@ def test_plaintext_reasoning_content_alias_is_response_only():
     assert cleaned["choices"][0]["message"]["reasoning_content"] == "Visible DeepSeek text."
     assert cleaned["choices"][1]["message"]["reasoning_content"] == "[REDACTED]"
     assert reasons == ["hidden_reasoning"]
+
+
+def test_chat_assistant_replay_alias_is_saved_without_full_thinking_approval(tmp_path):
+    document = {"operation_id": "openrouter.chat", "outbound": {"body": {"messages": [
+        {"role": "assistant", "content": None, "reasoning_content": "Visible prior summary."},
+        {"role": "user", "content": "Prompt", "reasoning_content": "Untrusted user state"},
+    ]}}}
+    cleaned, redactions = capture.sanitize_training_value(document)
+    assert cleaned["outbound"]["body"]["messages"][0]["reasoning_content"] == "Visible prior summary."
+    assert cleaned["outbound"]["body"]["messages"][1]["reasoning_content"] == "[REDACTED]"
+    assert redactions == ["hidden_reasoning"]
+    objects = LocalObjectStore(tmp_path)
+    pointer = capture.RequestCapture(objects)(document)
+    assert pointer["status"] == "stored"
+    assert capture.read_request(objects, pointer)["outbound"]["body"]["messages"][0][
+        "reasoning_content"] == "Visible prior summary."
+    # The same projection survives the export's second privacy pass.
+    from lab_arena.training_export import without_hidden_reasoning
+    projected, removed = without_hidden_reasoning({"provider_calls": [{
+        "operation_id": "openrouter.chat", "request": document}]})
+    messages = projected["provider_calls"][0]["request"]["outbound"]["body"]["messages"]
+    assert messages[0]["reasoning_content"] == "Visible prior summary."
+    assert "reasoning_content" not in messages[1]
+    assert removed is True
     request = {"admitted_parameters": {"messages": [{"role": "assistant",
                                                        "reasoning_content": "prior text"}],
                                        "choices": [{"message": {"reasoning_content": "spoofed"}}]}}

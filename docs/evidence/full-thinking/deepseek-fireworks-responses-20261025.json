@@ -1,0 +1,2330 @@
+{
+  "schema_version": 1,
+  "kind": "synthetic_broker_postgres_responses_route_probe",
+  "probe_id": "full-thinking-deepseek-deepseek-v4.1-flash-1017-fireworks-responses",
+  "model_id": "deepseek/deepseek-v4.1-flash-1017",
+  "provider": "fireworks",
+  "api": "openrouter.responses",
+  "max_output_tokens": 32768,
+  "full_text_fields": [
+    "output.content.reasoning_text"
+  ],
+  "verified_at": "2026-10-25T17:03:23.50892Z",
+  "semantic_source": "https://docs.fireworks.ai/guides/reasoning",
+  "qualification": "Provider-exposed generated reasoning_text, not a claim about all internal computation.",
+  "proof_limit": "Three short synthetic Responses calls with a 32768-token allowance, two function continuations, strict negative JSON qualification, disposable PostgreSQL ledger readback, and real local worker/SDK receipts. The allowance was not exhausted. No private native-agent prompts are included; this is not complete native TYCHE workflow, scoring, publication, production activation, or baseline-readiness proof.",
+  "response_projection": "Existing export normalization omits empty summary arrays. Exact raw wire bytes retain them; nonempty reasoning and tool/answer state stay unchanged.",
+  "scenario": "conflicting_evidence",
+  "reported_route_probe_passed": false,
+  "checks": {
+    "three_settled_completed_calls": true,
+    "full_reasoning_text_each_call": true,
+    "two_tool_continuations_and_final_json": true,
+    "worker_socket_and_agent_read": true,
+    "exact_outbound_and_wire_readback": true,
+    "raw_and_readable_roundtrip": true,
+    "strict_next_response_targets": true
+  },
+  "source_artifact_sha256": {
+    "report.json": "391d9a801ba0e6cdde8da815e36e28fc3a0ce8aeced6b527da14a12b59990673",
+    "diagnostic-export.json": "885879ecbe3f72ce12bad100f6fc656346d9b3b6604b2ecfbd75d66f03e381d3",
+    "readable-trace.json": "1878bae7287cdc71838108c02a3a818219c9e81fbaf064cd8cdb58446e73f411",
+    "ledger-readback.json": "8743a6d1b9e39cc815e04b4db93b70986795696de766df9d320ff17c4284d4f2"
+  },
+  "example": {
+    "completeness": {
+      "complete": false,
+      "incomplete_reasons": [
+        "scoring_label_unavailable",
+        "agent_task_state_unverified"
+      ]
+    },
+    "configuration": {
+      "reasoning_capture_policy": "full_generated_thinking_v1",
+      "reasoning_route_registry": {
+        "approved_routes": [
+          {
+            "allowed_fallback_routes": [],
+            "answer_headroom_tokens": 1024,
+            "api": "openrouter.responses",
+            "context_tokens": 1048576,
+            "evidence": {
+              "documentation_url": "https://openrouter.ai/",
+              "probe_id": "isolated-candidate-probe",
+              "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "verified_at": "2026-10-23T00:00:00Z"
+            },
+            "full_text_fields": [
+              "output.content.reasoning_text"
+            ],
+            "max_output_tokens": 32768,
+            "mode": {
+              "effort": "high"
+            },
+            "model_id": "deepseek/deepseek-v4.1-flash-1017",
+            "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+            "parser_version": "arena_openrouter_reasoning_v1",
+            "price_ceiling": {
+              "completion": "0.0000012",
+              "internal_reasoning": "0",
+              "prompt": "0.0000003",
+              "request": "0"
+            },
+            "provider": "fireworks",
+            "provider_name": "Fireworks",
+            "semantic_class": "full_generated_thinking",
+            "status": "approved"
+          }
+        ],
+        "baseline_route": null,
+        "schema_version": 1
+      }
+    },
+    "example_hash": "sha256:af82c39647b69b026b0b7f5611386d2945311771f7139c01db8e5491a4e19322",
+    "provider_calls": [
+      {
+        "accounting_state": "settlement",
+        "action_sequence": 0,
+        "actual_microusd": 116,
+        "base_call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+        "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+        "evidence_gaps": [],
+        "funding_source": "miner_key",
+        "lifecycle": [
+          {
+            "accounting": {
+              "action_sequence": 0,
+              "base_call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+              "provider_attempt": 1,
+              "request_hash": "sha256:329deca95eab539de6976efd00d821c0890a1df9551632611cff9dd61c925cc7"
+            },
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:03:21.689229+00:00",
+            "entry_id": 1,
+            "entry_kind": "reservation",
+            "funding_source": "miner_key"
+          },
+          {
+            "accounting": {},
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:03:21.690834+00:00",
+            "entry_id": 2,
+            "entry_kind": "dispatch",
+            "funding_source": "miner_key"
+          },
+          {
+            "accounting": {
+              "released_microusd": -116,
+              "reserved_microusd": 0,
+              "variance_microusd": 116
+            },
+            "amount_microusd": 116,
+            "created_at": "2026-10-25T17:03:22.378997+00:00",
+            "entry_id": 3,
+            "entry_kind": "settlement",
+            "funding_source": "miner_key"
+          }
+        ],
+        "operation_id": "openrouter.responses",
+        "provider": "openrouter",
+        "provider_attempt": 1,
+        "provider_cost": {
+          "basis": "openrouter_usage_cost",
+          "operation": "openrouter.responses",
+          "unit_name": "usd",
+          "units": "0.0001156344"
+        },
+        "reasoning_capture": {
+          "api": "openrouter.responses",
+          "changes": [
+            "reasoning",
+            "tested_output_allowance"
+          ],
+          "context_tokens": 1048576,
+          "full_text_fields": [
+            "output.content.reasoning_text"
+          ],
+          "max_output_tokens": 32768,
+          "mode": {
+            "effort": "high"
+          },
+          "model_id": "deepseek/deepseek-v4.1-flash-1017",
+          "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+          "parser_version": "arena_openrouter_reasoning_v1",
+          "policy": "full_generated_thinking_v1",
+          "price_ceiling": {
+            "completion": "0.0000012",
+            "internal_reasoning": "0",
+            "prompt": "0.0000003",
+            "request": "0"
+          },
+          "probe_id": "isolated-candidate-probe",
+          "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "provider_name": "Fireworks",
+          "provider_route": "fireworks",
+          "registry_sha256": "2ce5ad096f60606098393301171e944733aebdff9528a3e7941be0bac2b46ecf",
+          "requested": true,
+          "reviewed_route": true,
+          "semantic_class": "full_generated_thinking"
+        },
+        "request": {
+          "admitted_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "max_output_tokens": 2048,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "tool_choice": "required",
+            "tools": [
+              {
+                "description": "Read synthetic company evidence by ID.",
+                "name": "lookup_evidence",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_id": {
+                      "enum": [
+                        "profile",
+                        "headcount"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "evidence_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "effective_operation_id": "openrouter.responses",
+          "effective_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "max_output_tokens": 32768,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "reasoning": {
+              "effort": "high"
+            },
+            "tool_choice": "required",
+            "tools": [
+              {
+                "description": "Read synthetic company evidence by ID.",
+                "name": "lookup_evidence",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_id": {
+                      "enum": [
+                        "profile",
+                        "headcount"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "evidence_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "hashed_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "max_output_tokens": 32768,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "reasoning": {
+              "effort": "high"
+            },
+            "tool_choice": "required",
+            "tools": [
+              {
+                "description": "Read synthetic company evidence by ID.",
+                "name": "lookup_evidence",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_id": {
+                      "enum": [
+                        "profile",
+                        "headcount"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "evidence_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "normalized_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              }
+            ],
+            "max_output_tokens": 2048,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "tool_choice": "required",
+            "tools": [
+              {
+                "description": "Read synthetic company evidence by ID.",
+                "name": "lookup_evidence",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_id": {
+                      "enum": [
+                        "profile",
+                        "headcount"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "evidence_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "operation_id": "openrouter.responses",
+          "outbound": {
+            "body": {
+              "input": [
+                {
+                  "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                  "role": "user"
+                }
+              ],
+              "max_output_tokens": 32768,
+              "model": "deepseek/deepseek-v4.1-flash-1017",
+              "provider": {
+                "allow_fallbacks": false,
+                "data_collection": "deny",
+                "max_price": {
+                  "completion": 1.2,
+                  "prompt": 0.3,
+                  "request": 0
+                },
+                "only": [
+                  "fireworks"
+                ],
+                "require_parameters": true,
+                "zdr": true
+              },
+              "reasoning": {
+                "effort": "high"
+              },
+              "store": false,
+              "stream": false,
+              "tool_choice": "required",
+              "tools": [
+                {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "function"
+                }
+              ]
+            },
+            "body_sha256": "sha256:a1b267c148dc22c5503bd66713b4a6ad130b6019a3bbaa370a4e41e517b97694",
+            "content_type": "application/json",
+            "host": "openrouter.ai",
+            "method": "POST",
+            "path": "/api/v1/responses",
+            "query": {}
+          },
+          "privacy": {
+            "redacted": false,
+            "redactions": []
+          },
+          "reasoning_capture": {
+            "api": "openrouter.responses",
+            "changes": [
+              "reasoning",
+              "tested_output_allowance"
+            ],
+            "context_tokens": 1048576,
+            "full_text_fields": [
+              "output.content.reasoning_text"
+            ],
+            "max_output_tokens": 32768,
+            "mode": {
+              "effort": "high"
+            },
+            "model_id": "deepseek/deepseek-v4.1-flash-1017",
+            "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+            "parser_version": "arena_openrouter_reasoning_v1",
+            "policy": "full_generated_thinking_v1",
+            "price_ceiling": {
+              "completion": "0.0000012",
+              "internal_reasoning": "0",
+              "prompt": "0.0000003",
+              "request": "0"
+            },
+            "probe_id": "isolated-candidate-probe",
+            "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "provider_name": "Fireworks",
+            "provider_route": "fireworks",
+            "registry_sha256": "2ce5ad096f60606098393301171e944733aebdff9528a3e7941be0bac2b46ecf",
+            "requested": true,
+            "reviewed_route": true,
+            "semantic_class": "full_generated_thinking"
+          },
+          "request_hash": "sha256:329deca95eab539de6976efd00d821c0890a1df9551632611cff9dd61c925cc7",
+          "route": {},
+          "schema_version": "leadpoet.lab_arena.training_request.v1"
+        },
+        "request_capture": {
+          "compressed_bytes": 1289,
+          "encoding": "gzip",
+          "redacted": false,
+          "redactions": [],
+          "ref": "private/arena-training/requests/f9397ea085f13ddb509fe3ec8a6b47b3984d8a3089f1233a87bdcdca33210a13.json.gz",
+          "schema_version": "leadpoet.lab_arena.training_request.v1",
+          "sha256": "sha256:f9397ea085f13ddb509fe3ec8a6b47b3984d8a3089f1233a87bdcdca33210a13",
+          "size_bytes": 6062,
+          "status": "referenced"
+        },
+        "request_hash": "sha256:329deca95eab539de6976efd00d821c0890a1df9551632611cff9dd61c925cc7",
+        "reservation_entry_id": 1,
+        "response": {
+          "background": false,
+          "completed_at": 1792947802,
+          "created_at": 1792947801,
+          "error": null,
+          "frequency_penalty": 0,
+          "id": "gen-1792947801-RUil7JTQLolOkIzL0eAT",
+          "incomplete_details": null,
+          "instructions": null,
+          "max_output_tokens": 32768,
+          "max_tool_calls": null,
+          "metadata": {},
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "object": "response",
+          "openrouter_metadata": {
+            "attempt": 1,
+            "endpoints": {
+              "available": [
+                {
+                  "model": "deepseek/deepseek-v4.1-flash-20261017",
+                  "provider": "Fireworks",
+                  "selected": true
+                }
+              ],
+              "total": 34
+            },
+            "generation_time": 573,
+            "is_byok": false,
+            "region": "SJC",
+            "requested": "deepseek/deepseek-v4.1-flash-1017",
+            "strategy": "direct",
+            "summary": "available=1, selected=Fireworks"
+          },
+          "output": [
+            {
+              "content": [
+                {
+                  "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                  "type": "reasoning_text"
+                }
+              ],
+              "format": "unknown",
+              "id": "rs_tmp_t7b5jx187tg",
+              "status": "completed",
+              "type": "reasoning"
+            },
+            {
+              "arguments": "{\"evidence_id\":\"profile\"}",
+              "call_id": "call_eac88e6c62694d91a007566a",
+              "id": "fc_tmp_c7jirz6k4k9",
+              "name": "lookup_evidence",
+              "status": "completed",
+              "type": "function_call"
+            }
+          ],
+          "parallel_tool_calls": true,
+          "presence_penalty": 0,
+          "previous_response_id": null,
+          "prompt_cache_key": null,
+          "prompt_cache_options": null,
+          "reasoning": {
+            "effort": "high"
+          },
+          "safety_identifier": null,
+          "service_tier": "auto",
+          "status": "completed",
+          "store": false,
+          "temperature": 1,
+          "text": {
+            "format": {
+              "type": "text"
+            }
+          },
+          "tool_choice": "required",
+          "tools": [
+            {
+              "description": "Read synthetic company evidence by ID.",
+              "name": "lookup_evidence",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "evidence_id": {
+                    "enum": [
+                      "profile",
+                      "headcount"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "evidence_id"
+                ],
+                "type": "object"
+              },
+              "strict": null,
+              "type": "function"
+            }
+          ],
+          "top_logprobs": 0,
+          "top_p": 1,
+          "truncation": "disabled",
+          "usage": {
+            "cost": 0.0001156344,
+            "cost_details": {
+              "upstream_inference_cost": 0.0001156344,
+              "upstream_inference_input_cost": 4.67544e-05,
+              "upstream_inference_output_cost": 6.888e-05
+            },
+            "input_tokens": 401,
+            "input_tokens_details": {
+              "cached_tokens": 182
+            },
+            "is_byok": false,
+            "output_tokens": 82,
+            "output_tokens_details": {
+              "reasoning_tokens": 41
+            },
+            "total_tokens": 483
+          }
+        },
+        "response_hidden_reasoning_removed": false,
+        "response_privacy_redactions": [],
+        "response_provenance": {
+          "agent_receipt": "reported_exact_body_received",
+          "agent_receipt_refs": [
+            {
+              "id": 0,
+              "payload_sha256": "sha256:8e7d05ec97c60170d54cbdedda91b50005f6e577460229790ecc6d79c5c5156f",
+              "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+            }
+          ],
+          "delivery_to_worker": "socket_written",
+          "selected_response_acknowledged": true,
+          "source": "stored_provider_ledger_receipt",
+          "worker_body_exact_in_artifact": true,
+          "worker_body_source": "ledger_terminal",
+          "worker_receipt_ref": {
+            "ordinal": 0,
+            "payload_sha256": "sha256:8e7d05ec97c60170d54cbdedda91b50005f6e577460229790ecc6d79c5c5156f",
+            "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+          },
+          "worker_received_receipt_entry_ids": [
+            3
+          ]
+        },
+        "response_receipts": [
+          {
+            "created_at": "2026-10-25T17:03:22.378997+00:00",
+            "entry_id": 3,
+            "entry_kind": "settlement",
+            "metadata": {
+              "call_succeeded": true,
+              "headers": {
+                "content-length": "2191",
+                "content-type": "application/json"
+              },
+              "provider_cost": {
+                "basis": "openrouter_usage_cost",
+                "operation": "openrouter.responses",
+                "unit_name": "usd",
+                "units": "0.0001156344"
+              },
+              "reasoning_route_observation": {
+                "expected_model_version": "deepseek/deepseek-v4.1-flash-20261017",
+                "expected_provider_name": "Fireworks",
+                "requested_model": "deepseek/deepseek-v4.1-flash-1017",
+                "requested_provider_route": "fireworks",
+                "response_model": "deepseek/deepseek-v4.1-flash-1017",
+                "response_provider_name": null,
+                "selected_endpoint_model": "deepseek/deepseek-v4.1-flash-20261017",
+                "selected_endpoint_provider_name": "Fireworks",
+                "status": "matched"
+              },
+              "status": 200,
+              "timing_scope": "initial_provider_transport_send",
+              "transport_elapsed_ms": 686
+            },
+            "privacy_redactions": [],
+            "response_ref": {
+              "entry_id": 3,
+              "field": "response"
+            },
+            "response_sha256": "sha256:c9248ea3a7b8761baef884b9c17b2dc3848432f98c764cc774f18bf9975557ea",
+            "wire_body_bytes": 2191,
+            "wire_body_sha256": "sha256:9c4059d90395a49461cb7cb7a31b17d625fd3beef40655bfee4b215915bb1ed7"
+          }
+        ],
+        "response_sha256": "sha256:c9248ea3a7b8761baef884b9c17b2dc3848432f98c764cc774f18bf9975557ea",
+        "response_status": 200,
+        "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+        "terminal_entry_id": 3
+      },
+      {
+        "accounting_state": "settlement",
+        "action_sequence": 1,
+        "actual_microusd": 95,
+        "base_call_identity": "sha256:c774a3ee5ca6f753fc2937d634461dd02904b5c186c9e96693fadcf3717c52bb",
+        "call_identity": "sha256:c774a3ee5ca6f753fc2937d634461dd02904b5c186c9e96693fadcf3717c52bb",
+        "evidence_gaps": [],
+        "funding_source": "miner_key",
+        "lifecycle": [
+          {
+            "accounting": {
+              "action_sequence": 1,
+              "base_call_identity": "sha256:c774a3ee5ca6f753fc2937d634461dd02904b5c186c9e96693fadcf3717c52bb",
+              "provider_attempt": 1,
+              "request_hash": "sha256:742e587d08825bb36bae22a16944bfcb35aa63ad3d3170583106027ea3d4d41c"
+            },
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:03:22.387002+00:00",
+            "entry_id": 4,
+            "entry_kind": "reservation",
+            "funding_source": "miner_key"
+          },
+          {
+            "accounting": {},
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:03:22.388086+00:00",
+            "entry_id": 5,
+            "entry_kind": "dispatch",
+            "funding_source": "miner_key"
+          },
+          {
+            "accounting": {
+              "released_microusd": -95,
+              "reserved_microusd": 0,
+              "variance_microusd": 95
+            },
+            "amount_microusd": 95,
+            "created_at": "2026-10-25T17:03:22.875456+00:00",
+            "entry_id": 6,
+            "entry_kind": "settlement",
+            "funding_source": "miner_key"
+          }
+        ],
+        "operation_id": "openrouter.responses",
+        "provider": "openrouter",
+        "provider_attempt": 1,
+        "provider_cost": {
+          "basis": "openrouter_usage_cost",
+          "operation": "openrouter.responses",
+          "unit_name": "usd",
+          "units": "0.0000943824"
+        },
+        "reasoning_capture": {
+          "api": "openrouter.responses",
+          "changes": [
+            "reasoning",
+            "tested_output_allowance"
+          ],
+          "context_tokens": 1048576,
+          "full_text_fields": [
+            "output.content.reasoning_text"
+          ],
+          "max_output_tokens": 32768,
+          "mode": {
+            "effort": "high"
+          },
+          "model_id": "deepseek/deepseek-v4.1-flash-1017",
+          "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+          "parser_version": "arena_openrouter_reasoning_v1",
+          "policy": "full_generated_thinking_v1",
+          "price_ceiling": {
+            "completion": "0.0000012",
+            "internal_reasoning": "0",
+            "prompt": "0.0000003",
+            "request": "0"
+          },
+          "probe_id": "isolated-candidate-probe",
+          "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "provider_name": "Fireworks",
+          "provider_route": "fireworks",
+          "registry_sha256": "2ce5ad096f60606098393301171e944733aebdff9528a3e7941be0bac2b46ecf",
+          "requested": true,
+          "reviewed_route": true,
+          "semantic_class": "full_generated_thinking"
+        },
+        "request": {
+          "admitted_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": [
+                  {
+                    "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_t7b5jx187tg",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"profile\"}",
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "id": "fc_tmp_c7jirz6k4k9",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "type": "function_call_output"
+              }
+            ],
+            "max_output_tokens": 2048,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "tool_choice": "required",
+            "tools": [
+              {
+                "description": "Read synthetic company evidence by ID.",
+                "name": "lookup_evidence",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_id": {
+                      "enum": [
+                        "profile",
+                        "headcount"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "evidence_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "effective_operation_id": "openrouter.responses",
+          "effective_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": [
+                  {
+                    "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_t7b5jx187tg",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"profile\"}",
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "id": "fc_tmp_c7jirz6k4k9",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "type": "function_call_output"
+              }
+            ],
+            "max_output_tokens": 32768,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "reasoning": {
+              "effort": "high"
+            },
+            "tool_choice": "required",
+            "tools": [
+              {
+                "description": "Read synthetic company evidence by ID.",
+                "name": "lookup_evidence",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_id": {
+                      "enum": [
+                        "profile",
+                        "headcount"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "evidence_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "hashed_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": [
+                  {
+                    "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_t7b5jx187tg",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"profile\"}",
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "id": "fc_tmp_c7jirz6k4k9",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "type": "function_call_output"
+              }
+            ],
+            "max_output_tokens": 32768,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "reasoning": {
+              "effort": "high"
+            },
+            "tool_choice": "required",
+            "tools": [
+              {
+                "description": "Read synthetic company evidence by ID.",
+                "name": "lookup_evidence",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_id": {
+                      "enum": [
+                        "profile",
+                        "headcount"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "evidence_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "normalized_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": [
+                  {
+                    "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_t7b5jx187tg",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"profile\"}",
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "id": "fc_tmp_c7jirz6k4k9",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "type": "function_call_output"
+              }
+            ],
+            "max_output_tokens": 2048,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "tool_choice": "required",
+            "tools": [
+              {
+                "description": "Read synthetic company evidence by ID.",
+                "name": "lookup_evidence",
+                "parameters": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "evidence_id": {
+                      "enum": [
+                        "profile",
+                        "headcount"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "evidence_id"
+                  ],
+                  "type": "object"
+                },
+                "type": "function"
+              }
+            ]
+          },
+          "operation_id": "openrouter.responses",
+          "outbound": {
+            "body": {
+              "input": [
+                {
+                  "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                  "role": "user"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                      "type": "reasoning_text"
+                    }
+                  ],
+                  "format": "unknown",
+                  "id": "rs_tmp_t7b5jx187tg",
+                  "status": "completed",
+                  "summary": [],
+                  "type": "reasoning"
+                },
+                {
+                  "arguments": "{\"evidence_id\":\"profile\"}",
+                  "call_id": "call_eac88e6c62694d91a007566a",
+                  "id": "fc_tmp_c7jirz6k4k9",
+                  "name": "lookup_evidence",
+                  "status": "completed",
+                  "type": "function_call"
+                },
+                {
+                  "call_id": "call_eac88e6c62694d91a007566a",
+                  "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                  "type": "function_call_output"
+                }
+              ],
+              "max_output_tokens": 32768,
+              "model": "deepseek/deepseek-v4.1-flash-1017",
+              "provider": {
+                "allow_fallbacks": false,
+                "data_collection": "deny",
+                "max_price": {
+                  "completion": 1.2,
+                  "prompt": 0.3,
+                  "request": 0
+                },
+                "only": [
+                  "fireworks"
+                ],
+                "require_parameters": true,
+                "zdr": true
+              },
+              "reasoning": {
+                "effort": "high"
+              },
+              "store": false,
+              "stream": false,
+              "tool_choice": "required",
+              "tools": [
+                {
+                  "description": "Read synthetic company evidence by ID.",
+                  "name": "lookup_evidence",
+                  "parameters": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "evidence_id": {
+                        "enum": [
+                          "profile",
+                          "headcount"
+                        ],
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "evidence_id"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "function"
+                }
+              ]
+            },
+            "body_sha256": "sha256:e2274216c0c75ff0b2b90661cdfd33bf061177c29309ecde6545aaed611a4c3b",
+            "content_type": "application/json",
+            "host": "openrouter.ai",
+            "method": "POST",
+            "path": "/api/v1/responses",
+            "query": {}
+          },
+          "privacy": {
+            "redacted": false,
+            "redactions": []
+          },
+          "reasoning_capture": {
+            "api": "openrouter.responses",
+            "changes": [
+              "reasoning",
+              "tested_output_allowance"
+            ],
+            "context_tokens": 1048576,
+            "full_text_fields": [
+              "output.content.reasoning_text"
+            ],
+            "max_output_tokens": 32768,
+            "mode": {
+              "effort": "high"
+            },
+            "model_id": "deepseek/deepseek-v4.1-flash-1017",
+            "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+            "parser_version": "arena_openrouter_reasoning_v1",
+            "policy": "full_generated_thinking_v1",
+            "price_ceiling": {
+              "completion": "0.0000012",
+              "internal_reasoning": "0",
+              "prompt": "0.0000003",
+              "request": "0"
+            },
+            "probe_id": "isolated-candidate-probe",
+            "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "provider_name": "Fireworks",
+            "provider_route": "fireworks",
+            "registry_sha256": "2ce5ad096f60606098393301171e944733aebdff9528a3e7941be0bac2b46ecf",
+            "requested": true,
+            "reviewed_route": true,
+            "semantic_class": "full_generated_thinking"
+          },
+          "request_hash": "sha256:742e587d08825bb36bae22a16944bfcb35aa63ad3d3170583106027ea3d4d41c",
+          "route": {},
+          "schema_version": "leadpoet.lab_arena.training_request.v1"
+        },
+        "request_capture": {
+          "compressed_bytes": 1610,
+          "encoding": "gzip",
+          "redacted": false,
+          "redactions": [],
+          "ref": "private/arena-training/requests/22ddc4a15cf25fef720dc3d3efc5eb408bec47ef360349b7ed5a4727411d93c0.json.gz",
+          "schema_version": "leadpoet.lab_arena.training_request.v1",
+          "sha256": "sha256:22ddc4a15cf25fef720dc3d3efc5eb408bec47ef360349b7ed5a4727411d93c0",
+          "size_bytes": 9872,
+          "status": "referenced"
+        },
+        "request_hash": "sha256:742e587d08825bb36bae22a16944bfcb35aa63ad3d3170583106027ea3d4d41c",
+        "reservation_entry_id": 4,
+        "response": {
+          "background": false,
+          "completed_at": 1792947802,
+          "created_at": 1792947802,
+          "error": null,
+          "frequency_penalty": 0,
+          "id": "gen-1792947802-5NJBE2xDCiKeOoR55x1t",
+          "incomplete_details": null,
+          "instructions": null,
+          "max_output_tokens": 32768,
+          "max_tool_calls": null,
+          "metadata": {},
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "object": "response",
+          "openrouter_metadata": {
+            "attempt": 1,
+            "endpoints": {
+              "available": [
+                {
+                  "model": "deepseek/deepseek-v4.1-flash-20261017",
+                  "provider": "Fireworks",
+                  "selected": true
+                }
+              ],
+              "total": 34
+            },
+            "generation_time": 426,
+            "is_byok": false,
+            "region": "SJC",
+            "requested": "deepseek/deepseek-v4.1-flash-1017",
+            "strategy": "direct",
+            "summary": "available=1, selected=Fireworks"
+          },
+          "output": [
+            {
+              "content": [
+                {
+                  "text": "Now second call.",
+                  "type": "reasoning_text"
+                }
+              ],
+              "format": "unknown",
+              "id": "rs_tmp_arsmuo4ha96",
+              "status": "completed",
+              "type": "reasoning"
+            },
+            {
+              "arguments": "{\"evidence_id\":\"headcount\"}",
+              "call_id": "call_556fcfa4333048a39217588e",
+              "id": "fc_tmp_ii7b9xlw68",
+              "name": "lookup_evidence",
+              "status": "completed",
+              "type": "function_call"
+            }
+          ],
+          "parallel_tool_calls": true,
+          "presence_penalty": 0,
+          "previous_response_id": null,
+          "prompt_cache_key": null,
+          "prompt_cache_options": null,
+          "reasoning": {
+            "effort": "high"
+          },
+          "safety_identifier": null,
+          "service_tier": "auto",
+          "status": "completed",
+          "store": false,
+          "temperature": 1,
+          "text": {
+            "format": {
+              "type": "text"
+            }
+          },
+          "tool_choice": "required",
+          "tools": [
+            {
+              "description": "Read synthetic company evidence by ID.",
+              "name": "lookup_evidence",
+              "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                  "evidence_id": {
+                    "enum": [
+                      "profile",
+                      "headcount"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "evidence_id"
+                ],
+                "type": "object"
+              },
+              "strict": null,
+              "type": "function"
+            }
+          ],
+          "top_logprobs": 0,
+          "top_p": 1,
+          "truncation": "disabled",
+          "usage": {
+            "cost": 9.43824e-05,
+            "cost_details": {
+              "upstream_inference_cost": 9.43824e-05,
+              "upstream_inference_input_cost": 5.57424e-05,
+              "upstream_inference_output_cost": 3.864e-05
+            },
+            "input_tokens": 532,
+            "input_tokens_details": {
+              "cached_tokens": 272
+            },
+            "is_byok": false,
+            "output_tokens": 46,
+            "output_tokens_details": {
+              "reasoning_tokens": 4
+            },
+            "total_tokens": 578
+          }
+        },
+        "response_hidden_reasoning_removed": false,
+        "response_privacy_redactions": [],
+        "response_provenance": {
+          "agent_receipt": "reported_exact_body_received",
+          "agent_receipt_refs": [
+            {
+              "id": 1,
+              "payload_sha256": "sha256:8e7d05ec97c60170d54cbdedda91b50005f6e577460229790ecc6d79c5c5156f",
+              "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+            }
+          ],
+          "delivery_to_worker": "socket_written",
+          "selected_response_acknowledged": true,
+          "source": "stored_provider_ledger_receipt",
+          "worker_body_exact_in_artifact": true,
+          "worker_body_source": "ledger_terminal",
+          "worker_receipt_ref": {
+            "ordinal": 1,
+            "payload_sha256": "sha256:8e7d05ec97c60170d54cbdedda91b50005f6e577460229790ecc6d79c5c5156f",
+            "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+          },
+          "worker_received_receipt_entry_ids": [
+            6
+          ]
+        },
+        "response_receipts": [
+          {
+            "created_at": "2026-10-25T17:03:22.875456+00:00",
+            "entry_id": 6,
+            "entry_kind": "settlement",
+            "metadata": {
+              "call_succeeded": true,
+              "headers": {
+                "content-length": "2014",
+                "content-type": "application/json"
+              },
+              "provider_cost": {
+                "basis": "openrouter_usage_cost",
+                "operation": "openrouter.responses",
+                "unit_name": "usd",
+                "units": "0.0000943824"
+              },
+              "reasoning_route_observation": {
+                "expected_model_version": "deepseek/deepseek-v4.1-flash-20261017",
+                "expected_provider_name": "Fireworks",
+                "requested_model": "deepseek/deepseek-v4.1-flash-1017",
+                "requested_provider_route": "fireworks",
+                "response_model": "deepseek/deepseek-v4.1-flash-1017",
+                "response_provider_name": null,
+                "selected_endpoint_model": "deepseek/deepseek-v4.1-flash-20261017",
+                "selected_endpoint_provider_name": "Fireworks",
+                "status": "matched"
+              },
+              "status": 200,
+              "timing_scope": "initial_provider_transport_send",
+              "transport_elapsed_ms": 485
+            },
+            "privacy_redactions": [],
+            "response_ref": {
+              "entry_id": 6,
+              "field": "response"
+            },
+            "response_sha256": "sha256:26ea64eab862765c3821c0376e264b5d241ca84db5aea00a4873b05410f66b55",
+            "wire_body_bytes": 2014,
+            "wire_body_sha256": "sha256:01f43ffbb7961ac9c0611c981a5f707cbd15a8379e1e205b751ffb45dc7a3676"
+          }
+        ],
+        "response_sha256": "sha256:26ea64eab862765c3821c0376e264b5d241ca84db5aea00a4873b05410f66b55",
+        "response_status": 200,
+        "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+        "terminal_entry_id": 6
+      },
+      {
+        "accounting_state": "settlement",
+        "action_sequence": 2,
+        "actual_microusd": 140,
+        "base_call_identity": "sha256:4b5b07710bb9783ed8a697c54f2dfac6213a40b37658352e705105955bbc36ef",
+        "call_identity": "sha256:4b5b07710bb9783ed8a697c54f2dfac6213a40b37658352e705105955bbc36ef",
+        "evidence_gaps": [],
+        "funding_source": "miner_key",
+        "lifecycle": [
+          {
+            "accounting": {
+              "action_sequence": 2,
+              "base_call_identity": "sha256:4b5b07710bb9783ed8a697c54f2dfac6213a40b37658352e705105955bbc36ef",
+              "provider_attempt": 1,
+              "request_hash": "sha256:d2cf77c94f6dcb9604873b84da98569f844cacd42e9dc9f6cbcd648f9897d882"
+            },
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:03:22.885649+00:00",
+            "entry_id": 7,
+            "entry_kind": "reservation",
+            "funding_source": "miner_key"
+          },
+          {
+            "accounting": {},
+            "amount_microusd": 0,
+            "created_at": "2026-10-25T17:03:22.886742+00:00",
+            "entry_id": 8,
+            "entry_kind": "dispatch",
+            "funding_source": "miner_key"
+          },
+          {
+            "accounting": {
+              "released_microusd": -140,
+              "reserved_microusd": 0,
+              "variance_microusd": 140
+            },
+            "amount_microusd": 140,
+            "created_at": "2026-10-25T17:03:23.50892+00:00",
+            "entry_id": 9,
+            "entry_kind": "settlement",
+            "funding_source": "miner_key"
+          }
+        ],
+        "operation_id": "openrouter.responses",
+        "provider": "openrouter",
+        "provider_attempt": 1,
+        "provider_cost": {
+          "basis": "openrouter_usage_cost",
+          "operation": "openrouter.responses",
+          "unit_name": "usd",
+          "units": "0.00013944"
+        },
+        "reasoning_capture": {
+          "api": "openrouter.responses",
+          "changes": [
+            "reasoning",
+            "tested_output_allowance"
+          ],
+          "context_tokens": 1048576,
+          "full_text_fields": [
+            "output.content.reasoning_text"
+          ],
+          "max_output_tokens": 32768,
+          "mode": {
+            "effort": "high"
+          },
+          "model_id": "deepseek/deepseek-v4.1-flash-1017",
+          "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+          "parser_version": "arena_openrouter_reasoning_v1",
+          "policy": "full_generated_thinking_v1",
+          "price_ceiling": {
+            "completion": "0.0000012",
+            "internal_reasoning": "0",
+            "prompt": "0.0000003",
+            "request": "0"
+          },
+          "probe_id": "isolated-candidate-probe",
+          "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "provider_name": "Fireworks",
+          "provider_route": "fireworks",
+          "registry_sha256": "2ce5ad096f60606098393301171e944733aebdff9528a3e7941be0bac2b46ecf",
+          "requested": true,
+          "reviewed_route": true,
+          "semantic_class": "full_generated_thinking"
+        },
+        "request": {
+          "admitted_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": [
+                  {
+                    "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_t7b5jx187tg",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"profile\"}",
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "id": "fc_tmp_c7jirz6k4k9",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "type": "function_call_output"
+              },
+              {
+                "content": [
+                  {
+                    "text": "Now second call.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_arsmuo4ha96",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"headcount\"}",
+                "call_id": "call_556fcfa4333048a39217588e",
+                "id": "fc_tmp_ii7b9xlw68",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_556fcfa4333048a39217588e",
+                "output": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+                "type": "function_call_output"
+              }
+            ],
+            "max_output_tokens": 2048,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "text": {
+              "format": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true,
+                "type": "json_schema"
+              }
+            }
+          },
+          "effective_operation_id": "openrouter.responses",
+          "effective_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": [
+                  {
+                    "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_t7b5jx187tg",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"profile\"}",
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "id": "fc_tmp_c7jirz6k4k9",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "type": "function_call_output"
+              },
+              {
+                "content": [
+                  {
+                    "text": "Now second call.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_arsmuo4ha96",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"headcount\"}",
+                "call_id": "call_556fcfa4333048a39217588e",
+                "id": "fc_tmp_ii7b9xlw68",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_556fcfa4333048a39217588e",
+                "output": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+                "type": "function_call_output"
+              }
+            ],
+            "max_output_tokens": 32768,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "reasoning": {
+              "effort": "high"
+            },
+            "text": {
+              "format": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true,
+                "type": "json_schema"
+              }
+            }
+          },
+          "hashed_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": [
+                  {
+                    "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_t7b5jx187tg",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"profile\"}",
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "id": "fc_tmp_c7jirz6k4k9",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "type": "function_call_output"
+              },
+              {
+                "content": [
+                  {
+                    "text": "Now second call.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_arsmuo4ha96",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"headcount\"}",
+                "call_id": "call_556fcfa4333048a39217588e",
+                "id": "fc_tmp_ii7b9xlw68",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_556fcfa4333048a39217588e",
+                "output": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+                "type": "function_call_output"
+              }
+            ],
+            "max_output_tokens": 32768,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "reasoning": {
+              "effort": "high"
+            },
+            "text": {
+              "format": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true,
+                "type": "json_schema"
+              }
+            }
+          },
+          "normalized_parameters": {
+            "input": [
+              {
+                "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                "role": "user"
+              },
+              {
+                "content": [
+                  {
+                    "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_t7b5jx187tg",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"profile\"}",
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "id": "fc_tmp_c7jirz6k4k9",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_eac88e6c62694d91a007566a",
+                "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                "type": "function_call_output"
+              },
+              {
+                "content": [
+                  {
+                    "text": "Now second call.",
+                    "type": "reasoning_text"
+                  }
+                ],
+                "format": "unknown",
+                "id": "rs_tmp_arsmuo4ha96",
+                "status": "completed",
+                "summary": [],
+                "type": "reasoning"
+              },
+              {
+                "arguments": "{\"evidence_id\":\"headcount\"}",
+                "call_id": "call_556fcfa4333048a39217588e",
+                "id": "fc_tmp_ii7b9xlw68",
+                "name": "lookup_evidence",
+                "status": "completed",
+                "type": "function_call"
+              },
+              {
+                "call_id": "call_556fcfa4333048a39217588e",
+                "output": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+                "type": "function_call_output"
+              }
+            ],
+            "max_output_tokens": 2048,
+            "model": "deepseek/deepseek-v4.1-flash-1017",
+            "text": {
+              "format": {
+                "name": "qualification",
+                "schema": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "company": {
+                      "type": "string"
+                    },
+                    "evidence_ids": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "qualified": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "company",
+                    "qualified",
+                    "evidence_ids"
+                  ],
+                  "type": "object"
+                },
+                "strict": true,
+                "type": "json_schema"
+              }
+            }
+          },
+          "operation_id": "openrouter.responses",
+          "outbound": {
+            "body": {
+              "input": [
+                {
+                  "content": "Synthetic compatibility test. Decide whether Acme Test is a US B2B software company with 50-200 current employees. First call lookup_evidence for 'profile', then for 'headcount', one call per turn. The older profile and the newer official headcount disagree; use the newer official headcount for the employee criterion. After both tools return only strict JSON with company, qualified, evidence_ids. Use both sources and do not infer missing facts.",
+                  "role": "user"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "We need answer must call tools one per turn. First lookup profile. Then next turn headcount. Need strict JSON only with company, qualified, evidence_ids. Need inspect returns. Let's call first.",
+                      "type": "reasoning_text"
+                    }
+                  ],
+                  "format": "unknown",
+                  "id": "rs_tmp_t7b5jx187tg",
+                  "status": "completed",
+                  "summary": [],
+                  "type": "reasoning"
+                },
+                {
+                  "arguments": "{\"evidence_id\":\"profile\"}",
+                  "call_id": "call_eac88e6c62694d91a007566a",
+                  "id": "fc_tmp_c7jirz6k4k9",
+                  "name": "lookup_evidence",
+                  "status": "completed",
+                  "type": "function_call"
+                },
+                {
+                  "call_id": "call_eac88e6c62694d91a007566a",
+                  "output": "{\"evidence_id\":\"profile\",\"company\":\"Acme Test\",\"country\":\"US\",\"business\":\"B2B software\",\"employees\":80,\"observed_on\":\"2024-01-01\"}",
+                  "type": "function_call_output"
+                },
+                {
+                  "content": [
+                    {
+                      "text": "Now second call.",
+                      "type": "reasoning_text"
+                    }
+                  ],
+                  "format": "unknown",
+                  "id": "rs_tmp_arsmuo4ha96",
+                  "status": "completed",
+                  "summary": [],
+                  "type": "reasoning"
+                },
+                {
+                  "arguments": "{\"evidence_id\":\"headcount\"}",
+                  "call_id": "call_556fcfa4333048a39217588e",
+                  "id": "fc_tmp_ii7b9xlw68",
+                  "name": "lookup_evidence",
+                  "status": "completed",
+                  "type": "function_call"
+                },
+                {
+                  "call_id": "call_556fcfa4333048a39217588e",
+                  "output": "{\"evidence_id\":\"headcount\",\"employees\":12,\"observed_on\":\"2026-10-23\",\"source\":\"current official staffing\"}",
+                  "type": "function_call_output"
+                }
+              ],
+              "max_output_tokens": 32768,
+              "model": "deepseek/deepseek-v4.1-flash-1017",
+              "provider": {
+                "allow_fallbacks": false,
+                "data_collection": "deny",
+                "max_price": {
+                  "completion": 1.2,
+                  "prompt": 0.3,
+                  "request": 0
+                },
+                "only": [
+                  "fireworks"
+                ],
+                "require_parameters": true,
+                "zdr": true
+              },
+              "reasoning": {
+                "effort": "high"
+              },
+              "store": false,
+              "stream": false,
+              "text": {
+                "format": {
+                  "name": "qualification",
+                  "schema": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "company": {
+                        "type": "string"
+                      },
+                      "evidence_ids": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "qualified": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "company",
+                      "qualified",
+                      "evidence_ids"
+                    ],
+                    "type": "object"
+                  },
+                  "strict": true,
+                  "type": "json_schema"
+                }
+              }
+            },
+            "body_sha256": "sha256:4e3218d456de27acd3aeda1e8eb7a2b60efcae4c893e7f691dbc55b80b863ebc",
+            "content_type": "application/json",
+            "host": "openrouter.ai",
+            "method": "POST",
+            "path": "/api/v1/responses",
+            "query": {}
+          },
+          "privacy": {
+            "redacted": false,
+            "redactions": []
+          },
+          "reasoning_capture": {
+            "api": "openrouter.responses",
+            "changes": [
+              "reasoning",
+              "tested_output_allowance"
+            ],
+            "context_tokens": 1048576,
+            "full_text_fields": [
+              "output.content.reasoning_text"
+            ],
+            "max_output_tokens": 32768,
+            "mode": {
+              "effort": "high"
+            },
+            "model_id": "deepseek/deepseek-v4.1-flash-1017",
+            "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+            "parser_version": "arena_openrouter_reasoning_v1",
+            "policy": "full_generated_thinking_v1",
+            "price_ceiling": {
+              "completion": "0.0000012",
+              "internal_reasoning": "0",
+              "prompt": "0.0000003",
+              "request": "0"
+            },
+            "probe_id": "isolated-candidate-probe",
+            "probe_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "provider_name": "Fireworks",
+            "provider_route": "fireworks",
+            "registry_sha256": "2ce5ad096f60606098393301171e944733aebdff9528a3e7941be0bac2b46ecf",
+            "requested": true,
+            "reviewed_route": true,
+            "semantic_class": "full_generated_thinking"
+          },
+          "request_hash": "sha256:d2cf77c94f6dcb9604873b84da98569f844cacd42e9dc9f6cbcd648f9897d882",
+          "route": {},
+          "schema_version": "leadpoet.lab_arena.training_request.v1"
+        },
+        "request_capture": {
+          "compressed_bytes": 1738,
+          "encoding": "gzip",
+          "redacted": false,
+          "redactions": [],
+          "ref": "private/arena-training/requests/2b72e59de2a4f7675075946e17e0427f1258cc54afdd7a1df33d7c5099b8d6db.json.gz",
+          "schema_version": "leadpoet.lab_arena.training_request.v1",
+          "sha256": "sha256:2b72e59de2a4f7675075946e17e0427f1258cc54afdd7a1df33d7c5099b8d6db",
+          "size_bytes": 12722,
+          "status": "referenced"
+        },
+        "request_hash": "sha256:d2cf77c94f6dcb9604873b84da98569f844cacd42e9dc9f6cbcd648f9897d882",
+        "reservation_entry_id": 7,
+        "response": {
+          "background": false,
+          "completed_at": 1792947803,
+          "created_at": 1792947802,
+          "error": null,
+          "frequency_penalty": 0,
+          "id": "gen-1792947802-UkWM034NNvJcWWcwmaeV",
+          "incomplete_details": null,
+          "instructions": null,
+          "max_output_tokens": 32768,
+          "max_tool_calls": null,
+          "metadata": {},
+          "model": "deepseek/deepseek-v4.1-flash-1017",
+          "object": "response",
+          "openrouter_metadata": {
+            "attempt": 1,
+            "endpoints": {
+              "available": [
+                {
+                  "model": "deepseek/deepseek-v4.1-flash-20261017",
+                  "provider": "Fireworks",
+                  "selected": true
+                }
+              ],
+              "total": 34
+            },
+            "generation_time": 496,
+            "is_byok": false,
+            "region": "SJC",
+            "requested": "deepseek/deepseek-v4.1-flash-1017",
+            "strategy": "direct",
+            "summary": "available=1, selected=Fireworks"
+          },
+          "output": [
+            {
+              "content": [
+                {
+                  "text": "Need decide qualified false because newer official headcount 12, outside 50-200. Use both sources, no infer. Evidence ids both profile and headcount. Strict JSON schema only.",
+                  "type": "reasoning_text"
+                }
+              ],
+              "format": "unknown",
+              "id": "rs_tmp_d75ybkn0prh",
+              "status": "completed",
+              "type": "reasoning"
+            },
+            {
+              "content": [
+                {
+                  "annotations": [],
+                  "logprobs": [],
+                  "text": "{\"company\":\"Acme Test\",\"qualified\":false,\"evidence_ids\":[\"profile\",\"headcount\"]}",
+                  "type": "output_text"
+                }
+              ],
+              "id": "msg_tmp_6jhf870tlut",
+              "role": "assistant",
+              "status": "completed",
+              "type": "message"
+            }
+          ],
+          "parallel_tool_calls": true,
+          "presence_penalty": 0,
+          "previous_response_id": null,
+          "prompt_cache_key": null,
+          "prompt_cache_options": null,
+          "reasoning": {
+            "effort": "high"
+          },
+          "safety_identifier": null,
+          "service_tier": "auto",
+          "status": "completed",
+          "store": false,
+          "temperature": 1,
+          "text": {
+            "format": {
+              "name": "qualification",
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "company": {
+                    "type": "string"
+                  },
+                  "evidence_ids": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "qualified": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "company",
+                  "qualified",
+                  "evidence_ids"
+                ],
+                "type": "object"
+              },
+              "strict": true,
+              "type": "json_schema"
+            }
+          },
+          "tool_choice": "auto",
+          "tools": [],
+          "top_logprobs": 0,
+          "top_p": 1,
+          "truncation": "disabled",
+          "usage": {
+            "cost": 0.00013944,
+            "cost_details": {
+              "upstream_inference_cost": 0.00013944,
+              "upstream_inference_input_cost": 8.82e-05,
+              "upstream_inference_output_cost": 5.124e-05
+            },
+            "input_tokens": 420,
+            "input_tokens_details": {
+              "cached_tokens": 0
+            },
+            "is_byok": false,
+            "output_tokens": 61,
+            "output_tokens_details": {
+              "reasoning_tokens": 38
+            },
+            "total_tokens": 481
+          }
+        },
+        "response_hidden_reasoning_removed": false,
+        "response_privacy_redactions": [],
+        "response_provenance": {
+          "agent_receipt": "reported_exact_body_received",
+          "agent_receipt_refs": [
+            {
+              "id": 2,
+              "payload_sha256": "sha256:8e7d05ec97c60170d54cbdedda91b50005f6e577460229790ecc6d79c5c5156f",
+              "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+            }
+          ],
+          "delivery_to_worker": "socket_written",
+          "selected_response_acknowledged": true,
+          "source": "stored_provider_ledger_receipt",
+          "worker_body_exact_in_artifact": true,
+          "worker_body_source": "ledger_terminal",
+          "worker_receipt_ref": {
+            "ordinal": 2,
+            "payload_sha256": "sha256:8e7d05ec97c60170d54cbdedda91b50005f6e577460229790ecc6d79c5c5156f",
+            "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1"
+          },
+          "worker_received_receipt_entry_ids": [
+            9
+          ]
+        },
+        "response_receipts": [
+          {
+            "created_at": "2026-10-25T17:03:23.50892+00:00",
+            "entry_id": 9,
+            "entry_kind": "settlement",
+            "metadata": {
+              "call_succeeded": true,
+              "headers": {
+                "content-length": "2234",
+                "content-type": "application/json"
+              },
+              "provider_cost": {
+                "basis": "openrouter_usage_cost",
+                "operation": "openrouter.responses",
+                "unit_name": "usd",
+                "units": "0.00013944"
+              },
+              "reasoning_route_observation": {
+                "expected_model_version": "deepseek/deepseek-v4.1-flash-20261017",
+                "expected_provider_name": "Fireworks",
+                "requested_model": "deepseek/deepseek-v4.1-flash-1017",
+                "requested_provider_route": "fireworks",
+                "response_model": "deepseek/deepseek-v4.1-flash-1017",
+                "response_provider_name": null,
+                "selected_endpoint_model": "deepseek/deepseek-v4.1-flash-20261017",
+                "selected_endpoint_provider_name": "Fireworks",
+                "status": "matched"
+              },
+              "status": 200,
+              "timing_scope": "initial_provider_transport_send",
+              "transport_elapsed_ms": 621
+            },
+            "privacy_redactions": [],
+            "response_ref": {
+              "entry_id": 9,
+              "field": "response"
+            },
+            "response_sha256": "sha256:dd73fe840c729a2e841032b2fe8e79a246a1922f01755a2cfbbd284e17423a9d",
+            "wire_body_bytes": 2234,
+            "wire_body_sha256": "sha256:4eb6430f09e5e0c1adc237f3b6354d90806ede9e2da0eb07815b1b9d2c1a20fd"
+          }
+        ],
+        "response_sha256": "sha256:dd73fe840c729a2e841032b2fe8e79a246a1922f01755a2cfbbd284e17423a9d",
+        "response_status": 200,
+        "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+        "terminal_entry_id": 9
+      }
+    ],
+    "role": "miner",
+    "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+    "schema_version": "leadpoet.lab_arena.training_example.v1",
+    "worker_observation_artifacts": {
+      "arena-2099-10-14-host474:drain420-miner:2:8:1": {
+        "claim_request_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "execute",
+        "lease_generation": 1,
+        "payload": {
+          "agent_observation_count": 3,
+          "agent_observations": [
+            {
+              "after_action_sequence": 0,
+              "data": {
+                "body_bytes": 2191,
+                "body_sha256": "sha256:9c4059d90395a49461cb7cb7a31b17d625fd3beef40655bfee4b215915bb1ed7",
+                "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+                "status": 200
+              },
+              "depends_on": [],
+              "id": 0,
+              "kind": "response_received",
+              "observed_at": "2026-10-25T17:03:22Z",
+              "privacy": {
+                "redacted": false,
+                "redactions": []
+              }
+            },
+            {
+              "after_action_sequence": 1,
+              "data": {
+                "body_bytes": 2014,
+                "body_sha256": "sha256:01f43ffbb7961ac9c0611c981a5f707cbd15a8379e1e205b751ffb45dc7a3676",
+                "call_identity": "sha256:c774a3ee5ca6f753fc2937d634461dd02904b5c186c9e96693fadcf3717c52bb",
+                "status": 200
+              },
+              "depends_on": [],
+              "id": 1,
+              "kind": "response_received",
+              "observed_at": "2026-10-25T17:03:22Z",
+              "privacy": {
+                "redacted": false,
+                "redactions": []
+              }
+            },
+            {
+              "after_action_sequence": 2,
+              "data": {
+                "body_bytes": 2234,
+                "body_sha256": "sha256:4eb6430f09e5e0c1adc237f3b6354d90806ede9e2da0eb07815b1b9d2c1a20fd",
+                "call_identity": "sha256:4b5b07710bb9783ed8a697c54f2dfac6213a40b37658352e705105955bbc36ef",
+                "status": 200
+              },
+              "depends_on": [],
+              "id": 2,
+              "kind": "response_received",
+              "observed_at": "2026-10-25T17:03:23Z",
+              "privacy": {
+                "redacted": false,
+                "redactions": []
+              }
+            }
+          ],
+          "complete": true,
+          "failures": [],
+          "local_refusal_count": 0,
+          "observation_count": 0,
+          "observations": [],
+          "response_receipt_count": 3,
+          "response_receipts": [
+            {
+              "action_sequence": 0,
+              "body_bytes": 2191,
+              "body_sha256": "sha256:9c4059d90395a49461cb7cb7a31b17d625fd3beef40655bfee4b215915bb1ed7",
+              "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+              "operation_id": "openrouter.responses",
+              "ordinal": 0,
+              "protocol": "frame",
+              "socket_written_at": "2026-10-25T17:03:22Z",
+              "status": 200,
+              "write_state": "socket_written"
+            },
+            {
+              "action_sequence": 1,
+              "body_bytes": 2014,
+              "body_sha256": "sha256:01f43ffbb7961ac9c0611c981a5f707cbd15a8379e1e205b751ffb45dc7a3676",
+              "call_identity": "sha256:c774a3ee5ca6f753fc2937d634461dd02904b5c186c9e96693fadcf3717c52bb",
+              "operation_id": "openrouter.responses",
+              "ordinal": 1,
+              "protocol": "frame",
+              "socket_written_at": "2026-10-25T17:03:22Z",
+              "status": 200,
+              "write_state": "socket_written"
+            },
+            {
+              "action_sequence": 2,
+              "body_bytes": 2234,
+              "body_sha256": "sha256:4eb6430f09e5e0c1adc237f3b6354d90806ede9e2da0eb07815b1b9d2c1a20fd",
+              "call_identity": "sha256:4b5b07710bb9783ed8a697c54f2dfac6213a40b37658352e705105955bbc36ef",
+              "operation_id": "openrouter.responses",
+              "ordinal": 2,
+              "protocol": "frame",
+              "socket_written_at": "2026-10-25T17:03:23Z",
+              "status": 200,
+              "write_state": "socket_written"
+            }
+          ]
+        },
+        "payload_sha256": "sha256:8e7d05ec97c60170d54cbdedda91b50005f6e577460229790ecc6d79c5c5156f",
+        "run_id": "arena-2099-10-14-host474:drain420-miner:2:8:1",
+        "schema_version": "leadpoet.lab_arena.training_observations.v2"
+      }
+    }
+  },
+  "readable_trace_sha256": "sha256:24416774d2d8877cc2eec6969454c8dea1695186da7768d04a145d5df9df4fad",
+  "wire_responses": [
+    {
+      "body_b64": "CiAgICAgICAgIAp7ImlkIjoiZ2VuLTE3OTI5NDc4MDEtUlVpbDdKVFFMb2xPa0l6TDBlQVQiLCJvYmplY3QiOiJyZXNwb25zZSIsImNyZWF0ZWRfYXQiOjE3OTI5NDc4MDEsIm1vZGVsIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0xMDE3Iiwic3RhdHVzIjoiY29tcGxldGVkIiwiY29tcGxldGVkX2F0IjoxNzkyOTQ3ODAyLCJvdXRwdXQiOlt7ImlkIjoicnNfdG1wX3Q3YjVqeDE4N3RnIiwidHlwZSI6InJlYXNvbmluZyIsInN0YXR1cyI6ImNvbXBsZXRlZCIsImNvbnRlbnQiOlt7InR5cGUiOiJyZWFzb25pbmdfdGV4dCIsInRleHQiOiJXZSBuZWVkIGFuc3dlciBtdXN0IGNhbGwgdG9vbHMgb25lIHBlciB0dXJuLiBGaXJzdCBsb29rdXAgcHJvZmlsZS4gVGhlbiBuZXh0IHR1cm4gaGVhZGNvdW50LiBOZWVkIHN0cmljdCBKU09OIG9ubHkgd2l0aCBjb21wYW55LCBxdWFsaWZpZWQsIGV2aWRlbmNlX2lkcy4gTmVlZCBpbnNwZWN0IHJldHVybnMuIExldCdzIGNhbGwgZmlyc3QuIn1dLCJzdW1tYXJ5IjpbXSwiZm9ybWF0IjoidW5rbm93biJ9LHsiaWQiOiJmY190bXBfYzdqaXJ6Nms0azkiLCJ0eXBlIjoiZnVuY3Rpb25fY2FsbCIsInN0YXR1cyI6ImNvbXBsZXRlZCIsImNhbGxfaWQiOiJjYWxsX2VhYzg4ZTZjNjI2OTRkOTFhMDA3NTY2YSIsIm5hbWUiOiJsb29rdXBfZXZpZGVuY2UiLCJhcmd1bWVudHMiOiJ7XCJldmlkZW5jZV9pZFwiOlwicHJvZmlsZVwifSJ9XSwiZXJyb3IiOm51bGwsImluY29tcGxldGVfZGV0YWlscyI6bnVsbCwidG9vbHMiOlt7InR5cGUiOiJmdW5jdGlvbiIsIm5hbWUiOiJsb29rdXBfZXZpZGVuY2UiLCJkZXNjcmlwdGlvbiI6IlJlYWQgc3ludGhldGljIGNvbXBhbnkgZXZpZGVuY2UgYnkgSUQuIiwicGFyYW1ldGVycyI6eyJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsiZXZpZGVuY2VfaWQiOnsiZW51bSI6WyJwcm9maWxlIiwiaGVhZGNvdW50Il0sInR5cGUiOiJzdHJpbmcifX0sInJlcXVpcmVkIjpbImV2aWRlbmNlX2lkIl0sInR5cGUiOiJvYmplY3QifSwic3RyaWN0IjpudWxsfV0sInRvb2xfY2hvaWNlIjoicmVxdWlyZWQiLCJwYXJhbGxlbF90b29sX2NhbGxzIjp0cnVlLCJtYXhfb3V0cHV0X3Rva2VucyI6MzI3NjgsInRlbXBlcmF0dXJlIjoxLCJ0b3BfcCI6MSwicHJlc2VuY2VfcGVuYWx0eSI6MCwiZnJlcXVlbmN5X3BlbmFsdHkiOjAsInRvcF9sb2dwcm9icyI6MCwibWF4X3Rvb2xfY2FsbHMiOm51bGwsIm1ldGFkYXRhIjp7fSwiYmFja2dyb3VuZCI6ZmFsc2UsInByZXZpb3VzX3Jlc3BvbnNlX2lkIjpudWxsLCJzZXJ2aWNlX3RpZXIiOiJhdXRvIiwidHJ1bmNhdGlvbiI6ImRpc2FibGVkIiwic3RvcmUiOmZhbHNlLCJpbnN0cnVjdGlvbnMiOm51bGwsInRleHQiOnsiZm9ybWF0Ijp7InR5cGUiOiJ0ZXh0In19LCJyZWFzb25pbmciOnsiZWZmb3J0IjoiaGlnaCJ9LCJzYWZldHlfaWRlbnRpZmllciI6bnVsbCwicHJvbXB0X2NhY2hlX2tleSI6bnVsbCwicHJvbXB0X2NhY2hlX29wdGlvbnMiOm51bGwsInVzYWdlIjp7ImlucHV0X3Rva2VucyI6NDAxLCJpbnB1dF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjoxODJ9LCJvdXRwdXRfdG9rZW5zIjo4Miwib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjp7InJlYXNvbmluZ190b2tlbnMiOjQxfSwidG90YWxfdG9rZW5zIjo0ODMsImNvc3QiOjAuMDAwMTE1NjM0NCwiaXNfYnlvayI6ZmFsc2UsImNvc3RfZGV0YWlscyI6eyJ1cHN0cmVhbV9pbmZlcmVuY2VfY29zdCI6MC4wMDAxMTU2MzQ0LCJ1cHN0cmVhbV9pbmZlcmVuY2VfaW5wdXRfY29zdCI6MC4wMDAwNDY3NTQ0LCJ1cHN0cmVhbV9pbmZlcmVuY2Vfb3V0cHV0X2Nvc3QiOjAuMDAwMDY4ODh9fSwib3BlbnJvdXRlcl9tZXRhZGF0YSI6eyJyZXF1ZXN0ZWQiOiJkZWVwc2Vlay9kZWVwc2Vlay12NC4xLWZsYXNoLTEwMTciLCJzdHJhdGVneSI6ImRpcmVjdCIsInJlZ2lvbiI6IlNKQyIsInN1bW1hcnkiOiJhdmFpbGFibGU9MSwgc2VsZWN0ZWQ9RmlyZXdvcmtzIiwiYXR0ZW1wdCI6MSwiaXNfYnlvayI6ZmFsc2UsImVuZHBvaW50cyI6eyJ0b3RhbCI6MzQsImF2YWlsYWJsZSI6W3sicHJvdmlkZXIiOiJGaXJld29ya3MiLCJtb2RlbCI6ImRlZXBzZWVrL2RlZXBzZWVrLXY0LjEtZmxhc2gtMjAyNjEwMTciLCJzZWxlY3RlZCI6dHJ1ZX1dfSwiZ2VuZXJhdGlvbl90aW1lIjo1NzN9fQ==",
+      "wire_body_sha256": "sha256:9c4059d90395a49461cb7cb7a31b17d625fd3beef40655bfee4b215915bb1ed7",
+      "wire_body_bytes": 2191
+    },
+    {
+      "body_b64": "CiAgICAgICAgIAp7ImlkIjoiZ2VuLTE3OTI5NDc4MDItNU5KQkUyeERDaUtlT29SNTV4MXQiLCJvYmplY3QiOiJyZXNwb25zZSIsImNyZWF0ZWRfYXQiOjE3OTI5NDc4MDIsIm1vZGVsIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0xMDE3Iiwic3RhdHVzIjoiY29tcGxldGVkIiwiY29tcGxldGVkX2F0IjoxNzkyOTQ3ODAyLCJvdXRwdXQiOlt7ImlkIjoicnNfdG1wX2Fyc211bzRoYTk2IiwidHlwZSI6InJlYXNvbmluZyIsInN0YXR1cyI6ImNvbXBsZXRlZCIsImNvbnRlbnQiOlt7InR5cGUiOiJyZWFzb25pbmdfdGV4dCIsInRleHQiOiJOb3cgc2Vjb25kIGNhbGwuIn1dLCJzdW1tYXJ5IjpbXSwiZm9ybWF0IjoidW5rbm93biJ9LHsiaWQiOiJmY190bXBfaWk3Yjl4bHc2OCIsInR5cGUiOiJmdW5jdGlvbl9jYWxsIiwic3RhdHVzIjoiY29tcGxldGVkIiwiY2FsbF9pZCI6ImNhbGxfNTU2ZmNmYTQzMzMwNDhhMzkyMTc1ODhlIiwibmFtZSI6Imxvb2t1cF9ldmlkZW5jZSIsImFyZ3VtZW50cyI6IntcImV2aWRlbmNlX2lkXCI6XCJoZWFkY291bnRcIn0ifV0sImVycm9yIjpudWxsLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsInRvb2xzIjpbeyJ0eXBlIjoiZnVuY3Rpb24iLCJuYW1lIjoibG9va3VwX2V2aWRlbmNlIiwiZGVzY3JpcHRpb24iOiJSZWFkIHN5bnRoZXRpYyBjb21wYW55IGV2aWRlbmNlIGJ5IElELiIsInBhcmFtZXRlcnMiOnsiYWRkaXRpb25hbFByb3BlcnRpZXMiOmZhbHNlLCJwcm9wZXJ0aWVzIjp7ImV2aWRlbmNlX2lkIjp7ImVudW0iOlsicHJvZmlsZSIsImhlYWRjb3VudCJdLCJ0eXBlIjoic3RyaW5nIn19LCJyZXF1aXJlZCI6WyJldmlkZW5jZV9pZCJdLCJ0eXBlIjoib2JqZWN0In0sInN0cmljdCI6bnVsbH1dLCJ0b29sX2Nob2ljZSI6InJlcXVpcmVkIiwicGFyYWxsZWxfdG9vbF9jYWxscyI6dHJ1ZSwibWF4X291dHB1dF90b2tlbnMiOjMyNzY4LCJ0ZW1wZXJhdHVyZSI6MSwidG9wX3AiOjEsInByZXNlbmNlX3BlbmFsdHkiOjAsImZyZXF1ZW5jeV9wZW5hbHR5IjowLCJ0b3BfbG9ncHJvYnMiOjAsIm1heF90b29sX2NhbGxzIjpudWxsLCJtZXRhZGF0YSI6e30sImJhY2tncm91bmQiOmZhbHNlLCJwcmV2aW91c19yZXNwb25zZV9pZCI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInRydW5jYXRpb24iOiJkaXNhYmxlZCIsInN0b3JlIjpmYWxzZSwiaW5zdHJ1Y3Rpb25zIjpudWxsLCJ0ZXh0Ijp7ImZvcm1hdCI6eyJ0eXBlIjoidGV4dCJ9fSwicmVhc29uaW5nIjp7ImVmZm9ydCI6ImhpZ2gifSwic2FmZXR5X2lkZW50aWZpZXIiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9vcHRpb25zIjpudWxsLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjUzMiwiaW5wdXRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MjcyfSwib3V0cHV0X3Rva2VucyI6NDYsIm91dHB1dF90b2tlbnNfZGV0YWlscyI6eyJyZWFzb25pbmdfdG9rZW5zIjo0fSwidG90YWxfdG9rZW5zIjo1NzgsImNvc3QiOjAuMDAwMDk0MzgyNCwiaXNfYnlvayI6ZmFsc2UsImNvc3RfZGV0YWlscyI6eyJ1cHN0cmVhbV9pbmZlcmVuY2VfY29zdCI6MC4wMDAwOTQzODI0LCJ1cHN0cmVhbV9pbmZlcmVuY2VfaW5wdXRfY29zdCI6MC4wMDAwNTU3NDI0LCJ1cHN0cmVhbV9pbmZlcmVuY2Vfb3V0cHV0X2Nvc3QiOjAuMDAwMDM4NjR9fSwib3BlbnJvdXRlcl9tZXRhZGF0YSI6eyJyZXF1ZXN0ZWQiOiJkZWVwc2Vlay9kZWVwc2Vlay12NC4xLWZsYXNoLTEwMTciLCJzdHJhdGVneSI6ImRpcmVjdCIsInJlZ2lvbiI6IlNKQyIsInN1bW1hcnkiOiJhdmFpbGFibGU9MSwgc2VsZWN0ZWQ9RmlyZXdvcmtzIiwiYXR0ZW1wdCI6MSwiaXNfYnlvayI6ZmFsc2UsImVuZHBvaW50cyI6eyJ0b3RhbCI6MzQsImF2YWlsYWJsZSI6W3sicHJvdmlkZXIiOiJGaXJld29ya3MiLCJtb2RlbCI6ImRlZXBzZWVrL2RlZXBzZWVrLXY0LjEtZmxhc2gtMjAyNjEwMTciLCJzZWxlY3RlZCI6dHJ1ZX1dfSwiZ2VuZXJhdGlvbl90aW1lIjo0MjZ9fQ==",
+      "wire_body_sha256": "sha256:01f43ffbb7961ac9c0611c981a5f707cbd15a8379e1e205b751ffb45dc7a3676",
+      "wire_body_bytes": 2014
+    },
+    {
+      "body_b64": "CiAgICAgICAgIAp7ImlkIjoiZ2VuLTE3OTI5NDc4MDItVWtXTTAzNE5OdkpjV1djd21hZVYiLCJvYmplY3QiOiJyZXNwb25zZSIsImNyZWF0ZWRfYXQiOjE3OTI5NDc4MDIsIm1vZGVsIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0xMDE3Iiwic3RhdHVzIjoiY29tcGxldGVkIiwiY29tcGxldGVkX2F0IjoxNzkyOTQ3ODAzLCJvdXRwdXQiOlt7ImlkIjoicnNfdG1wX2Q3NXlia24wcHJoIiwidHlwZSI6InJlYXNvbmluZyIsInN0YXR1cyI6ImNvbXBsZXRlZCIsImNvbnRlbnQiOlt7InR5cGUiOiJyZWFzb25pbmdfdGV4dCIsInRleHQiOiJOZWVkIGRlY2lkZSBxdWFsaWZpZWQgZmFsc2UgYmVjYXVzZSBuZXdlciBvZmZpY2lhbCBoZWFkY291bnQgMTIsIG91dHNpZGUgNTAtMjAwLiBVc2UgYm90aCBzb3VyY2VzLCBubyBpbmZlci4gRXZpZGVuY2UgaWRzIGJvdGggcHJvZmlsZSBhbmQgaGVhZGNvdW50LiBTdHJpY3QgSlNPTiBzY2hlbWEgb25seS4ifV0sInN1bW1hcnkiOltdLCJmb3JtYXQiOiJ1bmtub3duIn0seyJpZCI6Im1zZ190bXBfNmpoZjg3MHRsdXQiLCJ0eXBlIjoibWVzc2FnZSIsInJvbGUiOiJhc3Npc3RhbnQiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJjb250ZW50IjpbeyJ0eXBlIjoib3V0cHV0X3RleHQiLCJ0ZXh0Ijoie1wiY29tcGFueVwiOlwiQWNtZSBUZXN0XCIsXCJxdWFsaWZpZWRcIjpmYWxzZSxcImV2aWRlbmNlX2lkc1wiOltcInByb2ZpbGVcIixcImhlYWRjb3VudFwiXX0iLCJhbm5vdGF0aW9ucyI6W10sImxvZ3Byb2JzIjpbXX1dfV0sImVycm9yIjpudWxsLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsInRvb2xzIjpbXSwidG9vbF9jaG9pY2UiOiJhdXRvIiwicGFyYWxsZWxfdG9vbF9jYWxscyI6dHJ1ZSwibWF4X291dHB1dF90b2tlbnMiOjMyNzY4LCJ0ZW1wZXJhdHVyZSI6MSwidG9wX3AiOjEsInByZXNlbmNlX3BlbmFsdHkiOjAsImZyZXF1ZW5jeV9wZW5hbHR5IjowLCJ0b3BfbG9ncHJvYnMiOjAsIm1heF90b29sX2NhbGxzIjpudWxsLCJtZXRhZGF0YSI6e30sImJhY2tncm91bmQiOmZhbHNlLCJwcmV2aW91c19yZXNwb25zZV9pZCI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInRydW5jYXRpb24iOiJkaXNhYmxlZCIsInN0b3JlIjpmYWxzZSwiaW5zdHJ1Y3Rpb25zIjpudWxsLCJ0ZXh0Ijp7ImZvcm1hdCI6eyJ0eXBlIjoianNvbl9zY2hlbWEiLCJuYW1lIjoicXVhbGlmaWNhdGlvbiIsInN0cmljdCI6dHJ1ZSwic2NoZW1hIjp7ImFkZGl0aW9uYWxQcm9wZXJ0aWVzIjpmYWxzZSwicHJvcGVydGllcyI6eyJjb21wYW55Ijp7InR5cGUiOiJzdHJpbmcifSwiZXZpZGVuY2VfaWRzIjp7Iml0ZW1zIjp7InR5cGUiOiJzdHJpbmcifSwidHlwZSI6ImFycmF5In0sInF1YWxpZmllZCI6eyJ0eXBlIjoiYm9vbGVhbiJ9fSwicmVxdWlyZWQiOlsiY29tcGFueSIsInF1YWxpZmllZCIsImV2aWRlbmNlX2lkcyJdLCJ0eXBlIjoib2JqZWN0In19fSwicmVhc29uaW5nIjp7ImVmZm9ydCI6ImhpZ2gifSwic2FmZXR5X2lkZW50aWZpZXIiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9vcHRpb25zIjpudWxsLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjQyMCwiaW5wdXRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MH0sIm91dHB1dF90b2tlbnMiOjYxLCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsicmVhc29uaW5nX3Rva2VucyI6Mzh9LCJ0b3RhbF90b2tlbnMiOjQ4MSwiY29zdCI6MC4wMDAxMzk0NCwiaXNfYnlvayI6ZmFsc2UsImNvc3RfZGV0YWlscyI6eyJ1cHN0cmVhbV9pbmZlcmVuY2VfY29zdCI6MC4wMDAxMzk0NCwidXBzdHJlYW1faW5mZXJlbmNlX2lucHV0X2Nvc3QiOjAuMDAwMDg4MiwidXBzdHJlYW1faW5mZXJlbmNlX291dHB1dF9jb3N0IjowLjAwMDA1MTI0fX0sIm9wZW5yb3V0ZXJfbWV0YWRhdGEiOnsicmVxdWVzdGVkIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0xMDE3Iiwic3RyYXRlZ3kiOiJkaXJlY3QiLCJyZWdpb24iOiJTSkMiLCJzdW1tYXJ5IjoiYXZhaWxhYmxlPTEsIHNlbGVjdGVkPUZpcmV3b3JrcyIsImF0dGVtcHQiOjEsImlzX2J5b2siOmZhbHNlLCJlbmRwb2ludHMiOnsidG90YWwiOjM0LCJhdmFpbGFibGUiOlt7InByb3ZpZGVyIjoiRmlyZXdvcmtzIiwibW9kZWwiOiJkZWVwc2Vlay9kZWVwc2Vlay12NC4xLWZsYXNoLTIwMjYxMDE3Iiwic2VsZWN0ZWQiOnRydWV9XX0sImdlbmVyYXRpb25fdGltZSI6NDk2fX0=",
+      "wire_body_sha256": "sha256:4eb6430f09e5e0c1adc237f3b6354d90806ede9e2da0eb07815b1b9d2c1a20fd",
+      "wire_body_bytes": 2234
+    }
+  ],
+  "ledger_readback": {
+    "rows": [
+      {
+        "entry_id": 1,
+        "entry_kind": "reservation",
+        "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+        "amount_microusd": 0,
+        "request_hash": "sha256:329deca95eab539de6976efd00d821c0890a1df9551632611cff9dd61c925cc7"
+      },
+      {
+        "entry_id": 2,
+        "entry_kind": "dispatch",
+        "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+        "amount_microusd": 0
+      },
+      {
+        "entry_id": 3,
+        "entry_kind": "settlement",
+        "call_identity": "sha256:a9aa71e6ea35a3ce88d90b47fdddd017ba1f8cce0b3081ad72a5c9463247546e",
+        "amount_microusd": 116,
+        "terminal_response": {
+          "status": 200,
+          "body_b64": "CiAgICAgICAgIAp7ImlkIjoiZ2VuLTE3OTI5NDc4MDEtUlVpbDdKVFFMb2xPa0l6TDBlQVQiLCJvYmplY3QiOiJyZXNwb25zZSIsImNyZWF0ZWRfYXQiOjE3OTI5NDc4MDEsIm1vZGVsIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0xMDE3Iiwic3RhdHVzIjoiY29tcGxldGVkIiwiY29tcGxldGVkX2F0IjoxNzkyOTQ3ODAyLCJvdXRwdXQiOlt7ImlkIjoicnNfdG1wX3Q3YjVqeDE4N3RnIiwidHlwZSI6InJlYXNvbmluZyIsInN0YXR1cyI6ImNvbXBsZXRlZCIsImNvbnRlbnQiOlt7InR5cGUiOiJyZWFzb25pbmdfdGV4dCIsInRleHQiOiJXZSBuZWVkIGFuc3dlciBtdXN0IGNhbGwgdG9vbHMgb25lIHBlciB0dXJuLiBGaXJzdCBsb29rdXAgcHJvZmlsZS4gVGhlbiBuZXh0IHR1cm4gaGVhZGNvdW50LiBOZWVkIHN0cmljdCBKU09OIG9ubHkgd2l0aCBjb21wYW55LCBxdWFsaWZpZWQsIGV2aWRlbmNlX2lkcy4gTmVlZCBpbnNwZWN0IHJldHVybnMuIExldCdzIGNhbGwgZmlyc3QuIn1dLCJzdW1tYXJ5IjpbXSwiZm9ybWF0IjoidW5rbm93biJ9LHsiaWQiOiJmY190bXBfYzdqaXJ6Nms0azkiLCJ0eXBlIjoiZnVuY3Rpb25fY2FsbCIsInN0YXR1cyI6ImNvbXBsZXRlZCIsImNhbGxfaWQiOiJjYWxsX2VhYzg4ZTZjNjI2OTRkOTFhMDA3NTY2YSIsIm5hbWUiOiJsb29rdXBfZXZpZGVuY2UiLCJhcmd1bWVudHMiOiJ7XCJldmlkZW5jZV9pZFwiOlwicHJvZmlsZVwifSJ9XSwiZXJyb3IiOm51bGwsImluY29tcGxldGVfZGV0YWlscyI6bnVsbCwidG9vbHMiOlt7InR5cGUiOiJmdW5jdGlvbiIsIm5hbWUiOiJsb29rdXBfZXZpZGVuY2UiLCJkZXNjcmlwdGlvbiI6IlJlYWQgc3ludGhldGljIGNvbXBhbnkgZXZpZGVuY2UgYnkgSUQuIiwicGFyYW1ldGVycyI6eyJhZGRpdGlvbmFsUHJvcGVydGllcyI6ZmFsc2UsInByb3BlcnRpZXMiOnsiZXZpZGVuY2VfaWQiOnsiZW51bSI6WyJwcm9maWxlIiwiaGVhZGNvdW50Il0sInR5cGUiOiJzdHJpbmcifX0sInJlcXVpcmVkIjpbImV2aWRlbmNlX2lkIl0sInR5cGUiOiJvYmplY3QifSwic3RyaWN0IjpudWxsfV0sInRvb2xfY2hvaWNlIjoicmVxdWlyZWQiLCJwYXJhbGxlbF90b29sX2NhbGxzIjp0cnVlLCJtYXhfb3V0cHV0X3Rva2VucyI6MzI3NjgsInRlbXBlcmF0dXJlIjoxLCJ0b3BfcCI6MSwicHJlc2VuY2VfcGVuYWx0eSI6MCwiZnJlcXVlbmN5X3BlbmFsdHkiOjAsInRvcF9sb2dwcm9icyI6MCwibWF4X3Rvb2xfY2FsbHMiOm51bGwsIm1ldGFkYXRhIjp7fSwiYmFja2dyb3VuZCI6ZmFsc2UsInByZXZpb3VzX3Jlc3BvbnNlX2lkIjpudWxsLCJzZXJ2aWNlX3RpZXIiOiJhdXRvIiwidHJ1bmNhdGlvbiI6ImRpc2FibGVkIiwic3RvcmUiOmZhbHNlLCJpbnN0cnVjdGlvbnMiOm51bGwsInRleHQiOnsiZm9ybWF0Ijp7InR5cGUiOiJ0ZXh0In19LCJyZWFzb25pbmciOnsiZWZmb3J0IjoiaGlnaCJ9LCJzYWZldHlfaWRlbnRpZmllciI6bnVsbCwicHJvbXB0X2NhY2hlX2tleSI6bnVsbCwicHJvbXB0X2NhY2hlX29wdGlvbnMiOm51bGwsInVzYWdlIjp7ImlucHV0X3Rva2VucyI6NDAxLCJpbnB1dF90b2tlbnNfZGV0YWlscyI6eyJjYWNoZWRfdG9rZW5zIjoxODJ9LCJvdXRwdXRfdG9rZW5zIjo4Miwib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjp7InJlYXNvbmluZ190b2tlbnMiOjQxfSwidG90YWxfdG9rZW5zIjo0ODMsImNvc3QiOjAuMDAwMTE1NjM0NCwiaXNfYnlvayI6ZmFsc2UsImNvc3RfZGV0YWlscyI6eyJ1cHN0cmVhbV9pbmZlcmVuY2VfY29zdCI6MC4wMDAxMTU2MzQ0LCJ1cHN0cmVhbV9pbmZlcmVuY2VfaW5wdXRfY29zdCI6MC4wMDAwNDY3NTQ0LCJ1cHN0cmVhbV9pbmZlcmVuY2Vfb3V0cHV0X2Nvc3QiOjAuMDAwMDY4ODh9fSwib3BlbnJvdXRlcl9tZXRhZGF0YSI6eyJyZXF1ZXN0ZWQiOiJkZWVwc2Vlay9kZWVwc2Vlay12NC4xLWZsYXNoLTEwMTciLCJzdHJhdGVneSI6ImRpcmVjdCIsInJlZ2lvbiI6IlNKQyIsInN1bW1hcnkiOiJhdmFpbGFibGU9MSwgc2VsZWN0ZWQ9RmlyZXdvcmtzIiwiYXR0ZW1wdCI6MSwiaXNfYnlvayI6ZmFsc2UsImVuZHBvaW50cyI6eyJ0b3RhbCI6MzQsImF2YWlsYWJsZSI6W3sicHJvdmlkZXIiOiJGaXJld29ya3MiLCJtb2RlbCI6ImRlZXBzZWVrL2RlZXBzZWVrLXY0LjEtZmxhc2gtMjAyNjEwMTciLCJzZWxlY3RlZCI6dHJ1ZX1dfSwiZ2VuZXJhdGlvbl90aW1lIjo1NzN9fQ=="
+        }
+      },
+      {
+        "entry_id": 4,
+        "entry_kind": "reservation",
+        "call_identity": "sha256:c774a3ee5ca6f753fc2937d634461dd02904b5c186c9e96693fadcf3717c52bb",
+        "amount_microusd": 0,
+        "request_hash": "sha256:742e587d08825bb36bae22a16944bfcb35aa63ad3d3170583106027ea3d4d41c"
+      },
+      {
+        "entry_id": 5,
+        "entry_kind": "dispatch",
+        "call_identity": "sha256:c774a3ee5ca6f753fc2937d634461dd02904b5c186c9e96693fadcf3717c52bb",
+        "amount_microusd": 0
+      },
+      {
+        "entry_id": 6,
+        "entry_kind": "settlement",
+        "call_identity": "sha256:c774a3ee5ca6f753fc2937d634461dd02904b5c186c9e96693fadcf3717c52bb",
+        "amount_microusd": 95,
+        "terminal_response": {
+          "status": 200,
+          "body_b64": "CiAgICAgICAgIAp7ImlkIjoiZ2VuLTE3OTI5NDc4MDItNU5KQkUyeERDaUtlT29SNTV4MXQiLCJvYmplY3QiOiJyZXNwb25zZSIsImNyZWF0ZWRfYXQiOjE3OTI5NDc4MDIsIm1vZGVsIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0xMDE3Iiwic3RhdHVzIjoiY29tcGxldGVkIiwiY29tcGxldGVkX2F0IjoxNzkyOTQ3ODAyLCJvdXRwdXQiOlt7ImlkIjoicnNfdG1wX2Fyc211bzRoYTk2IiwidHlwZSI6InJlYXNvbmluZyIsInN0YXR1cyI6ImNvbXBsZXRlZCIsImNvbnRlbnQiOlt7InR5cGUiOiJyZWFzb25pbmdfdGV4dCIsInRleHQiOiJOb3cgc2Vjb25kIGNhbGwuIn1dLCJzdW1tYXJ5IjpbXSwiZm9ybWF0IjoidW5rbm93biJ9LHsiaWQiOiJmY190bXBfaWk3Yjl4bHc2OCIsInR5cGUiOiJmdW5jdGlvbl9jYWxsIiwic3RhdHVzIjoiY29tcGxldGVkIiwiY2FsbF9pZCI6ImNhbGxfNTU2ZmNmYTQzMzMwNDhhMzkyMTc1ODhlIiwibmFtZSI6Imxvb2t1cF9ldmlkZW5jZSIsImFyZ3VtZW50cyI6IntcImV2aWRlbmNlX2lkXCI6XCJoZWFkY291bnRcIn0ifV0sImVycm9yIjpudWxsLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsInRvb2xzIjpbeyJ0eXBlIjoiZnVuY3Rpb24iLCJuYW1lIjoibG9va3VwX2V2aWRlbmNlIiwiZGVzY3JpcHRpb24iOiJSZWFkIHN5bnRoZXRpYyBjb21wYW55IGV2aWRlbmNlIGJ5IElELiIsInBhcmFtZXRlcnMiOnsiYWRkaXRpb25hbFByb3BlcnRpZXMiOmZhbHNlLCJwcm9wZXJ0aWVzIjp7ImV2aWRlbmNlX2lkIjp7ImVudW0iOlsicHJvZmlsZSIsImhlYWRjb3VudCJdLCJ0eXBlIjoic3RyaW5nIn19LCJyZXF1aXJlZCI6WyJldmlkZW5jZV9pZCJdLCJ0eXBlIjoib2JqZWN0In0sInN0cmljdCI6bnVsbH1dLCJ0b29sX2Nob2ljZSI6InJlcXVpcmVkIiwicGFyYWxsZWxfdG9vbF9jYWxscyI6dHJ1ZSwibWF4X291dHB1dF90b2tlbnMiOjMyNzY4LCJ0ZW1wZXJhdHVyZSI6MSwidG9wX3AiOjEsInByZXNlbmNlX3BlbmFsdHkiOjAsImZyZXF1ZW5jeV9wZW5hbHR5IjowLCJ0b3BfbG9ncHJvYnMiOjAsIm1heF90b29sX2NhbGxzIjpudWxsLCJtZXRhZGF0YSI6e30sImJhY2tncm91bmQiOmZhbHNlLCJwcmV2aW91c19yZXNwb25zZV9pZCI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInRydW5jYXRpb24iOiJkaXNhYmxlZCIsInN0b3JlIjpmYWxzZSwiaW5zdHJ1Y3Rpb25zIjpudWxsLCJ0ZXh0Ijp7ImZvcm1hdCI6eyJ0eXBlIjoidGV4dCJ9fSwicmVhc29uaW5nIjp7ImVmZm9ydCI6ImhpZ2gifSwic2FmZXR5X2lkZW50aWZpZXIiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9vcHRpb25zIjpudWxsLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjUzMiwiaW5wdXRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MjcyfSwib3V0cHV0X3Rva2VucyI6NDYsIm91dHB1dF90b2tlbnNfZGV0YWlscyI6eyJyZWFzb25pbmdfdG9rZW5zIjo0fSwidG90YWxfdG9rZW5zIjo1NzgsImNvc3QiOjAuMDAwMDk0MzgyNCwiaXNfYnlvayI6ZmFsc2UsImNvc3RfZGV0YWlscyI6eyJ1cHN0cmVhbV9pbmZlcmVuY2VfY29zdCI6MC4wMDAwOTQzODI0LCJ1cHN0cmVhbV9pbmZlcmVuY2VfaW5wdXRfY29zdCI6MC4wMDAwNTU3NDI0LCJ1cHN0cmVhbV9pbmZlcmVuY2Vfb3V0cHV0X2Nvc3QiOjAuMDAwMDM4NjR9fSwib3BlbnJvdXRlcl9tZXRhZGF0YSI6eyJyZXF1ZXN0ZWQiOiJkZWVwc2Vlay9kZWVwc2Vlay12NC4xLWZsYXNoLTEwMTciLCJzdHJhdGVneSI6ImRpcmVjdCIsInJlZ2lvbiI6IlNKQyIsInN1bW1hcnkiOiJhdmFpbGFibGU9MSwgc2VsZWN0ZWQ9RmlyZXdvcmtzIiwiYXR0ZW1wdCI6MSwiaXNfYnlvayI6ZmFsc2UsImVuZHBvaW50cyI6eyJ0b3RhbCI6MzQsImF2YWlsYWJsZSI6W3sicHJvdmlkZXIiOiJGaXJld29ya3MiLCJtb2RlbCI6ImRlZXBzZWVrL2RlZXBzZWVrLXY0LjEtZmxhc2gtMjAyNjEwMTciLCJzZWxlY3RlZCI6dHJ1ZX1dfSwiZ2VuZXJhdGlvbl90aW1lIjo0MjZ9fQ=="
+        }
+      },
+      {
+        "entry_id": 7,
+        "entry_kind": "reservation",
+        "call_identity": "sha256:4b5b07710bb9783ed8a697c54f2dfac6213a40b37658352e705105955bbc36ef",
+        "amount_microusd": 0,
+        "request_hash": "sha256:d2cf77c94f6dcb9604873b84da98569f844cacd42e9dc9f6cbcd648f9897d882"
+      },
+      {
+        "entry_id": 8,
+        "entry_kind": "dispatch",
+        "call_identity": "sha256:4b5b07710bb9783ed8a697c54f2dfac6213a40b37658352e705105955bbc36ef",
+        "amount_microusd": 0
+      },
+      {
+        "entry_id": 9,
+        "entry_kind": "settlement",
+        "call_identity": "sha256:4b5b07710bb9783ed8a697c54f2dfac6213a40b37658352e705105955bbc36ef",
+        "amount_microusd": 140,
+        "terminal_response": {
+          "status": 200,
+          "body_b64": "CiAgICAgICAgIAp7ImlkIjoiZ2VuLTE3OTI5NDc4MDItVWtXTTAzNE5OdkpjV1djd21hZVYiLCJvYmplY3QiOiJyZXNwb25zZSIsImNyZWF0ZWRfYXQiOjE3OTI5NDc4MDIsIm1vZGVsIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0xMDE3Iiwic3RhdHVzIjoiY29tcGxldGVkIiwiY29tcGxldGVkX2F0IjoxNzkyOTQ3ODAzLCJvdXRwdXQiOlt7ImlkIjoicnNfdG1wX2Q3NXlia24wcHJoIiwidHlwZSI6InJlYXNvbmluZyIsInN0YXR1cyI6ImNvbXBsZXRlZCIsImNvbnRlbnQiOlt7InR5cGUiOiJyZWFzb25pbmdfdGV4dCIsInRleHQiOiJOZWVkIGRlY2lkZSBxdWFsaWZpZWQgZmFsc2UgYmVjYXVzZSBuZXdlciBvZmZpY2lhbCBoZWFkY291bnQgMTIsIG91dHNpZGUgNTAtMjAwLiBVc2UgYm90aCBzb3VyY2VzLCBubyBpbmZlci4gRXZpZGVuY2UgaWRzIGJvdGggcHJvZmlsZSBhbmQgaGVhZGNvdW50LiBTdHJpY3QgSlNPTiBzY2hlbWEgb25seS4ifV0sInN1bW1hcnkiOltdLCJmb3JtYXQiOiJ1bmtub3duIn0seyJpZCI6Im1zZ190bXBfNmpoZjg3MHRsdXQiLCJ0eXBlIjoibWVzc2FnZSIsInJvbGUiOiJhc3Npc3RhbnQiLCJzdGF0dXMiOiJjb21wbGV0ZWQiLCJjb250ZW50IjpbeyJ0eXBlIjoib3V0cHV0X3RleHQiLCJ0ZXh0Ijoie1wiY29tcGFueVwiOlwiQWNtZSBUZXN0XCIsXCJxdWFsaWZpZWRcIjpmYWxzZSxcImV2aWRlbmNlX2lkc1wiOltcInByb2ZpbGVcIixcImhlYWRjb3VudFwiXX0iLCJhbm5vdGF0aW9ucyI6W10sImxvZ3Byb2JzIjpbXX1dfV0sImVycm9yIjpudWxsLCJpbmNvbXBsZXRlX2RldGFpbHMiOm51bGwsInRvb2xzIjpbXSwidG9vbF9jaG9pY2UiOiJhdXRvIiwicGFyYWxsZWxfdG9vbF9jYWxscyI6dHJ1ZSwibWF4X291dHB1dF90b2tlbnMiOjMyNzY4LCJ0ZW1wZXJhdHVyZSI6MSwidG9wX3AiOjEsInByZXNlbmNlX3BlbmFsdHkiOjAsImZyZXF1ZW5jeV9wZW5hbHR5IjowLCJ0b3BfbG9ncHJvYnMiOjAsIm1heF90b29sX2NhbGxzIjpudWxsLCJtZXRhZGF0YSI6e30sImJhY2tncm91bmQiOmZhbHNlLCJwcmV2aW91c19yZXNwb25zZV9pZCI6bnVsbCwic2VydmljZV90aWVyIjoiYXV0byIsInRydW5jYXRpb24iOiJkaXNhYmxlZCIsInN0b3JlIjpmYWxzZSwiaW5zdHJ1Y3Rpb25zIjpudWxsLCJ0ZXh0Ijp7ImZvcm1hdCI6eyJ0eXBlIjoianNvbl9zY2hlbWEiLCJuYW1lIjoicXVhbGlmaWNhdGlvbiIsInN0cmljdCI6dHJ1ZSwic2NoZW1hIjp7ImFkZGl0aW9uYWxQcm9wZXJ0aWVzIjpmYWxzZSwicHJvcGVydGllcyI6eyJjb21wYW55Ijp7InR5cGUiOiJzdHJpbmcifSwiZXZpZGVuY2VfaWRzIjp7Iml0ZW1zIjp7InR5cGUiOiJzdHJpbmcifSwidHlwZSI6ImFycmF5In0sInF1YWxpZmllZCI6eyJ0eXBlIjoiYm9vbGVhbiJ9fSwicmVxdWlyZWQiOlsiY29tcGFueSIsInF1YWxpZmllZCIsImV2aWRlbmNlX2lkcyJdLCJ0eXBlIjoib2JqZWN0In19fSwicmVhc29uaW5nIjp7ImVmZm9ydCI6ImhpZ2gifSwic2FmZXR5X2lkZW50aWZpZXIiOm51bGwsInByb21wdF9jYWNoZV9rZXkiOm51bGwsInByb21wdF9jYWNoZV9vcHRpb25zIjpudWxsLCJ1c2FnZSI6eyJpbnB1dF90b2tlbnMiOjQyMCwiaW5wdXRfdG9rZW5zX2RldGFpbHMiOnsiY2FjaGVkX3Rva2VucyI6MH0sIm91dHB1dF90b2tlbnMiOjYxLCJvdXRwdXRfdG9rZW5zX2RldGFpbHMiOnsicmVhc29uaW5nX3Rva2VucyI6Mzh9LCJ0b3RhbF90b2tlbnMiOjQ4MSwiY29zdCI6MC4wMDAxMzk0NCwiaXNfYnlvayI6ZmFsc2UsImNvc3RfZGV0YWlscyI6eyJ1cHN0cmVhbV9pbmZlcmVuY2VfY29zdCI6MC4wMDAxMzk0NCwidXBzdHJlYW1faW5mZXJlbmNlX2lucHV0X2Nvc3QiOjAuMDAwMDg4MiwidXBzdHJlYW1faW5mZXJlbmNlX291dHB1dF9jb3N0IjowLjAwMDA1MTI0fX0sIm9wZW5yb3V0ZXJfbWV0YWRhdGEiOnsicmVxdWVzdGVkIjoiZGVlcHNlZWsvZGVlcHNlZWstdjQuMS1mbGFzaC0xMDE3Iiwic3RyYXRlZ3kiOiJkaXJlY3QiLCJyZWdpb24iOiJTSkMiLCJzdW1tYXJ5IjoiYXZhaWxhYmxlPTEsIHNlbGVjdGVkPUZpcmV3b3JrcyIsImF0dGVtcHQiOjEsImlzX2J5b2siOmZhbHNlLCJlbmRwb2ludHMiOnsidG90YWwiOjM0LCJhdmFpbGFibGUiOlt7InByb3ZpZGVyIjoiRmlyZXdvcmtzIiwibW9kZWwiOiJkZWVwc2Vlay9kZWVwc2Vlay12NC4xLWZsYXNoLTIwMjYxMDE3Iiwic2VsZWN0ZWQiOnRydWV9XX0sImdlbmVyYXRpb25fdGltZSI6NDk2fX0="
+        }
+      }
+    ]
+  }
+}

@@ -55,6 +55,8 @@ from lab_arena import contracts, operations
 
 OPERATION_FRAME_SCHEMA_VERSION = "leadpoet.lab_arena.operation_frame.v1"
 WORKER_SOCKET_ENV = "LAB_ARENA_WORKER_SOCKET"
+REASONING_POLICY_ENV = "LAB_ARENA_REASONING_CAPTURE_POLICY"
+FULL_THINKING_POLICY = "full_generated_thinking_v1"
 MAX_FRAME_BYTES = 1_048_576
 MAX_RESPONSE_FRAME_BYTES = 4 * 1_048_576
 FRAME_FIELDS = ("schema_version", "operation_id", "parameters", "timeout_ms")
@@ -166,7 +168,8 @@ def build_operation_frame(operation_id: str, parameters: Mapping[str, Any], time
     return encoded
 
 
-def validate_operation_frame(frame: Any, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Tuple[str, Dict[str, Any], int]:
+def validate_operation_frame(frame: Any, *, deepline_catalog: Optional[Mapping[str, Any]] = None,
+                             allow_full_thinking: bool = False) -> Tuple[str, Dict[str, Any], int]:
     """Worker-side frame check: exact keys, known operation, bounded timeout,
     and a full re-validation of the parameters. Extra keys such as
     ``round_id``, ``lease_token`` or ``miner`` are rejected outright."""
@@ -184,18 +187,25 @@ def validate_operation_frame(frame: Any, *, deepline_catalog: Optional[Mapping[s
         raise OperationFrameError("invalid_frame")
     if not 1 <= timeout_ms <= operation.timeout_seconds * 1000:
         raise OperationFrameError("invalid_frame")
-    parameters = operations.validate_operation_request(operation_id, frame["parameters"], deepline_catalog=deepline_catalog)
+    parameters = operations.validate_operation_request(
+        operation_id, frame["parameters"], deepline_catalog=deepline_catalog,
+        allow_full_thinking=allow_full_thinking,
+    )
     return operation_id, parameters, timeout_ms
 
 
-def decode_operation_frame(data: bytes, *, deepline_catalog: Optional[Mapping[str, Any]] = None) -> Tuple[str, Dict[str, Any], int]:
+def decode_operation_frame(data: bytes, *, deepline_catalog: Optional[Mapping[str, Any]] = None,
+                           allow_full_thinking: bool = False) -> Tuple[str, Dict[str, Any], int]:
     if len(data) > MAX_FRAME_BYTES:
         raise OperationFrameError("frame_too_large")
     try:
         frame = json.loads(bytes(data).decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
         raise OperationFrameError("invalid_frame") from exc
-    return validate_operation_frame(frame, deepline_catalog=deepline_catalog)
+    return validate_operation_frame(
+        frame, deepline_catalog=deepline_catalog,
+        allow_full_thinking=allow_full_thinking,
+    )
 
 
 def encode_worker_response(status: int, headers: Mapping[str, str], body: bytes) -> bytes:
@@ -378,7 +388,12 @@ def _execute_with_response_url(
     if trusted:
         url, headers = strip_caller_credentials(url, headers)
     try:
-        operation_id, parameters = operations.match_request(method, url, body, headers, deepline_catalog=_input_deepline_catalog())
+        operation_id, parameters = operations.match_request(
+            method, url, body, headers, deepline_catalog=_input_deepline_catalog(),
+            # A sandbox hint permits local normalization only. The worker
+            # separately checks the gateway-issued frozen lease before dispatch.
+            allow_full_thinking=os.environ.get(REASONING_POLICY_ENV) == FULL_THINKING_POLICY,
+        )
     except operations.OperationError as exc:
         page_fetch = _trusted_page_fetch(method, url, body) if trusted and exc.code == "no_matching_operation" else None
         if page_fetch is None:

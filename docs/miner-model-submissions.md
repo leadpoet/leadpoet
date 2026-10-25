@@ -180,10 +180,34 @@ still incur charges. Arena reward activation is a separate setting: disabling
 rewards prevents champion allocation, while scoring and competition execution
 remain separate configuration behavior.
 
+## Provider reasoning capture
+
+A future round with `full_generated_thinking_v1` uses only the exact tested
+model/provider/API routes frozen in that round. The gateway applies the tested
+reasoning mode and output allowance. No miner-specific logging setting is needed.
+All model calls, including subagents, must use an approved route. Unsupported
+models return a clear pre-dispatch error; the gateway does not substitute models.
+
+The approved routes include Chat Completions and DeepSeek on the Responses API.
+Choose a listed alternative with `provider.only` on each request. The bundled
+Codex helper keeps the default Fireworks route. See the concise
+[model and settings list](../README.md#upcoming-model-whitelist).
+Keep the existing broker transport; no custom logging, response receipts, or
+agent architecture changes are required for provider capture.
+The gateway preserves supported reasoning history, tool IDs, and JSON schemas.
+It does not rewrite the submitted agent or promise unchanged answers or latency.
+
+The future policy has a $6 execution and cost-eligibility limit per ICP, equally
+for miners and baseline. Historical rounds and judges remain unchanged. Missing
+thinking is reported as a dataset gap; it does not itself fail a judgment.
+See [the policy and exact whitelist](arena-full-thinking-policy.md) for details.
+
 ## Decision summaries
 
-New or updated model harnesses should report short decision summaries through
-Arena's existing checkpoint helper. Use the same format as the public baseline:
+The existing checkpoint helper can optionally report short decision summaries.
+It is not required for provider reasoning capture or full-thinking eligibility,
+and these summaries do not replace provider-exposed thinking. If you use the
+helper, follow the public baseline's format:
 
 ```python
 from lab_arena_checkpoint import log_decision

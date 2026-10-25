@@ -3842,16 +3842,31 @@ def test_non_supplier_industry_role_gets_one_bounded_followup(
                 )},
                 "failure_reason": "",
             }
+        from tests.product_coverage_fixtures import coverage, trusted_plan
+
+        criterion = _kwargs["requested_product_service"]
+        raw = _finding(
+            "industry",
+            observed_value="University enrollment software",
+            observed_industry="Education Technology",
+            observed_subindustry="University enrollment platforms",
+            activity_role="supplier_operator",
+            evidence_url=product_url,
+            evidence_quote=product_quote,
+            product_coverage=coverage(criterion, product_url, product_quote),
+        )
+        # This mock stands in for the completed investigator, including its
+        # normal host validation. Raw VERIFIED labels have no proof authority.
+        claims = investigator._validated_findings(
+            {"findings": [raw]}, targets=("industry",),
+            fetched_pages={product_url: product_quote},
+            fetched_final_urls={product_url: product_url},
+            first_party_domains={"acme.example"}, identity_names={"acme"},
+            identity_anchor={"submitted_domain": "acme.example", "observed_domain": "acme.example"},
+            requested_product_service=criterion, product_plan=trusted_plan(criterion),
+        )
         return {
-            "claims": {"industry": _finding(
-                "industry",
-                observed_value="University enrollment software",
-                observed_industry="Education Technology",
-                observed_subindustry="University enrollment platforms",
-                activity_role="supplier_operator",
-                evidence_url=product_url,
-                evidence_quote=product_quote,
-            )},
+            "claims": claims,
             investigator.PRIVATE_FETCHED_PAGES_KEY: {
                 product_url: {"final_url": product_url, "text": product_quote},
             },

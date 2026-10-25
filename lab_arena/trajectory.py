@@ -86,7 +86,7 @@ def _redact_auth_schemes(text: str) -> str:
         scheme, token = match.group().split(None, 1)
         if scheme.lower() == "basic" and token.isalpha():
             try:
-                decoded = base64.b64decode(token, validate=True)
+                decoded = base64.b64decode(token + "=" * (-len(token) % 4), validate=True)
             except (ValueError, binascii.Error):
                 decoded = b""
             if (b":" not in decoded

@@ -191,6 +191,26 @@ def test_public_basic_prose_is_not_a_credential(sentence):
     assert capture.sanitize_training_value(sentence) == (sentence, [])
 
 
+@pytest.mark.parametrize("plain", [b"user:secret", b"user:se"])
+def test_unpadded_basic_credential_in_free_text_is_redacted(tmp_path, plain):
+    token = base64.b64encode(plain).decode("ascii").rstrip("=")
+    assert token.isalpha() and len(token) % 4 in (2, 3)
+    value = "A note contains Basic " + token + " in free text."
+    assert token not in trajectory.redact_text(value)
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert token not in cleaned
+    assert reasons == ["credential"]
+    event = trajectory.event("runtime.stdout", {"text": value})
+    assert token not in event["content"]["text"]
+    document = _document()
+    document["admitted_parameters"]["messages"][0]["content"] = value
+    objects = LocalObjectStore(tmp_path)
+    pointer = capture.RequestCapture(objects)(document)
+    assert pointer["redacted"] is True
+    assert "credential" in pointer["redactions"]
+    assert token not in json.dumps(capture.read_request(objects, pointer))
+
+
 def test_real_auth_and_signed_url_still_redact_around_basic_prose():
     value = ("Basic information is public. "
              "Authorization: Basic dXNlcjpwYXNz "

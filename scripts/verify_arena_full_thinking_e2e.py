@@ -103,6 +103,56 @@ def _preserve_object_store(harness: "FullThinkingHarness", report: Path) -> Path
     return destination
 
 
+def _local_pg_dump_tools() -> tuple[Path, Path]:
+    """Resolve matching local PostgreSQL tools before any paid work starts."""
+    configured = os.environ.get("LAB_ARENA_PG_BINDIR")
+    candidates = ([Path(configured)] if configured else [])
+    found = shutil.which("pg_dump")
+    if found:
+        candidates.append(Path(found).parent)
+    candidates.extend(sorted(Path("/opt/homebrew/opt").glob("postgresql@*/bin"), reverse=True))
+    candidates.extend(sorted(Path("/usr/lib/postgresql").glob("*/bin"), reverse=True))
+    for directory in candidates:
+        dump, restore = directory / "pg_dump", directory / "pg_restore"
+        if dump.is_file() and restore.is_file():
+            return dump, restore
+    raise ValueError("private E2E PostgreSQL dump tools are unavailable")
+
+
+def _preserve_checkpoint(harness: "FullThinkingHarness", report: Path,
+                         dsn: Mapping[str, Any], evidence: Evidence,
+                         pg_tools: tuple[Path, Path]) -> dict[str, Any]:
+    """Save exact objects and a restorable DB before slow readable exports."""
+    if dsn.get("host") not in ("127.0.0.1", "localhost") or dsn.get("password"):
+        raise ValueError("private E2E database is not local trust PostgreSQL")
+    objects = _preserve_object_store(harness, report)
+    manifest = objects / "_manifest.json"
+    dump = report.parent / (report.stem + "-database.dump")
+    partial = report.parent / (report.stem + "-database.dump.partial")
+    if dump.exists() or partial.exists():
+        raise FileExistsError("private E2E database checkpoint already exists")
+    pg_dump, pg_restore = pg_tools
+    command = [str(pg_dump), "-Fc", "-h", str(dsn["host"]),
+               "-p", str(dsn["port"]), "-U", str(dsn["user"]),
+               "-d", str(dsn["dbname"])]
+    with partial.open("xb") as output:
+        partial.chmod(0o600)
+        result = subprocess.run(command, stdout=output, stderr=subprocess.DEVNULL, timeout=180)
+        if result.returncode:
+            raise RuntimeError("private E2E database dump failed")
+    if not partial.stat().st_size or subprocess.run(
+        [str(pg_restore), "--list", str(partial)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30,
+    ).returncode:
+        raise RuntimeError("private E2E database dump is invalid")
+    partial.replace(dump)
+    result = {"database_path": str(dump), "database_sha256": contracts.hash_bytes(dump.read_bytes()),
+              "object_path": str(objects), "object_count": len(json.loads(manifest.read_text()))}
+    evidence.add("private_object_snapshot", path=str(objects))
+    evidence.add("private_resume_checkpoint", **result)
+    return result
+
+
 def _capture_review_state(harness: "FullThinkingHarness", evidence: Evidence) -> None:
     """Save bounded committed review state without a claim token or source body."""
     if not getattr(harness, "round_id", None):
@@ -713,6 +763,7 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
         raise ValueError("explicit company-only policy activations are required")
     if not isinstance(expected_scorer_policy_hash, str) or not expected_scorer_policy_hash.startswith("sha256:"):
         raise ValueError("expected scorer policy hash is required")
+    pg_tools = _local_pg_dump_tools()
     report.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     evidence = Evidence(report)
     evidence.add("preflight", **prepared["summary"])
@@ -729,6 +780,9 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
     database = database_factory()
     harness = None
     temporary = None
+    checkpoint_attempted = False
+    checkpoint_saved = False
+    checkpoint_error = None
     try:
         psycopg2, dsn = next(database)
         def connect():
@@ -778,6 +832,13 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
             raise AssertionError("benchmark did not commit")
         harness.clock.advance_to(harness.schedule()["stage_1_start"])
         harness.advance_until("published", runners=1)
+        checkpoint_attempted = True
+        try:
+            _preserve_checkpoint(harness, report, dsn, evidence, pg_tools)
+            checkpoint_saved = True
+        except BaseException as exc:
+            checkpoint_error = "checkpoint:" + type(exc).__name__
+            raise
         row = harness.service.store.get_round(harness.round_id)
         candidate = next(item for item in row["participants"] if not item["is_king"])
         submission_id = candidate["submission_id"]
@@ -878,30 +939,51 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
                 "strict_dataset_records": combined_count,
                 "strict_dataset_hash": combined_manifest["dataset_version"]}
     finally:
+        active_error = sys.exc_info()[0] is not None
+        preservation_errors = [checkpoint_error] if checkpoint_error else []
+        preservation_interrupt = None
         if harness is not None:
-            preservation_errors = []
+            if not checkpoint_attempted:
+                checkpoint_attempted = True
+                try:
+                    _preserve_checkpoint(harness, report, dsn, evidence, pg_tools)
+                    checkpoint_saved = True
+                except BaseException as exc:
+                    preservation_errors.append("checkpoint:" + type(exc).__name__)
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                        preservation_interrupt = exc
             try:
                 _capture_review_state(harness, evidence)
-            except Exception as exc:
+            except BaseException as exc:
                 preservation_errors.append("reviews:" + type(exc).__name__)
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    preservation_interrupt = exc
             try:
                 _capture_database_snapshot(harness, evidence)
-            except Exception as exc:
+            except BaseException as exc:
                 preservation_errors.append("database:" + type(exc).__name__)
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    preservation_interrupt = exc
             try:
                 _capture_private_ledger(harness, report, evidence)
-            except Exception as exc:
+            except BaseException as exc:
                 preservation_errors.append("ledger:" + type(exc).__name__)
-            try:
-                object_path = _preserve_object_store(harness, report)
-                evidence.add("private_object_snapshot", path=str(object_path))
-            except Exception as exc:
-                preservation_errors.append("objects:" + type(exc).__name__)
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    preservation_interrupt = exc
             if preservation_errors:
-                evidence.add("private_snapshot_failed", failures=preservation_errors)
-            harness._paid_transport.close()
-            shutil.rmtree(harness.objects_root, ignore_errors=True)
-        if temporary is not None:
+                try:
+                    evidence.add("private_snapshot_failed", failures=preservation_errors)
+                except BaseException as exc:
+                    preservation_errors.append("evidence:" + type(exc).__name__)
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                        preservation_interrupt = exc
+            try:
+                harness._paid_transport.close()
+            except BaseException as exc:
+                preservation_errors.append("transport_close:" + type(exc).__name__)
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    preservation_interrupt = exc
+        if temporary is not None and checkpoint_saved and not preservation_errors:
             shutil.rmtree(temporary, ignore_errors=True)
         database.close()
         for key, value in previous.items():
@@ -909,7 +991,9 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        if harness is not None and preservation_errors and sys.exc_info()[0] is None:
+        if preservation_interrupt is not None and not active_error:
+            raise preservation_interrupt
+        if harness is not None and preservation_errors and not active_error:
             raise RuntimeError("private E2E evidence snapshot failed: " + ", ".join(preservation_errors))
 
 

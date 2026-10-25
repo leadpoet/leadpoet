@@ -12,7 +12,6 @@
   <a href="https://x.com/LeadpoetAI"><img alt="Leadpoet X" src="https://img.shields.io/badge/X-@LeadpoetAI-000000?style=flat-square"></a>
 </p>
 
-
 ---
 
 # Leadpoet - the first open research lab advancing AI models for sales reasoning.
@@ -21,7 +20,7 @@ Leadpoet is Bittensor subnet 71. Miners improve an open sales-research agent. Th
 
 ## Daily schedule
 
-Day 0: submit models while that day's 20 ICPs stay hidden. At about **00:00 UTC on Day 1**, submissions close and evaluation starts for the baseline and prior-day models. All 20 are processed without fixed pauses between batches. Code and aggregate final scores publish when evaluation finishes. For rounds frozen with `after_scoring_day2_v1`, the benchmark stays private until the round is terminal and the submission cutoff is at least 24 hours old. Published outputs, run results, and per-ICP scores use the same boundary. Cancelled-round results and source remain private. Earlier rounds without this marker keep their original timing.
+Submit during the day before **00:00 UTC**, when submissions close and evaluation starts. The benchmark stays private during evaluation. Results and source publish according to the round's disclosure schedule. Check the [dashboard](https://subnet71.com) for current deadlines and results.
 
 ## Install and register
 
@@ -72,61 +71,38 @@ def run_icp(icp: dict) -> list[dict]:
     """Return at most five companies."""
 ```
 
-Keep `LICENSE` beside `harness.py`. It must contain the complete
-[Tyche AGPL-3.0 license](https://github.com/gzaentz/tyche/blob/main/LICENSE).
-The CLI checks the full license text before upload, and the gateway checks the
-uploaded archive again before it accepts the submission.
+Keep the complete [Tyche AGPL-3.0 license](https://github.com/gzaentz/tyche/blob/main/LICENSE) beside `harness.py` as `LICENSE`, `LICENSE.txt`, or `LICENSE.md`.
 
-Change the harness, model, prompts, and approved API routing. List Python dependencies in `requirements.txt`: package names and version constraints only, with binary wheels available. URLs, VCS dependencies, local paths, nested requirements, and source builds are not supported. Return at most five companies as a JSON list. Use `[]` if there are no valid matches.
+You can change the harness, model, prompts, and tools. Put package names and version constraints in `requirements.txt`; dependencies must have binary wheels. URLs, VCS dependencies, local paths, nested requirements, and source builds are not supported.
 
-**Arena enforces OpenRouter [Zero Data Retention (ZDR)](https://openrouter.ai/docs/guides/features/zdr):** choose models with a compatible endpoint; otherwise model calls fail, while earlier successful calls still incur charges.
+The sandbox blocks direct network access. Keep the baseline's broker transport for approved OpenRouter, Scrapingdog, and Deepline calls. See the [miner guide](docs/miner-model-submissions.md) for API access and limits.
 
-Each ICP execution attempt uses the time and provider limits frozen in its round configuration. New rounds use **2,000 OpenRouter calls, 200 Scrapingdog calls, and no Deepline call-count cap**. Deepline remains subject to the **$4 confirmed sourcing-spend limit per ICP** and a **flat $4 successful-sourcing limit per ICP** for final cost eligibility. Pending charges do not reserve money or block work; recovery records them when confirmed. Historical committed rounds retain their original limits.
-
-The gateway freezes Deepline's available public research tools, request schemas, and pricing with the round. Models can list this approved snapshot through brokered `GET /api/v2/tools?compact=true`, search it through `GET /api/v2/tools/search?q=company`, and describe a tool through `GET /api/v2/integrations/{tool}/get`. Company-only rounds exclude people/contact sourcing, private account data, outreach, and writes. Async status reads require a job created by the same run. Discovery is local and free. Deepline's `type: "any"` schema fields are normalized before validation; other schema and research-policy checks still apply.
-
-Paid execution uses stable idempotency keys where supported and exact-request billing. After a lost response, the worker can recover the same action within its original deadline. The broker reads the saved response or resumes an authenticated running execution with the original key and input. A missing or unbound key never authorizes another paid request. Recovered results are retained separately from immutable charge records. When the gateway has settled the charge, `x-leadpoet-settled-microusd` reports that confirmed amount even if the original provider body still says billing is pending. An unknown charge does not receive a confirmed-cost header.
-
-The sandbox blocks direct network access. Keep the baseline's broker transport when changing the harness, or implement the same [broker protocol](lab_arena/shim.py) using the [approved operations](lab_arena/operations.py).
+**OpenRouter must allow [Zero Data Retention (ZDR)](https://openrouter.ai/docs/guides/features/zdr) endpoints for your chosen model.** Calls fail if your account blocks the required provider. Keep your API keys funded.
 
 ### Upcoming thinking-model whitelist
 
-**Draft policy, not active in current rounds.** For rounds that enable
-`full_generated_thinking_v1`, every agent and subagent must use these exact
-OpenRouter routes:
+**Draft policy, not active in current rounds.** When enabled, agents and subagents must use one of these routes:
 
-| Model ID | Provider | API |
+| OpenRouter model | Provider | API |
 | --- | --- | --- |
 | `openai/gpt-oss-120b` | `deepinfra/bf16` | Chat Completions |
 | `openai/gpt-oss-20b` | `deepinfra/bf16` | Chat Completions |
 | `mistralai/mistral-large-4-0` | `mistral/zdr` | Chat Completions |
-| `deepseek/deepseek-v4.1-flash-1017` | `fireworks` | Chat Completions or Responses, including Codex clients |
+| `deepseek/deepseek-v4.1-flash-1017` | `fireworks` | Chat Completions or Responses, including Codex |
 | `reflection/beam-1.0-501b-a23b` | `nebius/fp8` | Chat Completions |
 | `google/gemma-4-31b-it` | `coreweave/fp4` | Chat Completions |
 
-Arena pins the provider, enforces ZDR, and enables the tested thinking settings.
-Your OpenRouter account must permit that provider; there is no automatic fallback.
-For local tests, use:
+Allow the listed provider in your [OpenRouter settings](https://openrouter.ai/settings/privacy). Arena uses that route with ZDR and no provider fallback. For local tests, enable thinking with:
 
 - Chat Completions: `"reasoning": {"effort": "high", "exclude": false}`.
 - Gemma: `"reasoning": {"enabled": true, "exclude": false}` instead.
 - DeepSeek Responses: `"reasoning": {"effort": "high"}`.
 
-Arena sets the combined thinking-and-answer allowance to 8,192 tokens for GPT-OSS
-and 32,768 for the other routes. Keep normal provider conversation history and
-tool-call IDs intact. **Keep your harness and custom tools; no custom logging,
-receipts, or new agent architecture is required.** Arena captures provider
-responses and brokered tool results itself, then checks the stored data.
-Provider summaries and encrypted state alone do not meet the full-thinking rule.
+Keep normal conversation history and tool-call IDs intact. **Keep your harness and custom tools. No custom logging or receipts are required.** These rounds require model-directed research and full provider-exposed thinking; summaries alone do not qualify. The sourcing cap increases to **$6 per ICP**. Champion eligibility requires a passing review and usable training data for at least **80% of ICPs**.
 
-These future rounds use a $6 confirmed sourcing cap per ICP. Champion eligibility
-also requires the research review to pass and at least 80% of ICPs to have complete
-training data. Incomplete ICPs keep their measured scores but are excluded from
-the training dataset; they do not cancel the round. See the
-[policy](docs/arena-full-thinking-policy.md) and
-[versioned route list](lab_arena/reasoning_models.json).
+Return a JSON list of up to five companies, or `[]` if none qualify. Use the `output_schema_version` and policy settings provided in the ICP input. Current rounds source companies only, with no contact details required. See [output requirements](docs/arena-company-quality.md) for required fields.
 
-The output below shows the exact supported fields. It is a format example, not a real company claim. `company_linkedin`, `company_stage`, and `state` may be empty; `required_attribute` may be `null` when it is not required. `matched_icp_signal` is the zero-based position in the input's `intent_signals` list.
+This example shows the output format. `matched_icp_signal` is the zero-based index in the input's `intent_signals` list. Example URLs and claims must be replaced with real evidence.
 
 <details>
 <summary>Output</summary>
@@ -163,36 +139,21 @@ The output below shows the exact supported fields. It is a format example, not a
 ```
 </details>
 
-Rounds that announce `intent_details_policy: "intent_details_v1"` use output
-schema v6 for current company-only rounds (v5 for historical contact rounds). They require one plain company-level `intent_details` paragraph and
-do not accept the older `fit_summary`, `fit_evidence_urls`, signal `why_now`, or
-signal `snippet` fields. The scorer verifies the paragraph against the
-independently verified signals before the company can receive credit.
+Scoring checks company fit, intent, and supporting evidence. The highest eligible score must beat the daily baseline by **at least 8 points** to become champion in new rounds. Winning code becomes the next baseline.
 
-The current competition discovers companies/accounts only. Contacts, roles, emails, and contact verification are not required and do not affect scoring. Optional legacy contact data is ignored. Historical contact rounds retain their frozen output and verification contract; see the [historical contact contract](docs/arena-contacts.md).
+Current reward tiers are cumulative:
 
-Rounds that announce `company_quality_policy: "company_quality_v1"` require a matching company LinkedIn URL and the headquarters state for U.S. companies. They share individual verification judgments and account for the fraction of requested companies that qualify within each buyer request. Missing new details zero only the affected company. See [company quality, scoring and activation](docs/arena-company-quality.md).
+| Improvement over baseline | Total emissions before decay |
+| --- | --- |
+| +8 points | 15% |
+| +15 points | 30% |
+| +20 points | 50% |
 
-Before submission, `/arena/v1/current` (`open_round`) and
-`/arena/v1/rounds/{round_id}` expose the round's pinned
-`output_schema_version` and its enabled policy markers. An absent marker means
-that policy is disabled for the round. The version matches the schema used to
-validate model output; historical rounds continue to report their frozen
-version.
+Slots remain with their holder until replaced. Each slot halves every 140 epochs, reaching a 1/16 floor after four periods. A new win resets only the slots it replaces. See [reward rules](docs/arena_reward_slots.md) for activation and historical policies.
 
-Your `harness.run_icp(icp)` input also includes `output_schema_version`; use this round-specific version and its policy markers when constructing company output.
+**Champion miners must keep their submitted API credentials funded. If Leadpoet funds a champion rebenchmark, that period's champion incentive is reduced by 50%.**
 
-Validators must update their runner to support company-only output v6. Older runners receive `validator_output_schema_upgrade_required` before a lease is allocated; this does not consume an ICP attempt or affect weight submission.
-
-Scoring checks company fit, intent, and supporting evidence across all configured ICPs (currently 10). In current baseline-first rounds with per-ICP cost eligibility, each model's aggregate score appears as soon as all its ICP evaluations and cost checks finish. Per-ICP results and diagnostics retain the round's ICP disclosure boundary. Unfinished models have no score; a completed zero is shown as zero. These public reads do not close the round or promote a model.
-
-The champion is chosen at final round publication, after all submissions finish or the evaluation deadline closes unfinished work, with no fixed midday promotion. The highest-ranked eligible miner must beat the daily baseline score by at least the round's promotion margin (8 points for new rounds on the 0–100 scale; historical rounds retain their frozen margin). The gateway promotes winning code to `main` and `lab` for the next baseline. Rewards activate separately through settlement. For evaluation dates **October 23, 2026 and later**, and any pending activation effective from **settlement epoch 25954**, reward slots require **+20 points for 20%**, **+15 for 15%**, and **+8 for 15%** of total emissions, before decay or funding reductions. The tiers are cumulative: +20 takes all three slots (50% total), +15 takes two (30%), and +8 takes one (15%). From epoch 25954, newly issued accepted states also requalify the current signed holders under these thresholds. This transition preserves their original clocks and does not revive replaced achievements. Earlier signed reward bases and accepted states keep their original policy; delayed activations from earlier evaluation dates use the new policy once their effective epoch reaches 25954. Only an eligible, published and successfully promoted winner can replace a holder, using its original same-round baseline comparison. Each achievement replaces every qualifying slot. Holders keep their slots until a newer qualifying achievement replaces them; there is no reward lock. Each slot reward halves after every completed 140-epoch reward week, reaching a permanent 1/16 floor after four weeks. A new qualifying win resets only the slots it replaces; daily baselines do not reset the clock. Decayed shares go to burn. Empty or unregistered shares go to the existing burn destination. The dated policies are centralized in `lab_arena/rewards.py`, including the pot size, thresholds, and slot shares. New signed accepted epoch states using reward-basis v2 keep occupied slots eligible until replacement, including when a reward basis is more than 45 epochs old. Existing signed reward bases and accepted epoch states retain their original rules. See [reward-slot allocation](docs/arena_reward_slots.md) for activation and funding details.
-
-**Champion miners must keep their submitted API credentials funded; if Leadpoet must fund a champion rebenchmark via fallback credentials, that period’s champion incentive is reduced by 50%.**
-
-Each ICP has a **$4 sourcing limit across OpenRouter, Scrapingdog, and Deepline combined**, including retries. An admitted call can finish above the limit; later paid sourcing calls then stop for that ICP. Only confirmed charges consume admission budget. New rounds exclude the charges of execution attempts lost to proved infrastructure failures from this competition budget and final cost eligibility. All actual provider charges remain in the ledger and cost reports. Model errors and credential errors receive no cost credit. Pending bills and temporary monetary holds do not block research.
-
-New rounds allow up to **$4 in successful sourcing calls per ICP**, independent of how many companies qualify. Existing quality and quantity scoring, duplicate handling, and penalties still apply; unqualified filler does not earn score. An ICP above $4 contributes zero; other ICPs still count. Independent judging has a separate default **$50 allowance per submitted model**, using the same credential selection but excluded from sourcing spend and eligibility. Full-code review is also recorded separately. Historical rounds retain their frozen cost rules. See the [cost accounting details](docs/arena-score-integrity.md).
+Current rounds have a **$4 sourcing cap per ICP**, across OpenRouter, Scrapingdog, and Deepline, including retries. Only confirmed charges count toward admission. An ICP above the successful-sourcing cost limit contributes zero; other ICPs still count. Judging has a separate default **$50 allowance per submitted model**, and code review is billed separately. Historical rounds retain their original rules. See [cost details](docs/arena-score-integrity.md).
 
 ## Submit a model
 
@@ -206,39 +167,15 @@ python scripts/lab_arena_miner.py interactive \
 
 Enter `../my-agent` as the source directory and confirm submission, then enter your OpenRouter API key, OpenRouter management key, and Deepline key in the masked prompts. Provide the optional Scrapingdog key only if your model uses it; otherwise press Enter. Runtime keys are stored encrypted and are never published or shared with other miners; the management key is checked and not stored.
 
-For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEPLINE_API_KEY`, optionally set `SCRAPINGDOG_API_KEY`, then replace `interactive` with `submit-model --source ../my-agent` in the command above. When provided, the sandbox exposes `SCRAPINGDOG_API_KEY` as a non-secret handle for the existing broker transport. The actual key stays in the gateway; it is never placed in model code or the validator environment.
+For automation, set `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, and `DEEPLINE_API_KEY`, plus `SCRAPINGDOG_API_KEY` if used. Replace `interactive` with `submit-model --source ../my-agent` in the command above.
 
-Every miner submission must pass a full-code review before evaluation. The gateway uses **Claude Sonnet 5 through that submitting miner's OpenRouter key**, including every file in the uploaded archive and all bundled prompts. It checks for prepared answers, fabricated evidence, malicious behavior, and attempts to manipulate the reviewer. Normal constants, routing changes, and alternative harnesses are allowed. Review charges are recorded separately in the existing cost ledger. An incomplete review, unreadable file, or submission that exceeds the judge's context window cannot pass; source is never silently truncated. The submission status API reports review progress and cost.
+Every submission must pass code review before evaluation. Review uses the submitting miner's OpenRouter key and is charged separately. Keep source and bundled prompts readable. Track review status and cost on the dashboard.
 
-The UTF-8 request byte count is a conservative token bound, not an exact token count. If this bound cannot prove that the full request fits, the review requires fresh OpenRouter routing metadata: the requested judge model must serve the request directly with no altering pipeline stages, and reported input tokens plus the reserved completion must fit the context window. Missing metadata, cache replays, compression, unknown stages, and invalid token usage fail closed. The complete source and comparison material remain in the request, and the byte bound remains the basis for the cost reservation.
+Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. Source limits are **10 MiB compressed, 50 MiB unpacked, and 1,000 files**.
 
-Temporary provider or transport failures may retry with increasing delays, up to six review attempts before the round's existing benchmark deadline; credential, credit, and invalid-source failures do not retry. Other incomplete responses retain the three-attempt limit. If review cannot pass, the admitted submission stays visible on the dashboard as not evaluated, with no score or published source.
+Each registered hotkey can submit one model per daily round. First submissions close at **00:00 UTC**. You have **one replacement attempt before 23:00 UTC** using the same command and hotkey. Upload and validation must finish before the cutoff. An abandoned or failed replacement still uses that attempt, but the last accepted model remains selected.
 
-Do not include keys or `.env` files in the source directory. Placeholder-only `.env.example`, `.env.sample`, and `.env.template` files are allowed. `LICENSE.txt` or `LICENSE.md` can replace `LICENSE`, but it must stay beside `harness.py` and contain the same complete AGPL-3.0 text. Source limits are 10 MiB compressed, 50 MiB unpacked, and 1,000 files.
-
-Each hotkey can have one accepted model per daily round. To replace your queued
-model, run the same submission command once more with the same hotkey before the public
-`submission_replacement_cutoff`: **23:00 UTC**, one hour before the next 00:00 UTC
-round boundary. Upload and final source, license, and credential validation must
-finish before that cutoff. Replacement is refused at or after 23:00 UTC, or
-once evaluation starts. The previous accepted model remains selected if these
-checks fail or finalization does not finish in time. Each revision has its own
-source archive; prior review charges and replacement links remain in the audit
-history. New code reviews start only after replacement closes. The selected
-revision must still pass review before evaluation.
-
-Only one replacement attempt is allowed per hotkey per daily round: reserving its upload uses the allowance even if the upload is abandoned or validation fails, and the last accepted model remains selected if the replacement fails.
-
-For example, a queued model submitted at 09:00 UTC on December 9 can be replaced using the same submission command and hotkey with updated source, as long as upload and validation finish before 23:00 UTC that day.
-
-First submissions retain the normal 00:00 UTC submission deadline. Hotkeys
-under the same coldkey may each submit. Each registered miner hotkey can enter
-one model per daily round. The default round supports up to 256 challengers,
-plus the baseline; there is no separate 20-challenger admission limit. Track
-admission, scoring, per-ICP results, and champion status on the
-[dashboard](https://subnet71.com).
-
-Once the round's ICPs are public, open a submission and expand an ICP to see each company's recorded checks, including company-fit, intent, failed checks, and checks that were not evaluated.
+Track submissions, scores, and champion status on the [dashboard](https://subnet71.com). See the [miner guide](docs/miner-model-submissions.md) for detailed submission rules.
 
 ## Public input example
 
@@ -276,38 +213,11 @@ This historical ICP comes from the September 9 set and was released under the ea
 
 ## Validators and rewards
 
-Arena is the only subnet incentive and work-allocation mechanism. Research Lab
-reimbursements, legacy champion obligations, and SOURCE_ADD are retired.
+Registered validators with a permit and at least **75,000 effective subnet stake** can receive Arena scoring jobs. Permitted validators below that threshold can still retrieve signed gateway weights. Scoring failures do not stop weight submission.
 
-Registered validators with a permit and at least 75,000 effective subnet stake
-can receive new Arena scoring jobs. Permitted validators below that threshold
-can still retrieve signed gateway weights. Recent Arena work is not required
-at any stake level. Validators can retrieve weights when no jobs are available
-or their scoring process is unavailable.
-Weight retrieval requires a local-hotkey signed request; miners without a
-validator permit and anonymous callers cannot retrieve the signed weight state.
+Run `python neurons/validator.py` with your wallet flags. Keep the runner updated for current output schemas. Follow the [validator setup guide](docs/arena_normal_validator_weights.md) and [proxy setup guide](docs/arena_parallel_icps.md#webshare-setup-for-validators).
 
-Eligible normal validators score submitted models with brokered miner credentials,
-returns scores through the competition API, and independently derives weights
-from the signed accepted reward state and finalized chain ownership. Each
-validator signs with its own local Bittensor hotkey, preserving the canonical
-commit/reveal and exact transaction checks. Scoring and weights use separate
-loops; scoring failures do not stop weight submission.
-Already-signed transaction recovery and pending reveals continue. Chain outcomes are recorded separately. No Nitro enclave or KMS
-provisioning is required for validators, and there is no audit-validator role.
-
-Run `python neurons/validator.py` with your existing wallet flags. The same
-validator handles scoring startup through existing non-interactive sudo
-permission while preserving your wallet and state paths. It does not grant
-host permissions or stop weights when scoring cannot start.
-Follow [the normal Arena validator setup](docs/arena_normal_validator_weights.md)
-for local wallet configuration, sandbox setup, restart, and verification.
-Configure your own proxies using the [Webshare setup guide](docs/arena_parallel_icps.md#webshare-setup-for-validators).
-Use `--check-scoring-only` to verify host setup, proxy connections, distinct
-exit IPs and memory capacity without accessing wallets or the chain;
-the separate installed-runtime probe verifies sandbox
-execution. The normal `--check-only` command verifies wallet and chain readiness.
-
+Use `--check-scoring-only` to check the scoring host and proxies without accessing wallets or the chain. Use `--check-only` to check wallet and chain readiness.
 
 ## License
 

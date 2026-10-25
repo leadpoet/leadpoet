@@ -1,5 +1,27 @@
 # Draft PR verification — 2026-10-23
 
+## DeepInfra follow-up and README trim, October 25
+
+The user authorized enabling DeepInfra on the test account. Both GPT-OSS routes
+then passed three calls each on `aaf257a3c`, with their unchanged 8,192-token
+allowance, ZDR and exact provider route. All **seven routes now have fresh
+passes**. The [combined evidence](evidence/full-thinking/final-whitelist-live-review-deepinfra-enabled-20261025.json)
+preserves the two earlier blocked attempts and supersedes their availability
+status below. The owner independently matched all six new wire responses to SQL
+terminal responses and their full reasoning text to the readable trace.
+
+Combined results: 21 successful calls, 19 full-thinking turns, two explicit
+zero-token turns, 2,828 reported reasoning tokens and no missing reported tokens.
+There were no client callbacks. Reported spend is **$0.0039543468**, plus the
+unchanged **$0.011323** reserved for the earlier unpriced failures, below $5.
+These remain synthetic compatibility checks, not a fresh complete scoring run.
+The source Python, SQL and registry were unchanged. No merge or deployment occurred.
+
+README text was reduced from 3,246 to 1,518 words, preserving setup, routes,
+provider settings, examples and public rules. Internal review and recovery
+details were removed. Local links, JSON examples, registry alignment and absence
+of em dashes were checked. The original test evidence remains unchanged.
+
 ## Final handoff review — October 25
 
 The final source checkpoint is `e0509ee82`, including main `93f15930e` and

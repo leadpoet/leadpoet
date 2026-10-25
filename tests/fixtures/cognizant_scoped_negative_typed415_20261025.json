@@ -1,0 +1,524 @@
+{
+  "provenance": {
+    "slot_id": "prior_pass:9:cognizant.com",
+    "source_commit": "aa4524c32600f7cb78ba9333da56a5098fbc9d29",
+    "capture_sha256": {
+      "18800": "2099166cdcc9dd475869f2d8dcf493d55d00f883b6bfc46b06014527c92554d4",
+      "18805": "b3a4fc821d99abfbeab8d3a081357e5a523ca9b6fb47984b5ded2001b865d310"
+    },
+    "scope": "Exact public final scoped packet plus retained siblings and model-visible source text; terminal/caller replay only, not timed full investigation.",
+    "final_url_basis": [
+      {
+        "url": "https://cognizant.com/",
+        "final_url": "https://www.cognizant.com/us/en",
+        "basis": "server_preloaded"
+      },
+      {
+        "url": "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx",
+        "final_url": "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx",
+        "basis": "server_preloaded"
+      },
+      {
+        "url": "https://www.cognizant.com/us/en/services/cloud-solutions/infrastructure-services",
+        "final_url": "https://www.cognizant.com/us/en/services/cloud-solutions/infrastructure-services",
+        "basis": "retained_native_parameter_hash_and_response_header"
+      },
+      {
+        "url": "https://www.linkedin.com/company/cognizant",
+        "final_url": null,
+        "basis": "exact_native_model_visible_linkedin_response_only_no_independent_final_URL_invented"
+      }
+    ],
+    "independent_validation_sha256": "d98711cdf22fb6cbe14091d4f03cf4f843fd421d625f19915a9e5af25898bdfc"
+  },
+  "document": {
+    "company_locator": {
+      "linkedin": "",
+      "name": "Cognizant",
+      "website": "https://cognizant.com/"
+    },
+    "evaluation_date": "2026-10-24",
+    "investigation_limits": {
+      "admission_deadline_seconds": 110.0,
+      "fetch_calls": 5,
+      "prefetched_pages": 1,
+      "reasoning_turns": 8,
+      "remaining_fetch_calls": 4,
+      "remaining_search_calls": 2,
+      "search_calls": 3,
+      "server_prefetch_fetch_calls": 1
+    },
+    "positive_semantic_review": true,
+    "prior_observations": {
+      "employee_size_evidence_quote": "",
+      "employee_size_evidence_url": "",
+      "geography_evidence_quote": "300 Frank W Burr Blvd, Suite 600, Teaneck, New Jersey 07666, US, Teaneck, New Jersey, United States (HQ)",
+      "geography_evidence_url": "https://www.linkedin.com/company/cognizant",
+      "geography_matches": true,
+      "industry_activity_role": "supplier_operator",
+      "industry_evidence_quote": "we help our clients modernize technology, reimagine processes and transform experiences so they can stay ahead in our fast-changing world.",
+      "industry_evidence_url": "https://www.linkedin.com/company/cognizant",
+      "industry_matches": true,
+      "observed_company_linkedin": "https://www.linkedin.com/company/cognizant",
+      "observed_company_name": "Cognizant",
+      "observed_company_stage": "Public",
+      "observed_company_website": "https://www.cognizant.com",
+      "observed_employee_count": null,
+      "observed_hq_country": "United States",
+      "observed_hq_state": "New Jersey",
+      "observed_industry": "IT services and IT consulting",
+      "observed_subindustry": "managed services and cloud modernization",
+      "required_attribute_evidence_quote": "",
+      "required_attribute_evidence_url": "",
+      "stage_evidence_quote": "Public Company",
+      "stage_evidence_url": "https://www.linkedin.com/company/cognizant",
+      "submitted_source_hints": [
+        {
+          "text": "TEANECK, N.J., June 2, 2026 /PRNewswire/ -- Cognizant (NASDAQ: CTSH) announced an expanded strategic alliance with CrowdStrike to help enterprises secure artificial intelligence across its lifecycle, from the AI agents and models to the foundational infrastructure that supports the entire AI ecosystem.",
+          "url": "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx"
+        },
+        {
+          "text": "Cognizant and CrowdStrike Expand Strategic Alliance to Secure the Agentic Enterprise",
+          "url": "https://prnewswire.com/news-releases/cognizant-and-crowdstrike-expand-strategic-alliance-to-secure-the-agentic-enterprise-302789069.html"
+        }
+      ],
+      "submitted_source_urls": [
+        "https://www.linkedin.com/company/cognizant",
+        "https://cognizant.com/",
+        "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx",
+        "https://prnewswire.com/news-releases/cognizant-and-crowdstrike-expand-strategic-alliance-to-secure-the-agentic-enterprise-302789069.html"
+      ],
+      "untrusted_company_stage_evidence": [
+        {
+          "quote": "TEANECK, N.J., June 2, 2026 /PRNewswire/ -- Cognizant (NASDAQ: CTSH) announced an expanded strategic alliance with CrowdStrike to help enterprises secure artificial intelligence across its lifecycle, from the AI agents and models to the foundational infrastructure that supports the entire AI ecosystem.",
+          "url": "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx"
+        }
+      ]
+    },
+    "requested_attribute": "Delivers managed infrastructure, cloud, or IT modernization services to large enterprise customers and is listed on a public stock exchange",
+    "requested_employee_buckets": [
+      "1,001-5,000",
+      "10,001+",
+      "5,001-10,000"
+    ],
+    "requested_geography": "United States",
+    "requested_industry": "Information Technology",
+    "requested_product_service": "Provides managed IT infrastructure, cloud migration, and mainframe modernization services that large enterprises outsource to run and transform their technology environments",
+    "requested_stage": "public",
+    "requested_subindustry": "IT Infrastructure and Managed Services",
+    "requested_targets": [
+      "stage",
+      "headcount",
+      "geography",
+      "required_attribute",
+      "industry"
+    ],
+    "server_current_stage_discovery": {
+      "discovery": {
+        "notice": "discovery_only_not_evidence",
+        "results": [
+          {
+            "discovery_excerpt": "Securities registered pursuant to Section 12(b) of ... | Title of each class | Trading Symbol(s) | Name of each exchange on which registered | | --- | --- | --- | | Class A Common Stock, $0.01 par value per share | CTSH | The Nasdaq Stock Market LLC |",
+            "title": "ctsh-20251231",
+            "url": "https://www.sec.gov/Archives/edgar/data/1058290/000105829026000008/ctsh-20251231.htm"
+          },
+          {
+            "discovery_excerpt": "Cognizant Completes Acquisition of Belcan | Cognizant ### Cognizant Completes Acquisition of Belcan August 27, 2024 Updates Third Quarter and Full-Year 2024 Guidance to Include Belcan Impact TEANECK, N.J., Aug. 27, 2024 /PRNewswire/ -- Cognizant (NASDAQ: CTSH) today announced it completed the acquisition of Belcan for approximately $1.3 billion in cash and stock. Belcan is a leading global",
+            "title": "Cognizant Completes Acquisition of Belcan | Cognizant",
+            "url": "https://investors.cognizant.com/news-and-events/news/news-details/2024/Cognizant-Completes-Acquisition-of-Belcan/"
+          },
+          {
+            "discovery_excerpt": "markets \u2014 a step that will make it the first foreign IT services company to do ... The company has its global headquarters in Teaneck, New Jersey, US, but a significant portion of its global workforce is based in India. It\u2019s listed on the Nasdaq.",
+            "title": "Cognizant looking to list on Indian exchanges, says IT firm's senior exec | Company News - Business Standard",
+            "url": "https://www.business-standard.com/companies/news/cognizant-explores-india-listing-to-boost-valuation-cfo-jatin-dalal-125103000471_1.html"
+          },
+          {
+            "discovery_excerpt": "year ended December 31, 2025, revenues increased by $1,372 million as compared to the year ended December 31, 2024, representing an increase of 7.0%, or 6.4% ... basis points to revenue growth. Additionally, revenues were positively impacted by",
+            "title": "Cognizant Technology Solutions Corporation (via Public) / Annual Report for Fiscal Year Ending December 31, 2025 (Form 10-K)",
+            "url": "https://ebs.publicnow.com/view/1F511D75FF3DC18F3E83B4123A2FEF8A7F260B53"
+          },
+          {
+            "discovery_excerpt": "Cognizant American information technology company \"CTSH\" redirects here. For the gene, see Cathepsin H. **Cognizant Technology Solutions Corporation** is an American multinational information technology consulting and outsourcing company, headquartered in Teaneck, New Jersey. It was originally founded in Chennai, India, as an in-house technology unit of Dun & Bradstreet in 1994. After a series of",
+            "title": "Cognizant",
+            "url": "https://en.wikipedia.org/wiki/Cognizant_Corporation"
+          }
+        ]
+      },
+      "notice": "server_search_results_are_discovery_only_not_evidence",
+      "ok": true,
+      "query": "Cognizant cognizant.com current public listing completed take-private acquisition delisting"
+    },
+    "server_public_stage_source_fetch": {
+      "notice": "server_fetched_page_is_untrusted_evidence",
+      "ok": true,
+      "url": "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx"
+    },
+    "untrusted_homepage_navigation_locators": [
+      {
+        "label": "Responsible AI",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/responsible-ai"
+      },
+      {
+        "label": "About Cognizant",
+        "url": "https://www.cognizant.com/us/en/about-cognizant"
+      },
+      {
+        "label": "AI builder",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/ai-builder"
+      },
+      {
+        "label": "Annual report",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/annual-report"
+      },
+      {
+        "label": "Board of directors",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/corporate-governance/board-of-directors"
+      },
+      {
+        "label": "Contact us",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/contact-us"
+      },
+      {
+        "label": "Corporate governance",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/corporate-governance"
+      },
+      {
+        "label": "Culture & values",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/culture-and-values"
+      },
+      {
+        "label": "Innovation network",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/innovation-network"
+      },
+      {
+        "label": "Leadership team",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/corporate-governance/leadership-team"
+      },
+      {
+        "label": "Partnerships",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/partners"
+      },
+      {
+        "label": "Public policy",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/public-policy"
+      },
+      {
+        "label": "Sponsorships",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/sponsorships"
+      },
+      {
+        "label": "Sustainability & corporate citizenship",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/sustainability-corporate-citizenship"
+      },
+      {
+        "label": "Testimonials",
+        "url": "https://www.cognizant.com/us/en/about-cognizant/testimonials"
+      },
+      {
+        "label": "Product engineering",
+        "url": "https://www.cognizant.com/us/en/industries/automotive-technology-solutions/connected-car-engineering"
+      },
+      {
+        "label": "MLOps for healthcare",
+        "url": "https://www.cognizant.com/us/en/industries/healthcare-technology-solutions/mlops-platform"
+      },
+      {
+        "label": "Insurance platform modernization",
+        "url": "https://www.cognizant.com/us/en/industries/insurance-digital-transformation/insurance-platform-modernization"
+      },
+      {
+        "label": "Shared investigator platform",
+        "url": "https://www.cognizant.com/us/en/industries/life-sciences-technology-solutions/shared-investigator-platform"
+      },
+      {
+        "label": "Operations intelligence platform",
+        "url": "https://www.cognizant.com/us/en/industries/oil-gas-digital-solutions/operations-intelligence-platform-oil-gas"
+      },
+      {
+        "label": "Merch Insight retail planning",
+        "url": "https://www.cognizant.com/us/en/industries/retail-technology-solutions/merch-insight-retail-planning-platform"
+      },
+      {
+        "label": "Neuro AI Trust",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/neuro-ai-trust"
+      },
+      {
+        "label": "Skillspring",
+        "url": "https://www.cognizant.com/us/en/services/build-a-future-ready-workforce/skillspring-workforce-transformation-platform"
+      },
+      {
+        "label": "Cognizant AI Nexus",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/ai-nexus"
+      },
+      {
+        "label": "Cognizant platforms",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms"
+      },
+      {
+        "label": "Cognizant Ignition",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/cognizant-ignition"
+      },
+      {
+        "label": "Cognizant Neuro AI",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/neuro-generative-ai-adoption"
+      },
+      {
+        "label": "Cognizant Neuro AI Enterprise Core",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/neuro-ai-enterprise-core"
+      },
+      {
+        "label": "Cognizant Neuro IT operations",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/neuro-ai-it-operations"
+      },
+      {
+        "label": "Cognizant Skygrade",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/cognizant-skygrade"
+      },
+      {
+        "label": "Flowsource",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/flowsource"
+      },
+      {
+        "label": "Neuro AI Engineering",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/neuro-ai-engineering"
+      },
+      {
+        "label": "Neuro Business Processes",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/neuro-cx-automation"
+      },
+      {
+        "label": "Neuro Cybersecurity",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/ai-cybersecurity"
+      },
+      {
+        "label": "Neuro Edge",
+        "url": "https://www.cognizant.com/us/en/services/cognizant-platforms/neuro-edge-generative-ai"
+      },
+      {
+        "label": "Enterprise platforms",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services"
+      },
+      {
+        "label": "Backup Exec",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/backup-exec"
+      },
+      {
+        "label": "Cloud integration brokerage",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/cloud-integration-brokerage"
+      },
+      {
+        "label": "Enterprise integration services",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/enterprise-integration-services"
+      },
+      {
+        "label": "Oracle",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/oracle"
+      },
+      {
+        "label": "Pega",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/pega-platform-services"
+      },
+      {
+        "label": "Process orchestration",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/process-orchestration"
+      },
+      {
+        "label": "SAP",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/sap-solutions"
+      },
+      {
+        "label": "ServiceNow",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/servicenow"
+      },
+      {
+        "label": "Supply chain management",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/supply-chain-management"
+      },
+      {
+        "label": "Workday",
+        "url": "https://www.cognizant.com/us/en/services/enterprise-platform-services/workday"
+      },
+      {
+        "label": "Smart products",
+        "url": "https://www.cognizant.com/us/en/services/iot-solutions/smart-products"
+      },
+      {
+        "label": "Careers",
+        "url": "https://www.cognizant.com/us/en/careers"
+      },
+      {
+        "label": "News",
+        "url": "https://news.cognizant.com/"
+      },
+      {
+        "label": "Events",
+        "url": "https://www.cognizant.com/us/en/events"
+      }
+    ],
+    "verified_homepage_identity": {
+      "linkedin_company_slug": "cognizant",
+      "normalized_name": "cognizant",
+      "registrable_dns_domain": "cognizant.com",
+      "verified_brand_name": "Cognizant",
+      "verified_legal_name_aliases": [
+        "Cognizant Technology Solutions Corp"
+      ]
+    }
+  },
+  "findings": [
+    {
+      "activity_role": "unresolved",
+      "evidence_quote": "Cognizant (Nasdaq: CTSH) is an AI Builder and technology services provider, bridging the gap between AI investment and enterprise value. We build full-stack AI solutions powered by deep industry, process and engineering expertise \u2014 embedding an organization's unique context into technology systems that amplify human potential and drive tangible outcomes. From strategy to deployment, we help global enterprises move from AI ambition to AI impact and stay ahead in a fast-changing world. See how at cognizant.ai | Follow us @cognizant \n\n Website \n\n https://www.cognizant.ai \n\nExternal link for Cognizant\n\n Industry \n\n IT Services and IT Consulting \n\n Company size \n\n 10,001+ employees",
+      "evidence_url": "https://www.linkedin.com/company/cognizant",
+      "new_domain": "cognizant.com",
+      "new_name": "Cognizant",
+      "observed_country": "",
+      "observed_industry": "",
+      "observed_state": "",
+      "observed_subindustry": "",
+      "observed_value": "10,001+",
+      "old_domain": "cognizant.com",
+      "old_name": "Cognizant",
+      "product_coverage": null,
+      "reason": "The exact fetched Cognizant company profile identifies its company-size band as 10,001+ employees, which matches a requested bucket. The quote includes Cognizant's name and company size field.",
+      "shared_linkedin_slug": "cognizant",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "",
+      "supporting_evidence_url_2": "",
+      "target": "headcount"
+    },
+    {
+      "activity_role": "unresolved",
+      "evidence_quote": "",
+      "evidence_url": "",
+      "new_domain": "cognizant.com",
+      "new_name": "Cognizant",
+      "observed_country": "",
+      "observed_industry": "",
+      "observed_state": "",
+      "observed_subindustry": "",
+      "observed_value": null,
+      "old_domain": "cognizant.com",
+      "old_name": "Cognizant",
+      "product_coverage": null,
+      "reason": "The fetched LinkedIn profile indicates headquarters in Teaneck, New Jersey, but the citation was rejected because LinkedIn did not satisfy the required independently bound first-party URL requirement. The fetched Cognizant homepage does not establish its current headquarters. Therefore no acceptable proof of the exact company's current US headquarters is available, so this remains unproven.",
+      "shared_linkedin_slug": "cognizant",
+      "status": "UNPROVEN",
+      "supporting_evidence_quote_1": "",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "",
+      "supporting_evidence_url_2": "",
+      "target": "geography"
+    },
+    {
+      "activity_role": "unresolved",
+      "evidence_quote": "",
+      "evidence_url": "",
+      "new_domain": "cognizant.com",
+      "new_name": "Cognizant",
+      "observed_country": "",
+      "observed_industry": "",
+      "observed_state": "",
+      "observed_subindustry": "",
+      "observed_value": null,
+      "old_domain": "cognizant.com",
+      "old_name": "Cognizant",
+      "product_coverage": "UNPROVEN",
+      "reason": "The fetched Cognizant infrastructure-services page verifies supplier activity in enterprise infrastructure services and hybrid cloud, including design, build, migrate and operate, but the requested product criterion requires the conjunction of managed IT infrastructure, cloud migration, and mainframe modernization services to large enterprises. The loaded page does not prove mainframe modernization, and the mainframe-document fetch failed, so the whole product criterion is unproven rather than contradicted. Since the requested industry finding must be grounded in the full product/service criterion, overall industry fit is likewise unproven. The fetched profile names the business category as IT Services and IT Consulting, but this broad label does not cure the specific capability gap.",
+      "shared_linkedin_slug": "cognizant",
+      "status": "UNPROVEN",
+      "supporting_evidence_quote_1": "",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "",
+      "supporting_evidence_url_2": "",
+      "target": "industry"
+    },
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "TEANECK, N.J., June 2, 2026 /PRNewswire/ -- Cognizant (NASDAQ: CTSH) announced an expanded strategic alliance with CrowdStrike to help enterprises secure artificial intelligence across its lifecycle, from the AI agents and models to the foundational infrastructure that supports the entire AI ecosystem.",
+      "evidence_url": "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx",
+      "new_domain": "cognizant.com",
+      "new_name": "Cognizant",
+      "observed_country": "",
+      "observed_industry": "",
+      "observed_state": "",
+      "observed_subindustry": "",
+      "observed_value": "Public",
+      "old_domain": "cognizant.com",
+      "old_name": "Cognizant",
+      "ownership": null,
+      "product_coverage": null,
+      "reason": "A Cognizant investor-relations announcement dated June 2, 2026 attributes the NASDAQ ticker CTSH to Cognizant. Current-stage discovery exposed no later completed take-private or delisting event, so the supplied company-bound listing evidence supports Public.",
+      "shared_linkedin_slug": "cognizant",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "",
+      "supporting_evidence_url_2": "",
+      "target": "stage"
+    },
+    {
+      "activity_role": "supplier_operator",
+      "evidence_quote": "Hybrid cloud: Cognizant's Hybrid Cloud offering provides a comprehensive portfolio of services covering design, build, migrate and operate across private and public cloud environments. It establishes the foundation for digital-ready operations by transforming legacy IT to a future-ready as-a-service delivery model.",
+      "evidence_url": "https://www.cognizant.com/us/en/services/cloud-solutions/infrastructure-services",
+      "new_domain": "cognizant.com",
+      "new_name": "Cognizant",
+      "observed_country": "",
+      "observed_industry": "",
+      "observed_state": "",
+      "observed_subindustry": "",
+      "observed_value": null,
+      "old_domain": "cognizant.com",
+      "old_name": "Cognizant",
+      "ownership": null,
+      "product_coverage": null,
+      "reason": "Cognizant's first-party service page describes its own cloud offering as designing, building, migrating and operating private and public cloud environments, transforming legacy IT to an as-a-service model. That directly supports the cloud-services alternative for enterprise customers, including operating outsourced technology environments. The investor-relations announcement independently identifies Cognizant as NASDAQ: CTSH, meeting the listed-company condition.",
+      "shared_linkedin_slug": "cognizant",
+      "status": "VERIFIED",
+      "supporting_evidence_quote_1": "TEANECK, N.J., June 2, 2026 /PRNewswire/ -- Cognizant (NASDAQ: CTSH) announced an expanded strategic alliance with CrowdStrike to help enterprises secure artificial intelligence across its lifecycle, from the AI agents and models to the foundational infrastructure that supports the entire AI ecosystem.",
+      "supporting_evidence_quote_2": "",
+      "supporting_evidence_url_1": "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx",
+      "supporting_evidence_url_2": "",
+      "target": "required_attribute"
+    }
+  ],
+  "pages": {
+    "https://cognizant.com/": "We\u2019re an AI Builder Bridging the gap from AI to impact Let\u2019s build Connect physical AI systems with agentic AI creating a single institutional mind you own and govern Find out how Cognizant launches Frontier Engineers to unlock the $4.5T AI opportunity gap Read the release Cognizant Innovation Network: Fast track to enterprise value Learn more We were our own first AI Builder client Learn more Cognizant helps companies modernize technology, reimagine processes and transform experiences so they stay ahead in a fast-changing world. AMF1 and Cognizant are building together Aston Martin Aramco Formula One\u2122 Team will race with a special livery at the United States Grand Prix, to celebrate five years of partnership with Cognizant, as the team's official Global AI Services partner. See the livery Case studies We help companies anticipate and act with insight and speed. MANUFACTURING Veidekke accelerates cloud transformation and AI adoption MANUFACTURING Veidekke accelerates cloud transformation and AI adoption Partnering with Cognizant, Veidekke modernized its IT landscape, reducing cost, increasing agility and AI innovation. MEDIA & ENTERTAINMENT Kantar transforms its digital user experiences to unlock new business value MEDIA & ENTERTAINMENT Kantar transforms its digital user experiences to unlock new business value Cognizant leads a multifaceted, user-centered transformation, improving employee and visitor experiences. MANUFACTURING Barry Callebaut leads the way in cocoa sustainability and compliance MANUFACTURING Barry Callebaut leads the way in cocoa sustainability and compliance Cognizant builds a near-real-time traceability solution, ensuring EU Deforestation Regulation compliance, enhances operational excellence. CASE STUDIES Discover more about our work CASE STUDIES Discover more about our work We engineer technology into your business to help you anticipate and act as if on intuition. Contact us We are sorry. Unable to submit your request. Please try again or post your inquiry to inquiry@cognizant.com. Thank you for your interest in Cognizant. We\"ll be in touch soon Unlock $6 trillion in trapped AI potential Our global study of 10,000-plus workers reveals the hidden segments in the workforce\u2014and $6 trillion in trapped productivity\u2014behind AI's adoption gap. Check out our latest research report. Read the report News https://news.cognizant.com/api/newsfeed\\_releases/list.php?\\&fields=headline,releaseDate,image\\_url,social\\_image\\_url,url,summary 3 https://mma.prnewswire.com/media/1794711/Cognizant\\_Logo.jpg?p=facebook See all Cognizant news Drive your career forward. Fast. Browse job listings Get answers to your questions Our clients turn to us to help them reimagine ways of working with technology. Name* Email* Organization* Contact Number* Region* North America South America Europe Middle East APAC India Region Inquiry Type* Alumni Career Seekers Investor Relations Media Partners Request for Services Synapse Inquiry Type Sub Inquiry Type* Cognizant Alumni Job Seeker Entry-Level Job Seeker Experienced Job Seeker Former Employee Verification Interview Status Login Issues Offered Candidates Other Sub Inquiry Type Message I would like Cognizant to contact me based on the information provided above. I agree to the processing of my personal data as described in the Privacy Notice. Submit We are sorry. Unable to submit your request. Please try again or post your inquiry to inquiry@cognizant.com. Thank you for your interest in Cognizant. We\"ll be in touch soon Thank you for your interest in Cognizant. We\"ll be in touch soon We are sorry. Unable to submit your request. Please try again or post your inquiry to inquiry@cognizant.com. I would like Cognizant to contact me based on the information provided above. I agree to the processing of my personal data as described in the Privacy Notice. This site is protected by reCAPTCHA and the Google Privacy Policy and Terms of Service apply.",
+    "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx": "Cognizant and CrowdStrike Expand Strategic Alliance to Secure the Agentic Enterprise | Cognizant Skip to main content Cognizant.com Industries Services Latest Thinking Site Search Investor Relations News & Investor Events Home News & Investor Events News News Details Cognizant.com Industries Services Latest Thinking View All News Cognizant and CrowdStrike Expand Strategic Alliance to Secure the Agentic Enterprise June 2, 2026 Cognizant deepens its partnership with CrowdStrike, bringing the CrowdStrike Falcon \u00ae platform to its AI Factory and Managed Cybersecurity Services to help enterprises secure AI across every layer. TEANECK, N.J., June 2, 2026 /PRNewswire/ -- Cognizant (NASDAQ: CTSH) announced an expanded strategic alliance with CrowdStrike to help enterprises secure artificial intelligence across its lifecycle, from the AI agents and models to the foundational infrastructure that supports the entire AI ecosystem. Building on a partnership established in 2025, Cognizant is bringing the CrowdStrike Falcon \u00ae platform to its AI Factory and its Managed Cybersecurity Services, powered by the Cognizant Neuro \u00ae Cybersecurity platform. The expansion arrives at an inflection point for enterprise AI. Organizations are no longer deciding whether to deploy autonomous AI agents; they are deploying them at scale, across operations, IT and core business processes, and across every environment they run in, from public and private cloud to the edge. That shift widens the enterprise attack surface in ways traditional tooling was not built to address. Adversaries are accelerating attacks with AI, exploiting unsanctioned \"shadow AI\", manipulating models through prompt injection and probing the new entry points that agentic architectures create. Security has become the decisive factor in whether enterprise AI scales with confidence or stalls. \"AI Builder is about putting AI to work inside the workflows that run a business, and that only scales if the AI is secure from the start. An unsecured AI agent isn't a productivity gain, it's an open door,\" said Surya Gummadi, President, Americas, Cognizant. \"By bringing the CrowdStrike Falcon platform together with our AI Factory and Neuro Cybersecurity platform, we're giving clients a way to build, run and secure autonomous AI across the agent, the model and the infrastructure beneath it. That's what it takes to move AI into real enterprise operations with an approach aligned to the assurance expectations of boards, regulators and customers.\" Cognizant's AI Builder approach is about putting AI to work where it matters, embedding intelligent agents into the workflows that run the enterprise. For that to scale, the AI has to be secure, governed and trustworthy. This alliance aims to deliver on both, across three capabilities: AI-native managed security operations: Cognizant is bringing the CrowdStrike Falcon \u00ae platform, including Charlotte AI\u2122 and CrowdStrike's Agentic Security Workforce, and Falcon \u00ae Next-Gen SIEM, to its managed cybersecurity services, orchestrated through the Cognizant Neuro \u00ae Cybersecurity platform. The result brings always-on AI agents supporting functions such as alert triage, threat intelligence, vulnerability prioritization and data onboarding into Cognizant's delivery operations, within guardrails set by Cognizant's security architects. Security and governance across AI Factory: Within Cognizant's AI Factory, CrowdStrike Falcon \u00ae capabilities support the governance layer that is designed to keep AI agents and applications operating inside defined security and compliance boundaries. Falcon \u00ae AI Detection and Response (AIDR) helps protect the prompt and agent interaction layer, while AI model scanning and shadow AI detection give clients visibility into every model, tool and agent in their environment. These capabilities are delivered in collaboration with clients and operate within client-defined governance, risk and compliance frameworks. A security layer for private, sovereign AI: For regulated industries such as financial services, healthcare and government, Cognizant's private AI Factory deployments aim to deliver sovereign, on-premises AI infrastructure hosted within a client's own data center. The CrowdStrike Falcon \u00ae platform serves as a security layer across these deployments, extending unified protection to the compute, containers and data pipelines that power private models. These capabilities build on Cognizant being named CrowdStrike's 2026 Americas Velocity Partner of the Year, recognizing Cognizant's measurable pipeline and delivery success and the speed at which it has brought joint capabilities to market with CrowdStrike. \"The future enterprise will be powered by AI agents. The challenge isn't building them, it's securing them,\" said Daniel Bernard, chief business officer at CrowdStrike. \"Together, CrowdStrike and Cognizant are helping organizations move AI from experimentation to enterprise adoption with the confidence that every agent, model and workload is protected by the Falcon platform. That's how businesses innovate faster, deploy AI securely and stop breaches in the AI era.\" Together, Cognizant and CrowdStrike are aiming to give enterprises a path to deploy autonomous AI with confidence that every agent, model and interaction is protected, governed and resilient by design. About Cognizant Cognizant (Nasdaq: CTSH) is an AI Builder and technology services provider, bridging the gap between AI investment and enterprise value by building full-stack AI solutions for our clients. Our deep industry, process and engineering expertise enables us to build an organization's unique context into technology systems that amplify human potential, drive tangible outcomes and keep global enterprises ahead in a fast-changing world. See how at www.cognizant.ai or @cognizant. For more information, contact: U.S. Name Ben Gorelick Email benjamin.gorelick@cognizant.com Europe / APAC Name Sarah Douglas Email sarah.douglas@cognizant.com India Name Vipin Nair Email Vipin.nair@cognizant.com View original content to download multimedia: https://www.prnewswire.com/news-releases/cognizant-and-crowdstrike-expand-strategic-alliance-to-secure-the-agentic-enterprise-302789069.html SOURCE Cognizant Technology Solutions View All News Investor Contacts Tyler Scott, CFA Senior Vice President, Investor Relations Transfer Agent Equiniti Trust Company LLC 1110 Centre Point Curve, Ste 101 Mendota Heights, MN 55120-4100 1-800-937-5449 Email Alerts If you are interested in receiving Cognizant investor alerts via email, fill out the form below and you will receive an e-mail each time we send out alerts based on your selection. You will receive an email which you must reply to in order to confirm your subscription. You may unsubscribe from our list at any time. At Cognizant, we promise to treat your data with respect and will not share your information with any third party. You can unsubscribe to any of the investor alerts you are subscribed to by visiting the \u2018unsubscribe\u2019 section below. If you experience any issues with this process, please contact us for further assistance. By providing your email address below, you are providing consent to Cognizant to send you the requested Investor Email Alert updates. * Required Email Address * Submit Sign up Investor Alert Options Mailing Lists * Press Releases Events Presentations SEC Filings End of Day Stock Quote Unsubscribe Follow Cognizant on LinkedIn Follow Cognizant on Twitter Follow Cognizant on Facebook Follow Cognizant on Instagram Subscribe to Cognizant on YouTube Sitemap Terms Privacy Notice Cookie Notice \u00a9 2026 Cognizant - All rights reserved Industries Automotive Banking Capital Markets Communications, Media & Technology Consumer Goods Education Healthcare Information Services Insurance Life Sciences Manufacturing Oil & Gas Retail Transportation & Logistics Travel & Hospitality Utilities Services Application Services & Modernization Artificial Intelligence Business Process Services Cloud Enablement Core Modernization Digital Experience Digital Strategy Enterprise Application Services Enterprise Services Industry+ Industry & Platform Solutions Infrastructure Services Intelligent Process Automation Quality Engineering & Assurance Security Software Product Engineering Consulting Latest Thinking Our Media & Publications All Latest Thinking Browse Case Studies Cognizant Podcasts Cognizanti Journal Digitally Cognizant Blog Infographics Perspectives Key Themes Digital Maturity Research Sustainability World Economic Forum\u2014Davos Center for the Future of Work 21 More Jobs of the Future Digital Workforce of the Future Explore the Future of Work Jobs of the Future Index Our Post-COVID Future The Work Ahead About Cognizant 2020 in Focus Be.Cognizant Board of Directors Client Briefing Program Cognizant Events Contact Us Corporate Governance Corporate Integrity Culture & Values Diversity & Inclusion Sustainability Leadership Team News & Press Releases Partnerships Public Policy Sponsorships Talent Worldwide Women Empowered Glossary Information for Suppliers Procure-to-Pay Powered By Q4 Inc. 5.190.1.9 (opens in new window) (Opens in new window) [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx#maincontent https://www.cognizant.com/ https://www.cognizant.com/industries https://www.cognizant.com/services https://www.cognizant.com/latest-thinking https://investors.cognizant.com/home/default.aspx https://investors.cognizant.com/news-and-events/news/default.aspx https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx https://edge.prnewswire.com/c/link/?t=0&l=en&o=4702464-1&h=201279212&u=https%3A%2F%2Fnews.cognizant.com%2F2025-01-21-Cognizant-and-CrowdStrike-Partner-to-Drive-Enterprise-Cybersecurity-Transformation&a=partnership https://edge.prnewswire.com/c/link/?t=0&l=en&o=4702464-1&h=3052724695&u=https%3A%2F%2Fwww.cognizant.ai%2F&a=www.cognizant.ai https://www.prnewswire.com/news-releases/cognizant-and-crowdstrike-expand-strategic-alliance-to-secure-the-agentic-enterprise-302789069.html https://investors.cognizant.com/investor-resources/email-alerts/default.aspx https://www.linkedin.com/company/cognizant https://twitter.com/cognizant https://www.facebook.com/Cognizant https://www.instagram.com/cognizant/ https://www.youtube.com/cognizant https://www.cognizant.com/sitemap https://www.cognizant.com/terms-conditions https://www.cognizant.com/privacy-notice https://www.cognizant.com/cookie-notice https://www.cognizant.com/automotive-technology-solutions https://www.cognizant.com/banking-technology-solutions https://www.cognizant.com/capital-markets-technology-solutions https://www.cognizant.com/cmt-solutions https://www.cognizant.com/consumer-goods-technology-solutions https://www.cognizant.com/education-technology-solutions https://www.cognizant.com/healthcare-technology-solutions https://www.cognizant.com/information-services-digital-solutions https://www.cognizant.com/insurance-technology-solutions https://www.cognizant.com/life-sciences-technology-solutions https://www.cognizant.com/manufacturing-technology-solutions https://www.cognizant.com/oil-gas-digital-solutions https://www.cognizant.com/retail-technology-solutions https://www.cognizant.com/transportation-logistics-technology-solutions https://www.cognizant.com/travel-hospitality-technology-solutions https://www.cognizant.com/utilities-digital-solutions https://www.cognizant.com/application-services-and-modernization https://www.cognizant.com/ai https://www.cognizant.com/business-process-services https://www.cognizant.com/cloud-enablement-services https://www.cognizant.com/core-application-modernization https://www.cognizant.com/digital-experience https://www.cognizant.com/digital-strategy https://www.cognizant.com/enterprise-application-services https://www.cognizant.com/enterprise-services https://www.cognizant.com/iot-solutions https://www.cognizant.com/industry-platform-solutions https://www.cognizant.com/infrastructure-services https://www.cognizant.com/intelligent-process-automation https://www.cognizant.com/enterprise-quality-engineering-assurance https://www.cognizant.com/cybersecurity-services https://www.cognizant.com/software-product-engineering https://www.cognizant.com/consulting https://www.cognizant.com/case-studies https://soundcloud.com/cognizant-worldwide/ https://www.cognizant.com/cognizanti-journal https://digitally.cognizant.com/ https://www.cognizant.com/infographics https://www.cognizant.com/perspectives https://www.cognizant.com/digital-maturity-research https://www.cognizant.com/us/en/latest-thinking/sustainability https://www.cognizant.com/world-economic-forum-davos-2020 https://www.cognizant.com/futureofwork https://www.cognizant.com/futureofwork/whitepaper/21-more-jobs-of-the-future-a-guide-to-getting-and-staying-employed-through-2029 https://www.cognizant.com/digital-workforce-of-the-future https://www.cognizant.com/future-of-work https://www.cognizant.com/jobs-of-the-future-index https://www.cognizant.com/post-covid-future-of-work https://www.cognizant.com/the-work-ahead https://www.cognizant.com/about-cognizant https://www.cognizant.com/about-cognizant/2020-annual-report https://be.cognizant.com/ https://www.cognizant.com/about-cognizant/board-of-directors https://www.cognizant.com/about-cognizant/client-briefing-program https://www.cognizant.com/events https://www.cognizant.com/contact-us https://www.cognizant.com/about-cognizant/corporate-governance https://www.cognizant.com/about-cognizant/corporate-integrity https://www.cognizant.com/about-cognizant/cultural-values https://www.cognizant.com/about-cognizant/diversity-and-inclusion https://www.cognizant.com/about-cognizant/esg https://www.cognizant.com/about-cognizant/leadership-team https://news.cognizant.com/ https://www.cognizant.com/partners https://www.cognizant.com/about-cognizant/public-policy https://www.cognizant.com/sponsorships https://www.cognizant.com/about-cognizant/talent-worldwide https://www.cognizant.com/women-empowered https://www.cognizant.com/glossary https://www.cognizant.com/procure-to-pay https://www.q4inc.com/Powered-by-Q4/",
+    "https://www.cognizant.com/us/en/services/cloud-solutions/infrastructure-services": "Services Services Cloud Solutions Cloud Solutions Infrastructure Services Contact Be a modern business with an always-on infrastructure Deliver personalized experiences with an agile infrastructure that ensures business continuity. Overview Offerings Latest thinking Our partners News Contact us Connected. Cognitive. Always-on. Transform your infrastructure for the digital era. Today\u2019s customers want seamless, intuitive and personalized experiences while they\u2019re using products and services. The digital era is forcing companies like yours to transform through technology to stay relevant. Your business must be always-on and your infrastructure must predict change before it happens, to act fast and put a smile on the faces of users. Cognizant is helping you prepare for the digital era with infrastructure services that are transforming the face of enterprises. We can help your business maximize the potential of automation and a software defined data center (SDDC) by delivering services through a business-aligned catalog model. View our offerings Offerings Stay ahead of the curve Business demands keep changing\u2014which means your infrastructure must do more to stay ahead of the competitive curve. Cognizant Cloud and Infrastructure Services keeps your business always ready, powers up employee productivity, integrates your departments and groups, and future-proofs your organization. Business experience services Transform your workplace for the new normal WorkNEXT\u2122, Cognizant\u2019s digital workplace solutions suite, delivers personalized, seamless experiences for your employees anywhere, anytime, on any device. In addition to leveraging AI, analytics and automation, our solutions also: Enable remote collaboration with flexible working models Improve employee productivity Resolve employee issues faster Create intelligent workspaces that promote creativity, innovation and collaboration Learn more Business foundation services Increase experiences at scale Enterprise service management: As the volume and velocity of data and interactions continue to increase, the departments and groups in your organization must be integrated. Service management and artificial intelligence (AI) need to be enabled to offer seamless and intelligent services. Cognizant can help strengthen the integration points across your organization. We offer next-generation service management and industry platforms for healthcare, financial services and insurance. We also offer automation and AI services, service integration and management (SIAM), DevOps and risk/compliance/regulatory services. ServiceNow: Harnessing all that ServiceNow offers requires a fresh, strategic, knowledgeable approach to business modernization. Cognizant\u2019s consultative approach helps you to create digital workflows based on the power and flexibility of the Now platform\u00ae\u2014and to run them at scale across your entire organization. Our partnership and collaboration with ServiceNow ensures that we continue to drive successful business outcomes. Utilizing the power of the Now platform, we create digital workflows that transform processes and deliver the experiences that employees need and customers expect. Learn more Business reliability services Integrate with digital Edge services: With ever-increasing, real-time data generation, processing and consumption at the edge of the enterprise, leading companies are building edge-to-core infrastructure services with an outside-in view. Cognizant\u2019s Edge Services offers managed edge-to-core computing and related industry solutions, services and platforms for industry nuances and scale. Learn more Hybrid cloud: Cognizant's Hybrid Cloud offering provides a comprehensive portfolio of services covering design, build, migrate and operate across private and public cloud environments. It establishes the foundation for digital-ready operations by transforming legacy IT to a future-ready as-a-service delivery model. Also, it lets you choose a best-fit option to meet your most particular requirements. Learn more Latest thinking carousel starts WHITE PAPER Rise of alternative virtualization: Solutions for modernization through cost-effective hybrid cloud Explore a modern hybrid cloud architecture that minimizes technology dependence through a hypervisor-agnostic approach. Diverse solutions shaped by evolving customer needs, migration challenges and emerging public cloud alternatives, serves as a decision-making guide for enterprises. Know more WHITE PAPER How an integrated cloud management platform cuts costs while increasing agility Through a \u201csingle pane of glass\u201d for multi-cloud management, organizations can significantly increase their productivity, lower the total cost of ownership of cloud management tools and cut release cycle times from weeks to as little as an hour. Know more WHITE PAPER AWS cloud migration: How modernization accelerates value creation With cloud migration well underway, organizations are embarking on large-scale modernization efforts to improve the speed and economics of IT service delivery, boost business innovation and engage customers with new experiences Know more WHITE PAPER Six data architecture and IT infrastructure governance mandates for multinational banks Banking and financial services institutions operating in multiple countries and executing digital transformation programs can leverage the principles of BCBS 239 to standardize and stabilize their IT infrastructure and related data architecture processes to realize digital business value across their geographic footprint. Know more WHITE PAPER How applying an AI-defined infrastructure can boost data center operations An artificial-intelligence-based infrastructure that uses the data available within the data center to optimize and automate infrastructure operations can enhance operational efficiencies and improve the quality of service offered to the business. Know more WHITE PAPER Transitioning to hybrid cloud offers greater operational choice & improved agility Cognizant helps keep businesses continuously available, delivering personalized experiences via powerful digital infrastructure and services. See how. Know more WHITE PAPER 10 key digital infrastructure considerations As digital becomes ever-more essential to revenue growth and market relevance, its underlying infrastructure must be made as efficient as possible if digital is to realize its true potential. By prioritizing foundational technology modernization and simplification, organizations can accelerate their transformation into the digital era. Know more carousel ends Our partners We form partnerships and strategic alliances with world-class organizations to expand our service offerings and deliver comprehensive solutions to clients. Strategic alliances with the world\u2019s leading companies enable us to provide complete solutions to your business and IT challenges. Amazon Web Services Cognizant is a Premier Consulting Partner for AWS, an AWS Channel Reseller, an AWS Managed Services Partner, an AWS Migration Acceleration Program (MAP) Partner and an AWS Marketplace Reseller. In addition, Cognizant has accredited status with AWS for healthcare and life sciences, financial services, migration competency, big data, Workspaces and SharePoint. Google Cloud Cognizant is a Premier Google Cloud Partner. This partnership brings you innovations in AI, machine learning and cloud-native platforms, as well as joint solutions powered by next-gen accelerators such as TensorFlow, DialogFlow, Kubernetes, APIs, microservices and containers. Agile platforms empower rapid ideation to meet emerging human needs with real-time intelligent insights and global reach. Microsoft Together, Cognizant and Microsoft are accelerating digital transformation for our customers. Partners for 15 years, we have a mutual focus on putting the customer first. We are helping our customers rethink, reinvent and rewire their organizations to unleash new potential with a mobile-first, cloud-first approach. Partner spotlight Cognizant is a Premier Consulting Partner and Channel Reseller of Amazon Web Services (AWS), which provides a reliable, scalable, low-cost infrastructure platform in the cloud. Learn more News Apr 12, 2024 Cognizant Recognized as a Leader in ISG Provider Lens\u2122 Salesforce Ecosystem Partners 2024 Study \u2013 US & UK Know more Feb 19, 2019 Cognizant Joins the Android Enterprise Recommended Program for Managed Service Providers Know more Oct 22, 2018 Cognizant\u2019s Center for the Future of Work: There is a Future in Human Work Know more Check us out See all Cognizant news Stay on top of what's happening across Cognizant. Know more Take the first step Serving customers by looking forward as well as back is a big promise, but the power of today\u2019s new digital capabilities is vast and growing. Let\u2019s talk about how digital can work for your business.",
+    "https://www.linkedin.com/company/cognizant": "Cognizant | LinkedIn\n\n \n\n \n\n### Teaneck, New Jersey 9,679,733 followers \n\n## About us \n\n Cognizant (Nasdaq: CTSH) is an AI Builder and technology services provider, bridging the gap between AI investment and enterprise value. We build full-stack AI solutions powered by deep industry, process and engineering expertise \u2014 embedding an organization's unique context into technology systems that amplify human potential and drive tangible outcomes. From strategy to deployment, we help global enterprises move from AI ambition to AI impact and stay ahead in a fast-changing world. See how at cognizant.ai | Follow us @cognizant \n\n Website \n\n https://www.cognizant.ai \n\nExternal link for Cognizant\n\n Industry \n\n IT Services and IT Consulting \n\n Company size \n\n 10,001+ employees \n\n Headquarters \n\n Teaneck, New Jersey \n\n Type \n\n Public Company \n\n Specialties \n\n Interactive, Intelligent Process Automation, Digital Engineering, Industry & Platform Solutions, Internet of Things, Artificial Intelligence, Cloud, Data , Healthcare, Banking, Finance , Fintech, Manufacturing, Retail, Technology , and Salesforce \n\n## Locations \n\n- Primary \n\n 300 Frank W Burr Blvd \n\n Suite 600 \n\n Teaneck, New Jersey 07666, US \n\n Get directions \n- Second Floor \n\n Phoenix, Arizona 85029, US \n\n Get directions \n- Thoraipakkam \n\n Chennai, Tamil Nadu 600 096, IN \n\n Get directions \n- 1 Kingdom Street \n\n Paddington Central \n\n London, W2 6BD, GB \n\n Get directions \n- 3rd floor, Technopolis, Kakkanad \n\n Kochi, Kerala 682 037, IN \n\n Get directions \n- Soroks\u00e1ri \u00fat \n\n 44. \n\n Budapest, Budapest 1095, HU \n\n Get directions \n- 129 Church St \n\n New Haven, CT 06510, US \n\n Get directions \n- 15 William St \n\n Melbourne, VIC 3000, AU \n\n Get directions \n- 50 Boulevard Haussmann \n\n Paris, IdF 75009, FR \n\n Get directions \n- Via Monte di Pieta, 21 \n\n Milan, Lomb. 20121, IT \n\n Get directions \n- Havenlaan 86C, Box 408 \n\n Brussels, Brussels Region 1000, BE \n\n Get directions \n- 7301 Ohms Ln \n\n Edina, MN 55439, US \n\n Get directions \n- Anson Rd \n\n Singapore, Singapore, SG \n\n Get directions \n- 28 Margaret St \n\n Sydney, NSW 2000, AU \n\n Get directions \n- aleja Grunwaldzka 411 \n\n Gdansk, PM 80-309, PL \n\n Get directions \n- 9655 Maroon Circle \n\n Englewood, CO 80112, US \n\n Get directions \n- Hardstrasse 201 \n\n Prime Tower office 18th floor \n\n Zurich, 8005, CH \n\n Get directions \n- St.-Martin-Stra\u00dfe 106 \n\n Munich, BY 81669, DE \n\n Get directions \n- Drammensveien 145B \n\n Oslo, Oslo 0277, NO \n\n Get directions \n- Savanoriu prospektas 16 \n\n Vilnius, Vilniaus 03116, LT \n\n Get directions \n- Calle Miraflores 222 \n\n Santiago, Santiago Metropolitan 8320000, CL \n\n Get directions \n- Toldbodgade \n\n Copenhagen, Capital Region 1253, DK \n\n Get directions \n- Placa d'Europa \n\n l'Hospitalet de Llobregat, Catalonia 08908, ES \n\n Get directions \n- Calle Moreno no. 845 to 899 \n\n on the corner of Calle Tacuar\u00ed no. 242 to 292 \n\n Buenos Aires, AR \n\n Get directions \n- Tucum\u00e1n 3720, Bulnes Street \n\n Buenos Aires, AR \n\n Get directions \n- 200 Barangaroo Avenue \n\n Barangaroo, New South Wales, AU \n\n Get directions \n- Science Hub Tower 4, 1110 Campus Avenue, Mckinley Hill Cyber Park \n\n 1st-4th floor \n\n Taguig City , 1634, PH \n\n Get directions \n- Avenida das Na\u00e7\u00f5es Unidas 14.171, Vila Gertrudes \n\n Torre A \u2013 Ebony \u2013 6\u00b0 andar \n\n S\u00e3o Paulo, SP, CEP 04794-000, BR \n\n Get directions \n\n## Employees at Cognizant \n\n- ### Chad Williams \n- ### Dawn C Simmons (Khan) \n- ### Amir Banifatemi \n- ### John Dickerson \n\n## Updates \n\n- \n\n Cognizant \n\n 9,679,733 followers \n\n 1d \n\n- Report this post \n\nThe gap between an AI use case and enterprise value is filled with real-world friction. Surya Gummadi of Cognizant and client leaders shared practical examples of how AI is beginning to transform the way organizations operate and create value for your business. The central takeaway: enterprises need more than technology. They need a clear view of where value sits in the business, what prevents AI from reaching it and how technology, operations and people must come togeth"
+  },
+  "final_urls": {
+    "https://cognizant.com/": "https://www.cognizant.com/us/en",
+    "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx": "https://investors.cognizant.com/news-and-events/news/news-details/2026/Cognizant-and-CrowdStrike-Expand-Strategic-Alliance-to-Secure-the-Agentic-Enterprise/default.aspx",
+    "https://www.cognizant.com/us/en/services/cloud-solutions/infrastructure-services": "https://www.cognizant.com/us/en/services/cloud-solutions/infrastructure-services"
+  },
+  "fetch_outcomes": [
+    {
+      "url_sha256": "e15472171caa06605e590b68390595c71c7b5e71f9694faae0db7eefcbcfc35e",
+      "ok": true,
+      "error_class": "",
+      "loaded_text_length": 8876
+    },
+    {
+      "url_sha256": "51abe1b263537ae04e93d90de7e0c7a95dc76b673e2b2ad42147eb841532bcf7",
+      "ok": true,
+      "error_class": "",
+      "loaded_text_length": 4000
+    },
+    {
+      "url_sha256": "ff75524a292d7b104736bafd66b14501c7bdc35f98059fe4f0801ba14a2eded1",
+      "ok": false,
+      "error_class": "source_not_found",
+      "loaded_text_length": 0
+    },
+    {
+      "url_sha256": "92fc1c236bc32ff7222efbd1957010b94fdd5112f15cf3b97f29592f8bd5fed9",
+      "ok": false,
+      "error_class": "unsupported_source",
+      "loaded_text_length": 0
+    }
+  ]
+}

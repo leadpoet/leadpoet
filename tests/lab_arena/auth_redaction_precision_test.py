@@ -84,7 +84,7 @@ def test_known_secrets_sensitive_fields_and_url_secrets_keep_priority():
 def test_quoted_json_credential_values_remain_parseable_and_private(label, credential):
     value = json.dumps({label: credential, 'public': 'basic security products'})
     for cleaned in (trajectory.redact_text(value), training_capture.sanitize_training_value(value)[0]):
-        assert json.loads(cleaned) == {label: '[REDACTED]', 'public': 'basic security products'}
+        assert json.loads(cleaned) == {label: '[REDACTED]', 'public': '[REDACTED] products'}
         assert training_capture.sanitize_training_value(cleaned)[0] == cleaned
 
 
@@ -125,5 +125,61 @@ def test_serialized_authentication_headers_remain_private_and_parseable(depth, l
         decoded = cleaned
         for _ in range(depth):
             decoded = json.loads(decoded)
-        assert decoded == {label: '[REDACTED]', 'public': 'basic security products'}
+        assert decoded == {label: '[REDACTED]', 'public': '[REDACTED] products'}
+        assert training_capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+SERIALIZED_CREDENTIAL_KEYS = sorted(set(training_capture._EXTRA_SECRET_KEYS) | {
+    'authorization', 'proxy_authorization', 'Proxy-Authorization', 'api_key', 'apikey',
+    'API-KEY', 'api key', 'x_api_key', 'lease', 'lease_token', 'password', 'passwd',
+    'secret', 'client_secret', 'access_token', 'refresh_token', 'cookie', 'set_cookie',
+})
+
+
+@pytest.mark.parametrize('depth', [2, 3, 4])
+@pytest.mark.parametrize('label', SERIALIZED_CREDENTIAL_KEYS)
+@pytest.mark.parametrize('credential', ['Basic invalid-value!', 'Basic security',
+    'Basic dXNlcjpwYXN=', 'Bearer abcdefghijklmnop', 'x'])
+def test_all_serialized_sensitive_contexts_stay_private(depth, label, credential):
+    value = {label: credential, 'public': 'basic security products'}
+    for _ in range(depth):
+        value = json.dumps(value)
+    for cleaned in (trajectory.redact_text(value), training_capture.sanitize_training_value(value)[0]):
+        decoded = cleaned
+        for _ in range(depth):
+            decoded = json.loads(decoded)
+        assert decoded == {label: '[REDACTED]', 'public': '[REDACTED] products'}
+        assert training_capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+@pytest.mark.parametrize('depth', [1, 2, 3, 4])
+@pytest.mark.parametrize('label', ['not-password', 'public-secret', 'other-api_key', 'non-authorization'])
+def test_serialized_public_key_suffixes_do_not_create_credential_context(depth, label):
+    value = {label: 'basic security products'}
+    for _ in range(depth):
+        value = json.dumps(value)
+    assert trajectory.redact_text(value) == value
+    assert training_capture.sanitize_training_value(value) == (value, [])
+
+
+@pytest.mark.parametrize('depth', [2, 3, 4])
+@pytest.mark.parametrize('label', SERIALIZED_CREDENTIAL_KEYS)
+@pytest.mark.parametrize('credential', [
+    'prefix\\suffix Basic invalid-value!',
+    'quoted "inner" Basic invalid-value!',
+    '\\Basic invalid-value!', 'basic security',
+])
+def test_serialized_private_context_keeps_old_basic_protection_after_escapes(depth, label, credential):
+    value = {label: credential, 'public': 'basic security products'}
+    for _ in range(depth):
+        value = json.dumps(value)
+    for cleaned in (trajectory.redact_text(value), training_capture.sanitize_training_value(value)[0]):
+        assert 'invalid-value' not in cleaned and 'basic security' not in cleaned
+        decoded = cleaned
+        for _ in range(depth):
+            decoded = json.loads(decoded)
+        # The whole serialized string declares private material. Conservative
+        # Basic masking there matches main; unrelated strings remain exact.
+        assert decoded['public'] == '[REDACTED] products'
+        assert '[REDACTED]' in decoded[label]
         assert training_capture.sanitize_training_value(cleaned)[0] == cleaned

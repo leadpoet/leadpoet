@@ -33,10 +33,15 @@ _SENSITIVE_KEY_RE = re.compile(
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _BASIC_RE = re.compile(r"(?i)\bbasic\s+([A-Za-z0-9._~+/=-]+)")
-_QUOTED_AUTHORIZATION_VALUE_RE = re.compile(
-    r"(?i)(\b(?:authorization|proxy[-_]authorization)(?:\\*[\"'])\s*:\s*(?:\\*[\"']))"
-    r"([^\\\"'\r\n]+)"
+_QUOTED_SENSITIVE_CONTEXT_RE = re.compile(
+    r"(?i)((?:\\*[\"'])(?:api[-_ ]?key|x[-_]api[-_]key|(?:proxy[-_])?authorization|"
+    r"password|passwd|secret|client[-_]secret|access[-_ ]?token|refresh[-_ ]?token|"
+    r"lease(?:[-_ ]?token)?|cookie|set[-_]cookie|credentials?|private[-_]key|"
+    r"secret[-_]key|session[-_]token|x[-_]amz[-_](?:credential|signature|security[-_]token))"
+    r"(?:\\*[\"'])\s*:\s*(?:\\*[\"']))"
 )
+_QUOTED_SENSITIVE_VALUE_RE = re.compile(_QUOTED_SENSITIVE_CONTEXT_RE.pattern + r"([^\\\"'\r\n]+)")
+_PRIVATE_BASIC_RE = re.compile(r"(?i)\bbasic\s+[A-Za-z0-9._~+/=-]{8,}")
 _AUTHORIZATION_VALUE_RE = re.compile(
     r"(?i)(\b(?:authorization|proxy[-_]authorization)\s*[:=]\s*)"
     r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|(?:(?:basic|bearer)\s+)?[^\s,;\"']+)"
@@ -76,13 +81,16 @@ class TrajectoryError(ValueError):
 
 
 def redact_auth_schemes(text: str) -> str:
-    """Keep Basic prose; redact credentials and explicit authentication values."""
+    """Keep Basic prose; redact credentials and explicit sensitive values."""
 
-    # Explicit header/assignment context is private even when the supplied
-    # authentication value is malformed, short or not Base64.
-    text = _QUOTED_AUTHORIZATION_VALUE_RE.sub(lambda match: match[1] + "[REDACTED]", text)
+    # A serialized string containing a declared private field retains the
+    # previous conservative Basic mask, including after escaped quotes/slashes.
+    private_context = _QUOTED_SENSITIVE_CONTEXT_RE.search(text) is not None
+    text = _QUOTED_SENSITIVE_VALUE_RE.sub(lambda match: match[1] + "[REDACTED]", text)
     text = _AUTHORIZATION_VALUE_RE.sub(lambda match: match[1] + "[REDACTED]", text)
     text = _BEARER_RE.sub("[REDACTED]", text)
+    if private_context:
+        text = _PRIVATE_BASIC_RE.sub("[REDACTED]", text)
 
     def basic(match: re.Match[str]) -> str:
         token = match[1]

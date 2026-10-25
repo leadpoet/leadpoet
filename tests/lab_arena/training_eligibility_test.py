@@ -479,6 +479,20 @@ def _unsettled_selected_call(example, *, privacy=False):
             provenance["worker_receipt_ref"]["payload_sha256"] = artifact["payload_sha256"]
         for ref in provenance.get("agent_receipt_refs") or []:
             ref["payload_sha256"] = artifact["payload_sha256"]
+    score_id = "score-" + example["run_id"]
+    example["score_run_id"] = score_id
+    example["output_identity"] = {"document_hash": contracts.document_hash(example["output"])}
+    example["attempts"] = [{"run_id": score_id, "kind": "score", "status": "accepted"}]
+    for identity, document in (
+        (example["run_id"], example["input_snapshots"][example["run_id"]]["input"]),
+        (score_id, {"scored_run_id": example["run_id"],
+                    "companies": example["output"]["companies"]}),
+    ):
+        example["input_snapshots"][identity] = {
+            "input": document, "input_sha256": contracts.document_hash(document),
+            "privacy": {"redacted": False, "redactions": []},
+        }
+    example["competition_cost_eligibility"] = {"status": "available", "eligible": True}
     example["completeness"] = {
         "complete": False, "incomplete_reasons": sorted(reasons),
         "dimensions": {"context": True, "source_identity": True, "exact_inputs": True,
@@ -553,6 +567,97 @@ def test_unsettled_cost_and_exact_length_stop_count_one_incomplete_icp():
     assert result["eligible"] is True, result
     assert result["counts"]["complete_runs"] == 9
     assert result["counts"]["incomplete_runs"] == 1
+
+
+def _add_settled_exa_call(example):
+    """A synthetic Exa request with its own bound worker write and read."""
+    from copy import deepcopy
+    call = deepcopy(example["provider_calls"][1])
+    original_identity = call["call_identity"]
+    call.update(operation_id="exa.search", provider="deepline",
+                call_identity="settled-exa", action_sequence=9)
+    request = call["request"]
+    request["operation_id"] = "exa.search"
+    request["hashed_parameters"] = {"query": "synthetic company"}
+    call["request_hash"] = request["request_hash"] = contracts.document_hash(request["hashed_parameters"])
+    body = {"operation": "exa_search", "query": "synthetic company"}
+    request["outbound"] = {"method": "POST", "host": "code.deepline.com",
+                           "path": "/api/v2/integrations/exa_search/execute", "body": body,
+                           "body_sha256": contracts.document_hash(body)}
+    call["response"] = {"results": []}
+    digest = contracts.document_hash(call["response"])
+    wire = contracts.canonical_json(call["response"]).encode()
+    wire_hash = contracts.hash_bytes(wire)
+    call["response_sha256"] = digest
+    call["terminal_entry_id"] = 999
+    receipt = call["response_receipts"][0]
+    receipt.update(entry_id=999, response_ref={"field": "response", "entry_id": 999},
+                   response_sha256=digest, wire_body_sha256=wire_hash,
+                   wire_body_bytes=len(wire))
+    provenance = call["response_provenance"]
+    provenance["worker_received_receipt_entry_ids"] = [999]
+    provenance["worker_receipt_ref"]["ordinal"] = 99
+    provenance["agent_receipt_refs"][0]["id"] = "ack-exa"
+    artifact = example["worker_observation_artifacts"][example["run_id"]]
+    payload = artifact["payload"]
+    source_write = next(row for row in payload["response_receipts"]
+                        if row["call_identity"] == original_identity)
+    write = deepcopy(source_write)
+    write.update(ordinal=99, call_identity="settled-exa", operation_id="exa.search",
+                 action_sequence=9, body_sha256=wire_hash, body_bytes=len(wire))
+    payload["response_receipts"].append(write)
+    source_read = next(row for row in payload["agent_observations"]
+                       if row.get("kind") == "response_received"
+                       and (row.get("data") or {}).get("call_identity") == original_identity)
+    read = deepcopy(source_read)
+    read["id"] = "ack-exa"
+    read["data"].update(call_identity="settled-exa", body_sha256=wire_hash,
+                        body_bytes=len(wire))
+    payload["agent_observations"].append(read)
+    example["provider_calls"].append(call)
+    artifact["payload_sha256"] = contracts.document_hash(payload)
+    for item in example["provider_calls"]:
+        refs = item.get("response_provenance") or {}
+        if refs.get("worker_receipt_ref"):
+            refs["worker_receipt_ref"]["payload_sha256"] = artifact["payload_sha256"]
+        for ref in refs.get("agent_receipt_refs") or []:
+            ref["payload_sha256"] = artifact["payload_sha256"]
+    return seal(example)
+
+
+@pytest.mark.parametrize("field", ["request_hash", "response_sha256", "response_receipts"])
+def test_unsettled_cost_cannot_hide_broken_settled_exa(field):
+    examples = ten_selected_examples()
+    damaged = _add_settled_exa_call(_unsettled_selected_call(examples["run-9"]))
+    assert assess_ten(examples)["eligible"] is True
+    tool = damaged["provider_calls"][-1]
+    tool[field] = [] if field == "response_receipts" else "sha256:" + "0" * 64
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
+
+
+@pytest.mark.parametrize("field", ["request_hash", "response_sha256", "response_receipts"])
+def test_unsettled_cost_cannot_hide_broken_settled_model(field):
+    examples = ten_selected_examples()
+    damaged = _unsettled_selected_call(examples["run-9"])
+    model = damaged["provider_calls"][1]
+    model[field] = [] if field == "response_receipts" else "sha256:" + "0" * 64
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
+
+
+@pytest.mark.parametrize("damage", [
+    lambda e: e["output_identity"].update(document_hash="sha256:" + "0" * 64),
+    lambda e: e.update(score_run_id="wrong-score"),
+    lambda e: e["input_snapshots"].pop(e["run_id"]),
+    lambda e: e["input_snapshots"][e["score_run_id"]]["input"].update(scored_run_id="wrong-run"),
+])
+def test_unsettled_cost_cannot_hide_unbound_score_or_output(damage):
+    examples = ten_selected_examples()
+    damaged = _unsettled_selected_call(examples["run-9"])
+    damage(damaged)
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
 
 
 def test_readable_projection_must_retain_paths_to_raw_provider_text(monkeypatch):

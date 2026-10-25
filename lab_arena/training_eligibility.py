@@ -133,6 +133,7 @@ def _selected_cost_gap_verified(example, run_id):
             or set(by_dimension.get("research_process") or []) != reasons
             or ("response_privacy_nonexact" in reasons
                 and not _documented_selected_privacy_gap(example, run_id))
+            or training_thinking._selected_input_output_binding(example) is None
             or not _all_model_routes_verified(example, run_id)):
         return False
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
@@ -172,8 +173,6 @@ def _selected_cost_gap_verified(example, run_id):
                                      and state["route_reviewed"] and state["provider_route_verified"])
                     if not privacy_gap and not truncated:
                         return False
-            if call not in cost_calls and not gaps:
-                continue
             request = call.get("request") or {}
             provenance = call.get("response_provenance") or {}
             response = call.get("response")

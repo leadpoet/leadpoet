@@ -662,6 +662,41 @@ def _delivered_response(call: Mapping[str, Any], digest: str) -> Mapping[str, An
     return values[0]
 
 
+def _selected_input_output_binding(example: Mapping[str, Any]) -> set[str] | None:
+    """Verify the accepted score, output hash, and both exact input snapshots."""
+    run_id = example.get("run_id")
+    score_id = example.get("score_run_id")
+    output = example.get("output")
+    judgment = example.get("judgment")
+    output_identity = example.get("output_identity") or {}
+    snapshots = example.get("input_snapshots") or {}
+    if (not isinstance(run_id, str) or not isinstance(score_id, str)
+            or not isinstance(output, Mapping) or not isinstance(judgment, Mapping)
+            or type(judgment.get("per_icp_score")) not in (int, float)
+            or output_identity.get("document_hash") != contracts.document_hash(output)):
+        return None
+    attempts = example.get("attempts") or []
+    score_runs = [row for row in attempts if row.get("run_id") == score_id
+                  and row.get("kind") == "score" and row.get("status") == "accepted"]
+    if len(score_runs) != 1:
+        return None
+    score_ids = {row.get("run_id") for row in attempts if row.get("kind") == "score"
+                 and isinstance(row.get("run_id"), str)}
+    for identity in (run_id, score_id):
+        snapshot = snapshots.get(identity) or {}
+        document = snapshot.get("input")
+        if (not isinstance(document, Mapping)
+                or (snapshot.get("privacy") or {}).get("redacted") is not False
+                or snapshot.get("input_sha256") != contracts.document_hash(document)):
+            return None
+    score_input = snapshots[score_id]["input"]
+    if (score_input.get("scored_run_id") != run_id
+            or score_input.get("companies") != output.get("companies")
+            or (example.get("competition_cost_eligibility") or {}).get("status") != "available"):
+        return None
+    return score_ids
+
+
 def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | None:
     """Return attributable judge-only gaps, or reject an inexact selected replay.
 
@@ -693,36 +728,10 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
             or dimensions.get("research_process") is not False
             or dimensions.get("costs") is not ("provider_cost_unresolved" not in reasons)):
         return None
-    run_id = example.get("run_id")
-    score_id = example.get("score_run_id")
-    output = example.get("output")
-    judgment = example.get("judgment")
-    output_identity = example.get("output_identity") or {}
-    snapshots = example.get("input_snapshots") or {}
-    if (not isinstance(run_id, str) or not isinstance(score_id, str)
-            or not isinstance(output, Mapping) or not isinstance(judgment, Mapping)
-            or type(judgment.get("per_icp_score")) not in (int, float)
-            or output_identity.get("document_hash") != contracts.document_hash(output)):
+    score_ids = _selected_input_output_binding(example)
+    if score_ids is None:
         return None
-    attempts = example.get("attempts") or []
-    score_runs = [row for row in attempts if row.get("run_id") == score_id
-                  and row.get("kind") == "score" and row.get("status") == "accepted"]
-    if len(score_runs) != 1:
-        return None
-    score_ids = {row.get("run_id") for row in attempts if row.get("kind") == "score"
-                 and isinstance(row.get("run_id"), str)}
-    for identity in (run_id, score_id):
-        snapshot = snapshots.get(identity) or {}
-        document = snapshot.get("input")
-        if (not isinstance(document, Mapping)
-                or (snapshot.get("privacy") or {}).get("redacted") is not False
-                or snapshot.get("input_sha256") != contracts.document_hash(document)):
-            return None
-    score_input = snapshots[score_id]["input"]
-    if (score_input.get("scored_run_id") != run_id
-            or score_input.get("companies") != output.get("companies")
-            or (example.get("competition_cost_eligibility") or {}).get("status") != "available"):
-        return None
+    run_id = example["run_id"]
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
     if (payload.get("complete") is not True

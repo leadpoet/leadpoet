@@ -1,58 +1,121 @@
 {
   "accepted_baseline_executions": 10,
   "accepted_candidate_executions": 10,
-  "accepted_scores": 0,
+  "accepted_scores": 20,
+  "activation_ready": false,
+  "all_failed_attempts_recovered": true,
   "benchmark_icps": 10,
   "budget_caps_usd": {
     "openrouter": 10,
-    "search_scraping": 5
+    "search_scraping": 8
   },
   "budget_charges_plus_unresolved_reservations_usd": {
-    "openrouter": 1.029009,
-    "search_scraping": 3.05975
+    "openrouter": 2.751869,
+    "search_scraping": 5.5865
   },
   "budget_is_final_invoice": false,
-  "candidate_icp0_readback": {
-    "clean_committed_source": true,
-    "complete_worker_capture": true,
-    "exact_agent_receipts": true,
-    "final_judgment_available": false,
-    "full_thinking_calls": 5,
-    "required_phase_coverage": true
+  "ci": {
+    "all_failures_classified": false,
+    "current_check_not_yet_green": true,
+    "observed_errors": 67,
+    "observed_failures": 226,
+    "prior_run_cancelled_before_full_suite": true,
+    "prior_run_id": 40141397510,
+    "reached_pr_changed_cases_failed_or_errored": 0,
+    "reached_pr_changed_cases_passed": 229
   },
-  "corrected_test_fixture_defect": "The in-process E2E API lacked signal_judgment and quota_usage controls; real worker/socket/PostgreSQL regression now passes.",
-  "failed_score_attempts": 8,
+  "failed_execute_attempts": 2,
+  "failed_score_attempts": 1,
   "merge_or_deploy": false,
   "model": "deepseek/deepseek-v4.1-flash-1017",
-  "paid_attempt_used_complete_current_schema": false,
-  "preserved_for_resume": [
-    "PostgreSQL custom dump",
-    "private ledger",
-    "exact referenced private objects",
-    "agent/scorer private artifacts"
-  ],
-  "privacy_limit": "Some exports contain explicit privacy redactions and remain excluded by the strict dataset gate. They were not rewritten to force eligibility.",
+  "original_incomplete_reasons": {
+    "agent_task_state_unverified": 2,
+    "provider_cost_unresolved": 1,
+    "request_privacy_nonexact": 2,
+    "response_privacy_nonexact": 9
+  },
+  "original_strict_exports": {
+    "baseline_eval": 11,
+    "baseline_total": 16,
+    "baseline_train": 5,
+    "candidate_eval": 9,
+    "candidate_icps_with_complete_strict_record": 4,
+    "candidate_total": 19,
+    "candidate_train": 10,
+    "raw_complete_examples": 9,
+    "raw_incomplete_examples": 11,
+    "total": 35,
+    "trainable_inputs_with_redaction_markers": 0
+  },
+  "paid_attempt_used_complete_current_schema": true,
+  "private_preservation": {
+    "dump_failure": "Private wrapper used pg_dump15 against PostgreSQL17; original final dump is empty. The local database has been removed.",
+    "exact_referenced_objects_saved": true,
+    "full_postgresql_dump_valid": false,
+    "ledger_saved": true,
+    "prevention": "Private wrapper now chooses pg_dump from the same installation as the test server and validates the archive. Reproduced old-client failure and matching-client success in an unpaid disposable database.",
+    "published_ranking_saved": true,
+    "raw_and_readable_exports_saved": true
+  },
   "production_actions": false,
+  "publication": {
+    "both_entries_eligibility_reason": "training_data_incomplete",
+    "cost_summary_is_private_projection_only": true,
+    "ineligibility_did_not_cancel_round": true,
+    "king_decision_matches": true,
+    "public_ranking_entries": 2,
+    "shared_ranking_fields_match": true,
+    "stored_ranking_entries": 2
+  },
+  "quality": {
+    "baseline_mean_raw_score": 0.0,
+    "candidate_mean_raw_score": 0.0,
+    "competitive_baseline_quality_demonstrated": false,
+    "judged_companies": 17,
+    "qualified_companies": 0
+  },
   "real_10_icp_publication_and_training_export_passed": false,
-  "real_scoring_blockers": [
-    "Configured Scrapingdog test credentials return authorization errors.",
-    "Deepline-managed Firecrawl reports THIRD_PARTY_DATA_ENRICHMENT_NOT_ENABLED."
-  ],
   "regressions": {
-    "existing_declared_field_skips": 2,
-    "final_current_schema_publication_passed": 4,
-    "homepage_provenance_passed": 24,
-    "post_main_integration_passed": 67,
-    "protocol_worker_reviewer_sql_passed": 854,
-    "quota_passed": 27,
-    "retry_sql_passed": 16,
+    "completed_call_replay_no_second_provider_charge_passed": true,
+    "current_schema_publication_promotion_review_export_replay_passed": 131,
+    "eligible_peer_local_git_promotion_and_next_baseline_adoption_passed": true,
+    "policy_off_protocol_regressions_passed": true,
     "stopped_contender_keeps_round_operational": true
   },
-  "round_status": "stage1_scoring",
-  "schema_fixture_correction": "Added 35 exact guarded migrations, including omitted independent branches before 538. Current service publication passes; five function definitions and four indexes independently match expected state. Dated data repairs 535 and 542-546 excluded. Paid trial must resume or rerun with corrected authority.",
+  "remaining_exclusions": [
+    "Genuine privacy redactions in selected execution or related judge data; privacy checks were not relaxed.",
+    "One Scrapingdog call remains in an uncertain cost state.",
+    "Candidate ICP4 returned a completed visible answer with null reasoning despite the approved reasoning request; the full-thinking exclusion is valid.",
+    "Baseline ICP9 has inherited literal redaction markers in model context; its strict replay is nonexact."
+  ],
+  "retry_phase_fix": {
+    "cause": "Failed earlier executions never reached admission/final phases, but export required them anyway.",
+    "failed_attempt_receipts_observations_and_costs_still_required": true,
+    "focused_tests_passed": 183,
+    "independent_root_tests_passed": 72,
+    "new_authoritative_raw_export_produced": false,
+    "red_before_green_regression": true,
+    "selected_accepted_execution_still_requires_all_phases": true,
+    "untouched_candidate_icp0_and_baseline_icp4_worker_snapshots_verified": true
+  },
+  "round_id": "arena-2026-10-25",
+  "round_status": "published",
   "schema_version": "leadpoet.arena.full_thinking_e2e_status.v1",
+  "scope_limit": "This paid test used genuine source review, model calls, search, scraping, execution, judging and PostgreSQL publication. It did not produce a qualified champion or prove a deployable baseline. Local Git promotion and next-baseline adoption are separately verified with controlled scoring.",
   "source_archive_sha256": "48e6baa8e27125cd4c83763389373cc9237ccc7950fbb2c4152fbb902ea4e3c0",
   "source_review": "model_directed",
-  "status": "blocked_before_complete_scoring",
-  "test_source_commit": "d5539cd1e"
+  "status": "published_training_gate_failed",
+  "stored_readback": {
+    "checker_errors": {},
+    "execution_model_acknowledgment_chains": 103,
+    "linked_accepted_scores": 20,
+    "provider_call_records_checked": 622,
+    "raw_exports": 20,
+    "readable_markdown_identities": 20,
+    "readable_views": 20,
+    "trace_context_references_checked": 1633,
+    "trace_events_checked": 8973
+  },
+  "subsequent_export_fix_commit": "ba5e28779",
+  "test_source_commit": "7441b8b7af16694d961713f009a055314ce18d9b"
 }

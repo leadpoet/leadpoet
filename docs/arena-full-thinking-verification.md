@@ -346,3 +346,75 @@ The fresh repeat uses the corrected committed source and the same cumulative
 spend ledger. The user approved raising only the combined search/scraping limit
 to $8; OpenRouter remains capped at $10. Genuine privacy exclusions remain
 exclusions and are not relaxed to obtain a passing test.
+
+## Fresh full workflow and final readback — 2026-10-25
+
+The fresh paid test ran on clean commit `7441b8b7a` with the current migration
+fixture. Both candidate and baseline completed all ten ICP executions and all
+twenty linked real scores. Two execution attempts failed output validation and
+one judge attempt failed malformed-response checks; all three recovered through
+normal retries. None canceled the round. The actual PostgreSQL round published.
+Both stored and public ranking entries have identical shared fields and the same
+king decision. The private `cost_summary` is intentionally absent from the public
+projection. Both participants were marked `training_data_incomplete`; their
+measured scores remained published.
+
+Independent readback, repeated by the owning agent, verified all twenty raw
+exports, twenty readable JSON/Markdown views, 8,973 trace events, 1,633 context
+references, 622 provider-call records, all 103 execution model acknowledgment
+chains, and all twenty linked accepted scores. The checker reported no hash,
+link, view, or ranking-field errors. The original strict datasets contain 19
+candidate records (10 train, 9 eval) and 16 baseline records (5 train, 11 eval).
+These are stored records, not proof of successful research: all twenty measured
+scores are zero, and none of the seventeen judged companies qualified. This
+bounded one-company research submission is not a validated competitive baseline.
+
+The strict all-ICP acceptance criterion failed. Nine raw examples are complete;
+eleven are incomplete. Nine have privacy exclusions, one of those also has an
+unresolved Scrapingdog cost, and two have the failed-attempt phase bug described
+below. Candidate ICP4 has a complete visible answer but no returned thinking
+despite the verified full-thinking request, so its exclusion is correct. Baseline
+ICP9 has inherited redaction markers in its model context and cannot be treated
+as exact replay. Some privacy exclusions come only from related judge calls;
+selected model thinking is still saved, but the current whole-trajectory policy
+excludes that example. No privacy or eligibility check was relaxed to pass.
+
+The fresh evidence exposed a second retry interaction. An earlier failed
+execution stopped before admission/final snapshots, while its successful retry
+stored every required phase. Requiring successful completion phases from that
+failed attempt incorrectly marked the whole export incomplete. Commit
+`ba5e28779` requires those phases from the selected accepted execution and retains
+all prior-attempt receipt, observation, source, privacy, and cost checks. Its
+regression failed before the fix; 183 focused tests passed afterward. Independent
+root checks passed 72 export/eligibility/thinking tests. Offline checks against
+the untouched candidate ICP0 and baseline ICP4 worker snapshots verify the
+correction. Missing selected-run phases and tampered prior receipts still fail.
+The earlier `b6cc4212a` fix also prevents strict model targets from selecting
+provider calls from a superseded failed attempt.
+
+The original exports and manifests remain unchanged. The optional final full
+PostgreSQL backup failed because the private test wrapper used `pg_dump15`
+against PostgreSQL17. The local database was then removed. Raw exports, readable
+views, the exact referenced object store, the private ledger, and the independent
+publication snapshot were preserved, but **no corrected authoritative raw export
+was produced after the phase fix**. The wrapper now selects the backup tool from
+the test server's installation and validates the archive. An unpaid disposable
+database reproduced the old-client version failure and passed the matching-client
+backup/readback check. This prevention does not recover the missing old backup.
+
+Final cumulative charges plus unresolved reservations are **$2.751869 OpenRouter**
+and **$5.586500 combined search/scraping**, within the authorized $10 and $8 caps.
+There was no budget reset. These ledger bounds are not final provider invoices.
+No further paid calls, production writes, merge to main, or deployment occurred.
+
+The prior broad CI run reached about 35% of the suite before cancellation, with
+226 failures and 67 errors. All 229 reached cases in PR-changed test files passed.
+Four more failure categories were independently reproduced on both the isolated
+base and PR checkout: company diagnostics, publication judgment binding, cost
+eligibility test mocks, and a saved scorer case. Relevant files are unchanged on
+current main. The remaining errors and unrun portion are not classified; this is
+not a green full CI result.
+
+**Activation remains off and this PR remains a draft.** Publication and capture
+readback are verified. A complete ten-ICP strict training pass, a competitive
+compatible baseline, and green required checks are still outstanding.

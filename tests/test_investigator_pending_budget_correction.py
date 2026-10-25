@@ -14,6 +14,7 @@ from scripts.arena_reviewer_budget_seam import (
     BudgetSeamError, _NEW, _OLD, convert_budget_seam,
 )
 from tests.test_company_evidence_investigator import _finding
+from tests.lab_arena.reviewer_rejected_final_packet_seam_test import frozen_reviewer_source
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "qualification/scoring/company_evidence_investigator.py"
@@ -24,7 +25,8 @@ ATTRIBUTE_QUOTE = "Acme manages assets on behalf of individual and professional 
 
 
 def _source(*, repaired):
-    source = SOURCE.read_bytes()
+    # This exact-source seam fixture models the historical reviewer contract.
+    source = frozen_reviewer_source(SOURCE.read_bytes())
     assert source.count(_NEW.encode()) == 1
     return source if repaired else source.replace(_NEW.encode(), _OLD.encode(), 1)
 

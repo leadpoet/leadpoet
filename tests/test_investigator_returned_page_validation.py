@@ -30,7 +30,7 @@ def _pages(count, *, url=PLATFORM_URL, text=PLATFORM_TEXT):
     return pages
 
 
-@pytest.mark.parametrize("count", [3, 4, 7])
+@pytest.mark.parametrize("count", [3, 4, 7, 8])
 def test_matched_source_survives_other_returned_pages(count):
     sink = {}
     result = _fit_result(decision=COMPANY_FIT_UNAVAILABLE)
@@ -44,11 +44,11 @@ def test_matched_source_survives_other_returned_pages(count):
     assert retry["pages"] == sink
     # Extra uncited pages do not become retry context.
     assert investigator.MAX_PREFETCHED_PAGES == 3
-    assert investigator.MAX_RETURNED_FETCHED_PAGES == 7
+    assert investigator.MAX_RETURNED_FETCHED_PAGES == 8
 
 
 def test_returned_count_is_checked_before_cited_source_selection():
-    pages = _pages(8)
+    pages = _pages(9)
     assert investigator._validated_returned_fetched_pages(
         pages, submitted_source_urls=(PLATFORM_URL,),
     ) == ({}, {})
@@ -59,7 +59,7 @@ def test_returned_count_is_checked_before_cited_source_selection():
     assert sink == {}
 
 
-@pytest.mark.parametrize("count", [4, 7])
+@pytest.mark.parametrize("count", [4, 7, 8])
 def test_returned_bound_does_not_change_incoming_prefetch_bound(count):
     pages = _pages(count)
     assert investigator._validated_returned_fetched_pages(
@@ -151,7 +151,7 @@ def test_targeted_projection_requires_independent_identity_and_matched_quote(uns
     assert result.details == original
 
 
-@pytest.mark.parametrize("count", [4, 7, 8])
+@pytest.mark.parametrize("count", [4, 7, 8, 9])
 def test_reopened_stage_requires_trigger_proof_with_other_returned_pages(count):
     trigger = "https://news.example/doctronic-raises-series-b"
     base = _company(name="Doctronic", website="https://doctronic.ai")
@@ -175,7 +175,7 @@ def test_reopened_stage_requires_trigger_proof_with_other_returned_pages(count):
     )
 
 
-@pytest.mark.parametrize("count", [4, 7, 8])
+@pytest.mark.parametrize("count", [4, 7, 8, 9])
 def test_headcount_requires_exact_profile_proof_with_other_returned_pages(count):
     output = deepcopy(_investigation())
     finding = output["claims"]["headcount"]
@@ -191,7 +191,7 @@ def test_headcount_requires_exact_profile_proof_with_other_returned_pages(count)
     )
 
 
-@pytest.mark.parametrize("count", [4, 7])
+@pytest.mark.parametrize("count", [4, 7, 8])
 def test_outer_retry_reuses_matched_source_and_rejudges_same_quality(monkeypatch, count):
     calls = []
     decisions = []

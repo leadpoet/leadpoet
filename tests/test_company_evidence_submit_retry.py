@@ -313,7 +313,7 @@ def test_normal_reasoning_request_uses_pinned_product_model(
 
 
 @pytest.mark.parametrize("response_exhausted", [False, True])
-def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
+def test_forced_positive_submit_uses_medium_and_keeps_format_retry_low(
     monkeypatch, response_exhausted,
 ):
     monkeypatch.setattr(
@@ -343,20 +343,21 @@ def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
     assert all(
         request[0]["tool_choice"] == {
             "type": "function", "function": {"name": "submit_findings"},
-        } and request[0]["reasoning"] == {"effort": "low"}
-        for request in requests
+        } and request[0]["reasoning"] == {"effort": "medium" if index == 0 else "low"}
+        and request[0]["max_tokens"] == (4096 if index == 0 else 3000)
+        for index, request in enumerate(requests)
     )
     payload, normalized, outbound = requests[0]
     assert payload["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
     assert payload["tool_choice"] == {
         "type": "function", "function": {"name": "submit_findings"},
     }
-    assert payload["max_tokens"] == normalized["max_tokens"] == 3000
+    assert payload["max_tokens"] == normalized["max_tokens"] == 4096
     assert payload["reasoning"] == normalized["reasoning"] == (
         outbound["reasoning"]
-    ) == {"effort": "low"}
+    ) == {"effort": "medium"}
     if response_exhausted:
-        # Low effort is a prevention measure, not a fabricated verifier pass.
+        # Repeated empty output cannot become a fabricated verifier pass.
         assert result["claims"] == {}
         assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
     else:

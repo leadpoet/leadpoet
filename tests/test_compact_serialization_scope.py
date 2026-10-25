@@ -102,6 +102,10 @@ def test_serialization_retry_scopes_only_rejected_targets_after_research(monkeyp
                                     "registrable_dns_domain": "acme.example"},
     ))
     assert len(requests) == 5, (result, validations)
+    assert requests[3]["max_tokens"] == 3000
+    assert requests[3]["reasoning"] == {"effort": "low"}
+    assert requests[-1]["max_tokens"] == 4096
+    assert requests[-1]["reasoning"] == {"effort": "medium"}
     assert validations == [TARGETS, PENDING]
     correction_tool = requests[-1]["tools"][0]["function"]
     assert len(requests[-1]["tools"]) == 1

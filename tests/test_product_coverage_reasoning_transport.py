@@ -110,8 +110,13 @@ def test_effort_survives_real_transport_and_generic_output_length_retry(
 @pytest.mark.parametrize("mode", [
     "generic_at_cap", "generic_below_cap", "serialization_at_cap",
     "serialization_below_cap", "forced_final", "late_final", "deadline_exhausted", "repeated_exhaustion",
+    "forced_final_nonproduct", "late_final_nonproduct",
+    "forced_final_nonpositive", "late_final_nonpositive",
 ])
 def test_per_request_budget_drives_repairs_and_final_admission(monkeypatch, mode):
+    product = "_nonproduct" not in mode
+    positive = "_nonpositive" not in mode
+    mode = mode.replace("_nonproduct", "").replace("_nonpositive", "")
     clock = SimpleNamespace(now=0.0)
     clock.monotonic = lambda: clock.now
     requests = []
@@ -158,7 +163,7 @@ def test_per_request_budget_drives_repairs_and_final_admission(monkeypatch, mode
                 return Response({"choices": [{"finish_reason": "stop", "message": message}],
                                  "usage": {"completion_tokens": used_tokens}})
             else:
-                raw = finding("VERIFIED")
+                raw = finding("VERIFIED" if product else None)
                 message = {"tool_calls": [{"id": "submit", "type": "function", "function": {
                     "name": "submit_findings", "arguments": jsonlib.dumps({"findings": [raw]}),
                 }}]}
@@ -176,19 +181,23 @@ def test_per_request_budget_drives_repairs_and_final_admission(monkeypatch, mode
     monkeypatch.setattr(inv, "_search_web", search)
     result = asyncio.run(inv.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},
-        targets=("industry",), requested_industry="Software", requested_product_service=CRITERION,
-        positive_semantic_review=True, prior_observations={"submitted_source_urls": [URL]},
+        targets=("industry",), requested_industry="Software", requested_product_service=CRITERION if product else "",
+        positive_semantic_review=positive, prior_observations={"submitted_source_urls": [URL]},
         verified_homepage_identity={"normalized_name": "Acme", "registrable_dns_domain": "acme.example"},
         prefetched_pages={URL: {"final_url": URL, "text": QUOTE}},
     ))
     expected_complete = mode in {"generic_at_cap", "serialization_at_cap", "forced_final", "late_final"}
     assert result.get("_completed_submit", False) is expected_complete
-    assert requests[0]["max_tokens"] == 4096
-    assert requests[0]["reasoning"] == {"effort": "medium"}
+    assert requests[0]["max_tokens"] == (4096 if product and positive else 3000)
+    if product:
+        assert requests[0]["reasoning"] == {"effort": "medium" if positive else "low"}
+    else:
+        assert "reasoning" not in requests[0]
     assert len(requests) == (1 if mode.endswith("below_cap") or mode == "deadline_exhausted" else 2)
     if len(requests) == 2:
-        assert requests[1]["max_tokens"] == 3000
-        assert requests[1]["reasoning"] == {"effort": "low"}
+        semantic_final = product and positive and mode in {"forced_final", "late_final"}
+        assert requests[1]["max_tokens"] == (4096 if semantic_final else 3000)
+        assert requests[1]["reasoning"] == {"effort": "medium" if semantic_final else "low"}
         if mode in {"serialization_at_cap", "forced_final", "late_final"}:
             assert requests[1]["tool_choice"] == {
                 "type": "function", "function": {"name": "submit_findings"},

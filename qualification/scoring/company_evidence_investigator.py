@@ -1420,6 +1420,39 @@ def _validated_server_pages(
     return pages, final_urls
 
 
+
+def _requested_url_for_citation(
+    value: Any,
+    *,
+    fetched_pages: Mapping[str, str],
+    fetched_final_urls: Optional[Mapping[str, str]],
+) -> Any:
+    """Resolve one observed final URL to its unique authoritative request key.
+
+    Keep the actual requested/final pair for all later source and identity
+    checks. Do not create page aliases, guess host variants, or choose between
+    multiple fetched requests that reached the same final URL.
+    """
+    if not isinstance(value, str) or value in fetched_pages:
+        return value
+    if _safe_https_url(value) != value or not isinstance(fetched_final_urls, Mapping):
+        return value
+    candidates = []
+    for requested, final in fetched_final_urls.items():
+        if (final != value or not isinstance(requested, str)
+                or _safe_https_url(requested) != requested
+                or not isinstance(fetched_pages.get(requested), str)
+                or not fetched_pages[requested]):
+            continue
+        try:
+            if public_http_url(requested) != requested or public_http_url(value) != value:
+                continue
+        except (TypeError, ValueError):
+            continue
+        candidates.append(requested)
+    return candidates[0] if len(candidates) == 1 else value
+
+
 def _surface_span(value: Any) -> str:
     if not isinstance(value, str):
         return ""
@@ -3353,6 +3386,15 @@ def _validated_findings(
         status = raw.get("status")
         if target not in targets or target in findings or status not in STATUSES:
             return None
+        # Normalize only a server-observed final citation back to its actual
+        # fetched request key, including whole-product supporting bindings.
+        raw = dict(raw)
+        for field in ("evidence_url", "supporting_evidence_url_1", "supporting_evidence_url_2"):
+            if field in raw:
+                raw[field] = _requested_url_for_citation(
+                    raw[field], fetched_pages=fetched_pages,
+                    fetched_final_urls=fetched_final_urls,
+                )
         finding = {
             "target": target,
             "status": status,
@@ -5231,15 +5273,14 @@ async def investigate_company_evidence(
                     )
                 ):
                     raise ValueError("reasoning_tool_arguments_malformed")
-                ordinary_product_review = bool(
+                semantic_product_review = bool(
                     positive_semantic_review
                     and "industry" in requested_targets
                     and requested_product_service.strip()
-                    and not (force_submit or required_tool == "submit_findings"
-                             or serialization_retry_request or output_budget_retry_request)
+                    and not (serialization_retry_request or output_budget_retry_request)
                 )
                 request_max_tokens = (
-                    PRODUCT_REVIEW_MAX_TOKENS if ordinary_product_review else REASONING_MAX_TOKENS
+                    PRODUCT_REVIEW_MAX_TOKENS if semantic_product_review else REASONING_MAX_TOKENS
                 )
                 status, body = await _post_openrouter_json(
                     session,
@@ -5297,13 +5338,13 @@ async def investigate_company_evidence(
                         "temperature": 0.0,
                         "max_tokens": request_max_tokens,
                         **(
-                            {"reasoning": {"effort": "medium" if ordinary_product_review else "low"}}
+                            {"reasoning": {"effort": "medium" if semantic_product_review else "low"}}
                             if (
                                 positive_semantic_review
                                 and (
-                                    # Ordinary product reviews use bounded medium
-                                    # reasoning; final/serialization/retry turns
-                                    # retain low effort and the 3,000-token cap.
+                                    # Product semantic judgments, including final
+                                    # and correction turns, use bounded medium.
+                                    # Format/output retries retain low/3,000.
                                     ("industry" in requested_targets
                                      and requested_product_service.strip())
                                     or serialization_retry_request

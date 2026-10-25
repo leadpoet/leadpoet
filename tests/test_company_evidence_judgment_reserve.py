@@ -147,7 +147,10 @@ def test_late_tool_is_not_dispatched_and_loaded_evidence_is_judged(
     assert requests[0].get("reasoning") == (
         {"effort": "medium"} if positive_semantic_review else {"effort": "low"}
     )
-    assert requests[1].get("reasoning") == {"effort": "low"}
+    assert requests[1].get("reasoning") == (
+        {"effort": "medium"} if positive_semantic_review else {"effort": "low"}
+    )
+    assert requests[1]["max_tokens"] == (4096 if positive_semantic_review else 3000)
     assert all(request["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
                for request in requests)
     feedback = json.loads(requests[1]["messages"][-1]["content"])
@@ -267,7 +270,10 @@ def test_reserved_judgment_cannot_turn_missing_evidence_positive(
     assert requests[0].get("reasoning") == (
         {"effort": "medium"} if positive_semantic_review else {"effort": "low"}
     )
-    assert requests[1].get("reasoning") == {"effort": "low"}
+    assert requests[1].get("reasoning") == (
+        {"effort": "medium"} if positive_semantic_review else {"effort": "low"}
+    )
+    assert requests[1]["max_tokens"] == (4096 if positive_semantic_review else 3000)
     assert all(request["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
                for request in requests)
     correction = json.loads(requests[2]["messages"][-1]["content"])

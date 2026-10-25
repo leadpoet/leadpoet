@@ -579,6 +579,40 @@ def test_exact_truncated_provider_reply_counts_as_one_incomplete_icp():
     assert "training_coverage_incomplete" in assess_ten(examples)["reasons"]
 
 
+def test_all_exact_truncated_replies_count_as_one_incomplete_icp():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    for index in (0, 1, 2):
+        damaged["provider_calls"][index]["response"]["choices"][0]["finish_reason"] = "length"
+        refresh_response_links(damaged, index)
+    result = assess_ten(examples)
+    assert result["eligible"] is True, result
+    assert result["counts"]["complete_runs"] == 9
+    strict, _ = training_thinking.build(
+        list(examples.values()), training_steps.Rules(production_rounds_only=False))
+    strict_runs = {ref["run_id"] for split in ("train", "eval")
+                   for record in strict[split] for ref in record["source_refs"]}
+    assert strict_runs == set(examples) - {"run-9"}
+    assert assess_ten(examples, percent=100)["eligible"] is False
+
+
+@pytest.mark.parametrize("damage", ["route", "receipt", "source"])
+def test_all_truncated_replies_still_require_route_receipt_and_source(damage):
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    for index in (0, 1, 2):
+        damaged["provider_calls"][index]["response"]["choices"][0]["finish_reason"] = "length"
+        refresh_response_links(damaged, index)
+    if damage == "route":
+        damaged["provider_calls"][1]["reasoning_capture"]["provider_route"] = "wrong-route"
+    elif damage == "receipt":
+        damaged["provider_calls"][1]["response_receipts"][0]["response_sha256"] = contracts.hash_bytes(b"wrong")
+    else:
+        damaged["source"]["sha256"] = contracts.hash_bytes(b"wrong archive")
+    seal(damaged)
+    assert assess_ten(examples)["eligible"] is False
+
+
 def test_truncated_reply_with_wrong_route_remains_ineligible():
     examples = ten_selected_examples()
     damaged = examples["run-9"]

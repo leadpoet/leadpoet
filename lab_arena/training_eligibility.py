@@ -484,6 +484,11 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     reasons.extend(run_reasons)
                 else:
                     soft = {"provider_response_truncated"}
+                    if ("provider_response_truncated" in run_reasons
+                            and set(run_reasons) <= {"provider_response_truncated", "full_thinking_call_missing"}):
+                        # Every selected model reply without full thinking was
+                        # proven to end at the provider's length limit above.
+                        soft.add("full_thinking_call_missing")
                     soft |= ({"full_thinking_unavailable", "full_thinking_call_missing"}
                             if _only_benign_empty_thinking(example, run_id) else set())
                     if run_reasons == ["trajectory_evidence_incomplete"]:

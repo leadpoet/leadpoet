@@ -1,3 +1,16 @@
+## Scoped production authorization: October 25 Arena full cycle
+
+On 2026-10-24 the user authorized monitoring the complete October 25 Arena
+cycle, fixing confirmed general failures, focused regression tests, safe push
+and merge, canonical deployment and live verification. This includes the narrow
+finish-review RPC diagnostic allowlist repair. The coordinating task owns
+production actions. Preserve submitted sources, frozen inputs and models,
+accepted work, qualification and scoring rules, provider privacy and billing,
+review claims and retry limits, rewards, weights and concurrent work. Do not
+fabricate reviewer results, bypass review gates, or change historical outcomes.
+Authority ends after the October 25 full cycle and deployed fixes are verified.
+Keep AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 24 eight-point champion promotion
 
 On 2026-10-24 the user explicitly required at least an eight-point improvement

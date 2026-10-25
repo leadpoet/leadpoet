@@ -709,6 +709,129 @@ def _selected_input_output_binding(
     return score_ids
 
 
+def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -> frozenset[str] | None:
+    """Use per-run export attribution only when the selected execution is exact."""
+    proof = example.get("completeness") or {}
+    dimensions = proof.get("dimensions") or {}
+    by_dimension = proof.get("reasons_by_dimension") or {}
+    if any(dimensions.get(name) is not True or by_dimension.get(name) != []
+           for name in ("context", "source_identity", "exact_inputs", "input_output_label")):
+        return None
+    if (_selected_input_output_binding(example) is None
+            or not isinstance(example.get("related_run_gap_attribution"), Mapping)):
+        return None
+    run_id = example["run_id"]
+    rows = example["related_run_gap_attribution"]
+    attempts = {row.get("run_id"): row for row in example.get("attempts") or []
+                if isinstance(row, Mapping) and isinstance(row.get("run_id"), str)}
+    if set(rows) != set(attempts) or run_id not in rows or len(attempts) != len(example.get("attempts") or []):
+        return None
+    research, costs = set(), set()
+    for source_id, row in rows.items():
+        attempt = attempts[source_id]
+        if (not isinstance(row, Mapping) or row.get("kind") != attempt.get("kind")
+                or row.get("status") != attempt.get("status")
+                or not isinstance(row.get("research_process_gaps"), list)
+                or not isinstance(row.get("cost_gaps"), list)):
+            return None
+        source_research = set(row["research_process_gaps"])
+        source_costs = set(row["cost_gaps"])
+        if (any(not isinstance(gap, str) for gap in source_research | source_costs)
+                or not source_costs <= source_research):
+            return None
+        if source_id == run_id:
+            if (row["kind"] != "execute" or row["status"] != "accepted"
+                    or source_research or source_costs):
+                return None
+        elif row["kind"] != "score":
+            return None
+        research.update(source_research)
+        costs.update(source_costs)
+    if (research != set(by_dimension.get("research_process") or [])
+            or costs != set(by_dimension.get("costs") or [])
+            or proof.get("complete") is not False
+            or dimensions.get("research_process") is not (not research)
+            or dimensions.get("costs") is not (not costs)
+            or reasons != research | costs
+            or not reasons):
+        return None
+    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+    payload = artifact.get("payload") or {}
+    if (payload.get("complete") is not True
+            or artifact.get("payload_sha256") != contracts.document_hash(payload)
+            or any((row.get("privacy") or {}).get("redacted") is not False
+                   for field in ("observations", "agent_observations")
+                   for row in payload.get(field) or [])):
+        return None
+    selected = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
+    if not selected:
+        return None
+    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    for call in example.get("provider_calls") or []:
+        call_gaps = set(call.get("evidence_gaps") or [])
+        if call.get("run_id") not in rows or not call_gaps <= set(rows[call["run_id"]]["research_process_gaps"]):
+            return None
+        if call.get("run_id") != run_id:
+            continue
+        provenance = call.get("response_provenance") or {}
+        request = call.get("request") or {}
+        response = call.get("response")
+        model = call.get("operation_id") in reasoning_capture.OPERATIONS
+        permitted_redactions = {"hidden_reasoning"} if model else set()
+        if (call_gaps or call.get("accounting_state") != "settlement"
+                or type(call.get("actual_microusd")) is not int
+                or (call.get("request_capture") or {}).get("redacted") is True
+                or not set(call.get("response_privacy_redactions") or []) <= permitted_redactions
+                or any(not set(row.get("privacy_redactions") or []) <= permitted_redactions
+                       for row in call.get("response_receipts") or [])
+                or not isinstance(request, Mapping)
+                or request.get("operation_id") != call.get("operation_id")
+                or request.get("request_hash") != call.get("request_hash")
+                or not isinstance(request.get("hashed_parameters"), Mapping)
+                or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
+                or not isinstance(response, Mapping)
+                or contracts.document_hash(response) != call.get("response_sha256")
+                or provenance.get("agent_receipt") != "reported_exact_body_received"
+                or provenance.get("selected_response_acknowledged") is not True
+                or provenance.get("delivery_to_worker") != "socket_written"):
+            return None
+        worker_ref = provenance.get("worker_receipt_ref") or {}
+        if (worker_ref.get("run_id") != run_id
+                or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
+            return None
+        writes = [row for row in payload.get("response_receipts") or []
+                  if row.get("ordinal") == worker_ref.get("ordinal")
+                  and row.get("call_identity") == call.get("call_identity")
+                  and row.get("operation_id") == call.get("operation_id")
+                  and row.get("action_sequence") == call.get("action_sequence")
+                  and row.get("write_state") == "socket_written"]
+        refs = provenance.get("agent_receipt_refs") or []
+        reads = [row for row in payload.get("agent_observations") or []
+                 if row.get("kind") == "response_received"
+                 and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                         and ref.get("payload_sha256") == artifact["payload_sha256"] for ref in refs)]
+        receipts = [row for row in call.get("response_receipts") or []
+                    if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
+                    and row.get("response_sha256") == call.get("response_sha256")]
+        if (len(writes) != 1 or not reads or not receipts
+                or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
+                           and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
+                           and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
+                           and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
+                           and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
+                           for read in reads for receipt in receipts)):
+            return None
+        if model:
+            try:
+                training_steps._candidate(example, call)
+                state = attempt_coverage(call, _role(example, call), registry)
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return None
+            if not state["route_reviewed"] or not state["provider_route_verified"]:
+                return None
+    return frozenset(reasons)
+
+
 def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | None:
     """Return attributable judge-only gaps, or reject an inexact selected replay.
 
@@ -728,7 +851,9 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
     if proof.get("complete") is True and not reasons:
         return frozenset()
     allowed = {"request_privacy_nonexact", "response_privacy_nonexact", "provider_cost_unresolved"}
-    if not reasons or not reasons <= allowed:
+    if reasons and not reasons <= allowed:
+        return _attributed_score_only_gaps(example, reasons)
+    if not reasons:
         return None
     dimensions = proof.get("dimensions") or {}
     by_dimension = proof.get("reasons_by_dimension") or {}

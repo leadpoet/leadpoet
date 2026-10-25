@@ -177,6 +177,27 @@ def test_prior_launched_judge_keeps_its_own_reviewer_runtime_identity():
     assert "reviewer_runtime_identity_unverified" in result["completeness"]["reasons_by_dimension"]["research_process"]
 
 
+def test_failed_score_without_resource_summary_keeps_per_run_gap_attribution():
+    values = fixture()
+    failed = copy.deepcopy(values["runs"][1])
+    failed.update(run_id="judge:failed", status="failed", terminal_cause="lease_expired",
+                  output_ref=None, result_doc={})
+    values["runs"][1]["attempt"] = 2
+    values["runs"].append(failed)
+    result = assemble_example(**values)
+    attribution = result["related_run_gap_attribution"]
+    assert result["completeness"]["complete"] is False
+    assert attribution["execute:1"]["research_process_gaps"] == []
+    assert attribution["execute:1"]["cost_gaps"] == []
+    assert {"direct_web_usage_unverified", "provider_capture_count_unverified",
+            "worker_local_refusals_unverified", "worker_observations_unavailable"} <= set(
+                attribution["judge:failed"]["research_process_gaps"])
+    assert "provider_capture_count_unverified" in attribution["judge:failed"]["cost_gaps"]
+    for dimension, key in (("research_process", "research_process_gaps"), ("costs", "cost_gaps")):
+        assert set(result["completeness"]["reasons_by_dimension"][dimension]) == set().union(
+            *(set(row[key]) for row in attribution.values()))
+
+
 def test_missing_snapshot_preserves_verified_labels_but_cannot_claim_full_process():
     values = fixture()
     del values["objects"].values[training_input.object_ref("execute:1", 1)]

@@ -845,6 +845,11 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True)
 def _worker_evidence(related, calls, objects, *, selected_run_id):
     from lab_arena import training_observations
     artifacts, partial_artifacts, errors, counts = {}, {}, set(), {}
+    per_run_errors = {}
+
+    def record_error(code, run_id):
+        errors.add(code)
+        per_run_errors.setdefault(run_id, set()).add(code)
     for run in related:
         run_id = run["run_id"]
         summary = (run.get("result_doc") or {}).get("resource_summary") or {}
@@ -858,7 +863,7 @@ def _worker_evidence(related, calls, objects, *, selected_run_id):
         counts[run_id] = set(sequences)
         local_refusals = summary.get("provider_local_refusal_count")
         if type(local_refusals) is not int or local_refusals < 0:
-            errors.add("worker_local_refusals_unverified")
+            record_error("worker_local_refusals_unverified", run_id)
         needed = (type(summary.get("provider_call_count")) is not int or summary.get("provider_call_count") != len(sequences)
                   or type(local_refusals) is int and local_refusals > 0
                   or any("full_response_unavailable" in call["evidence_gaps"] for call in paid))
@@ -879,19 +884,19 @@ def _worker_evidence(related, calls, objects, *, selected_run_id):
                             segment["number"]) for segment in segments],
                         "segment_sha256": [segment["segment_sha256"] for segment in segments],
                     }
-                    errors.add("worker_observations_incomplete")
+                    record_error("worker_observations_incomplete", run_id)
                 if journal_error:
-                    errors.add("worker_observation_journal_unavailable")
+                    record_error("worker_observation_journal_unavailable", run_id)
             except NotImplementedError:
                 pass
             except Exception:
-                errors.add("worker_observation_journal_unavailable")
+                record_error("worker_observation_journal_unavailable", run_id)
             if needed or capture is not None:
-                errors.add("worker_observations_unavailable")
+                record_error("worker_observations_unavailable", run_id)
             if run["kind"] == "execute" and paid:
-                errors.add("agent_response_receipts_unverified")
+                record_error("agent_response_receipts_unverified", run_id)
                 if require_completed_phases:
-                    errors.add("agent_task_state_unverified")
+                    record_error("agent_task_state_unverified", run_id)
             continue
         payload = snapshot["payload"]
         if capture is not None and (not isinstance(capture, dict)
@@ -899,33 +904,34 @@ def _worker_evidence(related, calls, objects, *, selected_run_id):
                 or capture.get("observation_count") != payload["observation_count"]
                 or capture.get("local_refusal_count") != payload["local_refusal_count"]
                 or capture.get("complete") != payload["complete"]):
-            errors.add("worker_observation_summary_invalid")
+            record_error("worker_observation_summary_invalid", run_id)
             continue
         if not payload["complete"]:
-            errors.add("worker_observations_incomplete")
+            record_error("worker_observations_incomplete", run_id)
         if payload["local_refusal_count"] != local_refusals:
-            errors.add("worker_local_refusals_unverified")
+            record_error("worker_local_refusals_unverified", run_id)
         artifacts[run_id] = snapshot
-        errors.update(_link_worker_receipts(
-            run, paid, snapshot, require_completed_phases=require_completed_phases))
+        for error in _link_worker_receipts(
+                run, paid, snapshot, require_completed_phases=require_completed_phases):
+            record_error(error, run_id)
         for observation in payload["observations"]:
             if observation["privacy"]["redacted"]:
-                errors.add("worker_observation_privacy_nonexact")
+                record_error("worker_observation_privacy_nonexact", run_id)
             sequence, identity = observation["action_sequence"], observation["call_identity"]
             matches = [call for call in paid if call.get("action_sequence") == sequence]
             if identity is not None:
                 sequence_matches = matches
                 matches = [call for call in matches if call["call_identity"] == identity]
                 if not matches and (sequence_matches or any(call["call_identity"] == identity for call in paid)):
-                    errors.add("worker_observation_link_invalid")
+                    record_error("worker_observation_link_invalid", run_id)
                     continue
             if matches:
                 if len(matches) != 1 or matches[0]["operation_id"] != observation["operation_id"] or not observation["contributes_to_provider_call_count"]:
-                    errors.add("worker_observation_link_invalid")
+                    record_error("worker_observation_link_invalid", run_id)
                     continue
                 call = matches[0]
                 if isinstance(call.get("request"), dict) and call["request"].get("admitted_parameters") != observation["request"]["admitted_parameters"]:
-                    errors.add("worker_observation_request_mismatch")
+                    record_error("worker_observation_request_mismatch", run_id)
                     continue
                 call["worker_observation_ref"] = {"run_id": run_id, "ordinal": observation["ordinal"], "payload_sha256": snapshot["payload_sha256"]}
                 # Only a returned bridge response can fill the missing-response
@@ -935,12 +941,12 @@ def _worker_evidence(related, calls, objects, *, selected_run_id):
                     call["evidence_gaps"] = [gap for gap in call["evidence_gaps"] if gap != "full_response_unavailable"]
             elif observation["contributes_to_provider_call_count"]:
                 if type(sequence) is not int:
-                    errors.add("worker_observation_link_invalid")
+                    record_error("worker_observation_link_invalid", run_id)
                     continue
                 counts[run_id].add(sequence)
                 if observation["kind"] != "local_catalog":
-                    errors.add("worker_call_accounting_unverified")
-    return artifacts, partial_artifacts, errors, counts
+                    record_error("worker_call_accounting_unverified", run_id)
+    return artifacts, partial_artifacts, errors, counts, per_run_errors
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
@@ -1229,12 +1235,23 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             raise ExportError("ledger_context_mismatch")
     calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
                          {row["run_id"]: index for index, row in enumerate(related)})
-    observations, partial_observations, observation_gaps, observed_actions = _worker_evidence(
+    observations, partial_observations, observation_gaps, observed_actions, worker_gaps_by_run = _worker_evidence(
         related, calls, objects, selected_run_id=run_id)
     # Recompute payload gaps after exact worker-side fallback joins. Structural
     # ledger failures and every accounting gap retain their original authority.
     gaps -= {"full_request_unavailable", "full_response_unavailable", "request_privacy_nonexact", "response_privacy_nonexact", "provider_call_inflight", "provider_cost_unresolved"}
     gaps.update(gap for call in calls for gap in call["evidence_gaps"])
+    related_gaps = {row["run_id"]: {"research_process": set(), "costs": set()}
+                    for row in related}
+    for source_id, source_gaps in worker_gaps_by_run.items():
+        related_gaps[source_id]["research_process"].update(source_gaps)
+        related_gaps[source_id]["costs"].update(source_gaps & {"worker_call_accounting_unverified"})
+    for call in calls:
+        source_gaps = set(call["evidence_gaps"])
+        related_gaps[call["run_id"]]["research_process"].update(source_gaps)
+        related_gaps[call["run_id"]]["costs"].update(source_gaps & {
+            "provider_call_inflight", "provider_cost_unresolved", "ambiguous_call_lifecycle",
+            "ledger_call_identity_missing"})
     example["provider_calls"] = calls
     reasons["research_process"].update(gaps | observation_gaps)
     reasons["costs"].update(observation_gaps & {"worker_call_accounting_unverified"})
@@ -1407,11 +1424,14 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             pass
         elif not isinstance(web, dict) or type(web.get("connection_count")) is not int or web["connection_count"] < 0:
             reasons["research_process"].add("direct_web_usage_unverified")
+            related_gaps[row["run_id"]]["research_process"].add("direct_web_usage_unverified")
         elif web["connection_count"]:
             reported_pages = (observations.get(row["run_id"], {}).get("payload", {}).get("agent_observations", []))
-            reasons["research_process"].add("direct_web_coverage_unverified" if any(
+            web_gap = "direct_web_coverage_unverified" if any(
                 item["kind"] in {"web_fetch", "web_fetch_binary"}
-                for item in reported_pages) else "direct_web_content_not_captured")
+                for item in reported_pages) else "direct_web_content_not_captured"
+            reasons["research_process"].add(web_gap)
+            related_gaps[row["run_id"]]["research_process"].add(web_gap)
         logical_calls = set()
         for call in calls:
             if call["run_id"] != row["run_id"]:
@@ -1424,12 +1444,15 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 logical_calls.add(("base", base))
             else:
                 reasons["research_process"].add("logical_call_identity_unverified")
+                related_gaps[row["run_id"]]["research_process"].add("logical_call_identity_unverified")
                 logical_calls.add(("unproved", call["call_identity"]))
         logical_calls.update(("action", sequence) for sequence in observed_actions.get(row["run_id"], set()))
         captured = len(logical_calls)
         if type(summary.get("provider_call_count")) is not int or summary.get("provider_call_count") != captured:
             reasons["research_process"].add("provider_capture_count_unverified")
             reasons["costs"].add("provider_capture_count_unverified")
+            related_gaps[row["run_id"]]["research_process"].add("provider_capture_count_unverified")
+            related_gaps[row["run_id"]]["costs"].add("provider_capture_count_unverified")
     reasons["research_process"].update(reasons["exact_inputs"])
     reasons["research_process"].update(reasons["input_output_label"])
     if reasons["context"]:
@@ -1465,5 +1488,10 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                              "dimensions": {key: not value for key, value in reasons.items()},
                              "incomplete_reasons": sorted({reason for values in reasons.values() for reason in values}),
                              "reasons_by_dimension": {key: sorted(value) for key, value in reasons.items()}}
+    clean["related_run_gap_attribution"] = {
+        row["run_id"]: {"kind": row["kind"], "status": row["status"],
+                        "research_process_gaps": sorted(related_gaps[row["run_id"]]["research_process"]),
+                        "cost_gaps": sorted(related_gaps[row["run_id"]]["costs"])}
+        for row in related}
     clean["example_hash"] = contracts.document_hash(clean)
     return json.loads(contracts.canonical_json(clean))

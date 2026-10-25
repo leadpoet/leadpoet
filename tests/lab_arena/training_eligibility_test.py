@@ -185,6 +185,71 @@ def test_failed_judge_attempt_privacy_is_attributed_without_hiding_other_runs():
     assert len(splits["train"]) + len(splits["eval"]) == 2
 
 
+def failed_score_gap_example():
+    example = judge_only_gap_example()
+    example["attempts"].insert(0, {"run_id": "run", "kind": "execute", "status": "accepted"})
+    example["attempts"].append({"run_id": "failed-score", "kind": "score", "status": "failed"})
+    for call in example["provider_calls"]:
+        if call.get("run_id") == "run":
+            call["response_provenance"]["selected_response_acknowledged"] = True
+    example["provider_calls"].append({"run_id": "failed-score", "operation_id": "scrapingdog.scrape",
+                                      "evidence_gaps": ["full_response_unavailable", "provider_cost_unresolved"]})
+    failed = {"direct_web_usage_unverified", "full_response_unavailable",
+              "provider_capture_count_unverified", "provider_cost_unresolved",
+              "worker_local_refusals_unverified", "worker_observation_link_invalid"}
+    reasons = failed | {"response_privacy_nonexact"}
+    example["related_run_gap_attribution"] = {
+        "run": {"kind": "execute", "status": "accepted", "research_process_gaps": [], "cost_gaps": []},
+        "failed-score": {"kind": "score", "status": "failed",
+                         "research_process_gaps": sorted(failed),
+                         "cost_gaps": ["provider_capture_count_unverified", "provider_cost_unresolved"]},
+        "score": {"kind": "score", "status": "accepted",
+                  "research_process_gaps": ["response_privacy_nonexact"], "cost_gaps": []},
+    }
+    example["completeness"]["incomplete_reasons"] = sorted(reasons)
+    example["completeness"]["reasons_by_dimension"]["research_process"] = sorted(reasons)
+    example["completeness"]["reasons_by_dimension"]["costs"] = [
+        "provider_capture_count_unverified", "provider_cost_unresolved"]
+    example["completeness"]["dimensions"]["costs"] = False
+    return seal(example)
+
+
+def test_failed_score_hard_gaps_do_not_erase_exact_selected_research():
+    example = failed_score_gap_example()
+    assert example["completeness"]["complete"] is False
+    assert example["privacy"]["exact_replay"] is False
+    assert training_thinking.selected_research_evidence(example) == frozenset(
+        example["completeness"]["incomplete_reasons"])
+    assert capture(example)["eligible"] is True
+    splits, _ = training_thinking.build([example])
+    assert len(splits["train"]) + len(splits["eval"]) == 2
+
+
+@pytest.mark.parametrize("damage", [
+    lambda e: e.pop("related_run_gap_attribution"),
+    lambda e: e["related_run_gap_attribution"]["run"]["research_process_gaps"].append(
+        "worker_observation_link_invalid"),
+    lambda e: e["related_run_gap_attribution"]["failed-score"]["research_process_gaps"].remove(
+        "direct_web_usage_unverified"),
+    lambda e: e["related_run_gap_attribution"]["failed-score"].update(kind="execute"),
+    lambda e: e["completeness"]["dimensions"].update(research_process=True),
+    lambda e: e["worker_observation_artifacts"]["run"].update(payload_sha256="0" * 64),
+    lambda e: e["provider_calls"][0]["response_provenance"].update(
+        selected_response_acknowledged=False),
+    lambda e: e["provider_calls"][0]["response_receipts"][0].update(wire_body_sha256="0" * 64),
+    lambda e: e["provider_calls"][0]["request"].update(request_hash="0" * 64),
+    lambda e: e["provider_calls"][0]["evidence_gaps"].append("full_response_unavailable"),
+    lambda e: e["input_snapshots"]["score"].update(input_sha256="0" * 64),
+    lambda e: e["output_identity"].update(document_hash="0" * 64),
+])
+def test_score_only_hard_gap_attribution_rejects_broken_selected_proof(damage):
+    example = failed_score_gap_example()
+    damage(example)
+    seal(example)
+    assert training_thinking.selected_research_evidence(example) is None
+    assert capture(example)["eligible"] is False
+
+
 def test_readiness_keeps_aggregate_gap_visible_alongside_selected_proof():
     from lab_arena import training_readiness
 

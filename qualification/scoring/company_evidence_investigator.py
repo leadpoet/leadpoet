@@ -1594,6 +1594,7 @@ def _strip_untrusted_product_feedback(claims: dict[str, dict[str, Any]]) -> dict
     """Keep correction hints out of the validated result packet."""
     for finding in claims.values():
         finding.pop("untrusted_product_citation_repairs", None)
+        finding.pop("untrusted_product_citation_rejections", None)
         finding.pop("product_positive_citation_rejected", None)
     return claims
 
@@ -3980,6 +3981,22 @@ def _validated_findings(
                 if finding["status"] == "VERIFIED":
                     finding.update(status="UNPROVEN", reason=str(exc)[:300])
             if rejected_product_citations:
+                rejections = []
+                for binding in rejected_product_citations[:3]:
+                    # Match original fields, not filtered raw_support position:
+                    # support slot 2 remains slot 2 when slot 1 is empty.
+                    for slot in (0, 1, 2):
+                        url_field = f"supporting_evidence_url_{slot}" if slot else "evidence_url"
+                        quote_field = f"supporting_evidence_quote_{slot}" if slot else "evidence_quote"
+                        if (raw.get(url_field) == binding["url"]
+                                and raw.get(quote_field) == binding["quote"]):
+                            rejections.append({
+                                "binding_index": slot,
+                                "url": str(binding["url"])[:2000],
+                                "reason": str(binding["reason"])[:300],
+                            })
+                            break
+                finding["untrusted_product_citation_rejections"] = rejections
                 finding["untrusted_product_citation_repairs"] = _untrusted_product_citation_repairs(
                     rejected_product_citations, fetched_pages=fetched_pages,
                     fetched_final_urls=fetched_final_urls, first_party_domains=first_party_domains,
@@ -6002,6 +6019,7 @@ async def investigate_company_evidence(
                                 "original_criterion": requested_product_service[:1200],
                                 "status": (product_coverage or {}).get("status", "UNPROVEN"),
                                 "untrusted_citation_repairs": industry_finding.get("untrusted_product_citation_repairs", []),
+                                "rejected_citations": industry_finding.get("untrusted_product_citation_rejections", []),
                                 "error": str(industry_finding.get("product_coverage_error", ""))[:300],
                             }} if (product_review_requested
                                    or industry_finding.get("product_coverage_error")) else {}),
@@ -6025,6 +6043,15 @@ async def investigate_company_evidence(
                             ),
                             "instruction": (
                                 (
+                                    "Product rejected_citations identify failed submitted bindings: "
+                                    "Binding index 0 is the primary citation; 1 and 2 are the "
+                                    "corresponding supporting evidence slots. These are rejection "
+                                    "details, not proof. Rejudge and resubmit exact evidence under "
+                                    "the unchanged source, identity, role and quote checks. "
+                                    if industry_finding.get("untrusted_product_citation_rejections")
+                                    else ""
+                                )
+                                + (
                                     "The industry finding has not established the requested "
                                     "capability or its absence. Identify the exact missing "
                                     "capability or shared qualifier from the requested "

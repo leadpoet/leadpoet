@@ -4043,6 +4043,22 @@ def _submitted_finding_rejection(
     submitted: Mapping[str, Any], finding: Mapping[str, Any]
 ) -> Optional[str]:
     status = submitted.get("status")
+    if (
+        status in {"VERIFIED", "CONTRADICTED"}
+        and finding.get("status") == "UNPROVEN"
+    ):
+        # Preserve the failed primary check even if product validation also
+        # rejects that citation. Support-only failures retain their own reason.
+        if (
+            finding.get("reason")
+            == "submitted quote was not present in fetched source"
+            and re.search(r"\.{3}|\u2026", str(submitted.get("evidence_quote") or ""))
+        ):
+            return (
+                "submitted quote contains a prohibited ellipsis instead of one "
+                "continuous fetched-page span"
+            )
+        return str(finding.get("reason") or "deterministic evidence validation failed")[:300]
     if (status == "UNPROVEN" and finding.get("target") == "industry"
             and finding.get("product_positive_citation_rejected")):
         return "positive product clause citation failed source validation"
@@ -4057,20 +4073,6 @@ def _submitted_finding_rejection(
         for field in ("evidence_url", "evidence_quote")
     ):
         return "UNPROVEN must have empty evidence_url and evidence_quote fields"
-    if (
-        status in {"VERIFIED", "CONTRADICTED"}
-        and finding.get("status") == "UNPROVEN"
-    ):
-        if (
-            finding.get("reason")
-            == "submitted quote was not present in fetched source"
-            and re.search(r"\.{3}|\u2026", str(submitted.get("evidence_quote") or ""))
-        ):
-            return (
-                "submitted quote contains a prohibited ellipsis instead of one "
-                "continuous fetched-page span"
-            )
-        return str(finding.get("reason") or "deterministic evidence validation failed")[:300]
     return None
 
 

@@ -72,6 +72,31 @@ def test_missing_industry_observation_keeps_precise_correction_reason():
     assert not finding.get("product_positive_citation_rejected")
 
 
+@pytest.mark.parametrize("quote, expected", [
+    ("Acme supplies a fabricated capability.",
+     "submitted quote was not present in fetched source"),
+    ("Acme supplies ... software for clinics.",
+     "submitted quote contains a prohibited ellipsis instead of one continuous fetched-page span"),
+])
+def test_primary_quote_failure_keeps_precise_correction_feedback(quote, expected):
+    raw = _finding()
+    raw["evidence_quote"] = quote
+    finding = _validate(raw)
+    assert finding["status"] == "UNPROVEN"
+    assert inv._submitted_finding_rejection(raw, finding) == expected
+    assert not coverage_matches(finding.get("product_coverage"), CRITERION)
+
+
+def test_support_only_quote_failure_still_requires_product_correction():
+    raw = _finding(support_quote="Acme supplies a fabricated workflow.")
+    finding = _validate(raw)
+    assert finding["status"] == "UNPROVEN"
+    assert inv._submitted_finding_rejection(raw, finding) == (
+        "whole-product citation failed source validation"
+    )
+    assert not coverage_matches(finding.get("product_coverage"), CRITERION)
+
+
 @pytest.mark.parametrize("case", [
     "unknown_source", "quote_absent", "other_entity", "redirected_final",
     "redirected_primary", "partial_pair", "customer_role", "missing_verdict",

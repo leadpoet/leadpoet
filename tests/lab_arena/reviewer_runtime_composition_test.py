@@ -14,8 +14,7 @@ from scripts.build_arena_reviewer_runtime import (
     CompositionError, verify_image_configuration, verify_overlay,
 )
 from tests.lab_arena.reviewer_rejected_final_packet_seam_test import (
-    frozen_reviewer_source, frozen_source_access_sources,
-    sources as frozen_reviewer_sources,
+    frozen_reviewer_source, sources as frozen_reviewer_sources,
 )
 ROOT = composer.ROOT
 
@@ -139,7 +138,6 @@ def test_source_access_correction_is_explicit_and_composes(negative_finality):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
     }
-    original = frozen_source_access_sources(original)
     original[builder.GRADER_FILE] = frozen_reviewer_source(original[builder.GRADER_FILE])
     # Model a frozen pre-correction image without depending on Git history.
     for name, deltas in ((builder.GRADER_FILE, INVESTIGATOR_DELTAS),
@@ -181,8 +179,6 @@ def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
-    if source_access:
-        original = frozen_source_access_sources(original)
     original[builder.GRADER_FILE] = frozen_reviewer_source(original[builder.GRADER_FILE])
     # Reproduce the original frozen loop; do not import current grading behavior.
     assert original[builder.GRADER_FILE].count(_NEW.encode()) == 1

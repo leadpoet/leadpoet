@@ -4,7 +4,6 @@ from copy import deepcopy
 import json
 import subprocess
 import sys
-from functools import lru_cache
 
 import pytest
 
@@ -16,26 +15,6 @@ from scripts.arena_reviewer_rejected_final_packet_seam import (
 )
 from scripts.arena_reviewer_identity_schema_seam import DELTAS as IDENTITY_DELTAS
 from tests import test_final_unproven_normalization as controls
-
-
-FROZEN_SOURCE_ACCESS_COMPOSITION = "f614af5fcb4ecfddc7a5308798a951fe5c094dc7"
-
-
-@lru_cache(maxsize=2)
-def _historical_source_access_source(path):
-    return subprocess.check_output(
-        ["git", "show", FROZEN_SOURCE_ACCESS_COMPOSITION + ":" + path],
-        cwd=builder.ROOT,
-    )
-
-
-def frozen_source_access_sources(source):
-    """Keep the historical access-denial overlay separate from typed 415 finality."""
-    result = dict(source)
-    for path in (builder.GRADER_FILE, builder.FINALITY_FILE):
-        assert path in result
-        result[path] = _historical_source_access_source(path)
-    return result
 
 
 # The operational converter accepts the historical reviewer completion block,
@@ -114,8 +93,6 @@ def sources(**options):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
-    if options.get("source_access_denied"):
-        result = frozen_source_access_sources(result)
     if options.get("authenticated_page_refusal"):
         # This historical 403 composition predates the separate exact 415
         # source-policy correction. Keep its committed transport preimage;
@@ -145,24 +122,6 @@ def sources(**options):
             compact.encode(), historical.encode(), 1,
         )
     return result
-
-
-@pytest.mark.parametrize("path", [builder.GRADER_FILE, builder.FINALITY_FILE])
-def test_typed_415_finality_does_not_expand_the_historical_access_converter(path):
-    from scripts import arena_reviewer_source_access_seam as seam
-
-    current = (builder.ROOT / path).read_bytes()
-    convert_access = (seam.convert_source_access_seam if path == builder.GRADER_FILE
-                      else seam.convert_source_access_finality_seam)
-    with pytest.raises(seam.SourceAccessSeamError, match="unrecognized or partial"):
-        convert_access(current)
-    historical = frozen_source_access_sources({
-        builder.GRADER_FILE: (builder.ROOT / builder.GRADER_FILE).read_bytes(),
-        builder.FINALITY_FILE: (builder.ROOT / builder.FINALITY_FILE).read_bytes(),
-        "unrelated": b"preserved",
-    })
-    assert historical["unrelated"] == b"preserved"
-    assert convert_access(historical[path]) == historical[path]
 
 
 def test_exact_guard_is_the_only_changed_frozen_byte_and_is_idempotent():

@@ -539,8 +539,10 @@ def test_inner_deadline_final_submit_retains_usage(monkeypatch, late_tool):
         "total_loaded_pages": 1,
         "fetch_outcomes": [],
     }
-    assert result["_completed_submit"] is True
-    assert result["failure_reason"] == ""
+    # A denied late research call leaves unused capacity and an incomplete
+    # UNPROVEN judgment. The terminal result must still retain usage.
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == "admission_budget_interrupted"
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL] == {
         "final_url": URL, "text": QUOTE,
     }

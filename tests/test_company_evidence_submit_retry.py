@@ -213,6 +213,7 @@ def test_grounded_finding_stays_complete_with_or_without_reserve_denial(
 
 def test_voluntary_unproven_after_search_stays_complete(monkeypatch):
     clock = _Clock()
+    monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
     monkeypatch.setattr(
         investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
     )
@@ -404,6 +405,12 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
     requests = []
     fabricated_quote = "Acme supplies payroll software to hospitals worldwide."
 
+    async def fake_search(_session, _query, *, key):
+        del key
+        return {"results": []}
+
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
@@ -421,18 +428,23 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
                 evidence_quote=fabricated_quote,
             )]})
             return 200, _tool_response("submit_findings", arguments)
+        if len(requests) == 3:
+            return 200, _tool_response(
+                "search_web", json.dumps({"query": "Acme enrollment software universities"})
+            )
         return 200, _tool_response(
             "submit_findings", json.dumps({"findings": [_finding()]})
         )
 
     result = _run(monkeypatch, fake_post_json)
 
-    assert len(requests) == 3
+    assert len(requests) == 4
     assert requests[0]["reasoning"] == {"effort": "medium"}
     assert requests[1]["reasoning"] == {"effort": "low"}
     assert requests[2]["reasoning"] == {"effort": "medium"}
     validation_feedback = json.loads(requests[2]["messages"][-1]["content"])
     assert validation_feedback["error"] == "deterministic_evidence_validation_failed"
+    assert requests[2]["tool_choice"]["function"]["name"] == "search_web"
     assert result["claims"]["industry"]["evidence_quote"] == QUOTE
 
 

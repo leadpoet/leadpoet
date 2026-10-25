@@ -2,8 +2,13 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import hashlib
+import io
 import json
 from pathlib import Path
+import subprocess
+import tarfile
 
 import pytest
 
@@ -218,3 +223,83 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
         if flavor == "Miner1"
     )
     assert ranking["PublicBaseline"]["final_score"] is not None
+    if not stopped:
+        return
+
+    # Follow this same published winner through the real Git and database
+    # promotion path, then freeze the next round from that repository head.
+    from lab_arena.promotion import GitPromoter
+    from tests.lab_arena.full_thinking_round_test import approved_registry
+
+    repository_root = tmp_path / "promotion-repository"
+    repository_root.mkdir()
+    remote = fixtures.promotion_repository(repository_root)
+    old_head = subprocess.run(
+        ("git", "--git-dir", str(remote), "rev-parse", "lab"),
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    harness.service._config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "promotion-objects",
+    )
+
+    def promoted_source(url, _limit):
+        assert url.endswith(".tar.gz")
+        return subprocess.run(
+            ("git", "--git-dir", str(remote), "archive", "--format=tar.gz", "lab"),
+            check=True, capture_output=True,
+        ).stdout
+
+    first_publication = deepcopy(saved["publication_doc"])
+    first_configuration = deepcopy(saved["configuration_doc"])
+    harness.clock.now = datetime.fromisoformat(
+        str(saved["published_at"]).replace("Z", "+00:00")
+    )
+    assert harness.service.promote_pending_baselines() == {"status": "ok", "promoted": 1}
+    promoted = harness.service.store.get_round(harness.round_id)
+    commit = promoted["promotion_doc"]["commit"]
+    assert promoted["baseline_promoted_at"] is not None
+    assert commit != old_head
+    for branch in ("main", "lab"):
+        assert subprocess.run(
+            ("git", "--git-dir", str(remote), "rev-parse", branch),
+            check=True, capture_output=True, text=True,
+        ).stdout.strip() == commit
+    with tarfile.open(fileobj=io.BytesIO(promoted_source("winner.tar.gz", 0)), mode="r:gz") as archive:
+        assert archive.extractfile("flavor.txt").read() == b"Miner1"
+
+    bootstrap_url = (
+        "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
+        + old_head + ".tar.gz"
+    )
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        reasoning_capture_from="2026-01-01T00:00:00Z",
+        reasoning_baseline_source_url=bootstrap_url,
+        reasoning_baseline_source_sha256=(
+            "sha256:" + hashlib.sha256(harness.baseline_source).hexdigest()
+        ),
+    )
+    harness.service._config.reasoning_registry_source = approved_registry
+    harness.service._config.baseline_source_fetcher = promoted_source
+    harness.clock.now = datetime.now(timezone.utc)
+    next_cutoff = harness.clock.now + timedelta(days=1)
+    next_config = harness.service.create_round(
+        next_cutoff, round_id="arena-2099-10-17-promoted",
+    )
+    assert next_config["reasoning_capture_policy"] == "full_generated_thinking_v1"
+    harness.round_id = next_config["round_id"]
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    next_row = harness.service.store.get_round(harness.round_id)
+    baseline = next(participant for participant in next_row["participants"]
+                    if participant["is_king"])
+    assert len(next_row["participants"]) == 1
+    assert baseline["miner_hotkey"] == harness.baseline_hotkey
+    assert next_row["champion_submission_id"] == saved["publication_doc"]["king_decision"]["winner_submission_id"]
+    assert next_row["champion_hotkey"] == saved["king_hotkey"]
+    assert next_row["configuration_doc"]["baseline_source_url"].endswith(commit + ".tar.gz")
+    baseline_row = harness.service.store.get_submission(baseline["submission_id"])
+    assert harness.objects.get(baseline_row["source_ref"]) == promoted_source("winner.tar.gz", 0)
+    original = harness.service.store.get_round(promoted["round_id"])
+    assert original["publication_doc"] == first_publication
+    assert original["configuration_doc"] == first_configuration

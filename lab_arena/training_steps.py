@@ -77,11 +77,11 @@ def _arguments(value):
         return False
     try:
         return isinstance(json.loads(value, parse_constant=_reject_constant), dict)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return False
 
 
-def _tool_calls(calls):
+def _tool_calls(calls, *, argument_validator=_arguments):
     _require(isinstance(calls, list) and calls, 'tool_call_shape_unsupported')
     ids = set()
     for call in calls:
@@ -93,7 +93,7 @@ def _tool_calls(calls):
         ids.add(call['id'])
         fn = call.get('function') or {}
         _require(set(fn) == {'name', 'arguments'} and isinstance(fn['name'], str)
-                 and bool(fn['name']) and _arguments(fn['arguments']), 'tool_call_shape_unsupported')
+                 and bool(fn['name']) and argument_validator(fn['arguments']), 'tool_call_shape_unsupported')
 
 
 def _chat_messages(messages, *, allow_reasoning_history=False):
@@ -186,7 +186,7 @@ def _response_tool_definitions(body):
     return declared
 
 
-def _target(body, response, operation, *, allow_reasoning_history=False):
+def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
@@ -214,7 +214,7 @@ def _target(body, response, operation, *, allow_reasoning_history=False):
         msg.pop('refusal', None)
         if msg.get('tool_calls'):
             _require(choice['finish_reason'] == 'tool_calls', 'tool_finish_mismatch')
-            _tool_calls(msg['tool_calls'])
+            _tool_calls(msg['tool_calls'], argument_validator=argument_validator)
         else:
             _require(choice['finish_reason'] == 'stop' and isinstance(msg.get('content'), str)
                      and bool(msg['content']), 'assistant_shape_unsupported')
@@ -275,7 +275,7 @@ def _target(body, response, operation, *, allow_reasoning_history=False):
             except operations.OperationError as exc:
                 raise ValueError('tool_call_shape_unsupported') from exc
             _require(item.get('status') == 'completed'
-                     and (kind != 'function_call' or _arguments(item['arguments'])),
+                     and (kind != 'function_call' or argument_validator(item['arguments'])),
                      'tool_call_shape_unsupported')
             target.append(copy.deepcopy(item))
         else:
@@ -400,6 +400,23 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
     return {'response': values[0], 'write': write, 'receipts': matches}
 
 
+def _validate_target_tools(body, target, op):
+    tools = body.get('tools', [])
+    if op == 'openrouter.chat':
+        definitions = [(tool.get('function') or {}) for tool in tools]
+        _require(all(isinstance(fn, dict) and isinstance(fn.get('name'), str) and fn['name']
+                     and isinstance(fn.get('parameters', {}), dict) for fn in definitions), 'tool_definition_unsupported')
+        declared = {fn['name'] for fn in definitions}
+        _require(len(declared) == len(definitions), 'tool_definition_unsupported')
+        _require(all(item['function']['name'] in declared for item in target.get('tool_calls', [])), 'undeclared_tool_call')
+    else:
+        declared = _response_tool_definitions(body)
+        _require(all((item.get('namespace'), item['name']) in declared
+                     and declared[(item.get('namespace'), item['name'])]['type'] == (
+                         'function' if item['type'] == 'function_call' else 'custom')
+                     for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
+
+
 def _candidate(example, call):
     _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
     op = call.get('operation_id')
@@ -485,19 +502,7 @@ def _candidate(example, call):
                     and annotation.get('reviewed_route') is True)
     target, reasoning = _target(body, responses[0], op,
                                 allow_reasoning_history=full_history)
-    if op == 'openrouter.chat':
-        definitions = [(tool.get('function') or {}) for tool in tools]
-        _require(all(isinstance(fn, dict) and isinstance(fn.get('name'), str) and fn['name']
-                     and isinstance(fn.get('parameters', {}), dict) for fn in definitions), 'tool_definition_unsupported')
-        declared = {fn['name'] for fn in definitions}
-        _require(len(declared) == len(definitions), 'tool_definition_unsupported')
-        _require(all(item['function']['name'] in declared for item in target.get('tool_calls', [])), 'undeclared_tool_call')
-    else:
-        declared = _response_tool_definitions(body)
-        _require(all((item.get('namespace'), item['name']) in declared
-                     and declared[(item.get('namespace'), item['name'])]['type'] == (
-                         'function' if item['type'] == 'function_call' else 'custom')
-                     for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
+    _validate_target_tools(body, target, op)
     return {'schema_version': RECORD_SCHEMA_VERSION, 'format': op, 'input': copy.deepcopy(body),
             'target': target,
             'quality': {'status': 'unreviewed', 'correct_action': 'not_established'},

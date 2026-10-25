@@ -579,6 +579,74 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
         return False
 
 
+def verified_cap_truncated_target(example, call) -> bool:
+    """Recognize exact cap-hit tool JSON ending at EOF, never repair a target.
+
+    Some providers report completed despite exhausting the requested output
+    limit. All normal request, host, route, output-shape and declaration checks
+    must pass; only the unfinished JSON argument may differ from a valid target.
+    """
+    if not training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+        return False
+    try:
+        body = call["request"]["outbound"]["body"]
+        operation = call.get("operation_id")
+        cap_key, usage_key = (("max_tokens", "completion_tokens") if operation == "openrouter.chat"
+                              else ("max_output_tokens", "output_tokens"))
+        cap = body.get(cap_key)
+        # Cheap rejection only: a possible cap hit still needs the full exact
+        # selected-host proof below, including older delivered receipt bodies.
+        bodies = [call.get("response")] + [row.get("response") for row in call.get("response_receipts") or []]
+        if not any(isinstance(value, Mapping) and type((value.get("usage") or {}).get(usage_key)) is int
+                   and (value.get("usage") or {})[usage_key] == cap for value in bodies):
+            return False
+        evidence = training_steps._host_result(example, call)
+        response = evidence["response"]
+        usage = response.get("usage") or {}
+        checked = dict(call, response=response, response_sha256=contracts.document_hash(response))
+        state = attempt_coverage(checked, _role(example, call),
+                                 (example.get("configuration") or {}).get("reasoning_route_registry"))
+        if (operation not in reasoning_capture.OPERATIONS or evidence["write"]["status"] != 200
+                or type(cap) is not int or cap < 1
+                or cap != (call.get("reasoning_capture") or {}).get("max_output_tokens")
+                or type(usage.get(usage_key)) is not int or usage[usage_key] != cap
+                or not state["requested"] or not state["route_reviewed"]
+                or not state["provider_route_verified"] or state["redactions"]):
+            return False
+        try:
+            training_steps._candidate(example, call)
+        except ValueError as exc:
+            if str(exc) != "tool_call_shape_unsupported":
+                return False
+        else:
+            return False  # A valid generation at its cap remains a valid target.
+        unfinished = []
+
+        def argument_shape(value):
+            if training_steps._arguments(value):
+                return True
+            if not isinstance(value, str) or not value.lstrip().startswith("{"):
+                return False
+            try:
+                json.loads(value, parse_constant=training_steps._reject_constant)
+            except json.JSONDecodeError as exc:
+                if exc.pos == len(value):
+                    unfinished.append(value)
+                    return True
+            except (ValueError, RecursionError):
+                pass
+            return False
+
+        # This validates the unchanged raw target's remaining shape only. It
+        # never returns a training candidate or inserts missing JSON syntax.
+        target, _ = training_steps._target(body, response, operation,
+            allow_reasoning_history=True, argument_validator=argument_shape)
+        training_steps._validate_target_tools(body, target, operation)
+        return bool(unfinished)
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        return False
+
+
 def _role(example: Mapping[str, Any], call: Mapping[str, Any]) -> str:
     if call.get("run_id") == example.get("run_id"):
         return example.get("role") if example.get("role") in {"miner", "baseline"} else "miner"
@@ -623,25 +691,30 @@ def coverage(examples) -> dict:
             grouped[key]["requested"] += row["requested"]
             grouped[key]["saved"] += row["storage"] == "saved"
             execution_model = _execution_model_call(example, call)
-            has_text |= execution_model and bool(full)
-            full_text_calls += execution_model and bool(full)
+            full_text_calls += execution_model and bool(full)  # Raw exposed text inventory.
             full_round = (example.get("configuration") or {}).get("reasoning_capture_policy") == POLICY
             failed = new_policy and verified_failed_attempt(example, call)
             omitted_truncation = False
-            if new_policy and execution_model and row["returned"] == "truncated":
+            target_usable = not new_policy
+            if new_policy and execution_model and not failed:
                 try:
                     training_steps._candidate(example, call)
-                except ValueError as exc:
-                    omitted_truncation = (str(exc) == "response_not_complete"
-                                          and row["route_reviewed"] and row["provider_route_verified"])
-                except (TypeError, KeyError, AttributeError):
-                    pass  # The malformed attempt remains disqualifying below.
+                    target_usable = True
+                except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+                    omitted_truncation = verified_cap_truncated_target(example, call) or (
+                        isinstance(exc, ValueError) and str(exc) == "response_not_complete"
+                        and row["returned"] == "truncated" and row["route_reviewed"]
+                        and row["provider_route_verified"])
             if (execution_model and new_policy and row["route_reviewed"] and row["provider_route_verified"]
                     and row["returned"] not in {"truncated", "interrupted", "redacted"}
-                    and row["tokens_reported"] is not None and not failed):
+                    and row["tokens_reported"] is not None and not failed and target_usable):
                 total_reasoning_tokens += row["tokens_reported"]
                 if not full and verified_missing_thinking(row):
                     missing_reasoning_tokens += row["tokens_reported"]
+            if omitted_truncation and row["returned"] != "truncated":
+                row["target_omission_reason"] = "inferred_output_cap_json_eof"
+            has_text |= execution_model and bool(full) and target_usable
+            bad |= execution_model and new_policy and not (target_usable or failed or omitted_truncation)
             empty = (verified_no_thinking(call, call.get("response") or {}, row) if new_policy
                      else verified_tool_only_empty(call, call.get("response") or {}, row))
             bad |= (execution_model and (row["requested"] or full_round) and
@@ -783,6 +856,8 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
                       "response_status": call.get("response_status"),
                       "response_provenance": copy.deepcopy(call.get("response_provenance")),
                       "reasoning_coverage": attempt_coverage(call, _role(example, call), registry),
+                      **({"target_omission_reason": "inferred_output_cap_json_eof"}
+                         if verified_cap_truncated_target(example, call) else {}),
                       "actual_microusd": call.get("actual_microusd"),
                       "provider_cost": copy.deepcopy(call.get("provider_cost")),
                       "lifecycle": copy.deepcopy(call.get("lifecycle")),
@@ -1360,6 +1435,8 @@ def build(examples, rules: training_steps.Rules | None = None):
                         linked = training_steps._candidate(example, row)["source_refs"][0]
                         response = _delivered_response(row, linked["delivered_response_sha256"])
                     except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                        if new_policy and verified_cap_truncated_target(example, row):
+                            continue
                         # _candidate reaches this finish check only after exact
                         # request, agent read, response hash and privacy proof.
                         # Keep other independently reconstructable targets.

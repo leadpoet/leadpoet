@@ -101,7 +101,9 @@ def _only_benign_thinking_gaps(example, run_id, *, new_policy=False):
     registry = (example.get("configuration") or {}).get("reasoning_route_registry")
     try:
         checked = [training_thinking.full_text_segments(call, example.get("role", "miner"), registry)
-                   for call in calls if not (new_policy and training_thinking.verified_failed_attempt(example, call))]
+                   for call in calls if not (new_policy and (
+                       training_thinking.verified_failed_attempt(example, call)
+                       or training_thinking.verified_cap_truncated_target(example, call)))]
         # An execution with only verified failed calls has no training target.
         # It consumes an incomplete ICP, while every failed receipt stays proven.
         if not checked:
@@ -677,6 +679,9 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 try:
                     candidate = training_steps._candidate(example, call)
                 except ValueError as exc:
+                    if new_policy and training_thinking.verified_cap_truncated_target(example, call):
+                        reasoning_counts["truncated_model_calls"] += 1
+                        continue
                     # _candidate checks the request, acknowledged receipt,
                     # exact response hash, and privacy before parsing the
                     # target. A provider's explicit length stop can therefore

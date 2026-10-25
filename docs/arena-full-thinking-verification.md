@@ -418,3 +418,11 @@ not a green full CI result.
 **Activation remains off and this PR remains a draft.** Publication and capture
 readback are verified. A complete ten-ICP strict training pass, a competitive
 compatible baseline, and green required checks are still outstanding.
+
+The E2E verifier also now checks complete strict training coverage for **both**
+candidate and baseline after saving all original artifacts. Previously the final
+assertions applied only to the candidate. Commit `fc7462fa4` shares the ten-ICP,
+linked-score, and strict-record checks across both roles. Seven acceptance tests
+passed independently, including a valid candidate paired with an incomplete
+baseline. This test correction did not trigger another paid run or change the
+results above.

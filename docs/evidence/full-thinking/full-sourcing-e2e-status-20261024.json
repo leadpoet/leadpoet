@@ -76,9 +76,11 @@
   },
   "real_10_icp_publication_and_training_export_passed": false,
   "regressions": {
+    "both_role_e2e_acceptance_tests_passed": 7,
     "completed_call_replay_no_second_provider_charge_passed": true,
     "current_schema_publication_promotion_review_export_replay_passed": 131,
     "eligible_peer_local_git_promotion_and_next_baseline_adoption_passed": true,
+    "incomplete_baseline_cannot_report_full_e2e_success": true,
     "policy_off_protocol_regressions_passed": true,
     "stopped_contender_keeps_round_operational": true
   },

@@ -18,7 +18,10 @@ JOINT_EVIDENCE_SUFFIX = (
     "required capabilities unless the criterion requires them to share that scope. Do not combine "
     "disconnected offerings to invent a missing capability, or treat customer-owned capabilities "
     "or hypothetical facts as the company's supplied activity. Every mandatory condition, "
-    "including shared market and use, and every source/identity check still applies."
+    "including shared market and use, and every source/identity check still applies. "
+    "For a missing product capability, prefer a safe first-party result whose discovery "
+    "highlight names that capability over a generic glossary or overview. Fetch the page; "
+    "discovery highlights are locators only, never proof."
 )
 
 
@@ -27,6 +30,7 @@ def test_joint_evidence_prompt_allows_portfolio_only_when_criterion_permits_it()
     assert "unless the criterion requires them to share that scope" in JOINT_EVIDENCE_SUFFIX
     assert "including shared market and use" in JOINT_EVIDENCE_SUFFIX
     assert "Do not combine disconnected offerings to invent a missing capability" in JOINT_EVIDENCE_SUFFIX
+    assert "discovery highlights are locators only, never proof" in JOINT_EVIDENCE_SUFFIX
 
 
 @pytest.mark.parametrize("positive,product", [(True, True), (True, False), (False, True), (False, False)])

@@ -638,7 +638,10 @@ _PRODUCT_JOINT_EVIDENCE_SUFFIX = (
     "required capabilities unless the criterion requires them to share that scope. Do not combine "
     "disconnected offerings to invent a missing capability, or treat customer-owned capabilities "
     "or hypothetical facts as the company's supplied activity. Every mandatory condition, "
-    "including shared market and use, and every source/identity check still applies."
+    "including shared market and use, and every source/identity check still applies. "
+    "For a missing product capability, prefer a safe first-party result whose discovery "
+    "highlight names that capability over a generic glossary or overview. Fetch the page; "
+    "discovery highlights are locators only, never proof."
 )
 
 _PRODUCT_COVERAGE_INSTRUCTIONS = """
@@ -1525,12 +1528,44 @@ def _untrusted_product_citation_repairs(
         reason = str(binding.get("reason") or "")
         if reason != "source quote did not identify the investigated company":
             continue
+        source_url, source_page, matching_quote = url, page, quote
         candidate = _untrusted_contiguous_quote_candidate(quote, page, identity_names)
+        # A trademark mark can differ across two already loaded first-party
+        # pages. Use it only to locate untrusted context; return raw page text.
+        if not candidate and any(mark in quote for mark in ("®", "™")):
+            variant = quote.replace("®", "").replace("™", "")
+            if len(_surface_span(variant)) >= 80 and len(variant.split()) >= 10:
+                for other_url, other_page in fetched_pages.items():
+                    safe_url = _safe_https_url(other_url)
+                    safe_final_url = _safe_https_url(
+                        (fetched_final_urls or {}).get(other_url)
+                    )
+                    if (
+                        not safe_url or safe_url == url or not safe_final_url
+                        or _registrable_domain(safe_url) != domain
+                        or _registrable_domain(safe_final_url) != domain
+                        or not _quote_occurs(variant, other_page)
+                    ):
+                        continue
+                    try:
+                        public_http_url(safe_url)
+                        public_http_url(safe_final_url)
+                    except (TypeError, ValueError):
+                        continue
+                    suggestion = _untrusted_contiguous_quote_candidate(
+                        variant, other_page, identity_names
+                    )
+                    if suggestion and _quote_occurs(suggestion, other_page):
+                        source_url, source_page, matching_quote = (
+                            safe_url, other_page, variant
+                        )
+                        candidate = suggestion
+                        break
         if not candidate:
             continue
         contexts.append({
-            "claim_id": str(binding.get("claim_id") or "")[:32], "source_url": url[:2000],
-            "rejection": reason[:300], "untrusted_source_context": _source_context_for_quote(quote, page)[:800],
+            "claim_id": str(binding.get("claim_id") or "")[:32], "source_url": source_url[:2000],
+            "rejection": reason[:300], "untrusted_source_context": _source_context_for_quote(matching_quote, source_page)[:800],
             "untrusted_suggested_quote": candidate,
             "instruction": "Context only, not proof. Rejudge company, product and supplier/customer/parent role; "
                            "submit an exact quote only if the original criterion is supported. Normal guards still apply.",

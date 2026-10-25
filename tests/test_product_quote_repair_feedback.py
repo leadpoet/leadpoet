@@ -12,6 +12,17 @@ CRITERION = "Manufactures interior and exterior surfaces"
 URL = "https://acmeproducts.example/products"
 QUOTE = "The Company manufactures interior and exterior surfaces."
 PAGE = 'Acme Products (“Acme”, or “the Company”) owns the operating brand Verda. ' + QUOTE
+BRAND_URL = "https://acmeproducts.example/brands"
+HOME_URL = "https://acmeproducts.example/"
+BRAND_QUOTE = (
+    "Verda® is a leading brand of manufactured stone tile for interior and "
+    "exterior floors, walls, and countertops."
+)
+HOME_QUOTE = BRAND_QUOTE.replace("®", "")
+HOME_PAGE = (
+    "Acme Products supplies building surfaces through its operating brand Verda. "
+    + HOME_QUOTE
+)
 NODES = [
     {"id": "p0", "span": CRITERION, "op": "all", "children": ["p1", "p2", "p3"]},
     {"id": "p1", "span": "Manufactures surfaces", "op": "leaf", "children": []},
@@ -39,6 +50,70 @@ def validated(raw, page=PAGE, *, url=URL, final_url=None):
         identity_anchor={"submitted_name": "Acme Products", "submitted_domain": "acmeproducts.example",
                          "observed_name": "Acme Products", "observed_domain": "acmeproducts.example"},
     )["industry"]
+
+
+def cross_page_validated(raw, *, home_page=HOME_PAGE, home_url=HOME_URL,
+                         home_final_url=HOME_URL):
+    pages = {BRAND_URL: "Our brands. " + BRAND_QUOTE, home_url: home_page}
+    return inv._validated_findings(
+        {"findings": [raw]}, targets=("industry",), fetched_pages=pages,
+        fetched_final_urls={BRAND_URL: BRAND_URL, home_url: home_final_url},
+        first_party_domains={"acmeproducts.example"}, identity_names={"acmeproducts"},
+        requested_product_service=CRITERION,
+        product_plan=pc.get_cached_plan(CRITERION, model=inv.POSITIVE_SEMANTIC_REVIEW_MODEL),
+        identity_anchor={"submitted_name": "Acme Products", "submitted_domain": "acmeproducts.example",
+                         "observed_name": "Acme Products", "observed_domain": "acmeproducts.example"},
+    )["industry"]
+
+
+def test_trademark_variant_finds_exact_contiguous_parent_brand_passage_on_loaded_page():
+    assert not inv._quote_occurs(BRAND_QUOTE, HOME_PAGE)
+    first = cross_page_validated(raw_finding(BRAND_QUOTE, url=BRAND_URL))
+    assert first["status"] == "UNPROVEN"
+    assert all(claim["status"] == "UNPROVEN" for claim in first["product_coverage"]["claims"])
+    repairs = first["untrusted_product_citation_repairs"]
+    assert len(repairs) == 3
+    assert all(repair["source_url"] == HOME_URL for repair in repairs)
+    candidate = repairs[0]["untrusted_suggested_quote"]
+    assert HOME_QUOTE in repairs[0]["untrusted_source_context"]
+    assert candidate in HOME_PAGE and "Acme Products" in candidate
+    assert HOME_QUOTE in candidate and BRAND_QUOTE not in candidate
+    assert len(candidate) <= 2000 and "not proof" in repairs[0]["instruction"]
+    assert candidate not in json.dumps(first["product_coverage"])
+
+    # The hint has no authority; only a fresh model submission can pass.
+    repaired = cross_page_validated(raw_finding(candidate, status="VERIFIED", url=HOME_URL))
+    assert repaired["status"] == "VERIFIED"
+    assert pc.coverage_matches(repaired["product_coverage"], CRITERION)
+
+
+@pytest.mark.parametrize("home_page,home_url,home_final_url", [
+    ("Acme Products owns Verda. Verda® makes tile.", HOME_URL, HOME_URL),
+    ("Other Products owns Verda. " + HOME_QUOTE, HOME_URL, HOME_URL),
+    ("Acme Products owns Verda. " + HOME_QUOTE.replace("exterior", "outdoor"), HOME_URL, HOME_URL),
+    (HOME_PAGE, "https://unbound.example/", "https://unbound.example/"),
+    (HOME_PAGE, "http://acmeproducts.example/", "http://acmeproducts.example/"),
+    (HOME_PAGE, HOME_URL, "https://unbound.example/"),
+])
+def test_cross_page_repair_rejects_short_overlap_wrong_entity_or_unsafe_source(
+    home_page, home_url, home_final_url,
+):
+    first = cross_page_validated(
+        raw_finding(BRAND_QUOTE, url=BRAND_URL),
+        home_page=home_page, home_url=home_url, home_final_url=home_final_url,
+    )
+    assert first["status"] == "UNPROVEN"
+    assert first["untrusted_product_citation_repairs"] == []
+
+
+def test_short_common_trademark_quote_does_not_trigger_cross_page_hint():
+    quote = "Verda® makes tile."
+    first = cross_page_validated(
+        raw_finding(quote, url=BRAND_URL),
+        home_page="Acme Products owns Verda. Verda makes tile.",
+    )
+    assert first["status"] == "UNPROVEN"
+    assert first["untrusted_product_citation_repairs"] == []
 
 
 def test_candidate_is_exact_bounded_same_page_and_not_admitted_into_proof():

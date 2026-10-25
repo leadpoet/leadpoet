@@ -199,6 +199,9 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
             # keeps confirmed-cost accounting.
             first = selected[bad_id][-1]
             for floor, reason in ((None, "provider_cost_uncertain"),
+                                  (0, "provider_cost_uncertain"),
+                                  (101, "provider_cost_uncertain"),
+                                  ("80", "provider_cost_uncertain"),
                                   (90, "eligible"), (100, "eligible")):
                 cursor.execute("SAVEPOINT cost_policy_probe")
                 if floor is None:
@@ -214,7 +217,7 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
                 assert cursor.fetchone()[0]["eligibility_reason"] == reason
                 cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)",
                                (harness.round_id,))
-                assert cursor.fetchone()[0] is (floor is not None)
+                assert cursor.fetchone()[0] is (floor in (90, 100))
                 cursor.execute("ROLLBACK TO SAVEPOINT cost_policy_probe")
             cursor.execute("SAVEPOINT confirmed_over_cap_probe")
             cursor.execute(
@@ -296,6 +299,11 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
         promoted = harness.service.store.get_round(harness.round_id)
         commit = promoted["promotion_doc"]["commit"]
         assert commit != old_head
+        promoted_candidate = harness.service.store.latest_promoted_champion(
+            network_name=promoted["arena_network_name"], netuid=promoted["arena_netuid"])
+        assert promoted_candidate is not None
+        assert promoted_candidate["reasoning_capture_policy"] == "full_generated_thinking_v1"
+        assert promoted_candidate["commit"] == commit
         with tarfile.open(fileobj=io.BytesIO(promoted_source("winner.tar.gz", 0)), mode="r:gz") as archive:
             assert archive.extractfile("flavor.txt").read() == b"Miner1"
 
@@ -315,7 +323,9 @@ def test_frozen_eighty_percent_publishes_scores_and_keeps_peer_eligible(
         harness.service._config.baseline_source_fetcher = promoted_source
         harness.clock.now = datetime.now(timezone.utc)
         next_config = harness.service.create_round(
-            harness.clock.now + timedelta(days=1), round_id="arena-2099-10-23-coverage",
+            harness.clock.now + timedelta(days=1),
+            round_id="arena-2099-10-23-cov%d%s" % (
+                missing, "u" if gap == "unsettled" else "m"),
         )
         harness.round_id = next_config["round_id"]
         harness.clock.advance_to(harness.schedule()["submission_cutoff"])

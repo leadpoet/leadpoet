@@ -19,11 +19,13 @@ PROOF = json.loads(PATH.read_text())
 
 def test_seventh_route_is_evidence_bound_and_does_not_select_a_baseline():
     registry = rc.load_registry()
-    assert len(registry['approved_routes']) == 7
+    assert len(registry['approved_routes']) >= 7
     assert registry['baseline_route'] is None
-    routes = [route for route in registry['approved_routes'] if route['api'] == 'openrouter.responses']
+    routes = [route for route in registry['approved_routes']
+              if route['api'] == 'openrouter.responses' and route['provider'] == 'fireworks']
     assert len(routes) == 1
     route = routes[0]
+    assert registry['approved_routes'][6] == route
     assert route['model_id'] == PROOF['model_id'] == 'deepseek/deepseek-v4.1-flash-1017'
     assert route['provider'] == PROOF['provider'] == 'fireworks'
     assert route['mode'] == {'effort': 'high'}

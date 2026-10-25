@@ -231,6 +231,601 @@
       "provider_name": "Fireworks",
       "semantic_class": "full_generated_thinking",
       "status": "approved"
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "enabled": true
+      },
+      "model_id": "google/gemma-4-31b-it",
+      "model_version": "google/gemma-4-31b-it-20260402",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000001",
+        "internal_reasoning": "0",
+        "prompt": "0.00000075",
+        "request": "0"
+      },
+      "provider": "modelrun/fp4",
+      "provider_name": "ModelRun",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/google/gemma-4-31b-it",
+        "probe_id": "alternate-provider-chat-20261025-01",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 524288,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "mistralai/mistral-large-4-0",
+      "model_version": "mistralai/mistral-large-4-0-20261006",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000004598",
+        "internal_reasoning": "0",
+        "prompt": "0.000001496",
+        "request": "0"
+      },
+      "provider": "mistral/eu",
+      "provider_name": "Mistral",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/mistralai/mistral-large-4-0",
+        "probe_id": "alternate-provider-chat-20261025-02",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 131072,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "openai/gpt-oss-120b",
+      "model_version": "openai/gpt-oss-120b",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.00000015",
+        "internal_reasoning": "0",
+        "prompt": "0.00000003",
+        "request": "0"
+      },
+      "provider": "near-ai/fp4",
+      "provider_name": "Near AI",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/openai/gpt-oss-120b",
+        "probe_id": "alternate-provider-chat-20261025-03",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 131072,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "openai/gpt-oss-120b",
+      "model_version": "openai/gpt-oss-120b",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000006",
+        "internal_reasoning": "0",
+        "prompt": "0.00000015",
+        "request": "0"
+      },
+      "provider": "phala",
+      "provider_name": "Phala",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/openai/gpt-oss-120b",
+        "probe_id": "alternate-provider-chat-20261025-04",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 131072,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "openai/gpt-oss-120b",
+      "model_version": "openai/gpt-oss-120b",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000006",
+        "internal_reasoning": "0",
+        "prompt": "0.00000015",
+        "request": "0"
+      },
+      "provider": "groq",
+      "provider_name": "Groq",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/openai/gpt-oss-120b",
+        "probe_id": "alternate-provider-chat-20261025-05",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 131072,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "openai/gpt-oss-120b",
+      "model_version": "openai/gpt-oss-120b",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.00000075",
+        "internal_reasoning": "0",
+        "prompt": "0.00000015",
+        "request": "0"
+      },
+      "provider": "mara",
+      "provider_name": "Mara",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/openai/gpt-oss-120b",
+        "probe_id": "alternate-provider-chat-20261025-06",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 131072,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "openai/gpt-oss-20b",
+      "model_version": "openai/gpt-oss-20b",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.00000013",
+        "internal_reasoning": "0",
+        "prompt": "0.00000003",
+        "request": "0"
+      },
+      "provider": "coreweave/fp4",
+      "provider_name": "CoreWeave",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/openai/gpt-oss-20b",
+        "probe_id": "alternate-provider-chat-20261025-07",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 131072,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 8192,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "openai/gpt-oss-20b",
+      "model_version": "openai/gpt-oss-20b",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000003",
+        "internal_reasoning": "0",
+        "prompt": "0.000000075",
+        "request": "0"
+      },
+      "provider": "groq",
+      "provider_name": "Groq",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/openai/gpt-oss-20b",
+        "probe_id": "alternate-provider-chat-20261025-08",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048320,
+      "full_text_fields": [
+        "reasoning_content",
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.00000098",
+        "internal_reasoning": "0",
+        "prompt": "0.00000024",
+        "request": "0"
+      },
+      "provider": "io-net/fp4",
+      "provider_name": "Io Net",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/reflection/beam-1.0-501b-a23b",
+        "probe_id": "alternate-provider-chat-20261025-09",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning_content",
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000001",
+        "internal_reasoning": "0",
+        "prompt": "0.0000003",
+        "request": "0"
+      },
+      "provider": "coreweave/fp4",
+      "provider_name": "CoreWeave",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/reflection/beam-1.0-501b-a23b",
+        "probe_id": "alternate-provider-chat-20261025-10",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning_content",
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000012",
+        "internal_reasoning": "0",
+        "prompt": "0.0000004",
+        "request": "0"
+      },
+      "provider": "digitalocean",
+      "provider_name": "DigitalOcean",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/reflection/beam-1.0-501b-a23b",
+        "probe_id": "alternate-provider-chat-20261025-11",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning_content",
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000012",
+        "internal_reasoning": "0",
+        "prompt": "0.0000004",
+        "request": "0"
+      },
+      "provider": "together",
+      "provider_name": "Together",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/reflection/beam-1.0-501b-a23b",
+        "probe_id": "alternate-provider-chat-20261025-12",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000012",
+        "internal_reasoning": "0",
+        "prompt": "0.0000003",
+        "request": "0"
+      },
+      "provider": "nebius/fp8",
+      "provider_name": "Nebius",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017",
+        "probe_id": "alternate-provider-chat-20261025-13",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000012",
+        "internal_reasoning": "0",
+        "prompt": "0.0000003",
+        "request": "0"
+      },
+      "provider": "together",
+      "provider_name": "Together",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017",
+        "probe_id": "alternate-provider-chat-20261025-14",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.00000084",
+        "internal_reasoning": "0",
+        "prompt": "0.00000021",
+        "request": "0"
+      },
+      "provider": "fireworks/spot",
+      "provider_name": "Fireworks",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017",
+        "probe_id": "alternate-provider-chat-20261025-15",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "7e5d395dcc90584f0305c2e44344159276b8ef21519fc7a195bcefd5051e2196"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000012",
+        "internal_reasoning": "0",
+        "prompt": "0.0000003",
+        "request": "0"
+      },
+      "provider": "nebius/fp8",
+      "provider_name": "Nebius",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017",
+        "probe_id": "alternate-provider-responses-20261025-01",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "791095427c555854c9000580fe88e23874674329916ad4171856adf22535f2f7"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.0000012",
+        "internal_reasoning": "0",
+        "prompt": "0.0000003",
+        "request": "0"
+      },
+      "provider": "together",
+      "provider_name": "Together",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017",
+        "probe_id": "alternate-provider-responses-20261025-02",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "791095427c555854c9000580fe88e23874674329916ad4171856adf22535f2f7"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.00000084",
+        "internal_reasoning": "0",
+        "prompt": "0.00000021",
+        "request": "0"
+      },
+      "provider": "fireworks/spot",
+      "provider_name": "Fireworks",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017",
+        "probe_id": "alternate-provider-responses-20261025-03",
+        "verified_at": "2026-10-25T21:33:20Z",
+        "probe_manifest_sha256": "791095427c555854c9000580fe88e23874674329916ad4171856adf22535f2f7"
+      }
     }
   ],
   "baseline_route": null

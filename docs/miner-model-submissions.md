@@ -188,9 +188,10 @@ reasoning mode and output allowance. No miner-specific logging setting is needed
 All model calls, including subagents, must use an approved route. Unsupported
 models return a clear pre-dispatch error; the gateway does not substitute models.
 
-The approved routes include Chat Completions and DeepSeek through Fireworks on
-the Responses API, including Codex clients. See the concise
-[model and settings list](../README.md#upcoming-thinking-model-whitelist).
+The approved routes include Chat Completions and DeepSeek on the Responses API.
+Choose a listed alternative with `provider.only` on each request. The bundled
+Codex helper keeps the default Fireworks route. See the concise
+[model and settings list](../README.md#upcoming-model-whitelist).
 Keep the existing broker transport; no custom logging, response receipts, or
 agent architecture changes are required for provider capture.
 The gateway preserves supported reasoning history, tool IDs, and JSON schemas.

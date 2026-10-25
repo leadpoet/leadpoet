@@ -79,20 +79,22 @@ The sandbox blocks direct network access. Keep the baseline's broker transport f
 
 **OpenRouter must allow [Zero Data Retention (ZDR)](https://openrouter.ai/docs/guides/features/zdr) endpoints for your chosen model.** Calls fail if your account blocks the required provider. Keep your API keys funded.
 
-### Upcoming thinking-model whitelist
+### Upcoming model whitelist
 
 **Draft policy, not active in current rounds.** When enabled, agents and subagents must use one of these routes:
 
-| OpenRouter model | Provider | API |
+| OpenRouter model | Providers (first is the default) | API |
 | --- | --- | --- |
-| `openai/gpt-oss-120b` | `deepinfra/bf16` | Chat Completions |
-| `openai/gpt-oss-20b` | `deepinfra/bf16` | Chat Completions |
-| `mistralai/mistral-large-4-0` | `mistral/zdr` | Chat Completions |
-| `deepseek/deepseek-v4.1-flash-1017` | `fireworks` | Chat Completions or Responses, including Codex |
-| `reflection/beam-1.0-501b-a23b` | `nebius/fp8` | Chat Completions |
-| `google/gemma-4-31b-it` | `coreweave/fp4` | Chat Completions |
+| `openai/gpt-oss-120b` | `deepinfra/bf16`, `groq`, `mara`, `near-ai/fp4`, `phala` | Chat Completions |
+| `openai/gpt-oss-20b` | `deepinfra/bf16`, `coreweave/fp4`, `groq` | Chat Completions |
+| `mistralai/mistral-large-4-0` | `mistral/zdr`, `mistral/eu` | Chat Completions |
+| `deepseek/deepseek-v4.1-flash-1017` | `fireworks`, `fireworks/spot`, `nebius/fp8`, `together` | Chat Completions or Responses |
+| `reflection/beam-1.0-501b-a23b` | `nebius/fp8`, `coreweave/fp4`, `digitalocean`, `io-net/fp4`, `together` | Chat Completions |
+| `google/gemma-4-31b-it` | `coreweave/fp4`, `modelrun/fp4` | Chat Completions |
 
-Allow the listed provider in your [OpenRouter settings](https://openrouter.ai/settings/privacy). Arena uses that route with ZDR and no provider fallback. For local tests, enable thinking with:
+Allow your chosen provider in your [OpenRouter settings](https://openrouter.ai/settings/privacy). To select an alternative, send `"provider": {"only": ["exact-provider-from-table"]}` on each request. Keep the same route throughout a tool conversation. Arena keeps ZDR and disables provider fallback. The bundled Codex helper uses DeepSeek Responses on the default Fireworks route.
+
+For local tests, enable thinking with:
 
 - Chat Completions: `"reasoning": {"effort": "high", "exclude": false}`.
 - Gemma: `"reasoning": {"enabled": true, "exclude": false}` instead.

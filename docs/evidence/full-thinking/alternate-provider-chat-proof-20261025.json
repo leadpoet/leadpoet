@@ -1,0 +1,1544 @@
+{
+  "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+  "captures": [
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 379,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:804a9fa236d3444a8992cc9ee32f7395fe8b2ad2f35f794bed082434370fcb37",
+      "model_id": "google/gemma-4-31b-it",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "bc188804424d7ccb11881fdacf52eb669d4660436dd3ec3eac2c7783c6e5b753",
+        "ledger-readback.json": "71758077063dc164329ea162fc33c7db434ecbd2e29f609dceeb373c1c892e00",
+        "new-policy-proof.json": "9499b509fccb36e6f937b829a031f6e236662a47f4163adf61152f0c3e501faa",
+        "readable-trace.json": "f731fb20bc82330673434da72e869688b2990e76e4b79a40c4da1f9ea06abc51",
+        "readable-trace.md": "050042287376d3236717e1dfa901c04cd7a3b481b0faed9cef7247bd2a15527c",
+        "wire-index.json": "393b58fd84eb840dbf5cca39b4f44993bdbb538c914f6dd735dca054826ca5e5"
+      },
+      "provider": "modelrun/fp4",
+      "raw_export_example_hash": "sha256:81282c71460652e2da4e9c2980b3214c2801f87b2ff3c01aea394977dc12f88b",
+      "readable_trace_document_sha256": "sha256:bbadc1a6e47ae503b548e6585f3197faea8639d01892820186f72e11759a6431",
+      "reported_cost_usd": "0.00121175",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 262144,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "enabled": true
+        },
+        "model_id": "google/gemma-4-31b-it",
+        "model_version": "google/gemma-4-31b-it-20260402",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.000001",
+          "internal_reasoning": "0",
+          "prompt": "0.00000075",
+          "request": "0"
+        },
+        "provider": "modelrun/fp4",
+        "provider_name": "ModelRun",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:64456653395fa3abd47c5f84277c7fbf2c131846b9f2078a1c70072582181dee",
+          "delivered_response_sha256": "sha256:794a6cc81225ce9c0647a7f4e09308402d8340fd90f532609f4a98b693a55557",
+          "full_segments": 1,
+          "input_sha256": "sha256:fe58352181d73a5e05dc91e901d7fec83694a39afd03d4e3ea0754df51de4e96",
+          "reported_reasoning_tokens": 142,
+          "target_sha256": "sha256:c114b614e27eabd9b1a0bf48c898a5977c3c81632c4a1b587378b33d897ce674"
+        },
+        {
+          "call_identity": "sha256:31679eeebdb27dcf0916c95ee97aa920e4481c341f994ba75854018fc570698d",
+          "delivered_response_sha256": "sha256:585942ac613afbc61f34a40552b1be36eb7e04baaacf0292b6cf4a68e17dac6c",
+          "full_segments": 1,
+          "input_sha256": "sha256:8bc0a74c66064212c48d820e91a4493f0613e22d4629f7f787c3788f287a2806",
+          "reported_reasoning_tokens": 68,
+          "target_sha256": "sha256:4694c2dcf117231be17f956c318be75cc464414f738ce855a8fe3b906ec38acd"
+        },
+        {
+          "call_identity": "sha256:59272f23336849303a189e5c1d6746ae891368b9d73b9e8e8c5d7f34f1dcadf9",
+          "delivered_response_sha256": "sha256:1e3004915b61742dfbf8f339a6d03c5c1931ce75e82e6ab301b644d0400fc0a3",
+          "full_segments": 1,
+          "input_sha256": "sha256:ce01f095d2d898518a9b1dbf670c1dfffbf93c4f0cb40d97b16d62b2505b3f63",
+          "reported_reasoning_tokens": 169,
+          "target_sha256": "sha256:54aeec46a34d7131d884b7baa7771bf712ce582ece8ae54fc3bf436629eb315f"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:fe58352181d73a5e05dc91e901d7fec83694a39afd03d4e3ea0754df51de4e96",
+          "status": 200,
+          "wire_body_bytes": 2404,
+          "wire_body_sha256": "sha256:8406a8fa8e8241d40fbfc6dca64dd8c8e496e8ba982b39050a61b05dfbec9abd"
+        },
+        {
+          "outbound_body_sha256": "sha256:8bc0a74c66064212c48d820e91a4493f0613e22d4629f7f787c3788f287a2806",
+          "status": 200,
+          "wire_body_bytes": 1785,
+          "wire_body_sha256": "sha256:ddafe68e5c936940cfc68b41b1e8a97fde6d5d43cab0a983d56c78ed5174be12"
+        },
+        {
+          "outbound_body_sha256": "sha256:ce01f095d2d898518a9b1dbf670c1dfffbf93c4f0cb40d97b16d62b2505b3f63",
+          "status": 200,
+          "wire_body_bytes": 2417,
+          "wire_body_sha256": "sha256:1dfcb55973a14965de322edb8d2297adbba3fc87217ff108ce19f1eac09eab76"
+        }
+      ],
+      "worker_payload_sha256": "sha256:4cfb3faf866ff3431de6c30600daf9cfb62594315e9f0a84e1c62b0f30e57248"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 2,
+        "full_thinking_calls": 1,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 257,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:c58a4fd208f81d7e6bddc5e044491d5b881aee73431c921dea8440e8031a25bf",
+      "model_id": "mistralai/mistral-large-4-0",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "0ed3698cb06f9a34c27058334f3668e72def21f7f9b8ac2af763b3cd42251e31",
+        "ledger-readback.json": "8bacfd703bb76c4a7fa7ca2e2c00f2026030c04894b3cd9bc018bc20ec112bb2",
+        "new-policy-proof.json": "ad5f8b965784452e32ce6d471ca3a38b87e8b3a67dc23740c93223538c432a53",
+        "readable-trace.json": "f5af3a3c8df0dad330475be97509be35987aaf5a4f1b1534810f3f351e5ab4af",
+        "readable-trace.md": "7bf0aca172440059459075343a08ae096ca88a94fe74fad562a105b993d0b3bc",
+        "wire-index.json": "154938b8ebd40cabc144810ffc3488e5309dfaf5c2e4a7ac9ea396b1c20f1326"
+      },
+      "provider": "mistral/eu",
+      "raw_export_example_hash": "sha256:733bf371b03a94ad3ae64a80ec034d8636f3dce6bad9df656e2c288b6e62867b",
+      "readable_trace_document_sha256": "sha256:3c72a25e76554713d0e8fb97d845e0bb7b92fece16ea666b1aa6937c0e13d0b7",
+      "reported_cost_usd": "0.002477178",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 524288,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "mistralai/mistral-large-4-0",
+        "model_version": "mistralai/mistral-large-4-0-20261006",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.000004598",
+          "internal_reasoning": "0",
+          "prompt": "0.000001496",
+          "request": "0"
+        },
+        "provider": "mistral/eu",
+        "provider_name": "Mistral",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:551e896f60d970eba41c5c634ef6314da5b3a38df4a382fa81b3d7329f351c0d",
+          "delivered_response_sha256": "sha256:1bc263b59e8dc8e6c6761d3e10bcd0b15a30600a2d32076883dd7e071e117f6a",
+          "full_segments": 0,
+          "input_sha256": "sha256:f55c80290cb27e30cfd0872f77a24b75263786afef0ec7e7d5f2bec4c8137366",
+          "reported_reasoning_tokens": 0,
+          "target_sha256": "sha256:f855ea13d3f65c4a23bc166b221d999ca8feace3b4bae34305056b8a3cd2db5a"
+        },
+        {
+          "call_identity": "sha256:e8aa6911793e942f28b7a61a53191c22cc3cc3f7e80eda307d7d72d4c0a4f086",
+          "delivered_response_sha256": "sha256:4cdf7345812fb3ff46de74ad600a5b08a2ac0ccbb18528ad0194948995263f17",
+          "full_segments": 0,
+          "input_sha256": "sha256:54cff339972695228bf6bf06d833d5399d2e8f5270aad9b365bfa667a30fd8bd",
+          "reported_reasoning_tokens": 0,
+          "target_sha256": "sha256:950786557e322cfc5cc058faeb29c4e3c83becc7113bd0ff5cc0fa5c4ac52946"
+        },
+        {
+          "call_identity": "sha256:5672d1938e8e03baf3eb2219ebbf114ac5892f7c5ef4bc577023dc2d2515528b",
+          "delivered_response_sha256": "sha256:19bf0e2bd50627f5bbdef8e907373e0b5db0e1b2e70e4190eea8b25fdb7055d9",
+          "full_segments": 1,
+          "input_sha256": "sha256:032e42fe83e3a7873c614d3b572d686f08ef0257734c190091f66d6b2a428f67",
+          "reported_reasoning_tokens": 257,
+          "target_sha256": "sha256:9c869445426e24ad742a077d9ff8a5b593434045bb26eab1d6994b787a0a86bc"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:f55c80290cb27e30cfd0872f77a24b75263786afef0ec7e7d5f2bec4c8137366",
+          "status": 200,
+          "wire_body_bytes": 1297,
+          "wire_body_sha256": "sha256:043e048205b4f0fb1d080391102e5a447e4004f0d2d2ed1036afedce31e1df77"
+        },
+        {
+          "outbound_body_sha256": "sha256:54cff339972695228bf6bf06d833d5399d2e8f5270aad9b365bfa667a30fd8bd",
+          "status": 200,
+          "wire_body_bytes": 1304,
+          "wire_body_sha256": "sha256:a768e969e0d2f9159ef48690fce90f25fec63edd293ef59663eb853ce2bdd667"
+        },
+        {
+          "outbound_body_sha256": "sha256:032e42fe83e3a7873c614d3b572d686f08ef0257734c190091f66d6b2a428f67",
+          "status": 200,
+          "wire_body_bytes": 3786,
+          "wire_body_sha256": "sha256:9a349665fe53973ce3e65d26c69464a0d8de4ea82e1e2e5175014bce948cb0ba"
+        }
+      ],
+      "worker_payload_sha256": "sha256:663db2c33c6ba649dbdac75a5535318fb3407f6e0d2855ffba8bac7f6fdd489a"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 1252,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:e72c16c67301c78c101c85b25764c426e1bd550e62ccf66d0be52efb667c373e",
+      "model_id": "openai/gpt-oss-120b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "1db51d9299900e0ef32a9da08404b3c57468d6507087acbd715831c561ac1dcf",
+        "ledger-readback.json": "de4c7641cc1b5641a6b5e9ec19870aedf2366605d09c5f42890988e682f2a266",
+        "new-policy-proof.json": "3d701f8c44f14de3d55cb68f27f2c37c3c26993be7229a7c7466e923b0dc3273",
+        "readable-trace.json": "36704ffe70cb05aab7fddb53590971da1f5c122fac414208a52e3aae2c4fdc87",
+        "readable-trace.md": "d0ef959b6a7b7a6b59273e65fcf5d47a8030b56c45bba43671772541b31d23b2",
+        "wire-index.json": "9fab204302518968671ac1c088b9d912d54a2a435246c094a6b572af60355fb2"
+      },
+      "provider": "near-ai/fp4",
+      "raw_export_example_hash": "sha256:437d1988d5c27cf0eb3641cda28b2fff2efd30e7d6c4a3f1398912cee39a792e",
+      "readable_trace_document_sha256": "sha256:11b0956652d55d72cb23b12d2bb266ad0ffeb401af10eb77f5916b768a8898d3",
+      "reported_cost_usd": "0.00027429",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 131072,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 8192,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "openai/gpt-oss-120b",
+        "model_version": "openai/gpt-oss-120b",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.00000015",
+          "internal_reasoning": "0",
+          "prompt": "0.00000003",
+          "request": "0"
+        },
+        "provider": "near-ai/fp4",
+        "provider_name": "Near AI",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:2fd37be293efb9c0f00c7617a281c07ffc8586640bb974062ea4aa0ab29a92f6",
+          "delivered_response_sha256": "sha256:f9f9f0a31afa5385be98dde1e6d73f321056ae8d34821dbfc6245a8824da3996",
+          "full_segments": 1,
+          "input_sha256": "sha256:4f96a82c4ef7e6fb2270bcf640771b075bd173566aeb34805560f798354e71fa",
+          "reported_reasoning_tokens": 839,
+          "target_sha256": "sha256:78be10fc741f53903ad73efbd19b7d74388d2c68209fbe590c2db670d5e7e55b"
+        },
+        {
+          "call_identity": "sha256:c56b9a2c07ec513b86924bbeeb7debd9a11cd2316637006bb8f74354e77a5d0b",
+          "delivered_response_sha256": "sha256:d2110ea8d2145f66ff4689e485f5564fd706d3939619b38042c64281083e708c",
+          "full_segments": 1,
+          "input_sha256": "sha256:7820a274b9bd1d7faaae0fa8ea647415f4c1f8bd9854465375dc544b07ac1646",
+          "reported_reasoning_tokens": 86,
+          "target_sha256": "sha256:4b1e19ed56a611f6572764839f58455cf850ba7a51723a9ac4983886c0330b1e"
+        },
+        {
+          "call_identity": "sha256:ae96a3dbef4c7de1808d0c392f3e2fe96351fe253b7fb068fa6b6cdfb91eeb5d",
+          "delivered_response_sha256": "sha256:8a660444060ebaa1bde4c3721c29aa6c5c8116143ffa63fdc8237455fcfd57fd",
+          "full_segments": 1,
+          "input_sha256": "sha256:f51b5035a29d8406e1a000cd144553a79007e2c7d7c33c0fadd3306a22577f06",
+          "reported_reasoning_tokens": 327,
+          "target_sha256": "sha256:5d703555db496e4fbe3d51870e6468438a4cce9e23ed3461ced2bb206a8f071a"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:4f96a82c4ef7e6fb2270bcf640771b075bd173566aeb34805560f798354e71fa",
+          "status": 200,
+          "wire_body_bytes": 9155,
+          "wire_body_sha256": "sha256:3767ce1f1b56dc0d1d6c5e8e6f6a6e6660f94a83c764909e75595ffe5a6aaa70"
+        },
+        {
+          "outbound_body_sha256": "sha256:7820a274b9bd1d7faaae0fa8ea647415f4c1f8bd9854465375dc544b07ac1646",
+          "status": 200,
+          "wire_body_bytes": 1944,
+          "wire_body_sha256": "sha256:c9a4487de74096965ee400558a8637f54834c743ffefff22cb4ebf45a19545c8"
+        },
+        {
+          "outbound_body_sha256": "sha256:f51b5035a29d8406e1a000cd144553a79007e2c7d7c33c0fadd3306a22577f06",
+          "status": 200,
+          "wire_body_bytes": 4297,
+          "wire_body_sha256": "sha256:03f47e9fa95b8b5a8f7cd5bcf5024e70e0b8a4152e3cdd0c4be54f884974794c"
+        }
+      ],
+      "worker_payload_sha256": "sha256:0518f2de863c84690c348b8e7048d218db07594e1000bc7df19ed2f3c8963373"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 907,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:b6099a81e18537b83117a9324f9244780e90163a2d60572a2bec76de50d4ecc6",
+      "model_id": "openai/gpt-oss-120b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "19df1f1940c08361df1844964e2071ab291ef3a6e76827d6bef3533b0047de02",
+        "ledger-readback.json": "f6424ea27e54cbd455f0b00aaf3c46dd8b1c19eef6d63feef824897a65d50dce",
+        "new-policy-proof.json": "5b10f2375aa346897364ccc65dabdfcc507965773edb5d2c44b58d6355f590f2",
+        "readable-trace.json": "096be49a9b5c613f434d9ef4521a0fd7ea5e15b54c54babbba99b637a342f554",
+        "readable-trace.md": "c26b9d3e7d0d4dffc6166a301a61fb42674f0dce9eee0c0aec97573621cc5ca6",
+        "wire-index.json": "92b706f5301cf4d39f14d9ec39cd4c1d7f94ce571a19c1cb073acf324c5b1e5e"
+      },
+      "provider": "phala",
+      "raw_export_example_hash": "sha256:098136398e6e9ee20a1c0238581910f8d57c488f3ac10ad9c847be69f8e54fe0",
+      "readable_trace_document_sha256": "sha256:8c52f931144897e726a2cfe546eb528515b1634a2acd8b935abfc4f3235d146e",
+      "reported_cost_usd": "0.00078405",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 131072,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 8192,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "openai/gpt-oss-120b",
+        "model_version": "openai/gpt-oss-120b",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000006",
+          "internal_reasoning": "0",
+          "prompt": "0.00000015",
+          "request": "0"
+        },
+        "provider": "phala",
+        "provider_name": "Phala",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:2fd37be293efb9c0f00c7617a281c07ffc8586640bb974062ea4aa0ab29a92f6",
+          "delivered_response_sha256": "sha256:1a78cf3d6f89a72902b1e4cd221297a4096758526a920e45f16867c64670225d",
+          "full_segments": 1,
+          "input_sha256": "sha256:9c9193490769c1e2f7c484d7dcaef88f216cdeeb5ca60b6a0482b98721596c36",
+          "reported_reasoning_tokens": 483,
+          "target_sha256": "sha256:14a7ab6074c69ef8df5e17644ba8e23cec5cb2bbcc422874f738b057796d05fd"
+        },
+        {
+          "call_identity": "sha256:94a14e745cb1b9171a9e688468aeed82e6c031895b9d27e5b7a74eeb512a8a6c",
+          "delivered_response_sha256": "sha256:88bdb38b810883655b46eb10273456d4223594dcbc639641e9a88e64ec9cc32e",
+          "full_segments": 1,
+          "input_sha256": "sha256:2575ad881fe4ebbd9c0c9e6d8606a7105971313265f75d58888cfdcf89c4c6c0",
+          "reported_reasoning_tokens": 81,
+          "target_sha256": "sha256:4c87f2c467cc9da95f7511b24cc67669012789b1a058c513d8cbfc20b1df55df"
+        },
+        {
+          "call_identity": "sha256:0df2cc451d98f7d1aa207bcab4b40b9fa8d6f7fdf5884bca77507ce1b6392172",
+          "delivered_response_sha256": "sha256:9421504dca66de6e31ca89a58f926e1cb4ce79d48235eada0b79ceaa2e5bac66",
+          "full_segments": 1,
+          "input_sha256": "sha256:5978e839effd83422b525d7c8f89e071cd9972ace45b6332b08d03ac4c74bb32",
+          "reported_reasoning_tokens": 343,
+          "target_sha256": "sha256:9c869445426e24ad742a077d9ff8a5b593434045bb26eab1d6994b787a0a86bc"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:9c9193490769c1e2f7c484d7dcaef88f216cdeeb5ca60b6a0482b98721596c36",
+          "status": 200,
+          "wire_body_bytes": 5291,
+          "wire_body_sha256": "sha256:d1106240cc7ee6219968516f8e56f4f2d4c32fbb2a5856286ab137e4913ea3f7"
+        },
+        {
+          "outbound_body_sha256": "sha256:2575ad881fe4ebbd9c0c9e6d8606a7105971313265f75d58888cfdcf89c4c6c0",
+          "status": 200,
+          "wire_body_bytes": 2008,
+          "wire_body_sha256": "sha256:7a383f9b0af3fc3aca57f828508a4149703cb91100e0befc3a494ef47014990e"
+        },
+        {
+          "outbound_body_sha256": "sha256:5978e839effd83422b525d7c8f89e071cd9972ace45b6332b08d03ac4c74bb32",
+          "status": 200,
+          "wire_body_bytes": 4053,
+          "wire_body_sha256": "sha256:f64543494fe16974b467069c3acf19ac9d54a4d4ecc2de3f05cd96176541ed82"
+        }
+      ],
+      "worker_payload_sha256": "sha256:575b2fba7a2c4261209aee81055527ca74ea45487b0fb662115e10ae6342ab1a"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 1645,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:b2e8516566bea8d1371d0f359fb0418f9bb433c025747e5fe764aebbf628ba79",
+      "model_id": "openai/gpt-oss-120b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "f18ef6cf2e31abccb69f4cf984b48df4fc68e4499e7c42c4b848d7eaa61751ae",
+        "ledger-readback.json": "9e312c668a311e504d79a74f519cc9861a98b477c10e54c04a3530790a6fa2d3",
+        "new-policy-proof.json": "8b4b7d34e5090edb9ee3c6bf92efcf2484fd5fe3edffdae9e804300af59cdd6a",
+        "readable-trace.json": "a451820939ac8daeba0e16c019146259a4ff9ad65856f5c09bfdf950ab2f80be",
+        "readable-trace.md": "ddda4848750f43d3b95bcad6fc56870625af7b7dd0d2b02e1f2d9a0414d32013",
+        "wire-index.json": "722ba405f77b560e9537bee1641567524b3e353a5601fde54f83a3ad32f8f7f5"
+      },
+      "provider": "groq",
+      "raw_export_example_hash": "sha256:b22b7d807ed46a2b3fc2886399d53caba3fc3f96c4591c06d2cf266ad935bb4c",
+      "readable_trace_document_sha256": "sha256:33821e5d81b194416017e247e528a1040a64b35993ef461762f88e65eda58cc8",
+      "reported_cost_usd": "0.00155400",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 131072,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 8192,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "openai/gpt-oss-120b",
+        "model_version": "openai/gpt-oss-120b",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000006",
+          "internal_reasoning": "0",
+          "prompt": "0.00000015",
+          "request": "0"
+        },
+        "provider": "groq",
+        "provider_name": "Groq",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:2fd37be293efb9c0f00c7617a281c07ffc8586640bb974062ea4aa0ab29a92f6",
+          "delivered_response_sha256": "sha256:c0415ff8f5b1911572a6e779bfa22f4e3bd61c08f0598b90c7f825e5fb2c1dfc",
+          "full_segments": 1,
+          "input_sha256": "sha256:77d80826c0fc136d618c8e839089df4b37873f3800dd0f9efaaec94f36da8315",
+          "reported_reasoning_tokens": 1204,
+          "target_sha256": "sha256:ec600e4f4d182fd0c1fca0de0a1b4f3ba0185b1a1b78952d65cf9f4d4b8ac276"
+        },
+        {
+          "call_identity": "sha256:e5a74c520dfe02a5df422dc7e6c77695ea99b2f8a4bd4adb614e2f499980aeca",
+          "delivered_response_sha256": "sha256:33e31488470cb3c6bab3a279c1f4e930ec1119fbb614b3d389466052af537ed7",
+          "full_segments": 1,
+          "input_sha256": "sha256:ff6eb91558c08bef0ddf777a4645ece78381469e019d4753e4e1d454be4d6003",
+          "reported_reasoning_tokens": 90,
+          "target_sha256": "sha256:7c1f2c946862d5b9301fc00705950144dd47d10daf503e46117f3676265d945d"
+        },
+        {
+          "call_identity": "sha256:1b98db98ba563b7f9b60820b3bbbcdbeee06d6121e1cfa31c597e0b453f51934",
+          "delivered_response_sha256": "sha256:ac9e1e2750dc03c1c869118e28d70f503c2e1b83aeabf4a7c4ce80e2ffe6b420",
+          "full_segments": 1,
+          "input_sha256": "sha256:78ddee75f511ac5bdb2bb2f5cea8e8461099b2734c7dbffe3b7f4434044bce59",
+          "reported_reasoning_tokens": 351,
+          "target_sha256": "sha256:9719fc2116d51fa7d0dab24927db19f99c7396bc673f58765d442a9f94270e7b"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:77d80826c0fc136d618c8e839089df4b37873f3800dd0f9efaaec94f36da8315",
+          "status": 200,
+          "wire_body_bytes": 12773,
+          "wire_body_sha256": "sha256:f782b3cae9570190eb23155508cda964874aa4da6fb2c6ddd0e12f7a198f4634"
+        },
+        {
+          "outbound_body_sha256": "sha256:ff6eb91558c08bef0ddf777a4645ece78381469e019d4753e4e1d454be4d6003",
+          "status": 200,
+          "wire_body_bytes": 2042,
+          "wire_body_sha256": "sha256:7c6201792832134034598a04d1338aab3192ce3bbe8b5ca6cafb9a6741682b43"
+        },
+        {
+          "outbound_body_sha256": "sha256:78ddee75f511ac5bdb2bb2f5cea8e8461099b2734c7dbffe3b7f4434044bce59",
+          "status": 200,
+          "wire_body_bytes": 4327,
+          "wire_body_sha256": "sha256:d07bfb4383776715e033ffa9d008ca56712e876b6a5d2d92bf3b88b8595ecd28"
+        }
+      ],
+      "worker_payload_sha256": "sha256:4d93270cb45998d73bc8f913c0506833dc858fd542696194f7d68f38c1a033a2"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 908,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:a921ea1d13c40c3ac931ff712f73a8cdc3cd104eeddfccd9e3e91ecbd8c65779",
+      "model_id": "openai/gpt-oss-120b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "4405f03323a4e1641d1486c8cfbe9c697ce18dffdfd067a84941025a60db34e7",
+        "ledger-readback.json": "aec81e9a87f2f1076ce707846cdceb027afb685b773dcbd524b1498ba4eb2bde",
+        "new-policy-proof.json": "8b8faa1cb3e9bb38cd2e56f31d65c126afa1e4b3df6095f0f7a35c612d09155d",
+        "readable-trace.json": "74105cbc530cfc789e3f755f339135471113fcb9c1f3e0cd7de30c22892b8026",
+        "readable-trace.md": "5579f7533b0041ade8842a7105f8831cd9c68f9fec1f73ab4c30a2869795f863",
+        "wire-index.json": "8c91b90ce422f9d50fce70db12471e79b5b70829f52778a132b7620d5e7731c1"
+      },
+      "provider": "mara",
+      "raw_export_example_hash": "sha256:bb440ed39fc716bdb28ed7ef6ebdb161b33af469efe8624a219ea79c6345af50",
+      "readable_trace_document_sha256": "sha256:f0a766b23038495aa230ecfbb71197d4d0339f4b8ccf4b56aad40c9b418f58b3",
+      "reported_cost_usd": "0.00105630",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 131072,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 8192,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "openai/gpt-oss-120b",
+        "model_version": "openai/gpt-oss-120b",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.00000075",
+          "internal_reasoning": "0",
+          "prompt": "0.00000015",
+          "request": "0"
+        },
+        "provider": "mara",
+        "provider_name": "Mara",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:2fd37be293efb9c0f00c7617a281c07ffc8586640bb974062ea4aa0ab29a92f6",
+          "delivered_response_sha256": "sha256:19eab9a4104b46f3447235fee0816e458a117abb70e7fd381ecd2dd7898b66bc",
+          "full_segments": 1,
+          "input_sha256": "sha256:a8f7cb0b0d1c5479a4ac6f5b9e61defb2eef6b0bf43492ea3a6c52abaa581798",
+          "reported_reasoning_tokens": 497,
+          "target_sha256": "sha256:7b1df037bffa24d16bf5f28a6ecc13b2762f112cb0005433592cb4b46d38c2bf"
+        },
+        {
+          "call_identity": "sha256:6929a45b0b0a2d643464833df93a7922e4cf94bc8dbe824e72efdc2014467f03",
+          "delivered_response_sha256": "sha256:da6762207e8fcb53ab9c51613849c604406469414d51694abfafa2159f998e1f",
+          "full_segments": 1,
+          "input_sha256": "sha256:d2eca25f101e1a9e23531abff506d2d1e46770194f4478d41226783217bd52a1",
+          "reported_reasoning_tokens": 130,
+          "target_sha256": "sha256:933cbe43d203c6636c7faa3f61ec2a18b101338e6cec40fefac085fe265337f9"
+        },
+        {
+          "call_identity": "sha256:ddf9f4ef59c27ad8e82e64ee70b8c4f1938a0e265a86eafd8a7bcb658c8200bb",
+          "delivered_response_sha256": "sha256:32f8d1df1f1174d069f2f6fee274563c5f97f273d77d958f0f4501a16e54fc60",
+          "full_segments": 1,
+          "input_sha256": "sha256:99d53ebcdb973b56c91612e8c6e245acea8284b53168b970a40f847b00f9294b",
+          "reported_reasoning_tokens": 281,
+          "target_sha256": "sha256:5d703555db496e4fbe3d51870e6468438a4cce9e23ed3461ced2bb206a8f071a"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:a8f7cb0b0d1c5479a4ac6f5b9e61defb2eef6b0bf43492ea3a6c52abaa581798",
+          "status": 200,
+          "wire_body_bytes": 5776,
+          "wire_body_sha256": "sha256:3e88fa75e0bd640a1f541ca8ca0241886eb6b8f1e0a773d73be0f3ccdaa0519c"
+        },
+        {
+          "outbound_body_sha256": "sha256:d2eca25f101e1a9e23531abff506d2d1e46770194f4478d41226783217bd52a1",
+          "status": 200,
+          "wire_body_bytes": 2513,
+          "wire_body_sha256": "sha256:287553f9e925253fd11cb519e3783e10e0a35cd3d658e734754229b56d7a5baa"
+        },
+        {
+          "outbound_body_sha256": "sha256:99d53ebcdb973b56c91612e8c6e245acea8284b53168b970a40f847b00f9294b",
+          "status": 200,
+          "wire_body_bytes": 3648,
+          "wire_body_sha256": "sha256:46f6056bb95d1ae9a3e6f434b94bc722e0b7694fc72bb3efb62d710ca4002051"
+        }
+      ],
+      "worker_payload_sha256": "sha256:63aa8b1fd5f4dec5723645858e3a03e93e535418dbae13b43b091ffc2efe1347"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 1705,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:71a3ab57a86599341948563ab11d57d5f21432b98a8fcd3821851dfa059a2859",
+      "model_id": "openai/gpt-oss-20b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "f141f9989e772f5a756389110c9e61661b835eee38c69a25a5e5257ea1e0b01b",
+        "ledger-readback.json": "a976638aa35b9db182a7d8299fa7350a4bcd8f1a7ce9c7c55644b45314ba286e",
+        "new-policy-proof.json": "b79a67c6c01076741a403ca7e6946c712d573d66bdad9bc5c2056c6b14244430",
+        "readable-trace.json": "570f70a452e2160882d60b5becc066617309d6e26d6756b9d8bf7eab809fc65b",
+        "readable-trace.md": "fb9cc28b5a26768de26dcff1304afbaa1710c5edef2b1e4f33be7e0b2f1041a1",
+        "wire-index.json": "d3f8258212cecac55a87c12cd82f0e8c08f5276e48251fc1512e064e3c6dbe3f"
+      },
+      "provider": "coreweave/fp4",
+      "raw_export_example_hash": "sha256:3c93a2b63765359ffc86cd822a7b58f9a2bbe38baf382917735ee3f7e17b9661",
+      "readable_trace_document_sha256": "sha256:a63cc51d67fafc5f88cc9915106a86cb29c39c65745d61049121d2c3078d5194",
+      "reported_cost_usd": "0.00023292",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 131072,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 8192,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "openai/gpt-oss-20b",
+        "model_version": "openai/gpt-oss-20b",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.00000013",
+          "internal_reasoning": "0",
+          "prompt": "0.00000003",
+          "request": "0"
+        },
+        "provider": "coreweave/fp4",
+        "provider_name": "CoreWeave",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:6576aefe07417e5eb614cea58571b0a30d99a7ba312237dc7973636562e3702c",
+          "delivered_response_sha256": "sha256:108d0e1562027a392baecf4ec573396f456033f797318626e2cb636548eb1635",
+          "full_segments": 1,
+          "input_sha256": "sha256:cdaa16304b14f034da80cf42c8706174509bfe83fe6b9fe24638ac504ffb1d09",
+          "reported_reasoning_tokens": 724,
+          "target_sha256": "sha256:ff9a95f541c4106fa450d95eec03d808f52c648a9871dd45bbd9441f57320d5d"
+        },
+        {
+          "call_identity": "sha256:dab04e203c90c45dfedb57682d54bfc92dddc46d85926349a2a30108c4eafec5",
+          "delivered_response_sha256": "sha256:957f08443d903e47c630085316bb338f9c5fecdd563c37653f79e56d2eca81a4",
+          "full_segments": 1,
+          "input_sha256": "sha256:07d5c85f276c540f4637d310fae8571d13402012a614db91b6fe8cf7405f7c99",
+          "reported_reasoning_tokens": 412,
+          "target_sha256": "sha256:87673897a35ba3b8563ec89fdb1eacf9512a31d2a803c03a716e169177a351aa"
+        },
+        {
+          "call_identity": "sha256:0d44ba7f46691cc2514ce66d78376acba099a0b813fb036342a559a57388edfc",
+          "delivered_response_sha256": "sha256:ba9530849d4a0f6d7b2f436f8891928772017acf28af9e0ffb2ff4292a6ea3a5",
+          "full_segments": 1,
+          "input_sha256": "sha256:f98fe3fe5599f96729f21d0c28462f44c01a0c6df49fd8b83f65e4f27744d9b9",
+          "reported_reasoning_tokens": 569,
+          "target_sha256": "sha256:9c869445426e24ad742a077d9ff8a5b593434045bb26eab1d6994b787a0a86bc"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:cdaa16304b14f034da80cf42c8706174509bfe83fe6b9fe24638ac504ffb1d09",
+          "status": 200,
+          "wire_body_bytes": 7244,
+          "wire_body_sha256": "sha256:90d000ef62ee66fd2383fd038c6a7c645e689b5dfcacbdd66ef07ed75f3cd4f4"
+        },
+        {
+          "outbound_body_sha256": "sha256:07d5c85f276c540f4637d310fae8571d13402012a614db91b6fe8cf7405f7c99",
+          "status": 200,
+          "wire_body_bytes": 4741,
+          "wire_body_sha256": "sha256:630caaea7534ec6d041bc86426fe44ba29fe0349bc539fdf500217ca95adcbab"
+        },
+        {
+          "outbound_body_sha256": "sha256:f98fe3fe5599f96729f21d0c28462f44c01a0c6df49fd8b83f65e4f27744d9b9",
+          "status": 200,
+          "wire_body_bytes": 5878,
+          "wire_body_sha256": "sha256:3987a4671cc8591aec077e7a3fbec32795048d36a49e42adccd9f763504e220e"
+        }
+      ],
+      "worker_payload_sha256": "sha256:e71b00714c45a7570c2fdf570bb6008c7f51de6c8c2f01b7417009224397c67b"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 708,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:1b238976ab4d8e197679f51b16f3df6eb25926e9c3980c87a9bc5e89c7a9f38b",
+      "model_id": "openai/gpt-oss-20b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "12e0df1d41a2d63b5b9aaa9b10416d0b16d1751d656e4e39d8c4acd522966b8b",
+        "ledger-readback.json": "3a2300ede69b6d8bd64726f2a96bb89680d43e2d5bb120fab164d2a0ef09a507",
+        "new-policy-proof.json": "cf2aaf7a3b6b5bb756d1847ec2efea3cba379f634539cd94f045e075f7a0ef55",
+        "readable-trace.json": "3c05d7824b72005902dd1074cc1efa431a40dc839d9c385bc1b7a3a00482976a",
+        "readable-trace.md": "431be0c5f27d3d917f7034251014aa8547c9f3da85cbab3886a403cf9e497355",
+        "wire-index.json": "86591fc3af10c2efe16a36120f2bcebb22dafdd2bb430715cd4b21d8fa3659b3"
+      },
+      "provider": "groq",
+      "raw_export_example_hash": "sha256:9ab42d30be0c272aa33964c85e59cbaf0fee6dfe26f0614d42a9c075ba27c7d0",
+      "readable_trace_document_sha256": "sha256:e5aa3d75cbe70d50b8d6dc2734a9d5fe8e96eeedf5ce1110c4b7070b921744ae",
+      "reported_cost_usd": "0.000340050",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 131072,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 8192,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "openai/gpt-oss-20b",
+        "model_version": "openai/gpt-oss-20b",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000003",
+          "internal_reasoning": "0",
+          "prompt": "0.000000075",
+          "request": "0"
+        },
+        "provider": "groq",
+        "provider_name": "Groq",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:6576aefe07417e5eb614cea58571b0a30d99a7ba312237dc7973636562e3702c",
+          "delivered_response_sha256": "sha256:299ae1c1b6950af789eeef4fef57224fd20c880f05d34251527af5faa889abf4",
+          "full_segments": 1,
+          "input_sha256": "sha256:928e9a2943a0230cc735d769f90c4b8a6ecf6f819104cce358a8b576c374ea12",
+          "reported_reasoning_tokens": 209,
+          "target_sha256": "sha256:ae67688218f31cca7e9a775d8d32c173d83f44b21b041415701d8543bb5550be"
+        },
+        {
+          "call_identity": "sha256:507e52165fb9dcdd5467cedf7b2d7fb5d4548373ef42a6bbd4717ae3fed5cd3c",
+          "delivered_response_sha256": "sha256:aeb90946ae1ece834bd11433c0eabb11ca757c9f23713d6ee6abde643657038f",
+          "full_segments": 1,
+          "input_sha256": "sha256:675bd6ede1976757bcc55d068ff46f15bb44b4a7fd402d7eb905c2a0db5e2e4b",
+          "reported_reasoning_tokens": 14,
+          "target_sha256": "sha256:0ea41b753b53d0fbd65d1da17675b8dd0d61db8081d18a7d43c8e32fac5a79a5"
+        },
+        {
+          "call_identity": "sha256:608a32b524bd0ec73ae7a306ec33ece656f781134d5c60d48d0cbeb318fccc9f",
+          "delivered_response_sha256": "sha256:462b610090a997cb6cf387acc8cd0336641dc99ce7d521d642205be315dbde59",
+          "full_segments": 1,
+          "input_sha256": "sha256:0ac20f5f0753e4f87715f9748c1b1d2e85455bd2cf85d7a3dd52122be3167727",
+          "reported_reasoning_tokens": 485,
+          "target_sha256": "sha256:9719fc2116d51fa7d0dab24927db19f99c7396bc673f58765d442a9f94270e7b"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:928e9a2943a0230cc735d769f90c4b8a6ecf6f819104cce358a8b576c374ea12",
+          "status": 200,
+          "wire_body_bytes": 3344,
+          "wire_body_sha256": "sha256:afd007670de8d92a9bda1363f0ae6a06fb56f51ef70493fa54206c2257f9fb48"
+        },
+        {
+          "outbound_body_sha256": "sha256:675bd6ede1976757bcc55d068ff46f15bb44b4a7fd402d7eb905c2a0db5e2e4b",
+          "status": 200,
+          "wire_body_bytes": 1473,
+          "wire_body_sha256": "sha256:936691615c37335ab0257874202df6b988ac34a13e486c81ee699b2ba8d43e0c"
+        },
+        {
+          "outbound_body_sha256": "sha256:0ac20f5f0753e4f87715f9748c1b1d2e85455bd2cf85d7a3dd52122be3167727",
+          "status": 200,
+          "wire_body_bytes": 5544,
+          "wire_body_sha256": "sha256:a209920550c2e29f6dd6c16c4e62b8aee834cb95ee4d4b88ae4d245f559792eb"
+        }
+      ],
+      "worker_payload_sha256": "sha256:00d686ab6a425a1944cee26964a3a0a70f7665c7e2e78f4a4fd454795f5f42bf"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 437,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:0d583b239af4c4689603bf1fa4c30fbc6e4253d3f18d0c0ee2b787569dfca893",
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "3b2953c8291b43635292d42df7bc9ca6cef8c3edbf355b6ab653ce554a85e122",
+        "ledger-readback.json": "ea56c41d11a0a0b30a23b273adeaab02f1bdf3cc26c1b396319b5d66f29126d5",
+        "new-policy-proof.json": "cf220ecfc798b0d32817f0a35d6cf8533ea3decda31a747923a0f338d997c525",
+        "readable-trace.json": "6bd1d8a4a3710cc60ff9859179995a3ba2347aa39027216977d19296bb2785f5",
+        "readable-trace.md": "b4544eed04fc4fd376d3833c8e80fcde8717cdaedea14831525849c1d43d3373",
+        "wire-index.json": "d26b78ca60b03f2c683e5c0780eadec33fce1ecb3d6e3b69ab55ced159036238"
+      },
+      "provider": "io-net/fp4",
+      "raw_export_example_hash": "sha256:ac5ce9f302fc45a15d13dc7482f1a8dad03b7f247c8733a00b5fbff120c06ea7",
+      "readable_trace_document_sha256": "sha256:c751729554cb46edc43f479c28ca983c5096c011b8b2ad60e8bcf71b611c692c",
+      "reported_cost_usd": "0.00067036",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 1048320,
+        "full_text_fields": [
+          "reasoning_content",
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "reflection/beam-1.0-501b-a23b",
+        "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.00000098",
+          "internal_reasoning": "0",
+          "prompt": "0.00000024",
+          "request": "0"
+        },
+        "provider": "io-net/fp4",
+        "provider_name": "Io Net",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:2f21364b7facd828f7e3078852000fc5cc6dbc28e2d17eb908511d4c0046194a",
+          "delivered_response_sha256": "sha256:8a48a8318e3c2f1cf3714411f822d1df727d06b9d63aab488c6c422a5cde344f",
+          "full_segments": 1,
+          "input_sha256": "sha256:a803fce0afa0f2bfb938f92d37bf1047f562ad4277d4c7890c36ee88342d0db0",
+          "reported_reasoning_tokens": 44,
+          "target_sha256": "sha256:fc90fd50ba9507d1b2c9c85d6190504b7d78ec1ce798845eb640dbca7dd2a103"
+        },
+        {
+          "call_identity": "sha256:9d5bdf033ae0bc540094275e779d3effc76b1dc1c92ff2dbb1022d269f84fef9",
+          "delivered_response_sha256": "sha256:a81c8ee6ccab309d5d7ba2d62750cbbb6d0c193bd2b1b146f3cd1e94fca037f7",
+          "full_segments": 1,
+          "input_sha256": "sha256:2ae69e8b36a4d0068e84c96c1e11f6689d5ee3fbeeb3f6e671a6b88c8e63a787",
+          "reported_reasoning_tokens": 13,
+          "target_sha256": "sha256:a8596081340c9edc4b6d4b8a0b29c9e04cfd710e38407348b54fab2eea88159a"
+        },
+        {
+          "call_identity": "sha256:89e07bdef859bdec6469b5988766c149d7fe4b277aade29cb8effeb3eeb978a4",
+          "delivered_response_sha256": "sha256:05ea224350a598538a50153986e276f7d854cb0b5f4b382899b9b904250ec812",
+          "full_segments": 1,
+          "input_sha256": "sha256:bf33e296e4dfd31ef03497b093092c92fa7694bac265b9d9d4d1591d74008489",
+          "reported_reasoning_tokens": 380,
+          "target_sha256": "sha256:9c869445426e24ad742a077d9ff8a5b593434045bb26eab1d6994b787a0a86bc"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:a803fce0afa0f2bfb938f92d37bf1047f562ad4277d4c7890c36ee88342d0db0",
+          "status": 200,
+          "wire_body_bytes": 1779,
+          "wire_body_sha256": "sha256:ec1c1ebb742cb729ad643b75afba663436b2d6e795904c45593fa07c53e81da0"
+        },
+        {
+          "outbound_body_sha256": "sha256:2ae69e8b36a4d0068e84c96c1e11f6689d5ee3fbeeb3f6e671a6b88c8e63a787",
+          "status": 200,
+          "wire_body_bytes": 1539,
+          "wire_body_sha256": "sha256:ecd5ec4db1ce4b2aff5c59d59bd63a988997d21170da11bb5006fdc495813c9f"
+        },
+        {
+          "outbound_body_sha256": "sha256:bf33e296e4dfd31ef03497b093092c92fa7694bac265b9d9d4d1591d74008489",
+          "status": 200,
+          "wire_body_bytes": 4332,
+          "wire_body_sha256": "sha256:02731f9cd8f763bad1309b2e37949934f490e6c31d43922e4f376fbe53c467de"
+        }
+      ],
+      "worker_payload_sha256": "sha256:1792ed46cc18a00fad62bdce0f01b1b99b267af6976e6cb79be7a89828072f85"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 413,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:73e68c30b5a732a9f75b30f0f49d78bd38d9ed9567f72c24a012af63a81ca987",
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "1f002a66e9bd9502d766831458f9c0188c793652fc0e5a20a6d00031f65a0a70",
+        "ledger-readback.json": "cab5ff05927358f0f7c466d167dc417feea71645bafe17469c6ef4c4ba23af07",
+        "new-policy-proof.json": "2eafcdc4a118c72fa5d1b925d518b1769c391fdce90f5d48e8629c313d6ccfaa",
+        "readable-trace.json": "e1a7886c6046f8e5dcf0fb8be389f1c4ce328b56894494c6dad9385ac052d79b",
+        "readable-trace.md": "9d9844fa9aacc68a38b06a4a80606d9b874b846809c01eda293f098f16f05e1e",
+        "wire-index.json": "e2fecc10fe14a6e9fa3f2b8b742aef1f88d0e3163cc2b0d3776ccd16cdc72e53"
+      },
+      "provider": "coreweave/fp4",
+      "raw_export_example_hash": "sha256:3ce33b0e14b915b855b1081d26c423b3592466c56464965bbcc38c80a8aab234",
+      "readable_trace_document_sha256": "sha256:8bae3639dc03b79873c9d521c9458597133c06727ab5fab552307f712f7d1213",
+      "reported_cost_usd": "0.00066968",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "reasoning_content",
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "reflection/beam-1.0-501b-a23b",
+        "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.000001",
+          "internal_reasoning": "0",
+          "prompt": "0.0000003",
+          "request": "0"
+        },
+        "provider": "coreweave/fp4",
+        "provider_name": "CoreWeave",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:2f21364b7facd828f7e3078852000fc5cc6dbc28e2d17eb908511d4c0046194a",
+          "delivered_response_sha256": "sha256:fe9e9859efeb3534e5b64b297bb324268755e0027f0d28b96e981361abb3f00a",
+          "full_segments": 1,
+          "input_sha256": "sha256:97873a628319c8d1cb017e71fca5df030b0f45322f2909242e34cc3aa114c28b",
+          "reported_reasoning_tokens": 82,
+          "target_sha256": "sha256:3af006ed7e180025fed561e7cfce065fb48d36e4fec5c6ca60aad32f6114d7ca"
+        },
+        {
+          "call_identity": "sha256:0507e0e2574844f8f310a94b0da8491f55505d5344ed74468e5e5fb3a9d86f5b",
+          "delivered_response_sha256": "sha256:e5cb86e09579edb0b0c05e88f78f77f2235271be154cc748bb4c1ce0a6886b94",
+          "full_segments": 1,
+          "input_sha256": "sha256:621f4c63747f32b9821d5edd88bdc57f39d0c74554d553eefa69f4fc12198f6c",
+          "reported_reasoning_tokens": 27,
+          "target_sha256": "sha256:9043c85d2d8bdd48eaecf6ed3aa9da9a84122451eef8ce87dbed5ccdb7d00fdb"
+        },
+        {
+          "call_identity": "sha256:613bfd492f29619c88c8503d346f5820fa5fee4f439e0ca93c42eab9173d38a3",
+          "delivered_response_sha256": "sha256:124ee6c50b9ce114717383618b4af6aed4087552347ad7916152149418b27693",
+          "full_segments": 1,
+          "input_sha256": "sha256:edd8a4fb7cb2cc7636eede2af535427b52e82953529894af6b9a52b7b975d1d5",
+          "reported_reasoning_tokens": 304,
+          "target_sha256": "sha256:c2e2366ea93f8653458bdaa07be8f3170dbaf6aef1a125222c88aca922118d6c"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:97873a628319c8d1cb017e71fca5df030b0f45322f2909242e34cc3aa114c28b",
+          "status": 200,
+          "wire_body_bytes": 1933,
+          "wire_body_sha256": "sha256:4aca523357a9e3fbde9e5762a9fb32171302ef043f99b93ecc50d654a12ab6c0"
+        },
+        {
+          "outbound_body_sha256": "sha256:621f4c63747f32b9821d5edd88bdc57f39d0c74554d553eefa69f4fc12198f6c",
+          "status": 200,
+          "wire_body_bytes": 1512,
+          "wire_body_sha256": "sha256:396f6900e88fc3f4ea7f9d6296d8c96aa11ff7e2842061905526eae25205ee9a"
+        },
+        {
+          "outbound_body_sha256": "sha256:edd8a4fb7cb2cc7636eede2af535427b52e82953529894af6b9a52b7b975d1d5",
+          "status": 200,
+          "wire_body_bytes": 3466,
+          "wire_body_sha256": "sha256:2fff443d0056960912623c77d9a966a0c69b5b4472b9e2653c7b638ba046db80"
+        }
+      ],
+      "worker_payload_sha256": "sha256:52a6f81d1326b65d30dd9a53b5c4db16e5fea984003e21e011351803dc5ab06c"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 338,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:ca8159f98c1c64aac73f390e114d62dadebe52efb385ff6511a7e2706e2c442a",
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "63bb5b4caad38d06fa14d14b7c24c256c48472665ee7cfa6a2e1763e57228047",
+        "ledger-readback.json": "a6c85b0a491a62ebef9ba147ece38e5b2ea2684366a4f5735d29d4860384c6e1",
+        "new-policy-proof.json": "6940c7a116c3cc3e748c5d18f6702db2bec124eab698bd9764bb36f888f20557",
+        "readable-trace.json": "9a101a6932321a5465e038cf13ffe41ca37519edf6f471c5927eca9320dbc8f7",
+        "readable-trace.md": "f662c9bbd2de6218384f3ba2020ccc6ace0b7e0d78246a04ca7527eeabc2c397",
+        "wire-index.json": "aad0a846d9609b72539eb6c26f282f6aa29d3af8081508be0339796d067196ac"
+      },
+      "provider": "digitalocean",
+      "raw_export_example_hash": "sha256:b55a3107adca8dfdffda2155f8e4e8a794b4840793bb97fb0d1ed65ce409df23",
+      "readable_trace_document_sha256": "sha256:1e2a669bb9d3b13e3957f388bc708beaddbbb1b7dfdd4246eba40970237272bb",
+      "reported_cost_usd": "0.00081560",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "reasoning_content",
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "reflection/beam-1.0-501b-a23b",
+        "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000012",
+          "internal_reasoning": "0",
+          "prompt": "0.0000004",
+          "request": "0"
+        },
+        "provider": "digitalocean",
+        "provider_name": "DigitalOcean",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:2f21364b7facd828f7e3078852000fc5cc6dbc28e2d17eb908511d4c0046194a",
+          "delivered_response_sha256": "sha256:4796fe6fd470ae058cbd1fb7fbe307354aa1c61333a801561a89232c9d1f5361",
+          "full_segments": 1,
+          "input_sha256": "sha256:2375b6200499774b961185c36f47d52ea9f59b2b76ffe92edf7e34e0a4e49f33",
+          "reported_reasoning_tokens": 122,
+          "target_sha256": "sha256:3ad4b570df902459e12d2ad8bf46a6d9157270b6236c71d0bb97de4aef2cb170"
+        },
+        {
+          "call_identity": "sha256:5fe95b17bbdd8b77ab0481ac58c1ffb5c3c8bf33d5a102bacd473a597f7569cb",
+          "delivered_response_sha256": "sha256:152a4e3a6bf719ee66cd70caa523d2f7c5827d81d81e29430621a7e61ece1ae6",
+          "full_segments": 1,
+          "input_sha256": "sha256:e933d99bd2ce0a945e3b04de678f238f8ef2ea8f750662e118450135eb7fab96",
+          "reported_reasoning_tokens": 13,
+          "target_sha256": "sha256:dddf4a6056f1d1b05842dcfab69b217569d02b242719f76e7bd56b8cde448cbc"
+        },
+        {
+          "call_identity": "sha256:3308380542e72b92d7964ffebd32d9de8125ca79c9a3f372127ffca9c07e6828",
+          "delivered_response_sha256": "sha256:c5ab5ae518054cc36fe556ee98cade360176e1361ccdbe8697b85da7220e59aa",
+          "full_segments": 1,
+          "input_sha256": "sha256:fcc13c8f9fb24c6edb6f1250d50fef38470355a0926405af7f4a82e0e076fa86",
+          "reported_reasoning_tokens": 203,
+          "target_sha256": "sha256:c2e2366ea93f8653458bdaa07be8f3170dbaf6aef1a125222c88aca922118d6c"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:2375b6200499774b961185c36f47d52ea9f59b2b76ffe92edf7e34e0a4e49f33",
+          "status": 200,
+          "wire_body_bytes": 2451,
+          "wire_body_sha256": "sha256:59a269de961985551e079943a19b155a0843727fb2cbb5e051d3b362c55d92ab"
+        },
+        {
+          "outbound_body_sha256": "sha256:e933d99bd2ce0a945e3b04de678f238f8ef2ea8f750662e118450135eb7fab96",
+          "status": 200,
+          "wire_body_bytes": 1523,
+          "wire_body_sha256": "sha256:fcfe5b99271a7d11185af9f5993a726d896061c459e2d1b9ff329051fabcf813"
+        },
+        {
+          "outbound_body_sha256": "sha256:fcc13c8f9fb24c6edb6f1250d50fef38470355a0926405af7f4a82e0e076fa86",
+          "status": 200,
+          "wire_body_bytes": 2793,
+          "wire_body_sha256": "sha256:243c04f84eb8bd983bed1b28dbb19c44159c923bad9a24e214d667675cf59d9b"
+        }
+      ],
+      "worker_payload_sha256": "sha256:c4474b6447f99c95b32383aec2e1e940e09341c1c2648825d4a1056e7f1e8da7"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 0,
+        "full_thinking_calls": 3,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 333,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:f02ae94f1b44e0d1e5757585eece13cab9aafd17cbbdc2ba2657543c7c2b2a5a",
+      "model_id": "reflection/beam-1.0-501b-a23b",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "93c8dd7c39243125b18e9bd6e0869ee500186a3813da2f7878b061d97784ddd3",
+        "ledger-readback.json": "62d8d31d9bde7f4275a3d61122e644f73ee33bfa74bf9008c248ef0b37d8de16",
+        "new-policy-proof.json": "aeb026e1ab68c068b1153f4d3fd0b1b847f5e8b4f7dac73df2c9e93271ae636f",
+        "readable-trace.json": "19a6b6f8af4232218121576fc63b851181baaf300b339e816a7b93db61692f09",
+        "readable-trace.md": "b2b99a366dceb9461d7be87c92f3203c5e15299d99ea65bafe13b6ca3205005b",
+        "wire-index.json": "1ae7e23614c5de200a92a3e2b3763d8912e010a619fb700ab9e02541b7f43a52"
+      },
+      "provider": "together",
+      "raw_export_example_hash": "sha256:175867a936a4e34a044ec5f457b4a811e1113551db2bb5b04d0501cb38d0b45f",
+      "readable_trace_document_sha256": "sha256:13c286a1f4516d55cc3aa4a95f207eee9c84164702b90d74a6b4b6781bd18a96",
+      "reported_cost_usd": "0.00080784",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "reasoning_content",
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "reflection/beam-1.0-501b-a23b",
+        "model_version": "reflection/beam-1.0-501b-a23b-20261016",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000012",
+          "internal_reasoning": "0",
+          "prompt": "0.0000004",
+          "request": "0"
+        },
+        "provider": "together",
+        "provider_name": "Together",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:2f21364b7facd828f7e3078852000fc5cc6dbc28e2d17eb908511d4c0046194a",
+          "delivered_response_sha256": "sha256:0e46e0b19db6e021c71a249f00859f3dd5117459f09ebe13951f97c5cc75083e",
+          "full_segments": 1,
+          "input_sha256": "sha256:1e2d838b0394dede047e00376985a311309b0d9b1a1eb7d041131867eda1df0a",
+          "reported_reasoning_tokens": 91,
+          "target_sha256": "sha256:e2657db5ad3b43bff5045cf8eff17d68fc230cd95af5b2480ca6ead6ef8eaf81"
+        },
+        {
+          "call_identity": "sha256:ccca22c1293abc602d2382d77e7f8779c798e9034fb79a6062e48e836f513238",
+          "delivered_response_sha256": "sha256:c07dede15587273bb40d376e304270639711bc8639ce37a886feceeac88873e8",
+          "full_segments": 1,
+          "input_sha256": "sha256:1b33102ce37eefdb1806ce8358d9457f2f16e5a054b94fd12cd28d1d8451ffba",
+          "reported_reasoning_tokens": 13,
+          "target_sha256": "sha256:d79df0caa61ddea057d647e05f39a9593b723e8b5ec8263e22e580148ea401ac"
+        },
+        {
+          "call_identity": "sha256:56a1d5d14b2af70efa6155d4640201e104a897294484d701f03aaf5af7e8952d",
+          "delivered_response_sha256": "sha256:77015eefc3bf6a3bc1bc55cd6ad84647da82f8dc60480bb40d4db163bb432418",
+          "full_segments": 1,
+          "input_sha256": "sha256:89455f0087a86ce65d7ead1c4e1a60cc4a87a7de79c638362bc9fadf518ba211",
+          "reported_reasoning_tokens": 229,
+          "target_sha256": "sha256:9c869445426e24ad742a077d9ff8a5b593434045bb26eab1d6994b787a0a86bc"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:1e2d838b0394dede047e00376985a311309b0d9b1a1eb7d041131867eda1df0a",
+          "status": 200,
+          "wire_body_bytes": 2134,
+          "wire_body_sha256": "sha256:ef387d91b3d980d82352194da2b83d2fac129009c302344c5b6ff8242c13ce18"
+        },
+        {
+          "outbound_body_sha256": "sha256:1b33102ce37eefdb1806ce8358d9457f2f16e5a054b94fd12cd28d1d8451ffba",
+          "status": 200,
+          "wire_body_bytes": 1502,
+          "wire_body_sha256": "sha256:0d9964e26222dda91daea36e153083fba13853cf00375bb95327a3a8a4dcf644"
+        },
+        {
+          "outbound_body_sha256": "sha256:89455f0087a86ce65d7ead1c4e1a60cc4a87a7de79c638362bc9fadf518ba211",
+          "status": 200,
+          "wire_body_bytes": 2927,
+          "wire_body_sha256": "sha256:f91fcf0457e4848afd11cbced6c5701c24acb9068f877ad99217d692e97accae"
+        }
+      ],
+      "worker_payload_sha256": "sha256:0e228311e1de3b9e4dfa2d4a8e40eb9f174069ba6eda693bca3f109b4acb32db"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 1,
+        "full_thinking_calls": 2,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 116,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:e409473d0a51b8412f220833cf613c76f58f86c6037d190bdc49bbe3e70f5c0f",
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "5b215fb956b8cb85e403ef3e1806533c0d365026ffe90c787d3079a6e11f16fb",
+        "ledger-readback.json": "5474da8181cbb7506f1f505cf5292a4da9c268d6bffd4d17fd0627be43bfcf7a",
+        "new-policy-proof.json": "ac659491901d73c8ddfee4397aaf3641cea86eef080d13f75f44e715374f1888",
+        "readable-trace.json": "e6c26dca1dbbd6c58e7badcb9633560e25082ddc61cbc36ae38f39b8523cccf0",
+        "readable-trace.md": "d9e7344174861c6d47b5cfda609e263fb1492bb944cd3c480bb4bc4ce59ab46b",
+        "wire-index.json": "be8660c64a62d31ed7ce3411e137a46f7f0097a56cfbff9768ca9f0a8fda9c48"
+      },
+      "provider": "nebius/fp8",
+      "raw_export_example_hash": "sha256:c39fb3a04e5fa04a6fdb1cad71e289174dae43abf75d6151dab4176e7772a2c5",
+      "readable_trace_document_sha256": "sha256:09906ccbd16211e9da9c49acdb0a017cf70712dcc42d13af439eea3b9bbfd822",
+      "reported_cost_usd": "0.0006264",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "deepseek/deepseek-v4.1-flash-1017",
+        "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000012",
+          "internal_reasoning": "0",
+          "prompt": "0.0000003",
+          "request": "0"
+        },
+        "provider": "nebius/fp8",
+        "provider_name": "Nebius",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:318e77b6d2c5513a20a98664bb6aed6112fe3baf9db833aeada69d24b3437a58",
+          "delivered_response_sha256": "sha256:aedf48f9f8f76df4217de4bc07d779b086c0092a2e78d58b1dae89a22928d978",
+          "full_segments": 0,
+          "input_sha256": "sha256:1a5f28e43b86d5d94fbb99dabf688dba7eaa4906a92facdeea0f95d66676d0da",
+          "reported_reasoning_tokens": 0,
+          "target_sha256": "sha256:b48f9766a5a0fab9785e8c466da6c8364a756d1ccd4bd8e9fe7601e46bd0d361"
+        },
+        {
+          "call_identity": "sha256:4c677ae50acea7e3e58429d170c1d56b12beb53411c1219c5fbdad9cfc225e24",
+          "delivered_response_sha256": "sha256:0a38469619e9b200c3aaeed96094ffbba6ff77a22387e5224ea65cf2019de66d",
+          "full_segments": 1,
+          "input_sha256": "sha256:ceeade8666d494a1fd81941f87329615b1ee8ae45cb0d73df672ace2d409aafe",
+          "reported_reasoning_tokens": 5,
+          "target_sha256": "sha256:b447365f23d84c58dea06ae665eeeb10ac71c94377f74cb85535c332b22e6cb1"
+        },
+        {
+          "call_identity": "sha256:f560b2dd3385bad024892e4f60780b42418de6529cc23c13658b3ad38bc27f8a",
+          "delivered_response_sha256": "sha256:989f952d25da1f55c5ddb07d98dd200a4768079daef4e537c62f998082cf1fed",
+          "full_segments": 1,
+          "input_sha256": "sha256:f2af902bb92b4ac384971f7eead5e62ce03958966954d76e19f2e1042655f39f",
+          "reported_reasoning_tokens": 111,
+          "target_sha256": "sha256:9c869445426e24ad742a077d9ff8a5b593434045bb26eab1d6994b787a0a86bc"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:1a5f28e43b86d5d94fbb99dabf688dba7eaa4906a92facdeea0f95d66676d0da",
+          "status": 200,
+          "wire_body_bytes": 1344,
+          "wire_body_sha256": "sha256:2197f75ea49e4a92bcb1d0411511c8f299f765ddd5fe47a5e383e4ec467028bf"
+        },
+        {
+          "outbound_body_sha256": "sha256:ceeade8666d494a1fd81941f87329615b1ee8ae45cb0d73df672ace2d409aafe",
+          "status": 200,
+          "wire_body_bytes": 1481,
+          "wire_body_sha256": "sha256:cec98edf476a6dd593bc3a24f8be76440d00920184fee1ec152e55ae227b5c36"
+        },
+        {
+          "outbound_body_sha256": "sha256:f2af902bb92b4ac384971f7eead5e62ce03958966954d76e19f2e1042655f39f",
+          "status": 200,
+          "wire_body_bytes": 2395,
+          "wire_body_sha256": "sha256:9d08daad44c17d88fcea3e239d3cb1fdd1b78ea4f00887b8c44e44782af4d8a7"
+        }
+      ],
+      "worker_payload_sha256": "sha256:ee49142aa6ab0e4788cd8414394873a00ca631d0b310ad55a988e128c6fd9e4a"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 1,
+        "full_thinking_calls": 2,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 155,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:33952c295eeb0e745f7e7fcb7b518551f4ab154a7b57b619a60daea2b6a65866",
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "c7fbff628240923be7fb2f4fcdfad5b2e0b5d0922167dde6fc36fc81b9303d52",
+        "ledger-readback.json": "93fb791e06f302d0ebd22d8cc029d2a1c1ee97435ea2cf5d54331185aa459c35",
+        "new-policy-proof.json": "a5afc5ec2844618ee5adee5c68ca7b5df2ed84184485d4efe9a7488f8f94903a",
+        "readable-trace.json": "ff5ee7eee49ea688b6dfc1cda0d6b20a9ddb74f6ef113aa497c77cda98966936",
+        "readable-trace.md": "141f551a3bb22c0a71960bd22014dbfed8afd61d5daba457faeb12e78e91c6a8",
+        "wire-index.json": "6ce28b05c2c52bd4d91004d8cfabc6057f7190c0b8a3a0bac885093d83d56808"
+      },
+      "provider": "together",
+      "raw_export_example_hash": "sha256:dcb2f89c38db5dce13e0e7fb60547a538436088a18e0fab5fb160a97dc0c3ecb",
+      "readable_trace_document_sha256": "sha256:b3864b51b1b51f084fdcbd640cd9eff6730d22fdff1f7240f79580cbfadbed4e",
+      "reported_cost_usd": "0.000566304",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "deepseek/deepseek-v4.1-flash-1017",
+        "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.0000012",
+          "internal_reasoning": "0",
+          "prompt": "0.0000003",
+          "request": "0"
+        },
+        "provider": "together",
+        "provider_name": "Together",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:318e77b6d2c5513a20a98664bb6aed6112fe3baf9db833aeada69d24b3437a58",
+          "delivered_response_sha256": "sha256:6f1cdffb6d5bb7b5dd542a64ac33dcfa77035bf5c6a7fe89c59ca667dfa8ee6e",
+          "full_segments": 1,
+          "input_sha256": "sha256:0f3416772ee399517d6c1be684a81f3d4452b5ed0491cc59b47ba63d0ffae262",
+          "reported_reasoning_tokens": 28,
+          "target_sha256": "sha256:55b117752e43e6aef175f67a0e1bce2e00760cdf47fd2e649b86c5d675b91e8f"
+        },
+        {
+          "call_identity": "sha256:6053ae3523c910344a960f3418744cd6ab86055fc36ae7f5625355c330c31b8f",
+          "delivered_response_sha256": "sha256:7f97aaa2a3e8d0146f4560adf5250cd28f864745235d2b0e87c80c57b28a6328",
+          "full_segments": 0,
+          "input_sha256": "sha256:e4df143184c07a644ba610de6bde18fa45305666c1408bac0fe42d67c48d3164",
+          "reported_reasoning_tokens": 0,
+          "target_sha256": "sha256:4a3dc162c20fad7921b20ffa91b35b29178ad7f90e92ac5b9d783a23e02da948"
+        },
+        {
+          "call_identity": "sha256:51500b3da2b0609aa4e318c3545a5646c0076b377ab8e8f12377d15c377a3947",
+          "delivered_response_sha256": "sha256:aa3c5f99a8def09fd3672818a632f9081b3f237532ba082fe7fd4ba72a694c58",
+          "full_segments": 1,
+          "input_sha256": "sha256:43a8ec9fbc289fa3baff59ff05331f1bc24ba26eb37092a41f6cc052e82139f9",
+          "reported_reasoning_tokens": 127,
+          "target_sha256": "sha256:9c869445426e24ad742a077d9ff8a5b593434045bb26eab1d6994b787a0a86bc"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:0f3416772ee399517d6c1be684a81f3d4452b5ed0491cc59b47ba63d0ffae262",
+          "status": 200,
+          "wire_body_bytes": 1633,
+          "wire_body_sha256": "sha256:e4dc2203ebaf89f8c71eac7e45836bb3bdd58b59384b16b54072fdf23d375bf2"
+        },
+        {
+          "outbound_body_sha256": "sha256:e4df143184c07a644ba610de6bde18fa45305666c1408bac0fe42d67c48d3164",
+          "status": 200,
+          "wire_body_bytes": 1328,
+          "wire_body_sha256": "sha256:8811211f2cf7bb91d19edbc44de8d4841a0a87c3a5ba8c157b3aa640a84fab00"
+        },
+        {
+          "outbound_body_sha256": "sha256:43a8ec9fbc289fa3baff59ff05331f1bc24ba26eb37092a41f6cc052e82139f9",
+          "status": 200,
+          "wire_body_bytes": 2527,
+          "wire_body_sha256": "sha256:6cac9dc5693c443895bb89f63f3064241b5b63555fe78c239e5f5c15a5e08346"
+        }
+      ],
+      "worker_payload_sha256": "sha256:fae2b74a1a95f6ae3ad828a361a5cb9e2bfc35f0dd424dee44b14937b0af877c"
+    },
+    {
+      "api": "openrouter.chat",
+      "capture_source_commit": "c4961cf74d86a672bce12a8f75f41fa742b038bb",
+      "checks": {
+        "client_callback_count": 0,
+        "explicit_zero_calls": 1,
+        "full_thinking_calls": 2,
+        "raw_wire_and_SQL_storage_exact": true,
+        "reported_reasoning_tokens": 26,
+        "strict_candidate_targets": 3,
+        "two_tool_continuations_and_strict_json": true
+      },
+      "isolated_registry_sha256": "sha256:e4c9ab0cf3756b386c3f1d9dc6e27370ee8e670aa883c713b5cbced232ca6f60",
+      "model_id": "deepseek/deepseek-v4.1-flash-1017",
+      "private_artifact_file_sha256": {
+        "diagnostic-export.json": "be57594749bac0bf827047cdfa54cf40f96b58909adc5c5d811485de1f485d66",
+        "ledger-readback.json": "90278a0d81f7aa9cba47f80d76ea9ae3a22a9d06e84d71a2e62b3773d9bbbae1",
+        "new-policy-proof.json": "396d098a3966a05188831e1093b6f05c09a95527838569b588832cbea12f3512",
+        "readable-trace.json": "b67359954951fe4070e3783125fcf5bb95e347e5ee7472a3a6a56ce2d2105278",
+        "readable-trace.md": "cfa48772e180f1b23bf7768324627afdca9fa03c750776c097fb77541df01a85",
+        "wire-index.json": "c2a3c6b1b43a27f8afdf4c005dcb5284bb24331d4a54eb1bffa0cb30dc48d977"
+      },
+      "provider": "fireworks/spot",
+      "raw_export_example_hash": "sha256:7a612376fddf134cc3cc3eb2254f27b467c0edb7ce410c9199fb886a797976f5",
+      "readable_trace_document_sha256": "sha256:f310356c4e8a87523f1a0e34c52a8203be457c84785cab4651d343ebda2e91ec",
+      "reported_cost_usd": "0.0002698248",
+      "route_metadata": {
+        "allowed_fallback_routes": [],
+        "answer_headroom_tokens": 1024,
+        "api": "openrouter.chat",
+        "context_tokens": 1048576,
+        "full_text_fields": [
+          "reasoning",
+          "reasoning_details.text"
+        ],
+        "max_output_tokens": 32768,
+        "mode": {
+          "effort": "high"
+        },
+        "model_id": "deepseek/deepseek-v4.1-flash-1017",
+        "model_version": "deepseek/deepseek-v4.1-flash-20261017",
+        "parser_version": "arena_openrouter_reasoning_v1",
+        "price_ceiling": {
+          "completion": "0.00000084",
+          "internal_reasoning": "0",
+          "prompt": "0.00000021",
+          "request": "0"
+        },
+        "provider": "fireworks/spot",
+        "provider_name": "Fireworks",
+        "semantic_class": "full_generated_thinking",
+        "status": "approved"
+      },
+      "strict_target_hashes": [
+        {
+          "call_identity": "sha256:318e77b6d2c5513a20a98664bb6aed6112fe3baf9db833aeada69d24b3437a58",
+          "delivered_response_sha256": "sha256:760b699198c0eb598c3b1abf9c990ef37a205e65271908aa9986838021d8051f",
+          "full_segments": 0,
+          "input_sha256": "sha256:139b0018c554094136e48f23c1d8a2272fc5d41ecd96f0109ff0dcf385ea7b30",
+          "reported_reasoning_tokens": 0,
+          "target_sha256": "sha256:6cbca11f7cde58a923fe4becb6c7dd10ce7839e0fc0cb949ee588399fc03da3a"
+        },
+        {
+          "call_identity": "sha256:822bf34b598d3695ea04fa26b7c819d3979560f0dc36bd946959797a6df5b500",
+          "delivered_response_sha256": "sha256:817a79c74d3a0300e547f0b56fe4b473bfa55dc161628c2ff128e6293018c18f",
+          "full_segments": 1,
+          "input_sha256": "sha256:1d1835f46856ac1c037f9e03d751442514336e368a124a3b588770f5705305f1",
+          "reported_reasoning_tokens": 7,
+          "target_sha256": "sha256:e788a9159799d0a8a73f7720bbc18accf6ac9b8212005bc52c8f7d11bb2d74a4"
+        },
+        {
+          "call_identity": "sha256:99cf8b8eef0480ba4fd766ea836c5a36ac13958461b5c7f8684b685be22592c2",
+          "delivered_response_sha256": "sha256:02e03386a8b115b243698bf04c203ac66797583ac1a01773c136fb7eeebdf162",
+          "full_segments": 1,
+          "input_sha256": "sha256:117f4a3d2be017b2f7ddb455e6459dc71772e15af0f4fa6fa5f5d4761bc7e1dd",
+          "reported_reasoning_tokens": 19,
+          "target_sha256": "sha256:7ebd48ecd3b64482ff7bff75675246923038c490df8cb124cc15690b63c3b787"
+        }
+      ],
+      "wire_and_request_hashes": [
+        {
+          "outbound_body_sha256": "sha256:139b0018c554094136e48f23c1d8a2272fc5d41ecd96f0109ff0dcf385ea7b30",
+          "status": 200,
+          "wire_body_bytes": 1339,
+          "wire_body_sha256": "sha256:7e0385cd22b4714c9ed623a234ff6f6fde3c52c477f8ffaea9a15cc54e93b78b"
+        },
+        {
+          "outbound_body_sha256": "sha256:1d1835f46856ac1c037f9e03d751442514336e368a124a3b588770f5705305f1",
+          "status": 200,
+          "wire_body_bytes": 1473,
+          "wire_body_sha256": "sha256:7338bd4557004070d0a074845fcd1b8b2b9cd953e8fc59ac8fc0d1cd0615dfaa"
+        },
+        {
+          "outbound_body_sha256": "sha256:117f4a3d2be017b2f7ddb455e6459dc71772e15af0f4fa6fa5f5d4761bc7e1dd",
+          "status": 200,
+          "wire_body_bytes": 1465,
+          "wire_body_sha256": "sha256:1cc4c9a8bfb352bcd25fbe659fc9d542252b9752918ed1e70321d5d2ed24abc6"
+        }
+      ],
+      "worker_payload_sha256": "sha256:11610613dd1a44904ecab42ee99ff4c0b5e6b31667b682a3f1ebe81797bff09f"
+    }
+  ],
+  "counts": {
+    "explicit_zero_calls": 5,
+    "full_reasoning_calls": 40,
+    "reported_reasoning_tokens": 9579,
+    "routes_passed": 15,
+    "strict_pair_candidates": 45,
+    "successful_model_calls": 45
+  },
+  "full_capture_archive_bytes": 2381020,
+  "full_capture_archive_sha256": "2ad1862a5db11f8d4cdcfaf47b1bdd167b3b2b051686b0b96fbfed7a4e2fc487",
+  "limits": [
+    "This file records completed isolated candidate captures. It does not activate routes or claim labeled ICP training, production deployment, or a complete native agent workflow.",
+    "Catalog capabilities alone grant no approval. Exact raw artifacts remain private and are bound here by file, wire, request, example, worker-payload, readable-view, and target hashes.",
+    "Mistral EU is an alternate regional endpoint from the same provider company. No different qualifying provider company was present in the live catalog.",
+    "The final full multi-route selector is verified separately after integration, so this manifest does not depend on a future registry hash.",
+    "The initial breadth includes explicit negatives and one interrupted Gemma attempt. Those are not passing routes and their unknown billing reservations remain held."
+  ],
+  "schema_version": "leadpoet.alternate_provider_live_capture_summary.v1",
+  "scope": "Fifteen passing alternate Chat endpoint captures across six models. Two tool continuations and a strict JSON final response were tested with the real Broker, local worker socket, disposable PostgreSQL, stored request and response proof, and zero client callbacks.",
+  "verified_date": "2026-10-25"
+}

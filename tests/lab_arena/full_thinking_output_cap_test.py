@@ -44,7 +44,7 @@ def test_current_caps_and_source_bounds_are_evidence_bound_without_rewriting_old
     with pytest.raises(ValueError):
         rc.validate_registry(bad)
     assert all(route['api'] == 'openrouter.chat' for route in registry['approved_routes'][:6])
-    assert [(route['model_id'], route['api']) for route in registry['approved_routes'][6:]] == [
+    assert [(route['model_id'], route['api']) for route in registry['approved_routes'][6:7]] == [
         ('deepseek/deepseek-v4.1-flash-1017', 'openrouter.responses')]
 
 

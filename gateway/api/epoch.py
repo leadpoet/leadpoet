@@ -1,6 +1,10 @@
 """Public chain epoch information for the gateway and Arena operators."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Response
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/epoch", tags=["Epoch"])
 
@@ -17,9 +21,12 @@ async def get_epoch_state(response: Response):
         response.headers["Pragma"] = "no-cache"
         return result
     except Exception as exc:
+        # Do not echo the internal failure text on a public, unauthenticated
+        # endpoint.
+        logger.exception("Failed to read authoritative subnet epoch state")
         raise HTTPException(
             status_code=503,
-            detail=f"Authoritative subnet epoch state unavailable: {exc}",
+            detail="Authoritative subnet epoch state unavailable.",
         ) from exc
 
 
@@ -58,6 +65,7 @@ async def get_epoch_information(epoch_id: int):
     except Exception:
         # Do not echo the internal failure text on a public, unauthenticated
         # endpoint.
+        logger.exception("Failed to get epoch info for epoch %s", epoch_id)
         raise HTTPException(
             status_code=500,
             detail="Failed to get epoch info.",
@@ -94,8 +102,11 @@ async def get_current_epoch():
             "epoch_info": info
         }
     
-    except Exception as e:
+    except Exception as exc:
+        # Do not echo the internal failure text on a public, unauthenticated
+        # endpoint.
+        logger.exception("Failed to get current epoch")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to get current epoch: {str(e)}"
-        )
+            detail="Failed to get current epoch.",
+        ) from exc

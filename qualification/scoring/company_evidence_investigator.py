@@ -4966,7 +4966,8 @@ async def investigate_company_evidence(
                 combined_stage_product
                 and current_stage_search_succeeded
                 and search_calls < search_limit
-                and fetch_calls < MAX_FETCH_CALLS
+                # Keep one fresh fetch for stage proof after product research.
+                and MAX_FETCH_CALLS - fetch_calls >= 2
                 and time.monotonic() - started < (
                     ADMISSION_DEADLINE_SECONDS
                     - JUDGMENT_ADMISSION_RESERVE_SECONDS
@@ -4979,6 +4980,8 @@ async def investigate_company_evidence(
                     early_product_research["search"] = "search_budget_exhausted"
                 elif fetch_calls >= MAX_FETCH_CALLS:
                     early_product_research["search"] = "fetch_budget_exhausted"
+                elif MAX_FETCH_CALLS - fetch_calls == 1:
+                    early_product_research["search"] = "stage_fetch_reserved"
                 elif not early_product_search_pending:
                     early_product_research["search"] = "judgment_time_reserved"
             if early_product_search_pending:
@@ -6455,6 +6458,9 @@ async def investigate_company_evidence(
                                     early_product_research["fetch"] = "already_loaded"
                                 elif fetch_calls >= MAX_FETCH_CALLS:
                                     early_product_research["fetch"] = "fetch_budget_exhausted"
+                                    early_product_fetch_urls.clear()
+                                elif MAX_FETCH_CALLS - fetch_calls == 1:
+                                    early_product_research["fetch"] = "stage_fetch_reserved"
                                     early_product_fetch_urls.clear()
                                 elif time.monotonic() - started >= (
                                     ADMISSION_DEADLINE_SECONDS

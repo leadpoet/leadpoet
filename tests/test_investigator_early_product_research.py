@@ -43,7 +43,10 @@ async def _investigate(*, product=PRODUCT_CRITERION, targets=("stage", "industry
     )
 
 
-def test_combined_stage_product_searches_and_fetches_product_before_stage(monkeypatch):
+@pytest.mark.parametrize("fetch_cap", [2, 4])
+def test_combined_stage_product_searches_and_fetches_product_before_stage(
+    monkeypatch, fetch_cap,
+):
     actions = [
         ("search_web", {"query": "Acme managed cloud platform enterprise customers"}),
         ("fetch_page", {"url": PRODUCT_URL}),
@@ -84,6 +87,7 @@ def test_combined_stage_product_searches_and_fetches_product_before_stage(monkey
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
+    monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", fetch_cap)
     monkeypatch.setattr(investigator, "_post_json", native_product_post(model))
     monkeypatch.setattr(investigator, "_search_web", search)
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
@@ -246,14 +250,13 @@ def test_judgment_reserve_suppresses_early_product_research(monkeypatch):
     assert result["usage"]["early_product_research"]["search"] == "judgment_time_reserved"
 
 
-def test_one_remaining_fetch_is_used_once_without_hidden_retry(monkeypatch):
+def test_one_remaining_fetch_is_reserved_for_stage(monkeypatch):
     actions = [
-        ("search_web", {"query": "Acme managed cloud platform enterprise customers"}),
-        ("fetch_page", {"url": PRODUCT_URL}),
         ("fetch_page", {"url": STAGE_URL}),
+        ("fetch_page", {"url": PRODUCT_URL}),
         ("submit_findings", {"findings": [
-            _finding("stage", status="UNPROVEN"),
-            _finding("industry", url=PRODUCT_URL, quote=PRODUCT_QUOTE),
+            _finding("stage", url=STAGE_URL, quote=STAGE_QUOTE),
+            _finding("industry", status="UNPROVEN"),
         ]}),
     ]
     requests = []
@@ -264,6 +267,8 @@ def test_one_remaining_fetch_is_used_once_without_hidden_retry(monkeypatch):
         del headers
         index = len(requests)
         requests.append(payload)
+        if index == 0:
+            assert payload["tool_choice"] == "required"
         name, args = actions[index]
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": str(index), "type": "function",
@@ -273,11 +278,11 @@ def test_one_remaining_fetch_is_used_once_without_hidden_retry(monkeypatch):
     async def search(_session, query, *, key):
         del key
         searches.append(query)
-        return {"results": [{"url": STAGE_URL if len(searches) == 1 else PRODUCT_URL}]}
+        return {"results": [{"url": STAGE_URL}]}
 
     async def fetch(_session, url):
         fetches.append(url)
-        return {"ok": True, "url": url, "final_url": url, "text": PRODUCT_QUOTE}
+        return {"ok": True, "url": url, "final_url": url, "text": STAGE_QUOTE}
 
     monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 1)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
@@ -288,11 +293,13 @@ def test_one_remaining_fetch_is_used_once_without_hidden_retry(monkeypatch):
 
     result = asyncio.run(_investigate())
 
-    assert fetches == [PRODUCT_URL]
+    assert searches and len(searches) == 1
+    assert fetches == [STAGE_URL]
     assert result["usage"]["fetch_calls"] == 1
-    assert result["claims"]["industry"]["status"] == "VERIFIED"
-    assert result["claims"]["stage"]["status"] == "UNPROVEN"
-    exhausted = json.loads(requests[3]["messages"][-1]["content"])
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert result["usage"]["early_product_research"]["search"] == "stage_fetch_reserved"
+    exhausted = json.loads(requests[2]["messages"][-1]["content"])
     assert exhausted == {"ok": False, "error": "fetch_budget_exhausted"}
 
 

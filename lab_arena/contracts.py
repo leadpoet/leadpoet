@@ -426,6 +426,15 @@ RESPONSES_PROVIDER_FRAME_LIMITS = dataclasses.replace(
     max_depth=26,
     max_list_items=768,
 )
+# Full-thinking continuations may replay one provider-generated string up to
+# the existing operation request byte cap. Envelope/total limits do not change.
+FULL_THINKING_MAX_STRING_BYTES = 1_000_000
+FULL_THINKING_PROVIDER_FRAME_LIMITS = dataclasses.replace(
+    PROVIDER_FRAME_LIMITS, max_string_bytes=FULL_THINKING_MAX_STRING_BYTES,
+)
+FULL_THINKING_RESPONSES_PROVIDER_FRAME_LIMITS = dataclasses.replace(
+    RESPONSES_PROVIDER_FRAME_LIMITS, max_string_bytes=FULL_THINKING_MAX_STRING_BYTES,
+)
 OUTPUT_LIMITS = StrictLimits(
     max_depth=8,
     max_list_items=200,

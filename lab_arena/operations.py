@@ -108,6 +108,15 @@ RESPONSES_OPERATION_LIMITS = dataclasses.replace(
 )
 _RESPONSES_STRUCTURE_LIMITS = dataclasses.replace(RESPONSES_OPERATION_LIMITS, max_total_bytes=2 ** 31)
 
+
+def _request_structure_limits(operation_id: str, allow_full_thinking: bool) -> contracts.StrictLimits:
+    limits = _RESPONSES_STRUCTURE_LIMITS if operation_id == "openrouter.responses" else _STRUCTURE_LIMITS
+    if allow_full_thinking and operation_id in {"openrouter.chat", "openrouter.responses"}:
+        # Token limits do not bound generated character counts. Keep every
+        # replay byte under the existing complete request cap instead.
+        return dataclasses.replace(limits, max_string_bytes=contracts.FULL_THINKING_MAX_STRING_BYTES)
+    return limits
+
 ERROR_CODES = frozenset(
     {
         "no_matching_operation",
@@ -1552,7 +1561,7 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
     if not isinstance(parameters, Mapping):
         raise OperationRequestError("invalid_request")
     try:
-        limits = _RESPONSES_STRUCTURE_LIMITS if operation_id == "openrouter.responses" else _STRUCTURE_LIMITS
+        limits = _request_structure_limits(operation_id, allow_full_thinking)
         contracts.check_strict_document(parameters, limits)
     except contracts.ArenaContractError as exc:
         raise OperationRequestError("invalid_request") from exc
@@ -1576,6 +1585,24 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
         message_fields["tool_calls"] = dataclasses.replace(call_spec, fields=call_fields)
         request_fields = dict(request_fields,
                               messages=dataclasses.replace(message_spec, fields=message_fields))
+    elif operation_id == "openrouter.chat" and allow_full_thinking:
+        # Copy the nested schema; the shared catalog and policy-off hashes
+        # retain their original field definitions.
+        message_spec = request_fields["messages"]
+        message_fields = dict(message_spec.fields)
+        detail_spec = message_fields["reasoning_details"]
+        detail_fields = dict(detail_spec.fields)
+        for name in ("text", "summary", "data"):
+            detail_fields[name] = dataclasses.replace(detail_fields[name], max_length=contracts.FULL_THINKING_MAX_STRING_BYTES)
+        message_fields["reasoning_details"] = dataclasses.replace(detail_spec, fields=detail_fields)
+        call_spec = message_fields["tool_calls"]
+        call_fields = dict(call_spec.fields)
+        function_spec = call_fields["function"]
+        function_fields = dict(function_spec.fields)
+        function_fields["arguments"] = dataclasses.replace(function_fields["arguments"], max_length=contracts.FULL_THINKING_MAX_STRING_BYTES)
+        call_fields["function"] = dataclasses.replace(function_spec, fields=function_fields)
+        message_fields["tool_calls"] = dataclasses.replace(call_spec, fields=call_fields)
+        request_fields = dict(request_fields, messages=dataclasses.replace(message_spec, fields=message_fields))
     if operation_id.startswith("deepline.tools.") and deepline_catalog is None:
         raise OperationRequestError("no_matching_operation")
     if operation_id in {"deepline.execute", "deepline.tools.get"} and deepline_catalog is not None:
@@ -1618,7 +1645,8 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
                                 detail[field] = None
         for index, message in enumerate(normalized["messages"]):
             content = message.get("content")
-            if not ((isinstance(content, str) and len(content) <= OPENROUTER_MAX_CONTENT_CHARS)
+            if not ((isinstance(content, str) and len(content) <= (contracts.FULL_THINKING_MAX_STRING_BYTES
+                        if message["role"] == "assistant" else OPENROUTER_MAX_CONTENT_CHARS))
                     or (content is None and message["role"] == "assistant" and message.get("tool_calls"))
                     or ("content" not in message and message["role"] == "assistant" and message.get("tool_calls"))):
                 raise OperationRequestError("invalid_field", "$.messages[%d].content" % index)
@@ -1627,7 +1655,7 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
                 raise OperationRequestError("invalid_field", "$.messages[%d].reasoning" % index)
             for field in ("reasoning", "reasoning_content", "refusal"):
                 if field in message and message[field] is not None and (
-                        not isinstance(message[field], str) or len(message[field]) > OPENROUTER_MAX_CONTENT_CHARS):
+                        not isinstance(message[field], str) or len(message[field]) > contracts.FULL_THINKING_MAX_STRING_BYTES):
                     raise OperationRequestError("invalid_field", "$.messages[%d].%s" % (index, field))
             for detail in message.get("reasoning_details", []):
                 required = {"reasoning.text": "text", "reasoning.summary": "summary", "reasoning.encrypted": "data"}[detail["type"]]
@@ -1683,17 +1711,19 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
 def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: bool = False) -> None:
     """Stateless text, local tools, and one bounded hosted web-search tool."""
 
+    limits = _request_structure_limits("openrouter.responses", allow_full_thinking)
     text = FieldSpec("str", max_length=OPENROUTER_MAX_CONTENT_CHARS)
+    history_text = dataclasses.replace(text, max_length=contracts.FULL_THINKING_MAX_STRING_BYTES) if allow_full_thinking else text
     identifier = FieldSpec("str", required=True, min_length=1, max_length=256)
     status = FieldSpec("str", choices=("in_progress", "completed", "incomplete"))
     item_fields = {
         "message": {"role": FieldSpec("str", required=True, choices=("system", "developer", "user", "assistant")), "content": FieldSpec("any", required=True), "status": status, "phase": FieldSpec("str", choices=("commentary", "final_answer"))},
-        "function_call": {"call_id": identifier, "name": identifier, "namespace": dataclasses.replace(identifier, required=False), "arguments": dataclasses.replace(text, required=True), "status": status},
+        "function_call": {"call_id": identifier, "name": identifier, "namespace": dataclasses.replace(identifier, required=False), "arguments": dataclasses.replace(history_text, required=True), "status": status},
         "function_call_output": {"call_id": identifier, "output": FieldSpec("any", required=True), "status": status},
-        "custom_tool_call": {"call_id": identifier, "name": identifier, "namespace": dataclasses.replace(identifier, required=False), "input": dataclasses.replace(text, required=True), "status": status},
+        "custom_tool_call": {"call_id": identifier, "name": identifier, "namespace": dataclasses.replace(identifier, required=False), "input": dataclasses.replace(history_text, required=True), "status": status},
         "custom_tool_call_output": {"call_id": identifier, "output": FieldSpec("any", required=True)},
         "additional_tools": {"role": FieldSpec("str", required=True, choices=("developer",)), "tools": FieldSpec("any", required=True)},
-        "reasoning": {"summary": FieldSpec("any"), "encrypted_content": FieldSpec("str", max_length=128_000), "content": FieldSpec("any"), "status": status},
+        "reasoning": {"summary": FieldSpec("any"), "encrypted_content": FieldSpec("str", max_length=contracts.FULL_THINKING_MAX_STRING_BYTES if allow_full_thinking else 128_000), "content": FieldSpec("any"), "status": status},
         "web_search_call": {
             "status": status,
             "action": FieldSpec("object", required=True),
@@ -1736,7 +1766,7 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
                             maximum=OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS,
                         ),
                     }),
-                }, tool, path, limits=_RESPONSES_STRUCTURE_LIMITS)
+                }, tool, path, limits=limits)
                 web_searches += 1
                 continue
             if kind == "namespace" and namespaces_allowed:
@@ -1745,7 +1775,7 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
                     "name": identifier,
                     "description": dataclasses.replace(text, required=True),
                     "tools": FieldSpec("any", required=True),
-                }, tool, path, limits=_RESPONSES_STRUCTURE_LIMITS)
+                }, tool, path, limits=limits)
                 total += 1
                 nested_count, nested_web_searches = validate_local_tools(
                     tool["tools"], path + ".tools", namespaces_allowed=False,
@@ -1771,7 +1801,7 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
                 })
             else:
                 raise OperationRequestError("invalid_field", path + ".type")
-            _validate_object(fields, tool, path, limits=_RESPONSES_STRUCTURE_LIMITS)
+            _validate_object(fields, tool, path, limits=limits)
             total += 1
         return total, web_searches
 
@@ -1817,7 +1847,7 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
             raise OperationRequestError("invalid_field", "$.input.action.type")
         normalized_action = _validate_object(
             fields, action, "$.input.action",
-            limits=_RESPONSES_STRUCTURE_LIMITS,
+            limits=limits,
         )
         if "url" in normalized_action:
             validate_response_url(normalized_action["url"], "$.input.action.url")
@@ -1863,21 +1893,22 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
                     "str", max_length=OPENROUTER_MAX_CONTENT_CHARS,
                 ),
             }, annotation, "$.input.content.annotations",
-               limits=_RESPONSES_STRUCTURE_LIMITS)
+               limits=limits)
             validate_response_url(
                 annotation["url"], "$.input.content.annotations.url",
             )
 
-    def content_parts(value: Any, *, reasoning: bool = False) -> None:
+    def content_parts(value: Any, *, reasoning: bool = False, assistant: bool = False) -> None:
+        content_text = history_text if reasoning or assistant else text
         if isinstance(value, str) and not reasoning:
-            _validate_field(text, value, "$.input.content")
+            _validate_field(content_text, value, "$.input.content")
             return
         if not isinstance(value, list) or len(value) > OPENROUTER_MAX_MESSAGES:
             raise OperationRequestError("invalid_field", "$.input.content")
         for part in value:
             fields = {
                 "type": FieldSpec("str", required=True, choices=(("summary_text", "reasoning_text") if reasoning else ("input_text", "output_text"))),
-                "text": dataclasses.replace(text, required=True),
+                "text": dataclasses.replace(content_text, required=True),
                 "annotations": FieldSpec("any"),
             }
             if allow_full_thinking and isinstance(part, Mapping) and part.get("type") == "output_text":
@@ -1887,7 +1918,7 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
                     fields={"token": text, "logprob": FieldSpec("float"),
                             "bytes": FieldSpec("any"), "top_logprobs": FieldSpec("list[object]", max_length=20,
                                 fields={"token": text, "logprob": FieldSpec("float"), "bytes": FieldSpec("any")})})
-            normalized_part = _validate_object(fields, part, "$.input.content", limits=_RESPONSES_STRUCTURE_LIMITS)
+            normalized_part = _validate_object(fields, part, "$.input.content", limits=limits)
             if "annotations" in normalized_part:
                 citation_annotations(normalized_part["annotations"])
 
@@ -1912,9 +1943,9 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
             kind = item.get("type", "message") if isinstance(item, dict) else None
             if kind not in item_fields:
                 raise OperationRequestError("invalid_field", "$.input.type")
-            _validate_object(dict(item_fields[kind], type=FieldSpec("str", choices=(kind,)), id=dataclasses.replace(identifier, required=False)), item, "$.input", limits=_RESPONSES_STRUCTURE_LIMITS)
+            _validate_object(dict(item_fields[kind], type=FieldSpec("str", choices=(kind,)), id=dataclasses.replace(identifier, required=False)), item, "$.input", limits=limits)
             if kind == "message":
-                content_parts(item["content"])
+                content_parts(item["content"], assistant=allow_full_thinking and item["role"] == "assistant")
                 if "phase" in item and item["role"] != "assistant":
                     raise OperationRequestError("invalid_field", "$.input.phase")
             elif kind == "additional_tools":
@@ -2330,7 +2361,7 @@ def build_outbound_request(
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         if schema_expanded:
             try:
-                contracts.check_strict_document(document, _RESPONSES_STRUCTURE_LIMITS)
+                contracts.check_strict_document(document, _request_structure_limits(operation_id, allow_full_thinking))
             except contracts.ArenaContractError as exc:
                 raise OperationRequestError("invalid_request") from exc
             if len(body) > operation.max_request_bytes:

@@ -6823,8 +6823,17 @@ class ArenaService:
             raise ServiceError("frame_invalid", 400)
         limits = (contracts.RESPONSES_PROVIDER_FRAME_LIMITS
                   if frame["operation_id"] == "openrouter.responses" else contracts.PROVIDER_FRAME_LIMITS)
-        contracts.check_strict_document(frame, limits)
+        # Decode only a bounded candidate before resolving its existing lease.
+        # The frozen execute policy, never a caller hint, admits larger history.
+        candidate_limits = limits
+        if frame["operation_id"] in {"openrouter.chat", "openrouter.responses"}:
+            candidate_limits = (contracts.FULL_THINKING_RESPONSES_PROVIDER_FRAME_LIMITS
+                if frame["operation_id"] == "openrouter.responses" else contracts.FULL_THINKING_PROVIDER_FRAME_LIMITS)
+        contracts.check_strict_document(frame, candidate_limits)
         run, context = self._run_context(run_id, lease_token)
+        if not (getattr(context, "kind", "execute") == "execute"
+                and context.reasoning_capture_policy == reasoning_capture.POLICY):
+            contracts.check_strict_document(frame, limits)
         broker = self._broker_for(run["round_id"])
         operation_id = str(frame["operation_id"])
         operation = operations.get_operation(operation_id)

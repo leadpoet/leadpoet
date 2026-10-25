@@ -259,8 +259,8 @@ def create_app(service: ArenaService) -> FastAPI:
     async def provider(run_id: str, request: Request, x_lab_arena_lease: Optional[str] = Header(default=None)) -> Any:
         lease_token = _lease_header(x_lab_arena_lease)
         # Decode within the largest admitted provider frame. The service then
-        # applies the operation-specific bound before context lookup or spend.
-        frame = await _read_json(request, limits=contracts.RESPONSES_PROVIDER_FRAME_LIMITS)
+        # applies the operation-specific and frozen-policy bounds before spend.
+        frame = await _read_json(request, limits=contracts.FULL_THINKING_RESPONSES_PROVIDER_FRAME_LIMITS)
 
         def disconnected() -> bool:
             return bool(anyio.from_thread.run(request.is_disconnected))

@@ -1,0 +1,27 @@
+{
+  "provenance": {
+    "requested_url": "https://www.ibm.com/",
+    "fetched_final_url": "https://www.ibm.com/us-en",
+    "fetched_utc": "2026-10-25T22:10:30.750438+00:00",
+    "original_html_sha256": "206933cb985cc1c63b012f6d3cad610d0f01a334ba5e24f654669d3e4cbe3e74",
+    "original_html_bytes": 213266,
+    "description": "Minimized exact document title and identity fields from the current public homepage. This is not the missing native Firecrawl response.",
+    "schema_reference": "https://schema.org/Corporation"
+  },
+  "title": "IBM",
+  "json_ld": {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Corporation",
+        "@id": "https://www.ibm.com/#organization",
+        "name": "IBM",
+        "legalName": "International Business Machines Corporation",
+        "url": "https://www.ibm.com/",
+        "sameAs": [
+          "https://www.linkedin.com/company/ibm"
+        ]
+      }
+    ]
+  }
+}

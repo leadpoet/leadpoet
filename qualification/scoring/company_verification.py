@@ -608,7 +608,10 @@ def _organization_identity_records(value) -> list[dict[str, object]]:
             continue
         raw_type = node.get("@type", "")
         types = raw_type if isinstance(raw_type, list) else [raw_type]
-        if not any(str(item or "").casefold() == "organization" for item in types):
+        if not any(
+            str(item or "").casefold() in {"organization", "corporation"}
+            for item in types
+        ):
             continue
         raw_same_as = node.get("sameAs", [])
         same_as_candidates = (
@@ -649,7 +652,8 @@ def _organization_same_as_urls(value) -> list[str]:
             raw_type = node.get("@type", "")
             types = raw_type if isinstance(raw_type, list) else [raw_type]
             is_organization = any(
-                str(item or "").casefold() == "organization" for item in types
+                str(item or "").casefold() in {"organization", "corporation"}
+                for item in types
             )
             if is_organization:
                 raw_same_as = node.get("sameAs", [])

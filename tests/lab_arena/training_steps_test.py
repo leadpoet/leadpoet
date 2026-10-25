@@ -12,14 +12,24 @@ from scripts.prepare_arena_agent_dataset import main
 @pytest.mark.parametrize("value", [
     "Bearer [REDACTED]suffix",
     "Basic [REDACTED]suffix",
+    "Bearer [REDACTED].synthetic-tail",
+    "Bearer [REDACTED]:synthetic-tail",
+    "Bearer [REDACTED]%2Fsynthetic-tail",
+    "Bearer %5BREDACTED%5Dsynthetic-tail",
+    "Basic %5BREDACTED%5Dsynthetic-tail",
+    'Bearer \\"[REDACTED]synthetic-tail\\"',
     '{\\"Authorization\\":\\"[REDACTED]suffix\\"}',
+    '{\\\\"Authorization\\\\":\\\\"[REDACTED]suffix\\\\"}',
+    '"Proxy-Authorization": "[REDACTED]suffix"',
 ])
 def test_attached_auth_marker_is_not_exact_training_text(value):
     assert steps._exact(value) is False
+    assert steps._exact({"messages": [{"role": "tool", "content": value}]}) is False
 
 
 def test_standalone_auth_marker_remains_exact_training_text():
     assert steps._exact("Bearer [REDACTED]") is True
+    assert steps._exact("Bearer %5BREDACTED%5D") is True
 
 
 def seal(example):

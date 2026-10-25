@@ -245,18 +245,32 @@ def test_auth_example_with_remaining_value_still_redacts(value):
     'Bearer "[REDACTED]suffix"',
     "Basic '[REDACTED]suffix'",
     "Bearer [REDACTED]/real-token",
+    "Bearer [REDACTED].synthetic-tail",
+    "Bearer [REDACTED]:synthetic-tail",
+    "Bearer [REDACTED]%2Fsynthetic-tail",
+    "Bearer %5BREDACTED%5Dsynthetic-tail",
+    "Basic %5BREDACTED%5Dsynthetic-tail",
+    'Bearer \\"[REDACTED]synthetic-tail\\"',
     '{\\"Authorization\\":\\"[REDACTED]suffix\\"}',
+    '{\\\\"Authorization\\\\":\\\\"[REDACTED]suffix\\\\"}',
+    '"Proxy-Authorization": "[REDACTED]suffix"',
 ])
 def test_attached_auth_marker_does_not_pass_as_exact(value):
     cleaned, reasons = capture.sanitize_training_value(value)
     assert cleaned != value and reasons == ["credential"]
     assert "suffix" not in cleaned and "real-token" not in cleaned
+    assert "synthetic-tail" not in cleaned
 
 
 @pytest.mark.parametrize("value", [
     "Bearer [REDACTED]",
     "Basic [REDACTED]",
+    "Bearer %5BREDACTED%5D",
+    "Basic %5BREDACTED%5D",
+    'Bearer \\"[REDACTED]\\"',
     '{\\"Authorization\\":\\"[REDACTED]\\"}',
+    '{\\\\"Authorization\\\\":\\\\"[REDACTED]\\\\"}',
+    '"Proxy-Authorization": "[REDACTED]"',
 ])
 def test_standalone_auth_marker_keeps_exact_source(value):
     assert capture.sanitize_training_value(value) == (value, [])

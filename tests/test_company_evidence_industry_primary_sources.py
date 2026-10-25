@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from unittest.mock import AsyncMock
 
 import pytest
@@ -42,6 +43,29 @@ def validate(page, *, url=PR_URL, final_url=None, extra_pages=None, **changes):
 def test_company_issued_release_can_prove_company_activity():
     page = "News provided by Nitra Mar 10, 2026, 07:00 ET. " + QUOTE + " SOURCE Nitra"
     assert validate(page)["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("name,quote,expected", [
+    ("Snap", "SnapLogic supplies enterprise integration software.", "UNPROVEN"),
+    ("Meta", "Meta Materials supplies advanced materials.", "UNPROVEN"),
+    ("Nitra", "Nitra supplies a healthcare operating platform.", "VERIFIED"),
+    ("Nitra", "Nitra Provides a healthcare operating platform.", "VERIFIED"),
+    ("Nitra", "Nitra Inc. provides a healthcare operating platform.", "VERIFIED"),
+    ("Nitra", "Nitra's platform serves healthcare practices.", "VERIFIED"),
+    ("AHF Products", "AHF Products manufactures flooring.", "VERIFIED"),
+    ("Universal Logistics Holdings", "Universal Logistics Holdings, Inc. provides logistics services.", "VERIFIED"),
+])
+def test_external_quote_requires_a_whole_company_name(name, quote, expected):
+    key = re.sub(r"[^a-z0-9]+", "", name.casefold())
+    result = inv._validated_findings(
+        {"findings": [finding(evidence_quote=quote)]}, targets=("industry",),
+        fetched_pages={PR_URL: f"News provided by {name} Mar 10, 2026. {quote}"},
+        fetched_final_urls={PR_URL: PR_URL}, first_party_domains={"company.example"},
+        identity_names={key},
+        identity_anchor={"submitted_name": name, "submitted_domain": "company.example",
+                         "observed_domain": "company.example", "verified_domain": "company.example"},
+    )
+    assert result["industry"]["status"] == expected
 
 
 def test_sec_registrant_can_prove_own_activity():

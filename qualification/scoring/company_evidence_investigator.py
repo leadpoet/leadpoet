@@ -1742,6 +1742,46 @@ def _independently_bound_first_party_url(
     )
 
 
+def _quote_has_external_company_name(quote: str, identity_names: set[str]) -> bool:
+    """Require whole name tokens without a longer proper-name continuation.
+
+    This is a conservative citation guard, not named-entity or subject proof.
+    The model must still resolve same-name entities and multi-company prose.
+    """
+    surface = _surface_span(quote)
+    words = list(re.finditer(r"[^\W_]+", surface))
+    names = {name for name in identity_names if len(name) >= 2}
+    longest = max(map(len, names), default=0)
+    # A capitalized predicate can start body prose or a headline. It does not
+    # extend the company name, but it never proves the claimed activity here.
+    following_words = {
+        "inc", "incorporated", "corp", "corporation", "ltd", "limited",
+        "plc", "llc", "is", "has", "was", "will", "announces", "announced",
+        "supplies", "provides", "manufactures", "offers", "operates",
+        "develops", "delivers", "sells", "produces", "designs", "builds",
+        "distributes", "makes", "enables", "supports", "serves",
+    }
+    for start in range(len(words)):
+        key = ""
+        for end in range(start, len(words)):
+            key += words[end].group().casefold()
+            if len(key) > longest:
+                break
+            if key not in names:
+                continue
+            if end + 1 < len(words):
+                following = words[end + 1].group()
+                separator = surface[words[end].end():words[end + 1].start()]
+                if (
+                    re.fullmatch(r"[\s-]+", separator)
+                    and following[0].isupper()
+                    and following.casefold() not in following_words
+                ):
+                    continue
+            return True
+    return False
+
+
 def _external_primary_activity_source(
     url: str,
     quote: str,
@@ -1757,7 +1797,7 @@ def _external_primary_activity_source(
     This admits sources, never their semantics. The finding must still pass
     exact quotation, company attribution, activity-role, and model review.
     """
-    if not identity_names or not _quote_names_company(quote, identity_names):
+    if not _quote_has_external_company_name(quote, identity_names):
         return False
     parsed = urlsplit(url)
     final_url = fetched_final_urls.get(url, "")

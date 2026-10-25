@@ -2502,13 +2502,35 @@ async def _fetch_exa_exact_page(
     if not isinstance(body, Mapping) or body.get("error") or body.get("errors"):
         return {"ok": False, "error": "contents_provider_error"}
     statuses = body.get("statuses")
+    # A confirmed crawl absence must name this exact target. An unbound
+    # broker error or a failed Exa request remains a provider fault.
+    if (isinstance(statuses, list) and len(statuses) == 1
+            and isinstance(statuses[0], Mapping) and body.get("results") == []):
+        source = statuses[0]
+        error = source.get("error")
+        if (
+            source.get("id") == canonical_url
+            and source.get("status") == "error"
+            and isinstance(error, Mapping)
+            and type(error.get("httpStatusCode")) is int
+            and error["httpStatusCode"] in {404, 410}
+            and (
+                error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
+                or (error["httpStatusCode"] == 404
+                    and error.get("tag") == "CRAWL_NOT_FOUND")
+            )
+        ):
+            return {"ok": False, "error": (
+                "source_not_found" if error["httpStatusCode"] == 404
+                else "source_gone"
+            )}
     if statuses is not None:
         if not isinstance(statuses, list) or any(
             not isinstance(item, Mapping) for item in statuses
         ):
             return {"ok": False, "error": "invalid_contents_status"}
-        # Exa authenticated the API request and bound this crawl status to
-        # the exact target. Do not confuse it with API auth, credits or outage.
+        # Exa authenticated the API request; this exact target denied access.
+        # Do not confuse a crawl status with API auth, credits or an outage.
         if len(statuses) == 1 and body.get("results") == []:
             source = statuses[0]
             error = source.get("error")
@@ -2517,17 +2539,10 @@ async def _fetch_exa_exact_page(
                 and source.get("status") == "error"
                 and isinstance(error, Mapping)
                 and type(error.get("httpStatusCode")) is int
-                and error["httpStatusCode"] in {401, 403, 404, 410}
-                and (
-                    error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
-                    or (error["httpStatusCode"] == 404
-                        and error.get("tag") == "CRAWL_NOT_FOUND")
-                )
+                and error["httpStatusCode"] in {401, 403}
+                and error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
             ):
-                return {"ok": False, "error": {
-                    401: "source_access_denied", 403: "source_access_denied",
-                    404: "source_not_found", 410: "source_gone",
-                }[error["httpStatusCode"]]}
+                return {"ok": False, "error": "source_access_denied"}
         if any(
             item.get("status") == "error" or item.get("error")
             for item in statuses
@@ -2572,8 +2587,10 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     elif raw_error in {
         "invalid_url", "unsupported_binary_content", "empty_page",
         "provider_request_refused", "provider_diagnostic_body",
-        "source_access_denied", "source_not_found", "source_gone",
+        "source_access_denied",
     }:
+        error_class = raw_error
+    elif raw_error in {"source_not_found", "source_gone"}:
         error_class = raw_error
     else:
         error_class = "fetch_failed"

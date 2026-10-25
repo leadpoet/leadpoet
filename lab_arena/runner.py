@@ -68,6 +68,17 @@ AUTOMATIC_CAPTURE_PATH = Path(__file__).with_name("automatic_capture.py").resolv
 CODEX_MODULE_PATH = Path(__file__).with_name("lab_arena_codex.py").resolve()
 WEB_BRIDGE_PATH = Path(__file__).with_name("web_egress_bridge.py").resolve()
 MAX_REFUSED_FRAMES = 25  # bound repeated refusals for the same operation/tool
+# A credential or provider-configuration refusal is a property of the
+# entrant's account, not of the tool that happened to ask for it, so the
+# per-tool budget above does not bound it: a run that walks N tools pays
+# N * MAX_REFUSED_FRAMES upstream refusals for one unfunded account. This
+# run-wide cap bounds that total without pre-empting any individual tool --
+# every tool keeps its own budget and is only ever refused locally once the
+# account as a whole has been refused this many times.
+ACCOUNT_SCOPED_REFUSAL_CODES = frozenset(
+    ("miner_credentials_unavailable", "miner_provider_not_configured")
+)
+MAX_ACCOUNT_REFUSED_FRAMES = 3 * MAX_REFUSED_FRAMES
 REFUSAL_PROBE_COOLDOWN_SECONDS = 30.0
 MAX_BUFFERED_PROVIDER_ERROR_EVENTS = 32
 MAX_BUFFERED_DECISION_EVENTS = 64
@@ -1880,6 +1891,10 @@ class RunState:
         default_factory=dict
     )
     operation_probe_inflight: set[Tuple[str, str]] = field(default_factory=set)
+    account_refusals: int = 0  # run-wide account/credential refusals
+    account_refusal_error: str = "call_refused"
+    account_refusal_until: float = 0.0
+    account_probe_inflight: bool = False
     operation_latest_calls: Dict[Tuple[str, str], Dict[str, Any]] = field(
         default_factory=dict
     )
@@ -2691,6 +2706,7 @@ class WorkerSocketServer:
                 refusal_key, (0, "call_refused")
             )
             probe = refusal_count >= MAX_REFUSED_FRAMES
+            account_probe = False
             if probe:
                 if (
                     refusal_key in state.operation_probe_inflight
@@ -2707,6 +2723,22 @@ class WorkerSocketServer:
                     return refusal_error, None
                 # Reserve one model-requested probe until its actual result.
                 state.operation_probe_inflight.add(refusal_key)
+            elif state.account_refusals >= MAX_ACCOUNT_REFUSED_FRAMES:
+                # The account itself has been refused this many times across
+                # every tool. A tool still inside its own budget no longer
+                # gets to spend an upstream call on it until a probe says the
+                # account works again.
+                account_probe = True
+                if (
+                    state.account_probe_inflight
+                    or self._monotonic() < state.account_refusal_until
+                ):
+                    state.local_refusals += 1
+                    if observation is not None:
+                        observation["kind"] = "local_refusal"
+                        observation["contributes_to_provider_call_count"] = False
+                    return state.account_refusal_error, None
+                state.account_probe_inflight = True
         # Calls admitted before the threshold can still complete concurrently.
         # Keep their original frames and accounting; do not serialize or cancel
         # an already dispatched request to enforce an exact cutoff.
@@ -2716,6 +2748,16 @@ class WorkerSocketServer:
                 refusal_key, probe, deadline, cancel_requested, observation,
             )
         finally:
+            if account_probe:
+                with state.lock:
+                    state.account_probe_inflight = False
+                    if (
+                        state.account_refusals >= MAX_ACCOUNT_REFUSED_FRAMES
+                        and state.account_refusal_until <= self._monotonic()
+                    ):
+                        state.account_refusal_until = (
+                            self._monotonic() + REFUSAL_PROBE_COOLDOWN_SECONDS
+                        )
             if probe:
                 with state.lock:
                     state.operation_probe_inflight.discard(refusal_key)
@@ -2905,6 +2947,22 @@ class WorkerSocketServer:
                     state.operation_refusal_until[refusal_key] = (
                         self._monotonic() + REFUSAL_PROBE_COOLDOWN_SECONDS
                     )
+                if (
+                    latest
+                    and state.operation_refusals[refusal_key][1]
+                    in ACCOUNT_SCOPED_REFUSAL_CODES
+                ):
+                    # Count it once more against the account, which every
+                    # tool shares. Kept off operation_refusals so per-tool
+                    # bookkeeping and recovery stay exactly as they were.
+                    state.account_refusals += 1
+                    state.account_refusal_error = state.operation_refusals[
+                        refusal_key
+                    ][1]
+                    if state.account_refusals >= MAX_ACCOUNT_REFUSED_FRAMES:
+                        state.account_refusal_until = (
+                            self._monotonic() + REFUSAL_PROBE_COOLDOWN_SECONDS
+                        )
             elif latest and (
                 (
                     type(document["status"]) is int
@@ -2928,6 +2986,10 @@ class WorkerSocketServer:
                 state.operation_recovery_sequence[refusal_key] = sequence
                 state.operation_refusals.pop(refusal_key, None)
                 state.operation_refusal_until.pop(refusal_key, None)
+                # Reaching the provider at all proves the account is
+                # usable, so the shared account count is stale too.
+                state.account_refusals = 0
+                state.account_refusal_until = 0.0
             elif latest and probe:
                 state.operation_refusal_until[refusal_key] = (
                     self._monotonic() + REFUSAL_PROBE_COOLDOWN_SECONDS

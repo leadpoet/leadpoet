@@ -262,3 +262,83 @@ def test_later_proved_per_icp_budget_stop_preserves_valid_empty_result(tmp_path)
     assert completion["result"]["terminal_status"] == "accepted"
     assert completion["output"]["companies"] == []
     assert completion["result"]["resource_summary"]["provider_call_count"] == 2
+
+
+class AccountRefusalApi(CreditRefusalApi):
+    """Every tool is refused: the entrant's Deepline account has no credit."""
+
+    def provider(self, run_id, lease_token, frame):
+        self.provider_frames.append(dict(frame))
+        call = {
+            "call_identity": contracts.document_hash(["account-call", frame["action_sequence"]]),
+            "operation_id": frame["operation_id"],
+            "action_sequence": frame["action_sequence"],
+            "provider": "deepline",
+            "funding_source": "miner_key",
+            "provider_status": 402,
+            "outcome": "refused",
+            "error_code": "miner_credentials_unavailable",
+            "actual_microusd": None,
+        }
+        return {
+            "status": 402,
+            "headers": {"content-type": "application/json"},
+            "body_b64": base64.b64encode(
+                json.dumps({"error": {"code": "payment_required"}}).encode()
+            ).decode(),
+            "call": call,
+        }
+
+
+ACCOUNT_REFUSAL_TOOLS = (
+    "exa_search", "exa_contents", "contextdev_post_web_search",
+    "contextdev_post_news_search", "contextdev_get_web_scrape_markdown",
+    "exa_answer", "exa_company_search", "exa_people_search",
+)
+
+
+class ManyToolRuntime(BridgingRuntime):
+    def __init__(self):
+        super().__init__(output={"companies": []}, calls=0)
+        self.local_refusals = 0
+
+    def run_icp(self, spec, **_):
+        os.environ[shim.WORKER_SOCKET_ENV] = str(spec.socket_path)
+        try:
+            for tool in ACCOUNT_REFUSAL_TOOLS:
+                for _ in range(rn.MAX_REFUSED_FRAMES + 1):
+                    try:
+                        status, _headers, _body = shim.dispatch(
+                            "deepline.execute",
+                            {"tool": tool, "payload": {"query": "fintech"}},
+                            5000,
+                        )
+                        assert status == 402
+                    except shim.ShimError as exc:
+                        assert "miner_credentials_unavailable" in str(exc)
+                        self.local_refusals += 1
+        finally:
+            os.environ.pop(shim.WORKER_SOCKET_ENV, None)
+        spec.output_path.write_bytes(json.dumps(self.output).encode())
+        return runtime.fake_result(exit_code=0, output_bytes=runtime.read_output(spec))
+
+
+def test_account_credential_refusal_bounds_every_tool_not_each_one(tmp_path):
+    """One unfunded account must not buy MAX_REFUSED_FRAMES upstream calls per tool."""
+    api = AccountRefusalApi([lease()])
+    sandbox = ManyToolRuntime()
+    (tmp_path / "work").mkdir()
+
+    assert rn.Runner(make_config(tmp_path, api, sandbox)).run_once() == 1
+
+    attempted = len(ACCOUNT_REFUSAL_TOOLS) * (rn.MAX_REFUSED_FRAMES + 1)
+    # Each tool keeps its own budget, but the run-wide account count caps the
+    # total: past MAX_ACCOUNT_REFUSED_FRAMES only a cooldown probe gets out.
+    assert len(api.provider_frames) <= (
+        rn.MAX_ACCOUNT_REFUSED_FRAMES + len(ACCOUNT_REFUSAL_TOOLS)
+    )
+    assert len(api.provider_frames) < attempted
+    # Everything over the cap is refused locally, without an upstream call.
+    assert sandbox.local_refusals > 0
+    completion = api.completions[0]["body"]
+    assert completion["result"]["terminal_status"] == "credential_error"

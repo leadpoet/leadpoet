@@ -2498,7 +2498,12 @@ async def _fetch_exa_exact_page(
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return {"ok": False, "error": "contents_provider_unavailable"}
     if status != 200:
-        return {"ok": False, "error": f"http_{status}"}
+        # Plain http_404/http_410 identify primary-page absence downstream.
+        # An outer Exa API error proves no such fact about the target URL.
+        return {"ok": False, "error": (
+            f"contents_http_{status}" if status in {404, 410}
+            else f"http_{status}"
+        )}
     if not isinstance(body, Mapping) or body.get("error") or body.get("errors"):
         return {"ok": False, "error": "contents_provider_error"}
     statuses = body.get("statuses")

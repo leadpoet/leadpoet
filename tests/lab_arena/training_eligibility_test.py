@@ -404,6 +404,17 @@ def test_nine_of_ten_allow_one_empty_thinking_run():
     assert result["counts"]["complete_runs"] == 9
 
 
+def test_eighty_percent_does_not_accept_unproved_thinking_as_empty():
+    examples = ten_selected_examples()
+    damaged = examples["run-9"]
+    message = damaged["provider_calls"][2]["response"]["choices"][0]["message"]
+    message["reasoning_content"] = "Unapproved second text."
+    refresh_response_links(damaged, 2)
+    result = assess_ten(examples)
+    assert result["eligible"] is False
+    assert "full_thinking_unavailable" in result["reasons"]
+
+
 def test_readable_projection_must_retain_paths_to_raw_provider_text(monkeypatch):
     original = training_thinking.readable_trace
 

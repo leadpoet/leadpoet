@@ -92,6 +92,20 @@ def _all_model_routes_verified(example, run_id):
         return False
 
 
+def _only_benign_empty_thinking(example, run_id):
+    calls = [call for call in example.get("provider_calls") or []
+             if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
+    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    try:
+        states = [training_thinking.attempt_coverage(call, example.get("role", "miner"), registry)
+                  for call in calls]
+        return bool(states) and any(state["returned"] == "requested_empty" for state in states) and all(
+            state["route_reviewed"] and state["provider_route_verified"]
+            and state["returned"] in {"requested_empty", "full_thinking"} for state in states)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def _documented_selected_privacy_gap(example, run_id):
     return any(
         call.get("run_id") == run_id and (
@@ -208,7 +222,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 if minimum_coverage_percent == 100:
                     reasons.extend(run_reasons)
                 else:
-                    soft = {"full_thinking_unavailable", "full_thinking_call_missing"}
+                    soft = ({"full_thinking_unavailable", "full_thinking_call_missing"}
+                            if _only_benign_empty_thinking(example, run_id) else set())
                     if run_reasons == ["trajectory_evidence_incomplete"]:
                         proof_reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])
                         if (proof_reasons and proof_reasons <= {"response_privacy_nonexact"}

@@ -1089,3 +1089,21 @@ Responses projection omits only empty summary arrays. Source review, the 80%
 ICP floor, missing-token policy, privacy rules, cost rules and live scorer image
 are unchanged. Provider-internal activity and the quality of generated reasoning
 remain outside what capture alone can prove.
+
+Later on October 25, an actual Codex 0.154 controlled miniagent exercised the
+Together Responses route through the broker, worker socket and disposable SQL
+ledger. Six paid replies matched the approved route; five accepted the native
+client's `web_search_call` continuation plus the real local tool result. Raw SQL
+bytes matched all six wire bodies. This proves native continuation compatibility,
+not successful final output: the model repeatedly searched and recorded evidence
+until the six-POST fixture limit, and produced no final JSON. Confirmed cost was
+$0.052976. No model output or client acknowledgement was synthesized.
+
+The separate bounded native TYCHE run retained 70 model calls and all 82 returned
+primary provider replies. Its hidden, settled-zero 429 was linked to the later
+same-request success without inventing a worker write. Ten research calls had no
+returned upstream body and remained uncertain. It confirmed no company. The
+TYCHE source archive was unchanged, but model and plain-tool settings were
+changed in memory; this is not proof of the unchanged configuration or production
+sandbox. Confirmed model cost was $0.073593; neither run proves a complete scored
+ICP or successful lead sourcing.

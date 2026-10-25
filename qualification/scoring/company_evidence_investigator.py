@@ -4892,6 +4892,7 @@ async def investigate_company_evidence(
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
             industry_followup_pending = False
+            reserve_denied_research = False
             product_coverage = None
             industry_previously_proven = False
             industry_followup_search_completed = False
@@ -6203,6 +6204,10 @@ async def investigate_company_evidence(
                         # incomplete; that projection is not a valid negative.
                         if rejected and not failure_reason:
                             failure_reason = MALFORMED_RESPONSE_FAILURE_REASON
+                        if (reserve_denied_research and not failure_reason
+                                and any(finding.get("status") == "UNPROVEN"
+                                        for finding in claims.values())):
+                            failure_reason = ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
                         # A complete validated judgment may finish UNPROVEN
                         # within bounded research. Missing submissions and
                         # required discovery failures remain incomplete;
@@ -6249,6 +6254,7 @@ async def investigate_company_evidence(
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
                     ):
+                        reserve_denied_research = True
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,
@@ -6306,6 +6312,7 @@ async def investigate_company_evidence(
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
                     ):
+                        reserve_denied_research = True
                         forced_next_tool = "submit_findings"
                         tool_result = {
                             "ok": False,

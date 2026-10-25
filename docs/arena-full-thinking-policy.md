@@ -112,13 +112,14 @@ quality may change; the user has accepted this tradeoff.
   run, or production readiness. Before activation, run representative ICPs,
   verify stored/exported artifacts and publication, and review latency, spend,
   failure rates, and output quality. No production claim is made in this PR.
-- Apply current main's `562-lab-arena-review-context-integrity-reason.sql`, then
-  `563-lab-arena-review-source-digest-reason.sql`. Apply this PR's exact committed
-  migrations `564-lab-arena-full-thinking-six-dollar-cap.sql`,
-  `565-lab-arena-research-review-result.sql`,
-  `566-lab-arena-full-thinking-champion-baseline.sql`,
-  `567-lab-arena-full-thinking-catalog-commit.sql`, and
-  `568-lab-arena-training-publication-eligibility.sql` through the normal release
+- Apply current main through `564-lab-arena-baseline-deadline-transition.sql`,
+  including review migrations 562 and 563. Apply this PR's exact committed
+  migrations `565-lab-arena-full-thinking-six-dollar-cap.sql`,
+  `566-lab-arena-research-review-result.sql`,
+  `567-lab-arena-full-thinking-champion-baseline.sql`,
+  `568-lab-arena-full-thinking-catalog-commit.sql`,
+  `569-lab-arena-training-publication-eligibility.sql`, and
+  `570-lab-arena-confirmed-full-thinking-final-cost.sql` through the normal release
   workflow before activation. They check source hashes and database privileges,
   preserve unrelated behavior, and are idempotent.
   The research review migration extends main's exact review function and

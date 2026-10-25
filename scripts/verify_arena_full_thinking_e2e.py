@@ -263,12 +263,13 @@ def full_thinking_database():
                     "561-lab-arena-open-promotion-margin.sql",
                     "562-lab-arena-review-context-integrity-reason.sql",
                     "563-lab-arena-review-source-digest-reason.sql",
-                    "564-lab-arena-full-thinking-six-dollar-cap.sql",
-                    "565-lab-arena-research-review-result.sql",
-                    "566-lab-arena-full-thinking-champion-baseline.sql",
-                    "567-lab-arena-full-thinking-catalog-commit.sql",
-                    "568-lab-arena-training-publication-eligibility.sql",
-                    "569-lab-arena-confirmed-full-thinking-final-cost.sql",
+                    "564-lab-arena-baseline-deadline-transition.sql",
+                    "565-lab-arena-full-thinking-six-dollar-cap.sql",
+                    "566-lab-arena-research-review-result.sql",
+                    "567-lab-arena-full-thinking-champion-baseline.sql",
+                    "568-lab-arena-full-thinking-catalog-commit.sql",
+                    "569-lab-arena-training-publication-eligibility.sql",
+                    "570-lab-arena-confirmed-full-thinking-final-cost.sql",
                 ):
                     cursor.execute((REPO / "scripts" / name).read_text())
         finally:

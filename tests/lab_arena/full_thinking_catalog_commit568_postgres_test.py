@@ -14,7 +14,7 @@ from tests.lab_arena.test_lab_arena_migration_postgres import (
 
 
 SCRIPTS = Path(__file__).parents[2] / "scripts"
-MIGRATION = SCRIPTS / "567-lab-arena-full-thinking-catalog-commit.sql"
+MIGRATION = SCRIPTS / "568-lab-arena-full-thinking-catalog-commit.sql"
 CATALOG = {
     "schema_version": "leadpoet.lab_arena.deepline_catalog.v1",
     "policy_version": "leadpoet.lab_arena.deepline_company_research.v1",
@@ -34,9 +34,9 @@ def database():
                 "539-lab-arena-held-recovery-provider-admission.sql",
                 "562-lab-arena-review-context-integrity-reason.sql",
                 "563-lab-arena-review-source-digest-reason.sql",
-                "564-lab-arena-full-thinking-six-dollar-cap.sql",
-                "565-lab-arena-research-review-result.sql",
-                "566-lab-arena-full-thinking-champion-baseline.sql",
+                "565-lab-arena-full-thinking-six-dollar-cap.sql",
+                "566-lab-arena-research-review-result.sql",
+                "567-lab-arena-full-thinking-champion-baseline.sql",
             ):
                 cursor.execute((SCRIPTS / name).read_text())
         yield db

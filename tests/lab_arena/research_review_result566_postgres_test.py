@@ -18,7 +18,7 @@ from tests.lab_arena.test_lab_arena_code_review_postgres import (
 from tests.postgres_migration_harness import SCRIPTS
 
 
-MIGRATION = SCRIPTS / "565-lab-arena-research-review-result.sql"
+MIGRATION = SCRIPTS / "566-lab-arena-research-review-result.sql"
 SIGNATURE = "public.lab_arena_finish_submission_review(text,text,text,text,jsonb,bigint)"
 ARCHIVE_HASH = "sha256:" + "a" * 64
 MANIFEST_HASH = "sha256:" + "b" * 64

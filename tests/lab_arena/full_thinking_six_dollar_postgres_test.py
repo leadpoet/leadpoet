@@ -10,7 +10,7 @@ from tests.lab_arena import flat_per_icp_cost500_postgres_test as flat
 
 
 ROOT = Path(__file__).parents[2]
-MIGRATION = ROOT / "scripts/564-lab-arena-full-thinking-six-dollar-cap.sql"
+MIGRATION = ROOT / "scripts/565-lab-arena-full-thinking-six-dollar-cap.sql"
 prior = flat.prior
 infra = flat.infra
 

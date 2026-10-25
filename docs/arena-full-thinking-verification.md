@@ -277,3 +277,36 @@ $3.059750 respectively. These are conservative ledger amounts, not final invoice
 No production migration, publication, restart, merge, or deployment was performed.
 
 Machine summary: [real sourcing E2E status](evidence/full-thinking/full-sourcing-e2e-status-20261024.json).
+
+## Subsequent local regression checks — 2026-10-24
+
+A real capture readback found that public prose such as `Basic information` was
+being redacted as an authorization value. The narrow correction preserves that
+prose while still removing real Basic credentials, Bearer values, explicit
+authorization headers, known secrets, and signed URLs. The new regression failed
+before the correction; 166 capture/trajectory tests passed afterward. Historical
+redacted artifacts were not rewritten or declared exact.
+
+After main added the context-integrity review diagnostic, its guarded migration
+and this PR's review migration targeted the same old function. The combined
+sequence now applies main's context migration first, then the research extension.
+The resulting exact function hash and retry behavior passed 51 PostgreSQL checks.
+The final research suite passed 22 tests.
+
+The stopped-contender regression now continues through the actual service Git
+promotion function against a local bare repository. It checks the winner's source
+on both branches, the database promotion commit, and adoption of that source and
+funding owner by the next round. The prior frozen configuration and publication
+remain unchanged. This uses controlled scoring and training outcomes; it is not
+the paid provider trial or a production repository push.
+
+Independent root checks on the combined code passed 113 publication, capture,
+and review SQL tests, plus nine terminal-replay tests. The replay tests verify
+that completed calls do not trigger another provider send or settlement.
+
+The broad GitHub Actions run `40141397510` failed and reached its 60-minute limit.
+It reported 226 failures in 92 files before stopping. Five representative failures
+were reproduced unchanged on clean main `c86511fcb`: a stale checkpoint default,
+an old cache-key expectation, and three old PostgreSQL fixtures missing migration
+474's execution-attempt-count function. This does not classify the remaining
+failures or establish a green broad CI run.

@@ -447,7 +447,7 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
     assert requests[2]["reasoning"] == {"effort": "medium"}
     validation_feedback = json.loads(requests[2]["messages"][-1]["content"])
     assert validation_feedback["error"] == "deterministic_evidence_validation_failed"
-    assert requests[2]["tool_choice"]["function"]["name"] == "search_web"
+    assert requests[2]["tool_choice"] == "required"
     assert result["claims"]["industry"]["evidence_quote"] == QUOTE
 
 

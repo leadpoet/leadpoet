@@ -4867,7 +4867,12 @@ async def investigate_company_evidence(
                             if (
                                 positive_semantic_review
                                 and (
-                                    serialization_retry_request
+                                    # Product matrices need serialization room
+                                    # on ordinary turns and generic length retries,
+                                    # within the unchanged total output budget.
+                                    ("industry" in requested_targets
+                                     and requested_product_service.strip())
+                                    or serialization_retry_request
                                     or force_submit
                                     or required_tool == "submit_findings"
                                 )

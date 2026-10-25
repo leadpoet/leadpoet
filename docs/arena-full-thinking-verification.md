@@ -1,5 +1,65 @@
 # Draft PR verification — 2026-10-23
 
+## Provider options for every approved model, October 25
+
+The draft registry now contains **25 model/API/provider routes**, up from seven,
+across the same six models. The eighteen additions have independent live proof:
+fifteen Chat routes and three DeepSeek Responses routes. Every model has more
+options. Mistral's addition is an EU endpoint from the same provider company.
+The original seven rows, their default order, output caps and unset baseline
+are unchanged. No policy was activated, merged or deployed.
+
+Miners can select a listed alternative with ordinary `provider.only` on each
+request. The existing default remains when that field is absent. Selection is
+bound to the captured request, its hash, the approved row and the outbound pin.
+ZDR, no fallback and price ceilings remain host-controlled. The README lists
+the exact choices and settings in six rows. The bundled Codex helper retains
+its existing DeepSeek/Fireworks default; it has no provider-selector parameter.
+
+All **25 routes passed fresh three-turn tests on source `4887173a7`** using the
+complete expanded registry through the real Arena broker, local worker socket,
+and disposable PostgreSQL. The seven original routes omitted the selector;
+all eighteen new routes selected it explicitly. Each task required two linked
+tool calls, processing conflicting evidence, and a strict final JSON response.
+The first GPT-OSS 20B/DeepInfra attempt received HTTP 429. One fresh test on the
+same route passed; the failure and its uncertain charge remain recorded.
+
+Final successful evidence: **75 model calls**, **66 full-thinking calls**, nine
+explicit zero-token calls, **11,485 reported reasoning tokens**, and zero
+missing tokens or unknown usage. All 75 strict input/output pairs passed.
+Independent offline checks covered 1,886 readable events, 207 context values,
+50 tool calls and Markdown views. The owner independently compared all 75 wire
+responses with SQL storage and the exported/readable representation. Nine
+Responses exports omit an empty `summary: []` placeholder; raw storage retains
+it exactly. No other response value or nonempty reasoning field was dropped.
+There were **zero client callbacks** and no extra miner logging requirements.
+
+The [final route matrix](evidence/full-thinking/expanded-whitelist-final-proof-20261025.json)
+records source and artifact hashes, failed and interrupted attempts, catalog
+exclusions and budget accounting. Separate
+[Chat](evidence/full-thinking/alternate-provider-chat-proof-20261025.json) and
+[Responses](evidence/full-thinking/alternate-provider-responses-proof-20261025.json)
+evidence supports each new registry row. Blocked, failed, interrupted and
+untested routes were not added. Account blocks were not bypassed.
+
+The integrated capture/export/route regression passed **611 tests**. The
+operations, broker, proxy, shim, rollback and worker regression passed **1,182
+tests**, with two existing declared-field skips. Independent review reproduced
+and closed a saved-provider-selection mismatch before these final checks.
+Offline replay preserved all **79 prior scored targets** (35 candidate and 44
+baseline), 85 native TYCHE targets plus one verified cap/EOF omission, and three
+earlier real continuation targets. Source and original artifact hashes stayed
+unchanged. Compilation, README/registry alignment and `git diff --check` passed.
+
+This work shares the existing $5 OpenRouter allowance. Cumulative reported
+charges are **$0.0337479570**, with **$1.195942** retained for unpriced attempts,
+or **$1.2296899570 conservatively accounted for**. No paid search/scraping was
+used. These short tasks prove route selection, continuation and capture
+compatibility. They do not establish lead quality, load reliability, maximum
+context/output behavior, a fresh complete scored workflow, or the best coverage
+threshold. The diagnostic runs correctly do not become scored training records
+without genuine scoring labels. Remote CI remains a separate required check.
+
 ## DeepInfra follow-up and README trim, October 25
 
 The user authorized enabling DeepInfra on the test account. Both GPT-OSS routes

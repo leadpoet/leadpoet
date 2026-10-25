@@ -17,25 +17,21 @@ behavior does. Catalog capability flags alone do not grant approval.
 
 ## Reviewed route registry
 
-The runtime source is `lab_arena/reasoning_models.json`. It contains seven exact
-model/API routes: six Chat Completions routes and DeepSeek through Fireworks on
-Responses. All use ZDR, no provider fallback, and a route price bound. Chat calls
+The runtime source is `lab_arena/reasoning_models.json`. It contains 25 exact
+model/API/provider routes: 21 Chat Completions routes and four DeepSeek Responses
+routes. All use ZDR, no provider fallback, and a route price bound. Chat calls
 use `exclude: false`; Responses uses its typed `reasoning_text` output. GPT-OSS
 keeps 8,192 output tokens. The other reviewed routes use 32,768. Gemma uses
 `enabled: true`; the other routes use `effort: high`.
 
-| Model ID | API | Exact provider selector | Output allowance |
-| --- | --- | --- | --- |
-| `openai/gpt-oss-120b` | Chat | `deepinfra/bf16` | 8,192 |
-| `mistralai/mistral-large-4-0` | Chat | `mistral/zdr` | 32,768 |
-| `deepseek/deepseek-v4.1-flash-1017` | Chat | `fireworks` | 32,768 |
-| `openai/gpt-oss-20b` | Chat | `deepinfra/bf16` | 8,192 |
-| `reflection/beam-1.0-501b-a23b` | Chat | `nebius/fp8` | 32,768 |
-| `google/gemma-4-31b-it` | Chat | `coreweave/fp4` | 32,768 |
-| `deepseek/deepseek-v4.1-flash-1017` | Responses | `fireworks` | 32,768 |
+The [README](../README.md#upcoming-model-whitelist) lists all approved choices.
+Use `provider.only` to select one exact provider on each request. The first
+registry row for each model/API remains its original default when no selector
+is given. Appending alternatives does not change existing default selection.
 
-The evidence files in `docs/evidence/full-thinking/` contain only synthetic test
-inputs and exact responses. Original 8,192-token evidence stays unchanged and
+The evidence files in `docs/evidence/full-thinking/` contain synthetic fixtures
+or sanitized verification reports with hashes of private raw artifacts.
+Original 8,192-token evidence stays unchanged and
 replays with its original frozen registry. The four larger caps bind the
 supplemental [32,768-token capture manifest](evidence/full-thinking/chat-output-cap-32768-20261025.json)
 by SHA-256 in the current registry. It retains exact requests, responses, wire
@@ -45,6 +41,9 @@ returned model and selected endpoint version/provider metadata. The separate
 retains three synthetic Responses turns, typed full text, two function
 continuations, final strict JSON, and exact wire/readable/receipt proof. No
 private native-agent prompts are included.
+The [expanded route matrix](evidence/full-thinking/expanded-whitelist-final-proof-20261025.json)
+verifies all 25 routes with the complete registry. Exact raw storage retains
+empty optional fields; the readable export may omit empty summary arrays.
 The requested provider selector is recorded separately: returned metadata does
 not independently expose its quantization suffix.
 
@@ -150,9 +149,9 @@ a hard thinking-token budget and cannot guarantee a final answer fits. The
 32,768-token checks used three short synthetic calls per route, two tool
 continuations, and a negative qualification from conflicting evidence. They
 prove acceptance of the requested envelope and exact capture; they do not
-exhaust 32,768 output tokens or prove full ICP quality. Both GPT-OSS cap probes
-were blocked by the account's ignored DeepInfra route, so their limits remain
-8,192. The separate Responses proof uses the same short conflicting-evidence
+exhaust 32,768 output tokens or prove full ICP quality. Earlier GPT-OSS cap probes
+were blocked by the account's ignored DeepInfra route. Later checks passed at
+the unchanged 8,192-token limit. The separate Responses proof uses the same short conflicting-evidence
 scenario and does not exhaust the allowance. Truncated responses are excluded
 from training targets. Runtime and answer quality may change; the
 user has accepted this tradeoff.
@@ -172,7 +171,8 @@ user has accepted this tradeoff.
   keeps its tested bootstrap source while retaining that champion as payer.
   This also covers a round opened before the previous round's promotion.
   Frozen rounds do not change their baseline snapshot.
-- Only the exact DeepSeek/Fireworks Responses route is approved. The existing
+- Only the four listed DeepSeek Responses routes are approved. The bundled
+  Codex helper retains its Fireworks default. The existing
   broker uses completed upstream responses; this PR does not add arbitrary
   upstream streaming support. Existing buffered Codex SSE behavior is preserved.
   Provider-side Responses web search remains unapproved. The latest native test
@@ -180,7 +180,7 @@ user has accepted this tradeoff.
   verification report. It does not prove a scored or published TYCHE workflow.
   Observed native token coverage supports keeping the provisional 1% setting;
   the small sample does not establish the best threshold or production readiness.
-- Keeping ZDR worked for all seven approved routes. Relaxing retention does not
+- Keeping ZDR worked for all 25 approved routes. Relaxing retention does not
   turn provider-withheld thinking into readable text. No privacy relaxation is
   included.
 - A provider can return no thinking on an individual successful call. Such calls

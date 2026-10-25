@@ -742,7 +742,7 @@ def _reported_phase_coverage(payload):
                 "state_record_errors", "state_local_errors", "state_overflow_rows", "state_overflow_manifests")))
 
 
-def _link_worker_receipts(run, paid, snapshot):
+def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True):
     """Join host writes and cooperative read acknowledgments without guessing.
 
     A host write is not consumption. An SDK acknowledgment is an agent report,
@@ -837,12 +837,12 @@ def _link_worker_receipts(run, paid, snapshot):
                     (200 <= call["response_status"] < 300 or call["call_identity"] in linked)}
         if expected - acknowledged:
             errors.add("agent_response_receipts_unverified")
-        if paid and not _reported_phase_coverage(payload):
+        if paid and require_completed_phases and not _reported_phase_coverage(payload):
             errors.add("agent_task_state_unverified")
     return errors
 
 
-def _worker_evidence(related, calls, objects):
+def _worker_evidence(related, calls, objects, *, selected_run_id):
     from lab_arena import training_observations
     artifacts, partial_artifacts, errors, counts = {}, {}, set(), {}
     for run in related:
@@ -850,6 +850,10 @@ def _worker_evidence(related, calls, objects):
         summary = (run.get("result_doc") or {}).get("resource_summary") or {}
         capture = summary.get("worker_observations")
         paid = [call for call in calls if call["run_id"] == run_id]
+        # A failed predecessor can stop before admission/final states. Its
+        # receipts and observations still pass through every check below.
+        require_completed_phases = (run_id == selected_run_id and run["kind"] == "execute"
+                                    and run.get("status") == "accepted")
         sequences = {call["action_sequence"] for call in paid if type(call.get("action_sequence")) is int}
         counts[run_id] = set(sequences)
         local_refusals = summary.get("provider_local_refusal_count")
@@ -885,7 +889,9 @@ def _worker_evidence(related, calls, objects):
             if needed or capture is not None:
                 errors.add("worker_observations_unavailable")
             if run["kind"] == "execute" and paid:
-                errors.update({"agent_response_receipts_unverified", "agent_task_state_unverified"})
+                errors.add("agent_response_receipts_unverified")
+                if require_completed_phases:
+                    errors.add("agent_task_state_unverified")
             continue
         payload = snapshot["payload"]
         if capture is not None and (not isinstance(capture, dict)
@@ -900,7 +906,8 @@ def _worker_evidence(related, calls, objects):
         if payload["local_refusal_count"] != local_refusals:
             errors.add("worker_local_refusals_unverified")
         artifacts[run_id] = snapshot
-        errors.update(_link_worker_receipts(run, paid, snapshot))
+        errors.update(_link_worker_receipts(
+            run, paid, snapshot, require_completed_phases=require_completed_phases))
         for observation in payload["observations"]:
             if observation["privacy"]["redacted"]:
                 errors.add("worker_observation_privacy_nonexact")
@@ -1203,7 +1210,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             raise ExportError("ledger_context_mismatch")
     calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
                          {row["run_id"]: index for index, row in enumerate(related)})
-    observations, partial_observations, observation_gaps, observed_actions = _worker_evidence(related, calls, objects)
+    observations, partial_observations, observation_gaps, observed_actions = _worker_evidence(
+        related, calls, objects, selected_run_id=run_id)
     # Recompute payload gaps after exact worker-side fallback joins. Structural
     # ledger failures and every accounting gap retain their original authority.
     gaps -= {"full_request_unavailable", "full_response_unavailable", "request_privacy_nonexact", "response_privacy_nonexact", "provider_call_inflight", "provider_cost_unresolved"}

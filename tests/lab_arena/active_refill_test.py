@@ -112,17 +112,19 @@ def _check_active_refill(
     )
     worker = rn.Runner(config)
 
-    def execute(lease, _token, _icp):
+    def execute(lease, _token, _icp, *, before_finished):
         if lease["run_id"] == "first":
             first_started.set()
             assert release_first.wait(3)
         else:
             second_started.set()
-        return contracts.build_signed_request(
+        document = contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE, round_id=config.round_id,
             hotkey=config.identity.hotkey, body={"run_id": lease["run_id"]},
             timestamp=int(config.clock().timestamp()), sign_message=config.identity.sign,
         )
+        before_finished(document)
+        return document
 
     worker._executor.execute = execute
     original_wait = rn.wait

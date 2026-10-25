@@ -464,11 +464,15 @@ def test_claim_and_completion_errors_have_run_correlation_and_recover(tmp_path):
     worker = runner.Runner(config)
     # The runtime trajectory is separately tested. Isolate operational delivery
     # around claim and completion so this test performs no sandbox or provider work.
-    worker._executor.execute = lambda lease, token, icp: contracts.build_signed_request(
-        scope=contracts.SCOPE_COMPLETE, round_id=config.round_id,
-        hotkey=config.identity.hotkey,
-        body={'run_id': lease['run_id']}, timestamp=int(config.clock().timestamp()),
-        sign_message=config.identity.sign)
+    def execute(lease, token, icp, *, before_finished):
+        document = contracts.build_signed_request(
+            scope=contracts.SCOPE_COMPLETE, round_id=config.round_id,
+            hotkey=config.identity.hotkey,
+            body={'run_id': lease['run_id']}, timestamp=int(config.clock().timestamp()),
+            sign_message=config.identity.sign)
+        before_finished(document)
+        return document
+    worker._executor.execute = execute
     try:
         assert worker.run_once() == 1
     finally:
@@ -695,10 +699,14 @@ def test_failed_claim_then_successful_lease_recovers_the_round_scope(tmp_path, m
     config = replace(make_config(tmp_path, api, None), operational_logger=log,
                      claim_retry_seconds=())
     worker = runner.Runner(config)
-    worker._executor.execute = lambda assigned, token, icp: contracts.build_signed_request(
-        scope=contracts.SCOPE_COMPLETE, round_id=config.round_id,
-        hotkey=config.identity.hotkey, body={'run_id': assigned['run_id']},
-        timestamp=int(config.clock().timestamp()), sign_message=config.identity.sign)
+    def execute(assigned, token, icp, *, before_finished):
+        document = contracts.build_signed_request(
+            scope=contracts.SCOPE_COMPLETE, round_id=config.round_id,
+            hotkey=config.identity.hotkey, body={'run_id': assigned['run_id']},
+            timestamp=int(config.clock().timestamp()), sign_message=config.identity.sign)
+        before_finished(document)
+        return document
+    worker._executor.execute = execute
     try:
         assert worker.run_once(max_claims=1) == 0
         assert worker.run_once(max_claims=1) == 1

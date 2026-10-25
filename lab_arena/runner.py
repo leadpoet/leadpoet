@@ -4127,8 +4127,15 @@ class AssignmentExecutor:
     def __init__(self, config: RunnerConfig) -> None:
         self._config = config
 
-    def execute(self, lease: Mapping[str, Any], lease_token: str, icp: Mapping[str, Any]) -> Dict[str, Any]:
-        """Run one leased ICP end to end and return the completion envelope."""
+    def execute(
+        self, lease: Mapping[str, Any], lease_token: str, icp: Mapping[str, Any],
+        *, before_finished: Optional[Callable[[Mapping[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
+        """Run one ICP; let its owner retain the signed result before telemetry.
+
+        Runner requires ``before_finished`` for production delivery. Direct
+        embedded callers can inspect the returned envelope without delivery.
+        """
 
         config = self._config
         state = RunState(lease=dict(lease), lease_token=lease_token)
@@ -4973,12 +4980,7 @@ class AssignmentExecutor:
             except trajectory.TrajectoryError:
                 # Keep the original lifecycle event if optional metadata reaches its cap.
                 pass
-        _record_trajectory(config, lease, lease_token, [
-            *_provider_error_events(state), *(
-                _decision_events_and_summary(state, finished_at)
-                if not scoring_run else []
-            ), finished_event, *_runtime_log_events(result, lease_token, finished_at)])
-        return contracts.build_signed_request(
+        envelope = contracts.build_signed_request(
             scope=contracts.SCOPE_COMPLETE,
             round_id=round_id,
             hotkey=config.identity.hotkey,
@@ -4986,6 +4988,14 @@ class AssignmentExecutor:
             timestamp=int(config.clock().timestamp()),
             sign_message=config.identity.sign,
         )
+        if before_finished is not None:
+            before_finished(envelope)
+        _record_trajectory(config, lease, lease_token, [
+            *_provider_error_events(state), *(
+                _decision_events_and_summary(state, finished_at)
+                if not scoring_run else []
+            ), finished_event, *_runtime_log_events(result, lease_token, finished_at)])
+        return envelope
 
 
 def _partial_company_judgment_output(document, lease):
@@ -5435,9 +5445,11 @@ class Runner:
                         raise ValueError("recovered lease expired")
                 except (KeyError, TypeError, ValueError, OverflowError):
                     raise RunnerError("recovered lease expired or invalid before dispatch") from None
-            envelope = self._executor.execute(lease, str(lease["lease_token"]), lease["icp"])
-            phase = "completion"
-            result = self._complete_with_retries(envelope)
+            def completion_started() -> None:
+                nonlocal phase
+                phase = "completion"
+
+            result = self._execute_and_complete(lease, before_completion=completion_started)
             self.completed.append({"run_id": lease["run_id"], "result": result})
             if log is not None:
                 log.state(progress=True, last_completion_at=self._config.clock().isoformat())
@@ -5475,6 +5487,35 @@ class Runner:
                 log.activity(-1)
             self._slots.release()
             self._report_capacity()
+
+    def _execute_and_complete(
+        self, lease: Mapping[str, Any], *, before_completion: Optional[Callable[[], None]] = None,
+    ) -> Dict[str, Any]:
+        """Retain the signed result before terminal telemetry and through delivery."""
+        with ExitStack() as retained:
+            pending_path = None
+            pending_hash = None
+
+            def before_finished(envelope: Mapping[str, Any]) -> None:
+                nonlocal pending_path, pending_hash
+                if before_completion is not None:
+                    before_completion()
+                if pending_path is not None:
+                    raise RunnerError("completion retention was repeated")
+                pending_path = retained.enter_context(self._retain_completion(envelope))
+                pending_hash = contracts.document_hash(envelope)
+
+            envelope = self._executor.execute(
+                lease, str(lease["lease_token"]), lease["icp"],
+                before_finished=before_finished,
+            )
+            if pending_path is None or contracts.document_hash(envelope) != pending_hash:
+                raise RunnerError("completion differs from its retained receipt")
+            # Keep the retained inode locked through terminal telemetry and
+            # delivery so a concurrent replay cannot take over between them.
+            result = self._deliver_completion_with_retries(envelope)
+            self._acknowledge_completion(pending_path, result)
+            return result
 
     def _complete_with_retries(self, envelope: Mapping[str, Any]) -> Dict[str, Any]:
         with self._retain_completion(envelope) as path:

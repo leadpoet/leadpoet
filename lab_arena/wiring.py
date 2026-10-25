@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
-from lab_arena import broker as broker_module, chain as chain_module, contracts, images, reasoning_capture, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture
+from lab_arena import broker as broker_module, chain as chain_module, contracts, images, reasoning_capture, runtime, scorer_image_access, scoring_provider_compat, signing, training_capture, training_coverage
 from lab_arena.api import create_app
 from lab_arena.credentials import CredentialManager
 from lab_arena.service import (
@@ -283,6 +283,15 @@ def _promotion_margin_from_environment() -> float:
     return value
 
 
+def _training_coverage_from_environment() -> int:
+    raw = os.environ.get("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT", "").strip()
+    try:
+        value = int(raw) if raw else training_coverage.NEW_ROUND_PERCENT
+        return training_coverage.percent_from_configuration({training_coverage.SETTING: value})
+    except ValueError:
+        raise ServiceError("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT must be an integer within 1..100", 500) from None
+
+
 def _rewards_enabled_from_environment() -> bool:
     """Freeze LAB_ARENA_REWARDS_ENABLED into each new live round."""
 
@@ -542,6 +551,7 @@ def build_service_from_environment(mode: str):
         signal_judgment_from=os.environ.get("LAB_ARENA_SIGNAL_JUDGMENT_FROM") or None,
         intent_details_from=os.environ.get("LAB_ARENA_INTENT_DETAILS_FROM") or None,
         reasoning_capture_from=os.environ.get("LAB_ARENA_REASONING_CAPTURE_FROM") or None,
+        training_minimum_icp_coverage_percent=_training_coverage_from_environment(),
         reasoning_baseline_source_sha256=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_SHA256") or None,
         reasoning_baseline_source_url=os.environ.get("LAB_ARENA_REASONING_BASELINE_SOURCE_URL") or None,
         benchmark_disclosure_from=os.environ.get("LAB_ARENA_BENCHMARK_DISCLOSURE_FROM") or None,

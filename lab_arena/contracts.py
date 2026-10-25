@@ -924,6 +924,8 @@ ROUND_CONFIGURATION_FIELDS = (
     # every historical round's provider requests unchanged.
     F("reasoning_capture_policy", "str", required=False,
       choices=("full_generated_thinking_v1",)),
+    F("training_minimum_icp_coverage_percent", "int", required=False,
+      minimum=1, maximum=100),
     F("reasoning_route_registry", "object", required=False),
     F("reasoning_baseline_source_sha256", "sha256", required=False),
     F("reasoning_activation_status", "str", required=False, choices=("not_ready",)),
@@ -1016,6 +1018,14 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         and config.get("sourcing_cost_eligibility_policy") not in PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
         raise ArenaContractError("infrastructure retry cost policy requires per-ICP costs")
     capture_policy = config.get("reasoning_capture_policy")
+    if "training_minimum_icp_coverage_percent" in config:
+        from lab_arena import training_coverage
+        try:
+            training_coverage.percent_from_configuration(config)
+        except ValueError as exc:
+            raise ArenaContractError("invalid training ICP coverage floor") from exc
+        if capture_policy != "full_generated_thinking_v1":
+            raise ArenaContractError("training ICP coverage requires full thinking policy")
     if ("reasoning_activation_status" in config) != ("reasoning_activation_reason" in config):
         raise ArenaContractError("reasoning activation status and reason are frozen together")
     if "reasoning_activation_status" in config and (

@@ -30,3 +30,19 @@ def test_margin_override_and_new_defaults(monkeypatch, raw, expected):
 def test_invalid_margin_fails_before_round_creation(monkeypatch, raw):
     monkeypatch.setenv("LAB_ARENA_PROMOTION_MARGIN", raw)
     with pytest.raises(ServiceError): wiring._promotion_margin_from_environment()
+
+
+@pytest.mark.parametrize("raw,expected", [(None,80),("",80),("80",80),("90",90),("100",100),("1",1)])
+def test_training_coverage_override(monkeypatch, raw, expected):
+    monkeypatch.delenv("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT", raw)
+    assert wiring._training_coverage_from_environment() == expected
+    assert RoundDefaults().training_minimum_icp_coverage_percent == 80
+
+
+@pytest.mark.parametrize("raw", ["0","101","80.5","true","-1"])
+def test_invalid_training_coverage_override(monkeypatch, raw):
+    monkeypatch.setenv("LAB_ARENA_TRAINING_MINIMUM_ICP_COVERAGE_PERCENT", raw)
+    with pytest.raises(ServiceError):
+        wiring._training_coverage_from_environment()

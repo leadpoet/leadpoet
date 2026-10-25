@@ -348,3 +348,43 @@ def test_open_next_round_adopts_champion_promoted_before_baseline_freeze(tmp_pat
     assert objects[participants[0]["source_ref"]] == champion
     assert service.freeze_participants(next_config["round_id"]) == participants
     assert reads == [champion_url, champion_url]
+
+
+def test_new_round_freezes_eighty_percent_coverage_and_publishes_it():
+    config = opted_in().create_round(OPEN)
+    assert config["training_minimum_icp_coverage_percent"] == 80
+    assert ArenaService._public_round_output_policy(config)["training_minimum_icp_coverage_percent"] == 80
+    assert contracts.validate_round_configuration(json.loads(json.dumps(config))) == config
+
+
+def test_coverage_override_is_frozen_and_legacy_absence_stays_absent():
+    service = opted_in()
+    service._config.defaults.training_minimum_icp_coverage_percent = 90
+    config = service.create_round(OPEN)
+    assert config["training_minimum_icp_coverage_percent"] == 90
+    service._config.defaults.training_minimum_icp_coverage_percent = 80
+    service._store.create_round = lambda *_args: {"status": "existing"}
+    service._round = lambda _round_id: {"configuration_doc": deepcopy(config)}
+    assert service.create_round(OPEN)["training_minimum_icp_coverage_percent"] == 90
+    legacy = dict(config)
+    del legacy["training_minimum_icp_coverage_percent"]
+    assert "training_minimum_icp_coverage_percent" not in contracts.validate_round_configuration(legacy)
+    assert ArenaService._public_round_output_policy(legacy)["training_minimum_icp_coverage_percent"] == 100
+
+
+@pytest.mark.parametrize("value", [None, True, False, "80", 80.0, 0, -1, 101])
+def test_frozen_coverage_rejects_invalid_values(value):
+    config = opted_in().create_round(OPEN)
+    config["training_minimum_icp_coverage_percent"] = value
+    with pytest.raises(contracts.ArenaContractError):
+        contracts.validate_round_configuration(config)
+
+
+def test_coverage_setting_cannot_be_attached_to_policy_off_round():
+    service = opted_in()
+    service._config.defaults.reasoning_capture_from = "2026-11-01T00:00:00Z"
+    config = service.create_round(OPEN)
+    assert "training_minimum_icp_coverage_percent" not in config
+    config["training_minimum_icp_coverage_percent"] = 80
+    with pytest.raises(contracts.ArenaContractError):
+        contracts.validate_round_configuration(config)

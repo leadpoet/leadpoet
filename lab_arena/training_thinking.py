@@ -138,7 +138,7 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                 continue
             for field in ("reasoning", "reasoning_content"):
                 value = message.get(field)
-                if isinstance(value, str) and value.strip() and "[REDACTED]" not in value:
+                if isinstance(value, str) and value.strip():
                     segments.append({"source_path": ["choices", ci, "message", field], "field": field, "text": value})
                 elif value not in (None, ""):
                     opaque = True
@@ -152,14 +152,13 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                 if kind in {"reasoning.summary", "summary_text"} or item.get("summary"):
                     summary = True
                     value = item.get("summary")
-                    if isinstance(value, str) and value.strip() and "[REDACTED]" not in value:
+                    if isinstance(value, str) and value.strip():
                         segments.append({"source_path": ["choices", ci, "message", "reasoning_details", ri, "summary"],
                                          "field": "reasoning_details.summary", "text": value})
                     elif isinstance(value, list):
                         for pi, part in enumerate(value):
                             if (isinstance(part, Mapping) and part.get("type") == "summary_text"
-                                    and isinstance(part.get("text"), str) and part["text"].strip()
-                                    and "[REDACTED]" not in part["text"]):
+                                    and isinstance(part.get("text"), str) and part["text"].strip()):
                                 segments.append({"source_path": ["choices", ci, "message", "reasoning_details", ri,
                                                                  "summary", pi, "text"],
                                                  "field": "reasoning_details.summary", "text": part["text"]})
@@ -169,7 +168,7 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                 for field in ("text", "thinking", "content"):
                     value = item.get(field)
                     field_id = "reasoning_details.text" if kind == "reasoning.text" and field == "text" else "reasoning_details.unproved"
-                    if isinstance(value, str) and value.strip() and "[REDACTED]" not in value:
+                    if isinstance(value, str) and value.strip():
                         segments.append({"source_path": ["choices", ci, "message", "reasoning_details", ri, field],
                                          "field": field_id, "text": value})
                     elif isinstance(value, list):
@@ -185,15 +184,14 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
                 summary = True
                 for pi, part in enumerate(item["summary"] if isinstance(item["summary"], list) else []):
                     if (isinstance(part, Mapping) and part.get("type") == "summary_text"
-                            and isinstance(part.get("text"), str) and part["text"].strip()
-                            and "[REDACTED]" not in part["text"]):
+                            and isinstance(part.get("text"), str) and part["text"].strip()):
                         segments.append({"source_path": ["output", oi, "summary", pi, "text"],
                                          "field": "output.summary.summary_text", "text": part["text"]})
             if item.get("encrypted_content") or item.get("redacted_thinking"):
                 opaque = True
             for field in ("text", "thinking", "content"):
                 value = item.get(field)
-                if isinstance(value, str) and value.strip() and "[REDACTED]" not in value:
+                if isinstance(value, str) and value.strip():
                     segments.append({"source_path": ["output", oi, field], "field": "output." + field, "text": value})
                 elif isinstance(value, list):
                     for pi, part in enumerate(value):

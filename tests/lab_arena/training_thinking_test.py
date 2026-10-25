@@ -102,6 +102,59 @@ def test_summary_unproved_and_redacted_text_are_excluded():
         assert manifest["counts"]["records_by_split"]["train"] == 0
 
 
+def test_literal_redaction_marker_in_exact_thinking_is_retained_but_capture_redaction_is_not():
+    example = full_example()
+    call = example["provider_calls"][0]
+    text = "The public source literally prints [REDACTED] in its example."
+    call["response"]["choices"][0]["message"]["reasoning_content"] = text
+    call["response_sha256"] = contracts.document_hash(call["response"])
+    call["response_receipts"][0]["response_sha256"] = call["response_sha256"]
+    got, _ = rows(example)
+    assert len(got) == 1
+    assert got[0]["generated_thinking"][0]["text"] == text
+    trace = training_thinking.readable_trace(seal(example))
+    assert any(event["kind"] == "full_generated_thinking" and event["value"] == text
+               for row in trace["calls"] for event in row["events"])
+
+    call["response_receipts"][0]["privacy_redactions"] = ["credential"]
+    assert rows(example)[0] == []
+
+    redacted = full_example()
+    saved = redacted["provider_calls"][0]
+    saved["response"]["choices"][0]["message"]["reasoning_content"] = "Evidence token: fixture-private-token"
+    saved["response"], redactions = training_capture.sanitize_training_value(
+        saved["response"], secrets=("fixture-private-token",))
+    assert redactions == ["credential"]
+    assert saved["response"]["choices"][0]["message"]["reasoning_content"] == "Evidence token: [REDACTED]"
+    saved["response_privacy_redactions"] = redactions
+    saved["response_receipts"][0]["privacy_redactions"] = redactions
+    saved["response_sha256"] = contracts.document_hash(saved["response"])
+    saved["response_receipts"][0]["response_sha256"] = saved["response_sha256"]
+    assert rows(redacted)[0] == []
+
+
+def test_literal_redaction_marker_in_exact_summary_is_rendered_as_summary():
+    text = "The source includes the literal marker [REDACTED]."
+    for operation, response in (
+        ("openrouter.chat", {"choices": [{"message": {"reasoning_details": [
+            {"type": "reasoning.summary", "summary": text}]}, "finish_reason": "stop"}]}),
+        ("openrouter.responses", {"status": "completed", "output": [{"type": "reasoning",
+            "summary": [{"type": "summary_text", "text": text}]}]}),
+    ):
+        segments, summary, opaque = training_thinking._segments(response, operation)
+        assert summary is True and opaque is False
+        assert [segment["text"] for segment in segments] == [text]
+        example = full_example()
+        call = example["provider_calls"][0]
+        call["operation_id"] = operation
+        call["response"] = response
+        assert training_thinking.attempt_coverage(call, "miner")["returned"] == "summary"
+        trace = training_thinking.readable_trace(seal(example))
+        assert any(event["kind"] == "summary" and event["value"] == text
+                   for row in trace["calls"] for event in row["events"])
+        assert text in training_thinking.readable_trace_markdown(trace)
+
+
 def test_summary_only_text_is_counted_with_source_paths_but_not_admitted():
     for operation, response in (
         ("openrouter.chat", {"choices": [{"message": {"reasoning_details": [

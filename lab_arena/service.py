@@ -6826,7 +6826,7 @@ class ArenaService:
         # Decode only a bounded candidate before resolving its existing lease.
         # The frozen execute policy, never a caller hint, admits larger history.
         candidate_limits = limits
-        if frame["operation_id"] in {"openrouter.chat", "openrouter.responses"}:
+        if frame["operation_id"] in ("openrouter.chat", "openrouter.responses"):
             candidate_limits = (contracts.FULL_THINKING_RESPONSES_PROVIDER_FRAME_LIMITS
                 if frame["operation_id"] == "openrouter.responses" else contracts.FULL_THINKING_PROVIDER_FRAME_LIMITS)
         contracts.check_strict_document(frame, candidate_limits)

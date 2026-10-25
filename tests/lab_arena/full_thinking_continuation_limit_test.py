@@ -248,6 +248,23 @@ def test_api_total_envelope_cap_rejects_before_context_or_provider_dispatch():
     assert transport.sent == [] and reads == []
 
 
+@pytest.mark.parametrize('operation_id', [[], {}])
+@pytest.mark.parametrize('full,kind', [(True, 'execute'), (False, 'execute'), (True, 'score')])
+def test_api_nonstring_operation_keeps_existing_broker_rejection(operation_id, full, kind):
+    from fastapi.testclient import TestClient
+    from lab_arena.api import create_app
+    service, transport, reads = api_service(full=full, kind=kind)
+    frame = {'operation_id': operation_id, 'parameters': {},
+             'timeout_ms': 1000, 'action_sequence': 0}
+    with TestClient(create_app(service)) as client:
+        answer = client.post('/arena/v1/runs/r1/provider', json=frame,
+            headers={'x-lab-arena-lease': 'a'*64})
+    assert answer.status_code == 200
+    assert answer.json()['status'] == 400
+    assert answer.json()['call']['error_code'] == 'invalid_request'
+    assert len(reads) == 1 and transport.sent == []
+
+
 @pytest.mark.parametrize('kind,size', [('reasoning', 32414), ('arguments', 51314), ('arguments', 82130)])
 def test_saved_training_replay_retains_exact_long_history(kind, size):
     from tests.lab_arena.training_native_responses_test import example, refresh

@@ -5,6 +5,7 @@ import json
 
 from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring.checked_sources import checked_source_provenance
+from tests.product_coverage_fixtures import trusted_plan
 
 
 URL = "https://acme.example/product"
@@ -64,6 +65,50 @@ def test_highlight_only_remains_locator_and_cannot_validate_quote():
         URL, excerpt, fetched_pages={}, fetched_final_urls={},
         first_party_domains={"acme.example"}, identity_names={"Acme"}, identity_anchor={},
     ) == investigator.REQUIRED_ATTRIBUTE_SUPPORT_UNLOADED_SOURCE_REASON
+
+
+def test_industry_product_quotes_in_search_highlight_need_fetched_pages(monkeypatch):
+    criterion = "Supplies AI ticket and account workflow software to businesses"
+    ticket_quote = "Acme supplies AI ticket workflow software to businesses."
+    account_quote = "Acme supplies account workflow software to businesses."
+    excerpt = f"{ticket_quote} {account_quote}"
+
+    async def post(_session, _url, *, headers, payload):
+        return 200, {"results": [{"url": URL, "title": "Acme workflows",
+                                  "highlights": [excerpt]}]}
+
+    monkeypatch.setattr(investigator, "_post_json", post)
+    search_result = asyncio.run(investigator._search_web(None, "Acme workflows", key="offline"))
+    assert search_result["results"][0]["discovery_excerpt"] == excerpt
+    plan = trusted_plan(criterion, nodes=[
+        {"id": "p0", "op": "all", "text": "", "children": ["p1", "p2"]},
+        {"id": "p1", "op": "leaf", "text": "Supplies AI ticket workflow software", "children": []},
+        {"id": "p2", "op": "leaf", "text": "Supplies account workflow software to businesses", "children": []},
+    ])
+    coverage = json.dumps({"plan_id": plan.plan_id, "claims": [
+        {"id": "p1", "status": "VERIFIED", "activity_role": "supplier_operator",
+         "evidence": [{"url": URL, "quote": ticket_quote}]},
+        {"id": "p2", "status": "VERIFIED", "activity_role": "supplier_operator",
+         "evidence": [{"url": URL, "quote": account_quote}]},
+    ]})
+    finding = {
+        "target": "industry", "status": "VERIFIED", "observed_industry": "Software",
+        "observed_subindustry": "Workflow software", "activity_role": "supplier_operator",
+        "evidence_url": URL, "evidence_quote": excerpt, "product_coverage": coverage,
+    }
+    checked = investigator._validated_findings(
+        {"findings": [finding]}, targets=("industry",), fetched_pages={},
+        fetched_final_urls={}, first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor={"submitted_domain": "acme.example", "observed_domain": "acme.example",
+                         "verified_domain": "acme.example", "submitted_name": "Acme"},
+        requested_product_service=criterion, product_plan=plan,
+    )["industry"]
+    assert checked["status"] == "UNPROVEN"
+    assert checked["evidence_url"] == checked["evidence_quote"] == ""
+    assert checked["product_coverage"]["status"] == "UNPROVEN"
+    assert checked["product_coverage"]["unresolved_ids"] == ["p1", "p2"]
+    assert set(checked["product_coverage"]["citation_issues"]) == {"p1", "p2"}
 
 
 def test_private_search_result_is_not_exposed_with_highlight(monkeypatch):

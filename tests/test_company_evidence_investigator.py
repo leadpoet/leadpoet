@@ -246,7 +246,7 @@ def test_undated_completed_round_requires_dates_only_for_material_chronology(
             })},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         assert "latest funding round acquisition IPO" in query
         return {"results": (
@@ -884,7 +884,7 @@ def test_saved_mirantis_acquisition_hint_reopens_full_match(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": [{"url": issuer_url}]}
@@ -967,7 +967,7 @@ def test_failed_submitted_acquisition_fetch_cannot_retain_old_stage(monkeypatch)
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del query, key
         return {"results": [{"url": submitted_url}]}
 
@@ -1305,7 +1305,7 @@ def test_doctronic_submitted_later_round_uses_validated_fetch(
             return {"ok": False, "url": requested_url, "text": ""}
         return {"ok": True, "url": requested_url, "text": page_text}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": []}
@@ -6021,7 +6021,7 @@ def test_audited_stage_quotes_get_source_context_then_exact_correction(
     async def fake_fetch(_session, requested_url):
         return {"ok": True, "url": requested_url, "text": page}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del query, key
         return {"results": []}
 
@@ -6375,7 +6375,7 @@ def test_pre_series_guard_reaches_bounded_investigator_and_stage_decision(
             },
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         searches.append(query)
         return {"results": [{"url": url}]}
 
@@ -6667,7 +6667,7 @@ def test_corestack_buyer_quote_is_rejected_before_submitted_series_b_fetch(
             "text": series_b_quote,
         }
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del query, key
         return {"results": []}
 
@@ -6761,7 +6761,7 @@ def test_acculon_retrospective_receipt_requires_live_current_stage_discovery(
     )
     search_queries = []
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": []}
@@ -8439,7 +8439,7 @@ def test_legacy_western_union_alias_uses_real_investigator_and_cached_size(
             "url": profile_url, "website": "https://westernunion.com/",
         }
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         assert key == "test-exa-key"
         assert "westernunion.com" in query
         calls["search"] += 1
@@ -12940,7 +12940,7 @@ def test_stage_archive_handoff_stays_within_existing_three_fetches(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def search(_session, _query, *, key):
+    async def search(_session, _query, *, key, max_results=5):
         del key
         return {"results": [{"url": stake}, {"url": debt}]}
 
@@ -13057,7 +13057,7 @@ def test_full_harness_loop_searches_fetches_and_submits_fetched_quote(monkeypatc
             }]}}]
         }
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": [{"url": url}], "notice": "discovery_only_not_evidence"}
@@ -13338,7 +13338,7 @@ def test_saved_doctronic_case_script_discovers_and_fetches_current_series_b(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": [{"url": current_url}]}
@@ -13440,7 +13440,7 @@ def test_current_stage_search_preserves_valid_series_a_without_superseding_event
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": ([{"url": later_url}] if later_url else [])}
@@ -13510,7 +13510,7 @@ def test_required_current_stage_search_failure_returns_unproven(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del query, key
         if search_mode == "zero_budget":
             raise AssertionError("zero search budget must not call the provider")
@@ -13583,7 +13583,7 @@ def test_current_stage_search_deadline_returns_unproven(monkeypatch, deadline_mo
     async def fake_fetch(_session, url):
         return {"ok": True, "url": url, "final_url": url, "text": old_quote}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": []}
@@ -13672,7 +13672,7 @@ def test_failed_current_stage_search_preserves_valid_other_findings(
             "text": page,
         }
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del query, key
         if search_mode == "malformed_response":
             raise ValueError("malformed search response")
@@ -13725,7 +13725,7 @@ def test_required_stage_failure_is_not_cleared_by_unrelated_search(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         if discovery_mode == "later_general_search" and len(searches) == 1:
@@ -13772,7 +13772,7 @@ def test_failed_required_stage_search_preserves_proved_different_stage(monkeypat
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         raise RuntimeError("search unavailable")
 
@@ -13855,7 +13855,7 @@ def test_curated_armada_relationship_rejection_forces_targeted_research(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": [{"url": software_url}]}
@@ -14079,7 +14079,7 @@ def test_no_search_customer_role_gets_one_bounded_industry_followup(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": [{"url": followup_url}]}
@@ -14247,7 +14247,7 @@ def test_successful_targeted_search_does_not_add_industry_followup_calls(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": [{"url": url}]}
@@ -14475,7 +14475,7 @@ def test_forced_industry_search_does_not_accept_an_unfetched_result(monkeypatch)
         fetched_urls.append(url)
         return {"ok": True, "url": url, "text": infrastructure_quote}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del query, key
         return {"results": [{"url": software_url}]}
 
@@ -14541,7 +14541,7 @@ def test_exhausted_budget_does_not_force_a_useless_industry_search(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": []}
@@ -14694,7 +14694,7 @@ def test_provider_injected_prefetched_body_is_not_reused(monkeypatch):
             },
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": []}
@@ -15068,7 +15068,7 @@ def test_multitarget_retrieval_allocates_after_current_stage_review(
     search_results = [{"url": stage_url}] if stage_conflict else []
     search_queries = []
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": (
@@ -15924,7 +15924,7 @@ def test_final_unproven_with_evidence_gets_one_submit_only_correction(monkeypatc
     async def fake_fetch(_session, requested_url):
         return {"ok": True, "url": requested_url, "text": quote}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         provider_searches.append(query)
         return {"results": [], "notice": "discovery_only_not_evidence"}
@@ -16129,7 +16129,7 @@ def test_harness_closes_search_budget_and_admission_boundary(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         provider_searches.append(query)
         return {"results": [], "notice": "discovery_only_not_evidence"}
@@ -16717,7 +16717,7 @@ def test_real_reserve_completed_judgment_and_faults_through_arena_score(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def search(_session, _query, *, key):
+    async def search(_session, _query, *, key, max_results=5):
         del key
         calls["search"] += 1
         clock.now = (
@@ -17190,7 +17190,7 @@ def test_final_rejected_stage_quote_gets_one_bounded_search_and_source_fetch(
             "function": {"name": name, "arguments": json.dumps(args)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         if initial_search_fails and len(search_queries) == 1:
@@ -17304,7 +17304,7 @@ def test_missing_saved_stage_quote_uses_only_bounded_stage_search(
             "function": {"name": name, "arguments": json.dumps(args)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": [{"url": current_url}]}
@@ -17418,7 +17418,7 @@ def test_stage_repair_owns_overlapping_industry_followup_search(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(args)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         search_queries.append(query)
         return {"results": [{"url": strong_stage_url}]}

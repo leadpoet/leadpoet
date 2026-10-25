@@ -2495,8 +2495,8 @@ def test_homepage_navigation_locator_count_is_bounded():
 
     assert len(locators) == MAX_HOMEPAGE_NAVIGATION_LOCATORS
     assert locators[-1] == {
-        "url": "https://flamapp.ai/product/39",
-        "label": "Product 39",
+        "url": "https://flamapp.ai/product/49",
+        "label": "Product 49",
     }
 
 

@@ -107,7 +107,7 @@ def _run_scoped_correction(
             },
         }]}}]}
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         return {"results": []}
 
@@ -360,7 +360,7 @@ def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
             }]},
         }]}
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         return {"results": []}
 
@@ -465,7 +465,7 @@ def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
             },
         }]}}]}
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         return {"results": []}
 
@@ -549,7 +549,7 @@ def test_timeout_preserves_only_server_validated_stage_metadata(monkeypatch):
             },
         }]}}]}
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         return {"results": []}
 

@@ -146,7 +146,7 @@ def test_time_forced_unproven_with_unused_research_is_incomplete(
             )]})
         )
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         clock.now = 50.0
         return {"results": []}
@@ -197,7 +197,7 @@ def test_grounded_finding_stays_complete_with_or_without_reserve_denial(
             "submit_findings", json.dumps({"findings": [_finding()]})
         )
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         clock.now = 50.0
         return {"results": []}
@@ -234,7 +234,7 @@ def test_voluntary_unproven_after_search_stays_complete(monkeypatch):
             )]})
         )
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         clock.now = 50.0
         return {"results": []}
@@ -408,7 +408,7 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
     requests = []
     fabricated_quote = "Acme supplies payroll software to hospitals worldwide."
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         return {"results": []}
 

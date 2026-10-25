@@ -167,7 +167,7 @@ def test_exact_multiverse_description_reaches_real_investigator(monkeypatch):
             }]
         }
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": []}

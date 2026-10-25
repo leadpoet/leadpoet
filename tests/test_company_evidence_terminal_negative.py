@@ -56,7 +56,7 @@ def _run(monkeypatch, *, final="negative", mixed=False, stage_failure=False,
     targets = (("stage",) if stage_failure else
                ("stage", "industry") if invalid_stage_identity else TARGETS)
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         searches.append(query)
         if stage_failure:
             raise TimeoutError("offline required discovery failure")

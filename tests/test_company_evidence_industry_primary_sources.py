@@ -208,7 +208,7 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
             },
         }]}}]}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         queries.append(query)
         return {"results": [{"url": url, "title": "Scheduling platform"}]}

@@ -50,7 +50,7 @@ def _replay(monkeypatch, *, repaired=True, settle=111.0,
         return {"ok": True, "url": url, "final_url": url,
                 "text": STAGE_QUOTE if url == STAGE_URL else ATTRIBUTE_QUOTE}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         searches.append(query)
         if search_failure and len(searches) == 1:
             raise RuntimeError("offline provider failure")

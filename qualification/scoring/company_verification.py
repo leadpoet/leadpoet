@@ -70,7 +70,7 @@ _TRANSIENT_FETCH_ATTEMPTS = 2
 _TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
 _MAX_ORGANIZATION_LEGAL_NAME_ALIASES = 3
 _MAX_ORGANIZATION_NAME_LENGTH = 200
-MAX_HOMEPAGE_NAVIGATION_LOCATORS = 40
+MAX_HOMEPAGE_NAVIGATION_LOCATORS = 50
 MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH = 200
 MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS = 6_000
 VERIFIED_REBRAND_REDIRECT_KEY = "verified_rebrand_redirect"
@@ -977,8 +977,8 @@ def _homepage_navigation_locators(
         if canonical in seen:
             continue
         seen.add(canonical)
-        # Large menus can hide relevant commercial and company pages after the
-        # first 40 links. Preserve these locators within the existing limits.
+        # Large menus can hide relevant commercial and company pages after
+        # dozens of links. Preserve these locators within the existing limits.
         words = set(re.findall(
             r"[a-z]+", f"{parsed.path} {label}".casefold()
         ))

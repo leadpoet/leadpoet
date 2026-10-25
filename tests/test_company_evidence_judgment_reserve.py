@@ -285,7 +285,7 @@ def test_mandatory_current_stage_discovery_precedes_reserved_submit(monkeypatch)
     searches = []
     requests = []
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         clock.now = (
@@ -331,7 +331,7 @@ def test_reserve_overrides_pending_stage_recovery_without_marking_search_success
     searches = []
     requests = []
 
-    async def unavailable_search(_session, query, *, key):
+    async def unavailable_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         raise RuntimeError("search unavailable")
@@ -615,7 +615,7 @@ def test_reserved_submit_completes_validated_bounded_judgment(
             call=2,
         )
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del query, key
         if reserve_time:
             clock.now = (

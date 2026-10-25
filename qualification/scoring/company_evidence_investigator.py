@@ -94,6 +94,7 @@ MAX_PREFETCHED_PAGES = 3
 MAX_RETURNED_FETCHED_PAGES = MAX_PREFETCHED_PAGES + MAX_FETCH_CALLS
 MAX_STAGE_ARCHIVE_CARDS = 3
 MAX_SEARCH_RESULTS = 5
+MAX_PRODUCT_SEARCH_RESULTS = 10
 MAX_PAGE_CHARACTERS = 24_000
 MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
@@ -656,6 +657,9 @@ query with company and useful synonyms; do not concatenate the full criterion
 or illustrative examples. Prefer a specific first-party product, docs or case
 page from navigation/search over a general overview or demo. After replacing
 a rejected citation, rejudge the complete criterion; never upgrade automatically.
+For a missing customer or user type, seek first-party sector solutions or customer
+stories that show actual use; do not re-bundle already established capabilities.
+Fetch a selected page; discovery highlights alone are not proof.
 Never infer absence from silence or add requirements not requested.
 """
 
@@ -2673,9 +2677,12 @@ async def _search_web(
     query: str,
     *,
     key: str,
+    max_results: int = MAX_SEARCH_RESULTS,
 ) -> dict[str, Any]:
+    if max_results not in {MAX_SEARCH_RESULTS, MAX_PRODUCT_SEARCH_RESULTS}:
+        raise ValueError("invalid bounded search result count")
     payload: dict[str, Any] = {
-        "query": query[:500], "type": "auto", "numResults": MAX_SEARCH_RESULTS,
+        "query": query[:500], "type": "auto", "numResults": max_results,
         # Exa's bounded highlights help select a page. They are never added to
         # fetched_pages, which remains the only source of citation text.
         "contents": {"highlights": {"maxCharacters": MAX_SEARCH_LOCATOR_EXCERPT_CHARS}},
@@ -2696,7 +2703,7 @@ async def _search_web(
     if not isinstance(results, list):
         raise ValueError("search_response_malformed")
     locators = []
-    for item in results[:MAX_SEARCH_RESULTS]:
+    for item in results[:max_results]:
         if not isinstance(item, Mapping):
             continue
         url = _safe_https_url(item.get("url") or item.get("id"))
@@ -4969,10 +4976,12 @@ async def investigate_company_evidence(
             if early_product_search_pending:
                 messages.append({"role": "user", "content": (
                     "The required current-stage discovery is already loaded. "
-                    "Use the next search_web call for one mandatory product-plan "
-                    "leaf or small related group that needs proof. Include the "
-                    "company name and useful synonyms; do not concatenate the "
-                    "full criterion or examples. Search results are locators only. "
+                    "Use the next search_web call for one unresolved product "
+                    "condition or small related group, especially a required "
+                    "customer or user type. Include the company name and useful "
+                    "synonyms; do not concatenate the full criterion or examples. "
+                    "Seek first-party sector solutions or customer stories for "
+                    "actual use when that is the gap. Search results are locators only. "
                     "Then fetch one useful first-party product, docs, or case "
                     "page if a safe result is available. Continue the stage review "
                     "after this bounded product research."
@@ -6440,8 +6449,13 @@ async def investigate_company_evidence(
                             if forced_product_search_call:
                                 early_product_research["search"] = "admitted"
                             try:
+                                search_result_limit = (
+                                    MAX_PRODUCT_SEARCH_RESULTS
+                                    if product_review_requested else MAX_SEARCH_RESULTS
+                                )
                                 tool_result = await _search_web(
-                                    session, query.strip(), key=exa_key
+                                    session, query.strip(), key=exa_key,
+                                    max_results=search_result_limit,
                                 )
                             except (
                                 aiohttp.ClientError, RuntimeError, TimeoutError,
@@ -6458,7 +6472,7 @@ async def investigate_company_evidence(
                                 )
                                 safe_results: set[str] = set()
                                 for item in (
-                                    results[:MAX_SEARCH_RESULTS]
+                                    results[:search_result_limit]
                                     if isinstance(results, list) else ()
                                 ):
                                     safe_url = _safe_https_url(

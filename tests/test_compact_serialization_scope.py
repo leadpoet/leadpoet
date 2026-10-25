@@ -72,7 +72,7 @@ def test_serialization_retry_scopes_only_rejected_targets_after_research(monkeyp
             return _response("submit_findings", {"findings": [_finding(t) for t in TARGETS]}, turn)
         return _response("submit_findings", {"findings": [_finding(t) for t in PENDING]}, turn)
 
-    async def search(_session, _query, *, key):
+    async def search(_session, _query, *, key, max_results=5):
         return {"results": []}
 
     def validate(arguments, *, targets, **kwargs):
@@ -132,7 +132,7 @@ def test_early_retry_does_not_scope_when_required_product_search_remains(monkeyp
             ]}, turn)
         return _response("search_web", {"query": "Acme missing practice capability"}, turn)
 
-    async def search(_session, _query, *, key):
+    async def search(_session, _query, *, key, max_results=5):
         return {"results": []}
 
     def validate(arguments, *, targets, **kwargs):
@@ -180,7 +180,7 @@ def test_ordinary_new_source_can_change_previous_industry_judgment(monkeypatch):
             _finding("headcount"),
         ]}, turn)
 
-    async def search(_session, _query, *, key):
+    async def search(_session, _query, *, key, max_results=5):
         return {"results": []}
 
     async def fetch(_session, url, **kwargs):

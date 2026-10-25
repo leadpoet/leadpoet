@@ -75,7 +75,7 @@ def test_combined_stage_product_searches_and_fetches_product_before_stage(
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": [{"url": STAGE_URL if len(searches) == 1 else PRODUCT_URL}]}
@@ -128,7 +128,7 @@ def test_empty_or_unsafe_product_results_do_not_force_fetch(monkeypatch, results
         assert payload["tool_choice"] == "required"
         raise RuntimeError("end offline trace")
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": [{"url": STAGE_URL}] if len(searches) == 1 else results}
@@ -163,7 +163,7 @@ def test_product_search_provider_error_does_not_force_fetch(monkeypatch):
             })},
         }]}}]}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         if len(searches) == 2:
@@ -209,7 +209,7 @@ def test_empty_product_or_stage_only_keeps_unforced_first_turn(
             })},
         }]}}]}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         assert "latest funding round" in query
         return {"results": []}
@@ -231,7 +231,7 @@ def test_judgment_reserve_suppresses_early_product_research(monkeypatch):
         assert payload["tool_choice"]["function"]["name"] == "submit_findings"
         raise RuntimeError("end offline trace")
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         assert "latest funding round" in query
         return {"results": [{"url": STAGE_URL}]}
@@ -281,7 +281,7 @@ def test_denied_server_required_product_search_keeps_unproven_industry_incomplet
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         assert "latest funding round" in query
         return {"results": [{"url": STAGE_URL}]}
@@ -328,7 +328,7 @@ def test_one_remaining_fetch_is_reserved_for_stage(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(args)},
         }]}}]}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": [{"url": STAGE_URL}]}
@@ -377,7 +377,7 @@ def test_forced_fetch_rejects_url_absent_from_product_results(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(args)},
         }]}}]}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": [{"url": STAGE_URL if len(searches) == 1 else PRODUCT_URL}]}
@@ -424,7 +424,7 @@ def test_product_allocation_keeps_three_search_total_cap(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(args)},
         }]}}]}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": [{"url": STAGE_URL if len(searches) == 1 else PRODUCT_URL}]}

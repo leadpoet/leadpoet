@@ -115,7 +115,7 @@ def test_loaded_chronology_and_later_stage_controls_keep_existing_gates(monkeypa
             })},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         assert case["name"] in query
         assert "latest funding round acquisition IPO" in query

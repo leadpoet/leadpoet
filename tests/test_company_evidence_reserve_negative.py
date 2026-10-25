@@ -70,7 +70,7 @@ def test_ordinary_reserve_denial_preserves_complete_final(
             name, arguments = "submit_findings", {"findings": findings}
         return 200, _tool_response(name, json.dumps(arguments))
 
-    async def search(_session, _query, *, key):
+    async def search(_session, _query, *, key, max_results=5):
         del key
         now[0] = 50.0
         return {"results": []}
@@ -155,7 +155,7 @@ def test_industry_followup_fetch_denial_is_bound_to_pending_obligation(
             )]}
         return 200, _tool_response(name, json.dumps(arguments), call_id=f"call-{turn}")
 
-    async def search(_session, _query, *, key):
+    async def search(_session, _query, *, key, max_results=5):
         del key
         return {"results": [{"url": followup}]}
 

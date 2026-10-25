@@ -86,7 +86,7 @@ def run_case(monkeypatch, *, stage_cached=True, geography=False, pricing=False,
             )
         return {"ok": True, "url": url, "final_url": url, "text": text}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         queries.append(query)
         return {"results": []}
 

@@ -31,7 +31,8 @@ def test_captured_mind_menu_retains_terms_with_existing_bounds():
     captured = Path(__file__).parent / "fixtures/company_evidence/mind_homepage_navigation.html"
     locators = _locators(captured.read_text(), "mind.io")
     assert {"url": "https://mind.io/terms-of-use", "label": "Terms of use"} in locators
-    assert len(locators) == verification.MAX_HOMEPAGE_NAVIGATION_LOCATORS == 40
+    assert len(locators) == 49
+    assert verification.MAX_HOMEPAGE_NAVIGATION_LOCATORS == 50
     assert sum(len(row["url"]) + len(row["label"]) for row in locators) <= (
         verification.MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS
     )

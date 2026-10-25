@@ -506,3 +506,62 @@ an authenticated, exact per-URL crawl receipt can establish absence. Exa documen
 per-URL statuses separately from API success in its [Contents reference](https://exa.ai/docs/reference/get-contents).
 The live retry on this fix remains required; the offline controls do not prove
 provider recovery or a complete sourcing run.
+
+The next paid retry confirmed that Exa uses `CRAWL_NOT_FOUND` with integer HTTP404
+for this missing page. The parser had accepted only `CRAWL_HTTP_404`. The narrow
+correction admits the observed tag only with the same exact URL, empty results,
+single error status, and successful API response checks. The positive captured
+shape and finality tests failed before the correction. All 100 focused tests
+passed after it; the owning agent separately passed the 69 source-absence cases.
+An absent source cannot produce a positive qualification result from this check.
+
+That retry's final private checkpoint was interrupted during readable export.
+Its partial evidence remains preserved, but its final database and object
+snapshot are unavailable. The next run therefore starts from the last complete
+`attempt-09-resume-01` checkpoint, not a reconstructed database. All spending
+remains in the cumulative ledger. The private runner now saves the database and
+object checkpoint before slow exports and retains its work directory on failure.
+An injected export interruption preserved a valid checkpoint in an unpaid test.
+
+
+## October 25 completed paid run and derived 80% verification
+
+`attempt-09-resume-04` completed all 20 accepted research executions and 20
+accepted scoring runs, then published the local PostgreSQL round. Its preserved
+final dump has SHA256
+`edb2afab19f95fe05e130fefa8fa8f2d7cb9ce006befdb8ce967818d1854e617`;
+758 objects were checkpointed before readable export. Both entries returned one
+qualified company and averaged 8.5. This demonstrates the workflow, not a
+competitive-quality baseline.
+
+The frozen exporter (`de5da476c`) produced 20 raw exports and 20 readable views,
+32 candidate and 37 baseline strict records. Independent readback verified
+84/84 selected model acknowledgements, 7,581 readable events and 1,468 context
+values. All 20 selected research records and 148 selected provider calls matched
+the prior checkpoint. Public and stored rankings match after the public API's
+intentional private-cost projection. The original round retains its 100% rule
+and its original published ineligibility; no historic decision was changed.
+
+The subsequent offline re-export isolates failed-judge evidence from selected
+research evidence. It records per-run gap attribution while retaining all raw
+aggregate incompleteness. A selected execution must still pass source, input,
+output, accepted-score, route, hash, worker receipt and acknowledgement checks.
+Judge-only request redactions no longer discard exact research. A documented
+selected scrape-to-model privacy cascade consumes an incomplete ICP at 80%,
+but remains excluded from strict training.
+
+On the unchanged saved database and provider objects, this correction produced
+35 candidate and 44 baseline strict records. The separate 80% assessment passed
+with 9/10 candidate and 10/10 baseline ICPs. All 20 raw completeness results
+remained unchanged. These are derived offline exports; they are not a new paid
+run or a retroactive publication. No API call was required for the re-export.
+
+The cumulative test ledger reserves about $3.751 OpenRouter and $7.462 for
+search/scraping, including unresolved reservations. The paid run finished within
+the original $10/$8 caps. The later approved $8/$10 reallocation, still $18
+total, was not needed for this run.
+
+The E2E runner now requires both stored capture gates as well as strict record
+coverage. A sufficient record count cannot hide invalid source or receipt proof.
+Checkpoint tests also verify matching PostgreSQL dump tools and preserve the
+snapshot before an interrupted readable export.

@@ -221,10 +221,24 @@ reasons. Route violations, changed source identity, or invalid evidence cannot b
 excused by the coverage floor. Coverage establishes availability and integrity,
 not the educational value or causal faithfulness of the model's thinking.
 
+A documented unsettled selected-provider charge also consumes one incomplete
+ICP when the request, receipt, route, and identity proof is intact. A combined
+documented privacy or explicit output-length gap still counts as that same ICP.
+These ICPs remain excluded from strict exports. A missing or contradictory
+accounting record is not treated as a proven unsettled charge.
+
 Migration564 raises the frozen full-thinking cap to $6 while preserving main's
 confirmed competition-cost accounting. It adds no pending or uncertain monetary
 holds. Call limits, price ceilings, and output-token limits remain enforced.
-Confirmed-cost admission and successful-cost champion eligibility remain distinct.
+For future full-thinking rounds with a valid frozen coverage setting, final
+eligibility also counts confirmed settled competition cost. Unsettled charges
+remain in the ledger and exclude the affected ICP from strict exports, but do
+not hold a fully scored baseline or exclude an otherwise eligible entrant by
+cost alone. Active provider calls still block final publication. Confirmed
+spend over $6 still fails the cost check, including charges whose success is
+unknown; proved infrastructure exclusions remain. The cap is on confirmed
+competition cost, so later bills can exceed it. Historical rounds keep their
+previous billing rule.
 
 The enhanced source-review check is still tied to full-thinking activation in
 this draft. An independent shadow/enforce review, including the baseline, is not

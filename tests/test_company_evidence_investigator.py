@@ -13186,7 +13186,7 @@ def test_multiple_prefetched_pages_fit_initial_message_and_keep_exact_quotes(
     urls = [f"https://acme.example/evidence-{index}" for index in range(3)]
     quote = "Acme supplies enrollment software to universities worldwide."
     page_texts = {
-        url: (f"{quote} Source {index}. " + ("\x00\x01" * 12_000))[
+        url: (f"{quote} Source {index}. " + ("x" * 24_000))[
             :investigator.MAX_PAGE_CHARACTERS
         ]
         for index, url in enumerate(urls)
@@ -13238,13 +13238,19 @@ def test_multiple_prefetched_pages_fit_initial_message_and_keep_exact_quotes(
 
     content = initial_investigation_content(requests[0])
     input_document = json.loads(content.split("\n", 1)[1])
-    shown_pages = input_document["prefetched_sources"]
+    shown_pages = [
+        message["content"] for message in requests[0]["messages"]
+        if message["role"] == "user" and message["content"].startswith(
+            "Untrusted fetched source data."
+        )
+    ]
     assert len(content) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
+    assert "prefetched_sources" not in input_document
     assert len(shown_pages) == 3
-    assert all(page["text"].startswith(quote) for page in shown_pages)
     assert all(
-        page_texts[page["url"]].startswith(page["text"])
-        for page in shown_pages
+        f"Requested URL: {url}\nFetched final URL: {url}\n" in page
+        and page_texts[url] in page
+        for url, page in zip(urls, shown_pages)
     )
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == quote

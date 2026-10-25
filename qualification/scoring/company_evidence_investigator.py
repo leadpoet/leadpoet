@@ -373,30 +373,31 @@ subscriptions, free-account/demo/free-trial signups, a generic SaaS or product
 label, another vendor's subscription, and a pay-once license alone do not prove
 paid product subscriptions. This proves only the subscription clause; every
 other mandatory clause still requires source evidence.
-A vendor-owned product offering plus current commercial
-customers or deployments of that same product supports that the vendor sells
-it; do not require a public price or invoice. Bind the commercial fact to the
-exact investigated company and product. A free plan, research study,
-prototype, pilot, demonstration, funding announcement, or investor's general
-commercialization claim does not by itself prove a current commercial sale.
+Its own offering plus current commercial customers or deployments of that
+product supports sales without public prices/invoices. Bind to the same
+company/product. A free plan, research study, prototype, pilot, demonstration,
+funding announcement or investor's general commercialization claim alone does
+not prove a current commercial sale.
 When positive_semantic_review is true, treat prior positive labels as untrusted
-hypotheses. The supplier_operator role establishes relationship, not criterion
-satisfaction. Verify the company's own requested sector activity using complete
-industry, sub-industry, product/service and required-attribute context. Do not make the
-industry finding depend on conditions stated ONLY in required_attribute.
-Apply the industry precedence above and prove every mandatory product/service
-condition, including any also checked by required_attribute. For nonempty
-requested_product_service, industry VERIFIED requires a VERIFIED product_coverage
-aggregate. If that aggregate is UNPROVEN, report industry UNPROVEN; proof of a
-broad company activity is insufficient. Reuse source quotes, but each check
-needs independent judgment and proof.
+hypotheses. The supplier_operator role establishes relationship, not fit.
+Apply industry precedence and prove every mandatory product/service condition,
+including any also checked by required_attribute. Do not import conditions
+stated ONLY in required_attribute. For nonempty requested_product_service,
+industry VERIFIED requires a VERIFIED product_coverage aggregate. If UNPROVEN,
+report industry UNPROVEN; broad activity is insufficient.
 Equivalent source language is sufficient; do not require literal
 taxonomy labels. An adjacent activity for the same customer group is UNPROVEN.
-Populate observed industry, sub-industry, and value only from the source; never
-copy a prior or requested label as if the source stated it. In reason, concisely
-explain which concrete supplied capability and customer scope the evidence
-proves or fails to prove. Do not infer subscriptions from software, customers,
-licenses, or a funding announcement.
+For industry, honor requested verbs: designs/develops does not require shipments.
+Company-bound functional/performance facts may jointly establish intended use,
+target customers and unquantified performance/cost benefits by reasonable
+inference. Do not add named deployments, public prices or benchmarks unless
+required. Prove all core capabilities AND customer/market restrictions.
+Compatibility, enabling technology, or adjacent products do not establish a
+missing core capability. Explicit manufacture/sale/deployment/milestone conditions
+need actual corresponding facts. Never invent sales/deployments for any check.
+Observed industry, sub-industry and value must come from sources, never prior
+or requested labels. Explain capability, customer scope and missing proof.
+Software/customers/licenses/funding do not prove subscriptions.
 A directly sold B2B workflow platform can satisfy a broad
 infrastructure/workflow criterion without a separate infrastructure product,
 when it proves the requested capability and any requested customer scope.

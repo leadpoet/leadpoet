@@ -78,6 +78,21 @@ def test_product_coverage_precedes_global_status_without_changing_fields(targets
         assert "product_coverage" not in item["properties"]
 
 
+def test_industry_purpose_inference_preserves_core_capability_and_actual_event_rules():
+    """Prompt contract only; live adjudication quality needs separate evidence."""
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+    assert "designs/develops does not require shipments" in prompt
+    assert "Company-bound functional/performance facts may jointly establish intended use" in prompt
+    assert "target customers and unquantified performance/cost benefits by reasonable inference" in prompt
+    assert "Do not add named deployments, public prices or benchmarks unless required" in prompt
+    assert "Prove all core capabilities AND customer/market restrictions" in prompt
+    assert "Compatibility, enabling technology, or adjacent products do not establish a missing core capability" in prompt
+    assert "Explicit manufacture/sale/deployment/milestone conditions need actual corresponding facts" in prompt
+    assert "Never invent sales/deployments for any check" in prompt
+    assert "Conditions also stated in product/service remain mandatory in BOTH checks" in prompt
+    assert len(investigator._SYSTEM_PROMPT) < OPENROUTER_MAX_CONTENT_CHARS
+
+
 @pytest.mark.parametrize(
     ("requested_stage", "quote", "loaded_text", "expected"),
     [

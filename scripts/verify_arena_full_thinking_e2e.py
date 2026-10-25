@@ -573,6 +573,47 @@ class FullThinkingHarness(PaidHarness):
             raise AssertionError("runner abandoned an assignment")
 
 
+def _per_icp_observed(executions, scores, examples, icps):
+    score_by_execution = {run["scored_run_id"]: run for run in scores}
+    per_icp = []
+    for run, example in zip(executions, examples):
+        splits, manifest = training_thinking.build([example])
+        count = len(splits["train"]) + len(splits["eval"])
+        judged = score_by_execution.get(run["run_id"])
+        output = example.get("output") or {}
+        companies = output.get("companies") if isinstance(output, Mapping) else None
+        raw_score = run.get("per_icp_score")
+        if raw_score is None:
+            raw_score = judged.get("per_icp_score") if judged is not None else None
+        per_icp.append({"icp_position": int(run["icp_position"]),
+                        "icp_id": icps[int(run["icp_position"])]["icp_id"],
+                        "run_id": run["run_id"],
+                        "score_run_id": judged["run_id"] if judged is not None else None,
+                        "raw_score": float(raw_score) if raw_score is not None else None,
+                        "returned_leads": len(companies) if isinstance(companies, list) else None,
+                        "records": count,
+                        "complete": (example.get("completeness") or {}).get("complete") is True,
+                        "exclusion_reasons": manifest["counts"]["exclusion_reasons"],
+                        "cost_eligibility": example.get("competition_cost_eligibility")})
+    return per_icp
+
+
+def _require_strict_exports(candidate, baseline):
+    """Accept only when each participant has ten linked, complete ICP records."""
+    for role, (executions, scores, per_icp, splits) in (
+            ("candidate", candidate), ("baseline", baseline)):
+        if (len(executions) != BENCHMARK_COUNT or len(scores) != BENCHMARK_COUNT
+                or {run["scored_run_id"] for run in scores}
+                != {run["run_id"] for run in executions}):
+            raise AssertionError(f"{role}: ten accepted executions and linked real scores are required")
+        if {item["icp_position"] for item in per_icp} != set(range(BENCHMARK_COUNT)):
+            raise AssertionError(f"{role}: execution ICP positions are incomplete")
+        if any(item["records"] < 1 or not item["complete"] for item in per_icp):
+            raise AssertionError(f"{role}: every ICP requires a complete strict training record")
+        if len(splits["train"]) + len(splits["eval"]) < BENCHMARK_COUNT:
+            raise AssertionError(f"{role}: combined strict dataset has fewer than ten records")
+
+
 def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
             dependency_dir: Path, baseline_url: str, model: str,
             organizer_keys: Mapping[str, str], miner_credentials: Mapping[str, str],
@@ -752,40 +793,17 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
         _private_file(private / "strict-eval.json", combined["eval"])
         _private_file(private / "strict-analysis.json", combined["analysis"])
         _private_file(private / "strict-manifest.json", combined_manifest)
-        per_icp = []
-        score_by_execution = {run["scored_run_id"]: run for run in scores}
-        for run, example in zip(executions, examples):
-            splits, manifest = training_thinking.build([example])
-            count = len(splits["train"]) + len(splits["eval"])
-            judged = score_by_execution.get(run["run_id"])
-            output = example.get("output") or {}
-            companies = output.get("companies") if isinstance(output, Mapping) else None
-            raw_score = run.get("per_icp_score")
-            if raw_score is None:
-                raw_score = judged.get("per_icp_score") if judged is not None else None
-            per_icp.append({"icp_position": int(run["icp_position"]),
-                            "icp_id": prepared["icps"][int(run["icp_position"])]["icp_id"],
-                            "run_id": run["run_id"],
-                            "score_run_id": judged["run_id"] if judged is not None else None,
-                            "raw_score": float(raw_score) if raw_score is not None else None,
-                            "returned_leads": len(companies) if isinstance(companies, list) else None,
-                            "records": count,
-                            "complete": (example.get("completeness") or {}).get("complete") is True,
-                            "exclusion_reasons": manifest["counts"]["exclusion_reasons"],
-                            "cost_eligibility": example.get("competition_cost_eligibility")})
+        per_icp = _per_icp_observed(executions, scores, examples, prepared["icps"])
+        baseline_per_icp = _per_icp_observed(
+            baseline_executions, baseline_scores, baseline_examples, prepared["icps"])
         evidence.add("per_icp_observed", round_id=row["round_id"],
                      submission_id=submission_id, per_icp=per_icp)
-        if (len(executions) != BENCHMARK_COUNT or len(scores) != BENCHMARK_COUNT
-                or {run["scored_run_id"] for run in scores}
-                != {run["run_id"] for run in executions}):
-            raise AssertionError("ten accepted executions and linked real scores are required")
-        if {item["icp_position"] for item in per_icp} != set(range(BENCHMARK_COUNT)):
-            raise AssertionError("execution ICP positions are incomplete")
-        if any(item["records"] < 1 or not item["complete"] for item in per_icp):
-            raise AssertionError("every ICP requires a complete strict training record")
+        evidence.add("baseline_per_icp_observed", round_id=row["round_id"],
+                     submission_id=baseline["submission_id"], per_icp=baseline_per_icp)
+        _require_strict_exports(
+            (executions, scores, per_icp, combined),
+            (baseline_executions, baseline_scores, baseline_per_icp, baseline_splits))
         combined_count = len(combined["train"]) + len(combined["eval"])
-        if combined_count < BENCHMARK_COUNT:
-            raise AssertionError("combined strict dataset has fewer than ten records")
         publication = row.get("publication_doc") or {}
         aggregate = next((item for item in publication.get("final_ranking") or []
                           if item["submission_id"] == submission_id), None)
@@ -797,12 +815,13 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
         if public_aggregate != aggregate:
             raise AssertionError("public aggregate differs from stored publication")
         evidence.add("full_thinking_e2e_complete", round_id=row["round_id"],
-                     submission_id=submission_id, per_icp=per_icp,
+                     submission_id=submission_id, per_icp=per_icp, baseline_per_icp=baseline_per_icp,
                      aggregate_score=aggregate["final_score"],
                      aggregate_eligible=aggregate.get("eligible"),
                      aggregate_eligibility_reason=aggregate.get("eligibility_reason"),
                      score_run_count=len(scores),
                      strict_dataset_records=combined_count,
+                     baseline_strict_dataset_records=len(baseline_splits["train"]) + len(baseline_splits["eval"]),
                      strict_dataset_hash=combined_manifest["dataset_version"])
         return {"round_id": row["round_id"], "submission_id": submission_id,
                 "aggregate": aggregate, "per_icp": per_icp,

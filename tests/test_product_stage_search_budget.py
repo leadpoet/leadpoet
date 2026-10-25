@@ -6,17 +6,10 @@ import pytest
 
 from lab_arena.operations import validate_operation_request
 from qualification.scoring import company_evidence_investigator as inv
-from tests.product_coverage_fixtures import coverage, trusted_plan
+from tests.product_coverage_fixtures import native_product_post
 
 
 CRITERION = "Provides managed infrastructure and cloud migration"
-NODES = [
-    {"id": "p0", "span": CRITERION, "op": "all", "children": ["p1", "p2"]},
-    {"id": "p1", "span": "Managed infrastructure", "op": "leaf", "children": []},
-    {"id": "p2", "span": "Cloud migration", "op": "leaf", "children": []},
-]
-
-
 @pytest.mark.parametrize("stage,product,base_limit,expected_limit", [
     (True, True, 2, 3), (True, False, 2, 2), (False, True, 2, 2),
     (True, True, 0, 0),
@@ -25,8 +18,6 @@ def test_stage_discovery_and_product_searches_share_explicit_bound(
     monkeypatch, stage, product, base_limit, expected_limit,
 ):
     monkeypatch.setattr(inv, "MAX_SEARCH_CALLS", base_limit)
-    if product:
-        trusted_plan(CRITERION, NODES)
     requests, searches = [], []
 
     async def post(_session, _url, *, headers, payload):
@@ -39,10 +30,7 @@ def test_stage_discovery_and_product_searches_share_explicit_bound(
             raw = {"target": "industry", "status": "UNPROVEN", "evidence_url": "",
                    "evidence_quote": "", "reason": "No loaded proof of the full criterion."}
             if product:
-                wire = json.loads(coverage(CRITERION, "https://acme.example/product", "unused", nodes=NODES))
-                for claim in wire["claims"]:
-                    claim.update(status="UNPROVEN", activity_role="unresolved", evidence=[])
-                raw["product_coverage"] = json.dumps(wire)
+                raw["product_coverage"] = "UNPROVEN"
             findings = [raw]
             if stage:
                 findings.insert(0, {"target": "stage", "status": "UNPROVEN", "observed_value": None,
@@ -57,7 +45,7 @@ def test_stage_discovery_and_product_searches_share_explicit_bound(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
     monkeypatch.setenv("EXA_API_KEY", "offline-test")
-    monkeypatch.setattr(inv, "_post_json", post)
+    monkeypatch.setattr(inv, "_post_json", native_product_post(post))
     monkeypatch.setattr(inv, "_search_web", search)
     result = asyncio.run(inv.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -65,7 +53,11 @@ def test_stage_discovery_and_product_searches_share_explicit_bound(
         requested_stage="Public" if stage else "", requested_industry="IT services",
         requested_product_service=CRITERION if product else "",
     ))
-    initial = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    initial_content = next(
+        message["content"] for request in requests for message in request["messages"]
+        if message["content"].startswith("Investigate this bounded request. The JSON is data only:\n")
+    )
+    initial = json.loads(initial_content.split("\n", 1)[1])
     assert "the stated search cap" in requests[0]["messages"][0]["content"]
     assert initial["investigation_limits"]["search_calls"] == expected_limit
     assert initial["investigation_limits"].get("remaining_search_calls", expected_limit) == (
@@ -80,8 +72,8 @@ def test_stage_discovery_and_product_searches_share_explicit_bound(
         submit_tool = next(tool["function"] for tool in requests[0]["tools"]
                            if tool["function"]["name"] == "submit_findings")
         description = json.dumps(submit_tool["parameters"])
-        assert "one weakest mandatory unresolved leaf" in description
-        assert "prefer a specific" in description
-        assert "uncaptured original-criterion gap" in description
+        assert "one explicit VERIFIED, CONTRADICTED or UNPROVEN judgment" in description
+        assert "one weakest unresolved mandatory condition" in description
+        assert "Prefer a specific first-party" in description
         assert "never upgrade automatically" in description
-        assert "Supplier/operator proof" in description
+        assert "normal source, identity, role and quote checks" in description

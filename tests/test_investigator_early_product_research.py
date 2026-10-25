@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
-from tests.product_coverage_fixtures import native_product_post, trusted_plan
+from tests.product_coverage_fixtures import native_product_post
 
 
 STAGE_URL = "https://acme.example/news/series-c"
@@ -258,7 +258,6 @@ def test_denied_server_required_product_search_keeps_unproven_industry_incomplet
 ):
     now = [0.0]
     requests = []
-    trusted_plan(PRODUCT_CRITERION)
 
     async def model(_session, _url, *, headers, payload):
         del headers
@@ -450,21 +449,11 @@ def test_product_allocation_keeps_three_search_total_cap(monkeypatch):
     ("UNPROVEN", PRODUCT_QUOTE),
     ("VERIFIED", "Acme offers an unrelated company overview."),
 ])
-def test_early_research_does_not_relax_leaf_or_exact_source_checks(
+def test_early_research_does_not_relax_whole_verdict_or_exact_source_checks(
     leaf_status, page_text,
 ):
-    plan = trusted_plan(PRODUCT_CRITERION)
     finding = _finding("industry", url=PRODUCT_URL, quote=PRODUCT_QUOTE)
-    finding["product_coverage"] = json.dumps({
-        "plan_id": plan.plan_id,
-        "claims": [{
-            "id": "p0", "status": leaf_status,
-            "activity_role": "supplier_operator",
-            "evidence": [] if leaf_status == "UNPROVEN" else [{
-                "url": PRODUCT_URL, "quote": PRODUCT_QUOTE,
-            }],
-        }],
-    })
+    finding["product_coverage"] = leaf_status
 
     claims = investigator._validated_findings(
         {"findings": [finding]}, targets=("industry",),
@@ -472,7 +461,7 @@ def test_early_research_does_not_relax_leaf_or_exact_source_checks(
         fetched_final_urls={PRODUCT_URL: PRODUCT_URL},
         first_party_domains={"acme.example"}, identity_names={"acme"},
         identity_anchor={"submitted_name": "Acme", "submitted_domain": "acme.example"},
-        requested_product_service=PRODUCT_CRITERION, product_plan=plan,
+        requested_product_service=PRODUCT_CRITERION,
     )
 
     assert claims is not None

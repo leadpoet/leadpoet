@@ -249,10 +249,10 @@ def main(argv=None) -> int:
         if stop.is_set():
             return False
         with telemetry.stage("review_guard"):
-            guard = service._store._transport.rpc("lab_arena_restart_guard_state_v1", {})
+            guard = service._store._transport.rpc("lab_arena_review_guard_state_v1", {})
             if (
                 not isinstance(guard, Mapping)
-                or guard.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
+                or guard.get("schema_version") != "leadpoet.lab_arena.review_guard_state.v1"
                 or type(guard.get("guard_present")) is not bool
             ):
                 raise ValueError("Arena restart guard state is invalid")

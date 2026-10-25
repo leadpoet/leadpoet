@@ -57,7 +57,8 @@ def _policy(call: Mapping[str, Any], registry: Any = None) -> bool:
     if contracts.document_hash(frozen).split(":", 1)[1] != annotation["registry_sha256"]:
         return False
     matches = [entry for entry in frozen["approved_routes"]
-               if entry["model_id"] == model and entry["api"] == operation]
+               if entry["model_id"] == model and entry["api"] == operation
+               and entry["provider"] == annotation.get("provider_route")]
     if len(matches) != 1:
         return False
     entry = matches[0]

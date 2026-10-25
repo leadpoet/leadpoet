@@ -81,7 +81,7 @@ def validate_registry(document: Any) -> Dict[str, Any]:
                 or not isinstance(entry["allowed_fallback_routes"], list)
                 or entry["allowed_fallback_routes"]):
             raise ValueError("invalid approved reasoning route")
-        pair = (entry["model_id"], entry["api"])
+        pair = (entry["model_id"], entry["api"], entry["provider"])
         if pair in seen:
             raise ValueError("duplicate approved reasoning route")
         seen.add(pair)
@@ -124,7 +124,7 @@ def validate_registry(document: Any) -> Dict[str, Any]:
     baseline = document["baseline_route"]
     if baseline is not None and (not isinstance(baseline, Mapping)
             or set(baseline) != {"model_id", "api"}
-            or (baseline["model_id"], baseline["api"]) not in seen):
+            or not any(key[:2] == (baseline["model_id"], baseline["api"]) for key in seen)):
         raise ValueError("baseline reasoning route is unapproved")
     return copy.deepcopy(dict(document))
 
@@ -140,8 +140,16 @@ def _apply_full(operation_id: str, parameters: Mapping[str, Any],
         raise ValueError("reasoning_route_unsupported")
     result = copy.deepcopy(dict(parameters))
     model = result.get("model")
+    preference = result.get("provider") or {}
+    selected = preference.get("only") if isinstance(preference, Mapping) else None
+    if selected is not None and (not isinstance(selected, list) or len(selected) != 1
+                                 or not isinstance(selected[0], str)):
+        raise ValueError("reasoning_route_unsupported")
+    # Existing row order is the default. Appending tested alternatives cannot
+    # silently redirect a caller which did not select a provider.
     entry = next((item for item in frozen["approved_routes"]
-                  if item["model_id"] == model and item["api"] == operation_id), None)
+                  if item["model_id"] == model and item["api"] == operation_id
+                  and (selected is None or item["provider"] == selected[0])), None)
     if entry is None:
         raise ValueError("reasoning_route_unsupported")
     if operation_id == "openrouter.responses":

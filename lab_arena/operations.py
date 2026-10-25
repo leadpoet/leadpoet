@@ -1567,6 +1567,23 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
         raise OperationRequestError("invalid_request") from exc
     if len(contracts.canonical_json(parameters).encode("utf-8")) > operation.max_request_bytes:
         raise OperationRequestError("request_too_large")
+    selected_provider = None
+    if allow_full_thinking and operation_id in {"openrouter.chat", "openrouter.responses"}:
+        preference = parameters.get("provider")
+        if isinstance(preference, Mapping) and "only" in preference:
+            fixed = dict(operation.superseded_fields.get("provider") or {})
+            selected = preference["only"]
+            if (set(preference) - (set(fixed) | {"only"})
+                    or any(type(value) is not type(fixed[key]) or value != fixed[key]
+                           for key, value in preference.items() if key != "only")
+                    or not isinstance(selected, list) or len(selected) != 1
+                    or not isinstance(selected[0], str)
+                    or re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", selected[0]) is None):
+                raise OperationRequestError("invalid_request")
+            # This is an exact route selector, not a caller-owned provider
+            # policy. The outbound builder still installs every host control.
+            selected_provider = {"only": [selected[0]]}
+            parameters = {key: value for key, value in parameters.items() if key != "provider"}
     parameters = _drop_superseded_fields(operation, parameters)
     request_fields = operation.request_fields
     if operation_id == "openrouter.chat" and not allow_full_thinking:
@@ -1612,6 +1629,8 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
         except catalog.CatalogError as exc:
             raise OperationRequestError("invalid_request") from exc
     normalized = _validate_object(request_fields, parameters, "$", forbidden=operation.forbidden_names, limits=limits)
+    if selected_provider is not None:
+        normalized["provider"] = selected_provider
     if (operation_id == "openrouter.chat" and not allow_full_thinking
             and normalized.get("max_tokens", 0) > OPENROUTER_MAX_OUTPUT_TOKENS):
         raise OperationRequestError("invalid_field", "$.max_tokens")

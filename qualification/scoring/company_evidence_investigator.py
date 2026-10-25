@@ -5453,12 +5453,16 @@ async def investigate_company_evidence(
                             and isinstance(submitted.get("evidence_quote"), str)
                             and finding.get("evidence_url") == ""
                             and finding.get("evidence_quote") == ""
+                            and not finding.get("product_coverage_error")
+                            and not finding.get("product_positive_citation_rejected")
                         ):
                             # After the existing final repair, keep an explicit
                             # negative with unused citations cleared, even when
-                            # no unrelated positive finding was retained. Never
-                            # clear failed VERIFIED/CONTRADICTED proof or skip an
-                            # ordinary correction and its discovery checks.
+                            # no unrelated positive finding was retained. A
+                            # missing matrix or rejected positive clause still
+                            # needs its structural correction. Never clear failed
+                            # VERIFIED/CONTRADICTED proof or skip an ordinary
+                            # correction and its discovery checks.
                             continue
                         reason = _submitted_finding_rejection(submitted, finding)
                         if not reason:

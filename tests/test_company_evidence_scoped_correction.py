@@ -8,6 +8,7 @@ import pytest
 
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import coverage, trusted_plan
 
 
 PRODUCT_URL = "https://rapid7.com/products/insightcloudsec/"
@@ -174,6 +175,53 @@ def _submit_tool(payload):
     tool = payload["tools"][0]["function"]
     assert tool["name"] == "submit_findings"
     return tool
+
+
+@pytest.mark.parametrize("final_mode", ["missing_matrix", "rejected_positive_clause", "complete_negative"])
+def test_retained_stage_cannot_hide_incomplete_product_matrix(monkeypatch, final_mode):
+    criterion = "Security software and services"
+    nodes = [
+        {"id": "p0", "span": criterion, "op": "all", "children": ["p1", "p2"]},
+        {"id": "p1", "span": "Security software", "op": "leaf", "children": []},
+        {"id": "p2", "span": "Security services", "op": "leaf", "children": []},
+    ]
+    trusted_plan(criterion, nodes)
+    rejected_matrix = coverage(criterion, PRODUCT_URL, "Invented product citation", nodes=nodes)
+    final_matrix = json.loads(rejected_matrix)
+    for claim in final_matrix["claims"]:
+        claim.update(status="UNPROVEN", activity_role="unresolved", evidence=[])
+    last_coverage = {
+        "missing_matrix": None,
+        "rejected_positive_clause": rejected_matrix,
+        "complete_negative": json.dumps(final_matrix),
+    }[final_mode]
+    negative_fields = {"status": "UNPROVEN", "observed_industry": "",
+                       "evidence_url": "", "evidence_quote": ""}
+    first = _industry_finding(**negative_fields, product_coverage=rejected_matrix)
+    last = _industry_finding(**negative_fields, product_coverage=last_coverage,
+                             reason="The stage finding was retained.")
+    responses = [[_finding("stage"), first], [last]]
+    if final_mode != "complete_negative":
+        responses.append([_industry_finding(
+            **negative_fields, product_coverage=json.dumps(final_matrix),
+            reason="No complete company-bound proof of the requested criterion.",
+        )])
+    result, requests = _run_scoped_correction(
+        monkeypatch, responses, max_turns=2,
+    )
+    assert len(requests) == (2 if final_mode == "complete_negative" else 3)
+    assert _submit_tool(requests[1])["parameters"]["properties"]["findings"]["items"]["properties"]["target"]["enum"] == ["industry"]
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["_completed_submit"] is True
+    if final_mode == "missing_matrix":
+        feedback = json.loads(requests[2]["messages"][-1]["content"])
+        assert feedback["rejected_findings"] == [{
+            "target": "industry", "reason": "missing structured product coverage",
+        }]
+    elif final_mode == "rejected_positive_clause":
+        feedback = json.loads(requests[2]["messages"][-1]["content"])
+        assert feedback["rejected_findings"][0]["reason"] == "positive product clause citation failed source validation"
+    assert result["claims"]["industry"]["product_coverage"]["status"] == "UNPROVEN"
 
 
 def test_submit_only_correction_scopes_and_merges_valid_pending_target(monkeypatch):

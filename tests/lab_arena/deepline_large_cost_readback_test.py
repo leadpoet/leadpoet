@@ -168,6 +168,14 @@ def test_large_lookup_cannot_settle_from_forged_identity_or_charge(change):
 
 def test_firecrawl_lookup_remains_bounded_above_existing_envelope_allowance():
     requests = []
+    # A valid keyed lookup must fail on size, not malformed JSON parsing.
+    document = _lookup()
+    document["padding"] = ""
+    encoded = json.dumps(document, separators=(",", ":")).encode()
+    target_bytes = br._DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES + 1
+    document["padding"] = "x" * (target_bytes - len(encoded))
+    encoded = json.dumps(document, separators=(",", ":")).encode()
+    assert len(encoded) == target_bytes
 
     def respond(request):
         requests.append(request)
@@ -175,7 +183,7 @@ def test_firecrawl_lookup_remains_bounded_above_existing_envelope_allowance():
         assert "/executions/by-key/" in str(request.url)
         return httpx.Response(200,
             headers={"x-deepline-idempotency-supported": "true"},
-            content=b"x" * (br._DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES + 16_385))
+            content=encoded)
 
     transport = _transport(respond)
     store = ReconciliationStore()
@@ -213,7 +221,7 @@ def test_other_deepline_tools_keep_ordinary_lookup_limit():
     assert len(requests) == 1 and store.calls == []
 
 
-@pytest.mark.parametrize("invalid_bound", [True, 0, 4 * 1024 * 1024, 32 * 1024 * 1024])
+@pytest.mark.parametrize("invalid_bound", [True, 0, 4 * 1024 * 1024, 64 * 1024 * 1024])
 def test_large_lookup_bound_is_fixed_and_rejects_other_values(invalid_bound):
     class NoRequests:
         def send(self, **_request):

@@ -263,12 +263,17 @@ def _segments(response: Any, operation: str) -> tuple[list[dict], bool, bool]:
 
 
 def _route_observation(call: Mapping[str, Any]) -> Any:
-    if isinstance(call.get("route_observation"), Mapping):
-        return call["route_observation"]
     matching = [receipt for receipt in call.get("response_receipts") or []
                 if receipt.get("response_sha256") == call.get("response_sha256")]
-    if len(matching) == 1:
-        return (matching[0].get("metadata") or {}).get("reasoning_route_observation")
+    observations = [(receipt.get("metadata") or {}).get("reasoning_route_observation")
+                    for receipt in matching]
+    if call.get("route_observation") is not None:
+        observations.append(call["route_observation"])
+    # Append-only recovery can retain the same delivered body again. Repeated
+    # identical proof is one observation; missing or conflicting proof is not.
+    if (observations and all(reasoning_capture.valid_route_observation(value) for value in observations)
+            and len({contracts.canonical_json(value) for value in observations}) == 1):
+        return observations[0]
     return None
 
 

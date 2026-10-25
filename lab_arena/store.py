@@ -86,6 +86,7 @@ FUNCTION_SIGNATURES: Dict[str, Sequence[tuple]] = {
         ("p_runtime_image_digest", "text"), ("p_runtime_image_reference", "text"),
     ),
     "lab_arena_restart_guard_state_v1": (),
+    "lab_arena_review_guard_state_v1": (),
     "lab_arena_append_validator_events_v1": (
         ("p_validator_hotkey", "text"), ("p_network", "text"),
         ("p_netuid", "integer"), ("p_events", "jsonb"),

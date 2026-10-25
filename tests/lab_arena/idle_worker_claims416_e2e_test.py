@@ -6,12 +6,14 @@ from leadpoet_canonical import arena_weights
 from tests.lab_arena import proxy_model_capacity401_e2e_test as fullflow
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
-from tests.lab_arena.idle_worker_claims416_postgres_test import database, migrated
-from tests.lab_arena.parallel_twenty_runtime_e2e_test import bounded_socket_shutdown_poll
+from tests.lab_arena.parallel_twenty_runtime_e2e_test import (
+    bounded_socket_shutdown_poll,
+    database,
+)
 
 
 def test_ten_slot_baseline_first_round_publishes_promotes_and_derives_weights(
-    database, migrated, tmp_path, monkeypatch,
+    database, tmp_path, monkeypatch,
 ):
     install = fullflow._install_company_only_sandbox
     make_runner = fullflow._http_runner
@@ -34,8 +36,9 @@ def test_ten_slot_baseline_first_round_publishes_promotes_and_derives_weights(
 
     monkeypatch.setattr(fullflow, "_install_company_only_sandbox", capture)
     monkeypatch.setattr(fullflow, "_http_runner", ten_slot_runner)
+    # The shared current-schema fixture has already installed the claim chain.
     fullflow.test_company_only_baseline_miners_costs_promotion_and_publication(
-        database, migrated, tmp_path,
+        database=database, migrated=True, tmp_path=tmp_path,
     )
     h = observed["harness"]
     published = h.service.store.get_round(h.round_id)
@@ -56,6 +59,8 @@ def test_ten_slot_baseline_first_round_publishes_promotes_and_derives_weights(
     burn = fixtures.keypair("idle-worker-claims-burn").ss58_address
     state = _accepted_state(h, int(activated["effective_reward_epoch"]), burn)
     weights = arena_weights.derive_arena_weights(state, [burn, winner])
-    assert weights["champion_share_ppb"] == 300_000_000
-    assert weights["burned_residual_ppb"] == 700_000_000
+    # This future-dated round uses the current signed 50-percent miner pot.
+    assert activated["reward_basis_doc"]["slot_policy"]["pool_percent"] == 50
+    assert weights["champion_share_ppb"] == 500_000_000
+    assert weights["burned_residual_ppb"] == 500_000_000
     fixtures.assert_canary_absent(h, lambda: database[0].connect(**database[1]))

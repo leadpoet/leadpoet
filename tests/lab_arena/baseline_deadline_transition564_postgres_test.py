@@ -174,11 +174,16 @@ def test_real_advance_fails_before_migration_and_preserves_live_retry_after(scen
         assert cur.fetchone() == ('pending', 13)
     # Keep the normal retry backoff. Miners can finish without taking or
     # terminating that baseline assignment, but cannot publish or promote.
-    h.advance_until('scored', runners=1)
+    h.advance_until('stage2_scoring', runners=1)
+    h.run_stage_with_runners(1)
+    assert h.service.advance_round(rid)['status'] == 'waiting'
+    assert h.status() == 'stage2_scoring'
     assert h.service.store.get_run(judge['assignment_id'] + ':13')['status'] == 'pending'
     assert h.service.store.get_run(judge['scored_run_id'])['per_icp_score'] is None
-    held = h.service.publish(rid)
-    assert held['status'] == 'retry' and held['reason'] == 'baseline_incomplete'
+    # Current baseline judges now participate in stage-two completion, so the
+    # unchanged final guard is reached only after that same retry finishes.
+    assert h.service.publish(rid)['status'] == 'stale'
+    assert not h.service._baseline_fully_succeeded(h.service.store.get_round(rid))
     assert h.service.promote_baseline(rid)['status'] == 'not_required'
     row = h.service.store.get_round(rid)
     assert row['publication_doc'] is None and row['promotion_doc'] is None
@@ -193,9 +198,10 @@ def test_real_advance_fails_before_migration_and_preserves_live_retry_after(scen
     accepted = h.service.store.get_run(judge['assignment_id'] + ':13')
     assert accepted['status'] == 'accepted'
     assert h.service.store.get_run(judge['scored_run_id'])['per_icp_score'] is None
-    # Publish uses its ordinary late-judgment materializer for the real
-    # accepted attempt 13 and original source. No score is fabricated.
+    # Normal final-stage scoring materializes the real accepted attempt 13
+    # against the original source before publication. No score is fabricated.
     h.service._invalidate_hot_round()
+    h.advance_until('scored', runners=1)
     assert h.service.publish(rid)['status'] == 'ok'
     assert h.status() == 'published'
     with db[0].connect(**db[1]) as conn, conn.cursor() as cur:

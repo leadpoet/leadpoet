@@ -404,8 +404,8 @@ def test_recovery_rejudges_saved_outputs_through_aggregate_and_publication(datab
         monkeypatch.setattr(flows,'SCORER_IMAGE_DIGEST',new_row['configuration_doc']['scorer_image_digest'])
         monkeypatch.setattr(flows,'SCORER_IMAGE_REFERENCE',new_row['configuration_doc']['scorer_image_reference'])
         harness.clock.now=now+timedelta(hours=2,seconds=1)
-        assert harness.service.advance_round(harness.round_id)['reason'] == 'baseline_current_judgments'
-        assert harness.status() == 'stage2'
+        assert harness.service.advance_round(harness.round_id)['status'] == 'ok'
+        assert harness.status() == 'stage2_closed'
         harness.advance_until('published',runners=1)
         final=harness.service.store.get_round(harness.round_id)
         assert final['status']=='published' and final['scoring_generation_floor']==revised['generation_floor']

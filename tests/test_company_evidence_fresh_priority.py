@@ -7,6 +7,7 @@ import json
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import initial_investigation_content
 from tests.product_coverage_fixtures import native_product_post
 from tests.test_company_evidence_investigator import _finding
 
@@ -101,7 +102,7 @@ def run_case(monkeypatch, *, stage_cached=True, geography=False, pricing=False,
         positive_semantic_review=True, prior_observations=prior,
         verified_homepage_identity={"normalized_name": "acme", "registrable_dns_domain": "acme.example", "linkedin_company_slug": "acme"},
         homepage_navigation_locators=navigation, prefetched_pages=pages))
-    initial = (json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    initial = (json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
                if requests else None)
     return result, initial, fetched, queries, requests
 
@@ -193,5 +194,5 @@ def test_fresh_terms_keeps_page_and_model_message_text_bounds(monkeypatch):
     terms = next(page for page in initial["prefetched_sources"] if page["url"] == TERMS)
     assert len(terms["text"]) <= investigator.MAX_PAGE_CHARACTERS
     assert terms["text"].startswith(TERMS_QUOTE)
-    assert len(requests[0]["messages"][1]["content"]) <= investigator.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(initial_investigation_content(requests[0])) <= investigator.OPENROUTER_MAX_CONTENT_CHARS
     assert len(result[investigator.PRIVATE_FETCHED_PAGES_KEY][TERMS]["text"]) == 24_000

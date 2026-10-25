@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import initial_investigation_content
 from tests.product_coverage_fixtures import coverage
 
 
@@ -184,7 +185,7 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
     assert result["claims"]["industry"]["evidence_quote"] == UNIBUDDY_QUOTE
     assert len(requests) == 1
     request_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert request_document["requested_industry"] == requested_industry
     assert request_document["requested_subindustry"] == requested_subindustry

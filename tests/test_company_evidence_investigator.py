@@ -21,7 +21,9 @@ from qualification.scoring import company_evidence_investigator as investigator
 from qualification.scoring import company_verification
 from qualification.scoring import lead_scorer
 from qualification.scoring import verification_helpers
-from tests.product_coverage_fixtures import native_product_post, validated_industry_finding
+from tests.product_coverage_fixtures import (
+    initial_investigation_content, native_product_post, validated_industry_finding,
+)
 from qualification.scoring.company_evidence_investigator import (
     _quote_proves_rebrand_continuity,
     _validated_homepage_rebrand_redirect,
@@ -291,7 +293,7 @@ def test_undated_completed_round_requires_dates_only_for_material_chronology(
     prompt = " ".join(requests[0]["messages"][0]["content"].split())
     assert "Do not require an exact date as an extra field" in prompt
     assert "If material chronology or transaction type remains unresolved" in prompt
-    request = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    request = json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
     assert request["server_current_stage_discovery"]["ok"] is True
     assert request["prior_observations"].get("stage_dispute_urls", []) == (
         [later_url] if unresolved_competing_stage else []
@@ -917,7 +919,7 @@ def test_saved_mirantis_acquisition_hint_reopens_full_match(monkeypatch):
         "Mirantis mirantis.com latest funding round acquisition IPO"
     ]
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert input_document["prior_observations"]["stage_dispute_urls"] == [
         submitted_url
@@ -4179,7 +4181,7 @@ def test_company_geography_repair_uses_bounded_current_contact_source(
         calls["judge"] += 1
         # The real investigator, not a mocked finding, validates the exact
         # fetched quote and the company-bound source before projection.
-        document = json.loads(payload["messages"][1]["content"].split("\n", 1)[1])
+        document = json.loads(initial_investigation_content(payload).split("\n", 1)[1])
         assert document["requested_targets"] == ["geography"]
         assert document["server_priority_submitted_source"]["url"] == contact_url
         assert document["investigation_limits"]["remaining_fetch_calls"] == 3
@@ -4664,7 +4666,7 @@ def test_retained_rapid7_shape_reaches_unnamed_industry_attribution(
         "fetch_calls": 0,
     }
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert input_document["company_locator"]["linkedin"] == ""
     assert input_document["verified_homepage_identity"][
@@ -5153,7 +5155,7 @@ def test_distinct_country_and_geography_reach_same_bound_investigator_prompt(
             review_positive_semantics=True,
         )
     )
-    request = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    request = json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
     assert request["requested_geography"] == (
         "Country requirement: Australia, Sydney; geography requirement: "
         "Australia. Both requirements must match the headquarters."
@@ -8275,7 +8277,7 @@ def test_alias_locator_in_actual_investigator_input(
         "together with a fetched first-party quote that names the observed legal\n"
         "or trading name"
     ) in prompt
-    document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    document = json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
     assert document["verified_homepage_identity"] == homepage_anchor
     assert "server_verified_structured_alias_locator" not in document["prior_observations"]
     locator = document.get("server_verified_structured_alias_locator")
@@ -8459,7 +8461,7 @@ def test_legacy_western_union_alias_uses_real_investigator_and_cached_size(
         if calls["model"] == 1:
             prompt = payload["messages"][0]["content"]
             document = json.loads(
-                payload["messages"][1]["content"].split("\n", 1)[1]
+                initial_investigation_content(payload).split("\n", 1)[1]
             )
             assert "server_verified_structured_alias_locator" in prompt
             assert document["verified_homepage_identity"] == {}
@@ -12248,7 +12250,7 @@ def test_investigation_request_uses_frozen_evaluation_date(monkeypatch):
 
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert input_document["evaluation_date"] == "2026-09-18"
     assert input_document["requested_industry"] == "Technology"
@@ -12629,7 +12631,7 @@ def test_positive_semantic_review_routes_one_bounded_loop_to_existing_luna(
     assert outbound_body["tools"] == requests[0]["tools"]
     assert outbound_body["tool_choice"] == "required"
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert input_document["positive_semantic_review"] is (
         positive_semantic_review
@@ -12966,7 +12968,7 @@ def test_stage_archive_handoff_stays_within_existing_three_fetches(monkeypatch):
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["usage"]["fetch_calls"] == 3
     first_input = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert first_input["verified_homepage_identity"] == {}
     assert first_input["untrusted_homepage_navigation_locators"] == [{
@@ -13234,7 +13236,7 @@ def test_multiple_prefetched_pages_fit_initial_message_and_keep_exact_quotes(
         },
     ))
 
-    content = requests[0]["messages"][1]["content"]
+    content = initial_investigation_content(requests[0])
     input_document = json.loads(content.split("\n", 1)[1])
     shown_pages = input_document["prefetched_sources"]
     assert len(content) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
@@ -13367,7 +13369,7 @@ def test_saved_doctronic_case_script_discovers_and_fetches_current_series_b(
     ]
     assert fetched_urls == [old_url, current_url]
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     stage_discovery = input_document["server_current_stage_discovery"]
     assert stage_discovery["ok"] is True
@@ -13538,7 +13540,7 @@ def test_required_current_stage_search_failure_returns_unproven(
         0 if search_mode == "zero_budget" else 1
     )
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert input_document["investigation_limits"]["remaining_search_calls"] == (
         0 if search_mode == "zero_budget" else 1
@@ -14644,7 +14646,7 @@ def test_prefetched_grab_source_requires_independent_exact_stage_submission(
     }
     assert network_fetch.await_count == 0
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert input_document["prefetched_sources"] == [{"url": url, "text": text}]
     assert input_document["investigation_limits"]["remaining_fetch_calls"] == 4
@@ -14714,7 +14716,7 @@ def test_provider_injected_prefetched_body_is_not_reused(monkeypatch):
         "acquisition delisting",
         "Grab current public listing",
     ]
-    assert "prefetched_sources" not in requests[0]["messages"][1]["content"]
+    assert "prefetched_sources" not in initial_investigation_content(requests[0])
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY] == {}
 
 
@@ -14815,7 +14817,7 @@ def test_prefetched_attribute_hint_remains_subject_to_industry_guards(
     }
     assert network_fetch.await_count == 0
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert input_document["prior_observations"][
         "required_attribute_evidence_url"
@@ -15120,7 +15122,7 @@ def test_multitarget_retrieval_allocates_after_current_stage_review(
     }
     assert search_queries[1] == actions[0][1]["query"]
     input_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert input_document["untrusted_homepage_navigation_locators"] == [{
         "url": product_url,

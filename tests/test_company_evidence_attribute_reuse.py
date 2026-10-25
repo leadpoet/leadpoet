@@ -13,6 +13,7 @@ import pytest
 
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import initial_investigation_content
 from tests.product_coverage_fixtures import native_product_post
 
 
@@ -161,7 +162,7 @@ def test_industry_pass_does_not_override_semantic_negative_or_retry_it(
     assert result["_completed_submit"] is True
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
-    sent = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    sent = json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
     assert sent["requested_attribute"] == attribute
     assert sent["requested_product_service"] == PRODUCT
     assert extra_text in sent["prefetched_sources"][0]["text"] or not extra_text

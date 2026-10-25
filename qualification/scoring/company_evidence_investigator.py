@@ -71,6 +71,8 @@ from qualification.scoring.linkedin_company_size import (
 )
 from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.verification_helpers import (
+    _VisibleHTMLTextParser,
+    _css_hidden_selectors,
     visible_html_link_labels,
     visible_html_links,
     visible_html_text,
@@ -1059,6 +1061,69 @@ def _is_known_provider_diagnostic_only(value: str) -> bool:
     )
 
 
+class _MainContentTextParser(_VisibleHTMLTextParser):
+    """Locate a visible main body behind oversized rendered site chrome."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.main_start: Optional[int] = None
+        self.main_parts: tuple[str, ...] = ()
+        self.main_prefix_parts: tuple[str, ...] = ()
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        super().handle_starttag(tag, attrs)
+        if (
+            tag.casefold() == "main" and not self._hidden_depth
+            and self.main_start is None and not self.main_parts
+        ):
+            self.main_start = len(self.parts)
+            self.main_prefix_parts = tuple(self.parts)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() == "main" and self.main_start is not None:
+            self.main_parts = tuple(self.parts[self.main_start:])
+            self.main_start = None
+        super().handle_endtag(tag)
+
+
+def _visible_main_after_page_bound(value: str) -> str:
+    """Use one continuous main-body surface only when chrome fills the cap."""
+
+    hidden_classes, hidden_ids = _css_hidden_selectors(value)
+    parser = _MainContentTextParser(
+        hidden_classes=hidden_classes,
+        hidden_ids=hidden_ids,
+        include_scroll_reveal=True,
+    )
+    try:
+        parser.feed(value)
+        parser.close()
+    except Exception:
+        return ""
+    if parser.main_start is not None and not parser.main_parts:
+        parser.main_parts = tuple(parser.parts[parser.main_start:])
+    if not parser.main_parts:
+        return ""
+    # The original prefix is retained whenever it already reaches main. This
+    # keeps short pages and article metadata on their existing text surface.
+    prefix = " ".join(" ".join(parser.main_prefix_parts).split())
+    if len(prefix) < MAX_PAGE_CHARACTERS:
+        return ""
+    return " ".join(parser.main_parts)
+
+
+def _normalized_visible_page_text(value: str) -> str:
+    decoded = html.unescape(value)
+    for tag in ("script", "style"):
+        decoded = re.sub(
+            rf"<{tag}\b[^>]*>.*?</{tag}\s*>",
+            " ", decoded, flags=re.I | re.S,
+        )
+    without_markup = re.sub(r"<[^>]+>", " ", decoded)
+    visible_quote_text = _visible_markdown_link_label_surface(without_markup)
+    return re.sub(r"\s+([,.;:!?])", r"\1", visible_quote_text)
+
+
 def _plain_text(value: str) -> str:
     if _is_known_binary_document(value):
         return ""
@@ -1071,24 +1136,18 @@ def _plain_text(value: str) -> str:
     # tables and feature grids that an article extractor considers boilerplate.
     # Keep their full visible surface. The shared parser still excludes hidden,
     # executable, fallback, navigation, and related-page markup.
-    decoded = html.unescape(visible_html_text(value, include_scroll_reveal=True))
-    # Script and style bodies are not visible page evidence. Remove them before
-    # applying the fixed page-text bound so they cannot displace visible text.
-    for tag in ("script", "style"):
-        decoded = re.sub(
-            rf"<{tag}\b[^>]*>.*?</{tag}\s*>",
-            " ",
-            decoded,
-            flags=re.I | re.S,
-        )
-    without_markup = re.sub(r"<[^>]+>", " ", decoded)
-    visible_quote_text = _visible_markdown_link_label_surface(without_markup)
-    # HTML text nodes can split at inline elements immediately before
-    # punctuation. Restore the visible punctuation boundary for exact quotes.
-    visible_quote_text = re.sub(r"\s+([,.;:!?])", r"\1", visible_quote_text)
+    visible_quote_text = _normalized_visible_page_text(
+        visible_html_text(value, include_scroll_reveal=True)
+    )
     combined = visible_quote_text
     if linked_urls:
         combined += f" {_IDENTITY_LINK_CONTEXT_MARKER} {linked_urls}"
+    if len(combined) > MAX_PAGE_CHARACTERS:
+        main_body = _visible_main_after_page_bound(value)
+        if main_body:
+            # A single visible main region remains one contiguous source
+            # surface; do not join it to an unrelated header or link list.
+            combined = _normalized_visible_page_text(main_body)
     return " ".join(combined.split())[:MAX_PAGE_CHARACTERS]
 
 

@@ -1,9 +1,8 @@
-"""Bounded product-requirement accounting over already admitted evidence.
+"""Host-created product receipts over admitted evidence.
 
-A criterion-only model prepares semantic obligations, reusing a trusted process
-cache when available. The host freezes those obligations and checks exact claim IDs,
-source quotes and roles. Language interpretation and entailment remain model
-judgments, including a separate judgment of the full original criterion.
+The active investigator uses a compact whole-criterion receipt. The older plan
+helpers remain for offline comparison; they are not called on this route.
+Language interpretation and entailment remain model judgments.
 """
 from __future__ import annotations
 
@@ -17,6 +16,7 @@ MAX_NODES = 24
 MAX_DEPTH = 6
 MAX_BINDINGS = 3
 SCHEMA = "product_coverage_v2"
+WHOLE_SCHEMA = "whole_product_coverage_v1"
 PLAN_VERSION = "semantic-product-plan-v1"
 MAX_CACHED_PLANS = 64
 PLANNER_PROMPT = """Compile only the supplied original product/service criterion into a compact semantic checklist.
@@ -43,6 +43,44 @@ class CoverageError(ValueError):
 
 class ValidatedProductCoverage(dict):
     """Host-created proof; JSON round trips deliberately lose this authority."""
+
+
+class ValidatedWholeProductCoverage(dict):
+    """Host-created whole-criterion receipt, never provider JSON authority."""
+
+
+def validate_whole_coverage(
+    raw_status: object, *, criterion: str, whole_status: str,
+    bindings: list[dict[str, str]],
+    citation_rejection: Callable[[str, str], str | None],
+    rejected_citation_sink: list[dict] | None = None,
+) -> ValidatedWholeProductCoverage:
+    """Bind one native semantic verdict to at most three admitted page quotes."""
+    if (not criterion.strip() or not isinstance(raw_status, str)
+            or raw_status not in {"VERIFIED", "CONTRADICTED", "UNPROVEN"}
+            or raw_status != whole_status):
+        raise CoverageError("missing or conflicting whole-product verdict")
+    if not isinstance(bindings, list) or len(bindings) > MAX_BINDINGS:
+        raise CoverageError("invalid whole-product evidence count")
+    if raw_status == "VERIFIED" and not bindings:
+        raise CoverageError("whole-product verdict lacks bound evidence")
+    validated = []
+    for binding in bindings:
+        if (not isinstance(binding, Mapping) or set(binding) != {"url", "quote"}
+                or not isinstance(binding["url"], str)
+                or not isinstance(binding["quote"], str)):
+            raise CoverageError("invalid whole-product evidence")
+        rejection = citation_rejection(binding["url"], binding["quote"])
+        if rejection:
+            if rejected_citation_sink is not None:
+                rejected_citation_sink.append({**dict(binding), "reason": rejection,
+                                               "submitted_status": raw_status})
+            raise CoverageError("whole-product citation failed source validation")
+        validated.append(dict(binding))
+    return ValidatedWholeProductCoverage(
+        schema=WHOLE_SCHEMA, criterion_sha256=criterion_hash(criterion),
+        status=raw_status, whole_criterion_status=whole_status, evidence=validated,
+    )
 
 
 def response_schema(*, description: str = "") -> dict:
@@ -277,8 +315,10 @@ def validate_coverage(
 
 
 def coverage_matches(value: object, criterion: str) -> bool:
-    return (isinstance(value, ValidatedProductCoverage)
-            and value.get("schema") == SCHEMA and value.get("plan_version") == PLAN_VERSION
+    return (isinstance(value, ValidatedWholeProductCoverage)
+            and value.get("schema") == WHOLE_SCHEMA
             and value.get("criterion_sha256") == criterion_hash(criterion)
             and value.get("whole_criterion_status") == "VERIFIED"
-            and value.get("status") == "VERIFIED")
+            and value.get("status") == "VERIFIED"
+            and isinstance(value.get("evidence"), list)
+            and 1 <= len(value["evidence"]) <= MAX_BINDINGS)

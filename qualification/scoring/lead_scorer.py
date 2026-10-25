@@ -104,7 +104,7 @@ from qualification.scoring.company_evidence_investigator import (
 )
 from qualification.scoring.product_coverage import (
     PRIVATE_KEY as _PRODUCT_COVERAGE,
-    ValidatedProductCoverage, coverage_matches,
+    ValidatedWholeProductCoverage, coverage_matches,
 )
 from qualification.scoring.evaluation_clock import evaluation_date
 from qualification.scoring.arena_integrity import (
@@ -2933,15 +2933,14 @@ def _retain_matched_investigator_source_contexts(
         if source_url and isinstance(quote, str) and quote:
             evidence_by_url[source_url] = quote
         coverage = web_evidence.get("product_coverage")
-        if dimension == "industry" and isinstance(coverage, ValidatedProductCoverage):
-            for claim in coverage.get("claims", ()):
-                for binding in claim.get("evidence", ()):
-                    if len(evidence_by_url) >= _MAX_RETAINED_INVESTIGATOR_CONTEXTS:
-                        break
-                    clause_url = _valid_web_evidence_url(binding.get("url"))
-                    clause_quote = binding.get("quote")
-                    if clause_url and isinstance(clause_quote, str) and clause_quote:
-                        evidence_by_url.setdefault(clause_url, clause_quote)
+        if dimension == "industry" and isinstance(coverage, ValidatedWholeProductCoverage):
+            for binding in coverage.get("evidence", ()):
+                if len(evidence_by_url) >= _MAX_RETAINED_INVESTIGATOR_CONTEXTS:
+                    break
+                source_url = _valid_web_evidence_url(binding.get("url"))
+                source_quote = binding.get("quote")
+                if source_url and isinstance(source_quote, str) and source_quote:
+                    evidence_by_url.setdefault(source_url, source_quote)
     identity = verified_identity_receipt([result.receipt("company_fit")])
     submitted_attribute = (
         getattr(company, "required_attribute", None)
@@ -6699,7 +6698,7 @@ def _reverify_decision(
         for dimension in active_dimensions
     }
     evidence["industry"] = industry_evidence
-    if isinstance(verdict.get(_PRODUCT_COVERAGE), ValidatedProductCoverage):
+    if isinstance(verdict.get(_PRODUCT_COVERAGE), ValidatedWholeProductCoverage):
         evidence["industry"] = {
             **industry_evidence,
             "product_coverage": verdict[_PRODUCT_COVERAGE],
@@ -8021,7 +8020,7 @@ def _project_investigator_industry(
     value = finding or {}
     if finding is not None:
         projected.pop(_PRODUCT_COVERAGE, None)
-    if isinstance(value.get("product_coverage"), ValidatedProductCoverage):
+    if isinstance(value.get("product_coverage"), ValidatedWholeProductCoverage):
         projected[_PRODUCT_COVERAGE] = value["product_coverage"]
     status = value.get("status")
     role = _strict_industry_activity_role(value.get("activity_role"))
@@ -8963,7 +8962,7 @@ async def _run_targeted_company_evidence_investigation(
         # Preserve the already grounded activity quote, never an old coverage
         # attestation after a fresh review failed to cover the criterion.
         projected.pop(_PRODUCT_COVERAGE, None)
-        if isinstance(industry_claim.get("product_coverage"), ValidatedProductCoverage):
+        if isinstance(industry_claim.get("product_coverage"), ValidatedWholeProductCoverage):
             projected[_PRODUCT_COVERAGE] = industry_claim["product_coverage"]
     if "required_attribute" in investigation_targets:
         attribute_claim = (
@@ -9292,7 +9291,7 @@ def _final_product_coverage_result(
         **(dict(industry) if isinstance(industry, Mapping) else {}),
         "product_coverage_required": True,
         "product_coverage_status": (coverage.get("status", "UNPROVEN")
-                                    if isinstance(coverage, ValidatedProductCoverage)
+                                    if isinstance(coverage, ValidatedWholeProductCoverage)
                                     else "UNPROVEN"),
     }
     revised = {**details, "dimension_decisions": dimensions,

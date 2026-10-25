@@ -59,13 +59,17 @@ def test_public_investigator_compiles_then_accepts_claims_only_frozen_obligation
             names = [t["function"]["name"] for t in json["tools"]]
             if "submit_product_plan" in names:
                 assert json["model"] == inv.POSITIVE_SEMANTIC_REVIEW_MODEL
+                planner_prompt = json["messages"][0]["content"]
+                assert "only leaves carry obligations" in planner_prompt
+                assert "never only in ALL/ANY text" in planner_prompt
+                assert "separate ALL leaf outside ANY" in planner_prompt
                 assert jsonlib.loads(json["messages"][1]["content"]) == {
                     "requested_product_service": criterion,
                 }
                 assert len(json["messages"]) == 2
                 texts = (["Voice software supply", "Workflow software supply", "Clinic customer scope"]
                          if not pressure else [f"Semantic obligation {i:02d} " + "x" * 878 for i in range(23)])
-                nodes = [{"id": "root", "op": "all", "text": "Complete supplied product criterion",
+                nodes = [{"id": "root", "op": "all", "text": "",
                           "children": [f"r{i}" for i in range(len(texts))]}]
                 nodes += [{"id": f"r{i}", "op": "leaf", "text": text, "children": []}
                           for i, text in enumerate(texts)]

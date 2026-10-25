@@ -271,6 +271,8 @@ prove the fact, use at least one targeted search before returning UNPROVEN when
 search budget remains. An unavailable page does not prove the fact absent.
 
 For industry, first resolve the requested capability using this precedence:
+For "such as" or "including", examples are not a closed list unless explicitly
+mandatory. Preserve the governing category, qualifiers, and ANDs.
 industry and sub-industry labels name sector categories. When a broad label
 joins capabilities or customer sectors with "and", but the product/service
 criterion explicitly lists those capabilities or sectors as OR alternatives,
@@ -325,6 +327,9 @@ unless the exact criterion explicitly requires either condition. Distinguish
 controls that customers operate in the sold product from the vendor's internal
 compliance, internal use, or badges. Apply the industry precedence above.
 Missing discussion is not a contradiction.
+Research the missing capability or shared qualifier via a known first-party
+product, solution, documentation, or customer-case page before generic search.
+External sources require issuer/registrant or company-link provenance.
 Read activity lists literally. For example, a criterion that requires a
 commercial real-estate business that "buys, sells, brokers, develops, or
 manages property assets" is satisfied by company-bound evidence for any one of
@@ -1737,6 +1742,91 @@ def _independently_bound_first_party_url(
     )
 
 
+def _external_primary_activity_source(
+    url: str,
+    quote: str,
+    *,
+    fetched_pages: Mapping[str, str],
+    fetched_final_urls: Mapping[str, str],
+    first_party_domains: set[str],
+    identity_names: set[str],
+    identity_anchor: Mapping[str, Any],
+) -> bool:
+    """Bind external primary provenance without trusting a publisher alone.
+
+    This admits sources, never their semantics. The finding must still pass
+    exact quotation, company attribution, activity-role, and model review.
+    """
+    if not identity_names or not _quote_names_company(quote, identity_names):
+        return False
+    parsed = urlsplit(url)
+    final_url = fetched_final_urls.get(url, "")
+    # A different final source cannot inherit the requested source's issuer.
+    if not final_url or _safe_https_url(final_url) != url:
+        return False
+    text = _surface_span(_visible_quote_surface(fetched_pages.get(url, "")))
+    if not text:
+        return False
+
+    def exact_company(value: str) -> bool:
+        key = re.sub(r"[^a-z0-9]+", "", _normalized_span(value))
+        return any(
+            key == name + suffix
+            for name in identity_names
+            for suffix in ("", "inc", "incorporated", "corp", "corporation",
+                           "ltd", "limited", "plc", "llc")
+        )
+
+    host = str(parsed.hostname or "").casefold()
+    # These domains carry issuer-distributed releases, but their hostname is
+    # insufficient: require their explicit provider field to name this entity.
+    if (
+        host in {"prnewswire.com", "www.prnewswire.com", "newswire.ca", "www.newswire.ca"}
+        and parsed.path.casefold().startswith("/news-releases/")
+    ):
+        issuers = re.findall(
+            r"\bNews provided by\s+(.{2,160}?)\s+"
+            r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?"
+            r"\s+\d{1,2},?\s+20\d{2}\b",
+            text, flags=re.I,
+        )
+        return len(issuers) == 1 and exact_company(issuers[0])
+    if (
+        host in {"sec.gov", "www.sec.gov"}
+        and parsed.path.casefold().startswith("/archives/edgar/data/")
+    ):
+        # A cover field is independent of a later business-section mention.
+        # Keep its whole preceding line/field: a different registrant must not
+        # qualify because its filing happens to mention the target company.
+        registrants = re.findall(
+            r"(?:^|Commission\s+file\s+number\s*:?\s*"
+            r"[0-9]{1,10}(?:-[0-9]{1,10})?)\s*"
+            r"([^();:]{2,160}?)\s*"
+            r"\(Exact name of registrant as specified in its charter\)",
+            text[:4000], flags=re.I,
+        )
+        return len(registrants) == 1 and exact_company(registrants[0])
+    # A sponsor or other external primary statement can be used only when the
+    # exact external document was linked by independently bound company text.
+    # A bare URL in prose, page title, or arbitrary third-party backlink cannot
+    # create this relationship. Link destinations are retained by our parser.
+    for source_url, source_text in fetched_pages.items():
+        if not (
+            _independently_bound_first_party_url(
+                source_url, first_party_domains, identity_anchor,
+            )
+            and _independently_bound_first_party_url(
+                fetched_final_urls.get(source_url, ""),
+                first_party_domains, identity_anchor,
+            )
+        ):
+            continue
+        _, separator, destinations = source_text.partition(_IDENTITY_LINK_CONTEXT_MARKER)
+        if separator and url in destinations.split():
+            return True
+    return False
+
+
 def _complete_verified_first_party_identity(
     url: str,
     domains: set[str],
@@ -3095,6 +3185,17 @@ def _validated_findings(
                     )
                 )
                 or (
+                    target == "industry"
+                    and _external_primary_activity_source(
+                        evidence_url, finding["evidence_quote"],
+                        fetched_pages=fetched_pages,
+                        fetched_final_urls=fetched_final_urls or {},
+                        first_party_domains=first_party_domains,
+                        identity_names=attribution_names,
+                        identity_anchor=identity_anchor or {},
+                    )
+                )
+                or (
                     target == "geography"
                     and _bound_structured_headquarters_finding(
                         finding, structured_headquarters_evidence, identity_anchor,
@@ -4414,6 +4515,7 @@ async def investigate_company_evidence(
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
             industry_followup_pending = False
+            industry_previously_proven = False
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
@@ -5026,16 +5128,36 @@ async def investigate_company_evidence(
                         == "supplier_operator"
                         for item in rejected
                     )
+                    industry_previously_proven = bool(
+                        industry_previously_proven
+                        or industry_finding.get("status") == "VERIFIED"
+                    )
+                    unresolved_industry_capability = bool(
+                        not industry_previously_proven
+                        and industry_finding.get("status") == "UNPROVEN"
+                        and submitted_industry.get("status") == "UNPROVEN"
+                        # Prose identifies a research gap, never proves a fact.
+                        # An honest generic exhausted search stays complete.
+                        and bool(re.search(
+                            r"\bmissing\b|\bnot (?:yet )?(?:proven|established)\b|"
+                            r"\b(?:does|do) not (?:prove|establish)\b",
+                            str(submitted_industry.get("reason") or ""),
+                            flags=re.I,
+                        ))
+                        and not industry_followup_search_completed
+                    )
                     force_industry_search = bool(
                         not scoped_correction_active
                         and (
                             non_supplier_industry_contradiction
                             or rejected_other_activity_contradiction
+                            or unresolved_industry_capability
                         )
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
                         and (
                             search_calls == 0
+                            or unresolved_industry_capability
                             or (
                                 requested_private_equity_stage
                                 and not industry_followup_search_completed
@@ -5306,11 +5428,11 @@ async def investigate_company_evidence(
                             ),
                             "instruction": (
                                 (
-                                    "The submitted industry contradiction proved another "
-                                    "activity or non-supplier relationship, but it did not "
-                                    "prove the requested activity absent. The next action "
-                                    "must search for the exact company and requested "
-                                    "industry, product/service, and attribute. Search "
+                                    "The industry finding has not established the requested "
+                                    "capability or its absence. Identify the exact missing "
+                                    "capability or shared qualifier from the requested "
+                                    "industry, product/service, and attribute. The next action "
+                                    "must search for that exact company and missing capability. Search "
                                     "results are discovery only; fetch a useful result "
                                     "before citing it. "
                                     if force_industry_followup

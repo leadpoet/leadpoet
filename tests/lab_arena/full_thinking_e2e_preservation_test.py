@@ -20,6 +20,35 @@ class _Evidence:
         self.events.append((event, fields))
 
 
+def _version_tools(directory, major):
+    directory.mkdir()
+    for name in ("pg_dump", "pg_restore"):
+        tool = directory / name
+        tool.write_text(f"#!/bin/sh\necho '{name} (PostgreSQL) {major}.1'\n", encoding="utf-8")
+        tool.chmod(0o755)
+
+
+def test_dump_tools_reject_older_path_binary_for_newer_server(tmp_path, monkeypatch):
+    older = tmp_path / "pg15"
+    _version_tools(older, 15)
+    monkeypatch.delenv("LAB_ARENA_PG_BINDIR", raising=False)
+    monkeypatch.setenv("PATH", str(older))
+    monkeypatch.setattr(Path, "glob", lambda _path, _pattern: iter(()))
+    with pytest.raises(ValueError, match="PostgreSQL 17"):
+        e2e._local_pg_dump_tools(17)
+
+
+def test_dump_tools_select_matching_server_version(tmp_path, monkeypatch):
+    older, matching = tmp_path / "pg15", tmp_path / "pg17"
+    _version_tools(older, 15)
+    _version_tools(matching, 17)
+    assert e2e._local_pg_dump_tools(17, candidates=(older, matching)) == (
+        matching / "pg_dump", matching / "pg_restore")
+    monkeypatch.setenv("LAB_ARENA_PG_BINDIR", str(older))
+    with pytest.raises(ValueError, match="configured PostgreSQL tools"):
+        e2e._local_pg_dump_tools(17, candidates=(matching,))
+
+
 def test_checkpoint_is_restorable_after_export_keyboard_interrupt(tmp_path, monkeypatch):
     monkeypatch.setenv("LAB_ARENA_PG_LOCAL", "1")
     database = database_with_lab_arena_migration(())
@@ -34,9 +63,13 @@ def test_checkpoint_is_restorable_after_export_keyboard_interrupt(tmp_path, monk
         harness = SimpleNamespace(round_id="round-local", objects_root=objects_root)
         report = tmp_path / "evidence-private-ledger.json"
         evidence = _Evidence()
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            cursor.execute("SHOW server_version_num")
+            server_major = int(cursor.fetchone()[0]) // 10000
+        pg_tools = e2e._local_pg_dump_tools(server_major)
 
         checkpoint = e2e._preserve_checkpoint(
-            harness, report, dsn, evidence, e2e._local_pg_dump_tools())
+            harness, report, dsn, evidence, pg_tools)
         monkeypatch.setattr(e2e.training_reader, "export_run", lambda *_: (_ for _ in ()).throw(KeyboardInterrupt))
         with pytest.raises(KeyboardInterrupt):
             e2e.training_reader.export_run(None, None, "run-local")
@@ -53,7 +86,7 @@ def test_checkpoint_is_restorable_after_export_keyboard_interrupt(tmp_path, monk
         finally:
             connection.close()
         subprocess.run(
-            [str(e2e._local_pg_dump_tools()[1]), "-h", str(dsn["host"]),
+            [str(pg_tools[1]), "-h", str(dsn["host"]),
              "-p", str(dsn["port"]), "-U", str(dsn["user"]),
              "-d", restore_dsn["dbname"], str(dump)],
             capture_output=True, text=True, check=True)

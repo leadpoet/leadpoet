@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -103,20 +104,36 @@ def _preserve_object_store(harness: "FullThinkingHarness", report: Path) -> Path
     return destination
 
 
-def _local_pg_dump_tools() -> tuple[Path, Path]:
-    """Resolve matching local PostgreSQL tools before any paid work starts."""
+def _local_pg_dump_tools(server_major: int, *, candidates: tuple[Path, ...] | None = None) -> tuple[Path, Path]:
+    """Require dump and restore binaries matching the live local server major."""
     configured = os.environ.get("LAB_ARENA_PG_BINDIR")
-    candidates = ([Path(configured)] if configured else [])
-    found = shutil.which("pg_dump")
-    if found:
-        candidates.append(Path(found).parent)
-    candidates.extend(sorted(Path("/opt/homebrew/opt").glob("postgresql@*/bin"), reverse=True))
-    candidates.extend(sorted(Path("/usr/lib/postgresql").glob("*/bin"), reverse=True))
-    for directory in candidates:
+    if configured:
+        directories = [Path(configured)]
+    elif candidates is not None:
+        directories = list(candidates)
+    else:
+        directories = []
+        found = shutil.which("pg_dump")
+        if found:
+            directories.append(Path(found).parent)
+        directories.extend(sorted(Path("/opt/homebrew/opt").glob("postgresql@*/bin"), reverse=True))
+        directories.extend(sorted(Path("/usr/lib/postgresql").glob("*/bin"), reverse=True))
+    for directory in directories:
         dump, restore = directory / "pg_dump", directory / "pg_restore"
-        if dump.is_file() and restore.is_file():
+        if not dump.is_file() or not restore.is_file():
+            continue
+        try:
+            versions = [subprocess.run(
+                [str(tool), "--version"], capture_output=True, text=True, check=True, timeout=5,
+            ).stdout for tool in (dump, restore)]
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            continue
+        majors = [int(match.group(1)) if (match := re.search(r"PostgreSQL\)\s+(\d+)", version))
+                  else None for version in versions]
+        if majors == [server_major, server_major]:
             return dump, restore
-    raise ValueError("private E2E PostgreSQL dump tools are unavailable")
+    label = "configured PostgreSQL tools" if configured else "PostgreSQL dump tools"
+    raise ValueError(f"{label} matching local PostgreSQL {server_major} are unavailable")
 
 
 def _preserve_checkpoint(harness: "FullThinkingHarness", report: Path,
@@ -763,7 +780,6 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
         raise ValueError("explicit company-only policy activations are required")
     if not isinstance(expected_scorer_policy_hash, str) or not expected_scorer_policy_hash.startswith("sha256:"):
         raise ValueError("expected scorer policy hash is required")
-    pg_tools = _local_pg_dump_tools()
     report.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     evidence = Evidence(report)
     evidence.add("preflight", **prepared["summary"])
@@ -785,6 +801,14 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
     checkpoint_error = None
     try:
         psycopg2, dsn = next(database)
+        version_connection = psycopg2.connect(**dsn)
+        try:
+            with version_connection.cursor() as cursor:
+                cursor.execute("SHOW server_version_num")
+                server_major = int(cursor.fetchone()[0]) // 10000
+        finally:
+            version_connection.close()
+        pg_tools = _local_pg_dump_tools(server_major)
         def connect():
             return psycopg2.connect(**dsn)
         temporary = tempfile.mkdtemp(prefix="arena-full-thinking-e2e-")

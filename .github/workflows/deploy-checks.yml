@@ -91,6 +91,22 @@ jobs:
               tests/lab_arena/codex_protocol_validation_test.py \
               tests/lab_arena/codex_runtime_limits_test.py
 
+      - name: Verify trace integrity and reviewer repair seams
+        run: |
+          python -m pytest -q \
+            tests/lab_arena/training_capture_test.py \
+            tests/lab_arena/trajectory_test.py \
+            tests/lab_arena/training_steps_test.py \
+            tests/lab_arena/training_eligibility_test.py \
+            tests/lab_arena/training_thinking_test.py \
+            tests/lab_arena/training_eligibility_publication_test.py \
+            tests/lab_arena/public_dashboard_cost_policy_test.py \
+            tests/lab_arena/typed_investigator_fallback_test.py \
+            tests/test_investigator_source_access_denied.py \
+            tests/test_arena_reviewer_source_access_seam.py \
+            tests/test_arena_reviewer_source_blocked_seam.py \
+            tests/lab_arena/reviewer_runtime_composition_test.py
+
       - name: Ensure PostgreSQL server binaries (migration integration test)
         run: |
           if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1 \

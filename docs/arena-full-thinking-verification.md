@@ -611,3 +611,58 @@ legacy `ready_for_final_review=false` still requires all ten candidate ICPs;
 it is not the new frozen 80% gate. No checker flag was changed to claim that the
 original 100% run passed. The final 80% evidence is an offline assessment plus
 separate real-PostgreSQL publication tests, not a fresh paid 80% round.
+
+
+## October 25 follow-up review fixes
+
+The five reported defects were reproduced and corrected in code checkpoint
+`668187f20`, based on main `914ee3c32`:
+
+- Preserve the exact existing source-access repair blocks that frozen-grader
+  patch scripts match. Keep authenticated, exact-URL source absence handling in
+  adjacent blocks. The broader claim that unbound or retryable fetch failures
+  become final zero scores was not reproduced: those controls remain incomplete.
+- Treat an ICP whose verified thinking replies are all truncated as one
+  incomplete ICP under the 80% floor. Wrong routes, missing receipts and changed
+  source evidence remain hard failures. Truncated data stays out of strict export.
+- Treat only a missing export artifact as a soft coverage gap. Hash, membership
+  and unexpected export errors fail the entrant's evidence check. A real
+  PostgreSQL publication test proves that this does not cancel the round or stop
+  an eligible peer from winning and becoming the next baseline.
+- Restore redaction of unpadded Basic credentials in free text. Synthetic test
+  credentials reproduced the regression; this is not evidence of an actual
+  credential exposure. Ordinary prose and existing header redaction still pass.
+- Retain the coverage failure reason and complete/incomplete ICP counts in the
+  public dashboard response. Private fields remain excluded. This checks the API
+  projection, not a browser rendering.
+
+The combined regression command passed **605 tests with 14 skipped**. Five real
+PostgreSQL publication cases also passed. The new failing cases were demonstrated
+before their corresponding fixes; preserved behavior is covered by existing
+capture, source-access, protocol and publication tests. Python compilation,
+`git diff --check`, and guide byte-parity checks passed. The critical combined
+command now runs early in existing CI so a later full-suite timeout cannot hide
+its result. No new production dependency was added.
+
+The 14 skipped checks require actual frozen-release source fixtures. The three
+fixture environment variables are unset, and the exact fixtures were not found
+in bounded repository and known test-artifact searches. They remain unverified.
+A wider reviewer seam run had eight failures; the same eight failed on clean
+main `914ee3c32`. They are in the finality and attribute-source repair suites and are not
+fixed by this PR. Full CI is still not established as green.
+
+Independent offline readback pinned clean exporter `668187f20`, restored the
+unchanged resume-04 dump and used its 758 saved objects. It made zero provider
+calls. Both the actual service eligibility method and the direct capture check
+pass at an isolated 80% setting: candidate 9/10, baseline 10/10. Strict export
+still contains 35 candidate and 44 baseline records. All 20 accepted score
+inputs and outputs remain bound, 84/84 model acknowledgements are present, and
+all 20 readable views contain the same 7,581 events. The private checker reports
+no integrity errors. Compared with the prior export, only recomputation
+timestamps and their derived hashes changed. No new redaction or selected
+provider-evidence change was found.
+
+The original 100% publication and ranking remain unchanged. This is offline
+verification of stored real-provider evidence plus separate PostgreSQL failure
+and promotion tests, not a new paid 80% sourcing round. No new paid calls,
+production change, merge or deployment occurred. The PR remains a draft.

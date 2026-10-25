@@ -3412,6 +3412,9 @@ class ArenaService:
         runs = self._store.list_runs(round_id, stage=1, kind="execute")
         judges = self._store.list_runs(round_id, stage=1, kind="score")
         if (not self._score_generation_floor(row)
+            and not (_judge_continuation_enabled(row)
+                and (row.get("configuration_doc") or {}).get("execution_sequence_policy")
+                    == contracts.BASELINE_SCORED_FIRST_POLICY)
             and not any(self._is_baseline_recovery(r, runs + judges, row) for r in runs + judges)):
             return
         plan = self._baseline_recovery_plan(row, runs, judges)
@@ -3436,8 +3439,12 @@ class ArenaService:
         if stage == 2:
             if (row.get("configuration_doc") or {}).get("execution_sequence_policy") == contracts.BASELINE_SCORED_FIRST_POLICY:
                 original = self._store.list_runs(round_id, stage=1)
+                # Ordinary first attempts also continue while miners execute.
+                # Keep the same scoring-floor fence as every other judgment.
                 runs += [r for r in original if self._is_baseline_recovery(r, original, row)
-                         or (self._score_generation_floor(row) > 0 and r.get("kind") == "score")]
+                         or (r.get("kind") == "score" and (
+                             _judge_continuation_enabled(row)
+                             or self._score_generation_floor(row) > 0))]
         return self._current_score_runs(row, runs)
 
     def scoring_is_complete(self, round_id: str, stage: int) -> bool:
@@ -7374,22 +7381,23 @@ class ArenaService:
             if status == "committed":
                 with telemetry.stage("advance_open_stage"):
                     return self.open_stage(round_id, 1)
+            if (status in ("stage1_scoring", "stage1_judged")
+                and round_row["configuration_doc"].get("execution_sequence_policy")
+                    == contracts.BASELINE_SCORED_FIRST_POLICY
+                and _judge_continuation_enabled(round_row)):
+                # The database checks every accepted baseline execution under
+                # the round lock. A pre-migration database returns stale and
+                # continues its existing sequential path.
+                with telemetry.stage("advance_open_stage"):
+                    opened = self.open_stage(round_id, 2)
+                if opened.get("status") == "ok":
+                    return opened
             if status in ("stage2", "stage2_closed", "stage2_scoring"):
                 self._recover_baseline(round_row)
             if status in ("stage1", "stage2"):
                 stage = int(status[-1])
                 with telemetry.stage("advance_expire_leases"):
                     self._store.expire_leases(round_id)
-                if (stage == 2 and self._score_generation_floor(round_row) > 0
-                    and round_row["configuration_doc"].get("execution_sequence_policy")
-                        == contracts.BASELINE_SCORED_FIRST_POLICY
-                    and self._baseline_recovery_plan(round_row,
-                        self._store.list_runs(round_id, stage=1, kind="execute"),
-                        self._store.list_runs(round_id, stage=1, kind="score")) is None):
-                    if now >= _parse_iso(schedule["publication_deadline"]):
-                        return self._hold_incomplete_evaluation(round_row, reason="baseline_incomplete")
-                    return {"status": "waiting", "round_status": status,
-                            "reason": "baseline_current_judgments"}
                 if now >= _parse_iso(schedule["stage_%d_close" % stage]) or self.stage_is_complete(round_id, stage):
                     with telemetry.stage("advance_close_stage"):
                         return self.close_stage(round_id, stage)

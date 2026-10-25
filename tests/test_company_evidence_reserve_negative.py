@@ -15,8 +15,9 @@ CRITERION = "Enrollment software for universities"
 
 
 @pytest.mark.parametrize("final_status", ["UNPROVEN", "VERIFIED"])
+@pytest.mark.parametrize("denied_tool", ["search_web", "fetch_page"])
 def test_reserve_denied_research_only_interrupts_unproven_final(
-    monkeypatch, final_status,
+    monkeypatch, final_status, denied_tool,
 ):
     now = [0.0]
     trusted_plan(CRITERION)
@@ -33,8 +34,13 @@ def test_reserve_denied_research_only_interrupts_unproven_final(
         requests.append(payload)
         turn = len(requests)
         if turn == 1:
+            if denied_tool == "search_web":
+                now[0] = (
+                    investigator.ADMISSION_DEADLINE_SECONDS
+                    - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS + 1
+                )
             name, arguments = "search_web", {"query": "Acme enrollment proof"}
-        elif turn == 2:
+        elif turn == 2 and denied_tool == "fetch_page":
             now[0] = (
                 investigator.ADMISSION_DEADLINE_SECONDS
                 - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS + 1
@@ -74,11 +80,11 @@ def test_reserve_denied_research_only_interrupts_unproven_final(
         prefetched_pages={URL: {"final_url": URL, "text": QUOTE}},
     ))
 
-    assert len(requests) == 3
-    assert json.loads(requests[2]["messages"][-1]["content"])["error"] == (
+    assert len(requests) == (2 if denied_tool == "search_web" else 3)
+    assert json.loads(requests[-1]["messages"][-1]["content"])["error"] == (
         "judgment_time_reserved"
     )
-    assert result["usage"]["search_calls"] == 1
+    assert result["usage"]["search_calls"] == int(denied_tool == "fetch_page")
     assert result["usage"]["fetch_calls"] == 0
     assert result["claims"]["industry"]["status"] == final_status
     if final_status == "UNPROVEN":

@@ -130,6 +130,7 @@ ARENA_TASK_STAGES = frozenset(
         "reconcile_deepline_cost",
         "reconcile_deepline_billing_lookup",
         "review_submissions",
+        "review_guard",
         "service_startup",
         "service_shutdown",
         "service_preflight",

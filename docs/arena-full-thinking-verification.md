@@ -1,5 +1,70 @@
 # Draft PR verification — 2026-10-23
 
+## Final handoff review — October 25
+
+The final source checkpoint is `e0509ee82`, including main `93f15930e` and
+migration 574. This check found and fixed one false rejection: a recovered call
+can retain the same provider response in both its uncertain and settled ledger
+entries. The shared route checker now accepts repeated identical, validated
+route evidence for that exact response. Missing, conflicting, malformed or
+unrelated evidence still fails. No new receipt protocol or model-specific bypass
+was added. Two actual-decoder recovery cases failed before the fix; twelve
+regressions and independent negative checks passed afterward.
+
+The complete E2E fixture now includes main's required review-guard read. Its
+NOSUPERUSER test uses a separate migration role because PostgreSQL 18 forbids
+demoting the bootstrap superuser. This changes test setup, not production SQL.
+The final integrated checks passed:
+
+- **1,035 passed, 14 skipped** in the exact early CI trace-integrity and reviewer
+  repair command. The skips require unavailable frozen release source fixtures.
+- **20 passed** in the combined migration-tail, review-guard and ACL checks,
+  including numeric/production migration order and actual local SQL publication.
+  Separate reviewed publication/promotion tests preserve measured scores for an
+  ineligible entrant and adopt an eligible champion as the next baseline.
+- Python compilation, workflow parsing, README/registry alignment, guide byte
+  equality and `git diff --check` passed.
+
+The new [seven-route live check](evidence/full-thinking/final-whitelist-live-review-20261025.json)
+made **17 real provider attempts** through the Arena broker, local worker socket,
+disposable PostgreSQL and raw/readable storage. Five exact routes completed two
+tool continuations and strict final JSON: Mistral, DeepSeek Chat, DeepSeek
+Responses, Reflection and Gemma. Their fifteen replies contained thirteen
+full-thinking turns and two explicit zero-token turns. All **1,186 reported
+reasoning tokens** had returned text; unknown usage and missing-token counts
+were zero. There were **zero client callbacks**. The short tasks do not establish
+the best missing-token threshold or exhaust the configured output caps.
+
+Both GPT-OSS routes returned OpenRouter 404, `Filter by Ignored Providers`, on
+the gateway test account. They are **not fresh passes**. No provider fallback or
+account setting change was used. Earlier successful GPT-OSS evidence still
+replays with its original frozen registry and 8,192-token allowance: three 120b
+responses and six 20b responses. Those replays do not prove current availability.
+
+Final-source offline verification checked all 17 stored wire/host results,
+15 strict input/output pairs, 13 readable full-thinking pairs, 411 events,
+54 context values and seven Markdown views with no errors. The diagnostic runs
+correctly produce no complete ICP training records because they lack real
+scoring labels. Separately, all **79 prior scored training targets** remained
+unchanged (35 candidate, 44 baseline); the native TYCHE evidence retained 85
+ordinary targets plus one verified cap/EOF omission, and all three earlier paid
+continuation replies passed. These replays attempted no network calls and
+preserved source and original artifact hashes.
+
+This task's new $5 OpenRouter allowance is separate from earlier experiments.
+Reported charges are **$0.0035859388**, with **$0.011323** conservatively reserved
+for the two unpriced blocked attempts. A reported subtotal of zero for those
+attempts is not proof that they were free. No paid search/scraping was used.
+
+The README now gives the concise whitelist and settings. Miners retain their
+harnesses and custom tools; existing broker transport is required, custom logs
+and acknowledgments are not. Stored provider-visible evidence can be checked
+without an extra LLM review. This does not prove client consumption, all local
+agent activity, the faithfulness of written reasoning, or training value.
+The PR remains draft and inactive. CI, a compatible baseline, and the existing
+activation requirements remain outstanding; these tests are not production
+deployment verification or a claim that no possible bugs remain.
+
 ## Final October 25 capture verification
 
 The integrated regression at `bfdb5989b` passed **4,415 tests**, with **17

@@ -188,9 +188,11 @@ reasoning mode and output allowance. No miner-specific logging setting is needed
 All model calls, including subagents, must use an approved route. Unsupported
 models return a clear pre-dispatch error; the gateway does not substitute models.
 
-The first approved routes are Chat Completions routes. Native Responses/Codex
-models are not approved by this registry. A miner using those models must choose
-a compatible model and client before entering a future full-thinking round.
+The approved routes include Chat Completions and DeepSeek through Fireworks on
+the Responses API, including Codex clients. See the concise
+[model and settings list](../README.md#upcoming-thinking-model-whitelist).
+Keep the existing broker transport; no custom logging, response receipts, or
+agent architecture changes are required for provider capture.
 The gateway preserves supported reasoning history, tool IDs, and JSON schemas.
 It does not rewrite the submitted agent or promise unchanged answers or latency.
 
@@ -201,8 +203,10 @@ See [the policy and exact whitelist](arena-full-thinking-policy.md) for details.
 
 ## Decision summaries
 
-New or updated model harnesses should report short decision summaries through
-Arena's existing checkpoint helper. Use the same format as the public baseline:
+The existing checkpoint helper can optionally report short decision summaries.
+It is not required for provider reasoning capture or full-thinking eligibility,
+and these summaries do not replace provider-exposed thinking. If you use the
+helper, follow the public baseline's format:
 
 ```python
 from lab_arena_checkpoint import log_decision

@@ -89,6 +89,43 @@ Paid execution uses stable idempotency keys where supported and exact-request bi
 
 The sandbox blocks direct network access. Keep the baseline's broker transport when changing the harness, or implement the same [broker protocol](lab_arena/shim.py) using the [approved operations](lab_arena/operations.py).
 
+### Upcoming thinking-model whitelist
+
+**Draft policy, not active in current rounds.** For rounds that enable
+`full_generated_thinking_v1`, every agent and subagent must use these exact
+OpenRouter routes:
+
+| Model ID | Provider | API |
+| --- | --- | --- |
+| `openai/gpt-oss-120b` | `deepinfra/bf16` | Chat Completions |
+| `openai/gpt-oss-20b` | `deepinfra/bf16` | Chat Completions |
+| `mistralai/mistral-large-4-0` | `mistral/zdr` | Chat Completions |
+| `deepseek/deepseek-v4.1-flash-1017` | `fireworks` | Chat Completions or Responses, including Codex clients |
+| `reflection/beam-1.0-501b-a23b` | `nebius/fp8` | Chat Completions |
+| `google/gemma-4-31b-it` | `coreweave/fp4` | Chat Completions |
+
+Arena pins the provider, enforces ZDR, and enables the tested thinking settings.
+Your OpenRouter account must permit that provider; there is no automatic fallback.
+For local tests, use:
+
+- Chat Completions: `"reasoning": {"effort": "high", "exclude": false}`.
+- Gemma: `"reasoning": {"enabled": true, "exclude": false}` instead.
+- DeepSeek Responses: `"reasoning": {"effort": "high"}`.
+
+Arena sets the combined thinking-and-answer allowance to 8,192 tokens for GPT-OSS
+and 32,768 for the other routes. Keep normal provider conversation history and
+tool-call IDs intact. **Keep your harness and custom tools; no custom logging,
+receipts, or new agent architecture is required.** Arena captures provider
+responses and brokered tool results itself, then checks the stored data.
+Provider summaries and encrypted state alone do not meet the full-thinking rule.
+
+These future rounds use a $6 confirmed sourcing cap per ICP. Champion eligibility
+also requires the research review to pass and at least 80% of ICPs to have complete
+training data. Incomplete ICPs keep their measured scores but are excluded from
+the training dataset; they do not cancel the round. See the
+[policy](docs/arena-full-thinking-policy.md) and
+[versioned route list](lab_arena/reasoning_models.json).
+
 The output below shows the exact supported fields. It is a format example, not a real company claim. `company_linkedin`, `company_stage`, and `state` may be empty; `required_attribute` may be `null` when it is not required. `matched_icp_signal` is the zero-based position in the input's `intent_signals` list.
 
 <details>

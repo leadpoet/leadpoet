@@ -192,7 +192,7 @@ user has accepted this tradeoff.
   verify stored/exported artifacts and publication, and review latency, spend,
   failure rates, and output quality. No production claim is made in this PR.
 - Apply the exact combined migration tail in numeric order through
-  `573-lab-arena-closed-provider-eligible-run-materialization.sql` before activation.
+  `574-lab-arena-review-guard-row-read.sql` before activation.
   This PR's migrations are `565-lab-arena-full-thinking-six-dollar-cap.sql`,
   `566-lab-arena-research-review-result.sql`,
   `567-lab-arena-full-thinking-champion-baseline.sql`,
@@ -200,7 +200,9 @@ user has accepted this tradeoff.
   `569-lab-arena-training-publication-eligibility.sql`, and
   `570-lab-arena-confirmed-full-thinking-final-cost.sql`. Main also includes
   `571-lab-arena-closed-failed-score-host-recovery.sql`,
-  `572-lab-arena-concurrent-baseline-judging.sql`, and migration 573 above.
+  `572-lab-arena-concurrent-baseline-judging.sql`,
+  `573-lab-arena-closed-provider-eligible-run-materialization.sql`, and migration
+  574 above. The review-guard read is required by the current source reviewer.
   Preserve earlier review migrations 562 and 563 and baseline-deadline migration
   564. Use the normal release workflow and retain the source-hash, privilege and
   idempotency checks. The research-review migration preserves both main's

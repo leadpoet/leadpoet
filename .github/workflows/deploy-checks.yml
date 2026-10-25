@@ -102,6 +102,7 @@ jobs:
             tests/lab_arena/training_related_host_result_test.py \
             tests/lab_arena/training_cap_eof_test.py \
             tests/lab_arena/training_tool_error_history_test.py \
+            tests/lab_arena/training_reconciled_route_evidence_test.py \
             tests/lab_arena/full_thinking_continuation_limit_test.py \
             tests/lab_arena/training_eligibility_test.py \
             tests/lab_arena/training_mixed_thinking_coverage_test.py \

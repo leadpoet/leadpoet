@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import coverage
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
 )
@@ -32,6 +33,7 @@ def _finding(
 ) -> dict[str, object]:
     return {
         "target": "industry",
+        "product_coverage": coverage("Enrollment software for universities", url, quote),
         "status": status,
         "observed_value": (
             "University enrollment software" if status != "UNPROVEN" else None

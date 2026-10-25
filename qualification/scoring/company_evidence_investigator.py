@@ -34,6 +34,11 @@ from qualification.scoring.company_fit_decision import (
     _company_name, verified_homepage_brand_name,
 )
 from qualification.scoring.checked_sources import checked_source_provenance
+from qualification.scoring.product_coverage import (
+    CoverageError, ValidatedProductCoverage, compile_plan,
+    response_schema as product_coverage_schema,
+    validate_coverage,
+)
 from qualification.scoring.country_data import US_STATES
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH,
@@ -612,7 +617,37 @@ evidence_url and evidence_quote fields. Return one finding for every requested
 target and no other target.
 VERIFIED means the requested claim is proven. CONTRADICTED means a different
 current value is proven. UNPROVEN means the evidence is absent, ambiguous,
-stale, scoped incorrectly, or conflicting."""
+stale, scoped incorrectly, or conflicting.
+"""
+
+_PRODUCT_COVERAGE_INSTRUCTIONS = """
+For an industry finding with nonempty requested_product_service, return
+product_coverage as compact JSON TEXT in this same submit_findings response;
+otherwise use null. The decoded object has exactly nodes and claims arrays.
+Its nodes are a bounded flat logical tree, in order with IDs p0, p1, etc.
+Each node has id, span (an exact unique continuous substring of the ORIGINAL
+requested_product_service), op (all, any, leaf, example), and children (IDs).
+p0 spans the complete original product criterion. Decompose independent
+mandatory capabilities and shared supplier, customer and channel qualifiers;
+do not hide a compound criterion in one root leaf. ALL requires every child;
+ANY requires one complete alternative and cannot waive shared qualifiers.
+Put shared qualifiers outside alternatives in enclosing ALL nodes. A compound
+name or phrase is not automatically a separate product: interpret the original
+meaning, not just individual words. Examples explicitly introduced by such as,
+for example or e.g. use example nodes and no claims; an example must stop before
+trailing relative clauses, customer restrictions or supply-channel qualifiers.
+All text must belong to a node; gaps may contain only punctuation and logical
+or example connectors. Do not add criteria, standalone-product requirements or
+conditions from required_attribute. Return each leaf ID exactly once in claims,
+with status, activity_role, and up to three evidence URL/quote bindings. Each
+VERIFIED leaf requires supplier/operator proof. Use all loaded company-bound
+pages; several clauses may cite the same exact quote, and a clause may use
+several pages. A source need not use the criterion's exact marketing wording.
+Keep the tree unchanged after it is returned in repair feedback; repair only
+listed clause evidence/statuses. Search only unresolved mandatory clause IDs
+using the remaining existing research allowance. A missing clause is UNPROVEN,
+not CONTRADICTED. Keep the response compact within the existing token budget.
+"""
 
 
 def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
@@ -702,6 +737,8 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "supporting_evidence_quote_1": {"type": "string"},
                                 "supporting_evidence_url_2": {"type": "string"},
                                 "supporting_evidence_quote_2": {"type": "string"},
+                                **({"product_coverage": product_coverage_schema(description=_PRODUCT_COVERAGE_INSTRUCTIONS)}
+                                   if "industry" in requested_targets else {}),
                                 **({"ownership": {
                                     "type": ["object", "null"],
                                     "additionalProperties": False,
@@ -746,6 +783,7 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "supporting_evidence_quote_2", "old_name",
                                 "new_name", "old_domain", "new_domain",
                                 "shared_linkedin_slug", "reason",
+                                *(["product_coverage"] if "industry" in requested_targets else []),
                                 *(["ownership"] if "stage" in requested_targets else []),
                             ],
                         },
@@ -3027,6 +3065,8 @@ def _validated_findings(
     identity_names: Optional[set[str]] = None,
     identity_anchor: Optional[Mapping[str, Any]] = None,
     requested_stage: str = "",
+    requested_product_service: str = "",
+    locked_product_nodes: Optional[list[dict[str, Any]]] = None,
     priority_headquarters_url: str = "",
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
 ) -> Optional[dict[str, dict[str, Any]]]:
@@ -3649,6 +3689,44 @@ def _validated_findings(
                 )
             else:
                 finding["supporting_evidence"] = validated_support
+        if target == "industry" and requested_product_service.strip():
+            def reject_product_citation(url: str, quote: str) -> Optional[str]:
+                # Use exactly the existing activity/source/entity gates for
+                # every additional clause quote, not the looser attribute gate.
+                citation = _validated_findings(
+                    {"findings": [{**raw, "status": "VERIFIED",
+                                   "activity_role": "supplier_operator",
+                                   "observed_industry": raw.get("observed_industry") or "Product activity",
+                                   "evidence_url": url, "evidence_quote": quote}]},
+                    targets=("industry",), fetched_pages=fetched_pages,
+                    fetched_final_urls=fetched_final_urls,
+                    first_party_domains=first_party_domains,
+                    identity_names=attribution_names, identity_anchor=identity_anchor,
+                )
+                checked = (citation or {}).get("industry", {})
+                return None if checked.get("status") == "VERIFIED" else str(
+                    checked.get("reason") or "product citation was not admitted"
+                )
+
+            try:
+                finding["product_coverage_nodes"] = compile_plan(
+                    requested_product_service, raw.get("product_coverage"),
+                )
+                coverage = validate_coverage(
+                    raw.get("product_coverage"), criterion=requested_product_service,
+                    citation_rejection=reject_product_citation,
+                    locked_nodes=locked_product_nodes,
+                )
+                finding["product_coverage"] = coverage
+                if finding["status"] == "VERIFIED" and coverage["status"] != "VERIFIED":
+                    finding.update(status="UNPROVEN", reason="mandatory product clauses remain unproven")
+            except CoverageError as exc:
+                finding["product_coverage_error"] = str(exc)
+                if finding["status"] == "VERIFIED":
+                    finding.update(status="UNPROVEN", reason=str(exc)[:300])
+            if finding["status"] == "UNPROVEN":
+                finding.update(evidence_url="", evidence_quote="", observed_industry="",
+                               observed_subindustry="", activity_role="unresolved")
         findings[target] = finding
         if target == "rebrand" and finding["status"] == "VERIFIED":
             proven_rebrand_domains.update({
@@ -3981,7 +4059,8 @@ async def investigate_company_evidence(
         "requested_employee_buckets": [str(value)[:40] for value in requested_employee_buckets],
         "requested_industry": str(requested_industry or "")[:300],
         "requested_subindustry": str(requested_subindustry or "")[:300],
-        "requested_product_service": str(requested_product_service or "")[:500],
+        # Coverage binds the original criterion; never show a truncated version.
+        "requested_product_service": str(requested_product_service or ""),
         "requested_attribute": str(requested_attribute or "")[:500],
         "requested_geography": str(requested_geography or "")[:300],
         "positive_semantic_review": bool(positive_semantic_review),
@@ -4560,6 +4639,8 @@ async def investigate_company_evidence(
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
             industry_followup_pending = False
+            locked_product_nodes = None
+            product_coverage = None
             industry_previously_proven = False
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
@@ -5019,6 +5100,18 @@ async def investigate_company_evidence(
                         and search_domain not in normalized_query
                     ):
                         raise ValueError("reasoning_forced_tool_arguments_malformed")
+                if forced_industry_search_call and isinstance(product_coverage, ValidatedProductCoverage):
+                    unresolved = set(product_coverage.get("unresolved_ids") or ())
+                    terms = [node["span"] for node in product_coverage["nodes"]
+                             if node["id"] in unresolved]
+                    # One existing search action, now targeted by host-owned
+                    # unresolved spans rather than a truncated prose reason.
+                    query = " ".join([search_name or search_domain, *terms])[:500]
+                    if query.strip():
+                        arguments = {"query": query}
+                        canonical_call = {**canonical_call, "function": {
+                            **canonical_call["function"], "arguments": json.dumps(arguments),
+                        }}
                 if required_tool:
                     forced_next_tool = ""
                     forced_stage_search_pending = False
@@ -5032,6 +5125,8 @@ async def investigate_company_evidence(
                         identity_names=identity_names,
                         identity_anchor=identity_anchor,
                         requested_stage=normalized_requested_stage,
+                        requested_product_service=requested_product_service,
+                        locked_product_nodes=locked_product_nodes,
                         structured_headquarters_evidence=structured_headquarters_evidence,
                         priority_headquarters_url=(
                             _priority_headquarters_navigation_source(
@@ -5086,6 +5181,9 @@ async def investigate_company_evidence(
                         for item in arguments["findings"]
                         if isinstance(item, Mapping)
                     }
+                    product_coverage = (claims.get("industry") or {}).get("product_coverage")
+                    if locked_product_nodes is None and (claims.get("industry") or {}).get("product_coverage_nodes"):
+                        locked_product_nodes = copy.deepcopy(claims["industry"]["product_coverage_nodes"])
                     rejected = []
                     for target, finding in claims.items():
                         submitted = submitted_findings.get(target, {})
@@ -5180,15 +5278,18 @@ async def investigate_company_evidence(
                     unresolved_industry_capability = bool(
                         not industry_previously_proven
                         and industry_finding.get("status") == "UNPROVEN"
-                        and submitted_industry.get("status") == "UNPROVEN"
-                        # Prose identifies a research gap, never proves a fact.
-                        # An honest generic exhausted search stays complete.
-                        and bool(re.search(
+                        and (
+                            bool(isinstance(product_coverage, ValidatedProductCoverage)
+                                 and product_coverage.get("unresolved_ids"))
+                            or (not requested_product_service.strip()
+                                and submitted_industry.get("status") == "UNPROVEN"
+                                and bool(re.search(
                             r"\bmissing\b|\bnot (?:yet )?(?:proven|established)\b|"
                             r"\b(?:does|do) not (?:prove|establish)\b",
                             str(submitted_industry.get("reason") or ""),
                             flags=re.I,
-                        ))
+                                )))
+                        )
                         and not industry_followup_search_completed
                     )
                     force_industry_search = bool(
@@ -5453,6 +5554,13 @@ async def investigate_company_evidence(
                             "ok": False,
                             "error": "deterministic_evidence_validation_failed",
                             "rejected_findings": rejected,
+                            **({"product_coverage": {
+                                "locked_nodes": [{key: node[key] for key in ("id", "span", "op", "children")}
+                                                 for node in locked_product_nodes],
+                                "unresolved_ids": (product_coverage or {}).get("unresolved_ids", []),
+                                "citation_issues": (product_coverage or {}).get("citation_issues", {}),
+                                "error": industry_finding.get("product_coverage_error", ""),
+                            }} if locked_product_nodes is not None else {}),
                             **(
                                 {
                                     "untrusted_non_rejected_source_context": (

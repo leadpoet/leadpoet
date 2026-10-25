@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import coverage
 
 
 UNIBUDDY_URL = "https://unibuddy.com/"
@@ -99,6 +100,22 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
             "Unibuddy supplies a platform used for enrollment and student "
             "communication."
         ),
+    )
+    # This is a declared model response for the full-criterion transport and
+    # supplier-role protocol control, not a real-world entailment label.
+    def n(i, span, op="leaf", children=()):
+        return {"id": f"p{i}", "span": span, "op": op, "children": list(children)}
+    finding["product_coverage"] = coverage(
+        requested_product_service, UNIBUDDY_URL, UNIBUDDY_QUOTE,
+        nodes=[
+            n(0, requested_product_service, "all", ["p1", "p2", "p3", "p4"]),
+            n(1, "A student"),
+            n(2, "enrollment, learning, or campus-operations", "any", ["p5", "p6", "p7"]),
+            n(3, "platform used by education providers"),
+            n(4, "to manage admissions, programs, and learner workflows.", "all", ["p8", "p9", "p10", "p11"]),
+            n(5, "enrollment"), n(6, "learning"), n(7, "campus-operations"),
+            n(8, "to manage"), n(9, "admissions"), n(10, "programs"), n(11, "learner workflows"),
+        ], unproven=("p6", "p7"),
     )
     requests = []
 

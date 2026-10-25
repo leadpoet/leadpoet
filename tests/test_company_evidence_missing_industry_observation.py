@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import coverage
 from tests.test_company_evidence_judgment_reserve import (
     _Clock, _finding as _generic_finding, _response, _run_industry,
 )
@@ -21,6 +22,7 @@ FINDING = CASE["finding"]
 URL = CASE["source"]["url"]
 QUOTE = FINDING["evidence_quote"]
 OBSERVATION = "DNA sequencing and multi-omics technology for research markets"
+PRODUCT = "DNA sequencing platform for research markets"
 
 
 def _validate(finding, *, source_text=None):
@@ -139,7 +141,7 @@ def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
                 - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS
             )
             return 200, _response("submit_findings", {
-                "findings": [FINDING, {
+                "findings": [{**FINDING, "product_coverage": coverage(PRODUCT, URL, QUOTE)}, {
                     **retained,
                     **({"evidence_quote": "An invented attribute quote."}
                        if attribute_quote_rejected else {}),
@@ -176,6 +178,7 @@ def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
         )
         assert "nonempty source-grounded" in properties["observed_industry"]["description"]
         corrected = {**FINDING, "observed_industry": OBSERVATION} if repair else FINDING
+        corrected = {**corrected, "product_coverage": coverage(PRODUCT, URL, QUOTE)}
         return 200, _response("submit_findings", {
             "findings": [corrected, retained] if attribute_quote_rejected else [corrected],
         }, call=len(requests))
@@ -194,10 +197,7 @@ def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
         targets=("industry", "required_attribute"),
         requested_industry="Biotechnology",
         requested_subindustry="Therapeutics and platform biotech",
-        requested_product_service=(
-            "A biotechnology company developing therapeutic, diagnostic, or "
-            "platform-based life sciences products for clinical or commercial use."
-        ),
+        requested_product_service=PRODUCT,
         requested_attribute=(
             "Develops regulated biological products, therapeutic candidates, "
             "or platform technologies for the life sciences market."

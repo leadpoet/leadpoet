@@ -6,6 +6,8 @@ import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring import lead_scorer
+from qualification.scoring.product_coverage import validate_coverage
+from tests.product_coverage_fixtures import coverage
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
@@ -134,6 +136,20 @@ def _finding(target: str, **overrides):
         "reason": "verified",
     }
     values.update(overrides)
+    if target == "industry" and values["status"] == "VERIFIED":
+        # The investigator is mocked below. Supply its host-validated receipt
+        # as well as its global finding; source admission is tested separately.
+        criterion = _icp().product_service
+        nodes = [
+            {"id": "p0", "span": criterion, "op": "all", "children": ["p1", "p2", "p3"]},
+            {"id": "p1", "span": "Platform for", "op": "leaf", "children": []},
+            {"id": "p2", "span": "student enrollment", "op": "leaf", "children": []},
+            {"id": "p3", "span": "campus operations", "op": "leaf", "children": []},
+        ]
+        values["product_coverage"] = validate_coverage(
+            coverage(criterion, values["evidence_url"], values["evidence_quote"], nodes=nodes),
+            criterion=criterion, citation_rejection=lambda url, quote: None,
+        )
     return values
 
 

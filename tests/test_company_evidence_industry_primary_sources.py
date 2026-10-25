@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from qualification.scoring import company_evidence_investigator as inv
+from tests.product_coverage_fixtures import coverage
 
 
 QUOTE = "Nitra supplies an operating platform for healthcare practices."
@@ -118,6 +119,7 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
     requests = []
     queries = []
     url = "https://nitra.com/solutions/scheduling"
+    criterion = "A practice platform providing patient scheduling."
 
     async def post(_session, _url, *, headers, payload):
         del headers
@@ -129,13 +131,16 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
             name, arguments = "submit_findings", {"findings": [finding(
                 status="UNPROVEN", activity_role="unresolved", evidence_url="",
                 evidence_quote="", reason="Patient scheduling capability is not yet proven.",
+                product_coverage=coverage(criterion, url, QUOTE, unproven=("p0",)),
             )]}
         elif turn == 3:
             name, arguments = "search_web", {"query": "Nitra patient scheduling"}
         elif turn == 4:
             name, arguments = "fetch_page", {"url": url}
         else:
-            name, arguments = "submit_findings", {"findings": [finding(evidence_url=url)]}
+            name, arguments = "submit_findings", {"findings": [finding(
+                evidence_url=url, product_coverage=coverage(criterion, url, QUOTE),
+            )]}
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": f"call-{turn}", "type": "function", "function": {
                 "name": name, "arguments": json.dumps(arguments),
@@ -156,11 +161,11 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
     result = asyncio.run(inv.investigate_company_evidence(
         company_locator={"name": "Nitra", "website": "https://nitra.com/"},
         targets=("industry",), requested_industry="Healthcare software",
-        requested_product_service="A practice platform providing patient scheduling.",
+        requested_product_service=criterion,
         verified_homepage_identity={"normalized_name": "Nitra", "registrable_dns_domain": "nitra.com"},
     ))
     assert result["claims"]["industry"]["status"] == "VERIFIED"
-    assert queries == ["Nitra healthcare software", "Nitra patient scheduling"]
+    assert queries == ["Nitra healthcare software", "Nitra " + criterion]
     assert result["usage"]["search_calls"] == 2
     assert result["usage"]["fetch_calls"] == 1
     assert result["usage"]["reasoning_turns"] == 5

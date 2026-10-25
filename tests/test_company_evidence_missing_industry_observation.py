@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
-from tests.product_coverage_fixtures import coverage
 from tests.test_company_evidence_judgment_reserve import (
     _Clock, _finding as _generic_finding, _response, _run_industry,
 )
@@ -124,7 +123,6 @@ def test_missing_metadata_does_not_bypass_evidence_or_role_checks(
 def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
     monkeypatch, repair, attribute_quote_rejected,
 ):
-    coverage(PRODUCT, URL, QUOTE)
     clock = _Clock()
     requests = []
     retained = {
@@ -142,7 +140,7 @@ def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
                 - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS
             )
             return 200, _response("submit_findings", {
-                "findings": [{**FINDING, "product_coverage": coverage(PRODUCT, URL, QUOTE)}, {
+                "findings": [{**FINDING, "product_coverage": "VERIFIED"}, {
                     **retained,
                     **({"evidence_quote": "An invented attribute quote."}
                        if attribute_quote_rejected else {}),
@@ -179,7 +177,7 @@ def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
         )
         assert "nonempty source-grounded" in properties["observed_industry"]["description"]
         corrected = {**FINDING, "observed_industry": OBSERVATION} if repair else FINDING
-        corrected = {**corrected, "product_coverage": coverage(PRODUCT, URL, QUOTE)}
+        corrected = {**corrected, "product_coverage": "VERIFIED"}
         return 200, _response("submit_findings", {
             "findings": [corrected, retained] if attribute_quote_rejected else [corrected],
         }, call=len(requests))

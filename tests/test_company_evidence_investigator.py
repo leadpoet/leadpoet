@@ -3909,8 +3909,6 @@ def test_non_supplier_industry_role_gets_one_bounded_followup(
                 )},
                 "failure_reason": "",
             }
-        from tests.product_coverage_fixtures import coverage, trusted_plan
-
         criterion = _kwargs["requested_product_service"]
         raw = _finding(
             "industry",
@@ -3920,7 +3918,7 @@ def test_non_supplier_industry_role_gets_one_bounded_followup(
             activity_role="supplier_operator",
             evidence_url=product_url,
             evidence_quote=product_quote,
-            product_coverage=coverage(criterion, product_url, product_quote),
+            product_coverage="VERIFIED",
         )
         # This mock stands in for the completed investigator, including its
         # normal host validation. Raw VERIFIED labels have no proof authority.
@@ -3930,7 +3928,7 @@ def test_non_supplier_industry_role_gets_one_bounded_followup(
             fetched_final_urls={product_url: product_url},
             first_party_domains={"acme.example"}, identity_names={"acme"},
             identity_anchor={"submitted_domain": "acme.example", "observed_domain": "acme.example"},
-            requested_product_service=criterion, product_plan=trusted_plan(criterion),
+            requested_product_service=criterion,
         )
         return {
             "claims": claims,

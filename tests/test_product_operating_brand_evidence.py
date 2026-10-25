@@ -1,8 +1,6 @@
 """Source/role controls; model semantic interpretation needs live comparison."""
 from qualification.scoring import company_evidence_investigator as inv
 from qualification.scoring.product_coverage import coverage_matches
-from qualification.scoring.product_coverage import get_cached_plan
-from tests.product_coverage_fixtures import coverage
 
 
 CRITERION = "Manufactures interior and exterior surfaces"
@@ -10,20 +8,13 @@ URL = "https://orbit.example/products"
 
 
 def validate(quote, role):
-    nodes = [
-        {"id": "p0", "span": CRITERION, "op": "all", "children": ["p1", "p2", "p3"]},
-        {"id": "p1", "span": "Manufactures", "op": "leaf", "children": []},
-        {"id": "p2", "span": "interior", "op": "leaf", "children": []},
-        {"id": "p3", "span": "exterior surfaces", "op": "leaf", "children": []},
-    ]
     raw = {"target": "industry", "status": "VERIFIED", "observed_industry": "Surface products",
            "activity_role": role, "evidence_url": URL, "evidence_quote": quote,
-           "product_coverage": coverage(CRITERION, URL, quote, nodes=nodes)}
+           "product_coverage": "VERIFIED"}
     return inv._validated_findings(
         {"findings": [raw]}, targets=("industry",), fetched_pages={URL: quote},
         fetched_final_urls={URL: URL}, first_party_domains={"orbit.example"},
         identity_names={"orbitproducts"}, requested_product_service=CRITERION,
-        product_plan=get_cached_plan(CRITERION, model=inv.POSITIVE_SEMANTIC_REVIEW_MODEL),
         identity_anchor={"submitted_name": "Orbit Products", "submitted_domain": "orbit.example",
                          "observed_domain": "orbit.example", "verified_domain": "orbit.example"},
     )["industry"]
@@ -50,7 +41,7 @@ def test_investment_portfolio_activity_cannot_replace_supplier_role():
 def test_brand_product_quote_needs_parent_binding_when_homepage_identity_is_incomplete():
     result = validate("Terra Tile manufactures interior and exterior surfaces.", "supplier_operator")
     assert result["status"] == "UNPROVEN"
-    assert not coverage_matches(result["product_coverage"], CRITERION)
+    assert not coverage_matches(result.get("product_coverage"), CRITERION)
 
 
 def test_industry_instructions_distinguish_operating_brand_from_investment_and_stage():

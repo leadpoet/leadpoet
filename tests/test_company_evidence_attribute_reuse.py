@@ -14,6 +14,7 @@ import pytest
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
 from tests.product_coverage_fixtures import initial_investigation_content
+from tests.product_coverage_fixtures import initial_loaded_sources
 from tests.product_coverage_fixtures import native_product_post
 
 
@@ -165,7 +166,7 @@ def test_industry_pass_does_not_override_semantic_negative_or_retry_it(
     sent = json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
     assert sent["requested_attribute"] == attribute
     assert sent["requested_product_service"] == PRODUCT
-    assert extra_text in sent["prefetched_sources"][0]["text"] or not extra_text
+    assert extra_text in initial_loaded_sources(requests[0])[0]["text"] or not extra_text
     prompt = " ".join(requests[0]["messages"][0]["content"].split())
     assert "every mandatory condition still needs proof there" in prompt
     assert len(requests[0]["messages"][0]["content"]) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS

@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from qualification.scoring import company_evidence_investigator as inv
-from tests.product_coverage_fixtures import coverage
 
 
 QUOTE = "Nitra supplies an operating platform for healthcare practices."
@@ -180,7 +179,6 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
     queries = []
     url = "https://nitra.com/solutions/scheduling"
     criterion = "A practice platform providing patient scheduling."
-    coverage(criterion, url, QUOTE)
 
     async def post(_session, _url, *, headers, payload):
         del headers
@@ -192,7 +190,7 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
             name, arguments = "submit_findings", {"findings": [finding(
                 status="UNPROVEN", activity_role="unresolved", evidence_url="",
                 evidence_quote="", reason="Patient scheduling capability is not yet proven.",
-                product_coverage=coverage(criterion, url, QUOTE, unproven=("p0",)),
+                product_coverage="UNPROVEN",
             )]}
         elif turn == 3:
             name, arguments = "search_web", {"query": "Nitra patient scheduling"}
@@ -200,7 +198,7 @@ def test_missing_capability_uses_remaining_search_after_generic_research(monkeyp
             name, arguments = "fetch_page", {"url": url}
         else:
             name, arguments = "submit_findings", {"findings": [finding(
-                evidence_url=url, product_coverage=coverage(criterion, url, QUOTE),
+                evidence_url=url, product_coverage="VERIFIED",
             )]}
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": f"call-{turn}", "type": "function", "function": {

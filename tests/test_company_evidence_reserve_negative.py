@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
-from tests.product_coverage_fixtures import coverage, trusted_plan
 from tests.test_company_evidence_submit_retry import URL, QUOTE, _finding, _tool_response
 
 
@@ -21,7 +20,6 @@ def test_ordinary_reserve_denial_preserves_complete_final(
     monkeypatch, final_status, denied_tool, other_unproven,
 ):
     now = [0.0]
-    trusted_plan(CRITERION)
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
     monkeypatch.setenv("EXA_API_KEY", "offline-test")
     monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 2)
@@ -48,10 +46,7 @@ def test_ordinary_reserve_denial_preserves_complete_final(
             )
             name, arguments = "fetch_page", {"url": "https://acme.example/news"}
         else:
-            finding = _finding(product_coverage=coverage(
-                CRITERION, URL, QUOTE,
-                unproven=("p0",) if final_status == "UNPROVEN" else (),
-            ))
+            finding = _finding(product_coverage=final_status)
             if final_status == "UNPROVEN":
                 finding.update(
                     status="UNPROVEN", observed_value="", observed_industry="",

@@ -8,6 +8,7 @@ import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
 from tests.product_coverage_fixtures import initial_investigation_content
+from tests.product_coverage_fixtures import initial_loaded_sources
 from tests.product_coverage_fixtures import native_product_post
 from tests.test_company_evidence_investigator import _finding
 
@@ -109,13 +110,13 @@ def run_case(monkeypatch, *, stage_cached=True, geography=False, pricing=False,
 
 @pytest.mark.parametrize("pricing", [False, True])
 def test_cached_series_b_and_homepage_admit_terms_with_pricing_preferred(monkeypatch, pricing):
-    result, initial, fetched, queries, _ = run_case(monkeypatch, pricing=pricing)
+    result, initial, fetched, queries, requests = run_case(monkeypatch, pricing=pricing)
     selected = PRICING if pricing else TERMS
     assert fetched == [selected]
     assert initial["server_priority_submitted_source"] == {
         "url": selected, "ok": True, "cache_hit": False,
         "notice": "server_selected_first_party_locator_is_untrusted_evidence"}
-    assert {page["url"] for page in initial["prefetched_sources"]} == {HOME, STAGE, selected}
+    assert {page["url"] for page in initial_loaded_sources(requests[0])} == {HOME, STAGE, selected}
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
     assert result["usage"]["fetch_calls"] == 1
@@ -123,10 +124,10 @@ def test_cached_series_b_and_homepage_admit_terms_with_pricing_preferred(monkeyp
 
 
 def test_cached_disputed_stage_remains_loaded_and_current_search_required(monkeypatch):
-    result, initial, fetched, queries, _ = run_case(monkeypatch, dispute=True)
+    result, initial, fetched, queries, requests = run_case(monkeypatch, dispute=True)
     assert fetched == [TERMS]
-    assert any(page == {"url": STAGE, "text": STAGE_QUOTE}
-               for page in initial["prefetched_sources"])
+    assert any(page["url"] == STAGE and page["text"] == STAGE_QUOTE
+               for page in initial_loaded_sources(requests[0]))
     assert initial["prior_observations"]["stage_dispute_urls"] == [STAGE]
     assert len(queries) == 2
     assert result["claims"]["stage"]["status"] == "VERIFIED"
@@ -191,7 +192,7 @@ def test_terms_fetch_does_not_extend_admission_deadline(monkeypatch):
 def test_fresh_terms_keeps_page_and_model_message_text_bounds(monkeypatch):
     result, initial, fetched, _, requests = run_case(monkeypatch, long_text=True)
     assert fetched == [TERMS]
-    terms = next(page for page in initial["prefetched_sources"] if page["url"] == TERMS)
+    terms = next(page for page in initial_loaded_sources(requests[0]) if page["url"] == TERMS)
     assert len(terms["text"]) <= investigator.MAX_PAGE_CHARACTERS
     assert terms["text"].startswith(TERMS_QUOTE)
     assert len(initial_investigation_content(requests[0])) <= investigator.OPENROUTER_MAX_CONTENT_CHARS

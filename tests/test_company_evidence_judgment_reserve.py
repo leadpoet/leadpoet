@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
-from tests.product_coverage_fixtures import coverage
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
 )
@@ -33,7 +32,7 @@ def _finding(
 ) -> dict[str, object]:
     return {
         "target": "industry",
-        "product_coverage": coverage("Enrollment software for universities", url, quote),
+        "product_coverage": status,
         "status": status,
         "observed_value": (
             "University enrollment software" if status != "UNPROVEN" else None
@@ -76,8 +75,6 @@ def _run_industry(monkeypatch, post_json, clock: _Clock, **kwargs):
     requested_product_service = kwargs.pop(
         "requested_product_service", "Enrollment software for universities",
     )
-    if requested_product_service:
-        coverage(requested_product_service, URL, QUOTE)
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", post_json)
@@ -204,7 +201,6 @@ def test_freshly_fetched_evidence_is_judged_after_late_search_is_withheld(
     monkeypatch.setattr(investigator, "_fetch_page", fake_fetch)
     monkeypatch.setattr(investigator, "_search_web", fail_search)
     monkeypatch.setattr(investigator, "time", clock)
-    coverage("Enrollment software for universities", URL, QUOTE)
     result = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("industry",),

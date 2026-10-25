@@ -7,8 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
-from tests.product_coverage_fixtures import initial_investigation_content
-from tests.product_coverage_fixtures import coverage
+from tests.product_coverage_fixtures import initial_investigation_content, initial_loaded_sources
 
 
 UNIBUDDY_URL = "https://unibuddy.com/"
@@ -102,22 +101,9 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
             "communication."
         ),
     )
-    # This is a declared model response for the full-criterion transport and
-    # supplier-role protocol control, not a real-world entailment label.
-    def n(i, span, op="leaf", children=()):
-        return {"id": f"p{i}", "span": span, "op": op, "children": list(children)}
-    finding["product_coverage"] = coverage(
-        requested_product_service, UNIBUDDY_URL, UNIBUDDY_QUOTE,
-        nodes=[
-            n(0, requested_product_service, "all", ["p1", "p2", "p3", "p4"]),
-            n(1, "A student"),
-            n(2, "enrollment, learning, or campus-operations", "any", ["p5", "p6", "p7"]),
-            n(3, "platform used by education providers"),
-            n(4, "to manage admissions, programs, and learner workflows.", "all", ["p8", "p9", "p10", "p11"]),
-            n(5, "enrollment"), n(6, "learning"), n(7, "campus-operations"),
-            n(8, "to manage"), n(9, "admissions"), n(10, "programs"), n(11, "learner workflows"),
-        ], unproven=("p6", "p7"),
-    )
+    # This declares a model whole-criterion judgment; the host still validates
+    # the quote and supplier role. It is not a real-world entailment label.
+    finding["product_coverage"] = "VERIFIED"
     requests = []
 
     async def fake_post(_session, _url, *, headers, payload):
@@ -191,8 +177,8 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
     assert request_document["requested_subindustry"] == requested_subindustry
     assert request_document["requested_product_service"] == requested_product_service
     assert request_document["requested_attribute"] == requested_attribute
-    assert request_document["prefetched_sources"] == [
-        {"url": UNIBUDDY_URL, "text": UNIBUDDY_QUOTE}
+    assert initial_loaded_sources(requests[0]) == [
+        {"url": UNIBUDDY_URL, "final_url": UNIBUDDY_URL, "text": UNIBUDDY_QUOTE}
     ]
 
 
@@ -329,7 +315,7 @@ def test_prompt_preserves_negative_controls_and_all_required_conjuncts():
         "by required_attribute" in prompt
     )
     assert "condition that is not separately checked by the required attribute" not in prompt
-    assert "requested_product_service, industry VERIFIED requires a VERIFIED product_coverage aggregate" in prompt
+    assert "return one explicit whole-criterion product_coverage verdict" in prompt
     assert "The independent required-attribute check must still prove" in prompt
     assert "An adjacent activity for the same customer group is UNPROVEN" in prompt
     assert "criterion explicitly lists those capabilities or sectors as OR alternatives" in prompt

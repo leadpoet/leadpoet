@@ -2507,8 +2507,8 @@ async def _fetch_exa_exact_page(
             not isinstance(item, Mapping) for item in statuses
         ):
             return {"ok": False, "error": "invalid_contents_status"}
-        # Exa authenticated the API request; this exact target denied access.
-        # Do not confuse a crawl status with API auth, credits or an outage.
+        # Exa authenticated the API request and bound this crawl status to
+        # the exact target. Do not confuse it with API auth, credits or outage.
         if len(statuses) == 1 and body.get("results") == []:
             source = statuses[0]
             error = source.get("error")
@@ -2517,10 +2517,13 @@ async def _fetch_exa_exact_page(
                 and source.get("status") == "error"
                 and isinstance(error, Mapping)
                 and type(error.get("httpStatusCode")) is int
-                and error["httpStatusCode"] in {401, 403}
+                and error["httpStatusCode"] in {401, 403, 404, 410}
                 and error.get("tag") == "CRAWL_HTTP_%d" % error["httpStatusCode"]
             ):
-                return {"ok": False, "error": "source_access_denied"}
+                return {"ok": False, "error": {
+                    401: "source_access_denied", 403: "source_access_denied",
+                    404: "source_not_found", 410: "source_gone",
+                }[error["httpStatusCode"]]}
         if any(
             item.get("status") == "error" or item.get("error")
             for item in statuses
@@ -2565,7 +2568,7 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     elif raw_error in {
         "invalid_url", "unsupported_binary_content", "empty_page",
         "provider_request_refused", "provider_diagnostic_body",
-        "source_access_denied",
+        "source_access_denied", "source_not_found", "source_gone",
     }:
         error_class = raw_error
     else:
@@ -4062,15 +4065,20 @@ async def investigate_company_evidence(
                     primary_timeout = exc
                     result = {"ok": False, "error": "timeout"}
                 except _ArenaProviderFetchError as exc:
-                    if exc.broker_status not in (502, 503):
+                    if exc.broker_status not in (404, 502, 503):
                         raise
                     # Preserve the failed fetch so the existing bounded,
                     # exact-URL fallback can recover it without trusting its body.
-                    result = {"ok": False, "error": f"http_{exc.broker_status}"}
+                    # An unbound broker 404 is not proof that the target is absent.
+                    result = {"ok": False, "error": (
+                        "broker_http_404" if exc.broker_status == 404
+                        else f"http_{exc.broker_status}"
+                    )}
                 fetch_outcomes.append(_fetch_outcome(url, result))
                 if (
                     result.get("error") in {
-                        "http_502", "http_503", "timeout", "provider_diagnostic_body",
+                        "broker_http_404", "http_502", "http_503", "timeout",
+                        "provider_diagnostic_body",
                         "provider_request_refused",
                     }
                     and not result.get("ok")

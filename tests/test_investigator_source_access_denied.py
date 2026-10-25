@@ -38,6 +38,37 @@ def test_exact_source_denial_is_typed(monkeypatch, status):
     assert investigator._fetch_outcome(URL, result)["error_class"] == "source_access_denied"
 
 
+@pytest.mark.parametrize("status,expected", [(404, "source_not_found"), (410, "source_gone")])
+def test_exact_exa_crawl_absence_is_typed(monkeypatch, status, expected):
+    body = copy.deepcopy(FLIGHTPATH_401)
+    body["statuses"][0]["error"] = {"httpStatusCode": status, "tag": f"CRAWL_HTTP_{status}"}
+    result = _classify(monkeypatch, body)
+    assert result == {"ok": False, "error": expected}
+    assert investigator._fetch_outcome(URL, result)["error_class"] == expected
+
+
+@pytest.mark.parametrize("fault", [
+    "wrong_url", "missing_id", "wrong_tag", "string_status", "bool_status",
+    "duplicate", "text_result", "missing_results", "top_error", "not_error",
+])
+def test_unbound_exa_404_cannot_claim_source_absence(monkeypatch, fault):
+    body = copy.deepcopy(FLIGHTPATH_401)
+    source = body["statuses"][0]
+    source["error"] = {"httpStatusCode": 404, "tag": "CRAWL_HTTP_404"}
+    if fault == "wrong_url": source["id"] = ALTERNATE
+    elif fault == "missing_id": source.pop("id")
+    elif fault == "wrong_tag": source["error"]["tag"] = "CRAWL_HTTP_410"
+    elif fault == "string_status": source["error"]["httpStatusCode"] = "404"
+    elif fault == "bool_status": source["error"]["httpStatusCode"] = True
+    elif fault == "duplicate": body["statuses"].append(copy.deepcopy(source))
+    elif fault == "text_result": body["results"] = [{"url": URL, "text": QUOTE}]
+    elif fault == "missing_results": body.pop("results")
+    elif fault == "top_error": body["error"] = {"message": "API unavailable"}
+    elif fault == "not_error": source["status"] = "success"
+    result = _classify(monkeypatch, body)
+    assert result["error"] != "source_not_found"
+
+
 @pytest.mark.parametrize("fault", [
     "wrong_url", "missing_id", "wrong_tag", "string_status", "bool_status",
     "rate_limit", "credit", "server", "success", "duplicate", "text_result",

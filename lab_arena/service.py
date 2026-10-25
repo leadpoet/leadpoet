@@ -59,7 +59,7 @@ _OBSERVATION_FINALIZATION_GRACE = timedelta(seconds=180)
 
 
 class _PublicResultEvidenceReads(dict):
-    """One response's evidence and bounded raw reads; never shared by requests."""
+    """One validation call's evidence and bounded raw reads; never shared."""
 
     MAX_IDENTITIES = 128
     MAX_BYTES = 8 * 1024 * 1024
@@ -3336,7 +3336,7 @@ class ArenaService:
         """Read and fully bind one immutable company judgment variant."""
 
         reads = evidence_reads if isinstance(evidence_reads, _PublicResultEvidenceReads) else None
-        # Only public_results supplies this response-local map. Keep invalid
+        # Public results and publication supply this call-local map. Keep invalid
         # argument types on the original validation path (bool/float slots
         # must not alias an already validated integer slot).
         identity = (
@@ -4233,6 +4233,10 @@ class ArenaService:
         evidence_reads: Optional[_PublicResultEvidenceReads] = None,
     ) -> Dict[int, int]:
         """Count qualified entities per ICP in one judgment/object pass."""
+        # Keep immutable proof reuse within this participant qualification call,
+        # rather than retaining company evidence across the whole publication.
+        if publication_reads is not None and evidence_reads is None:
+            evidence_reads = _PublicResultEvidenceReads()
         policy = round_row["configuration_doc"]["scorer_policy"]
         round_id = str(round_row["round_id"])
         icps = (

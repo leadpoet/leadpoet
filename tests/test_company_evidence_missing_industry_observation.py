@@ -101,8 +101,8 @@ def test_contradicted_industry_requires_metadata_and_correct_activity_role():
     ({"activity_role": "unresolved"}, None,
      investigator.INDUSTRY_RELATIONSHIP_UNPROVEN_REASON),
     ({"evidence_url": "https://other.example/product"}, None,
-     "activity and headquarters evidence must use an independently bound "
-     "first-party company domain"),
+     "industry evidence must use independently bound "
+     "first-party requested and fetched final URLs"),
     ({"evidence_quote": "Other Company supplies sequencing products."},
      "Other Company supplies sequencing products.",
      "source quote did not identify the investigated company"),

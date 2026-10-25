@@ -15,6 +15,7 @@ def _validate(finding):
         {"findings": [finding]},
         targets=("industry",),
         fetched_pages={URL: QUOTE},
+        fetched_final_urls={URL: URL},
         first_party_domains={"acme.example"},
         identity_names={"acme"},
         identity_anchor={

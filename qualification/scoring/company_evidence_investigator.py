@@ -3589,8 +3589,7 @@ def _validated_findings(
                         or _registrable_domain(evidence_url) in proven_rebrand_domains
                     )
                     and (
-                        target != "geography"
-                        or _independently_bound_first_party_url(
+                        _independently_bound_first_party_url(
                             str((fetched_final_urls or {}).get(evidence_url) or ""),
                             first_party_domains, identity_anchor or {},
                         )
@@ -3633,8 +3632,8 @@ def _validated_findings(
                         "headquarters evidence must use independently bound "
                         "first-party requested and fetched final URLs"
                         if target == "geography" else
-                        "activity and headquarters evidence must use an "
-                        "independently bound first-party company domain"
+                        "industry evidence must use independently bound "
+                        "first-party requested and fetched final URLs"
                     ),
                 )
             elif (

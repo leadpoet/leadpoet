@@ -107,6 +107,66 @@ def test_first_party_path_is_preserved():
     assert validate(QUOTE, url="https://nitra.com/platform")["status"] == "VERIFIED"
 
 
+def test_named_first_party_industry_rejects_unrelated_final_redirect():
+    assert validate(
+        QUOTE, url="https://nitra.com/platform",
+        final_url="https://unrelated.example/copy",
+    )["status"] == "UNPROVEN"
+
+
+def test_named_first_party_industry_requires_fetched_final_map():
+    url = "https://nitra.com/platform"
+    result = inv._validated_findings(
+        {"findings": [finding(evidence_url=url)]}, targets=("industry",),
+        fetched_pages={url: QUOTE}, first_party_domains={"nitra.com"},
+        identity_names={"nitra"},
+        identity_anchor={"submitted_domain": "nitra.com",
+                         "observed_domain": "nitra.com"},
+    )
+    assert result["industry"]["status"] == "UNPROVEN"
+
+
+def test_named_first_party_www_final_redirect_remains_admitted():
+    assert validate(
+        QUOTE, url="https://nitra.com/platform",
+        final_url="https://www.nitra.com/platform",
+    )["status"] == "VERIFIED"
+
+
+def test_verified_rebrand_domain_can_bind_first_party_final_redirect():
+    old_url = "https://oldnitra.example/about"
+    new_url = "https://nitra.com/about"
+    continuity = (
+        "Old Nitra formerly known as Nitra. "
+        "oldnitra.example is now nitra.com."
+    )
+    rebrand = {
+        "target": "rebrand", "status": "VERIFIED", "observed_value": "Nitra",
+        "evidence_url": old_url, "evidence_quote": continuity,
+        "old_name": "Old Nitra", "new_name": "Nitra",
+        "old_domain": "oldnitra.example", "new_domain": "nitra.com",
+        "shared_linkedin_slug": "nitra", "reason": "Explicit continuity.",
+    }
+    result = inv._validated_findings(
+        {"findings": [finding(evidence_url=old_url), rebrand]},
+        targets=("industry", "rebrand"),
+        fetched_pages={old_url: continuity + " " + QUOTE},
+        fetched_final_urls={old_url: new_url},
+        first_party_domains={"oldnitra.example", "nitra.com"},
+        identity_names={"nitra"},
+        identity_anchor={
+            "submitted_name": "Nitra", "observed_name": "Nitra",
+            "submitted_domain": "nitra.com", "observed_domain": "nitra.com",
+            "verified_domain": "nitra.com",
+            "verified_rebrand_old_domain": "oldnitra.example",
+            "verified_rebrand_new_domain": "nitra.com",
+            "verified_rebrand_linkedin_slug": "nitra",
+        },
+    )
+    assert result["rebrand"]["status"] == "VERIFIED"
+    assert result["industry"]["status"] == "VERIFIED"
+
+
 def test_prompt_separates_examples_and_missing_capability_research():
     prompt = " ".join(inv._SYSTEM_PROMPT.split())
     assert "such as" in prompt

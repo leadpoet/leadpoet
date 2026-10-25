@@ -4386,6 +4386,7 @@ def test_activity_and_headquarters_findings_require_bound_direct_evidence():
         {"findings": [industry]},
         targets=("industry",),
         fetched_pages={industry_url: industry_quote},
+        fetched_final_urls={industry_url: industry_url},
         first_party_domains={"acme.example"},
         identity_names={"acme"},
         identity_anchor={
@@ -4400,6 +4401,7 @@ def test_activity_and_headquarters_findings_require_bound_direct_evidence():
         {"findings": [customer_claimed_as_supplier]},
         targets=("industry",),
         fetched_pages={industry_url: industry_quote},
+        fetched_final_urls={industry_url: industry_url},
         first_party_domains={"acme.example"},
         identity_names={"acme"},
         identity_anchor={

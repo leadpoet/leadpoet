@@ -2,6 +2,7 @@
 import ast
 from copy import deepcopy
 import json
+import subprocess
 import sys
 
 import pytest
@@ -92,6 +93,15 @@ def sources(**options):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    if options.get("authenticated_page_refusal"):
+        # This historical 403 composition predates the separate exact 415
+        # source-policy correction. Keep its committed transport preimage;
+        # current unsupported-source behavior has its own native tests.
+        for name in (builder.GRADER_FILE, builder.VERIFICATION_FILE):
+            result[name] = subprocess.check_output(
+                ["git", "show", "36f8e91390a14398194250c3dc898a4a98836a70:" + name],
+                cwd=builder.ROOT,
+            )
     result[builder.GRADER_FILE] = frozen_reviewer_source(result[builder.GRADER_FILE])
     assert result[builder.GRADER_FILE].count(NEW.encode()) == 1
     result[builder.GRADER_FILE] = result[builder.GRADER_FILE].replace(

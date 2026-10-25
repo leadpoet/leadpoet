@@ -3,20 +3,36 @@
 import ast
 import copy
 import json
+import subprocess
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
 
 from scripts import build_arena_reviewer_runtime as composer
 from scripts import arena_reviewer_typed_refusal_seam as seam
+from tests.lab_arena.reviewer_rejected_final_packet_seam_test import frozen_reviewer_source
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+# This converter composes the historical authenticated-403 correction. The
+# current source also has exact 415 handling, which is a different correction
+# and must not expand the historical converter's accepted shapes.
+FROZEN_TYPED_REFUSAL_SOURCE = "36f8e91390a14398194250c3dc898a4a98836a70"
+
+
+@lru_cache(maxsize=2)
+def _historical_source(path):
+    return subprocess.check_output(
+        ["git", "show", FROZEN_TYPED_REFUSAL_SOURCE + ":" + path], cwd=ROOT,
+    )
+
+
 def _sources():
-    verifier = (ROOT / composer.VERIFICATION_FILE).read_bytes()
-    investigator = (ROOT / composer.GRADER_FILE).read_bytes()
+    verifier = _historical_source(composer.VERIFICATION_FILE)
+    investigator = _historical_source(composer.GRADER_FILE)
     old_verifier = verifier
     old_investigator = investigator
     for old, new in (
@@ -37,8 +53,8 @@ def _sources():
 
 def test_exact_helper_bytes_only_and_idempotent():
     (old_v, new_v), (old_i, new_i) = _sources()
-    # The current source may change outside these reviewed helper blocks.
-    # Exact frozen-image source is checked separately during image composition.
+    # Exact frozen-image source is checked separately during composition;
+    # these historical variants keep all bytes outside the reviewed blocks.
     assert seam.convert_verification_seam(old_v) == new_v
     assert seam.convert_verification_seam(new_v) == new_v
     assert seam.convert_investigator_seam(old_i) == new_i
@@ -136,7 +152,9 @@ def _base_sources():
     files = {name: (ROOT / ("lab_arena/scorer_entrypoint.py"
                            if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in paths}
-    files[composer.GRADER_FILE] = old_i
+    # Compose the historical admission layout, not the later compact host
+    # bookkeeping. This fixture-only normalization preserves the native rules.
+    files[composer.GRADER_FILE] = frozen_reviewer_source(old_i)
     files[composer.VERIFICATION_FILE] = old_v
     return files
 
@@ -221,3 +239,24 @@ def test_all_correction_flags_keep_docker_tag_within_limit(monkeypatch, capsys):
     assert tag.startswith(repo + ":reviewer-")
     assert len(tag.rsplit(":", 1)[1]) <= 128
     assert tag.endswith("-refusal")
+
+
+@pytest.mark.parametrize("path,convert", [
+    (composer.VERIFICATION_FILE, seam.convert_verification_seam),
+    (composer.GRADER_FILE, seam.convert_investigator_seam),
+])
+def test_later_unsupported_source_shape_does_not_expand_historical_converter(path, convert):
+    current = (ROOT / path).read_bytes()
+    assert b'"unsupported_source"' in current
+    with pytest.raises(seam.TypedRefusalSeamError, match="unrecognized|partial"):
+        convert(current)
+
+
+def test_historical_fixture_keeps_unrelated_bytes_during_conversion():
+    (old_v, new_v), (old_i, new_i) = _sources()
+    for before, after, convert in (
+        (old_v, new_v, seam.convert_verification_seam),
+        (old_i, new_i, seam.convert_investigator_seam),
+    ):
+        prefix, suffix = b"# Historical input prefix.\n", b"\n# Historical input suffix.\n"
+        assert convert(prefix + before + suffix) == prefix + after + suffix

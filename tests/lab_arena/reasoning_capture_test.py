@@ -290,7 +290,7 @@ def test_context_limit_refuses_request_before_dispatch():
             policy=rc.POLICY, registry=registry)
 
 
-def test_unpriced_hosted_search_is_not_admitted_by_full_responses_route():
+def test_hosted_search_without_call_bound_is_not_admitted_by_full_responses_route():
     registry = _reviewed_registry(api="openrouter.responses")
     request = {"model": "openai/gpt-4o-mini", "input": "Find evidence.",
                "tools": [{"type": "openrouter:web_search", "parameters": {

@@ -1753,6 +1753,12 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
         # Preserve the opaque provider tag only for the new protocol. Existing
         # rounds retain the previous release's accepted schema and request hash.
         item_fields["reasoning"]["format"] = FieldSpec("str", min_length=1, max_length=128)
+        # OpenRouter's server tool returns this provider-specific item type.
+        # Admit its observed search shape only; old rounds retain their schema.
+        item_fields["openrouter:web_search"] = {
+            "status": dataclasses.replace(status, required=True),
+            "action": FieldSpec("object", required=True),
+        }
 
     local_tool_fields = {"type": FieldSpec("str", required=True, choices=("function", "custom")), "name": identifier, "description": text}
 
@@ -1962,7 +1968,7 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
             kind = item.get("type", "message") if isinstance(item, dict) else None
             if kind not in item_fields:
                 raise OperationRequestError("invalid_field", "$.input.type")
-            _validate_object(dict(item_fields[kind], type=FieldSpec("str", choices=(kind,)), id=dataclasses.replace(identifier, required=False)), item, "$.input", limits=limits)
+            _validate_object(dict(item_fields[kind], type=FieldSpec("str", choices=(kind,)), id=dataclasses.replace(identifier, required=kind == "openrouter:web_search")), item, "$.input", limits=limits)
             if kind == "message":
                 content_parts(item["content"], assistant=allow_full_thinking and item["role"] == "assistant")
                 if "phase" in item and item["role"] != "assistant":
@@ -1982,7 +1988,13 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
                 for name in ("summary", "content"):
                     if item.get(name) is not None:
                         content_parts(item[name], reasoning=True)
-            elif kind == "web_search_call":
+            elif kind in ("web_search_call", "openrouter:web_search"):
+                if kind == "openrouter:web_search":
+                    action = item["action"]
+                    if action.get("type") != "search":
+                        raise OperationRequestError("invalid_field", "$.input.action.type")
+                    if not action.get("query") and not action.get("queries"):
+                        raise OperationRequestError("invalid_field", "$.input.action.query")
                 validate_web_search_action(item["action"])
     else:
         raise OperationRequestError("invalid_field", "$.input")

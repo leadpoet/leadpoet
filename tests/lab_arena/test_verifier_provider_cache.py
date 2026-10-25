@@ -627,7 +627,7 @@ def test_declared_tools_never_share_even_when_choice_disables_tools(choice):
     {"messages": [{"role": "assistant", "tool_calls": []}]},
     *[{"input": [{"type": kind}]} for kind in (
         "function_call", "function_call_output", "custom_tool_call",
-        "custom_tool_call_output", "web_search_call", "additional_tools",
+        "custom_tool_call_output", "web_search_call", "openrouter:web_search", "additional_tools",
     )],
 ])
 def test_tool_history_requires_own_call_when_tools_are_omitted(marker):

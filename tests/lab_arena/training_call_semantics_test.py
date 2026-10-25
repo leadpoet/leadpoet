@@ -115,7 +115,7 @@ def _failed_example(status, *, worker_error=False):
     return seal(example)
 
 
-@pytest.mark.parametrize('status', [429, 502, 503, 504])
+@pytest.mark.parametrize('status', [429, 500, 502, 503, 504])
 @pytest.mark.parametrize('worker_error', [False, True])
 def test_exact_failed_attempt_preserves_successful_training_and_entrant(status, worker_error):
     from lab_arena import training_steps
@@ -355,6 +355,90 @@ def test_honest_failed_attempt_with_unsettled_cost_consumes_only_one_icp():
     assert result['counts']['complete_runs'] == 9
 
 
+def _unsettled_worker_failure(status=502, *, retained_response=False):
+    from tests.lab_arena.training_eligibility_test import _unsettled_selected_call
+    example = _unsettled_selected_call(_failed_example(status, worker_error=True))
+    call = example['provider_calls'][0]
+    call['response_provenance']['worker_error_observation_ref']['payload_sha256'] = (
+        example['worker_observation_artifacts']['run']['payload_sha256'])
+    if not retained_response:
+        call.pop('response')
+        call.pop('response_sha256')
+    return seal(example)
+
+
+@pytest.mark.parametrize('status', [500, 502])
+@pytest.mark.parametrize('retained_response', [False, True])
+def test_exact_host_failure_with_unknown_bill_consumes_one_icp(status, retained_response):
+    from copy import deepcopy
+    from lab_arena import training_steps
+    example = _unsettled_worker_failure(status, retained_response=retained_response)
+    original = deepcopy(example)
+    call = example['provider_calls'][0]
+    assert training_thinking.verified_failed_attempt(example, call)
+    examples = ten_selected_examples()
+    examples.pop('run-9')
+    examples['run'] = example
+    result = training_eligibility.assess_capture(
+        submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80)
+    assert result['eligible'], result
+    assert result['counts']['complete_runs'] == 9
+    assert result['counts']['incomplete_runs'] == 1
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    assert not strict['train'] and not strict['eval']
+    assert call['accounting_state'] == 'uncertain' and call['actual_microusd'] is None
+    assert example == original
+    # Combine independent availability failures at the unchanged floor.
+    examples['run-8'] = None
+    assert training_eligibility.assess_capture(
+        submission(), examples, list(examples), enabled=True,
+        minimum_coverage_percent=80)['eligible']
+    examples['run-7'] = None
+    result = training_eligibility.assess_capture(
+        submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80)
+    assert not result['eligible'] and result['counts']['complete_runs'] == 7
+    assert 'training_coverage_incomplete' in result['reasons']
+
+
+@pytest.mark.parametrize('damage', ['request_hash', 'outbound_hash', 'host_hash', 'host_write',
+    'host_body_missing', 'wrong_route', 'response_hash', 'response_changed', 'response_redaction_unreported'])
+def test_unknown_bill_cannot_excuse_invalid_or_missing_host_failure(damage):
+    from lab_arena import contracts
+    example = _unsettled_worker_failure(retained_response=True)
+    call = example['provider_calls'][0]
+    payload = example['worker_observation_artifacts']['run']['payload']
+    if damage == 'request_hash': call['request']['request_hash'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'outbound_hash': call['request']['outbound']['body_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'host_hash': call['response_provenance']['worker_error_observation_ref']['payload_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'host_write': payload['response_receipts'][0]['write_state'] = 'write_failed'
+    elif damage == 'host_body_missing': payload['observations'] = []
+    elif damage == 'wrong_route': call['reasoning_capture']['provider_route'] = 'unapproved'
+    elif damage == 'response_hash': call['response_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'response_redaction_unreported': call['response_privacy_redactions'] = ['credential']
+    else:
+        call['response'] = {'choices': [{'message': {'content': 'Contradictory generated output'}}]}
+        call['response_sha256'] = contracts.document_hash(call['response'])
+    if damage in {'host_write', 'host_body_missing'}:
+        # Keep the object/reference hashes valid so these controls exercise
+        # absent delivery/body proof independently of hash-tamper rejection.
+        digest = contracts.document_hash(payload)
+        example['worker_observation_artifacts']['run']['payload_sha256'] = digest
+        for item in example['provider_calls']:
+            provenance = item['response_provenance']
+            refs = provenance.get('agent_receipt_refs', []) + [
+                provenance[key] for key in ('worker_receipt_ref', 'worker_error_observation_ref')
+                if key in provenance]
+            for reference in refs:
+                reference['payload_sha256'] = digest
+    seal(example)
+    examples = ten_selected_examples()
+    examples.pop('run-9')
+    examples['run'] = example
+    result = training_eligibility.assess_capture(
+        submission(), examples, list(examples), enabled=True, minimum_coverage_percent=80)
+    assert not result['eligible']
+
+
 def test_live_parameter_cannot_override_frozen_zero_tolerance():
     example = captured_example()
     result = training_eligibility.assess_capture(
@@ -477,9 +561,10 @@ def test_source_timeout_plus_cost_does_not_mask_retained_evidence_damage(damage)
 
 
 @pytest.mark.parametrize('frozen_setting', ['absent', 0, 1])
-def test_frozen_error_policy_presence_controls_capture_build_and_coverage(frozen_setting):
+@pytest.mark.parametrize('status', [429, 500])
+def test_frozen_error_policy_presence_controls_capture_build_and_coverage(frozen_setting, status):
     from lab_arena import training_steps
-    example = _failed_example(429)
+    example = _failed_example(status)
     example['configuration'].pop('training_maximum_missing_reasoning_percent', None)
     if frozen_setting != 'absent':
         example['configuration']['training_maximum_missing_reasoning_percent'] = frozen_setting

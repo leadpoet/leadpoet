@@ -2460,7 +2460,8 @@ def _judgment_requires_own_call(request: Mapping[str, Any]) -> bool:
     return isinstance(inputs, list) and any(
         isinstance(item, Mapping) and item.get("type") in {
             "function_call", "function_call_output", "custom_tool_call",
-            "custom_tool_call_output", "web_search_call", "additional_tools",
+            "custom_tool_call_output", "web_search_call", "openrouter:web_search",
+            "additional_tools",
         } for item in inputs
     )
 
@@ -5700,7 +5701,8 @@ class Broker:
         transport_elapsed_ms: Optional[int] = None
 
         def retain_transport_timing(document: Dict[str, Any]) -> None:
-            if transport_elapsed_ms is not None:
+            if (getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY
+                    and transport_elapsed_ms is not None):
                 _retain_broker_observations(document, {
                     "transport_elapsed_ms": transport_elapsed_ms,
                     "timing_scope": "initial_provider_transport_send",

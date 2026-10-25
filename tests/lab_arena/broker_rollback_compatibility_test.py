@@ -1,5 +1,6 @@
 """New paid-call records remain readable by the release being rolled back to."""
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 import json
 
@@ -81,33 +82,46 @@ def test_legacy_draft_observation_and_conflicts():
 
 
 @pytest.mark.parametrize("failure", [False, True])
-def test_uncertain_transport_and_missing_cost_keep_observations_and_never_resend(failure):
+@pytest.mark.parametrize("full_thinking", [False, True])
+def test_uncertain_transport_and_missing_cost_keep_observations_and_never_resend(failure, full_thinking):
     response = {"error": {"code": 408, "message": "request timeout"}}
     transport = bt.FakeTransport([(200, response)], fail=failure)
     instance, store, _ = bt.make_broker(transport=transport)
     arguments = dict(operation_id="openrouter.chat", parameters=bt.CHAT,
                      action_sequence=0, timeout_ms=30000)
-    first = instance.execute(bt.CONTEXT, **arguments)
+    context = (replace(bt.CONTEXT, reasoning_capture_policy=br.reasoning_capture.POLICY,
+                       reasoning_route_registry=ct._reviewed_registry()) if full_thinking else bt.CONTEXT)
+    first = instance.execute(context, **arguments)
     saved = store.calls[first.call["call_identity"]]
     assert first.call["outcome"] == "uncertain"
     observations = br.broker_observations(json.loads(json.dumps(saved["uncertain_doc"])))
-    assert observations["timing_scope"] == "initial_provider_transport_send"
-    assert type(observations["transport_elapsed_ms"]) is int
+    if full_thinking:
+        assert observations["timing_scope"] == "initial_provider_transport_send"
+        assert type(observations["transport_elapsed_ms"]) is int
+    else:
+        assert observations == {}
     capacity = store.openrouter_capacity
-    replay = instance.execute(bt.CONTEXT, **arguments)
+    replay = instance.execute(context, **arguments)
     assert replay.call["outcome"] == "uncertain"
     assert len(transport.sent) == store.log.count("dispatch") == 1
     assert store.openrouter_capacity == capacity
 
 
-def test_completed_uncertain_deepline_response_and_later_reconciliation_replay_on_main(monkeypatch):
+@pytest.mark.parametrize("full_thinking", [False, True])
+def test_completed_uncertain_deepline_response_and_later_reconciliation_replay_on_main(monkeypatch, full_thinking):
     from tests.lab_arena import deepline_score_billing_latency_test as score
     transport = score.CompletedTransport()
     instance, store, context = score.setup(transport)
+    if full_thinking:
+        context = replace(context, reasoning_capture_policy=br.reasoning_capture.POLICY)
     first = score.execute(instance, context)
     identity = first.call["call_identity"]
     assert first.status == 200 and first.call["outcome"] == "uncertain"
-    assert br.broker_observations(store.calls[identity]["uncertain_doc"])["timing_scope"] == "initial_provider_transport_send"
+    observations = br.broker_observations(store.calls[identity]["uncertain_doc"])
+    if full_thinking:
+        assert observations["timing_scope"] == "initial_provider_transport_send"
+    else:
+        assert observations == {}
     assert main_decoder()(json.loads(json.dumps(store.responses[identity])))[2] == first.body
     monkeypatch.setattr(br, "_decode_terminal", main_decoder())
     before = len(transport.requests)
@@ -130,7 +144,8 @@ def test_completed_uncertain_deepline_response_and_later_reconciliation_replay_o
 
 
 @pytest.mark.parametrize("compact", [False, True])
-def test_failed_and_compact_known_charge_terminal_replays_on_main(monkeypatch, compact):
+@pytest.mark.parametrize("full_thinking", [False, True])
+def test_failed_and_compact_known_charge_terminal_replays_on_main(monkeypatch, compact, full_thinking):
     class EdgeStore(bt.FakeLedgerStore):
         def settle_call(self, **kwargs):
             if compact and kwargs["terminal_response"]["status"] == 200:
@@ -147,13 +162,19 @@ def test_failed_and_compact_known_charge_terminal_replays_on_main(monkeypatch, c
         arguments = dict(operation_id="openrouter.chat", parameters=bt.CHAT,
                          action_sequence=0, timeout_ms=30000)
     instance, store, transport = bt.make_broker(store=EdgeStore(), transport=bt.FakeTransport(responses))
-    first = instance.execute(bt.CONTEXT, **arguments)
+    context = (replace(bt.CONTEXT, reasoning_capture_policy=br.reasoning_capture.POLICY,
+                       reasoning_route_registry=ct._reviewed_registry()) if full_thinking else bt.CONTEXT)
+    first = instance.execute(context, **arguments)
     assert first.call["outcome"] == "settled" and first.status in (400, 502)
     terminal = store.calls[first.call["call_identity"]]["terminal"]
     assert main_decoder()(json.loads(json.dumps(terminal)))[2] == first.body
-    assert br.broker_observations(terminal)["timing_scope"] == "initial_provider_transport_send"
+    observations = br.broker_observations(terminal)
+    if full_thinking:
+        assert observations["timing_scope"] == "initial_provider_transport_send"
+    else:
+        assert observations == {}
     monkeypatch.setattr(br, "_decode_terminal", main_decoder())
-    replay = instance.execute(bt.CONTEXT, **arguments)
+    replay = instance.execute(context, **arguments)
     assert replay.body == first.body and replay.status == first.status
     assert replay.call["actual_microusd"] == first.call["actual_microusd"]
     assert len(transport.sent) == store.log.count("dispatch") == 1

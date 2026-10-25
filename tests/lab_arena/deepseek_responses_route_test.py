@@ -44,7 +44,20 @@ def test_actual_responses_wire_readable_and_strict_targets_replay_through_curren
     assert json.loads(contracts.canonical_json(example)) == example
     trace = training_thinking.readable_trace(example)
     assert trace['projection_truncated'] is False
-    assert contracts.document_hash(trace) == PROOF['readable_trace_sha256']
+    # The saved digest names the older derived view. Keep that immutable
+    # evidence unchanged and verify the richer projection against its exact
+    # provider output, including whole reasoning items and original order.
+    assert len(trace['calls']) == len(example['provider_calls'])
+    for index, (call, projected) in enumerate(zip(example['provider_calls'], trace['calls'])):
+        prefix = ['provider_calls', index, 'response', 'output']
+        output = [event for event in projected['events']
+                  if event.get('delivery') == 'selected_terminal'
+                  and len(event.get('source_path', [])) == 5
+                  and event['source_path'][:4] == prefix]
+        assert [event['source_path'] for event in output] == [
+            prefix + [position] for position in range(len(call['response']['output']))]
+        assert [event['value'] for event in output] == call['response']['output']
+        assert all(event['value_sha256'] == contracts.document_hash(event['value']) for event in output)
     markdown = training_thinking.readable_trace_markdown(trace)
     registry = rc.load_registry()
     route = next(r for r in registry['approved_routes'] if r['api'] == 'openrouter.responses')

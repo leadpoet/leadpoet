@@ -6832,7 +6832,7 @@ class ArenaService:
         contracts.check_strict_document(frame, candidate_limits)
         run, context = self._run_context(run_id, lease_token)
         if not (getattr(context, "kind", "execute") == "execute"
-                and context.reasoning_capture_policy == reasoning_capture.POLICY):
+                and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY):
             contracts.check_strict_document(frame, limits)
         broker = self._broker_for(run["round_id"])
         operation_id = str(frame["operation_id"])

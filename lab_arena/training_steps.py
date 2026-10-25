@@ -1,9 +1,9 @@
 """Offline observed next-response candidates. No trajectory or action-quality claim.
 
-Only self-contained text and local-tool chat/Responses calls are supported. A
-positive run result or HTTP status never makes an observed action correct.
-Explicit retrieval markers are excluded. Provider-internal retrieval without
-visible markers cannot be proved absent from the retained response.
+Self-contained text, local tools, and exposed hosted-search Responses are
+supported. Hosted targets retain the provider-executed trajectory verbatim;
+they do not imply local tool execution or invent intermediate model inputs.
+A positive run result or HTTP status never makes an observed action correct.
 """
 from __future__ import annotations
 
@@ -148,12 +148,26 @@ def _chat_messages(messages, *, allow_reasoning_history=False, allow_tool_error_
     _require(not pending, 'tool_context_unresolved')
 
 
-def _responses_input(value, *, tools=(), allow_reasoning_history=False, allow_tool_error_history=False):
+_HOSTED_SEARCH_TYPES = {'openrouter:web_search', 'web_search_call'}
+
+
+def _hosted_search_declared(body):
+    return any(isinstance(tool, dict) and tool.get('type') == 'openrouter:web_search'
+               for tool in body.get('tools', []))
+
+
+def _hosted_search_history(value):
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and item.get('type') in _HOSTED_SEARCH_TYPES for item in value)
+
+
+def _responses_input(value, *, tools=(), max_tool_calls=None, allow_reasoning_history=False, allow_tool_error_history=False):
     # Reuse the paid boundary's closed native schema. Keep the original values;
     # this validation must never normalize or rewrite captured request bytes.
     try:
         operations.validate_operation_request('openrouter.responses', {
             'model': 'training/input', 'input': value, 'tools': list(tools),
+            **({'max_tool_calls': max_tool_calls} if max_tool_calls is not None else {}),
         }, allow_full_thinking=allow_reasoning_history)
     except operations.OperationError as exc:
         raise ValueError('input_shape_unsupported') from exc
@@ -169,7 +183,9 @@ def _responses_input(value, *, tools=(), allow_reasoning_history=False, allow_to
             _require(not pending, 'tool_context_unresolved')
             content = item['content']
             if isinstance(content, list):
-                _require(not any(part.get('annotations') for part in content), 'retrieval_context_unsupported')
+                _require(not any(part.get('annotations') for part in content)
+                         or _hosted_search_declared({'tools': tools})
+                         or _hosted_search_history(value), 'retrieval_context_unsupported')
         elif kind in {'function_call', 'custom_tool_call'}:
             _require(item['call_id'] not in pending, 'tool_context_unresolved')
             if allow_tool_error_history:
@@ -190,6 +206,11 @@ def _responses_input(value, *, tools=(), allow_reasoning_history=False, allow_to
             pending.pop(item['call_id'])
         elif kind == 'reasoning':
             _require(allow_reasoning_history and _exact(item), 'reasoning_history_unsupported')
+        elif kind in _HOSTED_SEARCH_TYPES:
+            # Native history is captured input, not a new execution request.
+            # A later turn can remove the search declaration without removing
+            # previously exposed provider events or inventing local results.
+            _require(item.get('status') == 'completed', 'retrieval_context_unsupported')
         elif kind != 'additional_tools':
             raise ValueError('retrieval_context_unsupported')
     _require(not pending, 'tool_context_unresolved')
@@ -201,6 +222,8 @@ def _response_tool_definitions(body):
 
     def collect(tools, namespace=None):
         for tool in tools:
+            if tool['type'] == 'openrouter:web_search' and namespace is None:
+                continue
             if tool['type'] == 'namespace':
                 collect(tool['tools'], tool['name'])
                 continue
@@ -252,12 +275,15 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
                      and bool(msg['content']), 'assistant_shape_unsupported')
         return msg, reasoning
     _responses_input(body.get('input'), tools=body.get('tools', []),
+                     max_tool_calls=body.get('max_tool_calls'),
                      allow_reasoning_history=allow_reasoning_history,
                      allow_tool_error_history=allow_tool_error_history)
     _require(response.get('status') == 'completed' and not response.get('error')
              and not response.get('incomplete_details'), 'response_not_complete')
     output = response.get('output')
     _require(isinstance(output, list) and output, 'response_shape_unsupported')
+    hosted = _hosted_search_history(output)
+    _require(not hosted or _hosted_search_declared(body), 'hosted_tool_undeclared')
     target = []
     for item in output:
         _require(isinstance(item, dict), 'response_shape_unsupported')
@@ -283,6 +309,8 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
             if 'text' in item:
                 _require(isinstance(item['text'], str), 'reasoning_shape_unsupported')
                 reasoning.append({'type': 'reasoning_text', 'text': item['text']})
+            if hosted:
+                target.append(copy.deepcopy(item))
         elif kind == 'message':
             _require(set(item) <= {'id', 'type', 'status', 'role', 'content', 'phase'}
                      and item.get('role') == 'assistant' and item.get('status') == 'completed'
@@ -290,13 +318,24 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
             _require(item.get('phase') in (None, 'commentary', 'final_answer'), 'assistant_shape_unsupported')
             _require(all(isinstance(part, dict) and set(part) <= {'type', 'text', 'annotations', 'logprobs'}
                          and part.get('type') == 'output_text' and isinstance(part.get('text'), str)
-                         and not part.get('annotations') for part in item['content']), 'assistant_shape_unsupported')
+                         and (not part.get('annotations') or _hosted_search_declared(body)
+                              or _hosted_search_history(body.get('input')))
+                         for part in item['content']), 'assistant_shape_unsupported')
             try:
                 operations.validate_operation_request('openrouter.responses', {
                     'model': body['model'], 'input': [item],
                 }, allow_full_thinking=allow_reasoning_history)
             except operations.OperationError as exc:
                 raise ValueError('assistant_shape_unsupported') from exc
+            target.append(copy.deepcopy(item))
+        elif kind in _HOSTED_SEARCH_TYPES:
+            try:
+                operations.validate_operation_request('openrouter.responses', {
+                    'model': body['model'], 'input': [item],
+                }, allow_full_thinking=allow_reasoning_history)
+            except operations.OperationError as exc:
+                raise ValueError('hosted_tool_shape_unsupported') from exc
+            _require(item.get('status') == 'completed', 'response_not_complete')
             target.append(copy.deepcopy(item))
         elif kind in {'function_call', 'custom_tool_call'}:
             try:
@@ -317,9 +356,10 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
     messages = [item for item in target if item['type'] == 'message']
     calls = [item for item in target if item['type'] in call_kinds]
     # A completed turn may state its next action and issue local tool calls.
-    # Preserve their wire order. Two answer messages, or a final-answer message
-    # combined with calls, do not establish one unambiguous next action.
-    _require(bool(target) and len(messages) <= 1
+    # Preserve their wire order. Hosted output is a provider-executed
+    # trajectory and can contain intermediate messages around search events.
+    # Ordinary turns still require one unambiguous next action.
+    _require(bool(target) and (hosted or len(messages) <= 1)
              and not (calls and any(item.get('phase') == 'final_answer' for item in messages)),
              'response_choice_ambiguous')
     _require(len({item['call_id'] for item in target if item['type'] in call_kinds})
@@ -542,6 +582,15 @@ def _candidate(example, call):
                                 allow_tool_error_history=training_coverage.uses_host_result_evidence(
                                     example.get('configuration') or {}))
     _validate_target_tools(body, target, op)
+    target_provenance = {}
+    if op == 'openrouter.responses':
+        hosted = any(item.get('type') in _HOSTED_SEARCH_TYPES for item in responses[0]['output'])
+        target_provenance['target_source_paths'] = [
+            ['output', index] for index, item in enumerate(responses[0]['output'])
+            if hosted or item.get('type') != 'reasoning']
+        if hosted:
+            target_provenance.update(target_semantics='provider_executed_trajectory',
+                                     hosted_tool_execution='provider')
     return {'schema_version': RECORD_SCHEMA_VERSION, 'format': op, 'input': copy.deepcopy(body),
             'target': target,
             'quality': {'status': 'unreviewed', 'correct_action': 'not_established'},
@@ -549,8 +598,7 @@ def _candidate(example, call):
                              'call_identity': call['call_identity'], 'teacher_reasoning_metadata': reasoning,
                              **({'capture_scope': 'provider_visible_request_result', 'client_consumption': 'not_proved'}
                                 if training_coverage.uses_host_result_evidence(example.get('configuration') or {}) else {}),
-                             **({'target_source_paths': [['output', index] for index, item in enumerate(responses[0]['output'])
-                                  if item.get('type') != 'reasoning']} if op == 'openrouter.responses' else {}),
+                             **target_provenance,
                              'delivered_response_sha256': contracts.document_hash(responses[0]),
                              'response_projection': {'opaque_reasoning_omitted': any('hidden_reasoning' in (r.get('privacy_redactions') or []) for r in matches), 'exact_provider_replay': not any(r.get('privacy_redactions') for r in matches)}, 'attempt': example.get('attempt'),
                              'round_id': example.get('round_id'), 'model': body['model'],
@@ -619,7 +667,8 @@ def build(examples, rules=None):
     manifest = {'schema_version': SCHEMA_VERSION, 'rules': asdict(rules),
                 'training_permission': copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 'eligibility_limits': ['observed_next_response_only', 'quality_unreviewed', 'not_a_complete_trajectory',
-                                       'no_training_permission_confirmed', 'text_and_local_function_calls_only',
+                                       'no_training_permission_confirmed', 'text_local_tools_and_exposed_hosted_search_only',
+                                       'hosted_internal_prompts_not_observed',
                                        'host_delivery_required_for_new_policy', 'agent_read_required_for_historical_policy', 'no_encrypted_reasoning'],
                 'counts': {'examples': len(sources), 'candidate_executions': len({ref['run_id'] for r in candidates.values() for ref in r['source_refs']}),
                            'records_by_split': {k: len(v) for k, v in splits.items()}, 'exclusion_reasons': dict(sorted(counts.items()))},

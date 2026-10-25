@@ -152,16 +152,6 @@ def _apply_full(operation_id: str, parameters: Mapping[str, Any],
                   and (selected is None or item["provider"] == selected[0])), None)
     if entry is None:
         raise ValueError("reasoning_route_unsupported")
-    if operation_id == "openrouter.responses":
-        tools = result.get("tools")
-        items = result.get("input")
-        if (isinstance(tools, list) and any(
-                isinstance(tool, Mapping) and tool.get("type") == "openrouter:web_search"
-                for tool in tools)
-                or isinstance(items, list) and any(
-                    isinstance(item, Mapping) and item.get("type") == "web_search_call"
-                    for item in items)):
-            raise ValueError("reasoning_route_unsupported")
     field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
     cap = min(entry["max_output_tokens"], operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS)
     budget = entry["mode"].get("budget_tokens", 1024)

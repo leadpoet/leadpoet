@@ -1064,3 +1064,28 @@ The active AGENTS.md/CLAUDE.md instructions were shortened from 156,257 to 6,372
 bytes. Exact historical instructions remain in the linked archive. The concise
 new rule requires root-cause fixes, tracing every affected actual code path,
 production-path and combined-failure tests, and explicit verification limits.
+
+## October 25 hosted search continuation and ordered capture
+
+Approved Responses routes now accept their returned hosted search items in
+later requests. The native Codex adapter changes only the provider-specific
+search type name in the transport copy. Raw provider responses remain exact.
+Readable views preserve output order, including intermediate messages,
+reasoning, searches, exposed results and citations. Hosted export records are
+marked as provider-executed trajectories; internal prompts and missing search
+results are not invented.
+
+[Focused live evidence](evidence/full-thinking/hosted-search-capture-20261025.json)
+records fresh Fireworks and Together hosted-search conversations, followed by a
+local tool, its result and a final answer. Together returned valid JSON. Fireworks
+returned Markdown despite the strict JSON request; this is retained as a failed
+format check. Both captured all exposed fields. Fresh GPT-OSS 120B and Mistral
+Chat conversations passed two tool turns and final JSON. These runs used actual
+OpenRouter, the worker socket and disposable PostgreSQL. No client callbacks
+were sent. They are compatibility tests, not a new production quality benchmark.
+
+Raw SQL response bytes match the independently saved wire bodies. The sanitized
+Responses projection omits only empty summary arrays. Source review, the 80%
+ICP floor, missing-token policy, privacy rules, cost rules and live scorer image
+are unchanged. Provider-internal activity and the quality of generated reasoning
+remain outside what capture alone can prove.

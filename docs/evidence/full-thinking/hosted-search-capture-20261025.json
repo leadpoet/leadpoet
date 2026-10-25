@@ -1,0 +1,153 @@
+{
+  "schema_version": "hosted-capture-verification.v1",
+  "execution": "Actual OpenRouter through broker, worker socket, disposable PostgreSQL RPC/SQL ledger and local object store; no production execution claimed.",
+  "scenarios": [
+    {
+      "case": "fireworks-04",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "api": "openrouter.responses",
+      "provider": "fireworks",
+      "calls": 3,
+      "confirmed_cost_microusd": 9743,
+      "capture_gaps": [],
+      "worker_gaps": [],
+      "client_callbacks": 0,
+      "hosted_events": 2,
+      "citations": 5,
+      "full_thinking_calls": 3,
+      "reported_reasoning_tokens": 1036,
+      "strict_final_json": false,
+      "tool_urls_exact_citations": false,
+      "format_failure": "provider_output_not_matching_requested_JSON"
+    },
+    {
+      "case": "together-05",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "api": "openrouter.responses",
+      "provider": "together",
+      "calls": 3,
+      "confirmed_cost_microusd": 10963,
+      "capture_gaps": [],
+      "worker_gaps": [],
+      "client_callbacks": 0,
+      "hosted_events": 2,
+      "citations": 5,
+      "full_thinking_calls": 3,
+      "reported_reasoning_tokens": 951,
+      "strict_final_json": true,
+      "tool_urls_exact_citations": true,
+      "format_failure": null
+    },
+    {
+      "case": "openai_gpt-oss-120b-chat-01",
+      "model": "openai/gpt-oss-120b",
+      "api": "openrouter.chat",
+      "provider": "deepinfra/bf16",
+      "calls": 3,
+      "confirmed_cost_microusd": 196,
+      "capture_gaps": [],
+      "worker_gaps": [],
+      "client_callbacks": 0,
+      "hosted_events": 0,
+      "citations": 0,
+      "full_thinking_calls": 3,
+      "reported_reasoning_tokens": 779,
+      "strict_final_json": true,
+      "tool_urls_exact_citations": null,
+      "format_failure": null
+    },
+    {
+      "case": "mistralai_mistral-large-4-0-chat-01",
+      "model": "mistralai/mistral-large-4-0",
+      "api": "openrouter.chat",
+      "provider": "mistral/zdr",
+      "calls": 3,
+      "confirmed_cost_microusd": 2065,
+      "capture_gaps": [],
+      "worker_gaps": [],
+      "client_callbacks": 0,
+      "hosted_events": 0,
+      "citations": 0,
+      "full_thinking_calls": 1,
+      "reported_reasoning_tokens": 212,
+      "strict_final_json": true,
+      "tool_urls_exact_citations": null,
+      "format_failure": null
+    }
+  ],
+  "raw_readback": {
+    "checks": [
+      {
+        "case": "fireworks-04",
+        "call_identity": "sha256:e01af6e07bebbdc84ea59a2180c421b70840c745d9237c16cca15ec941920d5f",
+        "raw_SQL_bytes_equal_wire": true,
+        "wire_hash_matches": true,
+        "projection_differences": [
+          "/output/0/summary",
+          "/output/4/summary"
+        ],
+        "only_empty_summary_fields_removed": true
+      },
+      {
+        "case": "fireworks-04",
+        "call_identity": "sha256:715b1dc112e8b2df8df9e6abdb6d5dd0adf1aae361e049ebd84000a1cbc7e87e",
+        "raw_SQL_bytes_equal_wire": true,
+        "wire_hash_matches": true,
+        "projection_differences": [
+          "/output/0/summary"
+        ],
+        "only_empty_summary_fields_removed": true
+      },
+      {
+        "case": "fireworks-04",
+        "call_identity": "sha256:fff636a57ba38408a9797e6bf434e32919f3e00e5ef8ce6a618977006214f5eb",
+        "raw_SQL_bytes_equal_wire": true,
+        "wire_hash_matches": true,
+        "projection_differences": [
+          "/output/0/summary"
+        ],
+        "only_empty_summary_fields_removed": true
+      },
+      {
+        "case": "together-05",
+        "call_identity": "sha256:ed30bd9ebe75e5bdd7638c069a993da8e7ff1e990b2ac772ecbb5bdd3ffb8560",
+        "raw_SQL_bytes_equal_wire": true,
+        "wire_hash_matches": true,
+        "projection_differences": [
+          "/output/0/summary",
+          "/output/3/summary"
+        ],
+        "only_empty_summary_fields_removed": true
+      },
+      {
+        "case": "together-05",
+        "call_identity": "sha256:8d833be1551c7d3ec1e9f783e85fc8c3fd7c21149eb99966df713281d1a1b778",
+        "raw_SQL_bytes_equal_wire": true,
+        "wire_hash_matches": true,
+        "projection_differences": [
+          "/output/0/summary"
+        ],
+        "only_empty_summary_fields_removed": true
+      },
+      {
+        "case": "together-05",
+        "call_identity": "sha256:712f29192cf5f0baac871e213f6ace06877c4dc8dd301bf7919fd4fb160cd668",
+        "raw_SQL_bytes_equal_wire": true,
+        "wire_hash_matches": true,
+        "projection_differences": [
+          "/output/0/summary"
+        ],
+        "only_empty_summary_fields_removed": true
+      }
+    ],
+    "no_miner_acknowledgements": true,
+    "projection_note": "Only empty reasoning summary arrays are omitted from the sanitized projection. Raw SQL bytes remain exact."
+  },
+  "limitations": [
+    "Provider-internal prompts and search documents not exposed by the provider cannot be reconstructed.",
+    "Fireworks returned Markdown despite strict JSON request; raw response is preserved without repair.",
+    "These focused compatibility tests are not a lead-quality benchmark or a scored publication round.",
+    "Native TYCHE uses exact dcaeb4b source and Codex0.154 but needs a process model override because its Arena entry point ignores TYCHE_MODEL; no source or tool behavior was changed.",
+    "ZDR model-route settings do not independently establish hosted search engine retention."
+  ]
+}

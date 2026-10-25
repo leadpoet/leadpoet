@@ -189,12 +189,32 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
             gaps = set(call.get("evidence_gaps") or [])
             if not gaps <= call_allowed:
                 return False
+            if "response_privacy_nonexact" not in reasons and (
+                "credential" in (call.get("response_privacy_redactions") or [])
+                or any("credential" in (receipt.get("privacy_redactions") or [])
+                       for receipt in call.get("response_receipts") or [])):
+                return False
             if call in cost_calls and (
                 call.get("accounting_state") != "uncertain"
                 or call.get("actual_microusd") is not None
                 or type(call.get("terminal_entry_id")) is not int
                 or call["terminal_entry_id"] < 1):
                 return False
+            if training_thinking.verified_recovered_responses_retry(example, call):
+                continue
+            if (call in cost_calls and new_policy
+                    and training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+                    and training_thinking.verified_failed_attempt(example, call)):
+                # A host-written bridge failure can have no upstream response.
+                # Reuse its exact existing proof; an unknown bill makes this
+                # whole ICP incomplete, never free or a strict training target.
+                evidence = training_steps._host_result(example, call, allow_worker_error=True)
+                if ("response" in call or "response_sha256" in call) and (
+                    not isinstance(call.get("response"), Mapping)
+                    or contracts.document_hash(call["response"]) != call.get("response_sha256")
+                    or call["response"] != evidence["response"]):
+                    return False
+                continue
             if (call.get("operation_id") in reasoning_capture.OPERATIONS
                     and not (new_policy and training_thinking.verified_failed_attempt(example, call))):
                 try:
@@ -221,11 +241,6 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
                     or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
                     or not isinstance(response, Mapping)
                     or contracts.document_hash(response) != call.get("response_sha256")
-                    or ("credential" in (call.get("response_privacy_redactions") or [])
-                        and "response_privacy_nonexact" not in reasons)
-                    or (any("credential" in (receipt.get("privacy_redactions") or [])
-                            for receipt in call.get("response_receipts") or [])
-                        and "response_privacy_nonexact" not in reasons)
                     or (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
                         and provenance.get("agent_receipt") != "reported_exact_body_received")
                     or provenance.get("delivery_to_worker") != "socket_written"):
@@ -327,6 +342,8 @@ def _selected_privacy_cascade_verified(example, run_id):
             return False
         for call in selected:
             gaps = set(call.get("evidence_gaps") or [])
+            if training_thinking.verified_recovered_responses_retry(example, call):
+                continue
             if call.get("accounting_state") == "refusal" and training_thinking.verified_failed_attempt(example, call):
                 continue
             if call.get("accounting_state") != "settlement" or type(call.get("actual_microusd")) is not int:

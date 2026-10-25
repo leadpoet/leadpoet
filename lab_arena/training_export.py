@@ -628,6 +628,8 @@ def _calls(rows, run_ids, objects, run_order):
                     "wire_body_bytes": captured["wire_body_bytes"],
                     "provenance": "private_upstream_response_receipt",
                     "delivery_to_worker": "not_proved",
+                    **({"response_sha256": contracts.document_hash(response)}
+                       if (call.get("reasoning_capture") or {}).get("policy") == "full_generated_thinking_v1" else {}),
                 })
                 if redactions:
                     call_reasons.add("upstream_response_privacy_nonexact")
@@ -774,7 +776,7 @@ def _reported_phase_coverage(payload):
                 "state_record_errors", "state_local_errors", "state_overflow_rows", "state_overflow_manifests")))
 
 
-def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True, require_client_ack=True):
+def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True, require_client_ack=True, configuration=None):
     """Join host writes and cooperative read acknowledgments without guessing.
 
     A host write is not consumption. An SDK acknowledgment is an agent report,
@@ -866,9 +868,13 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
     # The caller sets this flag only for the selected accepted execution.
     # Related judge attempts may stop before delivery; every present link
     # still passes the unconditional identity and byte checks above.
-    if (not require_client_ack and require_completed_phases
-            and {call["call_identity"] for call in paid} - set(linked)):
-        errors.add("worker_response_receipt_link_invalid")
+    if not require_client_ack and require_completed_phases:
+        from lab_arena import training_thinking
+        proof = {"run_id": run["run_id"], "configuration": configuration or {},
+                 "provider_calls": paid, "worker_observation_artifacts": {run["run_id"]: snapshot}}
+        if any(call["call_identity"] not in linked
+               and not training_thinking.verified_recovered_responses_retry(proof, call) for call in paid):
+            errors.add("worker_response_receipt_link_invalid")
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid
                     if call.get("accounting_state") == "refusal" or
@@ -955,7 +961,7 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
         artifacts[run_id] = snapshot
         for error in _link_worker_receipts(
                 run, paid, snapshot, require_completed_phases=require_completed_phases,
-                require_client_ack=require_client_ack):
+                require_client_ack=require_client_ack, configuration=configuration):
             record_error(error, run_id)
         for observation in payload["observations"]:
             if observation["privacy"]["redacted"]:

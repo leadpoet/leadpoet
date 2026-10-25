@@ -64,6 +64,64 @@ def test_cap_eof_omits_only_this_generation_and_keeps_other_full_targets(api):
 
 
 @pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('arguments', ['{"company":"unfinished', '{"company":"escaped\\',
+    '{"company":"unicode\\u12', '{"company":1e', '{"company":-1.2e+',
+    '{"company":1.', '{"company":tru', '{"company":nul', '{"company":-'])
+def test_cap_cut_inside_a_valid_json_token_omits_only_that_call(api, arguments):
+    example = cap_example(api)
+    call = example['provider_calls'][0]
+    target = (call['response']['choices'][0]['message']['tool_calls'][0]['function']
+              if api.endswith('chat') else call['response']['output'][1])
+    target['arguments'] = arguments
+    refresh_response_links(example, 0)
+    before = deepcopy(example)
+    assert training_thinking.verified_cap_truncated_target(example, call)
+    assert training_eligibility.assess_capture(
+        submission(), {'run': example}, ['run'], enabled=True)['eligible']
+    splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    records = splits['train'] + splits['eval']
+    assert len(records) == 2
+    assert all(row['source_refs'][0]['call_identity'] != call['call_identity'] for row in records)
+    assert example == before
+
+
+@pytest.mark.parametrize('document', [
+    '{}', '{"value":[true,false,null,-1,0,1.25e-4,{"escaped":"a\\\\b\\\"c\\u1234"}]}',
+    ' { "unicode": "source café", "nested": { "values": [[],{}] } }',
+])
+def test_every_incomplete_object_prefix_is_recognized_without_repair(document):
+    for length in range(1, len(document)):
+        prefix = document[:length]
+        assert training_thinking._incomplete_json_object_prefix(prefix) is bool(prefix.strip()), prefix
+    assert not training_thinking._incomplete_json_object_prefix(document)
+
+
+@pytest.mark.parametrize('arguments', [
+    '{"x":"\\q', '{"x":"\\uZZ', '{"x":"raw\n', '{"x":01', '{"x":1.e',
+    '{"x":1.2.', '{"x":0\n.', '{"x":0\ne', '{"x":0\r.', '{"x":0\t.',
+    '{"x":0 .', '{"x":0 e+', '{"x":1e2e', '{"x":"word"e', '{"x":[]e', '{"x":t ', '{"x":truex',
+    '{"x":NaN,', '{"x":Infinity,', '{"x":1,}', '{"x":1}\u00a0', '{}{"x":"',
+    '{"x" 1', '[1,', '', '  ', '{}', '{"x":1} garbage',
+])
+def test_invalid_or_complete_json_cannot_be_a_cap_prefix(arguments):
+    assert not training_thinking._incomplete_json_object_prefix(arguments)
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('arguments', ['{"company":1.2.', '{"company":0\n.'])
+def test_invalid_number_suffix_at_cap_keeps_the_entrant_ineligible(api, arguments):
+    example = cap_example(api)
+    call = example['provider_calls'][0]
+    target = (call['response']['choices'][0]['message']['tool_calls'][0]['function']
+              if api.endswith('chat') else call['response']['output'][1])
+    target['arguments'] = arguments
+    refresh_response_links(example, 0)
+    assert not training_thinking.verified_cap_truncated_target(example, call)
+    assert not training_eligibility.assess_capture(
+        submission(), {'run': example}, ['run'], enabled=True)['eligible']
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
 @pytest.mark.parametrize('damage', ['below_cap', 'above_cap', 'missing_usage', 'boolean_usage', 'wrong_request_cap',
                                    'generic_json', 'array_eof', 'complete_json', 'schema', 'host', 'request', 'route', 'legacy'])
 def test_cap_eof_never_waives_other_output_or_evidence_failures(api, damage):

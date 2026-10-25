@@ -1412,8 +1412,7 @@ def test_scrapingdog_without_observed_success_stays_uncertain(status):
     assert_unpriced_uncertain(result, reserved=250)
     call = store.calls[result.call["call_identity"]]
     assert call["kind"] == "uncertain" and call["amount"] == 250
-    assert br.broker_observations(call["uncertain_doc"])["timing_scope"] == "initial_provider_transport_send"
-    assert type(br.broker_observations(call["uncertain_doc"])["transport_elapsed_ms"]) is int
+    assert br.broker_observations(call["uncertain_doc"]) == {}  # Historical policy stays unchanged.
     assert {key: value for key, value in call["uncertain_doc"].items()
             if key != "upstream_response_receipt"} == {
         "reason": "transport_failure", "call_succeeded": False,
@@ -1734,8 +1733,7 @@ def test_stream_timeout_generation_header_credential_echo_is_not_persisted(
     retained = json.dumps(store.calls)
     assert result.status == 502
     assert_unpriced_uncertain(result)
-    assert br.broker_observations(diagnostic)["timing_scope"] == "initial_provider_transport_send"
-    assert type(br.broker_observations(diagnostic)["transport_elapsed_ms"]) is int
+    assert br.broker_observations(diagnostic) == {}  # Historical policy stays unchanged.
     assert {key: value for key, value in diagnostic.items()
             if key != "upstream_response_receipt"} == {
         "reason": "transport_failure",
@@ -2020,8 +2018,7 @@ def test_company_profile_transport_failure_holds_only_fixed_reservation():
     assert result.status == 502
     assert_unpriced_uncertain(result, reserved=3000)
     uncertain = store.calls[result.call["call_identity"]]["uncertain_doc"]
-    assert br.broker_observations(uncertain)["timing_scope"] == "initial_provider_transport_send"
-    assert type(br.broker_observations(uncertain)["transport_elapsed_ms"]) is int
+    assert br.broker_observations(uncertain) == {}  # Historical policy stays unchanged.
     assert store.openrouter_capacity == 7000
     sent_before_replay = len(transport.sent)
     replay = broker.execute(
@@ -2349,9 +2346,7 @@ def test_openrouter_reserves_maximum_cost_and_settles_reported_actual():
     assert body["provider"] == {"allow_fallbacks": False, "data_collection": "deny", "zdr": True} and body["stream"] is False
     assert store.openrouter_capacity == 10_000_000 - expected_actual
     terminal = store.calls[result.call["call_identity"]]["terminal"]
-    assert br.broker_observations(terminal)["timing_scope"] == "initial_provider_transport_send"
-    assert type(br.broker_observations(terminal)["transport_elapsed_ms"]) is int
-    assert 0 <= br.broker_observations(terminal)["transport_elapsed_ms"] <= 3_600_000
+    assert br.broker_observations(terminal) == {}  # Historical policy stays unchanged.
 
 
 def test_native_web_search_reserves_every_bounded_search_and_settles_usage_cost_once():
@@ -3207,8 +3202,7 @@ def test_openrouter_timeout_without_billing_is_uncertain():
     assert_unpriced_uncertain(result)
     assert store.log == ["reserve", "dispatch", "uncertain"]
     uncertain = store.calls[result.call["call_identity"]]["uncertain_doc"]
-    assert br.broker_observations(uncertain)["timing_scope"] == "initial_provider_transport_send"
-    assert type(br.broker_observations(uncertain)["transport_elapsed_ms"]) is int
+    assert br.broker_observations(uncertain) == {}  # Historical policy stays unchanged.
 
 
 def test_openrouter_error_with_known_usage_settles_the_exact_charge():
@@ -3946,8 +3940,7 @@ def test_stream_timeout_generation_settles_exact_cost_without_second_post(caplog
 
     diagnostic = store.calls[first.call["call_identity"]]["uncertain_doc"]
     assert first.status == 502 and first.call["outcome"] == "uncertain"
-    assert br.broker_observations(diagnostic)["timing_scope"] == "initial_provider_transport_send"
-    assert type(br.broker_observations(diagnostic)["transport_elapsed_ms"]) is int
+    assert br.broker_observations(diagnostic) == {}  # Historical policy stays unchanged.
     assert {key: value for key, value in diagnostic.items()
             if key != "upstream_response_receipt"} == {
         "reason": "missing_provider_cost",
@@ -4054,8 +4047,7 @@ def test_non_openrouter_transport_failure_ignores_generation_identity():
     assert result.status == 502
     assert_unpriced_uncertain(result)
     uncertain_doc = store.calls[result.call["call_identity"]]["uncertain_doc"]
-    assert br.broker_observations(uncertain_doc)["timing_scope"] == "initial_provider_transport_send"
-    assert type(br.broker_observations(uncertain_doc)["transport_elapsed_ms"]) is int
+    assert br.broker_observations(uncertain_doc) == {}  # Historical policy stays unchanged.
     assert {key: value for key, value in uncertain_doc.items()
             if key != "upstream_response_receipt"} == {
         "reason": "transport_failure",
@@ -4201,8 +4193,7 @@ def _accounting_without_verified_upstream_receipt(call, result, body, *, status=
     assert receipt["wire_body_bytes"] == receipt["body_bytes"] == len(body)
     assert receipt["privacy"] == {"redacted": False, "redactions": []}
     assert "upstream_response_receipt" not in json.dumps(result.to_document())
-    assert br.broker_observations(call["uncertain_doc"])["timing_scope"] == "initial_provider_transport_send"
-    assert type(br.broker_observations(call["uncertain_doc"])["transport_elapsed_ms"]) is int
+    assert br.broker_observations(call["uncertain_doc"]) == {}  # Historical policy stays unchanged.
     return {key: value for key, value in call["uncertain_doc"].items()
             if key not in {"upstream_response_receipt", "timing_scope", "transport_elapsed_ms"}}
 

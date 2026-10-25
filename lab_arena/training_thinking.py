@@ -449,6 +449,120 @@ def _bound_admission_refusal(example, call) -> bool:
             and lifecycle[0].get("amount_microusd") == 0)
 
 
+def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
+    """Prove a hidden free throttle recovered by the same request's host write.
+
+    A managed retry is provider evidence, never a delivered response or target.
+    Keep its missing write explicit; only an exact settled-zero 429 can borrow
+    proof of recovery from a later successful request on the frozen route.
+    """
+    try:
+        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        request = call.get("request") or {}
+        outbound = request.get("outbound") or {}
+        body = outbound.get("body")
+        provenance = call.get("response_provenance") or {}
+        terminal_id = call.get("terminal_entry_id")
+        sequence = call.get("action_sequence")
+        expected_error = {"error": {"code": "provider_unavailable"}}
+        digest = contracts.document_hash(expected_error)
+        if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+                or call.get("run_id") != example.get("run_id")
+                or call.get("operation_id") != "openrouter.responses"
+                or call.get("funding_source") not in {"host", "miner_key"}
+                or call.get("accounting_state") != "settlement"
+                or type(call.get("actual_microusd")) is not int or call["actual_microusd"] != 0
+                or type(sequence) is not int or sequence < 0 or type(terminal_id) is not int or terminal_id < 1
+                or not _policy(call, registry) or call.get("evidence_gaps")
+                or (call.get("request_capture") or {}).get("redacted")
+                or not training_steps._exact(request)
+                or request.get("operation_id") != "openrouter.responses"
+                or request.get("request_hash") != call.get("request_hash")
+                or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
+                or not isinstance(body, Mapping)
+                or contracts.document_hash(body) != outbound.get("body_sha256")
+                or outbound.get("method") != "POST" or outbound.get("host") != "openrouter.ai"
+                or outbound.get("path") != "/api/v1/responses"
+                or call.get("response_status") != 502 or call.get("response") != expected_error
+                or call.get("response_sha256") != digest or call.get("response_privacy_redactions")
+                or provenance.get("delivery_to_worker") != "not_proved"
+                or provenance.get("agent_receipt") not in (None, "not_reported")
+                or any(provenance.get(key) for key in ("worker_receipt_ref", "worker_error_observation_ref",
+                    "agent_receipt_refs", "selected_response_acknowledged", "worker_error_body_acknowledged",
+                    "worker_received_receipt_entry_ids", "worker_body_source", "worker_body_exact_in_artifact"))):
+            return False
+        provider = body.get("provider") or {}
+        if (provider.get("only") != [call["reasoning_capture"]["provider_route"]]
+                or provider.get("allow_fallbacks") is not False or provider.get("zdr") is not True
+                or provider.get("data_collection") != "deny" or provider.get("require_parameters") is not True
+                or body.get("max_output_tokens") != call["reasoning_capture"]["max_output_tokens"]
+                or body.get("reasoning") != call["reasoning_capture"]["mode"]):
+            return False
+        settlements = [row for row in call.get("lifecycle") or []
+                       if row.get("entry_id") == terminal_id and row.get("entry_kind") == "settlement"]
+        if (len(settlements) != 1 or type(settlements[0].get("amount_microusd")) is not int
+                or settlements[0]["amount_microusd"] != 0):
+            return False
+        receipts = [row for row in call.get("response_receipts") or [] if row.get("entry_id") == terminal_id]
+        if (len(receipts) != 1 or receipts[0].get("response_sha256") != digest
+                or receipts[0].get("wire_body_sha256") != digest
+                or receipts[0].get("wire_body_bytes") != len(contracts.canonical_json(expected_error).encode())
+                or (receipts[0].get("metadata") or {}).get("status") != 502
+                or (receipts[0].get("metadata") or {}).get("call_succeeded") is not False
+                or receipts[0].get("response_ref") != {"entry_id": terminal_id, "field": "response"}
+                or receipts[0].get("response_unavailable") or receipts[0].get("privacy_redactions")):
+            return False
+        upstream = call.get("upstream_response_receipts") or []
+        if not upstream:
+            return False
+        for receipt in upstream:
+            response = receipt.get("response")
+            if (receipt.get("status") != 429 or not isinstance(response, Mapping)
+                    or type(receipt.get("entry_id")) is not int or not 0 < receipt["entry_id"] <= terminal_id
+                    or not isinstance(response.get("error"), Mapping) or response["error"].get("code") != 429
+                    or response.get("choices") or response.get("output")
+                    or receipt.get("provenance") != "private_upstream_response_receipt"
+                    or receipt.get("delivery_to_worker") != "not_proved"
+                    or receipt.get("privacy_redactions") or not training_steps._exact(response, response=True)
+                    or receipt.get("response_sha256") != contracts.document_hash(response)
+                    or not isinstance(receipt.get("body_sha256"), str)
+                    or contracts.SHA256_RE.fullmatch(receipt["body_sha256"]) is None
+                    or type(receipt.get("body_bytes")) is not int or receipt["body_bytes"] < 1
+                    or receipt.get("body_sha256") != receipt.get("wire_body_sha256")
+                    or receipt.get("body_bytes") != receipt.get("wire_body_bytes")):
+                return False
+        payload = ((example.get("worker_observation_artifacts") or {}).get(call["run_id"]) or {}).get("payload") or {}
+        if payload.get("complete") is not True or payload.get("failures") or any(row.get("call_identity") == call.get("call_identity")
+               for row in payload.get("response_receipts") or []):
+            return False
+        for recovered in example.get("provider_calls") or []:
+            later_request = recovered.get("request") or {}
+            if (recovered.get("run_id") != call["run_id"] or recovered.get("call_identity") == call.get("call_identity")
+                    or recovered.get("operation_id") != "openrouter.responses"
+                    or type(recovered.get("action_sequence")) is not int or recovered["action_sequence"] <= sequence
+                    or type(recovered.get("terminal_entry_id")) is not int or recovered["terminal_entry_id"] <= terminal_id
+                    or recovered.get("request_hash") != call.get("request_hash")
+                    or later_request.get("hashed_parameters") != request["hashed_parameters"]
+                    or (later_request.get("outbound") or {}).get("body") != body
+                    or (later_request.get("outbound") or {}).get("body_sha256") != outbound["body_sha256"]
+                    or recovered.get("accounting_state") != "settlement" or recovered.get("response_status") != 200
+                    or type(recovered.get("actual_microusd")) is not int or recovered["actual_microusd"] < 0
+                    or not _policy(recovered, registry)):
+                continue
+            # Recovery proves a delivered provider response, not target quality.
+            # Its own eligibility checks still validate or omit a cap-hit target.
+            evidence = training_steps._host_result(example, recovered)
+            if (evidence["write"]["status"] != 200 or evidence["response"] != recovered.get("response")
+                    or contracts.document_hash(evidence["response"]) != recovered.get("response_sha256")):
+                continue
+            state = attempt_coverage(recovered, _role(example, recovered), registry)
+            if state["route_reviewed"] and state["provider_route_verified"]:
+                return True
+        return False
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
     """Prove a delivered retryable error without making it a model target.
 
@@ -456,6 +570,8 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
     claimed. The reviewed request, saved failure bytes, host write and agent
     read must agree. Unsettled billing remains a separate eligibility gate.
     """
+    if verified_recovered_responses_retry(example, call):
+        return True
     try:
         run_id = example["run_id"]
         admission_refusal = call.get("accounting_state") == "refusal"
@@ -498,7 +614,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
         if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
             evidence = training_steps._host_result(example, call, allow_worker_error=True)
             status = evidence["write"]["status"]
-            if status not in ({402} if admission_refusal else {404, 429, 502, 503, 504}):
+            if status not in ({402} if admission_refusal else {404, 429, 500, 502, 503, 504}):
                 return False
             failure_bodies = [evidence["response"]]
             if admission_refusal:
@@ -522,7 +638,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
                 return False
             write = writes[0]
             status = write.get("status")
-            if (type(status) is not int or status not in ({402} if admission_refusal else {404, 429, 502, 503, 504})
+            if (type(status) is not int or status not in ({402} if admission_refusal else {404, 429, 500, 502, 503, 504})
                     or write.get("write_state") != "socket_written"
                     or write.get("operation_id") != operation
                     or write.get("action_sequence") != call.get("action_sequence")
@@ -586,6 +702,47 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
         return False
 
 
+def _incomplete_json_object_prefix(value: str) -> bool:
+    """Recognize strict JSON cut at EOF; never add bytes or produce a target.
+
+    The standard decoder reports an unfinished string or scalar at its start,
+    rather than at EOF. Its first syntax error still proves the preceding
+    document valid. Accept only an unfinished token that occupies the entire
+    remaining suffix. A complete object, invalid token, or trailing garbage
+    cannot use this omission rule.
+    """
+    if not isinstance(value, str) or not value.lstrip(" \t\r\n").startswith("{"):
+        return False
+    try:
+        json.loads(value, parse_constant=training_steps._reject_constant)
+    except json.JSONDecodeError as exc:
+        suffix = value[exc.pos:]
+        if exc.pos == len(value):
+            return True
+        if exc.msg == "Unterminated string starting at":
+            # JSON's string scanner already rejected bad escapes and controls.
+            return True
+        if exc.msg == "Invalid \\uXXXX escape":
+            return re.fullmatch(r"u[0-9a-fA-F]{0,4}", suffix) is not None
+        if exc.msg == "Expecting value":
+            return suffix == "-" or any(
+                token.startswith(suffix) and len(suffix) < len(token)
+                for token in ("true", "false", "null"))
+        if exc.msg == "Expecting ',' delimiter":
+            # A number decoder stops before an unfinished decimal/exponent.
+            # Verify its left token too, so a closed string or container with
+            # the same suffix cannot masquerade as a partial number.
+            number_token = r"-?(?:0|[1-9][0-9]*)"
+            if suffix != ".":
+                number_token += r"(?:\.[0-9]+)?"
+            number = re.search(r"(?:^|[\[,:\s])(" + number_token + r")\Z", value[:exc.pos])
+            return number is not None and re.fullmatch(r"\.|[eE][+-]?", suffix) is not None
+        return False
+    except (ValueError, RecursionError):
+        return False
+    return False
+
+
 def verified_cap_truncated_target(example, call) -> bool:
     """Recognize exact cap-hit tool JSON ending at EOF, never repair a target.
 
@@ -632,16 +789,9 @@ def verified_cap_truncated_target(example, call) -> bool:
         def argument_shape(value):
             if training_steps._arguments(value):
                 return True
-            if not isinstance(value, str) or not value.lstrip().startswith("{"):
-                return False
-            try:
-                json.loads(value, parse_constant=training_steps._reject_constant)
-            except json.JSONDecodeError as exc:
-                if exc.pos == len(value):
-                    unfinished.append(value)
-                    return True
-            except (ValueError, RecursionError):
-                pass
+            if _incomplete_json_object_prefix(value):
+                unfinished.append(value)
+                return True
             return False
 
         # This validates the unchanged raw target's remaining shape only. It
@@ -765,11 +915,12 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
         body = ((call.get("request") or {}).get("outbound") or {}).get("body")
         events = []
 
-        def add(kind, path, value, *, delivery=None, reasoning_field=None, alias_paths=()):
+        def add(kind, path, value, *, delivery=None, reasoning_field=None, alias_paths=(), execution=None):
             events.append({"kind": kind, "source_path": path, "value": copy.deepcopy(value),
                            "value_sha256": contracts.document_hash(value),
                            **({"delivery": delivery} if delivery else {}),
                            **({"reasoning_field": reasoning_field} if reasoning_field else {}),
+                           **({"execution": execution} if execution else {}),
                            **({"alias_source_paths": [path_prefix for path_prefix in alias_paths]}
                               if alias_paths else {})})
 
@@ -806,15 +957,19 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
                     add("response_metadata", path + [key], response[key], delivery=delivery)
             segments, summary, opaque = _segments(response, operation)
             full, _ = full_text_segments({**call, "response": response}, _role(example, call), registry)
-            for segment in segments:
-                classification = ("summary" if "summary" in segment["field"] else
-                                  "full_generated_thinking" if (delivery == "selected_terminal"
-                                                                 and segment in full) else
-                                  "unverified_reasoning_text")
-                sources = segment["source_paths"]
-                add(classification, path + sources[0], segment["text"], delivery=delivery,
-                    reasoning_field=segment["field"],
-                    alias_paths=[path + source for source in sources[1:]])
+            def add_segments(values):
+                for segment in values:
+                    classification = ("summary" if "summary" in segment["field"] else
+                                      "full_generated_thinking" if (delivery == "selected_terminal"
+                                                                     and segment in full) else
+                                      "unverified_reasoning_text")
+                    sources = segment["source_paths"]
+                    add(classification, path + sources[0], segment["text"], delivery=delivery,
+                        reasoning_field=segment["field"],
+                        alias_paths=[path + source for source in sources[1:]])
+
+            if operation != "openrouter.responses":
+                add_segments(segments)
             if summary and not any("summary" in segment["field"] for segment in segments):
                 add_derived("summary_present_without_readable_text", path, delivery=delivery)
             if opaque or "hidden_reasoning" in (call.get("response_privacy_redactions") or []):
@@ -834,11 +989,20 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
                             add("tool_call", base + ["tool_calls", tool_index], tool, delivery=delivery)
             elif operation == "openrouter.responses":
                 for output_index, item in enumerate(response.get("output") or []):
-                    if not isinstance(item, Mapping):
-                        continue
-                    if item.get("type") in {"message", "function_call", "function_call_output"}:
-                        add("assistant_output" if item.get("type") == "message" else "tool_call",
-                            path + ["output", output_index], item, delivery=delivery)
+                    kind = item.get("type") if isinstance(item, Mapping) else None
+                    hosted = kind in training_steps._HOSTED_SEARCH_TYPES
+                    event_kind = ("assistant_output" if kind == "message" else
+                                  "provider_hosted_tool" if hosted else
+                                  "tool_call" if kind in {"function_call", "custom_tool_call"} else
+                                  "tool_result" if kind in {"function_call_output", "custom_tool_call_output"} else
+                                  "reasoning_item" if kind == "reasoning" else "provider_output_item")
+                    # Whole native items preserve IDs, status, citations and
+                    # exposed search sources. The list order is the provider's
+                    # wire order; no internal tool response is synthesized.
+                    add(event_kind, path + ["output", output_index], item, delivery=delivery,
+                        execution="provider" if hosted else None)
+                    add_segments([segment for segment in segments
+                                  if segment["source_paths"][0][:2] == ["output", output_index]])
 
         if isinstance(call.get("response"), Mapping):
             response_events(call["response"], prefix + ["response"], "selected_terminal")
@@ -933,6 +1097,7 @@ def readable_trace_markdown(report: Mapping[str, Any], *, raw_export_name: str |
                     "This marker is inferred from the saved response or redaction metadata; it is not a raw value.", ""]
         return [f"#### {event['kind']}",
                 *([f"Reasoning field: `{event['reasoning_field']}`  "] if event.get("reasoning_field") else []),
+                *([f"Execution: `{event['execution']}`  "] if event.get("execution") else []),
                 *([f"Receipt source: `{event['delivery']}`  "] if event.get("delivery") else []),
                 f"Raw path: `{contracts.canonical_json(event['source_path'])}`  ",
                 *([f"Alias paths: `{contracts.canonical_json(event['alias_source_paths'])}`  "]
@@ -1154,7 +1319,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -
             return None
         if call.get("run_id") != run_id:
             continue
-        if call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call):
+        if (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call)
+                or verified_recovered_responses_retry(example, call)):
             continue
         provenance = call.get("response_provenance") or {}
         request = call.get("request") or {}
@@ -1247,6 +1413,8 @@ def _selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | 
                 for call in example.get("provider_calls") or []:
                     if call.get("run_id") != selected_id:
                         continue
+                    if verified_recovered_responses_retry(example, call):
+                        continue
                     if call.get("accounting_state") == "refusal":
                         if not verified_failed_attempt(example, call):
                             return None
@@ -1296,6 +1464,8 @@ def _selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | 
         elif call_reasons:
             return None
         if call.get("run_id") == run_id:
+            if verified_recovered_responses_retry(example, call):
+                continue
             if call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call):
                 continue
             redactions = set(call.get("response_privacy_redactions") or [])

@@ -142,7 +142,9 @@ def test_late_tool_is_not_dispatched_and_loaded_evidence_is_judged(
         "type": "function",
         "function": {"name": "submit_findings"},
     }
-    assert "reasoning" not in requests[0]
+    assert requests[0].get("reasoning") == (
+        {"effort": "low"} if positive_semantic_review else None
+    )
     assert requests[1].get("reasoning") == (
         {"effort": "low"} if positive_semantic_review else None
     )
@@ -260,7 +262,9 @@ def test_reserved_judgment_cannot_turn_missing_evidence_positive(
     )
 
     assert len(requests) == 3
-    assert "reasoning" not in requests[0]
+    assert requests[0].get("reasoning") == (
+        {"effort": "low"} if positive_semantic_review else None
+    )
     assert requests[1].get("reasoning") == (
         {"effort": "low"} if positive_semantic_review else None
     )

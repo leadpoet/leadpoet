@@ -74,6 +74,31 @@ def test_repair_cannot_change_the_compiled_tree():
         validate(raw, locked_nodes=locked)
 
 
+def test_node_permutation_has_one_stable_plan_lock_and_hash():
+    raw = matrix()
+    original = validate(raw)
+    raw["nodes"] = [raw["nodes"][i] for i in (0, 3, 4, 1, 2)]
+    reordered = validate(raw, locked_nodes=original["nodes"])
+    assert reordered["nodes"] == original["nodes"]
+    assert reordered["tree_sha256"] == original["tree_sha256"]
+    assert reordered["status"] == "VERIFIED"
+
+
+@pytest.mark.parametrize("change", ["duplicate", "sparse", "unreachable", "cycle"])
+def test_permuted_node_support_keeps_identity_and_tree_guards(change):
+    raw = matrix()
+    if change == "duplicate":
+        raw["nodes"][-1]["id"] = "p3"
+    elif change == "sparse":
+        raw["nodes"][-1]["id"] = "p99"
+    elif change == "unreachable":
+        raw["nodes"].append(node(5, "software"))
+    else:
+        raw["nodes"][0]["children"] = ["p0", "p1"]
+    with pytest.raises(CoverageError):
+        validate(raw)
+
+
 @pytest.mark.parametrize("field,value", [("op", []), ("id", []), ("status", {}), ("activity_role", [])])
 def test_malformed_inner_json_gets_scoped_validation_error(field, value):
     raw = matrix()
@@ -138,6 +163,20 @@ def test_examples_are_annotations_but_cannot_swallow_trailing_relative_scope():
     raw["nodes"][2]["span"] += " that serves clinics through partners"
     with pytest.raises(CoverageError):
         validate(raw, text)
+
+
+@pytest.mark.parametrize("marker_inside", [False, True])
+def test_example_marker_can_start_the_span_or_immediately_precede_it(marker_inside):
+    text = "Provides workflow software such as scheduling and intake"
+    span = "such as scheduling and intake" if marker_inside else "scheduling and intake"
+    raw = {"nodes": [node(0, text, "all", ["p1", "p2"]),
+                     node(1, "Provides workflow software"), node(2, span, "example")],
+           "claims": [claim(1)]}
+    assert validate(raw, text)["status"] == "VERIFIED"
+    raw["nodes"][0]["span"] += " that serves clinics through partners"
+    raw["nodes"][2]["span"] += " that serves clinics through partners"
+    with pytest.raises(CoverageError):
+        validate(raw, raw["nodes"][0]["span"])
 
 
 def test_wrong_role_unbound_quote_and_json_matrix_have_no_pass_authority():
@@ -296,3 +335,51 @@ def test_existing_loop_targets_missing_ids_with_unchanged_call_limits(monkeypatc
     assert request_document["requested_product_service"] == CRITERION
     assert "product_coverage_instructions" not in request_document
     assert "Acme provides voice software for clinics." in str(request_document["prefetched_sources"])
+
+
+def test_initial_invalid_plan_feedback_can_repair_without_a_locked_tree(monkeypatch):
+    requests = []
+
+    async def post(_session, _url, *, headers, payload):
+        from lab_arena.operations import validate_operation_request
+        validate_operation_request("openrouter.chat", payload)
+        requests.append(payload)
+        if len(requests) == 1:
+            coverage = {"nodes": [node(0, CRITERION)], "claims": [claim(0)]}
+        else:
+            feedback = next(json.loads(m["content"]) for m in reversed(payload["messages"])
+                            if m.get("role") == "tool")
+            assert feedback["product_coverage"]["locked_nodes"] == []
+            assert feedback["product_coverage"]["error"] == (
+                "compound product criterion requires explicit requirement structure"
+            )
+            assert len(feedback["product_coverage"]["error"]) <= 300
+            coverage = matrix()
+        raw = finding(json.dumps(coverage))
+        return 200, {"choices": [{"message": {"tool_calls": [{
+            "id": str(len(requests)), "type": "function", "function": {
+                "name": "submit_findings", "arguments": json.dumps({"findings": [raw]}),
+            },
+        }]}}]}
+
+    async def no_research(*args, **kwargs):
+        pytest.fail("A structural correction must use loaded sources")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
+    monkeypatch.setenv("EXA_API_KEY", "offline-test")
+    monkeypatch.setattr(inv, "_post_json", post)
+    monkeypatch.setattr(inv, "_search_web", no_research)
+    monkeypatch.setattr(inv, "_fetch_page", no_research)
+    output = asyncio.run(inv.investigate_company_evidence(
+        company_locator={"name": "Acme", "website": "https://acme.example/"},
+        targets=("industry",), requested_industry="Software", requested_product_service=CRITERION,
+        prior_observations={"submitted_source_urls": [URL]},
+        verified_homepage_identity={"normalized_name": "Acme", "registrable_dns_domain": "acme.example"},
+        prefetched_pages={URL: {"final_url": URL, "text": QUOTE}},
+    ))
+    assert output["_completed_submit"] is True
+    assert output["claims"]["industry"]["status"] == "VERIFIED"
+    assert len(requests) == 2
+    assert output["usage"]["search_calls"] == output["usage"]["fetch_calls"] == 0
+    assert all(p["max_tokens"] == 3000 for p in requests)
+    assert inv.MAX_REASONING_TURNS == 8 and inv.ADMISSION_DEADLINE_SECONDS == 110.0

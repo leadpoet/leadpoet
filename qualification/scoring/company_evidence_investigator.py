@@ -293,11 +293,11 @@ semantic reviews and corrected findings. Keep the required attribute as a
 separate mandatory judgment; industry proof does not prove that attribute.
 
 For industry, investigate what the company itself supplies or operates. A
-customer's use of a product, an internal department, a partner, a portfolio
-company, or an industry named only as a target market does not establish that
-the investigated company operates in that industry. A first-party product or
-company description can establish a specific operating activity even when a
-directory uses a broader label. Return supplier_operator only when the fetched
+customer, department, partner, financial-investor portfolio, or target-market
+label does not prove its supplied activity. Bound operating brands/divisions
+can establish its products; quote their explicit parent binding. This does not
+transfer identity or stage. First-party descriptions can establish activity
+despite broad labels. Return supplier_operator only when the fetched
 quote directly describes the investigated company's own product, service, or
 operation. Return customer_user, internal_function, or third_party when that
 relationship is what the quote proves. Never infer absence from a page that
@@ -624,7 +624,8 @@ _PRODUCT_COVERAGE_INSTRUCTIONS = """
 For an industry finding with nonempty requested_product_service, return
 product_coverage as compact JSON TEXT in this same submit_findings response;
 otherwise use null. The decoded object has exactly nodes and claims arrays.
-Its nodes are a bounded flat logical tree, in order with IDs p0, p1, etc.
+Its nodes are a bounded flat logical tree with unique dense IDs p0, p1, etc.;
+the array may use any order. Each node belongs to one parent, except root p0.
 Each node has id, span (an exact unique continuous substring of the ORIGINAL
 requested_product_service), op (all, any, leaf, example), and children (IDs).
 p0 spans the complete original product criterion. Decompose independent
@@ -634,7 +635,8 @@ ANY requires one complete alternative and cannot waive shared qualifiers.
 Put shared qualifiers outside alternatives in enclosing ALL nodes. A compound
 name or phrase is not automatically a separate product: interpret the original
 meaning, not just individual words. Examples explicitly introduced by such as,
-for example or e.g. use example nodes and no claims; an example must stop before
+for example or e.g. use example nodes and no claims. The marker may start the
+example span or immediately precede it; an example must stop before
 trailing relative clauses, customer restrictions or supply-channel qualifiers.
 All text must belong to a node; gaps may contain only punctuation and logical
 or example connectors. Do not add criteria, standalone-product requirements or
@@ -643,8 +645,9 @@ with status, activity_role, and up to three evidence URL/quote bindings. Each
 VERIFIED leaf requires supplier/operator proof. Use all loaded company-bound
 pages; several clauses may cite the same exact quote, and a clause may use
 several pages. A source need not use the criterion's exact marketing wording.
-Keep the tree unchanged after it is returned in repair feedback; repair only
-listed clause evidence/statuses. Search only unresolved mandatory clause IDs
+Keep nonempty locked_nodes unchanged in repair feedback; repair only listed
+clause evidence/statuses. Without a locked tree, correct the reported tree error.
+Search only unresolved mandatory clause IDs
 using the remaining existing research allowance. A missing clause is UNPROVEN,
 not CONTRADICTED. Keep the response compact within the existing token budget.
 """
@@ -5561,11 +5564,12 @@ async def investigate_company_evidence(
                             "rejected_findings": rejected,
                             **({"product_coverage": {
                                 "locked_nodes": [{key: node[key] for key in ("id", "span", "op", "children")}
-                                                 for node in locked_product_nodes],
+                                                 for node in (locked_product_nodes or [])],
                                 "unresolved_ids": (product_coverage or {}).get("unresolved_ids", []),
                                 "citation_issues": (product_coverage or {}).get("citation_issues", {}),
-                                "error": industry_finding.get("product_coverage_error", ""),
-                            }} if locked_product_nodes is not None else {}),
+                                "error": str(industry_finding.get("product_coverage_error", ""))[:300],
+                            }} if (locked_product_nodes is not None
+                                   or industry_finding.get("product_coverage_error")) else {}),
                             **(
                                 {
                                     "untrusted_non_rejected_source_context": (

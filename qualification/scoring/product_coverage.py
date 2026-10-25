@@ -58,9 +58,11 @@ def _plan(criterion: str, nodes: object) -> list[dict]:
     if not isinstance(nodes, list) or not 1 <= len(nodes) <= MAX_NODES:
         raise CoverageError("product coverage requires a bounded requirement tree")
     indexed = {}
-    for index, raw in enumerate(nodes):
+    for raw in nodes:
         if (not isinstance(raw, Mapping) or set(raw) != {"id", "span", "op", "children"}
-                or raw.get("id") != f"p{index}"
+                or not isinstance(raw.get("id"), str)
+                or not re.fullmatch(r"p(?:0|[1-9]\d*)", raw["id"])
+                or raw["id"] in indexed
                 or not isinstance(raw.get("op"), str)
                 or raw.get("op") not in {"all", "any", "leaf", "example"}
                 or not isinstance(raw.get("span"), str) or not raw["span"].strip()
@@ -75,6 +77,8 @@ def _plan(criterion: str, nodes: object) -> list[dict]:
             raise CoverageError("product requirement span is absent or ambiguous")
         start = starts[0]
         indexed[raw["id"]] = {**dict(raw), "start": start, "end": start + len(span)}
+    if set(indexed) != {f"p{i}" for i in range(len(nodes))}:
+        raise CoverageError("product requirement IDs must be unique and dense")
     if indexed["p0"]["span"] != criterion:
         raise CoverageError("product tree root must retain the complete original criterion")
     if indexed["p0"]["op"] == "leaf" and re.search(
@@ -94,7 +98,8 @@ def _plan(criterion: str, nodes: object) -> list[dict]:
                 raise CoverageError("product leaf cannot hide child requirements")
             if node["op"] == "example":
                 prefix = criterion[max(0, node["start"] - 40):node["start"]]
-                if (not re.search(r"(?:such as|for example|e\.g\.)\s*[:,(]?\s*$", prefix, re.I)
+                if (not (re.search(r"(?:such as|for example|e\.g\.)\s*[:,(]?\s*$", prefix, re.I)
+                         or re.match(r"(?:such as|for example|e\.g\.)(?:\s|[:,(])", node["span"], re.I))
                         or re.search(r"\b(?:must|required|requires|mandatory|only|that|which|who|whose|where|through)\b", node["span"], re.I)):
                     raise CoverageError("unlicensed product example or hidden mandatory qualifier")
             return
@@ -125,7 +130,7 @@ def _plan(criterion: str, nodes: object) -> list[dict]:
     visit("p0", 0)
     if seen != set(indexed):
         raise CoverageError("unreachable product requirement nodes")
-    return list(indexed.values())
+    return [indexed[f"p{i}"] for i in range(len(nodes))]
 
 
 def compile_plan(criterion: str, raw: object) -> list[dict]:

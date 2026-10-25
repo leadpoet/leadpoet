@@ -259,8 +259,8 @@ before citing it.
 URLs after [[SERVER_VISIBLE_LINK_DESTINATIONS_FOR_IDENTITY_ONLY]] are identity
 context only. Never include that marker or those URL strings in a quote.
 
-You have at most 8 reasoning turns, 2 searches, and 4 fresh page fetches across all
-requested targets. Prioritize official company investor-relations pages for
+Use at most 8 turns, the stated search cap, and 4 fresh fetches across targets.
+Prioritize official company investor-relations pages for
 public listing. For Public, prefer a relevant supplied recent issuer
 announcement or filing that names the investigated company with an exchange
 ticker, and fetch it before a stock-quote or chart page. This source order does
@@ -641,7 +641,15 @@ whole-criterion match. Industry VERIFIED requires the whole criterion and the
 frozen leaf logic both proven. Global UNPROVEN has empty global URL/quote, but
 retain valid per-clause evidence. Search unresolved obligations only within the
 existing remaining research allowance, preserving useful query operators and
-synonyms. Never infer absence from silence or add requirements not requested.
+synonyms. Search one weakest mandatory unresolved leaf or small related group
+per query with the company and useful synonyms; do not concatenate the full
+criterion or illustrative examples. For a remaining gap, prefer a specific
+first-party product, docs, or case page from navigation or search results over
+a general overview or demo. If all leaves are VERIFIED but the whole criterion
+is UNPROVEN, identify the uncaptured original-criterion gap. After replacing a
+rejected citation with a valid quote, rejudge that leaf and the whole criterion;
+never upgrade automatically. Never infer absence from silence or add
+requirements not requested.
 """
 
 
@@ -4320,6 +4328,7 @@ async def investigate_company_evidence(
             ),
         }
     search_calls = 0
+    search_limit = MAX_SEARCH_CALLS
     fetch_calls = 0
     fetch_outcomes: list[dict[str, Any]] = []
     requested_venture_stage = (
@@ -4810,13 +4819,24 @@ async def investigate_company_evidence(
                     required_stage_discovery_failure_reason = (
                         ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
                     )
-                elif search_calls >= MAX_SEARCH_CALLS:
+                elif search_calls >= search_limit:
                     stage_discovery.update(ok=False, error="search_budget_exhausted")
                     required_stage_discovery_failure_reason = (
                         ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
                     )
                 else:
                     search_calls += 1
+                    if (
+                        "industry" in requested_targets
+                        and requested_product_service.strip()
+                    ):
+                        # Mandatory stage discovery consumed one search. Give
+                        # product review its ordinary two model-controlled
+                        # searches without changing any other case's cap.
+                        search_limit += 1
+                        input_document["investigation_limits"][
+                            "search_calls"
+                        ] = search_limit
                     try:
                         discovery = await _search_web(
                             session, required_current_stage_query, key=exa_key
@@ -4839,7 +4859,7 @@ async def investigate_company_evidence(
                         stage_discovery.update(ok=True, discovery=discovery)
                 input_document["server_current_stage_discovery"] = stage_discovery
                 input_document["investigation_limits"]["remaining_search_calls"] = (
-                    MAX_SEARCH_CALLS - search_calls
+                    search_limit - search_calls
                 )
             messages: list[dict[str, Any]] = [{
                 "role": "user",
@@ -5508,7 +5528,7 @@ async def investigate_company_evidence(
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
                         and search_calls == 0
-                        and search_calls < MAX_SEARCH_CALLS
+                        and search_calls < search_limit
                         and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
@@ -5571,7 +5591,7 @@ async def investigate_company_evidence(
                                 and not industry_followup_search_completed
                             )
                         )
-                        and search_calls < MAX_SEARCH_CALLS
+                        and search_calls < search_limit
                         and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
@@ -5596,7 +5616,7 @@ async def investigate_company_evidence(
                             search_calls == 0
                             or requested_private_equity_stage
                         )
-                        and search_calls < MAX_SEARCH_CALLS
+                        and search_calls < search_limit
                         and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
@@ -5627,7 +5647,7 @@ async def investigate_company_evidence(
                         and quote_presence_rejected_targets & quote_repair_targets
                         and not force_submit
                         and _turn < MAX_REASONING_TURNS - 3
-                        and search_calls < MAX_SEARCH_CALLS
+                        and search_calls < search_limit
                         and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
                         < ADMISSION_DEADLINE_SECONDS
@@ -6239,7 +6259,7 @@ async def investigate_company_evidence(
                                 "for any claim whose required proof is still missing."
                             ),
                         }
-                    elif search_calls >= MAX_SEARCH_CALLS:
+                    elif search_calls >= search_limit:
                         tool_result = {"ok": False, "error": "search_budget_exhausted"}
                     else:
                         query = arguments.get("query") if isinstance(arguments, Mapping) else None

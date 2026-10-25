@@ -2555,6 +2555,11 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
         error_class = "source_not_found"
     elif raw_error == "http_410":
         error_class = "source_gone"
+    elif raw_error == "source_blocked":
+        # The exact-profile reader already distinguishes source-local blocks
+        # from outer transport, malformed replies, and unbound crawl failures.
+        # Reuse the canonical class recognized by both finality consumers.
+        error_class = "source_access_denied"
     elif raw_error.startswith("http_"):
         error_class = "http_error"
     elif raw_error in {

@@ -510,6 +510,15 @@ service errors and ambiguous or mismatched source responses remain failures.
 Verify the affected unfinished judgment through accepted completion and public
 publication, and compare its previously accepted outputs before and after.
 
+For a typed LinkedIn `source_blocked` diagnostic that becomes a generic fetch
+failure, build and verify with `--source-blocked-alias`. It records
+`typed_linkedin_source_blocked_alias_v1` and changes only the frozen investigator's
+diagnostic normalization to the existing `source_access_denied` class. Preserve
+all prior explicit correction options. The base must already contain the exact
+source-access correction above, or select that option first. Outer transport
+failures, ambiguous crawl failures, malformed evidence and required-search
+failures remain retryable. A completed `UNPROVEN` finding remains unproven.
+
 For the approved pending final-correction repair, also build and verify with
 `--pending-final-correction`. It changes only the frozen loop predicate so an
 already-pending correction uses the next existing turn, even if the preceding

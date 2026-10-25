@@ -111,9 +111,10 @@ quality may change; the user has accepted this tradeoff.
   `562-lab-arena-full-thinking-catalog-commit.sql`, and
   `563-lab-arena-training-publication-eligibility.sql` through the normal release workflow before activation. They check source hashes
   and database privileges, preserve unrelated behavior, and are idempotent.
-  Current main's `562-lab-arena-review-context-integrity-reason.sql` must be applied
-  **before** this PR's `556-lab-arena-research-review-result.sql`. The latter now
-  extends that exact function version and preserves `context_integrity` handling.
+  Apply current main's `562-lab-arena-review-context-integrity-reason.sql`, then
+  `563-lab-arena-review-source-digest-reason.sql`, **before** this PR's
+  `556-lab-arena-research-review-result.sql`. The latter extends that exact
+  function version and preserves both context-integrity and source-digest handling.
   Migration prefixes alone do not define the order of these independent branches.
 
 ## Reproducible checks

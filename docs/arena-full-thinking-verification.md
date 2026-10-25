@@ -205,10 +205,10 @@ new bounded review result. Both must pass the normal release workflow.
 
 Machine summary: [reviewer/capture evidence](evidence/full-thinking/reviewer-capture-validation-20261024.json).
 
-## Real ten-ICP sourcing test and review corrections — 2026-10-24
+## Initial ten-ICP sourcing attempt and review corrections — 2026-10-24
 
-**This end-to-end test is not complete. The PR remains a draft and activation
-remains off.** Earlier component and synthetic tests did not prove the actual
+**This initial attempt stopped before completion; later results are recorded below.
+The PR remains a draft and activation remains off.** Earlier component and synthetic tests did not prove the actual
 database publication boundary or real sourcing/qualification workflow.
 
 The new run used the actual source archive, signed submission review, worker
@@ -310,3 +310,39 @@ were reproduced unchanged on clean main `c86511fcb`: a stale checkpoint default,
 an old cache-key expectation, and three old PostgreSQL fixtures missing migration
 474's execution-attempt-count function. This does not classify the remaining
 failures or establish a green broad CI run.
+
+## Resumed scoring and export diagnosis — 2026-10-25
+
+The preserved test completed real judging after provider access was restored.
+All 20 executions have accepted, linked scores. The actual PostgreSQL publication
+succeeded and both public ranking rows matched stored publication. A failed judge
+attempt completed on its normal retry while other work continued. No score or
+provider response was substituted.
+
+Independent readback verified 20 raw exports, 20 readable views, all 100 execution
+model receipt chains, and all 20 selected scorer output hashes. The original strict
+exports were empty. Reasons included historical false Basic-prose redactions,
+genuine privacy exclusions in fetched pages, unresolved old provider attempts,
+and two inputs from an inconsistent old database/object checkpoint. The original
+evidence was preserved; it was not rewritten to claim a complete trajectory.
+
+Readback also exposed a separate parser bug: full-thinking Chat history can
+contain `refusal: null` on an assistant tool-call turn. The outbound request
+preserved that valid field, but the training exporter rejected it. The correction
+admits only assistant null refusals in approved full-thinking history. Non-null
+refusals and invalid roles remain rejected. A two-step regression failed before
+the correction and produced two strict records afterward. All 95 focused export
+tests passed. An offline rebuild of one unchanged, complete saved ICP now yields
+five strict records instead of zero; this does not repair the other saved gaps.
+
+Main's subsequent source-digest diagnostic also changes the review SQL function.
+The compatible order is context562, source-digest563, then research556. The
+combined migration and publication checks passed 74 tests, plus two digest/catalog
+checks. Independent root verification on commit `7441b8b7a` passed 131 tests across
+the current full E2E schema, actual publication and Git promotion, source review,
+strict exports, and completed-call replay. No production migration was applied.
+
+The fresh repeat uses the corrected committed source and the same cumulative
+spend ledger. The user approved raising only the combined search/scraping limit
+to $8; OpenRouter remains capped at $10. Genuine privacy exclusions remain
+exclusions and are not relaxed to obtain a passing test.

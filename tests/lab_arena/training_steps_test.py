@@ -75,7 +75,7 @@ def test_private_binary_bytes_never_enter_agent_dataset_splits_or_manifest():
     lambda e: e['provider_calls'][0]['response_receipts'][0].update(response_sha256='bad'),
     lambda e: e['provider_calls'][0]['response']['choices'][0].update(finish_reason='length'),
     lambda e: e['provider_calls'][0]['response']['choices'][0]['message'].update(refusal='No'),
-    lambda e: e['provider_calls'][0]['response']['choices'][0]['message'].update(content='[REDACTED]'),
+    lambda e: e['provider_calls'][0]['response_receipts'][0].update(privacy_redactions=['credential']),
     lambda e: e['provider_calls'][0]['response']['choices'][0]['message'].update(reasoning_details=[{'type': 'reasoning.encrypted', 'data': 'secret'}]),
     lambda e: e['provider_calls'][0]['response_provenance'].update(agent_receipt='not_reported'),
     lambda e: e['provider_calls'][0]['request']['outbound']['body'].update(previous_response_id='external'),
@@ -91,6 +91,44 @@ def test_fail_closed(mutate):
         call['response_receipts'][0]['response_sha256'] = call['response_receipts'][0]['response_sha256'] if call['response_receipts'][0]['response_sha256'] == 'bad' else c.document_hash(call['response'])
         seal(e)
     assert not records(e)[0]
+
+
+@pytest.mark.parametrize('marker', ['[REDACTED]', '%5BREDACTED%5D'])
+def test_literal_marker_in_acknowledged_tool_input_is_exact(marker):
+    e = fixture()
+    call = e['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    body['messages'] = [
+        {'role': 'user', 'content': 'Research the source'},
+        {'role': 'assistant', 'content': None, 'tool_calls': [{
+            'id': 'search-1', 'type': 'function',
+            'function': {'name': 'search', 'arguments': '{}'}}]},
+        {'role': 'tool', 'tool_call_id': 'search-1', 'content': json.dumps({'snippet': marker})},
+    ]
+    body['tools'] = [{'type': 'function', 'function': {
+        'name': 'search', 'parameters': {'type': 'object'}}}]
+    call['request']['outbound']['body_sha256'] = c.document_hash(body)
+    call['request_capture'] = {'redacted': False, 'redactions': []}
+    rows, _ = records(seal(e))
+    assert len(rows) == 1
+    assert rows[0]['input']['messages'][2]['content'] == json.dumps({'snippet': marker})
+    assert rows[0]['source_refs'][0]['delivered_response_sha256'] == c.document_hash(call['response'])
+
+    call['request_capture'] = {'redacted': True, 'redactions': ['credential']}
+    assert not records(seal(e))[0]
+    call['request_capture'] = {'redacted': False, 'redactions': []}
+    call['request']['effective_parameters']['api_key'] = 'synthetic-secret'
+    assert not records(seal(e))[0]
+
+
+def test_literal_model_reply_is_not_a_privacy_redaction_without_receipt_flag():
+    e = fixture()
+    call = e['provider_calls'][0]
+    call['response']['choices'][0]['message']['content'] = '[REDACTED]'
+    call['response_receipts'][0]['response_sha256'] = c.document_hash(call['response'])
+    assert records(seal(e))[0][0]['target']['content'] == '[REDACTED]'
+    call['response_receipts'][0]['privacy_redactions'] = ['credential']
+    assert not records(seal(e))[0]
 
 
 def test_select_acknowledged_earlier_reply_not_billing_recovery():

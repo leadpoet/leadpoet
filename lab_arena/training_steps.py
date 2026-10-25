@@ -48,8 +48,9 @@ def _exact(value, *, response=False):
                         msg.pop(field)
     clean, removed = training_export.without_hidden_reasoning(value)
     sanitized, redactions = training_capture.sanitize_training_value(value)
-    return (not removed and not redactions and clean == value and sanitized == value
-            and not re.search(r'\[REDACTED\]|%5[Bb]REDACTED%5[Dd]', contracts.canonical_json(value)))
+    # A provider can return the marker literally. Callers verify capture and
+    # receipt redaction flags plus request/response hashes separately.
+    return not removed and not redactions and clean == value and sanitized == value
 
 
 def _reject_constant(value):

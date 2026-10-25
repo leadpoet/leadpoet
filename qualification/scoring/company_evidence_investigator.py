@@ -5898,6 +5898,20 @@ async def investigate_company_evidence(
                             and not force_stage_search
                             and not force_quote_recovery_search
                         )
+                        serialization_scope_eligible = bool(
+                            serialization_retry_request
+                            and not force_public_stage_rereview
+                            and not unproven_without_search
+                            and not (
+                                forced_stage_search_pending
+                                or (industry_followup_pending
+                                    and not industry_followup_search_completed)
+                                or industry_followup_fetch_pending
+                                or early_product_search_pending
+                                or early_product_fetch_urls
+                            )
+                        )
+                        scoped_serialization_repair = False
                         if capture_scoped_correction:
                             rejected_targets = {
                                 str(item.get("target") or "")
@@ -5918,10 +5932,19 @@ async def investigate_company_evidence(
                                 if target not in preserved
                             )
                             if preserved and pending_targets:
-                                if force_submit:
+                                if force_submit or serialization_scope_eligible:
                                     scoped_correction_preserved = preserved
                                     scoped_correction_targets = pending_targets
                                     scoped_correction_active = True
+                                    if serialization_scope_eligible:
+                                        # The one-time envelope retry has now
+                                        # produced validated siblings. Use the
+                                        # existing final correction turn for only
+                                        # the rejected targets, provided no
+                                        # required research remains pending.
+                                        scoped_serialization_repair = True
+                                        final_correction_pending = True
+                                        forced_next_tool = "submit_findings"
                                 else:
                                     scoped_correction_candidate_preserved = preserved
                                     scoped_correction_candidate_targets = (
@@ -6180,7 +6203,8 @@ async def investigate_company_evidence(
                                 + (
                                     "This is the single final submit-only correction; "
                                     "do not search or fetch. "
-                                    if force_submit and not force_stage_search
+                                    if (force_submit or scoped_serialization_repair)
+                                    and not force_stage_search
                                     else (
                                         (
                                             "After the required search, fetch a useful "

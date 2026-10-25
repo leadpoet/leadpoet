@@ -376,6 +376,8 @@ def coverage(examples) -> dict:
         trajectories["eligible_without_disqualifying_capture"] += not bad
         trajectories["complete_full_thinking"] += bool(
             not bad and has_text and (example.get("completeness") or {}).get("complete") is True)
+        trajectories["selected_research_full_thinking"] += bool(
+            not bad and has_text and selected_research_evidence(example) is not None)
     return {"attempts": attempts, "returned_classes": dict(sorted(counts.items())),
             "distinct_verified_exports": len(seen),
             "saved_calls": sum(row["storage"] == "saved" for row in attempts),
@@ -662,6 +664,93 @@ def _delivered_response(call: Mapping[str, Any], digest: str) -> Mapping[str, An
     return values[0]
 
 
+def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | None:
+    """Return attributable judge-only gaps, or reject an inexact selected replay.
+
+    Raw export completeness remains an all-related-runs audit. A score worker's
+    private provider response is not part of the accepted agent's prior context
+    or target, provided the score input and published label are still bound.
+    """
+    proof = example.get("completeness") or {}
+    reasons = set(proof.get("incomplete_reasons") or [])
+    if proof.get("complete") is True and not reasons:
+        return frozenset()
+    allowed = {"response_privacy_nonexact", "provider_cost_unresolved"}
+    if not reasons or not reasons <= allowed:
+        return None
+    dimensions = proof.get("dimensions") or {}
+    by_dimension = proof.get("reasons_by_dimension") or {}
+    for name in ("context", "source_identity", "exact_inputs", "input_output_label"):
+        if dimensions.get(name) is not True or by_dimension.get(name) != []:
+            return None
+    if (set(by_dimension.get("research_process") or []) != reasons
+            or set(by_dimension.get("costs") or []) != (reasons & {"provider_cost_unresolved"})
+            or dimensions.get("research_process") is not False
+            or dimensions.get("costs") is not ("provider_cost_unresolved" not in reasons)):
+        return None
+    run_id = example.get("run_id")
+    score_id = example.get("score_run_id")
+    output = example.get("output")
+    judgment = example.get("judgment")
+    output_identity = example.get("output_identity") or {}
+    snapshots = example.get("input_snapshots") or {}
+    if (not isinstance(run_id, str) or not isinstance(score_id, str)
+            or not isinstance(output, Mapping) or not isinstance(judgment, Mapping)
+            or type(judgment.get("per_icp_score")) not in (int, float)
+            or output_identity.get("document_hash") != contracts.document_hash(output)):
+        return None
+    attempts = example.get("attempts") or []
+    score_runs = [row for row in attempts if row.get("run_id") == score_id
+                  and row.get("kind") == "score" and row.get("status") == "accepted"]
+    if len(score_runs) != 1:
+        return None
+    score_ids = {row.get("run_id") for row in attempts if row.get("kind") == "score"
+                 and isinstance(row.get("run_id"), str)}
+    for identity in (run_id, score_id):
+        snapshot = snapshots.get(identity) or {}
+        document = snapshot.get("input")
+        if (not isinstance(document, Mapping)
+                or (snapshot.get("privacy") or {}).get("redacted") is not False
+                or snapshot.get("input_sha256") != contracts.document_hash(document)):
+            return None
+    score_input = snapshots[score_id]["input"]
+    if (score_input.get("scored_run_id") != run_id
+            or score_input.get("companies") != output.get("companies")
+            or (example.get("competition_cost_eligibility") or {}).get("status") != "available"):
+        return None
+    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+    payload = artifact.get("payload") or {}
+    if (payload.get("complete") is not True
+            or artifact.get("payload_sha256") != contracts.document_hash(payload)
+            or any((row.get("privacy") or {}).get("redacted") is not False
+                   for field in ("observations", "agent_observations")
+                   for row in payload.get(field) or [])):
+        return None
+    attributed = set()
+    for call in example.get("provider_calls") or []:
+        call_reasons = set(call.get("evidence_gaps") or [])
+        if call.get("run_id") in score_ids:
+            if not call_reasons <= allowed:
+                return None
+            attributed.update(call_reasons)
+        elif call_reasons:
+            return None
+        if call.get("run_id") == run_id:
+            redactions = set(call.get("response_privacy_redactions") or [])
+            model = call.get("operation_id") in reasoning_capture.OPERATIONS
+            permitted = {"hidden_reasoning"} if model else set()
+            if ((call.get("request_capture") or {}).get("redacted") is True
+                    or not redactions <= permitted
+                    or any(not set(row.get("privacy_redactions") or []) <= permitted
+                           for row in call.get("response_receipts") or [])
+                    or call.get("accounting_state") != "settlement"
+                    or type(call.get("actual_microusd")) is not int):
+                return None
+    if attributed != reasons:
+        return None
+    return frozenset(reasons)
+
+
 def build(examples, rules: training_steps.Rules | None = None):
     """Return private candidates only for proven full generated thinking."""
     rules = rules or training_steps.Rules()
@@ -670,6 +759,7 @@ def build(examples, rules: training_steps.Rules | None = None):
     # Reuse existing exact request, agent read, receipt and split checks. Its
     # summary-only candidates are merely a search space, never admitted here.
     by_hash = {example.get("example_hash"): example for example in examples}
+    scoped = {key: selected_research_evidence(example) for key, example in by_hash.items()}
     output = {"train": [], "eval": [], "analysis": []}
     records_by_split: dict[str, dict[str, dict]] = {"train": {}, "eval": {}}
     reasons = Counter()
@@ -683,7 +773,8 @@ def build(examples, rules: training_steps.Rules | None = None):
                              if row.get("call_identity") == ref["call_identity"] and row.get("run_id") == ref["run_id"]), None)
                 if call is None:
                     continue
-                if (example.get("completeness") or {}).get("complete") is not True:
+                ancillary_gaps = scoped[ref["example_hash"]]
+                if ancillary_gaps is None:
                     reasons["trajectory_evidence_incomplete"] += 1
                     continue
                 try:
@@ -729,7 +820,10 @@ def build(examples, rules: training_steps.Rules | None = None):
                           "source_refs": [{**{key: copy.deepcopy(value) for key, value in ref.items()
                                                if key != "teacher_reasoning_metadata"},
                                            "response_sha256": ref["delivered_response_sha256"],
-                                           "route": copy.deepcopy(call["reasoning_capture"])}]}
+                                           "route": copy.deepcopy(call["reasoning_capture"]),
+                                           "selected_research_evidence": {
+                                               "complete": True,
+                                               "ancillary_judge_gaps": sorted(ancillary_gaps)}}]}
                 record["candidate_id"] = contracts.document_hash({key: record[key] for key in
                     ("format", "input", "prior_observations", "generated_thinking", "target")})
                 existing = records_by_split[split].get(record["candidate_id"])

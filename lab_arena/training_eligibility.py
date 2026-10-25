@@ -123,8 +123,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     or (example.get("configuration") or {}).get("reasoning_capture_policy") != reasoning_capture.POLICY):
                 reasons.append("selected_run_identity_unverified")
                 continue
-            completeness = example.get("completeness") or {}
-            if completeness.get("complete") is not True or completeness.get("incomplete_reasons"):
+            ancillary_gaps = training_thinking.selected_research_evidence(example)
+            if ancillary_gaps is None:
                 reasons.append("trajectory_evidence_incomplete")
                 continue
             if (not isinstance(example.get("output"), Mapping)
@@ -133,7 +133,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 reasons.append("input_or_output_unavailable")
                 continue
             report = training_thinking.readable_trace(example)
-            if report.get("projection_truncated") is not False or report.get("capture_gaps"):
+            if (report.get("projection_truncated") is not False
+                    or not set(report.get("capture_gaps") or []) <= ancillary_gaps):
                 reasons.append("readable_trace_incomplete")
                 continue
             calls = [(index, call) for index, call in enumerate(example.get("provider_calls") or [])

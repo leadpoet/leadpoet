@@ -593,13 +593,14 @@ def _per_icp_observed(executions, scores, examples, icps):
                         "returned_leads": len(companies) if isinstance(companies, list) else None,
                         "records": count,
                         "complete": (example.get("completeness") or {}).get("complete") is True,
+                        "selected_research_complete": training_thinking.selected_research_evidence(example) is not None,
                         "exclusion_reasons": manifest["counts"]["exclusion_reasons"],
                         "cost_eligibility": example.get("competition_cost_eligibility")})
     return per_icp
 
 
 def _require_strict_exports(candidate, baseline):
-    """Accept only when each participant has ten linked, complete ICP records."""
+    """Accept ten linked selected-research records for each participant."""
     for role, (executions, scores, per_icp, splits) in (
             ("candidate", candidate), ("baseline", baseline)):
         if (len(executions) != BENCHMARK_COUNT or len(scores) != BENCHMARK_COUNT
@@ -608,7 +609,8 @@ def _require_strict_exports(candidate, baseline):
             raise AssertionError(f"{role}: ten accepted executions and linked real scores are required")
         if {item["icp_position"] for item in per_icp} != set(range(BENCHMARK_COUNT)):
             raise AssertionError(f"{role}: execution ICP positions are incomplete")
-        if any(item["records"] < 1 or not item["complete"] for item in per_icp):
+        if any(item["records"] < 1 or item.get("selected_research_complete") is not True
+               for item in per_icp):
             raise AssertionError(f"{role}: every ICP requires a complete strict training record")
         if len(splits["train"]) + len(splits["eval"]) < BENCHMARK_COUNT:
             raise AssertionError(f"{role}: combined strict dataset has fewer than ten records")

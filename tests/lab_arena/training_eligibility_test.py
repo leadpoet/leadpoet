@@ -62,11 +62,148 @@ def refresh_response_links(example, index):
     payload_hash = contracts.document_hash(payload)
     example["worker_observation_artifacts"]["run"]["payload_sha256"] = payload_hash
     for item in example["provider_calls"]:
+        if "response_provenance" not in item:
+            continue
         provenance = item["response_provenance"]
         provenance["worker_receipt_ref"]["payload_sha256"] = payload_hash
         for ref in provenance["agent_receipt_refs"]:
             ref["payload_sha256"] = payload_hash
     seal(example)
+
+
+def judge_only_gap_example(*, cost_gap=False):
+    example = captured_example()
+    example["round_status"] = "published"
+    example["score_run_id"] = "score"
+    example["output_identity"] = {"document_hash": contracts.document_hash(example["output"])}
+    example["attempts"] = [{"run_id": "score", "kind": "score", "status": "accepted"}]
+    for run_id, document in (("run", example["input_snapshots"]["run"]["input"]),
+                             ("score", {"scored_run_id": "run", "companies": []})):
+        example["input_snapshots"][run_id] = {
+            "input": document, "input_sha256": contracts.document_hash(document),
+            "privacy": {"redacted": False, "redactions": []}}
+    example["competition_cost_eligibility"] = {"status": "available", "eligible": True}
+    example["privacy"] = {"exact_replay": False, "privacy_filtered": True}
+    example["worker_observation_artifacts"]["run"]["payload"]["complete"] = True
+    example["worker_observation_artifacts"]["run"]["payload_sha256"] = contracts.document_hash(
+        example["worker_observation_artifacts"]["run"]["payload"])
+    for call in example["provider_calls"]:
+        provenance = call["response_provenance"]
+        provenance["worker_receipt_ref"]["payload_sha256"] = example["worker_observation_artifacts"]["run"]["payload_sha256"]
+        for ref in provenance["agent_receipt_refs"]:
+            ref["payload_sha256"] = example["worker_observation_artifacts"]["run"]["payload_sha256"]
+    reasons = ["response_privacy_nonexact"]
+    if cost_gap:
+        reasons.append("provider_cost_unresolved")
+    example["provider_calls"].append({
+        "run_id": "score", "operation_id": "scrapingdog.scrape", "provider": "scrapingdog",
+        "evidence_gaps": reasons, "response_privacy_redactions": ["credential"],
+    })
+    example["completeness"] = {
+        "complete": False, "incomplete_reasons": sorted(reasons),
+        "dimensions": {"context": True, "source_identity": True, "exact_inputs": True,
+                       "input_output_label": True, "costs": not cost_gap, "research_process": False},
+        "reasons_by_dimension": {"context": [], "source_identity": [], "exact_inputs": [],
+                                 "input_output_label": [], "costs": ["provider_cost_unresolved"] if cost_gap else [],
+                                 "research_process": sorted(reasons)},
+    }
+    return seal(example)
+
+
+@pytest.mark.parametrize("cost_gap", [False, True])
+def test_judge_only_privacy_or_uncertain_cost_does_not_erase_selected_thinking(cost_gap):
+    example = judge_only_gap_example(cost_gap=cost_gap)
+    assert example["completeness"]["complete"] is False
+    assert example["privacy"]["exact_replay"] is False
+    assert capture(example)["eligible"] is True
+    splits, _ = training_thinking.build([example])
+    assert len(splits["train"]) + len(splits["eval"]) == 2
+    source = (splits["train"] + splits["eval"])[0]["source_refs"][0]
+    assert source["source_quality"]["complete"] is False
+    assert source["selected_research_evidence"] == {
+        "complete": True,
+        "ancillary_judge_gaps": sorted(example["completeness"]["incomplete_reasons"]),
+    }
+
+
+def test_failed_judge_attempt_privacy_is_attributed_without_hiding_other_runs():
+    example = judge_only_gap_example()
+    example["attempts"].append({"run_id": "failed-score", "kind": "score", "status": "failed"})
+    example["provider_calls"].append({"run_id": "failed-score", "operation_id": "scrapingdog.scrape",
+                                      "evidence_gaps": ["response_privacy_nonexact"]})
+    seal(example)
+    assert capture(example)["eligible"] is True
+    splits, _ = training_thinking.build([example])
+    assert len(splits["train"]) + len(splits["eval"]) == 2
+
+
+def test_readiness_keeps_aggregate_gap_visible_alongside_selected_proof():
+    from lab_arena import training_readiness
+
+    report = training_readiness.build([judge_only_gap_example()], production_rounds_only=False)
+    assert report["capture"]["executions_passing_all_export_dimensions"] == 0
+    assert report["capture"]["selected_research_complete"] == 1
+    source = report["sources"][0]["capture"]
+    assert source["status"] == "incomplete"
+    assert source["selected_research_complete"] is True
+    assert source["ancillary_judge_gaps"] == ["response_privacy_nonexact"]
+    assert report["full_thinking"]["candidate_records"] == 2
+
+
+@pytest.mark.parametrize("damage", ["selected_gap", "prior_gap", "judge_input", "score_binding",
+                                     "score_companies", "execution_cost", "selected_unsettled_cost",
+                                     "missing_ack", "output_identity", "route", "missing_thinking",
+                                     "selected_tool_response_redacted", "selected_tool_request_redacted",
+                                     "unmapped_aggregate_gap"])
+def test_ancillary_gap_never_masks_missing_selected_or_judgment_evidence(damage):
+    example = judge_only_gap_example()
+    if damage == "selected_gap":
+        example["provider_calls"][0]["evidence_gaps"] = ["response_privacy_nonexact"]
+    elif damage == "prior_gap":
+        example["provider_calls"].append({"run_id": "prior", "operation_id": "scrapingdog.scrape",
+                                          "evidence_gaps": ["response_privacy_nonexact"]})
+    elif damage == "judge_input":
+        example["input_snapshots"]["score"]["privacy"]["redacted"] = True
+    elif damage == "score_binding":
+        example["input_snapshots"]["score"]["input"]["scored_run_id"] = "other"
+    elif damage == "score_companies":
+        document = example["input_snapshots"]["score"]["input"]
+        document["companies"] = [{"company": "Different"}]
+        example["input_snapshots"]["score"]["input_sha256"] = contracts.document_hash(document)
+    elif damage == "execution_cost":
+        example["competition_cost_eligibility"]["status"] = "unavailable"
+    elif damage == "selected_unsettled_cost":
+        example["provider_calls"][0]["accounting_state"] = "reserved"
+    elif damage == "output_identity":
+        example["output_identity"]["document_hash"] = contracts.hash_bytes(b"wrong")
+    elif damage == "route":
+        example["provider_calls"][2]["reasoning_capture"]["provider_route"] = "wrong-route"
+    elif damage == "missing_thinking":
+        message = example["provider_calls"][2]["response"]["choices"][0]["message"]
+        message.pop("reasoning", None)
+        message.pop("reasoning_content", None)
+        message.pop("reasoning_details", None)
+        refresh_response_links(example, 2)
+    elif damage in {"selected_tool_response_redacted", "selected_tool_request_redacted"}:
+        example["provider_calls"].append({
+            "run_id": "run", "operation_id": "exa.search", "provider": "exa",
+            "evidence_gaps": [], "request_capture": {
+                "redacted": damage == "selected_tool_request_redacted"},
+            "response_privacy_redactions": ["credential"] if damage == "selected_tool_response_redacted" else [],
+            "response_receipts": [], "accounting_state": "settlement", "actual_microusd": 1,
+        })
+    elif damage == "unmapped_aggregate_gap":
+        proof = example["completeness"]
+        proof["incomplete_reasons"].append("provider_cost_unresolved")
+        proof["reasons_by_dimension"]["research_process"].append("provider_cost_unresolved")
+        proof["reasons_by_dimension"]["costs"].append("provider_cost_unresolved")
+        proof["dimensions"]["costs"] = False
+    else:
+        example["provider_calls"][2]["response_provenance"]["agent_receipt"] = "not_reported"
+    seal(example)
+    assert capture(example)["eligible"] is False
+    splits, _ = training_thinking.build([example])
+    assert not splits["train"] and not splits["eval"]
 
 
 def test_source_requires_bound_model_directed_review_but_legacy_is_disabled():

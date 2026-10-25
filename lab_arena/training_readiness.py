@@ -43,13 +43,15 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
         valid.append(next(iter(versions.values())))
 
     dimensions, gaps, call_gaps, calls, recorder_counts = Counter(), Counter(), Counter(), Counter(), Counter()
-    recorder_runs, recorder_missing, complete, cohorts = 0, 0, 0, defaultdict(list)
+    recorder_runs, recorder_missing, complete, selected_research_complete, cohorts = 0, 0, 0, 0, defaultdict(list)
     sources = []
     for example in valid:
         proof = example.get("completeness") or {}
         dimensions_for_run = {name: (proof.get("dimensions") or {}).get(name) is True for name in _DIMENSIONS}
         complete_for_run = (proof.get("complete") is True and all(dimensions_for_run.values())
                             and not proof.get("incomplete_reasons"))
+        selected_gaps = training_thinking.selected_research_evidence(example)
+        selected_research_complete += selected_gaps is not None
         for name in _DIMENSIONS:
             dimensions[name] += dimensions_for_run[name]
         complete += complete_for_run
@@ -91,6 +93,8 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                                     "status": "complete" if complete_for_run else "incomplete" if proof else "unverified",
                                     "dimensions": dimensions_for_run,
                                     "incomplete_reasons": sorted(set(proof.get("incomplete_reasons") or [])),
+                                    "selected_research_complete": selected_gaps is not None,
+                                    "ancillary_judge_gaps": sorted(selected_gaps) if selected_gaps is not None else [],
                                     "recorder_buffer_complete": recorder_complete,
                                     "response_receipts": receipts}})
         config = example.get("configuration") or {}
@@ -116,6 +120,7 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
         "excluded_exports": dict(sorted(rejected.items())),
         "sources": sources,
         "capture": {"executions_passing_all_export_dimensions": complete,
+                    "selected_research_complete": selected_research_complete,
                     "passing_dimensions": {name: dimensions[name] for name in _DIMENSIONS},
                     "execution_gap_counts": dict(sorted(gaps.items())),
                     "execution_calls": dict(sorted(calls.items())),

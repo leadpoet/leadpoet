@@ -70,3 +70,20 @@ def test_frozen_eighty_percent_still_requires_all_real_scores():
     candidate[1].pop()
     with pytest.raises(AssertionError, match="ten accepted executions and linked real scores"):
         e2e._require_strict_exports(candidate, baseline, minimum_coverage_percent=80)
+
+
+@pytest.mark.parametrize("role", ["candidate", "baseline"])
+def test_sufficient_record_count_cannot_hide_failed_capture_gate(role):
+    reports = {name: {"eligible": True, "reasons": []}
+               for name in ("candidate", "baseline")}
+    reports[role] = {"eligible": False, "reasons": ["selected_run_identity_unverified"]}
+    with pytest.raises(AssertionError, match=role + ": stored capture gate failed"):
+        e2e._require_strict_exports(participant(), participant(),
+                                   minimum_coverage_percent=80, capture_reports=reports)
+
+
+def test_both_verified_capture_gates_and_strict_exports_pass():
+    reports = {name: {"eligible": True, "reasons": []}
+               for name in ("candidate", "baseline")}
+    e2e._require_strict_exports(participant(), participant(),
+                               minimum_coverage_percent=80, capture_reports=reports)

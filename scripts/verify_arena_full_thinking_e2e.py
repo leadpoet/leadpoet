@@ -34,7 +34,7 @@ if str(REPO) not in sys.path:
 
 from lab_arena import (
     broker, code_review, contracts, deepline_catalog, integrity, reasoning_capture, runtime, scoring,
-    shim, source_bundle, training_capture, training_coverage, training_reader, training_thinking, runtime_version,
+    shim, source_bundle, training_capture, training_coverage, training_eligibility, training_reader, training_thinking, runtime_version,
 )
 from tests.lab_arena.champion_funding_paid_e2e_test import (
     Evidence, LocalEntrypointRuntime, PaidHarness, _capture_database_snapshot,
@@ -706,12 +706,17 @@ def _per_icp_observed(executions, scores, examples, icps):
     return per_icp
 
 
-def _require_strict_exports(candidate, baseline, *, minimum_coverage_percent=100):
+def _require_strict_exports(candidate, baseline, *, minimum_coverage_percent=100,
+                            capture_reports=None):
     """Require the frozen fraction of ICPs to have exact selected-research records."""
     required = training_coverage.required_count(BENCHMARK_COUNT, minimum_coverage_percent)
     coverage = {}
     for role, (executions, scores, per_icp, splits) in (
             ("candidate", candidate), ("baseline", baseline)):
+        if capture_reports is not None:
+            report = capture_reports.get(role) or {}
+            if report.get("eligible") is not True or report.get("reasons") != []:
+                raise AssertionError(f"{role}: stored capture gate failed")
         if (len(executions) != BENCHMARK_COUNT or len(scores) != BENCHMARK_COUNT
                 or {run["scored_run_id"] for run in scores}
                 != {run["run_id"] for run in executions}):
@@ -934,10 +939,21 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
                      submission_id=submission_id, per_icp=per_icp)
         evidence.add("baseline_per_icp_observed", round_id=row["round_id"],
                      submission_id=baseline["submission_id"], per_icp=baseline_per_icp)
+        minimum_coverage = training_coverage.percent_from_configuration(config)
+        capture_reports = {}
+        for role, identity, records in (
+                ("candidate", submission_id, examples),
+                ("baseline", baseline["submission_id"], baseline_examples)):
+            capture_reports[role] = training_eligibility.assess_capture(
+                harness.service.store.get_submission(identity),
+                {item["run_id"]: item for item in records},
+                [item["run_id"] for item in records], enabled=True,
+                minimum_coverage_percent=minimum_coverage)
+        evidence.add("stored_capture_eligibility", round_id=row["round_id"], roles=capture_reports)
         strict_coverage = _require_strict_exports(
             (executions, scores, per_icp, combined),
             (baseline_executions, baseline_scores, baseline_per_icp, baseline_splits),
-            minimum_coverage_percent=training_coverage.percent_from_configuration(config))
+            minimum_coverage_percent=minimum_coverage, capture_reports=capture_reports)
         evidence.add("strict_training_coverage", round_id=row["round_id"], coverage=strict_coverage)
         combined_count = len(combined["train"]) + len(combined["eval"])
         publication = row.get("publication_doc") or {}

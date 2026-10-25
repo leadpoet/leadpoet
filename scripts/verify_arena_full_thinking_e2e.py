@@ -270,6 +270,7 @@ def full_thinking_database():
                     "568-lab-arena-full-thinking-catalog-commit.sql",
                     "569-lab-arena-training-publication-eligibility.sql",
                     "570-lab-arena-confirmed-full-thinking-final-cost.sql",
+                    "571-lab-arena-closed-failed-score-host-recovery.sql",
                 ):
                     cursor.execute((REPO / "scripts" / name).read_text())
         finally:

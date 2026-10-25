@@ -121,7 +121,9 @@ quality may change; the user has accepted this tradeoff.
   `569-lab-arena-training-publication-eligibility.sql`, and
   `570-lab-arena-confirmed-full-thinking-final-cost.sql` through the normal release
   workflow before activation. They check source hashes and database privileges,
-  preserve unrelated behavior, and are idempotent.
+  preserve unrelated behavior, and are idempotent. Current main also includes
+  `571-lab-arena-closed-failed-score-host-recovery.sql`; the combined migration
+  order is checked in local PostgreSQL.
   The research review migration extends main's exact review function and
   preserves both context-integrity and source-digest handling.
 
@@ -228,7 +230,7 @@ documented privacy or explicit output-length gap still counts as that same ICP.
 These ICPs remain excluded from strict exports. A missing or contradictory
 accounting record is not treated as a proven unsettled charge.
 
-Migration564 raises the frozen full-thinking cap to $6 while preserving main's
+Migration565 raises the frozen full-thinking cap to $6 while preserving main's
 confirmed competition-cost accounting. It adds no pending or uncertain monetary
 holds. Call limits, price ceilings, and output-token limits remain enforced.
 For future full-thinking rounds with a valid frozen coverage setting, final
@@ -240,6 +242,15 @@ spend over $6 still fails the cost check, including charges whose success is
 unknown; proved infrastructure exclusions remain. The cap is on confirmed
 competition cost, so later bills can exceed it. Historical rounds keep their
 previous billing rule.
+
+Training reads retry a recognized transient object-store error once. If an
+accepted output was already read and validated during the same publication
+attempt, its exact cached bytes can supply a later failed training read. All
+normal source, input, output-hash, receipt, route, cost and privacy checks still
+run. That later availability failure consumes one incomplete ICP; it does not
+repair or overwrite the stored object. Other missing artifacts and integrity
+errors remain hard failures. A first scoring read without verified output is
+still a score-authority problem, not a training-coverage exception.
 
 The enhanced source-review check is still tied to full-thinking activation in
 this draft. An independent shadow/enforce review, including the baseline, is not

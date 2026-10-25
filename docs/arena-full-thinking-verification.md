@@ -620,8 +620,8 @@ The five reported defects were reproduced and corrected in code checkpoint
 
 - Preserve the exact existing source-access repair blocks that frozen-grader
   patch scripts match. Keep authenticated, exact-URL source absence handling in
-  adjacent blocks. The broader claim that unbound or retryable fetch failures
-  become final zero scores was not reproduced: those controls remain incomplete.
+  adjacent blocks. Those initial controls did not cover an outer Exa API
+  404/410 response. The later review below records that missed defect and fix.
 - Treat an ICP whose verified thinking replies are all truncated as one
   incomplete ICP under the 80% floor. Wrong routes, missing receipts and changed
   source evidence remain hard failures. Truncated data stays out of strict export.
@@ -666,3 +666,96 @@ The original 100% publication and ranking remain unchanged. This is offline
 verification of stored real-provider evidence plus separate PostgreSQL failure
 and promotion tests, not a new paid 80% sourcing round. No new paid calls,
 production change, merge or deployment occurred. The PR remains a draft.
+
+## October 25 final review corrections
+
+Implementation checkpoint `79d0a61fb` includes main `15ba0eda0`. The later
+documentation/fixture commit adds main's migration 571 to the E2E harness tail;
+the complete 565–571 tail passed in local PostgreSQL. No policy was activated.
+
+Three further defects in review of `b21790adc` were reproduced and fixed:
+
+- An ICP containing both verified truncated and empty thinking replies now
+  consumes one incomplete ICP, like either condition alone. Wrong routes,
+  unproved thinking, source changes and receipt failures remain hard failures.
+- Outer Exa API 404/410 responses now use `contents_http_*` errors. The real
+  broker, investigator and scorer retain retryable provider failure instead of
+  finalizing the target page as absent. Exact target-URL absence controls and
+  historical frozen-source repair blocks remain covered.
+- Publication training reads use the actual local/S3 optional-read interface
+  and retry a recognized transient error once. If the canonical accepted output
+  was already read successfully in the same publication attempt, its exact raw
+  bytes can supply a later failed training read. The normal exporter still
+  checks source, input, output hash, receipts, routes, privacy and costs. The
+  availability failure consumes one incomplete ICP; it does not repair stored
+  evidence or admit incomplete data into strict training. Without that verified
+  earlier read, or for other missing objects, access denial, malformed data or
+  integrity failures, this exception does not apply.
+
+The storage change reuses existing publication reads and the existing export
+validator. An initial duplicate validation helper was removed after independent
+failure testing exposed gaps. The public reason allowlist also includes
+`accepted_output_unavailable`; its regression failed before that addition.
+
+### Production-path checks and substitutions
+
+The unchanged real paid-run dump and all 758 saved objects were restored into
+disposable PostgreSQL. Actual `ArenaService.publish`, `training_reader.export_run`
+and SQL publication readback ran together. No export result was mocked. The
+disposable round setting was projected to 80%; fault wrappers affected only
+later reads after the first verified scoring read.
+
+| Candidate case | Complete ICPs | Eligible | Round published | Saved score |
+| --- | ---: | --- | --- | ---: |
+| Healthy stored evidence | 9/10 | Yes | Yes | 8.5 |
+| One later output read missing | 8/10 | Yes | Yes | 8.5 |
+| One later output read repeatedly times out | 8/10 | Yes | Yes | 8.5 |
+| Two later output reads missing | 7/10 | No | Yes | 8.5 |
+
+The baseline remained 10/10 complete, eligible and scored 8.5 in each case.
+All 40 accepted research/scoring run outcomes stayed unchanged. A second restore
+preserved database owners, applied exact guarded migrations 570 and 571, and
+repeated healthy and later-missing publication successfully. Original dump and
+object fingerprints did not change. These tied real scores did not produce a
+new champion; separate PostgreSQL fixtures prove eligible-peer promotion to a
+local Git repository and next-round baseline adoption.
+
+The final raw/readable re-export checked 20 raw trajectories and 20 JSON/Markdown
+views, 84/84 model acknowledgements, 7,581 source-linked events and 1,488 context
+values. Both strict manifests validated: 35 candidate records and 44 baseline
+records. All 148 selected provider calls and all raw completeness flags match
+the prior saved export. Only observation timestamps and derived export hashes
+changed. The original 100% publication remains unchanged. The old private
+checker readiness flag requires all ten candidate ICPs and stays false; it is
+not the 80% eligibility rule. The final view/hash check has no errors.
+
+### Regression evidence and remaining limits
+
+- The combined existing and new regression command: **952 passed, 19 failed,
+  14 skipped**. All 19 failures reproduce on clean main `15ba0eda0`, with the
+  same test IDs in the dashboard suite. None is unique to this PR. The 14 skips
+  still require unavailable exact historical release fixtures.
+- Final real PostgreSQL publication/coverage/promotion tests with the full
+  565–571 tail: **14 passed**. Main's 571 migration suite also passed its
+  **89 checks**; these counts describe separate commands, not a unique total.
+- Independent review ran 12 actual-artifact storage cases, covering missing and
+  timeout reads, truncation and mixed thinking gaps. Separate sealed fixtures
+  covered privacy and unsettled-cost combinations. Bad hashes, source, receipts,
+  access denial and missing prior proof stayed ineligible. Existing policy-off
+  protocol, replay, redaction, export, frozen
+  repair and dashboard checks were included in the focused regression run.
+- Python compilation, workflow YAML parsing, `git diff --check`, and active
+  guide byte equality passed. CI remains required; the prior remote run was
+  cancelled and does not establish a green build.
+
+These are local executions of production code with saved real provider evidence,
+local PostgreSQL/object storage, test service configuration and injected faults.
+They are not a new live 80% sourcing run, a deployed S3 test, or a claim that all
+possible paths are bug-free. No new paid calls, production writes, PR merge or
+production deployment occurred. The independent shadow/enforce review remains outside this
+draft's implemented behavior, as stated in the policy document.
+
+The active AGENTS.md/CLAUDE.md instructions were shortened from 156,257 to 6,372
+bytes. Exact historical instructions remain in the linked archive. The concise
+new rule requires root-cause fixes, tracing every affected actual code path,
+production-path and combined-failure tests, and explicit verification limits.

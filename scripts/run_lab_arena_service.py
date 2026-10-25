@@ -248,14 +248,15 @@ def main(argv=None) -> int:
     def review_allowed() -> bool:
         if stop.is_set():
             return False
-        guard = service._store._transport.rpc("lab_arena_restart_guard_state_v1", {})
-        if (
-            not isinstance(guard, Mapping)
-            or guard.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
-            or type(guard.get("guard_present")) is not bool
-        ):
-            raise ValueError("Arena restart guard state is invalid")
-        return not stop.is_set() and not guard["guard_present"]
+        with telemetry.stage("review_guard"):
+            guard = service._store._transport.rpc("lab_arena_restart_guard_state_v1", {})
+            if (
+                not isinstance(guard, Mapping)
+                or guard.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
+                or type(guard.get("guard_present")) is not bool
+            ):
+                raise ValueError("Arena restart guard state is invalid")
+            return not stop.is_set() and not guard["guard_present"]
 
     def safe_review_allowed() -> bool:
         try:

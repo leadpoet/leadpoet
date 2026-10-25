@@ -33,6 +33,10 @@ _SENSITIVE_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _BEARER_RE = re.compile(r"(?i)\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}")
+_ATTACHED_AUTH_MARKER_RE = re.compile(
+    r"(?i)\b(?:bearer|basic)\s+(?:[\"'])?\[REDACTED\]"
+    r"[A-Za-z0-9/_~+=-][^\s\"']*"
+)
 _AUTH_HEADER_PREFIX_RE = re.compile(
     r"(?i)\b(?:proxy[-_ ]?authorization|authorization)\s*[:=]\s*['\"]?\s*$"
 )
@@ -43,6 +47,10 @@ _KEY_VALUE_RE = re.compile(
 _QUOTED_KEY_VALUE_RE = re.compile(
     r"(?i)([\"'](?:api[-_ ]?key|authorization|password|secret|access[-_ ]?token|"
     r"refresh[-_ ]?token|lease[-_ ]?token)[\"']\s*:\s*)([\"'])([^\"']{4,})([\"'])"
+)
+_ESCAPED_QUOTED_KEY_VALUE_RE = re.compile(
+    r'(?i)((?:\\["\'])(?:api[-_ ]?key|authorization|password|secret|access[-_ ]?token|'
+    r'refresh[-_ ]?token|lease[-_ ]?token)(?:\\["\'])\s*:\s*)(\\["\'])([^"\']{4,})(\\["\'])'
 )
 _BARE_API_KEY_RE = re.compile(
     r"\b(?:sk-or-v1-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,})\b"
@@ -107,6 +115,14 @@ def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = T
         ),
         text,
     )
+    text = _ESCAPED_QUOTED_KEY_VALUE_RE.sub(
+        lambda match: match.group(0) if match.group(3) == "[REDACTED]"
+        else "%s%s[REDACTED]%s" % (
+            match.group(1), match.group(2), match.group(4)
+        ),
+        text,
+    )
+    text = _ATTACHED_AUTH_MARKER_RE.sub("[REDACTED]", text)
     text = _redact_auth_schemes(text)
     def redact_key_value(match: re.Match[str]) -> str:
         # A provider may already supply this literal marker in a public

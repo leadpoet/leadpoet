@@ -239,6 +239,29 @@ def test_auth_example_with_remaining_value_still_redacts(value):
     assert "actual-private-value" not in cleaned
 
 
+@pytest.mark.parametrize("value", [
+    "Bearer [REDACTED]suffix",
+    "Basic [REDACTED]suffix",
+    'Bearer "[REDACTED]suffix"',
+    "Basic '[REDACTED]suffix'",
+    "Bearer [REDACTED]/real-token",
+    '{\\"Authorization\\":\\"[REDACTED]suffix\\"}',
+])
+def test_attached_auth_marker_does_not_pass_as_exact(value):
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert cleaned != value and reasons == ["credential"]
+    assert "suffix" not in cleaned and "real-token" not in cleaned
+
+
+@pytest.mark.parametrize("value", [
+    "Bearer [REDACTED]",
+    "Basic [REDACTED]",
+    '{\\"Authorization\\":\\"[REDACTED]\\"}',
+])
+def test_standalone_auth_marker_keeps_exact_source(value):
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
 @pytest.mark.parametrize("prefix", ["sk-01234567890", "sk-or-v1-abc12345", "Bearer abc", "Basic abc"])
 @pytest.mark.parametrize("tail", [
     "example.com/path", "example.com/path?token=private-value#;fragment",

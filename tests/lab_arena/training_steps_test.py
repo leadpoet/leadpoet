@@ -9,6 +9,19 @@ from lab_arena import contracts as c, training_steps as steps
 from scripts.prepare_arena_agent_dataset import main
 
 
+@pytest.mark.parametrize("value", [
+    "Bearer [REDACTED]suffix",
+    "Basic [REDACTED]suffix",
+    '{\\"Authorization\\":\\"[REDACTED]suffix\\"}',
+])
+def test_attached_auth_marker_is_not_exact_training_text(value):
+    assert steps._exact(value) is False
+
+
+def test_standalone_auth_marker_remains_exact_training_text():
+    assert steps._exact("Bearer [REDACTED]") is True
+
+
 def seal(example):
     example['example_hash'] = c.document_hash({k: v for k, v in example.items() if k != 'example_hash'})
     return example

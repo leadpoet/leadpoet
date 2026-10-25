@@ -49,23 +49,9 @@ def database():
     # Current full-flow coverage needs the deployed claim and scoring helpers.
     # Reuse the descendant builder without changing historical migration tests.
     # Providers, verified exits and the sandbox boundary remain controlled here.
-    from tests.lab_arena import company_judgment_validation_projection548_postgres_test as current_schema
+    from scripts.verify_arena_full_thinking_e2e import full_thinking_database
 
-    generator = current_schema.database.__wrapped__()
-    db = next(generator)
-    try:
-        with db[0].connect(**db[1]) as connection, connection.cursor() as cursor:
-            for migration in (
-                "548-lab-arena-company-judgment-validation-projection.sql",
-                "551-lab-arena-expire-leases-shared-round-lock.sql",
-                "552-lab-arena-expiry-recovery-candidate-locks.sql",
-                "564-lab-arena-baseline-deadline-transition.sql",
-                "572-lab-arena-concurrent-baseline-judging.sql",
-            ):
-                cursor.execute((Path(__file__).parents[2] / "scripts" / migration).read_text())
-        yield db
-    finally:
-        generator.close()
+    yield from full_thinking_database()
 
 
 def _proxy_pool(process_capacity: int) -> ProxyWorkerPool:

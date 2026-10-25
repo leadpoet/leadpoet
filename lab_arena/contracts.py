@@ -125,6 +125,9 @@ CHECKPOINT_DEADLINE_PROFILES = {
     ),
 }
 CHECKPOINT_DEADLINE_POLICIES = tuple(CHECKPOINT_DEADLINE_PROFILES)
+# Historical wire identity, retained for strict older validators. Baseline
+# execution remains first; its judgments can continue alongside miner work.
+# Complete legitimate baseline scoring still gates all final authority.
 BASELINE_SCORED_FIRST_POLICY = "baseline_scored_first_v1"
 # A judge run reads pages and calls several models per company against live
 # providers; it gets its own wall clock, longer than a model's, under the same

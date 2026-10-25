@@ -224,10 +224,19 @@ checked as well as completed attempt counts.
 
 ## Round and host safeguards
 
-Parallel execution follows the round's frozen execution policy, including the
-current baseline-first flow. Historical rounds keep their prior stage behavior;
-a validator restart cannot rewrite that round-level decision. Migration 401
-adds proxy-based model admission without changing those stage transitions.
+Parallel execution follows the frozen baseline-first participant and ICP layout.
+The legacy wire name `baseline_scored_first_v1` stays unchanged so existing
+strict validators can read the configuration. Migration 572 permits early miner
+execution after every frozen baseline execution position is accepted, while
+baseline judging and retries continue. It applies to eligible unpublished
+rounds and future rounds using the same policy. It does not change frozen
+inputs, scorer images, budgets, deadlines or accepted work. Complete legitimate
+baseline scoring still gates publication, promotion, incentives and weights.
+Eligible baseline judges take priority over the miner queue and keep their
+normal retry backoff. Existing post-deadline partial-baseline recovery stays
+unchanged, including its complete-baseline final publication gate. Other
+execution policies keep their existing behavior.
+Migration 401 adds proxy-based model admission without changing these gates.
 
 The readiness guard reserves 2 GiB for each active slot, 2 GiB for the host,
 and another 128 MiB for each slot. Twenty slots therefore require 44.5 GiB;

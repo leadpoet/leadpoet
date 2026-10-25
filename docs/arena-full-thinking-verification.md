@@ -1,5 +1,76 @@
 # Draft PR verification — 2026-10-23
 
+## Final October 25 capture verification
+
+The integrated regression at `bfdb5989b` passed **4,415 tests**, with **17
+skipped**, across 85 files. Actual Codex 0.154.0 and local PostgreSQL checks were
+enabled. The skips require Linux root/runsc or exact frozen release source
+fixtures, except two existing declared-field cases. This is not full CI or a
+production deployment test.
+
+Three additional failures were compared against a clean checkout of main
+`a0e2f9870` and reproduced there: two telemetry cases expect no
+`arena.reconcile_deepline_cost` span, and one validator logging fixture supplies
+an invalid lease. They remain disclosed failures, not passes or PR fixes.
+
+The final narrow history fix preserves malformed **prior** tool arguments as
+exact input context only in a closed, declared local-tool exchange under the
+new frozen policy. It never repairs arguments or accepts them as a new target.
+Eight positive cases failed before the fix; the new history tests cover both
+Chat and Responses, pairing, identity, declaration, type, raw-hash and historical
+compatibility failures. Independent review also exercised twelve combined
+negative controls. The final integrated history, target, export, eligibility,
+readiness, coverage, and continuation regression passed **755 tests**, with no
+skips, at `b940251e1`. Python compilation and `git diff --check` also passed.
+
+Three original rejected TYCHE continuations were sent to the real provider
+through Arena's bridge, worker and broker. All three returned HTTP 200/completed,
+with unchanged history and exact saved wire, PostgreSQL and readable evidence.
+There were three host writes and no client callbacks. The replies reported
+1,693 reasoning tokens. The test cost was $0.0204798636. The redacted top-level
+reasoning setting was restored from uniform earlier requests; this is an
+exact-history projection, not an unmodified original frame. Newly returned tools
+were not executed. The parser fix subsequently admits all three valid replies
+without changing the saved raw export.
+
+Total measured spend for this $5 experiment is $0.2528262620, with $2.142311
+still conservatively reserved for unpriced earlier attempts. No additional paid
+search/scraping was used. The 1% ceiling remains provisional: no missing text was
+observed in these reported reasoning tokens, which does not establish the best
+population threshold. The 80% complete-ICP floor remains unchanged.
+
+The final restored paid-data check at `bfdb5989b` used a disposable PostgreSQL
+17 database with PR migrations 565–570 and main 571–573. Both the historical
+80% case and explicit 1%/80% case reached actual SQL publication. The candidate
+had **9/10 complete ICPs and 35 strict records**; the baseline had **10/10 and 44**.
+Both retained their measured **8.5 scores**. The tie correctly produced no king;
+this replay does not demonstrate promotion. Separate promotion regressions are
+part of the integrated test suite.
+
+The new-policy strict checks passed with actual evidence and with optional
+client callbacks removed in memory. No replacement host evidence was invented.
+All **60 raw/readable/Markdown comparisons**, 22,743 nonderived event values and
+4,186 context values matched their saved source paths and hashes, with zero
+trace errors. These counts span the repeated variants, not unique provider calls.
+The check took 1,055.89 seconds and made no external network requests. Original
+source, dump and object-tree fingerprints stayed unchanged.
+
+The original whole-run completeness remains four candidate and five baseline
+ICPs. Selected research completeness is nine and ten. This distinction is
+intentional: the new policy verifies provider-visible research pairs and does
+not claim complete local-agent observability or client consumption. The saved
+100% source run and private artifacts remain unchanged. This is a replay of a
+real paid sourcing/scoring run under an explicit local policy projection, not a
+fresh paid 80% run or a deployed S3 verification.
+
+After the final parser change at `b940251e1`, a separate network-disabled
+replay verified all **79 saved scored targets** unchanged: input, target, format,
+full-thinking segments, delivery digest, and candidate identity. The native TYCHE
+export retained **85 ordinary targets and one verified cap/EOF omission**; all
+three paid continuation replies became valid targets. Python-source and input
+artifact hashes stayed unchanged. SQL publication was not repeated after this
+isolated parser change; its preceding `bfdb5989b` verification is stated above.
+
 ## October 25 Responses route and current policy
 
 The seventh reviewed route is DeepSeek through Fireworks on Responses, with a

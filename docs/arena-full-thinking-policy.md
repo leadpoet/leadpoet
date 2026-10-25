@@ -106,6 +106,10 @@ when its verified output usage exactly reaches its requested cap and its JSON
 arguments end unfinished at EOF, even if the provider labels it completed. The
 report labels this inference; it never repairs the JSON or waives other evidence
 checks. Raw exposed text remains saved and separate from usable-target counts.
+Malformed arguments in a prior call may remain exact input history when paired
+with the declared local tool's result under the new policy. This preserves a
+later valid response after a tool error. It does not repair the failed arguments,
+admit them as a training target, or waive identity and stored-evidence checks.
 If no full target survives, the ICP is
 incomplete. An ICP above its frozen missing-token limit is also incomplete.
 At least **80%** of selected ICPs must be complete, rounded up. An incomplete

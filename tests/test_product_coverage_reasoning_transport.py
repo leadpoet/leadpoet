@@ -10,7 +10,7 @@ from qualification.scoring import company_evidence_investigator as inv
 from tests.test_product_coverage import CRITERION, URL, QUOTE, finding, matrix
 
 
-@pytest.mark.parametrize("positive,product", [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize("positive,product", [(True, True), (True, False), (False, True), (False, False)])
 @pytest.mark.parametrize("exhausted", [False, True])
 def test_effort_survives_real_transport_and_generic_output_length_retry(
     monkeypatch, positive, product, exhausted,
@@ -78,8 +78,8 @@ def test_effort_survives_real_transport_and_generic_output_length_retry(
         assert request["tool_choice"] == "required"  # Ordinary turn, including generic retry.
         ordinary_product = positive and product and index == 0
         assert request["max_tokens"] == (4096 if ordinary_product else 3000)
-        assert request["model"] == (inv.POSITIVE_SEMANTIC_REVIEW_MODEL if positive else inv.INVESTIGATOR_MODEL)
-        if positive and product:
+        assert request["model"] == (inv.POSITIVE_SEMANTIC_REVIEW_MODEL if positive or product else inv.INVESTIGATOR_MODEL)
+        if product:
             assert request["reasoning"] == {"effort": "medium" if ordinary_product else "low"}
         else:
             assert "reasoning" not in request

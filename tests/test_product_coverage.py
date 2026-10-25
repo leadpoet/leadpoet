@@ -337,14 +337,23 @@ def test_existing_loop_targets_missing_ids_with_unchanged_call_limits(monkeypatc
     assert "Acme provides voice software for clinics." in str(request_document["prefetched_sources"])
 
 
-def test_initial_invalid_plan_feedback_can_repair_without_a_locked_tree(monkeypatch):
+@pytest.mark.parametrize("negative_after_search,repair_valid", [(False, True), (True, True), (True, False)])
+def test_initial_invalid_plan_feedback_can_repair_without_a_locked_tree(
+    monkeypatch, negative_after_search, repair_valid,
+):
     requests = []
 
     async def post(_session, _url, *, headers, payload):
         from lab_arena.operations import validate_operation_request
         validate_operation_request("openrouter.chat", payload)
         requests.append(payload)
-        if len(requests) == 1:
+        if negative_after_search and len(requests) == 1:
+            return 200, {"choices": [{"message": {"tool_calls": [{
+                "id": "search", "type": "function", "function": {
+                    "name": "search_web", "arguments": json.dumps({"query": "Acme supplied software"}),
+                },
+            }]}}]}
+        if len(requests) == (2 if negative_after_search else 1):
             coverage = {"nodes": [node(0, CRITERION)], "claims": [claim(0)]}
         else:
             feedback = next(json.loads(m["content"]) for m in reversed(payload["messages"])
@@ -354,8 +363,11 @@ def test_initial_invalid_plan_feedback_can_repair_without_a_locked_tree(monkeypa
                 "compound product criterion requires explicit requirement structure"
             )
             assert len(feedback["product_coverage"]["error"]) <= 300
-            coverage = matrix()
+            coverage = matrix() if repair_valid else {"nodes": [node(0, CRITERION)], "claims": [claim(0)]}
         raw = finding(json.dumps(coverage))
+        if negative_after_search and (len(requests) == 2 or not repair_valid):
+            raw.update(status="UNPROVEN", activity_role="unresolved", observed_industry="",
+                       observed_subindustry="", evidence_url="", evidence_quote="")
         return 200, {"choices": [{"message": {"tool_calls": [{
             "id": str(len(requests)), "type": "function", "function": {
                 "name": "submit_findings", "arguments": json.dumps({"findings": [raw]}),
@@ -365,10 +377,16 @@ def test_initial_invalid_plan_feedback_can_repair_without_a_locked_tree(monkeypa
     async def no_research(*args, **kwargs):
         pytest.fail("A structural correction must use loaded sources")
 
+    searches = []
+
+    async def search(_session, query, **kwargs):
+        searches.append(query)
+        return {"results": []}
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "offline-test")
     monkeypatch.setenv("EXA_API_KEY", "offline-test")
     monkeypatch.setattr(inv, "_post_json", post)
-    monkeypatch.setattr(inv, "_search_web", no_research)
+    monkeypatch.setattr(inv, "_search_web", search if negative_after_search else no_research)
     monkeypatch.setattr(inv, "_fetch_page", no_research)
     output = asyncio.run(inv.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example/"},
@@ -378,8 +396,11 @@ def test_initial_invalid_plan_feedback_can_repair_without_a_locked_tree(monkeypa
         prefetched_pages={URL: {"final_url": URL, "text": QUOTE}},
     ))
     assert output["_completed_submit"] is True
-    assert output["claims"]["industry"]["status"] == "VERIFIED"
-    assert len(requests) == 2
-    assert output["usage"]["search_calls"] == output["usage"]["fetch_calls"] == 0
+    assert output["claims"]["industry"]["status"] == ("VERIFIED" if repair_valid else "UNPROVEN")
+    assert len(requests) == (
+        (3 if negative_after_search else 2) if repair_valid else inv.MAX_REASONING_TURNS + 1
+    )  # Existing final correction follows the bounded ordinary turns.
+    assert len(searches) == output["usage"]["search_calls"] == int(negative_after_search)
+    assert output["usage"]["fetch_calls"] == 0
     assert all(p["max_tokens"] == 3000 for p in requests)
     assert inv.MAX_REASONING_TURNS == 8 and inv.ADMISSION_DEADLINE_SECONDS == 110.0

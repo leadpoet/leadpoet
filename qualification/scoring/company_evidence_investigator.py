@@ -3793,6 +3793,12 @@ def _submitted_finding_rejection(
     submitted: Mapping[str, Any], finding: Mapping[str, Any]
 ) -> Optional[str]:
     status = submitted.get("status")
+    if (finding.get("target") == "industry"
+            and isinstance(finding.get("product_coverage_error"), str)
+            and finding["product_coverage_error"]):
+        # An ordinary negative status cannot bypass structural repair. The
+        # caller retains its existing forced/final UNPROVEN settlement rules.
+        return finding["product_coverage_error"][:300]
     if status == "UNPROVEN" and any(
         str(submitted.get(field) or "").strip()
         for field in ("evidence_url", "evidence_quote")

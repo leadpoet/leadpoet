@@ -273,10 +273,19 @@ def test_normal_reasoning_request_keeps_existing_provider_default(
 
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     payload, normalized, outbound = routed[0]
-    assert payload["max_tokens"] == normalized["max_tokens"] == 3000
-    assert "reasoning" not in payload
-    assert "reasoning" not in normalized
-    assert "reasoning" not in outbound
+    expected_tokens = (
+        investigator.PRODUCT_REVIEW_MAX_TOKENS
+        if positive_semantic_review else investigator.REASONING_MAX_TOKENS
+    )
+    assert payload["max_tokens"] == normalized["max_tokens"] == expected_tokens
+    if positive_semantic_review:
+        assert payload["reasoning"] == normalized["reasoning"] == outbound["reasoning"] == {
+            "effort": "medium",
+        }
+    else:
+        assert "reasoning" not in payload
+        assert "reasoning" not in normalized
+        assert "reasoning" not in outbound
 
 
 @pytest.mark.parametrize("response_exhausted", [False, True])
@@ -306,7 +315,13 @@ def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
 
     result = _run(monkeypatch, fake_post_json)
 
-    assert len(requests) == 1
+    assert len(requests) == (2 if response_exhausted else 1)
+    assert all(
+        request[0]["tool_choice"] == {
+            "type": "function", "function": {"name": "submit_findings"},
+        } and request[0]["reasoning"] == {"effort": "low"}
+        for request in requests
+    )
     payload, normalized, outbound = requests[0]
     assert payload["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
     assert payload["tool_choice"] == {
@@ -332,7 +347,7 @@ def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
         ("length", None),
         # Retained actions 80 and 108 reported tool_calls, but both consumed
         # the request's exact 3,000 completion-token allowance.
-        ("tool_calls", investigator.REASONING_MAX_TOKENS),
+        ("tool_calls", investigator.PRODUCT_REVIEW_MAX_TOKENS),
     ],
 )
 def test_incomplete_submit_retries_once_inside_ordinary_turn_budget(
@@ -374,7 +389,7 @@ def test_incomplete_submit_retries_once_inside_ordinary_turn_budget(
         "type": "function",
         "function": {"name": "submit_findings"},
     }
-    assert "reasoning" not in requests[0]
+    assert requests[0]["reasoning"] == {"effort": "medium"}
     assert requests[1]["reasoning"] == {"effort": "low"}
     replayed_arguments = outbound_requests[1]["messages"][-2]["tool_calls"][0][
         "function"
@@ -396,7 +411,7 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
             return 200, _tool_response(
                 "submit_findings",
                 '{"findings":[{"evidence_quote":"Acme',
-                completion_tokens=investigator.REASONING_MAX_TOKENS,
+                completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
             )
         if len(requests) == 2:
             arguments = json.dumps({"findings": [_finding(
@@ -413,9 +428,9 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
     result = _run(monkeypatch, fake_post_json)
 
     assert len(requests) == 3
-    assert "reasoning" not in requests[0]
+    assert requests[0]["reasoning"] == {"effort": "medium"}
     assert requests[1]["reasoning"] == {"effort": "low"}
-    assert "reasoning" not in requests[2]
+    assert requests[2]["reasoning"] == {"effort": "medium"}
     validation_feedback = json.loads(requests[2]["messages"][-1]["content"])
     assert validation_feedback["error"] == "deterministic_evidence_validation_failed"
     assert result["claims"]["industry"]["evidence_quote"] == QUOTE
@@ -539,7 +554,7 @@ def test_late_positive_submit_reuses_one_forced_low_reasoning_repair(
         if len(requests) == 1:
             response = _tool_response(
                 "submit_findings", '{"findings":[{"target":"industry"',
-                completion_tokens=investigator.REASONING_MAX_TOKENS,
+                completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
             )
             response["usage"]["completion_tokens_details"] = {
                 "reasoning_tokens": 2863,
@@ -553,12 +568,15 @@ def test_late_positive_submit_reuses_one_forced_low_reasoning_repair(
 
     assert len(requests) == 2
     assert requests[0]["tool_choice"] == "required"
-    assert "reasoning" not in requests[0]
+    assert requests[0]["reasoning"] == {"effort": "medium"}
     assert requests[1]["tool_choice"] == {
         "type": "function", "function": {"name": "submit_findings"},
     }
     assert requests[1]["reasoning"] == {"effort": "low"}
-    assert all(request["max_tokens"] == 3000 for request in requests)
+    assert [request["max_tokens"] for request in requests] == [
+        investigator.PRODUCT_REVIEW_MAX_TOKENS,
+        investigator.REASONING_MAX_TOKENS,
+    ]
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == QUOTE
     assert result["usage"]["reasoning_turns"] == 2
@@ -579,7 +597,7 @@ def test_late_submit_repair_does_not_repeat_or_bypass_turn_limit(monkeypatch):
         clock.now = 113.557
         return 200, _tool_response(
             "submit_findings", '{"findings":[',
-            completion_tokens=investigator.REASONING_MAX_TOKENS,
+            completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
         )
 
     result = _run(monkeypatch, fake_post_json)
@@ -620,7 +638,7 @@ def test_expired_pending_repair_fails_malformed_without_paid_dispatch(
         response_seen = True
         return 200, _tool_response(
             "submit_findings", '{"findings":[',
-            completion_tokens=investigator.REASONING_MAX_TOKENS,
+            completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
         )
 
     result = _run(monkeypatch, fake_post_json)
@@ -644,7 +662,7 @@ def test_late_repair_still_rejects_fabricated_quote(monkeypatch):
         if len(requests) == 1:
             return 200, _tool_response(
                 "submit_findings", '{"findings":[',
-                completion_tokens=investigator.REASONING_MAX_TOKENS,
+                completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
             )
         return 200, _tool_response(
             "submit_findings",

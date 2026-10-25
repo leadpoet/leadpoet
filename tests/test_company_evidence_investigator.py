@@ -2450,6 +2450,8 @@ def test_typesafe_investigator_fetch_repairs_same_attribute_source_only(
         "software systems. Jev is currently available in early access for "
         "select developers."
     )
+    # This separate first-party fixture proves product activity. The
+    # BusinessWire page remains the attribute quote repair case under test.
     product_url = "https://typesafe.ai/product"
     product_quote = "TypeSafe AI supplies developer software for AI workflows."
     stage_finding = _finding(

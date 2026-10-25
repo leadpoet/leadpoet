@@ -83,6 +83,7 @@ def _industry_finding(**overrides):
 
 def _run_scoped_correction(
     monkeypatch, responses, *, max_turns=2, reserve_after_first=True,
+    attach_offline_coverage=True,
 ):
     requests = []
 
@@ -112,8 +113,13 @@ def _run_scoped_correction(
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
+    if attach_offline_coverage:
+        trusted_plan("Security software and services")
     monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", max_turns)
-    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post_json))
+    monkeypatch.setattr(
+        investigator, "_post_json",
+        native_product_post(fake_post_json) if attach_offline_coverage else fake_post_json,
+    )
     monkeypatch.setattr(investigator, "_search_web", fake_search)
 
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -209,7 +215,7 @@ def test_retained_stage_cannot_hide_incomplete_product_matrix(monkeypatch, final
             reason="No complete company-bound proof of the requested criterion.",
         )])
     result, requests = _run_scoped_correction(
-        monkeypatch, responses, max_turns=2,
+        monkeypatch, responses, max_turns=2, attach_offline_coverage=False,
     )
     assert len(requests) == (2 if final_mode == "complete_negative" else 3)
     assert _submit_tool(requests[1])["parameters"]["properties"]["findings"]["items"]["properties"]["target"]["enum"] == ["industry"]

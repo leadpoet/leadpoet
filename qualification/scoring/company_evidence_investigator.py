@@ -2887,6 +2887,11 @@ async def _fetch_page(
         safe_final_url = public_http_url(safe_final_url)
     except _ArenaProviderFetchError as exc:
         if (
+            exc.broker_status == 415
+            and exc.broker_error_code == "unsupported_source"
+        ):
+            return {"ok": False, "error": "unsupported_source"}
+        if (
             api_key
             and exc.broker_status == 403
             and exc.broker_error_code == "provider_request_refused"
@@ -3034,7 +3039,7 @@ def _fetch_outcome(url: str, result: Mapping[str, Any]) -> dict[str, Any]:
     elif raw_error.startswith("http_"):
         error_class = "http_error"
     elif raw_error in {
-        "invalid_url", "unsupported_binary_content", "empty_page",
+        "invalid_url", "unsupported_binary_content", "unsupported_source", "empty_page",
         "provider_request_refused", "provider_diagnostic_body",
         "source_access_denied",
     }:

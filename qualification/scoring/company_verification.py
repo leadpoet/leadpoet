@@ -1271,9 +1271,11 @@ class _ArenaProviderFetchError(aiohttp.ClientError):
             else None
         )
         self.broker_error_code = (
-            "provider_request_refused"
-            if self.broker_status == 403
-            and broker_error_code == "provider_request_refused"
+            broker_error_code
+            if (self.broker_status, broker_error_code) in {
+                (403, "provider_request_refused"),
+                (415, "unsupported_source"),
+            }
             else ""
         )
 
@@ -1281,6 +1283,7 @@ class _ArenaProviderFetchError(aiohttp.ClientError):
 _ARENA_PROVIDER_REQUEST_REFUSED_BODY = (
     b'{"error":{"code":"provider_request_refused"}}'
 )
+_ARENA_UNSUPPORTED_SOURCE_BODY = b'{"error":{"code":"unsupported_source"}}'
 
 
 async def _fetch_bounded_html(
@@ -1298,26 +1301,37 @@ async def _fetch_bounded_html(
             and getattr(resp, "_lab_arena_response_url_validated", None) is False
         ):
             broker_error_code = ""
+            expected_error_body = b""
+            expected_error_code = ""
             if (
                 resp.status == 403
                 and bool(getattr(resp, "headers", {}).get(
                     "x-leadpoet-call-identity"
                 ))
             ):
-                # The broker's fixed refusal has no target URL. Read at most
-                # one byte beyond its exact envelope; never return this body
-                # or the shim's request-URL fallback as page evidence.
+                expected_error_body = _ARENA_PROVIDER_REQUEST_REFUSED_BODY
+                expected_error_code = "provider_request_refused"
+            elif resp.status == 415:
+                # A source policy can refuse an unsupported document before
+                # provider dispatch, so it has no paid call identity. Only the
+                # trusted worker response marker and exact error envelope
+                # identify this refusal. It supplies no URL or source text.
+                expected_error_body = _ARENA_UNSUPPORTED_SOURCE_BODY
+                expected_error_code = "unsupported_source"
+            if expected_error_body:
+                # Read one byte beyond the exact envelope. Never expose the
+                # error body or the shim's fallback URL as page evidence.
                 raw_error = bytearray()
-                while len(raw_error) <= len(_ARENA_PROVIDER_REQUEST_REFUSED_BODY):
+                while len(raw_error) <= len(expected_error_body):
                     chunk = await resp.content.read(
-                        len(_ARENA_PROVIDER_REQUEST_REFUSED_BODY) + 1
+                        len(expected_error_body) + 1
                         - len(raw_error)
                     )
                     if not chunk:
                         break
                     raw_error.extend(chunk)
-                if bytes(raw_error) == _ARENA_PROVIDER_REQUEST_REFUSED_BODY:
-                    broker_error_code = "provider_request_refused"
+                if bytes(raw_error) == expected_error_body:
+                    broker_error_code = expected_error_code
             raise _ArenaProviderFetchError(
                 "website fetch error: Arena provider response unavailable",
                 broker_status=resp.status,
@@ -1442,8 +1456,10 @@ async def verify_company_exists(
             str(e),
             failure_reason_code=(
                 "source_blocked"
-                if e.broker_status == 403
-                and e.broker_error_code == "provider_request_refused"
+                if (e.broker_status, e.broker_error_code) in {
+                    (403, "provider_request_refused"),
+                    (415, "unsupported_source"),
+                }
                 else "provider_error"
             ),
         )

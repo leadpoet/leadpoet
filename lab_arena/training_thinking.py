@@ -1,6 +1,6 @@
 """Read-only coverage and strict generated-thinking candidates from Arena exports.
 
-The provider receipt and agent read proof remain in training_steps. A request
+The saved provider result and host-delivery proof remain in training_steps. A request
 annotation establishes route semantics; returned text alone never does.
 """
 from __future__ import annotations
@@ -488,78 +488,88 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
                     "worker_response_receipt_link_invalid", "agent_response_receipt_link_invalid",
                     "agent_dependency_link_invalid", "runtime_input_context_mismatch"}):
             return False
-        provenance = call.get("response_provenance") or {}
-        artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
-        payload = artifact.get("payload") or {}
-        payload_hash = contracts.document_hash(payload)
-        worker_ref = provenance.get("worker_receipt_ref") or {}
-        if (artifact.get("payload_sha256") != payload_hash
-                or provenance.get("agent_receipt") != "reported_exact_body_received"
-                or provenance.get("delivery_to_worker") != "socket_written"
-                or worker_ref.get("run_id") != run_id
-                or worker_ref.get("payload_sha256") != payload_hash):
-            return False
-        writes = [row for row in payload.get("response_receipts") or []
-                  if row.get("ordinal") == worker_ref.get("ordinal")]
-        if len(writes) != 1:
-            return False
-        write = writes[0]
-        status = write.get("status")
-        if (type(status) is not int or status not in ({402} if admission_refusal else {404, 429, 502, 503, 504})
-                or write.get("write_state") != "socket_written"
-                or write.get("operation_id") != operation
-                or write.get("action_sequence") != call.get("action_sequence")
-                or write.get("call_identity") != call.get("call_identity")
-                or type(write.get("body_bytes")) is not int or write["body_bytes"] < 0
-                or not isinstance(write.get("body_sha256"), str)
-                or contracts.SHA256_RE.fullmatch(write["body_sha256"]) is None):
-            return False
-        refs = provenance.get("agent_receipt_refs") or []
-        reads = [row for row in payload.get("agent_observations") or []
-                 if row.get("kind") == "response_received" and any(
-                     ref.get("id") == row.get("id") and ref.get("run_id") == run_id
-                     and ref.get("payload_sha256") == payload_hash for ref in refs)]
-        if (not reads or any((row.get("privacy") or {}).get("redacted") is not False
-                            or any((row.get("data") or {}).get(key) != write.get(key)
-                                   for key in ("call_identity", "status", "body_sha256", "body_bytes"))
-                            for row in reads)):
-            return False
-        failure_bodies = []
-        for receipt in call.get("response_receipts") or []:
-            if (receipt.get("entry_id") not in (provenance.get("worker_received_receipt_entry_ids") or [])
-                    or (receipt.get("metadata") or {}).get("status") != status
-                    or receipt.get("wire_body_sha256") != write["body_sha256"]
-                    or receipt.get("wire_body_bytes") != write["body_bytes"]):
-                continue
-            if receipt.get("privacy_redactions") or receipt.get("response_unavailable"):
+        if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+            evidence = training_steps._host_result(example, call, allow_worker_error=True)
+            status = evidence["write"]["status"]
+            if status not in ({402} if admission_refusal else {404, 429, 502, 503, 504}):
                 return False
-            failure_bodies.append(_delivered_response(call, receipt["response_sha256"]))
-        if not failure_bodies:
-            ref = provenance.get("worker_error_observation_ref") or {}
-            if (provenance.get("worker_error_body_acknowledged") is not True
-                    or ref.get("run_id") != run_id or ref.get("payload_sha256") != payload_hash
-                    or any(receipt.get("wire_body_sha256") for receipt in call.get("response_receipts") or [])):
+            failure_bodies = [evidence["response"]]
+            if admission_refusal:
+                return (not evidence["receipts"]
+                        and evidence["response"] == {"error": {"code": "budget_refused"}})
+        else:
+            provenance = call.get("response_provenance") or {}
+            artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+            payload = artifact.get("payload") or {}
+            payload_hash = contracts.document_hash(payload)
+            worker_ref = provenance.get("worker_receipt_ref") or {}
+            if (artifact.get("payload_sha256") != payload_hash
+                    or provenance.get("agent_receipt") != "reported_exact_body_received"
+                    or provenance.get("delivery_to_worker") != "socket_written"
+                    or worker_ref.get("run_id") != run_id
+                    or worker_ref.get("payload_sha256") != payload_hash):
                 return False
-            observations = [row for row in payload.get("observations") or []
-                            if row.get("ordinal") == ref.get("ordinal")]
-            if len(observations) != 1:
+            writes = [row for row in payload.get("response_receipts") or []
+                      if row.get("ordinal") == worker_ref.get("ordinal")]
+            if len(writes) != 1:
                 return False
-            observed = observations[0]
-            response = (observed.get("outcome") or {}).get("response") or {}
-            raw = base64.b64decode(response["body_b64"], validate=True)
-            if ((observed.get("privacy") or {}).get("redacted") is not False
-                    or any(observed.get(key) != call.get(key)
-                           for key in ("call_identity", "operation_id", "action_sequence"))
-                    or response.get("status") != status or len(raw) != write["body_bytes"]
-                    or contracts.hash_bytes(raw) != write["body_sha256"]):
+            write = writes[0]
+            status = write.get("status")
+            if (type(status) is not int or status not in ({402} if admission_refusal else {404, 429, 502, 503, 504})
+                    or write.get("write_state") != "socket_written"
+                    or write.get("operation_id") != operation
+                    or write.get("action_sequence") != call.get("action_sequence")
+                    or write.get("call_identity") != call.get("call_identity")
+                    or type(write.get("body_bytes")) is not int or write["body_bytes"] < 0
+                    or not isinstance(write.get("body_sha256"), str)
+                    or contracts.SHA256_RE.fullmatch(write["body_sha256"]) is None):
                 return False
-            if admission_refusal and (observed.get("request") or {}).get("admitted_parameters") != request.get("admitted_parameters"):
+            refs = provenance.get("agent_receipt_refs") or []
+            reads = [row for row in payload.get("agent_observations") or []
+                     if row.get("kind") == "response_received" and any(
+                         ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                         and ref.get("payload_sha256") == payload_hash for ref in refs)]
+            if (not reads or any((row.get("privacy") or {}).get("redacted") is not False
+                                or any((row.get("data") or {}).get(key) != write.get(key)
+                                       for key in ("call_identity", "status", "body_sha256", "body_bytes"))
+                                for row in reads)):
                 return False
-            failure_bodies.append(json.loads(raw))
-        if admission_refusal:
-            return (provenance.get("worker_body_source") == "worker_error_observation"
-                    and bool(failure_bodies)
-                    and all(value == {"error": {"code": "budget_refused"}} for value in failure_bodies))
+            failure_bodies = []
+            for receipt in call.get("response_receipts") or []:
+                if (receipt.get("entry_id") not in (provenance.get("worker_received_receipt_entry_ids") or [])
+                        or (receipt.get("metadata") or {}).get("status") != status
+                        or receipt.get("wire_body_sha256") != write["body_sha256"]
+                        or receipt.get("wire_body_bytes") != write["body_bytes"]):
+                    continue
+                if receipt.get("privacy_redactions") or receipt.get("response_unavailable"):
+                    return False
+                failure_bodies.append(_delivered_response(call, receipt["response_sha256"]))
+            if not failure_bodies:
+                ref = provenance.get("worker_error_observation_ref") or {}
+                if (provenance.get("worker_error_body_acknowledged") is not True
+                        or ref.get("run_id") != run_id or ref.get("payload_sha256") != payload_hash
+                        or any(receipt.get("wire_body_sha256") for receipt in call.get("response_receipts") or [])):
+                    return False
+                observations = [row for row in payload.get("observations") or []
+                                if row.get("ordinal") == ref.get("ordinal")]
+                if len(observations) != 1:
+                    return False
+                observed = observations[0]
+                response = (observed.get("outcome") or {}).get("response") or {}
+                raw = base64.b64decode(response["body_b64"], validate=True)
+                if ((observed.get("privacy") or {}).get("redacted") is not False
+                        or any(observed.get(key) != call.get(key)
+                               for key in ("call_identity", "operation_id", "action_sequence"))
+                        or response.get("status") != status or len(raw) != write["body_bytes"]
+                        or contracts.hash_bytes(raw) != write["body_sha256"]):
+                    return False
+                if admission_refusal and (observed.get("request") or {}).get("admitted_parameters") != request.get("admitted_parameters"):
+                    return False
+                failure_bodies.append(json.loads(raw))
+            if admission_refusal:
+                return (provenance.get("worker_body_source") == "worker_error_observation"
+                        and bool(failure_bodies)
+                        and all(value == {"error": {"code": "budget_refused"}} for value in failure_bodies))
         return all(isinstance(value, Mapping) and bool(value.get("error"))
                    and not value.get("choices") and not value.get("output")
                    and (status != 404 or _ignored_provider_failure(
@@ -899,6 +909,8 @@ def _prior_observations(example: Mapping[str, Any], call: Mapping[str, Any]) -> 
     sequence = call.get("action_sequence")
     if type(sequence) is not int:
         raise ValueError("action_sequence_unavailable")
+    if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+        return []  # New targets include only the exact provider-visible input.
     result = []
     for row in payload.get("agent_observations") or []:
         previous = row.get("after_action_sequence")
@@ -1045,7 +1057,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -
     payload = artifact.get("payload") or {}
     if (payload.get("complete") is not True
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
-            or any((row.get("privacy") or {}).get("redacted") is not False
+            or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
                    for row in payload.get(field) or [])):
         return None
@@ -1079,36 +1091,45 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -
                 or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")
                 or not isinstance(response, Mapping)
                 or contracts.document_hash(response) != call.get("response_sha256")
-                or provenance.get("agent_receipt") != "reported_exact_body_received"
-                or provenance.get("selected_response_acknowledged") is not True
+                or (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+                    and (provenance.get("agent_receipt") != "reported_exact_body_received"
+                         or provenance.get("selected_response_acknowledged") is not True))
                 or provenance.get("delivery_to_worker") != "socket_written"):
             return None
-        worker_ref = provenance.get("worker_receipt_ref") or {}
-        if (worker_ref.get("run_id") != run_id
-                or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
-            return None
-        writes = [row for row in payload.get("response_receipts") or []
-                  if row.get("ordinal") == worker_ref.get("ordinal")
-                  and row.get("call_identity") == call.get("call_identity")
-                  and row.get("operation_id") == call.get("operation_id")
-                  and row.get("action_sequence") == call.get("action_sequence")
-                  and row.get("write_state") == "socket_written"]
-        refs = provenance.get("agent_receipt_refs") or []
-        reads = [row for row in payload.get("agent_observations") or []
-                 if row.get("kind") == "response_received"
-                 and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
-                         and ref.get("payload_sha256") == artifact["payload_sha256"] for ref in refs)]
-        receipts = [row for row in call.get("response_receipts") or []
-                    if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
-                    and row.get("response_sha256") == call.get("response_sha256")]
-        if (len(writes) != 1 or not reads or not receipts
-                or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
-                           and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
-                           and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
-                           and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
-                           and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
-                           for read in reads for receipt in receipts)):
-            return None
+        if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+            try:
+                evidence = training_steps._host_result(example, call)
+                if evidence["response"] != response:
+                    return None
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return None
+        else:
+            worker_ref = provenance.get("worker_receipt_ref") or {}
+            if (worker_ref.get("run_id") != run_id
+                    or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
+                return None
+            writes = [row for row in payload.get("response_receipts") or []
+                      if row.get("ordinal") == worker_ref.get("ordinal")
+                      and row.get("call_identity") == call.get("call_identity")
+                      and row.get("operation_id") == call.get("operation_id")
+                      and row.get("action_sequence") == call.get("action_sequence")
+                      and row.get("write_state") == "socket_written"]
+            refs = provenance.get("agent_receipt_refs") or []
+            reads = [row for row in payload.get("agent_observations") or []
+                     if row.get("kind") == "response_received"
+                     and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                             and ref.get("payload_sha256") == artifact["payload_sha256"] for ref in refs)]
+            receipts = [row for row in call.get("response_receipts") or []
+                        if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
+                        and row.get("response_sha256") == call.get("response_sha256")]
+            if (len(writes) != 1 or not reads or not receipts
+                    or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
+                               and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
+                               and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
+                               and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
+                               and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
+                               for read in reads for receipt in receipts)):
+                return None
         if model:
             try:
                 training_steps._candidate(example, call)
@@ -1120,7 +1141,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -
     return frozenset(reasons)
 
 
-def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | None:
+def _selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | None:
     """Return attributable judge-only gaps, or reject an inexact selected replay.
 
     Raw export completeness remains an all-related-runs audit. A score worker's
@@ -1138,6 +1159,18 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
     proof = example.get("completeness") or {}
     reasons = set(proof.get("incomplete_reasons") or [])
     if proof.get("complete") is True and not reasons:
+        if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+            try:
+                for call in example.get("provider_calls") or []:
+                    if call.get("run_id") != selected_id:
+                        continue
+                    if call.get("accounting_state") == "refusal":
+                        if not verified_failed_attempt(example, call):
+                            return None
+                    else:
+                        training_steps._host_result(example, call, allow_worker_error=True)
+            except (KeyError, ValueError, TypeError, AttributeError):
+                return None
         return frozenset()
     allowed = {"request_privacy_nonexact", "response_privacy_nonexact", "provider_cost_unresolved"}
     if reasons and not reasons <= allowed:
@@ -1162,7 +1195,7 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
     payload = artifact.get("payload") or {}
     if (payload.get("complete") is not True
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
-            or any((row.get("privacy") or {}).get("redacted") is not False
+            or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
                    for row in payload.get(field) or [])):
         return None
@@ -1195,6 +1228,84 @@ def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | N
     if attributed != reasons:
         return None
     return frozenset(reasons)
+
+
+_LOCAL_WEB_DIAGNOSTICS = frozenset({"direct_web_usage_unverified", "direct_web_content_not_captured",
+                                   "direct_web_coverage_unverified"})
+_OPTIONAL_LOCAL_KINDS = frozenset({"web_fetch", "web_fetch_binary", "http_response_metadata", "state_snapshot"})
+
+
+def _required_observation_redacted(example, row, *, agent=False):
+    return ((row.get("privacy") or {}).get("redacted") is not False
+            and not (agent and row.get("kind") in _OPTIONAL_LOCAL_KINDS
+                     and training_coverage.uses_host_result_evidence(example.get("configuration") or {})))
+
+
+def _provider_visible_view(example):
+    """Ignore only attributed local-runtime diagnostics for provider proof.
+
+    This is a validation view. The saved export, completeness, hashes and
+    optional observations remain unchanged. All callers still prove the
+    retained gateway inputs/results, host writes, source/output and costs.
+    """
+    if not training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+        return example, frozenset()
+    proof = example.get("completeness") or {}
+    reasons = set(proof.get("incomplete_reasons") or [])
+    ignored = reasons & _LOCAL_WEB_DIAGNOSTICS
+    artifacts = example.get("worker_observation_artifacts") or {}
+    optional_redacted = False
+    optional_binary = False
+    for artifact in artifacts.values():
+        payload = artifact.get("payload") or {}
+        if artifact.get("payload_sha256") != contracts.document_hash(payload):
+            return example, frozenset()
+        if any(_required_observation_redacted(example, row) for row in payload.get("observations") or []):
+            return example, frozenset()
+        for row in payload.get("agent_observations") or []:
+            if _required_observation_redacted(example, row, agent=True):
+                return example, frozenset()
+            optional_redacted |= (row.get("kind") in _OPTIONAL_LOCAL_KINDS
+                                  and (row.get("privacy") or {}).get("redacted") is True)
+            optional_binary |= row.get("kind") == "web_fetch_binary"
+    if optional_redacted and "worker_observation_privacy_nonexact" in reasons:
+        ignored.add("worker_observation_privacy_nonexact")
+    if optional_binary and "binary_privacy_review_required" in reasons:
+        ignored.add("binary_privacy_review_required")
+    if not ignored:
+        return example, frozenset()
+    by_dimension = proof.get("reasons_by_dimension") or {}
+    dimensions = proof.get("dimensions") or {}
+    if (proof.get("complete") is not False or not by_dimension
+            or set().union(*(set(value) for value in by_dimension.values())) != reasons
+            or any(dimensions.get(name) is not (not value) for name, value in by_dimension.items())
+            or not ignored <= set(by_dimension.get("research_process") or [])
+            or any(ignored & set(value) for name, value in by_dimension.items() if name != "research_process")):
+        return example, frozenset()
+    view = copy.deepcopy(example)
+    result = view["completeness"]
+    result["incomplete_reasons"] = sorted(reasons - ignored)
+    result["reasons_by_dimension"]["research_process"] = sorted(set(by_dimension["research_process"]) - ignored)
+    result["dimensions"]["research_process"] = not result["reasons_by_dimension"]["research_process"]
+    result["complete"] = not result["incomplete_reasons"]
+    for row in (view.get("related_run_gap_attribution") or {}).values():
+        row["research_process_gaps"] = sorted(set(row.get("research_process_gaps") or []) - ignored)
+    return view, frozenset(ignored)
+
+
+def provider_visible_view(example):
+    try:
+        return _provider_visible_view(example)
+    except (TypeError, ValueError, KeyError, AttributeError):
+        return example, frozenset()  # Invalid diagnostics never grant an exception.
+
+
+def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | None:
+    view, diagnostic_gaps = provider_visible_view(example)
+    if diagnostic_gaps and _selected_input_output_binding(view) is None:
+        return None
+    result = _selected_research_evidence(view)
+    return None if result is None else result | diagnostic_gaps
 
 
 def build(examples, rules: training_steps.Rules | None = None):
@@ -1293,6 +1404,7 @@ def build(examples, rules: training_steps.Rules | None = None):
                 except ValueError as exc:
                     reasons[str(exc)] += 1
                     continue
+                diagnostic_gaps = provider_visible_view(example)[1]
                 record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                           "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,
                           "generated_thinking": segments, "target": copy.deepcopy(candidate["target"]),
@@ -1303,7 +1415,10 @@ def build(examples, rules: training_steps.Rules | None = None):
                                            "route": copy.deepcopy(call["reasoning_capture"]),
                                            "selected_research_evidence": {
                                                "complete": True,
-                                               "ancillary_judge_gaps": sorted(ancillary_gaps)}}]}
+                                               **({"scope": "provider_visible_request_results"} if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
+                                               "ancillary_judge_gaps": sorted(ancillary_gaps - diagnostic_gaps),
+                                               **({"diagnostic_capture_gaps": sorted(diagnostic_gaps)}
+                                                  if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {})}}]}
                 record["candidate_id"] = contracts.document_hash({key: record[key] for key in
                     ("format", "input", "prior_observations", "generated_thinking", "target")})
                 existing = records_by_split[split].get(record["candidate_id"])

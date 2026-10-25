@@ -774,7 +774,7 @@ def _reported_phase_coverage(payload):
                 "state_record_errors", "state_local_errors", "state_overflow_rows", "state_overflow_manifests")))
 
 
-def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True):
+def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True, require_client_ack=True):
     """Join host writes and cooperative read acknowledgments without guessing.
 
     A host write is not consumption. An SDK acknowledgment is an agent report,
@@ -863,20 +863,24 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True)
         elif not latest_acknowledged:
             errors.add("agent_selected_response_unacknowledged")
         acknowledged.add(data["call_identity"])
+    if not require_client_ack and {call["call_identity"] for call in paid} - set(linked):
+        errors.add("worker_response_receipt_link_invalid")
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid
                     if call.get("accounting_state") == "refusal" or
                     type(call.get("response_status")) is int and
                     (200 <= call["response_status"] < 300 or call["call_identity"] in linked)}
-        if expected - acknowledged:
+        if require_client_ack and expected - acknowledged:
             errors.add("agent_response_receipts_unverified")
-        if paid and require_completed_phases and not _reported_phase_coverage(payload):
+        if require_client_ack and paid and require_completed_phases and not _reported_phase_coverage(payload):
             errors.add("agent_task_state_unverified")
     return errors
 
 
-def _worker_evidence(related, calls, objects, *, selected_run_id):
+def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=None):
     from lab_arena import training_observations
+    from lab_arena import training_coverage
+    require_client_ack = not training_coverage.uses_host_result_evidence(configuration or {})
     artifacts, partial_artifacts, errors, counts = {}, {}, set(), {}
     per_run_errors = {}
 
@@ -924,11 +928,12 @@ def _worker_evidence(related, calls, objects, *, selected_run_id):
                 pass
             except Exception:
                 record_error("worker_observation_journal_unavailable", run_id)
-            if needed or capture is not None:
+            if needed or capture is not None or (paid and not require_client_ack):
                 record_error("worker_observations_unavailable", run_id)
             if run["kind"] == "execute" and paid:
-                record_error("agent_response_receipts_unverified", run_id)
-                if require_completed_phases:
+                if require_client_ack:
+                    record_error("agent_response_receipts_unverified", run_id)
+                if require_client_ack and require_completed_phases:
                     record_error("agent_task_state_unverified", run_id)
             continue
         payload = snapshot["payload"]
@@ -945,7 +950,8 @@ def _worker_evidence(related, calls, objects, *, selected_run_id):
             record_error("worker_local_refusals_unverified", run_id)
         artifacts[run_id] = snapshot
         for error in _link_worker_receipts(
-                run, paid, snapshot, require_completed_phases=require_completed_phases):
+                run, paid, snapshot, require_completed_phases=require_completed_phases,
+                require_client_ack=require_client_ack):
             record_error(error, run_id)
         for observation in payload["observations"]:
             if observation["privacy"]["redacted"]:
@@ -1272,7 +1278,7 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
                          {row["run_id"]: index for index, row in enumerate(related)})
     observations, partial_observations, observation_gaps, observed_actions, worker_gaps_by_run = _worker_evidence(
-        related, calls, objects, selected_run_id=run_id)
+        related, calls, objects, selected_run_id=run_id, configuration=config)
     # Recompute payload gaps after exact worker-side fallback joins. Structural
     # ledger failures and every accounting gap retain their original authority.
     gaps -= {"full_request_unavailable", "full_response_unavailable", "request_privacy_nonexact", "response_privacy_nonexact", "provider_call_inflight", "provider_cost_unresolved"}

@@ -1,4 +1,4 @@
-"""The Codex bridge acknowledges only complete, host-bound response bytes."""
+"""The Codex bridge leaves capture to the existing organizer worker."""
 import tempfile
 from pathlib import Path
 
@@ -11,7 +11,7 @@ from tests.lab_arena.test_lab_arena_runner import lease
 
 
 @pytest.mark.parametrize("active_capture", [False, True])
-def test_real_worker_codex_response_ack_is_exact_and_does_not_send_provider_again(monkeypatch, active_capture):
+def test_real_worker_codex_response_keeps_host_capture_without_client_ack(monkeypatch, active_capture):
     broker, store, transport = make_broker(transport=FakeTransport([(200, response())]))
 
     class Api:
@@ -35,16 +35,12 @@ def test_real_worker_codex_response_ack_is_exact_and_does_not_send_provider_agai
     receipts = state.worker_observations.document()["response_receipts"]
     observations = state.worker_observations.document()["agent_observations"]
     assert len(receipts) == 1
-    assert len(observations) == int(active_capture)
-    if active_capture:
-        ack = observations[0]
-        assert ack["kind"] == "response_received"
-        assert all(ack["data"][key] == receipts[0][key]
-                   for key in ("call_identity", "status", "body_sha256", "body_bytes"))
+    assert observations == []
+    assert receipts[0]["write_state"] == "socket_written"
     assert len(transport.sent) == store.log.count("dispatch") == store.log.count("settle") == 1
 
 
-def test_ack_capture_failure_cannot_change_the_paid_response(monkeypatch):
+def test_codex_dispatch_does_not_invoke_client_capture(monkeypatch):
     broker, store, transport = make_broker(transport=FakeTransport([(200, response())]))
 
     class Api:

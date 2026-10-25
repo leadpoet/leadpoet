@@ -97,7 +97,10 @@ def _review(monkeypatch, *, primary=404, status=404, body=None, direct=False,
     async def search(*_, **__):
         return {"results": []}
 
-    for key in ("OPENROUTER_API_KEY", "EXA_API_KEY", "SCRAPINGDOG_API_KEY"):
+    # The real scorer lazily sets the qualification alias. Track it too so
+    # fixture teardown restores it before another judge binds its credentials.
+    for key in ("OPENROUTER_API_KEY", "QUALIFICATION_OPENROUTER_API_KEY",
+                "EXA_API_KEY", "SCRAPINGDOG_API_KEY"):
         monkeypatch.setenv(key, "offline-test-key")
     monkeypatch.setattr("socket.socket.connect", lambda *_: pytest.fail("network forbidden"))
     monkeypatch.setattr(investigator.aiohttp, "ClientSession", lambda **_: Session())
@@ -225,3 +228,17 @@ def test_trusted_primary_page_absence_keeps_existing_finality(monkeypatch, statu
     assert attempts == [True]
     assert receipt["_completed_submit"] is True and receipt["failure_reason"] == ""
     assert receipt["usage"]["fetch_outcomes"][0]["error_class"] == expected
+
+
+def test_offline_review_restores_lazy_provider_credential_alias(monkeypatch):
+    import os
+
+    alias = "QUALIFICATION_OPENROUTER_API_KEY"
+    monkeypatch.delenv(alias, raising=False)
+    with monkeypatch.context() as isolated:
+        receipt = _review(isolated, primary=404, trusted_primary=True)
+        assert _final_score(isolated, receipt, [])
+        present_inside = alias in os.environ
+        assert present_inside is True
+    present_after = alias in os.environ
+    assert present_after is False

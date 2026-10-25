@@ -93,6 +93,7 @@ def _failed_example(status, *, worker_error=False):
             'ordinal': 1, 'call_identity': call['call_identity'],
             'operation_id': call['operation_id'], 'action_sequence': call['action_sequence'],
             'privacy': {'redacted': False},
+            'request': {'admitted_parameters': call['request']['admitted_parameters']},
             'outcome': {'response': {'status': status, 'body_b64': base64.b64encode(wire).decode()}},
         }]
         provenance = call['response_provenance']

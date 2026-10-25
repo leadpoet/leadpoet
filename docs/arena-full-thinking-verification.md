@@ -11,14 +11,55 @@ and local worker/SDK receipts. All three saved calls pass the strict exact
 next-response target validator. Empty summary-array normalization is explicit;
 the original wire bodies retain those arrays.
 
-Separate private native checks accepted the actual request parameters after the
-unsupported default parallel flag was omitted, and saved ten installed-Codex
-responses with readable text and 1,759 reported reasoning tokens. Those checks
-have no observed missing text, but the full native workflow stopped at the local
-ten-call fixture limit, used MCP substitutions, lacks exact TYCHE runtime
-parity, and has unresolved full-worker linkage/scoring proof. It is not a strict
-complete training run, scored/publication run, activation, or readiness claim.
-No private native prompts or local paths enter the public manifest.
+The latest private TYCHE check uses source `dcaeb4bacbb864bc10575fe1758cf487a3466324`
+and its exact Codex **0.154.0** binary, downloaded with explicit owner approval
+and verified against the npm SHA-512 digest. All 33 completed model calls passed
+the exact next-response target check: 30 returned generated thinking, and three
+explicitly reported zero reasoning tokens. The completed calls reported
+**10,547 reasoning tokens**, with **zero tokens in calls missing readable text**.
+The raw-to-readable export retained 50,851 full-thinking characters. Every
+completed model response has an exact worker-write and agent-read receipt.
+Source hashes stayed unchanged throughout the run.
+
+One further attempt hit the provider's actual 429 rate limit. Its retained
+upstream bytes, broker-delivered 502, zero-charge settlement, and worker/read
+receipts prove a failed attempt. It is not a training target and is not included
+in the completed-token denominator. This test proves the failure classifier;
+the diagnostic fixture did not freeze the new allowance setting and is not an
+entrant-eligibility demonstration.
+
+The native tools received usable arguments after the simple open-object schema
+default was made explicit on the outbound wire. The unchanged original schema
+and projected wire are both captured. Independent schema checks preserved strict,
+closed, composed, reference-based, and unevaluated-property behavior. TYCHE read
+three supplied public-page fixtures and correctly held its one candidate because
+the fixtures did not establish required headquarters and employee-count facts.
+Zero companies were published. This tests withholding unsupported results, not
+live lead quality.
+
+**The native workflow is not a complete strict training or scoring run.**
+TYCHE's custom provider-socket client does not send consumption acknowledgments
+for its six direct research-tool calls. This exposed an unnecessary prerequisite
+in the earlier training gate. All six results already have exact saved data and
+host delivery records; the new policy no longer requires client acknowledgments
+or named SDK phases. Client consumption remains unknown. The run still lacks an
+independent scoring label. It ran
+on the native host rather than gVisor, selected DeepSeek and recalculated TYCHE's documented non-OpenAI plain-function mode,
+disabled hosted web, used recorded public pages with zero fixture billing, and
+limited the task to one company. Matching the Codex version does not remove
+these substitutions. No private native prompts or local paths enter the public
+synthetic manifest.
+
+Earlier installed-Codex checks saved another ten full-thinking responses with
+1,759 reported reasoning tokens. Their quota/refusal and null-history capture
+issues were reproduced and corrected, but the old missing refusal-request object
+cannot be recovered. These records do not become complete by reinterpretation.
+
+The current experiment reports $0.0586229492 of provider costs and retains
+$2.142311 in conservative reservations for unpriced earlier
+attempts, below the $5 shared cap. There was no new paid search/scraping.
+These are recorded provider costs and conservative test reservations, not an
+invoice reconciliation or a change to confirmed-cost-only competition billing.
 
 The provisional missing-token ceiling is **1% per ICP**, using reported tokens
 from completed, untruncated, verified calls. It is configurable and frozen; it

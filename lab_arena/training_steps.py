@@ -8,12 +8,13 @@ visible markers cannot be proved absent from the retained response.
 from __future__ import annotations
 
 import copy
+import base64
 import json
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass
 
-from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset
+from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset, training_coverage
 
 SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_dataset.v1'
 RECORD_SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_candidate.v1'
@@ -293,6 +294,112 @@ def _target(body, response, operation, *, allow_reasoning_history=False):
     return target, reasoning
 
 
+def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False):
+    """Resolve saved gateway bytes against one existing host socket write.
+
+    The caller keeps route, cost, privacy-admission and target-schema policy.
+    Client read reports are optional only for the validated new frozen policy;
+    an existing report must still agree. No consumption claim is synthesized.
+    """
+    provenance = call.get('response_provenance') or {}
+    run_id = call.get('run_id')
+    request = call.get('request') or {}
+    capture = call.get('request_capture') or {}
+    permitted_redactions = {'hidden_reasoning'} if call.get('operation_id') in {'openrouter.chat', 'openrouter.responses'} else set()
+    if not allow_privacy:
+        _require(not capture.get('redacted') and _exact(request), 'request_privacy_nonexact')
+    _require(isinstance(request, dict) and request.get('operation_id') == call.get('operation_id')
+             and request.get('request_hash') == call.get('request_hash'), 'request_identity_mismatch')
+    if not (allow_privacy and capture.get('redacted') is True):
+        _require(isinstance(request.get('hashed_parameters'), dict)
+                 and contracts.document_hash(request['hashed_parameters']) == call.get('request_hash'),
+                 'request_identity_mismatch')
+    artifact = (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
+    payload = artifact.get('payload') or {}
+    digest = contracts.document_hash(payload)
+    _require(artifact.get('payload_sha256') == digest, 'worker_payload_hash_mismatch')
+    ref = provenance.get('worker_receipt_ref') or {}
+    writes = [row for row in payload.get('response_receipts') or [] if row.get('ordinal') == ref.get('ordinal')]
+    _require(provenance.get('delivery_to_worker') == 'socket_written'
+             and ref.get('run_id') == run_id and ref.get('payload_sha256') == digest
+             and len(writes) == 1, 'worker_write_unverified')
+    write = writes[0]
+    _require(write.get('write_state') == 'socket_written'
+             and all(write.get(key) == call.get(key) for key in ('call_identity', 'operation_id', 'action_sequence'))
+             and type(write.get('status')) is int and 100 <= write['status'] <= 599
+             and type(write.get('body_bytes')) is int and write['body_bytes'] >= 0
+             and isinstance(write.get('body_sha256'), str)
+             and contracts.SHA256_RE.fullmatch(write['body_sha256']) is not None,
+             'worker_write_identity_mismatch')
+    receipts = call.get('response_receipts') or []
+    matches = [receipt for receipt in receipts
+               if receipt.get('entry_id') in (provenance.get('worker_received_receipt_entry_ids') or [])
+               and receipt.get('wire_body_sha256') == write['body_sha256']
+               and receipt.get('wire_body_bytes') == write['body_bytes']
+               and (receipt.get('metadata') or {}).get('status') == write['status']]
+    values = []
+    for receipt in matches:
+        _require(not receipt.get('response_unavailable'), 'delivered_response_unresolved')
+        if not allow_privacy:
+            _require(set(receipt.get('privacy_redactions') or []) <= permitted_redactions, 'response_privacy_nonexact')
+        value = receipt.get('response')
+        if value is None:
+            target = receipt.get('response_ref') or {}
+            if target.get('field') == 'response' and target.get('entry_id') == call.get('terminal_entry_id'):
+                value = call.get('response')
+            else:
+                linked = [r for r in receipts if r.get('entry_id') == target.get('entry_id') and 'response' in r]
+                _require(len(linked) == 1, 'response_reference_unresolved')
+                value = linked[0]['response']
+        _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
+        if not allow_privacy:
+            _require(_exact(value, response=True), 'response_privacy_nonexact')
+        values.append(value)
+    if not values and allow_worker_error:
+        error_ref = provenance.get('worker_error_observation_ref') or {}
+        _require(not any(row.get('wire_body_sha256') for row in receipts)
+                 and error_ref.get('run_id') == run_id and error_ref.get('payload_sha256') == digest,
+                 'delivered_response_unresolved')
+        observations = [row for row in payload.get('observations') or [] if row.get('ordinal') == error_ref.get('ordinal')]
+        _require(len(observations) == 1, 'delivered_response_unresolved')
+        observed = observations[0]
+        response = (observed.get('outcome') or {}).get('response') or {}
+        _require((observed.get('privacy') or {}).get('redacted') is False
+                 and all(observed.get(key) == call.get(key) for key in ('call_identity', 'operation_id', 'action_sequence'))
+                 and response.get('status') == write['status'], 'worker_write_identity_mismatch')
+        raw = base64.b64decode(response['body_b64'], validate=True)
+        _require(len(raw) == write['body_bytes'] and contracts.hash_bytes(raw) == write['body_sha256'],
+                 'response_hash_mismatch')
+        _require((observed.get('request') or {}).get('admitted_parameters') == request.get('admitted_parameters'),
+                 'request_identity_mismatch')
+        values.append(json.loads(raw))
+    _require(values and len({contracts.document_hash(value) for value in values}) == 1,
+             'delivered_response_unresolved' if not values else 'delivered_response_ambiguous')
+    # Optional cooperative telemetry cannot contradict the trusted result.
+    refs = provenance.get('agent_receipt_refs') or []
+    reads = [row for row in payload.get('agent_observations') or [] if row.get('kind') == 'response_received'
+             and ((row.get('data') or {}).get('call_identity') == call.get('call_identity')
+                  or any(ref.get('id') == row.get('id') for ref in refs))]
+    required = not training_coverage.uses_host_result_evidence(example.get('configuration') or {})
+    if required or reads or refs or provenance.get('agent_receipt') == 'reported_exact_body_received':
+        _require(reads and provenance.get('agent_receipt') == 'reported_exact_body_received'
+                 and len(refs) == len(reads), 'agent_read_unverified')
+        for read in reads:
+            _require((read.get('privacy') or {}).get('redacted') is False
+                     and any(ref.get('id') == read.get('id') and ref.get('run_id') == run_id
+                             and ref.get('payload_sha256') == digest for ref in refs)
+                     and all((read.get('data') or {}).get(key) == write.get(key)
+                             for key in ('call_identity', 'status', 'body_sha256', 'body_bytes')),
+                     'agent_read_identity_mismatch')
+    else:
+        _require(provenance.get('agent_receipt') in (None, 'not_reported')
+                 and provenance.get('selected_response_acknowledged') is not True
+                 and provenance.get('worker_error_body_acknowledged') is not True, 'agent_read_unverified')
+    if provenance.get('selected_response_acknowledged') is True:
+        _require(call.get('terminal_entry_id') in {row['entry_id'] for row in matches}, 'agent_read_identity_mismatch')
+    return {'response': values[0], 'write': write, 'receipts': matches}
+
+
 def _candidate(example, call):
     _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
     op = call.get('operation_id')
@@ -320,51 +427,57 @@ def _candidate(example, call):
     _require(isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools), 'hosted_tool_unsupported')
     if op == 'openrouter.chat':
         _require(all(tool.get('type') == 'function' for tool in tools), 'hosted_tool_unsupported')
-    provenance = call.get('response_provenance') or {}
-    _require(provenance.get('agent_receipt') == 'reported_exact_body_received'
-             and provenance.get('delivery_to_worker') == 'socket_written', 'agent_read_unverified')
-    snapshot = (example.get('worker_observation_artifacts') or {}).get(call['run_id']) or {}
-    payload = snapshot.get('payload') or {}
-    _require(contracts.document_hash(payload) == snapshot.get('payload_sha256'), 'worker_payload_hash_mismatch')
-    refs = provenance.get('agent_receipt_refs') or []
-    acks = [row for row in payload.get('agent_observations', []) if row.get('kind') == 'response_received'
-            and any(ref.get('id') == row.get('id') and ref.get('run_id') == call['run_id']
-                    and ref.get('payload_sha256') == snapshot.get('payload_sha256') for ref in refs)]
-    _require(acks and all(not (row.get('privacy') or {}).get('redacted') for row in acks), 'agent_read_unverified')
-    identities = {contracts.canonical_json(row.get('data')) for row in acks}
-    _require(len(identities) == 1, 'agent_read_ambiguous')
-    data = acks[0]['data']
-    _require(data.get('call_identity') == call['call_identity'] and data.get('status') == 200, 'agent_read_identity_mismatch')
-    worker_ref = provenance.get('worker_receipt_ref') or {}
-    worker_receipts = [row for row in payload.get('response_receipts', [])
-                       if row.get('ordinal') == worker_ref.get('ordinal')]
-    _require(worker_ref.get('run_id') == call['run_id'] and worker_ref.get('payload_sha256') == snapshot.get('payload_sha256')
-             and len(worker_receipts) == 1, 'worker_write_unverified')
-    worker = worker_receipts[0]
-    _require(worker.get('write_state') == 'socket_written' and worker.get('operation_id') == op
-             and worker.get('action_sequence') == call.get('action_sequence')
-             and all(worker.get(key) == data.get(key) for key in ('call_identity', 'status', 'body_sha256', 'body_bytes')), 'worker_write_identity_mismatch')
-    receipts = call.get('response_receipts') or []
-    matches = [r for r in receipts if r.get('entry_id') in provenance.get('worker_received_receipt_entry_ids', [])
-               and r.get('wire_body_sha256') == data.get('body_sha256')
-               and r.get('wire_body_bytes') == data.get('body_bytes') and (r.get('metadata') or {}).get('status') == 200]
-    _require(bool(matches), 'delivered_response_unresolved')
-    responses = []
-    for receipt in matches:
-        _require(set(receipt.get('privacy_redactions') or []) <= {'hidden_reasoning'} and not receipt.get('response_unavailable'), 'response_privacy_nonexact')
-        value = receipt.get('response')
-        if value is None:
-            ref = receipt.get('response_ref') or {}
-            if ref.get('field') == 'response' and ref.get('entry_id') == call.get('terminal_entry_id'):
-                value = call.get('response')
-            else:
-                linked = [r for r in receipts if r.get('entry_id') == ref.get('entry_id') and 'response' in r]
-                _require(len(linked) == 1, 'response_reference_unresolved')
-                value = linked[0]['response']
-        _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
-        _require(_exact(value, response=True), 'response_privacy_nonexact')
-        responses.append(value)
-    _require(len({contracts.document_hash(value) for value in responses}) == 1, 'delivered_response_ambiguous')
+    if training_coverage.uses_host_result_evidence(example.get('configuration') or {}):
+        evidence = _host_result(example, call)
+        _require(evidence['write']['status'] == 200, 'agent_read_identity_mismatch')
+        responses = [evidence['response']]
+        matches = evidence['receipts']
+    else:
+        provenance = call.get('response_provenance') or {}
+        _require(provenance.get('agent_receipt') == 'reported_exact_body_received'
+                 and provenance.get('delivery_to_worker') == 'socket_written', 'agent_read_unverified')
+        snapshot = (example.get('worker_observation_artifacts') or {}).get(call['run_id']) or {}
+        payload = snapshot.get('payload') or {}
+        _require(contracts.document_hash(payload) == snapshot.get('payload_sha256'), 'worker_payload_hash_mismatch')
+        refs = provenance.get('agent_receipt_refs') or []
+        acks = [row for row in payload.get('agent_observations', []) if row.get('kind') == 'response_received'
+                and any(ref.get('id') == row.get('id') and ref.get('run_id') == call['run_id']
+                        and ref.get('payload_sha256') == snapshot.get('payload_sha256') for ref in refs)]
+        _require(acks and all(not (row.get('privacy') or {}).get('redacted') for row in acks), 'agent_read_unverified')
+        identities = {contracts.canonical_json(row.get('data')) for row in acks}
+        _require(len(identities) == 1, 'agent_read_ambiguous')
+        data = acks[0]['data']
+        _require(data.get('call_identity') == call['call_identity'] and data.get('status') == 200, 'agent_read_identity_mismatch')
+        worker_ref = provenance.get('worker_receipt_ref') or {}
+        worker_receipts = [row for row in payload.get('response_receipts', [])
+                           if row.get('ordinal') == worker_ref.get('ordinal')]
+        _require(worker_ref.get('run_id') == call['run_id'] and worker_ref.get('payload_sha256') == snapshot.get('payload_sha256')
+                 and len(worker_receipts) == 1, 'worker_write_unverified')
+        worker = worker_receipts[0]
+        _require(worker.get('write_state') == 'socket_written' and worker.get('operation_id') == op
+                 and worker.get('action_sequence') == call.get('action_sequence')
+                 and all(worker.get(key) == data.get(key) for key in ('call_identity', 'status', 'body_sha256', 'body_bytes')), 'worker_write_identity_mismatch')
+        receipts = call.get('response_receipts') or []
+        matches = [r for r in receipts if r.get('entry_id') in provenance.get('worker_received_receipt_entry_ids', [])
+                   and r.get('wire_body_sha256') == data.get('body_sha256')
+                   and r.get('wire_body_bytes') == data.get('body_bytes') and (r.get('metadata') or {}).get('status') == 200]
+        _require(bool(matches), 'delivered_response_unresolved')
+        responses = []
+        for receipt in matches:
+            _require(set(receipt.get('privacy_redactions') or []) <= {'hidden_reasoning'} and not receipt.get('response_unavailable'), 'response_privacy_nonexact')
+            value = receipt.get('response')
+            if value is None:
+                ref = receipt.get('response_ref') or {}
+                if ref.get('field') == 'response' and ref.get('entry_id') == call.get('terminal_entry_id'):
+                    value = call.get('response')
+                else:
+                    linked = [r for r in receipts if r.get('entry_id') == ref.get('entry_id') and 'response' in r]
+                    _require(len(linked) == 1, 'response_reference_unresolved')
+                    value = linked[0]['response']
+            _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
+            _require(_exact(value, response=True), 'response_privacy_nonexact')
+            responses.append(value)
+        _require(len({contracts.document_hash(value) for value in responses}) == 1, 'delivered_response_ambiguous')
     annotation = call.get('reasoning_capture') or {}
     full_history = (isinstance(annotation, dict)
                     and annotation.get('policy') == 'full_generated_thinking_v1'
@@ -390,6 +503,8 @@ def _candidate(example, call):
             'quality': {'status': 'unreviewed', 'correct_action': 'not_established'},
             'source_refs': [{'example_hash': example['example_hash'], 'run_id': call['run_id'],
                              'call_identity': call['call_identity'], 'teacher_reasoning_metadata': reasoning,
+                             **({'capture_scope': 'provider_visible_request_result', 'client_consumption': 'not_proved'}
+                                if training_coverage.uses_host_result_evidence(example.get('configuration') or {}) else {}),
                              **({'target_source_paths': [['output', index] for index, item in enumerate(responses[0]['output'])
                                   if item.get('type') != 'reasoning']} if op == 'openrouter.responses' else {}),
                              'delivered_response_sha256': contracts.document_hash(responses[0]),
@@ -461,7 +576,7 @@ def build(examples, rules=None):
                 'training_permission': copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 'eligibility_limits': ['observed_next_response_only', 'quality_unreviewed', 'not_a_complete_trajectory',
                                        'no_training_permission_confirmed', 'text_and_local_function_calls_only',
-                                       'exact_agent_read_required', 'no_encrypted_reasoning'],
+                                       'host_delivery_required_for_new_policy', 'agent_read_required_for_historical_policy', 'no_encrypted_reasoning'],
                 'counts': {'examples': len(sources), 'candidate_executions': len({ref['run_id'] for r in candidates.values() for ref in r['source_refs']}),
                            'records_by_split': {k: len(v) for k, v in splits.items()}, 'exclusion_reasons': dict(sorted(counts.items()))},
                 'sources': sorted(sources), 'split_hashes': {k: contracts.document_hash(v) for k, v in splits.items()}}

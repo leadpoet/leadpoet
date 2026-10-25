@@ -51,6 +51,7 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
         complete_for_run = (proof.get("complete") is True and all(dimensions_for_run.values())
                             and not proof.get("incomplete_reasons"))
         selected_gaps = training_thinking.selected_research_evidence(example)
+        diagnostic_gaps = training_thinking.provider_visible_view(example)[1]
         selected_research_complete += selected_gaps is not None
         for name in _DIMENSIONS:
             dimensions[name] += dimensions_for_run[name]
@@ -94,7 +95,10 @@ def build(examples: Iterable[Mapping[str, Any]], *, production_rounds_only: bool
                                     "dimensions": dimensions_for_run,
                                     "incomplete_reasons": sorted(set(proof.get("incomplete_reasons") or [])),
                                     "selected_research_complete": selected_gaps is not None,
-                                    "ancillary_judge_gaps": sorted(selected_gaps) if selected_gaps is not None else [],
+                                    "ancillary_judge_gaps": sorted(selected_gaps - diagnostic_gaps) if selected_gaps is not None else [],
+                                    **({"scope": "provider_visible_request_results",
+                                        "diagnostic_capture_gaps": sorted(diagnostic_gaps)}
+                                       if training_coverage.uses_host_result_evidence(example.get("configuration") or {}) else {}),
                                     "recorder_buffer_complete": recorder_complete,
                                     "response_receipts": receipts}})
         config = example.get("configuration") or {}

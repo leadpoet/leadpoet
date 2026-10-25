@@ -74,7 +74,7 @@ exposes full thinking. New routes require the same evidence and tests.
 | Central collection | Apply policy before hashing, capture, and budget admission to all execution model calls. Miner, baseline, and subagent calls share the same gateway. Judges retain their policy. |
 | Exact routes | Freeze the reviewed registry in each new round. Pin provider and version expectations. Reject unsupported routes before dispatch. Record returned route mismatches without stopping scoring; exclude them from strict exports. |
 | Tool and JSON continuity | Preserve reasoning fields, signatures, opaque continuation state, tool IDs, ordering, and caller schemas in the live conversation. Validate two tool continuations and strict JSON. Never insert thinking into a JSON answer. |
-| Useful training data | Export actual generated thinking beside prior observations and the target action. Require request/response hashes, delivery/receipt evidence, a matching frozen route, and complete provider text. Deduplicate alias fields. |
+| Useful training data | Export actual generated thinking beside prior observations and the target action. Verify the saved request and provider result against the existing worker delivery record, the frozen route, and the retained text. Client read acknowledgments and named SDK phase callbacks are optional diagnostics in the new policy. Deduplicate alias fields. |
 | Linked evidence | Reuse task/ICP, prompts, tools, page observations, receipts, final output, and judgment links. Retain model/route/settings, source version, retries, cost, and runtime. Missing or unsupported evidence remains an explicit gap. |
 | Dataset quality | Reuse secret removal, failure distinctions, deduplication, held-out companies, source references, dataset versions, and existing training-permission status. Labels still require evaluation before training. |
 | Honest counts | Separate miner/baseline/judge calls, saved text, and complete trajectories. Report empty, summary-only, opaque, truncated, unavailable, failed capture, and unproved routes separately. No invented historical backfill. |
@@ -111,6 +111,23 @@ These rules are selected by the presence of the frozen setting. An explicit
 round without the setting keeps its original behavior, including its limited
 unknown-usage tool-only compatibility; a live default cannot rewrite that round.
 Exact failed-attempt omissions also apply only to rounds with the new setting.
+
+The new policy uses the saved provider request/result and the existing worker
+socket-write record to verify a training pair. It does not require a client to
+send a separate acknowledgment or legacy SDK phase snapshots. It adds no TYCHE
+callback, receipt protocol, or recovery state. The host-delivered result must
+match the saved call, status, byte count, and content; a later billing-recovery
+response cannot replace it. Missing client reports do not prove consumption,
+and the export must not claim that the agent read or used the result. Actual
+input, output, scoring, privacy, and integrity checks remain required. Historical
+rounds keep their existing checks.
+
+This verifies the provider-visible trajectory. It does not prove that Arena
+observed every local function or web request inside a miner's agent. Those local
+coverage limits remain visible in the raw report. Miners can keep their tools
+and harnesses without adding logging or phase callbacks. Any tool result sent
+back to the model is retained in the model's captured input; provider tool
+results are also retained at the gateway.
 
 The selected research check is shared by champion capture eligibility and strict
 thinking exports. It retains the raw export's completeness and privacy flags.

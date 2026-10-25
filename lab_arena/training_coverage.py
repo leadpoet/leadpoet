@@ -39,3 +39,19 @@ def required_count(bank_size: int, percent: int) -> int:
     if type(percent) is not int or not 1 <= percent <= 100:
         raise ValueError("training minimum ICP coverage percent is invalid")
     return (bank_size * percent + 99) // 100
+
+
+def uses_host_result_evidence(configuration: Mapping) -> bool:
+    """Only validated new frozen full-thinking rounds omit client callbacks."""
+    from lab_arena import reasoning_capture
+    try:
+        if (not isinstance(configuration, Mapping)
+                or configuration.get("reasoning_capture_policy") != reasoning_capture.POLICY
+                or MISSING_REASONING_SETTING not in configuration):
+            return False
+        missing_reasoning_percent_from_configuration(configuration)
+        percent_from_configuration(configuration)
+        reasoning_capture.validate_registry(configuration.get("reasoning_route_registry"))
+        return True
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False

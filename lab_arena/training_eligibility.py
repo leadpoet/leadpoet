@@ -134,6 +134,7 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
     Only the separately proved source-timeout path can supply the missing
     source dimension. All input/output and provider evidence remains required.
     """
+    example, _ = training_thinking.provider_visible_view(example)
     proof = example.get("completeness") or {}
     source_reasons = {"source_unverified"} if unavailable_source else set()
     new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
@@ -223,37 +224,43 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
                     or (any("credential" in (receipt.get("privacy_redactions") or [])
                             for receipt in call.get("response_receipts") or [])
                         and "response_privacy_nonexact" not in reasons)
-                    or provenance.get("agent_receipt") != "reported_exact_body_received"
+                    or (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+                        and provenance.get("agent_receipt") != "reported_exact_body_received")
                     or provenance.get("delivery_to_worker") != "socket_written"):
                 return False
-            worker_ref = provenance.get("worker_receipt_ref") or {}
-            if (worker_ref.get("run_id") != run_id
-                    or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
-                return False
-            writes = [row for row in payload.get("response_receipts") or []
-                      if row.get("ordinal") == worker_ref.get("ordinal")
-                      and row.get("call_identity") == call.get("call_identity")
-                      and row.get("operation_id") == call.get("operation_id")
-                      and row.get("action_sequence") == call.get("action_sequence")
-                      and row.get("write_state") == "socket_written"]
-            refs = provenance.get("agent_receipt_refs") or []
-            reads = [row for row in payload.get("agent_observations") or []
-                     if row.get("kind") == "response_received"
-                     and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
-                             and ref.get("payload_sha256") == artifact["payload_sha256"]
-                             for ref in refs)]
-            receipts = [row for row in call.get("response_receipts") or []
-                        if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
-                        and row.get("response_sha256") == call.get("response_sha256")]
-            if (len(writes) != 1 or not reads or not receipts
-                    or any((row.get("privacy") or {}).get("redacted") is True for row in reads)
-                    or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
-                               and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
-                               and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
-                               and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
-                               and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
-                               for read in reads for receipt in receipts)):
-                return False
+            if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+                evidence = training_steps._host_result(example, call, allow_privacy=True)
+                if evidence["response"] != response:
+                    return False
+            else:
+                worker_ref = provenance.get("worker_receipt_ref") or {}
+                if (worker_ref.get("run_id") != run_id
+                        or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
+                    return False
+                writes = [row for row in payload.get("response_receipts") or []
+                          if row.get("ordinal") == worker_ref.get("ordinal")
+                          and row.get("call_identity") == call.get("call_identity")
+                          and row.get("operation_id") == call.get("operation_id")
+                          and row.get("action_sequence") == call.get("action_sequence")
+                          and row.get("write_state") == "socket_written"]
+                refs = provenance.get("agent_receipt_refs") or []
+                reads = [row for row in payload.get("agent_observations") or []
+                         if row.get("kind") == "response_received"
+                         and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                                 and ref.get("payload_sha256") == artifact["payload_sha256"]
+                                 for ref in refs)]
+                receipts = [row for row in call.get("response_receipts") or []
+                            if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
+                            and row.get("response_sha256") == call.get("response_sha256")]
+                if (len(writes) != 1 or not reads or not receipts
+                        or any((row.get("privacy") or {}).get("redacted") is True for row in reads)
+                        or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
+                                   and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
+                                   and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
+                                   and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
+                                   and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
+                                   for read in reads for receipt in receipts)):
+                    return False
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
     return True
@@ -261,6 +268,7 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
 
 def _selected_privacy_cascade_verified(example, run_id):
     """Count a documented redaction as an incomplete ICP, never exact training."""
+    example, _ = training_thinking.provider_visible_view(example)
     proof = example.get("completeness") or {}
     reasons = set(proof.get("incomplete_reasons") or [])
     allowed = {"context_privacy_nonexact", "request_privacy_nonexact", "response_privacy_nonexact"}
@@ -281,7 +289,7 @@ def _selected_privacy_cascade_verified(example, run_id):
     payload = artifact.get("payload") or {}
     if (payload.get("complete") is not True
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
-            or any((row.get("privacy") or {}).get("redacted") is not False
+            or any(training_thinking._required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
                    for row in payload.get(field) or [])):
         return False
@@ -346,36 +354,42 @@ def _selected_privacy_cascade_verified(example, run_id):
                     or (not redacted_request and capture.get("redacted") is True)
                     or not isinstance(response, Mapping)
                     or contracts.document_hash(response) != call.get("response_sha256")
-                    or provenance.get("agent_receipt") != "reported_exact_body_received"
-                    or provenance.get("selected_response_acknowledged") is not True
+                    or (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+                        and (provenance.get("agent_receipt") != "reported_exact_body_received"
+                             or provenance.get("selected_response_acknowledged") is not True))
                     or provenance.get("delivery_to_worker") != "socket_written"):
                 return False
-            worker_ref = provenance.get("worker_receipt_ref") or {}
-            if (worker_ref.get("run_id") != run_id
-                    or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
-                return False
-            writes = [row for row in payload.get("response_receipts") or []
-                      if row.get("ordinal") == worker_ref.get("ordinal")
-                      and row.get("call_identity") == call.get("call_identity")
-                      and row.get("operation_id") == call.get("operation_id")
-                      and row.get("action_sequence") == call.get("action_sequence")
-                      and row.get("write_state") == "socket_written"]
-            refs = provenance.get("agent_receipt_refs") or []
-            reads = [row for row in payload.get("agent_observations") or []
-                     if row.get("kind") == "response_received"
-                     and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
-                             and ref.get("payload_sha256") == artifact["payload_sha256"] for ref in refs)]
-            receipts = [row for row in call.get("response_receipts") or []
-                        if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
-                        and row.get("response_sha256") == call.get("response_sha256")]
-            if (len(writes) != 1 or not reads or not receipts
-                    or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
-                               and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
-                               and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
-                               and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
-                               and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
-                               for read in reads for receipt in receipts)):
-                return False
+            if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+                evidence = training_steps._host_result(example, call, allow_privacy=True)
+                if evidence["response"] != response:
+                    return False
+            else:
+                worker_ref = provenance.get("worker_receipt_ref") or {}
+                if (worker_ref.get("run_id") != run_id
+                        or worker_ref.get("payload_sha256") != artifact["payload_sha256"]):
+                    return False
+                writes = [row for row in payload.get("response_receipts") or []
+                          if row.get("ordinal") == worker_ref.get("ordinal")
+                          and row.get("call_identity") == call.get("call_identity")
+                          and row.get("operation_id") == call.get("operation_id")
+                          and row.get("action_sequence") == call.get("action_sequence")
+                          and row.get("write_state") == "socket_written"]
+                refs = provenance.get("agent_receipt_refs") or []
+                reads = [row for row in payload.get("agent_observations") or []
+                         if row.get("kind") == "response_received"
+                         and any(ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                                 and ref.get("payload_sha256") == artifact["payload_sha256"] for ref in refs)]
+                receipts = [row for row in call.get("response_receipts") or []
+                            if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
+                            and row.get("response_sha256") == call.get("response_sha256")]
+                if (len(writes) != 1 or not reads or not receipts
+                        or not any((read.get("data") or {}).get("call_identity") == call.get("call_identity")
+                                   and (read.get("data") or {}).get("body_sha256") == receipt.get("wire_body_sha256")
+                                   and (read.get("data") or {}).get("body_bytes") == receipt.get("wire_body_bytes")
+                                   and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
+                                   and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
+                                   for read in reads for receipt in receipts)):
+                    return False
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
     return True
@@ -388,6 +402,7 @@ def _transient_artifact_gap_verified(example, submission, artifacts):
     storage reads. Missing objects, access denial and malformed bytes never
     produce this marker. The completed export still checks all other paths.
     """
+    example, _ = training_thinking.provider_visible_view(example)
     if not isinstance(artifacts, Mapping) or not artifacts or not set(artifacts) <= {
             "source", "benchmark", "input", "judge_input", "judge_output"}:
         return False
@@ -499,43 +514,48 @@ def _transient_artifact_gap_verified(example, submission, artifacts):
                         or (call.get("request_capture") or {}).get("redacted")
                         or call.get("response_privacy_redactions")):
                     return False
-                artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
-                payload = artifact.get("payload") or {}
-                payload_hash = contracts.document_hash(payload)
-                provenance = call.get("response_provenance") or {}
-                worker_ref = provenance.get("worker_receipt_ref") or {}
-                if (artifact.get("payload_sha256") != payload_hash
-                        or provenance.get("agent_receipt") != "reported_exact_body_received"
-                        or provenance.get("delivery_to_worker") != "socket_written"
-                        or worker_ref.get("run_id") != run_id
-                        or worker_ref.get("payload_sha256") != payload_hash):
-                    return False
-                writes = [row for row in payload.get("response_receipts") or []
-                          if row.get("ordinal") == worker_ref.get("ordinal")
-                          and row.get("call_identity") == call.get("call_identity")
-                          and row.get("operation_id") == call.get("operation_id")
-                          and row.get("action_sequence") == call.get("action_sequence")
-                          and row.get("write_state") == "socket_written"]
-                refs = provenance.get("agent_receipt_refs") or []
-                reads = [row for row in payload.get("agent_observations") or []
-                         if row.get("kind") == "response_received" and any(
-                             ref.get("id") == row.get("id") and ref.get("run_id") == run_id
-                             and ref.get("payload_sha256") == payload_hash for ref in refs)]
-                receipts = [row for row in call.get("response_receipts") or []
-                            if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
-                            and row.get("response_sha256") == call.get("response_sha256")
-                            and not row.get("privacy_redactions")]
-                if (len(writes) != 1 or not reads or not receipts
-                        or any((row.get("privacy") or {}).get("redacted") is not False for row in reads)
-                        or not all(any(
-                            (read.get("data") or {}).get("call_identity") == call.get("call_identity")
-                            and (read.get("data") or {}).get("status") == (receipt.get("metadata") or {}).get("status")
-                            and all((read.get("data") or {}).get(key) == writes[0].get(key)
-                                    for key in ("status", "body_sha256", "body_bytes"))
-                            and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
-                            and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
-                            for receipt in receipts) for read in reads)):
-                    return False
+                if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+                    evidence = training_steps._host_result(example, call)
+                    if evidence["response"] != response:
+                        return False
+                else:
+                    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+                    payload = artifact.get("payload") or {}
+                    payload_hash = contracts.document_hash(payload)
+                    provenance = call.get("response_provenance") or {}
+                    worker_ref = provenance.get("worker_receipt_ref") or {}
+                    if (artifact.get("payload_sha256") != payload_hash
+                            or provenance.get("agent_receipt") != "reported_exact_body_received"
+                            or provenance.get("delivery_to_worker") != "socket_written"
+                            or worker_ref.get("run_id") != run_id
+                            or worker_ref.get("payload_sha256") != payload_hash):
+                        return False
+                    writes = [row for row in payload.get("response_receipts") or []
+                              if row.get("ordinal") == worker_ref.get("ordinal")
+                              and row.get("call_identity") == call.get("call_identity")
+                              and row.get("operation_id") == call.get("operation_id")
+                              and row.get("action_sequence") == call.get("action_sequence")
+                              and row.get("write_state") == "socket_written"]
+                    refs = provenance.get("agent_receipt_refs") or []
+                    reads = [row for row in payload.get("agent_observations") or []
+                             if row.get("kind") == "response_received" and any(
+                                 ref.get("id") == row.get("id") and ref.get("run_id") == run_id
+                                 and ref.get("payload_sha256") == payload_hash for ref in refs)]
+                    receipts = [row for row in call.get("response_receipts") or []
+                                if row.get("entry_id") in (provenance.get("worker_received_receipt_entry_ids") or [])
+                                and row.get("response_sha256") == call.get("response_sha256")
+                                and not row.get("privacy_redactions")]
+                    if (len(writes) != 1 or not reads or not receipts
+                            or any((row.get("privacy") or {}).get("redacted") is not False for row in reads)
+                            or not all(any(
+                                (read.get("data") or {}).get("call_identity") == call.get("call_identity")
+                                and (read.get("data") or {}).get("status") == (receipt.get("metadata") or {}).get("status")
+                                and all((read.get("data") or {}).get(key) == writes[0].get(key)
+                                        for key in ("status", "body_sha256", "body_bytes"))
+                                and writes[0].get("body_sha256") == receipt.get("wire_body_sha256")
+                                and writes[0].get("body_bytes") == receipt.get("wire_body_bytes")
+                                for receipt in receipts) for read in reads)):
+                        return False
         return True
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
         return False

@@ -103,3 +103,18 @@ def test_concurrent_baseline_judging_uses_complete_e2e_schema(
             concurrent.test_real_overlap_and_final_authority(scenario, 1, 0)
     finally:
         completed.close()
+
+
+def test_review_guard_read_is_installed_and_preserves_restart_authority(database):
+    from tests.lab_arena import review_guard_row_read_postgres_test as guard
+
+    # The current reviewer uses this RPC before reserving review work. It must
+    # exist in the same complete schema used by publication and paid E2E.
+    with database[0].connect(**database[1]) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT to_regprocedure('public.lab_arena_review_guard_state_v1()')")
+        assert cursor.fetchone()[0] is not None, 'current E2E tail omits migration 574'
+    guard.test_idempotent_install_preserves_control_canonical_function_and_permissions(database)
+    guard.test_review_guard_does_not_queue_behind_claim_control_but_canonical_state_still_does(database)
+    for commit in (False, True):
+        guard.test_real_guard_update_blocks_read_until_commit_or_rollback(database, commit)
+    guard.test_retained_expired_guard_still_blocks_and_operator_pause_semantics_stay_same(database)

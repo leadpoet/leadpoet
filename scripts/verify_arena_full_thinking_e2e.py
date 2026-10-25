@@ -273,9 +273,10 @@ def full_thinking_database(*, production_order: bool = True):
                     "571-lab-arena-closed-failed-score-host-recovery.sql",
                     "572-lab-arena-concurrent-baseline-judging.sql",
                     "573-lab-arena-closed-provider-eligible-run-materialization.sql",
+                    "574-lab-arena-review-guard-row-read.sql",
                 )
                 if production_order:
-                    # Production already has main's 571-573. Verify the PR
+                    # Production already has main's 571-574. Verify the PR
                     # against that authority, while tests also cover numeric order.
                     pr_tail = tuple(name for name in migrations if 565 <= int(name[:3]) <= 570)
                     migrations = tuple(name for name in migrations if name not in pr_tail) + pr_tail

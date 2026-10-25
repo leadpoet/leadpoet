@@ -467,3 +467,42 @@ linked-score, and strict-record checks across both roles. Seven acceptance tests
 passed independently, including a valid candidate paired with an incomplete
 baseline. This test correction did not trigger another paid run or change the
 results above.
+
+
+## October 25 correction and checkpoint readback
+
+The new frozen training coverage default is **80%**, using integer ceiling.
+Existing rounds without this field keep 100%; no historical configuration was
+rewritten. Complete ICPs remain subject to the existing strict raw/receipt/route
+checks, and incomplete ICPs stay outside the strict dataset. Confirmed monetary
+costs still control admission; the PR no longer adds pending or uncertain holds.
+The PR migrations now occupy 564–568, after main's 563.
+
+Current reproducible checks:
+
+- 156 focused coverage, frozen configuration, strict export, migration,
+  publication, promotion, and next-baseline tests passed.
+- A further 98 focused cap, coverage/publication, and exact-source fallback
+  tests passed. Counts overlap earlier tests; they are not a full CI pass.
+- The actual PostgreSQL coverage test uses synthetic sealed evidence and the
+  normal service publication path: 8/10 qualifies; 7/10 does not; all measured
+  scores publish; an eligible peer wins and is adopted as the next baseline.
+- Three reported PR-only regressions were reproduced before repair: second-turn
+  summary diagnostic HTTP400, exact replay timing fields, and telemetry vocabulary.
+
+The private saved paid checkpoint `attempt-09-resume-01` has SHA256
+`62490a781439ba244e328e82b9dbfc4aa616c2bd6ce73fac861aeadb109fd018`.
+A fresh PG17 restore read 20 accepted research executions and 9 accepted scores.
+All 20 raw exports and readable views load. Independent comparison of 148 selected
+provider calls, including 84 model calls, found no selected research changes.
+This checkpoint remains at `stage1_scoring`, so final cost and judgment bindings
+are unavailable and strict eligibility has not been established for either role.
+The threshold was not rewritten to turn this incomplete run into a passing test.
+
+The repeated scoring failure was an unbound scraper404 for a citation. A narrow
+fix sends that typed transport failure through the existing bounded exact-URL
+fallback. It does not treat the proxy404 as proof that the page is absent. Only
+an authenticated, exact per-URL crawl receipt can establish absence. Exa documents
+per-URL statuses separately from API success in its [Contents reference](https://exa.ai/docs/reference/get-contents).
+The live retry on this fix remains required; the offline controls do not prove
+provider recovery or a complete sourcing run.

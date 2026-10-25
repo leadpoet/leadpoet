@@ -312,11 +312,11 @@ the supplier to operate the customer institution or require the criterion to
 literally say that vendors qualify. A customer sector named only as a target
 market remains insufficient, and a supplier does not satisfy a criterion that
 explicitly requires the investigated company itself to be the institution or
-downstream operator. For industry, VERIFIED means direct supplier/operator
-evidence for the requested activity. A separate required-attribute condition,
-such as recurring commercial terms or a recent milestone, is reviewed by the
-scorer independently. Do not mark industry UNPROVEN solely because that
-separate condition is unproven; do not claim industry proof establishes it.
+downstream operator. Industry needs direct supplier/operator proof of the
+complete requested product/service under the precedence above. Conditions stated
+ONLY in required_attribute are judged there; do not import them into industry.
+Conditions also stated in product/service remain mandatory in BOTH checks.
+Reuse exact quotes, but evaluate each check independently.
 A first-party URL, site ownership, footer, navigation, logo, URL path, or page
 title does not by itself establish that a quoted capability is supplied by the
 investigated company. Decide the activity role from the fetched page body.
@@ -379,17 +379,16 @@ exact investigated company and product. A free plan, research study,
 prototype, pilot, demonstration, funding announcement, or investor's general
 commercialization claim does not by itself prove a current commercial sale.
 When positive_semantic_review is true, treat prior positive labels as untrusted
-hypotheses, not source observations. The supplier_operator role establishes
-only the company's relationship to the cited activity; it does not establish
-that the activity satisfies the requested industry criterion. For the industry
-finding, verify that the company itself supplies or operates the requested
-sector activity, using the complete industry, sub-industry, product/service,
-and required-attribute context to identify that activity. Do not make the
-industry finding depend on a commercial or other condition that is separately
-stated in the required attribute; that condition needs its own independent
-required-attribute judgment and source proof before company fit can match.
-Apply the industry precedence above and prove every independent mandatory
-condition that is not separately checked by the required attribute.
+hypotheses. The supplier_operator role establishes relationship, not criterion
+satisfaction. Verify the company's own requested sector activity using complete
+industry, sub-industry, product/service and required-attribute context. Do not make the
+industry finding depend on conditions stated ONLY in required_attribute.
+Apply the industry precedence above and prove every mandatory product/service
+condition, including any also checked by required_attribute. For nonempty
+requested_product_service, industry VERIFIED requires a VERIFIED product_coverage
+aggregate. If that aggregate is UNPROVEN, report industry UNPROVEN; proof of a
+broad company activity is insufficient. Reuse source quotes, but each check
+needs independent judgment and proof.
 Equivalent source language is sufficient; do not require literal
 taxonomy labels. An adjacent activity for the same customer group is UNPROVEN.
 Populate observed industry, sub-industry, and value only from the source; never
@@ -641,8 +640,11 @@ trailing relative clauses, customer restrictions or supply-channel qualifiers.
 All text must belong to a node; gaps may contain only punctuation and logical
 or example connectors. Do not add criteria, standalone-product requirements or
 conditions from required_attribute. Return each leaf ID exactly once in claims,
-with status, activity_role, and up to three evidence URL/quote bindings. Each
-VERIFIED leaf requires supplier/operator proof. Use all loaded company-bound
+with up to three evidence URL/quote bindings, activity_role and status. Write
+claim fields in order: id, evidence, activity_role, status. Collect
+exact loaded-source quotes before deciding the role and status. Output order
+does not change field meaning. Each VERIFIED leaf requires supplier/operator
+proof. Use all loaded company-bound
 pages; several clauses may cite the same exact quote, and a clause may use
 several pages. A source need not use the criterion's exact marketing wording.
 Before UNPROVEN, scan ALL loaded sources for each leaf, including product,
@@ -711,6 +713,8 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                     "type": "string",
                                     "enum": requested_targets,
                                 },
+                                **({"product_coverage": product_coverage_schema(description=_PRODUCT_COVERAGE_INSTRUCTIONS)}
+                                   if "industry" in requested_targets else {}),
                                 "status": {"type": "string", "enum": sorted(STATUSES)},
                                 "observed_value": {"type": ["string", "integer", "null"]},
                                 "observed_country": {"type": "string"},
@@ -746,8 +750,6 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "supporting_evidence_quote_1": {"type": "string"},
                                 "supporting_evidence_url_2": {"type": "string"},
                                 "supporting_evidence_quote_2": {"type": "string"},
-                                **({"product_coverage": product_coverage_schema(description=_PRODUCT_COVERAGE_INSTRUCTIONS)}
-                                   if "industry" in requested_targets else {}),
                                 **({"ownership": {
                                     "type": ["object", "null"],
                                     "additionalProperties": False,
@@ -781,7 +783,9 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "reason": {"type": "string"},
                             },
                             "required": [
-                                "target", "status", "observed_value",
+                                "target",
+                                *(["product_coverage"] if "industry" in requested_targets else []),
+                                "status", "observed_value",
                                 "observed_country", "observed_state",
                                 "observed_industry", "observed_subindustry",
                                 "activity_role",
@@ -792,7 +796,6 @@ def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
                                 "supporting_evidence_quote_2", "old_name",
                                 "new_name", "old_domain", "new_domain",
                                 "shared_linkedin_slug", "reason",
-                                *(["product_coverage"] if "industry" in requested_targets else []),
                                 *(["ownership"] if "stage" in requested_targets else []),
                             ],
                         },

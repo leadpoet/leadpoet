@@ -62,6 +62,22 @@ def test_original_prompt_preserves_conflict_and_qualifier_limits():
     assert len(investigator._SYSTEM_PROMPT) <= OPENROUTER_MAX_CONTENT_CHARS
 
 
+@pytest.mark.parametrize("targets", [("industry",), ("industry", "required_attribute"), ("stage",)])
+def test_product_coverage_precedes_global_status_without_changing_fields(targets):
+    submit = next(t for t in investigator._tools(targets) if t["name"] == "submit_findings")
+    item = submit["parameters"]["properties"]["findings"]["items"]
+    order = list(item["properties"])
+    expected = ["target", "product_coverage", "status"] if "industry" in targets else ["target", "status"]
+    assert order[:len(expected)] == expected
+    assert item["required"][:len(expected)] == expected
+    if "industry" in targets:
+        field = item["properties"]["product_coverage"]
+        assert field["type"] == ["string", "null"] and field["maxLength"] == 24000
+        assert "id, evidence, activity_role, status" in field["description"]
+    else:
+        assert "product_coverage" not in item["properties"]
+
+
 @pytest.mark.parametrize(
     ("requested_stage", "quote", "loaded_text", "expected"),
     [

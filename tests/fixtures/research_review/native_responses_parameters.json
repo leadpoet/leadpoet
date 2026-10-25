@@ -1,0 +1,93 @@
+{
+  "provenance": "Reduced actual tyche-installed-02 native request. Private launch instructions and cache identity replaced; parameter and local-tool schema retained.",
+  "request": {
+    "model": "deepseek/deepseek-v4.1-flash-1017",
+    "parallel_tool_calls": true,
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "tool_choice": "auto",
+    "reasoning": {
+      "effort": "high"
+    },
+    "max_output_tokens": 4096,
+    "instructions": "Native local-tool protocol compatibility fixture.",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Inspect two retained observations, then return the result."
+          }
+        ]
+      }
+    ],
+    "prompt_cache_key": "native-public-fixture",
+    "tools": [
+      {
+        "description": "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+        "name": "exec_command",
+        "parameters": {
+          "additionalProperties": false,
+          "properties": {
+            "cmd": {
+              "description": "Shell command to execute.",
+              "type": "string"
+            },
+            "justification": {
+              "description": "User-facing approval question for `require_escalated`; omit otherwise.",
+              "type": "string"
+            },
+            "login": {
+              "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true.",
+              "type": "boolean"
+            },
+            "max_output_tokens": {
+              "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.",
+              "type": "number"
+            },
+            "prefix_rule": {
+              "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for example [\"git\", \"pull\"].",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "sandbox_permissions": {
+              "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed execution.",
+              "enum": [
+                "use_default",
+                "require_escalated"
+              ],
+              "type": "string"
+            },
+            "shell": {
+              "description": "Shell binary to launch. Defaults to the user's default shell.",
+              "type": "string"
+            },
+            "tty": {
+              "description": "True allocates a PTY for the command; false or omitted uses plain pipes.",
+              "type": "boolean"
+            },
+            "workdir": {
+              "description": "Working directory for the command. Defaults to the turn cwd.",
+              "type": "string"
+            },
+            "yield_time_ms": {
+              "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms.",
+              "type": "number"
+            }
+          },
+          "required": [
+            "cmd"
+          ],
+          "type": "object"
+        },
+        "strict": false,
+        "type": "function"
+      }
+    ]
+  }
+}

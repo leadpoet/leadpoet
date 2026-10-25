@@ -38,6 +38,89 @@ def test_exact_source_denial_is_typed(monkeypatch, status):
     assert investigator._fetch_outcome(URL, result)["error_class"] == "source_access_denied"
 
 
+@pytest.mark.parametrize("status,expected", [(404, "source_not_found"), (410, "source_gone")])
+def test_exact_exa_crawl_absence_is_typed(monkeypatch, status, expected):
+    body = copy.deepcopy(FLIGHTPATH_401)
+    body["statuses"][0]["error"] = {"httpStatusCode": status, "tag": f"CRAWL_HTTP_{status}"}
+    result = _classify(monkeypatch, body)
+    assert result == {"ok": False, "error": expected}
+    assert investigator._fetch_outcome(URL, result)["error_class"] == expected
+
+
+def test_captured_exa_crawl_not_found_is_exact_source_absence(monkeypatch):
+    body = {"results": [], "statuses": [{
+        "id": URL, "status": "error",
+        "error": {"httpStatusCode": 404, "tag": "CRAWL_NOT_FOUND"},
+    }]}
+    result = _classify(monkeypatch, body)
+    assert result == {"ok": False, "error": "source_not_found"}
+    assert investigator._fetch_outcome(URL, result)["error_class"] == "source_not_found"
+
+
+@pytest.mark.parametrize("fault", [
+    "wrong_url", "missing_id", "wrong_code", "wrong_tag", "string_code",
+    "bool_code", "extra_status", "text_result", "missing_results",
+    "top_error", "status_success", "api_403",
+])
+def test_captured_not_found_shape_requires_exact_bound_source(monkeypatch, fault):
+    body = {"results": [], "statuses": [{
+        "id": URL, "status": "error",
+        "error": {"httpStatusCode": 404, "tag": "CRAWL_NOT_FOUND"},
+    }]}
+    source = body["statuses"][0]
+    api_status = 200
+    if fault == "wrong_url": source["id"] = ALTERNATE
+    elif fault == "missing_id": source.pop("id")
+    elif fault == "wrong_code": source["error"]["httpStatusCode"] = 410
+    elif fault == "wrong_tag": source["error"]["tag"] = "OTHER_NOT_FOUND"
+    elif fault == "string_code": source["error"]["httpStatusCode"] = "404"
+    elif fault == "bool_code": source["error"]["httpStatusCode"] = True
+    elif fault == "extra_status": body["statuses"].append(copy.deepcopy(source))
+    elif fault == "text_result": body["results"] = [{"url": URL, "text": QUOTE}]
+    elif fault == "missing_results": body.pop("results")
+    elif fault == "top_error": body["error"] = {"message": "provider unavailable"}
+    elif fault == "status_success": source["status"] = "success"
+    elif fault == "api_403": api_status = 403
+    assert _classify(monkeypatch, body, api_status).get("error") != "source_not_found"
+
+
+def test_captured_not_found_receipt_can_complete_only_unproven(monkeypatch):
+    body = {"results": [], "statuses": [{
+        "id": URL, "status": "error",
+        "error": {"httpStatusCode": 404, "tag": "CRAWL_NOT_FOUND"},
+    }]}
+    result, fetches, searches = _full_review(monkeypatch, response=(200, body))
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
+    assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    assert fetches == [URL] and searches
+    assert [row["error_class"] for row in result["usage"]["fetch_outcomes"]] == [
+        "http_error", "source_not_found",
+    ]
+
+
+@pytest.mark.parametrize("fault", [
+    "wrong_url", "missing_id", "wrong_tag", "string_status", "bool_status",
+    "duplicate", "text_result", "missing_results", "top_error", "not_error",
+])
+def test_unbound_exa_404_cannot_claim_source_absence(monkeypatch, fault):
+    body = copy.deepcopy(FLIGHTPATH_401)
+    source = body["statuses"][0]
+    source["error"] = {"httpStatusCode": 404, "tag": "CRAWL_HTTP_404"}
+    if fault == "wrong_url": source["id"] = ALTERNATE
+    elif fault == "missing_id": source.pop("id")
+    elif fault == "wrong_tag": source["error"]["tag"] = "CRAWL_HTTP_410"
+    elif fault == "string_status": source["error"]["httpStatusCode"] = "404"
+    elif fault == "bool_status": source["error"]["httpStatusCode"] = True
+    elif fault == "duplicate": body["statuses"].append(copy.deepcopy(source))
+    elif fault == "text_result": body["results"] = [{"url": URL, "text": QUOTE}]
+    elif fault == "missing_results": body.pop("results")
+    elif fault == "top_error": body["error"] = {"message": "API unavailable"}
+    elif fault == "not_error": source["status"] = "success"
+    result = _classify(monkeypatch, body)
+    assert result["error"] != "source_not_found"
+
+
 @pytest.mark.parametrize("fault", [
     "wrong_url", "missing_id", "wrong_tag", "string_status", "bool_status",
     "rate_limit", "credit", "server", "success", "duplicate", "text_result",

@@ -8,6 +8,7 @@ import pytest
 from lab_arena import training_readiness as readiness
 from scripts import report_arena_training as cli
 from tests.lab_arena.training_dataset_test import example, claim, row, seal
+from tests.lab_arena.training_eligibility_test import ten_selected_examples
 
 
 def document(run="private-run"):
@@ -22,6 +23,27 @@ def test_real_build_reports_company_candidate_without_claiming_complete_executio
     assert report["readiness"]["training_ready"] is False
     assert report["readiness"]["human_label_review"] == "not_proved_by_storage"
     assert report["agent_steps"]["candidate_records"] == 0
+
+
+def test_full_thinking_inventory_reports_frozen_coverage_without_champion_claim():
+    exports = list(ten_selected_examples().values())
+    for position, item in enumerate(exports):
+        item["configuration"]["training_minimum_icp_coverage_percent"] = 80
+        item["configuration"].update(stage_1_icp_count=5, stage_2_icp_count=5)
+        item["icp_position"] = position
+        seal(item)
+    report = readiness.build(exports, production_rounds_only=False)
+    coverage = report["full_thinking"]["coverage"]
+    assert len(coverage) == 1
+    assert coverage[0]["provided_icps"] == 10
+    assert coverage[0]["required_icps"] == 8
+    assert coverage[0]["strict_icps"] == 10
+    assert coverage[0]["supplied_inventory_complete"] is True
+    assert coverage[0]["strict_coverage_met_in_supplied_inventory"] is True
+    assert report["readiness"]["training_ready"] is False
+    exports[-1]["completeness"].update(complete=False, incomplete_reasons=["response_privacy_nonexact"])
+    report = readiness.build([*exports[:-1], seal(exports[-1])], production_rounds_only=False)
+    assert report["full_thinking"]["coverage"][0]["strict_icps"] == 9
 
 
 def test_duplicate_exports_conflicting_versions_and_bad_hash_are_not_counted_twice():

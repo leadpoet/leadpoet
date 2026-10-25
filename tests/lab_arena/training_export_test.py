@@ -10,7 +10,7 @@ import tarfile
 
 import pytest
 
-from lab_arena import contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, verify
+from lab_arena import broker as br, contracts, judgment_cache, reviewer_runtime, scoring, training_capture, training_input, training_thinking, verify
 from lab_arena.training_export import ExportError, _competition_cost_snapshot, assemble_example, without_hidden_reasoning
 from lab_arena.output import validate_output_document
 from scripts.export_arena_training import _ledger, export_run, write_private
@@ -177,6 +177,27 @@ def test_prior_launched_judge_keeps_its_own_reviewer_runtime_identity():
     assert "reviewer_runtime_identity_unverified" in result["completeness"]["reasons_by_dimension"]["research_process"]
 
 
+def test_failed_score_without_resource_summary_keeps_per_run_gap_attribution():
+    values = fixture()
+    failed = copy.deepcopy(values["runs"][1])
+    failed.update(run_id="judge:failed", status="failed", terminal_cause="lease_expired",
+                  output_ref=None, result_doc={})
+    values["runs"][1]["attempt"] = 2
+    values["runs"].append(failed)
+    result = assemble_example(**values)
+    attribution = result["related_run_gap_attribution"]
+    assert result["completeness"]["complete"] is False
+    assert attribution["execute:1"]["research_process_gaps"] == []
+    assert attribution["execute:1"]["cost_gaps"] == []
+    assert {"direct_web_usage_unverified", "provider_capture_count_unverified",
+            "worker_local_refusals_unverified", "worker_observations_unavailable"} <= set(
+                attribution["judge:failed"]["research_process_gaps"])
+    assert "provider_capture_count_unverified" in attribution["judge:failed"]["cost_gaps"]
+    for dimension, key in (("research_process", "research_process_gaps"), ("costs", "cost_gaps")):
+        assert set(result["completeness"]["reasons_by_dimension"][dimension]) == set().union(
+            *(set(row[key]) for row in attribution.values()))
+
+
 def test_missing_snapshot_preserves_verified_labels_but_cannot_claim_full_process():
     values = fixture()
     del values["objects"].values[training_input.object_ref("execute:1", 1)]
@@ -242,6 +263,8 @@ def assert_legacy_agent_gaps(result):
 def test_full_request_not_excerpt_and_plaintext_response_alias_retained():
     values = fixture()
     add_call(values)
+    values["ledger_rows"][-1]["terminal_response"].update(
+        transport_elapsed_ms=37, timing_scope="initial_provider_transport_send")
     result = assemble_example(**values)
     assert_legacy_agent_gaps(result)
     assert len(result["provider_calls"][0]["request"]["admitted_parameters"]["messages"][0]["content"]) == 12000
@@ -249,6 +272,62 @@ def test_full_request_not_excerpt_and_plaintext_response_alias_retained():
     assert result["provider_calls"][0]["response_privacy_redactions"] == []
     assert result["privacy"]["hidden_reasoning_removed"] is False
     assert result["costs"]["confirmed_actual_microusd"] == 42
+    metadata = result["provider_calls"][0]["response_receipts"][0]["metadata"]
+    assert (metadata["transport_elapsed_ms"], metadata["timing_scope"]) == (
+        37, "initial_provider_transport_send")
+
+
+def test_upstream_capture_failure_is_recorded_without_losing_saved_response():
+    values = fixture()
+    add_call(values)
+    values["ledger_rows"][-1]["terminal_response"]["upstream_response_receipt"] = {
+        "status": "unavailable", "reason": "response_capture_failed"}
+    result = assemble_example(**values)
+    call = result["provider_calls"][0]
+    assert call["upstream_response_capture"] == {"status": "unavailable", "reason": "response_capture_failed"}
+    assert call["response"]["choices"][0]["message"]["reasoning_content"] == "PRIVATE THOUGHT"
+
+
+def test_uncertain_entry_top_level_upstream_receipt_survives_export():
+    values = fixture()
+    add_call(values, status="uncertain")
+    reserve, _, uncertain = values["ledger_rows"]
+    raw = b'{"error":{"message":"provider unavailable"}}'
+    captured = br._capture_upstream_response(
+        br.ProviderResponse(503, {"content-type": "application/json"}, raw),
+        operation_id="openrouter.chat", request_hash=reserve["entry_doc"]["request_hash"],
+        call_identity=reserve["call_identity"])
+    uncertain["entry_doc"]["upstream_response_receipt"] = captured
+    call = assemble_example(**values)["provider_calls"][0]
+    receipt = call["upstream_response_receipts"][0]
+    assert receipt["response"] == {"error": {"message": "provider unavailable"}}
+    assert receipt["wire_body_sha256"] == contracts.hash_bytes(raw)
+    assert receipt["delivery_to_worker"] == "not_proved"
+    assert call["actual_microusd"] is None
+
+
+def test_stored_provider_body_and_route_identity_reach_exported_coverage():
+    values = fixture()
+    add_call(values)
+    annotation = {"policy": training_thinking.POLICY, "requested": True, "reviewed_route": True,
+                  "semantic_class": "full_generated_thinking", "model_id": "test",
+                  "model_version": "2026-10-23", "provider_route": "route-a", "api": "openrouter.chat",
+                  "mode": {"effort": "high"}, "parser_version": "arena_openrouter_reasoning_v1",
+                  "probe_id": "probe-a", "probe_manifest_sha256": "a" * 64,
+                  "registry_sha256": "b" * 64,
+                  "full_text_fields": ["reasoning_content"]}
+    values["ledger_rows"][0]["entry_doc"]["reasoning_capture"] = annotation
+    complete_body = {"choices": [{"finish_reason": "stop", "message": {
+        "role": "assistant", "content": "result", "reasoning_content": "PRIVATE THOUGHT"}}]}
+    values["ledger_rows"][-1]["terminal_response"]["body_b64"] = base64.b64encode(
+        json.dumps(complete_body).encode()).decode()
+    example = assemble_example(**values)
+    call = example["provider_calls"][0]
+    assert call["request"]["outbound"]["body"]["model"] == annotation["model_id"]
+    assert call["response_sha256"] == contracts.document_hash(call["response"])
+    coverage = training_thinking.attempt_coverage(call, "miner")
+    assert coverage["returned"] == "unproved_text"
+    assert coverage["characters"] == len("PRIVATE THOUGHT")
 
 
 def test_empty_credential_fields_and_nul_do_not_create_false_export_gaps():
@@ -393,8 +472,11 @@ def test_exact_snapshot_hash_does_not_override_wrong_frozen_context():
 def test_unresolved_money_is_not_reported_as_confirmed_actual_cost():
     values = fixture()
     add_call(values, status="uncertain")
+    values["ledger_rows"][-1]["entry_doc"].update(
+        transport_elapsed_ms=41, timing_scope="initial_provider_transport_send")
     result = assemble_example(**values)
     assert result["provider_calls"][0]["actual_microusd"] is None
+    assert result["provider_calls"][0]["lifecycle"][-1]["accounting"]["transport_elapsed_ms"] == 41
     assert result["costs"]["confirmed_actual_microusd"] == 0
     assert result["completeness"]["dimensions"]["costs"] is False
 
@@ -711,7 +793,10 @@ def test_execution_hash_uses_canonical_parsed_document_not_transport_whitespace(
     values["objects"].put(OUTPUT_REF, json.dumps(document, indent=4).encode())
     result = assemble_example(**values)
     assert result["completeness"]["complete"]
-    assert result["output_identity"] == {"ref": OUTPUT_REF, "document_hash": digest, "recorded_hash_present": True}
+    assert result["output_identity"] == {
+        "ref": OUTPUT_REF, "document_hash": digest,
+        "normalized_document_hash": digest, "recorded_hash_present": True,
+    }
 
 
 @pytest.mark.parametrize("absent_hash", [None, ""])
@@ -852,6 +937,53 @@ def test_eligible_snapshot_is_distinct_from_actual_paid_cost():
     assert result["competition_cost_eligibility"]["eligible"] is True
     assert result["competition_cost_eligibility"]["competition_sourcing_microusd"] == 500_000
     assert result["judgment"]["per_icp_score"] == 12.75
+
+
+@pytest.mark.parametrize("excluded", [None, 405_351])
+def test_frozen_full_thinking_snapshot_uses_confirmed_cost_with_unsettled_call(excluded):
+    values = per_icp_cost_fixture()
+    config = values["round_row"]["configuration_doc"]
+    config.update(reasoning_capture_policy="full_generated_thinking_v1",
+                  training_minimum_icp_coverage_percent=80,
+                  sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+                  execution_icp_cap_microusd=6_000_000,
+                  cost_per_company_microusd=6_000_000)
+    if excluded is not None:
+        config["infrastructure_retry_cost_policy"] = "trusted_infrastructure_v1"
+
+    def reader(**identity):
+        observed = per_icp_cost_reader(
+            spend=500_000, reason="eligible", flat=True, excluded=excluded)(**identity)
+        snapshot = observed["eligibility"]
+        snapshot.update(execution_icp_cap_microusd=6_000_000,
+                        cost_per_company_cap_microusd=6_000_000,
+                        eligibility_cap_microusd=6_000_000)
+        snapshot["execution"].update(settled_microusd=500_000 + (excluded or 0),
+                                     success_unresolved_calls=1,
+                                     success_unresolved_microusd=700_000)
+        if excluded is not None:
+            snapshot["execution"].update(
+                competition_settled_microusd=500_000,
+                excluded_infrastructure_settled_microusd=excluded)
+        return observed
+
+    result = assemble_example(**values, cost_eligibility_reader=reader)
+    assert result["competition_cost_eligibility"]["status"] == "available"
+    assert result["competition_cost_eligibility"]["eligible"] is True
+    assert result["competition_cost_eligibility"]["competition_sourcing_microusd"] == 500_000
+    del config["training_minimum_icp_coverage_percent"]
+    assert assemble_example(**values, cost_eligibility_reader=reader)[
+        "competition_cost_eligibility"]["status"] == "unavailable"
+    if excluded is not None:
+        config["training_minimum_icp_coverage_percent"] = 80
+
+        def malformed(**identity):
+            observed = reader(**identity)
+            observed["eligibility"]["execution"]["excluded_infrastructure_settled_microusd"] -= 1
+            return observed
+
+        assert assemble_example(**values, cost_eligibility_reader=malformed)[
+            "competition_cost_eligibility"]["status"] == "unavailable"
 
 
 @pytest.mark.parametrize("flat", [False, True])
@@ -1100,3 +1232,46 @@ def test_evidence_reader_defines_every_service_helper_its_borrowed_methods_call(
     called = {name for method in borrowed
               for name in re.findall(r"self\.(_\w+)\(", inspect.getsource(getattr(ArenaService, method)))}
     assert sorted(name for name in called if not hasattr(reader, name)) == []
+
+
+def test_export_keeps_request_reasoning_policy_metadata_without_duplicating_text():
+    values = fixture()
+    add_call(values)
+    annotation = {"policy": "agent_readable_reasoning_v1", "treatment": "chat",
+                  "requested": True, "changes": ["summary"]}
+    values["ledger_rows"][0]["entry_doc"]["reasoning_capture"] = annotation
+    example = assemble_example(**values)
+    call = example["provider_calls"][0]
+    assert call["reasoning_capture"] == annotation
+    assert "readable_reasoning" not in call
+
+
+@pytest.mark.parametrize("location", ["terminal", "entry", "call"])
+def test_rollback_safe_observations_preserve_exported_metadata_without_false_upstream_gap(location):
+    values = fixture()
+    add_call(values, status="uncertain" if location != "terminal" else "settlement")
+    row = values["ledger_rows"][-1]
+    observations = {"transport_elapsed_ms": 41, "timing_scope": "initial_provider_transport_send"}
+    target = (row["terminal_response"] if location == "terminal" else row["entry_doc"]
+              if location == "entry" else row["entry_doc"].setdefault("call", {}))
+    br._retain_broker_observations(target, observations)
+    result = assemble_example(**values)
+    call = result["provider_calls"][0]
+    if location == "terminal":
+        metadata = call["response_receipts"][-1]["metadata"]
+    else:
+        metadata = call["lifecycle"][-1]["accounting"]
+        if location == "call":
+            metadata = metadata["call"]
+    assert all(metadata[key] == value for key, value in observations.items())
+    assert "upstream_response_receipts" not in call
+    assert "upstream_response_capture_unavailable" not in result["completeness"]["incomplete_reasons"]
+
+
+def test_rollback_safe_metadata_cannot_smuggle_response_authority_into_export():
+    values = fixture()
+    add_call(values)
+    values["ledger_rows"][-1]["terminal_response"]["upstream_response_receipt"] = {
+        "broker_observations": {"status": 200, "body_b64": "e30="}}
+    with pytest.raises(ExportError, match="broker_observation_invalid"):
+        assemble_example(**values)

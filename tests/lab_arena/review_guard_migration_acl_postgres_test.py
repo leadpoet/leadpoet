@@ -17,10 +17,14 @@ def database():
         with closing(psycopg2.connect(**dsn)) as connection:
             connection.autocommit = True
             with connection.cursor() as cursor:
-                cursor.execute("REVOKE CREATE ON SCHEMA public FROM lab_arena_owner")
-                cursor.execute("GRANT lab_arena_owner TO postgres")
-                cursor.execute("ALTER ROLE postgres NOSUPERUSER INHERIT CREATEDB CREATEROLE BYPASSRLS")
-                cursor.execute("SELECT rolsuper,pg_has_role('postgres','lab_arena_owner','MEMBER'),has_schema_privilege('lab_arena_owner','public','CREATE') FROM pg_roles WHERE rolname=current_user")
+                # PostgreSQL 18 forbids demoting its bootstrap superuser.
+                # Model the release role separately, as migration 567 does.
+                cursor.execute("CREATE ROLE review_guard574_migrator NOLOGIN NOSUPERUSER INHERIT")
+                cursor.execute("GRANT lab_arena_owner TO review_guard574_migrator")
+                cursor.execute("ALTER SCHEMA public OWNER TO review_guard574_migrator")
+                cursor.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC,lab_arena_owner")
+                cursor.execute("SET ROLE review_guard574_migrator")
+                cursor.execute("SELECT rolsuper,pg_has_role(current_user,'lab_arena_owner','MEMBER'),has_schema_privilege('lab_arena_owner','public','CREATE') FROM pg_roles WHERE rolname=current_user")
                 assert cursor.fetchone() == (False, True, False)
             yield psycopg2, connection
 

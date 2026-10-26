@@ -568,6 +568,15 @@ DEEPLINE_CONTACT_FINDER_IDENTITY_FIELDS: Mapping[str, tuple[str, ...]] = Mapping
 # Asks Deepline for the provider's raw response under result.data instead of a
 # normalized view; captured from the official client and verified live.
 DEEPLINE_EXECUTE_HEADERS: Mapping[str, str] = MappingProxyType({"x-deepline-execute-response-intent": "raw"})
+# The generic HTTP tool's native receipt carries target URL, status, headers,
+# and body only under rawV2. Intent alone returns a bare result.data string
+# with no target provenance. Keep other tools on their existing contracts,
+# including Exa clients that unwrap result.data. The same builder is used for
+# initial dispatch and a proved same-key recovery.
+DEEPLINE_GENERIC_HTTP_HEADERS: Mapping[str, str] = MappingProxyType({
+    "x-deepline-execute-response-contract": "raw-v2",
+    "x-deepline-tool-error-schema": "1",
+})
 # Exa attaches extracted ``entities`` (people with employers and education) to
 # search and contents results. Nothing in the judge reads them, so the broker
 # drops person entities before a model or the ledger sees them; the people
@@ -1348,6 +1357,9 @@ def operation_table_document() -> Dict[str, Any]:
         "payload_forbidden_field_names": sorted(PAYLOAD_FORBIDDEN_FIELD_NAMES),
         "host_account_statuses": sorted(HOST_ACCOUNT_STATUSES),
         "operations": [operation_document(OPERATIONS[key]) for key in sorted(OPERATIONS)],
+        "deepline_tool_outbound_headers": {
+            "generic_http_request": dict(DEEPLINE_GENERIC_HTTP_HEADERS),
+        },
     }
 
 
@@ -2400,7 +2412,10 @@ def build_outbound_request(
                 raise OperationRequestError("invalid_request") from exc
             if len(body) > operation.max_request_bytes:
                 raise OperationRequestError("request_too_large")
-        return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential, operation.outbound_headers)
+        headers = operation.outbound_headers
+        if operation_id == "deepline.execute" and normalized["tool"] == "generic_http_request":
+            headers = MappingProxyType({**headers, **DEEPLINE_GENERIC_HTTP_HEADERS})
+        return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential, headers)
     query: Dict[str, str] = {name: _query_value(value) for name, value in normalized.items()}
     for name, value in operation.fixed_params.items():
         query[name] = _query_value(value)

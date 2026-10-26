@@ -178,7 +178,11 @@ def test_deepline_path_field_is_closed_and_rendered_into_the_outbound_path():
         outbound = ops.build_outbound_request("deepline.execute", {"tool": tool, "payload": payload})
         assert outbound.url == "https://code.deepline.com/api/v2/integrations/%s/execute" % tool
         assert json.loads(outbound.body) == {"provider": ops.DEEPLINE_TOOL_PROVIDERS[tool], "operation": tool, "payload": payload}  # the path field names the tool, never a body key
-        assert dict(outbound.headers) == {"x-deepline-execute-response-intent": "raw"}
+        expected_headers = {"x-deepline-execute-response-intent": "raw"}
+        if tool == "generic_http_request":
+            expected_headers.update({"x-deepline-execute-response-contract": "raw-v2",
+                                     "x-deepline-tool-error-schema": "1"})
+        assert dict(outbound.headers) == expected_headers
     reject("deepline.execute", {"tool": "exa_search/../admin", "payload": {}}, "invalid_field")
     reject("deepline.execute", {"tool": "unknown_tool", "payload": {}}, "invalid_field")
     reject("deepline.execute", {"payload": {"query": "x"}}, "missing_field")

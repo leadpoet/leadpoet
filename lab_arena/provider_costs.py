@@ -543,7 +543,9 @@ def deepline_free_completed_cost(
     callers must not replace invalid provider accounting with this fixed zero.
     Only Hunter's authenticated per-call ``no_bill`` contract also proves a
     structured HTTP error costs zero.  Other tools still require a valid
-    completed response or exact provider billing.
+    completed response or exact provider billing. Generic HTTP's native
+    rawV2 receipt is the same completed tool result under its newer contract;
+    it does not change which tools or frozen prices qualify as free.
     """
 
     tool = parameters.get("tool")
@@ -583,7 +585,17 @@ def deepline_free_completed_cost(
         or not isinstance(response_json.get("job_id"), str)
         or not response_json["job_id"].strip()
         or len(response_json["job_id"]) > _DEEPLINE_MAX_REQUEST_ID_LENGTH
-        or not isinstance(response_json.get("result"), (Mapping, list))
+        or not (
+            isinstance(response_json.get("result"), (Mapping, list))
+            or (
+                tool == "generic_http_request"
+                and isinstance(response_json.get("toolResponse"), Mapping)
+                and response_json["toolResponse"].get("view") == "rawV2"
+                and isinstance(response_json["toolResponse"].get("rawV2"), Mapping)
+                and response_json["toolResponse"]["rawV2"].get("provider") == "generic_http"
+                and response_json["toolResponse"]["rawV2"].get("operation") == tool
+            )
+        )
     ):
         return None
     return ProviderCost(

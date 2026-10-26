@@ -5,13 +5,17 @@
 PR #732 is merged and deployed. Full-thinking activation remains off. Later
 entries below retain their original dates and do not represent current status.
 
-Two narrow follow-ups address failures found in real TYCHE tests. PR #783 keeps
+Three narrow follow-ups address real TYCHE failures and final review findings.
+They are merged; final installation is waiting for active runs to drain.
+PR #783 keeps
 verified provider output failures within the existing 80% ICP coverage rule.
 It does not accept malformed outputs as training targets or relax provenance,
 privacy or cost checks. PR #784 translates a completed native hosted-search
 history event to OpenRouter's required type at the provider boundary. The
 original miner request remains stored unchanged; no miner code changes are
-required. Neither change requires a database migration.
+required. PR #786 restores policy-off Codex stream bytes and requires an inferred
+cap cut to be the final generated argument. These changes need no migration,
+new miner settings, receipts or logging.
 
 The exact original TYCHE request returned HTTP 400. A controlled comparison
 changed only the search event type and returned HTTP 200. The corrected broker
@@ -42,6 +46,13 @@ records remain valid, but resubmitting an affected old request after upgrading
 changes its canonical identity. Production has zero configured full-thinking
 rounds. This fix must be installed before activation, not during an old
 full-policy run.
+
+Final review of #786 independently compared policy-off SSE with the pre-PR
+encoder and ran pinned Codex 0.154 in both policy modes. Compound tests preserve
+strict rejection of altered evidence and nonfinal malformed arguments. On the
+latest-main integration, 645 checks passed with one Linux-only skip, 153 further
+capture/failure checks passed, and the 829-check release gate passed. The Linux
+sandbox and installed-source checks are recorded after deployment below.
 
 Current-task OpenRouter accounting is $0.8872432620 confirmed and $6.989051
 reserved for uncertain attempts, within $10. The two later TYCHE runs used

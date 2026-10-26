@@ -3,7 +3,7 @@
 PR #732 is merged and its capture changes are deployed. The policy remains off
 and existing rounds keep their frozen settings. The policy name is
 `full_generated_thinking_v1`. See the [verification record](arena-full-thinking-verification.md)
-for deployed follow-ups, test evidence and remaining limits.
+for follow-ups, test evidence and remaining limits.
 
 ## Admission rule
 
@@ -176,8 +176,9 @@ user has accepted this tradeoff.
   Codex helper retains its Fireworks default. The existing
   broker uses completed upstream responses; this PR does not add arbitrary
   upstream streaming support. Existing buffered Codex SSE behavior is preserved.
-  Hosted web search is supported on these approved Responses routes. Raw
-  search events, citations and interleaved messages retain their provider order.
+  The broker admits hosted web search on approved Responses routes. Live hosted
+  continuation and capture were verified on Fireworks and Together. Raw search
+  events, citations and interleaved messages retain their provider order.
   Internal search content the provider does not expose is not reconstructed.
   The native test uses TYCHE's exact Codex 0.154.0 version, with the limits listed
   in the verification report. It does not prove a scored or published TYCHE workflow.

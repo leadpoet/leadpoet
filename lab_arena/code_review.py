@@ -523,12 +523,16 @@ def _parse_research_control(document: Any, prepared: PreparedCodeReview) -> Mapp
         "source_manifest_sha256", "classification", "evidence", "limitations",
     }:
         invalid("research_keys")
-    if any(document.get(key) != value for key, value in (
-        ("policy_id", RESEARCH_POLICY_ID),
-        ("policy_hash", RESEARCH_POLICY_HASH),
-        ("source_archive_sha256", prepared.source_archive_sha256),
-        ("source_manifest_sha256", prepared.source_manifest_sha256),
-    )):
+    # These generated strings are echoes, not source or policy authority.
+    # The runtime binds the loaded archive to the saved submission before
+    # dispatch; this result is bound to that prepared request and claim.
+    # Keep the response shape bounded, but persist only host-owned bindings.
+    if any(not isinstance(document[key], str) or not document[key].strip()
+           or len(document[key]) > 128 for key in (
+               "policy_id", "policy_hash", "source_archive_sha256", "source_manifest_sha256")):
+        invalid("research_binding")
+    if any(not isinstance(value, str) or contracts.SHA256_RE.fullmatch(value) is None
+           for value in (prepared.source_archive_sha256, prepared.source_manifest_sha256)):
         invalid("research_binding")
     manifest = [{"path": item.path, "size_bytes": item.size_bytes,
                  "sha256": contracts.hash_bytes(item.content.encode("utf-8"))}

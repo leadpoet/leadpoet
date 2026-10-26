@@ -88,6 +88,7 @@ def test_404_allowance_keeps_other_errors_and_tamper_hard(damage):
     call = example['provider_calls'][0]
     if damage == 'old404':
         call['response']['error']['message'] = 'No endpoints found for the model'
+        call['response']['error'].pop('metadata')
         refresh_response_links(example, 0)
     elif damage == 'wrong_model':
         call['request']['outbound']['body']['model'] = 'openai/not-reviewed'
@@ -126,3 +127,62 @@ def test_404_allowance_keeps_other_errors_and_tamper_hard(damage):
 def test_generic_404_is_not_a_verified_retryable_failure():
     example = _failed_example(404)
     assert training_thinking.verified_failed_attempt(example, example['provider_calls'][0]) is False
+
+
+@pytest.mark.parametrize('worker_error', [False, True])
+def test_parameter_routing_failure_preserves_other_targets_without_client_receipt(worker_error):
+    from tests.lab_arena.training_host_result_test import without_client_callbacks
+    from lab_arena import training_steps
+    example = _failed_example(404, worker_error=worker_error)
+    call = example['provider_calls'][0]
+    route = call['reasoning_capture']
+    body = call['request']['outbound']['body']
+    endpoint = {'model': route['model_version'], 'provider': route['provider_name'], 'selected': False}
+    response = {
+        'error': {'code': 404, 'message': 'No matching endpoints support the requested parameters.',
+                  'metadata': {'failed_routing_step': 'Filter by Parameters',
+                               'routing_funnel': [{'step': 'Initial Endpoints', 'endpoint_count': 2},
+                                                 {'step': 'Filter by Allowed Providers', 'endpoint_count': 2}]}},
+        'openrouter_metadata': {'requested': route['model_id'], 'strategy': 'direct',
+                                'endpoints': {'available': [deepcopy(endpoint), deepcopy(endpoint)]}}}
+    assert body['provider']['only'] == [route['provider_route']]
+    call['response'] = response
+    if worker_error:
+        wire = contracts.canonical_json(response).encode()
+        payload = example['worker_observation_artifacts']['run']['payload']
+        payload['observations'][0]['outcome']['response']['body_b64'] = base64.b64encode(wire).decode()
+        for row in payload['response_receipts'] + payload['agent_observations']:
+            item = row.get('data', row)
+            if item.get('call_identity') == call['call_identity']:
+                item.update(body_sha256=contracts.hash_bytes(wire), body_bytes=len(wire))
+        call['response_sha256'] = contracts.document_hash(response)
+    else:
+        refresh_response_links(example, 0)
+    example = without_client_callbacks(example)
+    call = example['provider_calls'][0]
+    assert training_thinking.verified_failed_attempt(example, call)
+    result = training_eligibility.assess_capture(submission(), {'run': example}, ['run'], enabled=True)
+    assert result['eligible'], result
+    splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    records = splits['train'] + splits['eval']
+    assert len(records) == 2
+    assert all(record['source_refs'][0]['call_identity'] != call['call_identity'] for record in records)
+    assert call['response'] == response
+
+
+@pytest.mark.parametrize('damage', ['selected', 'selection_unknown', 'missing_funnel', 'missing_failed_step',
+                                   'count_mismatch', 'wrong_model', 'wrong_provider', 'fallbacks'])
+def test_routing_failure_requires_structural_no_selection_proof(damage):
+    probe = deepcopy(saved('120b')['example'])
+    call = probe['provider_calls'][0]
+    response = call['response']
+    body = deepcopy(call['request']['outbound']['body'])
+    if damage == 'selected': response['openrouter_metadata']['endpoints']['available'][0]['selected'] = True
+    elif damage == 'selection_unknown': response['openrouter_metadata']['endpoints']['available'][0].pop('selected')
+    elif damage == 'missing_funnel': response['error']['metadata'].pop('routing_funnel')
+    elif damage == 'missing_failed_step': response['error']['metadata'].pop('failed_routing_step')
+    elif damage == 'count_mismatch': response['error']['metadata']['routing_funnel'][-1]['endpoint_count'] = 2
+    elif damage == 'wrong_model': response['openrouter_metadata']['requested'] = 'wrong'
+    elif damage == 'wrong_provider': body['provider']['only'] = ['wrong']
+    else: body['provider']['allow_fallbacks'] = True
+    assert not training_thinking._ignored_provider_failure(response, body, call['reasoning_capture'])

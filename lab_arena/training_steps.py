@@ -240,7 +240,14 @@ def _response_tool_definitions(body):
     return declared
 
 
-def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False):
+def _empty_target_message(item):
+    """Recognize empty scaffolding only after the ordinary item validation."""
+    return item['type'] == 'message' and all(not part['text'].strip()
+        and not part.get('annotations') and not part.get('logprobs') for part in item['content'])
+
+
+def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False,
+            allow_empty_messages=False):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
@@ -314,7 +321,7 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
         elif kind == 'message':
             _require(set(item) <= {'id', 'type', 'status', 'role', 'content', 'phase'}
                      and item.get('role') == 'assistant' and item.get('status') == 'completed'
-                     and isinstance(item.get('content'), list) and item['content'], 'assistant_shape_unsupported')
+                     and isinstance(item.get('content'), list) and (item['content'] or allow_empty_messages), 'assistant_shape_unsupported')
             _require(item.get('phase') in (None, 'commentary', 'final_answer'), 'assistant_shape_unsupported')
             _require(all(isinstance(part, dict) and set(part) <= {'type', 'text', 'annotations', 'logprobs'}
                          and part.get('type') == 'output_text' and isinstance(part.get('text'), str)
@@ -353,7 +360,8 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
         else:
             raise ValueError('response_shape_unsupported')
     call_kinds = {'function_call', 'custom_tool_call'}
-    messages = [item for item in target if item['type'] == 'message']
+    messages = [item for item in target if item['type'] == 'message'
+                and (not allow_empty_messages or not _empty_target_message(item))]
     calls = [item for item in target if item['type'] in call_kinds]
     # A completed turn may state its next action and issue local tool calls.
     # Preserve their wire order. Hosted output is a provider-executed

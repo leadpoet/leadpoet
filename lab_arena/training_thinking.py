@@ -384,7 +384,12 @@ def attempt_coverage(call: Mapping[str, Any], role: str, registry: Any = None) -
 
 
 def _ignored_provider_failure(response, request_body, annotation) -> bool:
-    """Prove the observed account-policy routing failure, not arbitrary 404s."""
+    """Prove a bound routing failure before selection, not arbitrary 404s.
+
+    The surrounding failure check proves the saved request and response.
+    Routing metadata proves no endpoint was selected; it does not prove a
+    zero bill. Error wording and endpoint multiplicity are not authority.
+    """
     error = response.get("error") or {}
     metadata = error.get("metadata") or {}
     routing = response.get("openrouter_metadata") or {}
@@ -392,9 +397,8 @@ def _ignored_provider_failure(response, request_body, annotation) -> bool:
     funnel = metadata.get("routing_funnel")
     endpoints = (routing.get("endpoints") or {}).get("available")
     if (type(error.get("code")) is not int or error["code"] != 404
-            or not isinstance(error.get("message"), str)
-            or not error["message"].startswith("All providers have been ignored.")
-            or metadata.get("failed_routing_step") != "Filter by Ignored Providers"
+            or not isinstance(metadata.get("failed_routing_step"), str)
+            or not metadata["failed_routing_step"].strip()
             or provider.get("only") != [annotation.get("provider_route")]
             or provider.get("allow_fallbacks") is not False
             or routing.get("requested") != annotation.get("model_id")
@@ -408,9 +412,10 @@ def _ignored_provider_failure(response, request_body, annotation) -> bool:
     target = [row for row in endpoints if row.get("model") == annotation.get("model_version")
               and row.get("provider") == annotation.get("provider_name")]
     return (len(allowed) == 1 and funnel[-1] == allowed[0]
-            and type(allowed[0].get("endpoint_count")) is int and allowed[0]["endpoint_count"] == 1
-            and allowed[0].get("reason") == "not in your request's provider.only preference"
-            and len(target) == 1)
+            and type(allowed[0].get("endpoint_count")) is int
+            and allowed[0]["endpoint_count"] == len(target) > 0
+            and metadata["failed_routing_step"] not in {row.get("step") for row in funnel
+                                                       if isinstance(row, Mapping)})
 
 
 def _bound_admission_refusal(example, call) -> bool:
@@ -849,15 +854,27 @@ def verified_cap_truncated_target(example, call) -> bool:
         # never returns a training candidate or inserts missing JSON syntax.
         target, _ = training_steps._target(body, response, operation,
             allow_reasoning_history=True, argument_validator=argument_shape,
-            allow_tool_error_history=True)
+            allow_tool_error_history=True, allow_empty_messages=True)
         training_steps._validate_target_tools(body, target, operation)
-        # A cap cut can end only the final generated argument. Later retained
-        # output disproves that inference, even if it is otherwise well formed.
+        # A cut must be the final generated action. Reasoning and empty
+        # response frames may follow in provider output without proving that
+        # another action was completed. All frames were validated above.
         if len(unfinished) != 1:
             return False
         if operation == "openrouter.chat":
-            return target["tool_calls"][-1]["function"]["arguments"] == unfinished[0]
-        final = response["output"][-1]
+            calls = target['tool_calls']
+            if any('index' in item for item in calls):
+                indexes = [item.get('index') for item in calls]
+                if (any(type(index) is not int for index in indexes)
+                        or len(set(indexes)) != len(indexes)):
+                    return False
+                final = max(calls, key=lambda item: item['index'])
+            else:
+                final = calls[-1]
+            return final['function']['arguments'] == unfinished[0]
+        actions = [item for item in response['output'] if item['type'] != 'reasoning'
+                   and not training_steps._empty_target_message(item)]
+        final = actions[-1]
         return final.get("type") == "function_call" and final.get("arguments") == unfinished[0]
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return False
@@ -1639,6 +1656,9 @@ def build(examples, rules: training_steps.Rules | None = None):
     output = {"train": [], "eval": [], "analysis": []}
     records_by_split: dict[str, dict[str, dict]] = {"train": {}, "eval": {}}
     reasons = Counter()
+    # Reuse only within this build and only after each source's delivery proof.
+    trajectory_reasons: dict[str, str | None] = {}
+    diagnostic_gaps_by_source: dict[str, frozenset[str]] = {}
     for split in ("train", "eval"):
         for candidate in splits[split]:
             for ref in candidate["source_refs"]:
@@ -1661,60 +1681,12 @@ def build(examples, rules: training_steps.Rules | None = None):
                 delivered_call = dict(call, response=delivered,
                                       response_sha256=ref["delivered_response_sha256"])
                 registry = (example.get("configuration") or {}).get("reasoning_route_registry")
-                trajectory_valid = True
-                new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
-                try:
-                    maximum_missing = training_coverage.missing_reasoning_percent_from_configuration(
-                        example.get("configuration") or {})
-                except (TypeError, ValueError, AttributeError):
-                    reasons["frozen_reasoning_policy_invalid"] += 1
-                    continue
-                total_reasoning_tokens = missing_reasoning_tokens = 0
-                for row in example.get("provider_calls") or []:
-                    if not _execution_model_call(example, row):
-                        continue
-                    if new_policy and verified_failed_attempt(example, row):
-                        continue
-                    try:
-                        linked = training_steps._candidate(example, row)["source_refs"][0]
-                        response = _delivered_response(row, linked["delivered_response_sha256"])
-                    except (ValueError, TypeError, KeyError, AttributeError) as exc:
-                        if new_policy and verified_cap_truncated_target(example, row):
-                            continue
-                        # _candidate reaches this finish check only after exact
-                        # request, agent read, response hash and privacy proof.
-                        # Keep other independently reconstructable targets.
-                        if (new_policy and isinstance(exc, ValueError)
-                                and str(exc) == "response_not_complete"):
-                            try:
-                                state = attempt_coverage(row, _role(example, row), registry)
-                            except (ValueError, TypeError, KeyError, AttributeError):
-                                trajectory_valid = False
-                                break
-                            if (state["returned"] == "truncated" and state["route_reviewed"]
-                                    and state["provider_route_verified"]):
-                                continue
-                        trajectory_valid = False
-                        break
-                    checked = dict(row, response=response,
-                                   response_sha256=linked["delivered_response_sha256"])
-                    full, state = full_text_segments(checked, _role(example, row), registry)
-                    if (state["route_reviewed"] and state["provider_route_verified"]
-                            and state["tokens_reported"] is not None):
-                        total_reasoning_tokens += state["tokens_reported"]
-                        if not full and verified_missing_thinking(state):
-                            missing_reasoning_tokens += state["tokens_reported"]
-                    if (not full and not (verified_no_thinking(row, response, state) if new_policy
-                                          else verified_tool_only_empty(row, response, state))
-                            and not (new_policy and verified_missing_thinking(state))):
-                        trajectory_valid = False
-                        break
-                if (new_policy
-                        and missing_reasoning_tokens * 100 > total_reasoning_tokens * maximum_missing):
-                    reasons["missing_reasoning_share_exceeded"] += 1
-                    continue
-                if not trajectory_valid:
-                    reasons["trajectory_reasoning_ineligible"] += 1
+                source = ref["example_hash"]
+                if source not in trajectory_reasons:
+                    trajectory_reasons[source] = _trajectory_reason(example)
+                reason = trajectory_reasons[source]
+                if reason is not None:
+                    reasons[reason] += 1
                     continue
                 segments, status = full_text_segments(delivered_call, _role(example, call), registry)
                 if not segments:
@@ -1725,7 +1697,9 @@ def build(examples, rules: training_steps.Rules | None = None):
                 except ValueError as exc:
                     reasons[str(exc)] += 1
                     continue
-                diagnostic_gaps = provider_visible_view(example)[1]
+                if source not in diagnostic_gaps_by_source:
+                    diagnostic_gaps_by_source[source] = provider_visible_view(example)[1]
+                diagnostic_gaps = diagnostic_gaps_by_source[source]
                 record = {"schema_version": RECORD_SCHEMA_VERSION, "format": candidate["format"],
                           "input": copy.deepcopy(candidate["input"]), "prior_observations": prior,
                           "generated_thinking": segments, "target": copy.deepcopy(candidate["target"]),
@@ -1761,3 +1735,61 @@ def build(examples, rules: training_steps.Rules | None = None):
                 "coverage": coverage(examples)}
     manifest["dataset_version"] = contracts.document_hash(manifest)
     return output, manifest
+
+
+def _trajectory_reason(example: Mapping[str, Any]) -> str | None:
+    """Validate the unchanged execution trajectory without candidate state."""
+    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    trajectory_valid = True
+    new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
+    try:
+        maximum_missing = training_coverage.missing_reasoning_percent_from_configuration(
+            example.get("configuration") or {})
+    except (TypeError, ValueError, AttributeError):
+        return "frozen_reasoning_policy_invalid"
+    total_reasoning_tokens = missing_reasoning_tokens = 0
+    for row in example.get("provider_calls") or []:
+        if not _execution_model_call(example, row):
+            continue
+        if new_policy and verified_failed_attempt(example, row):
+            continue
+        try:
+            linked = training_steps._candidate(example, row)["source_refs"][0]
+            response = _delivered_response(row, linked["delivered_response_sha256"])
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            if new_policy and verified_cap_truncated_target(example, row):
+                continue
+            # _candidate reaches this finish check only after exact
+            # request, agent read, response hash and privacy proof.
+            # Keep other independently reconstructable targets.
+            if (new_policy and isinstance(exc, ValueError)
+                    and str(exc) == "response_not_complete"):
+                try:
+                    state = attempt_coverage(row, _role(example, row), registry)
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    trajectory_valid = False
+                    break
+                if (state["returned"] == "truncated" and state["route_reviewed"]
+                        and state["provider_route_verified"]):
+                    continue
+            trajectory_valid = False
+            break
+        checked = dict(row, response=response,
+                       response_sha256=linked["delivered_response_sha256"])
+        full, state = full_text_segments(checked, _role(example, row), registry)
+        if (state["route_reviewed"] and state["provider_route_verified"]
+                and state["tokens_reported"] is not None):
+            total_reasoning_tokens += state["tokens_reported"]
+            if not full and verified_missing_thinking(state):
+                missing_reasoning_tokens += state["tokens_reported"]
+        if (not full and not (verified_no_thinking(row, response, state) if new_policy
+                              else verified_tool_only_empty(row, response, state))
+                and not (new_policy and verified_missing_thinking(state))):
+            trajectory_valid = False
+            break
+    if (new_policy
+            and missing_reasoning_tokens * 100 > total_reasoning_tokens * maximum_missing):
+        return "missing_reasoning_share_exceeded"
+    if not trajectory_valid:
+        return "trajectory_reasoning_ineligible"
+    return None

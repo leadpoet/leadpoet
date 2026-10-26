@@ -563,6 +563,53 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
         return False
 
 
+def _terminal_accounting_matches(call, kind, amount) -> bool:
+    """Check the terminal ledger projection for the two coverage exceptions."""
+    lifecycle = call.get("lifecycle")
+    if not isinstance(lifecycle, list) or not all(isinstance(row, Mapping) for row in lifecycle):
+        return False
+    terminal_id = call.get("terminal_entry_id")
+    terminals = [row for row in lifecycle if row.get("entry_id") == terminal_id
+                 or row.get("entry_kind") in {"settlement", "uncertain", "refusal"}]
+    return (type(terminal_id) is int and terminal_id > 0 and len(terminals) == 1
+            and type(terminals[0].get("entry_id")) is int and terminals[0]["entry_id"] == terminal_id
+            and terminals[0].get("entry_kind") == kind
+            and type(terminals[0].get("amount_microusd")) is int
+            and terminals[0]["amount_microusd"] == amount)
+
+
+def _verified_unavailable_upstream_failure(example, call) -> bool:
+    """Prove the observed no-upstream-response bridge error, not a free call."""
+    configuration = example.get("configuration") or {}
+    if (training_coverage.MISSING_REASONING_SETTING not in configuration
+            or not training_coverage.uses_host_result_evidence(configuration)
+            or call.get("accounting_state") != "uncertain"
+            or "actual_microusd" not in call
+            or call.get("actual_microusd") is not None
+            or not _terminal_accounting_matches(call, "uncertain", 0)
+            or type(call.get("terminal_entry_id")) is not int or call["terminal_entry_id"] < 1
+            or any(key in call for key in ("response", "response_sha256", "response_status"))
+            or any(key in call and (not isinstance(call[key], list) or call[key])
+                   for key in ("upstream_response_receipts", "response_privacy_redactions"))):
+        return False
+    receipts = call.get("response_receipts")
+    if not isinstance(receipts, list) or len(receipts) != 1:
+        return False
+    receipt = receipts[0]
+    if (not isinstance(receipt, Mapping)
+            or not set(receipt) <= {"created_at", "entry_id", "entry_kind", "metadata", "response_unavailable"}
+            or type(receipt.get("entry_id")) is not int or receipt["entry_id"] != call["terminal_entry_id"]
+            or receipt.get("entry_kind") != "uncertain" or receipt.get("metadata") != {}
+            or receipt.get("response_unavailable") is not True):
+        return False
+    try:
+        evidence = training_steps._host_result(example, call, allow_worker_error=True)
+        return (evidence["write"]["status"] == 502 and not evidence["receipts"]
+                and evidence["response"] == {"error": {"code": "provider_unavailable"}})
+    except (KeyError, TypeError, ValueError, AttributeError, binascii.Error):
+        return False
+
+
 def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
     """Prove a delivered retryable error without making it a model target.
 
@@ -606,7 +653,11 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
                 or outbound.get("path") != ("/api/v1/responses" if operation.endswith("responses")
                                               else "/api/v1/chat/completions")
                 or (request.get("effective_parameters") or {}).get("model") != body.get("model")
-                or not set(call.get("evidence_gaps") or []) <= {"provider_cost_unresolved"}
+                or not set(call.get("evidence_gaps") or []) <= (
+                    {"provider_cost_unresolved", "full_response_unavailable"}
+                    if "full_response_unavailable" in (call.get("evidence_gaps") or [])
+                    and _verified_unavailable_upstream_failure(example, call)
+                    else {"provider_cost_unresolved"})
                 or set((example.get("completeness") or {}).get("incomplete_reasons") or []) & {
                     "worker_response_receipt_link_invalid", "agent_response_receipt_link_invalid",
                     "agent_dependency_link_invalid", "runtime_input_context_mismatch"}):
@@ -1255,7 +1306,7 @@ def _selected_input_output_binding(
     return score_ids
 
 
-def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -> frozenset[str] | None:
+def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *, target_omission_proof=None) -> frozenset[str] | None:
     """Use per-run export attribution only when the selected execution is exact."""
     proof = example.get("completeness") or {}
     dimensions = proof.get("dimensions") or {}
@@ -1381,7 +1432,11 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -
                 return None
         if model:
             try:
-                training_steps._candidate(example, call)
+                try:
+                    training_steps._candidate(example, call)
+                except ValueError:
+                    if target_omission_proof is None or not target_omission_proof(example, call):
+                        return None
                 state = attempt_coverage(call, _role(example, call), registry)
             except (ValueError, KeyError, TypeError, AttributeError):
                 return None
@@ -1390,7 +1445,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str]) -
     return frozenset(reasons)
 
 
-def _selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | None:
+def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_proof=None) -> frozenset[str] | None:
     """Return attributable judge-only gaps, or reject an inexact selected replay.
 
     Raw export completeness remains an all-related-runs audit. A score worker's
@@ -1425,7 +1480,7 @@ def _selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | 
         return frozenset()
     allowed = {"request_privacy_nonexact", "response_privacy_nonexact", "provider_cost_unresolved"}
     if reasons and not reasons <= allowed:
-        return _attributed_score_only_gaps(example, reasons)
+        return _attributed_score_only_gaps(example, reasons, target_omission_proof=target_omission_proof)
     if not reasons:
         return None
     dimensions = proof.get("dimensions") or {}
@@ -1553,11 +1608,13 @@ def provider_visible_view(example):
         return example, frozenset()  # Invalid diagnostics never grant an exception.
 
 
-def selected_research_evidence(example: Mapping[str, Any]) -> frozenset[str] | None:
+def selected_research_evidence(example: Mapping[str, Any], *, target_omission_proof=None) -> frozenset[str] | None:
+    # Eligibility may prove a generation unusable without treating its exact
+    # capture as corruption. Exporters keep the strict default target check.
     view, diagnostic_gaps = provider_visible_view(example)
     if diagnostic_gaps and _selected_input_output_binding(view) is None:
         return None
-    result = _selected_research_evidence(view)
+    result = _selected_research_evidence(view, target_omission_proof=target_omission_proof)
     return None if result is None else result | diagnostic_gaps
 
 

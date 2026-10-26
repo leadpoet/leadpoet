@@ -94,24 +94,86 @@ def _all_model_routes_verified(example, run_id):
         return False
 
 
+def _verified_provider_output_fault(example, call):
+    """Prove an unusable generated action without admitting a training target.
+
+    Only the two observed output faults qualify. Reaching these target errors
+    must still prove the exact request, input history and host-written response.
+    Actual provider routing and settled cost are independent requirements.
+    """
+    configuration = example.get("configuration") or {}
+    if (training_coverage.MISSING_REASONING_SETTING not in configuration
+            or not training_coverage.uses_host_result_evidence(configuration)
+            or call.get("accounting_state") != "settlement"
+            or type(call.get("actual_microusd")) is not int
+            or call["actual_microusd"] < 0 or call.get("evidence_gaps")
+            or not training_thinking._terminal_accounting_matches(call, "settlement", call["actual_microusd"])):
+        return False
+    try:
+        # Reject ordinary outputs before hashing a potentially large artifact.
+        # This filter grants nothing; the complete candidate proof follows.
+        response = call.get("response") or {}
+        op = call.get("operation_id")
+        target = (response.get("output") if op == "openrouter.responses"
+                  else response["choices"][0]["message"])
+        reasoning_only = (op == "openrouter.responses" and isinstance(target, list) and bool(target)
+                          and all(isinstance(item, Mapping) and item.get("type") == "reasoning"
+                                  for item in target))
+        if not reasoning_only:
+            try:
+                training_steps._validate_target_tools(
+                    call["request"]["outbound"]["body"], target, op)
+            except ValueError as exc:
+                if str(exc) != "undeclared_tool_call":
+                    return False
+            else:
+                return False
+        evidence = training_steps._host_result(example, call)
+        if (evidence["write"]["status"] != 200
+                or not isinstance(call.get("response"), Mapping)
+                or contracts.document_hash(call["response"]) != call.get("response_sha256")
+                or call["response"] != evidence["response"]
+                or not set(call.get("response_privacy_redactions") or []) <= {"hidden_reasoning"}):
+            return False
+        state = training_thinking.attempt_coverage(
+            call, example.get("role", "miner"), configuration.get("reasoning_route_registry"))
+        if not state["route_reviewed"] or not state["provider_route_verified"]:
+            return False
+        try:
+            training_steps._candidate(example, call)
+        except ValueError as exc:
+            if str(exc) == "undeclared_tool_call":
+                return True
+            if str(exc) == "response_choice_ambiguous" and call.get("operation_id") == "openrouter.responses":
+                output = evidence["response"].get("output")
+                return (isinstance(output, list) and bool(output)
+                        and all(isinstance(item, Mapping) and item.get("type") == "reasoning"
+                                for item in output))
+        return False
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def _only_benign_thinking_gaps(example, run_id, *, new_policy=False):
     """Verified omissions and length stops share one incomplete ICP budget."""
     calls = [call for call in example.get("provider_calls") or []
              if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
     registry = (example.get("configuration") or {}).get("reasoning_route_registry")
     try:
+        output_fault = new_policy and any(_verified_provider_output_fault(example, call) for call in calls)
         checked = [training_thinking.full_text_segments(call, example.get("role", "miner"), registry)
                    for call in calls if not (new_policy and (
                        training_thinking.verified_failed_attempt(example, call)
-                       or training_thinking.verified_cap_truncated_target(example, call)))]
+                       or training_thinking.verified_cap_truncated_target(example, call)
+                       or _verified_provider_output_fault(example, call)))]
         # An execution with only verified failed calls has no training target.
         # It consumes an incomplete ICP, while every failed receipt stays proven.
         if not checked:
             return bool(calls)
         # Coverage labels preserve ancillary summaries and removed opaque state.
         # Admission uses the proven segments instead of those display labels.
-        return any(state["returned"] in {"requested_empty", "truncated", "missing_thinking", "summary", "opaque"}
-                                     and not full for full, state in checked) and all(
+        return (output_fault or any(state["returned"] in {"requested_empty", "truncated", "missing_thinking", "summary", "opaque"}
+                                     and not full for full, state in checked)) and all(
             state["route_reviewed"] and state["provider_route_verified"]
             and (full or state["returned"] in {"requested_empty", "truncated", "missing_thinking"}
                  or new_policy and training_thinking.verified_missing_thinking(state))
@@ -148,6 +210,15 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
                                  == "unavailable")
     call_allowed = {"provider_cost_unresolved", "response_privacy_nonexact"}
     allowed = set(call_allowed)
+    if new_policy and "full_response_unavailable" in reasons:
+        unavailable = [call for call in example.get("provider_calls") or []
+                       if call.get("run_id") == run_id
+                       and "full_response_unavailable" in (call.get("evidence_gaps") or [])]
+        if not unavailable or not all(
+                training_thinking._verified_unavailable_upstream_failure(example, call)
+                and training_thinking.verified_failed_attempt(example, call) for call in unavailable):
+            return False
+        allowed.add("full_response_unavailable")
     if cost_snapshot_unavailable:
         allowed.add("competition_cost_eligibility_unavailable")
     if "provider_cost_unresolved" not in reasons or not reasons <= allowed:
@@ -187,7 +258,10 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
     try:
         for call in selected:
             gaps = set(call.get("evidence_gaps") or [])
-            if not gaps <= call_allowed:
+            permitted = call_allowed | ({"full_response_unavailable"} if (
+                new_policy and training_thinking._verified_unavailable_upstream_failure(example, call)
+                and training_thinking.verified_failed_attempt(example, call)) else set())
+            if not gaps <= permitted:
                 return False
             if "response_privacy_nonexact" not in reasons and (
                 "credential" in (call.get("response_privacy_redactions") or [])
@@ -229,7 +303,7 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
                             (example.get("configuration") or {}).get("reasoning_route_registry"))
                         truncated = (state["returned"] == "truncated"
                                      and state["route_reviewed"] and state["provider_route_verified"])
-                    if not privacy_gap and not truncated:
+                    if not privacy_gap and not truncated and not _verified_provider_output_fault(example, call):
                         return False
             request = call.get("request") or {}
             provenance = call.get("response_provenance") or {}
@@ -352,7 +426,7 @@ def _selected_privacy_cascade_verified(example, run_id):
                 try:
                     training_steps._candidate(example, call)
                 except ValueError as exc:
-                    if str(exc) not in gaps:
+                    if str(exc) not in gaps and not _verified_provider_output_fault(example, call):
                         return False
             request = call.get("request") or {}
             response = call.get("response")
@@ -516,8 +590,9 @@ def _transient_artifact_gap_verified(example, submission, artifacts):
                     training_steps._candidate(example, call)
                 except ValueError as exc:
                     state = training_thinking.attempt_coverage(call, example.get("role", "miner"), registry)
-                    if (str(exc) != "response_not_complete" or state["returned"] != "truncated"
-                            or not state["route_reviewed"] or not state["provider_route_verified"]):
+                    if (not _verified_provider_output_fault(example, call)
+                            and (str(exc) != "response_not_complete" or state["returned"] != "truncated"
+                                 or not state["route_reviewed"] or not state["provider_route_verified"])):
                         return False
             else:
                 # The exporter validated the graph. Recheck retained request and
@@ -664,7 +739,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     for call in example.get("provider_calls") or []):
                 run_reasons.append("trajectory_evidence_incomplete")
                 continue
-            ancillary_gaps = training_thinking.selected_research_evidence(example)
+            ancillary_gaps = training_thinking.selected_research_evidence(
+                example, target_omission_proof=_verified_provider_output_fault if new_policy else None)
             if transient_verified:
                 ancillary_gaps = frozenset((example.get("completeness") or {}).get("incomplete_reasons") or [])
                 run_reasons.append("selected_artifact_temporarily_unavailable")
@@ -696,6 +772,9 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 try:
                     candidate = training_steps._candidate(example, call)
                 except ValueError as exc:
+                    if new_policy and _verified_provider_output_fault(example, call):
+                        run_reasons.append("provider_output_untrainable")
+                        continue
                     if new_policy and training_thinking.verified_cap_truncated_target(example, call):
                         reasoning_counts["truncated_model_calls"] += 1
                         continue
@@ -777,7 +856,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                     # The loop above still proves each candidate or exact
                     # length stop. Mixed verified gaps consume the same ICP;
                     # route, receipt and other evidence failures remain hard.
-                    soft = ({"provider_response_truncated", "full_thinking_unavailable",
+                    soft = ({"provider_response_truncated", "provider_output_untrainable", "full_thinking_unavailable",
                              "full_thinking_call_missing", "missing_reasoning_share_exceeded"}
                             if _only_benign_thinking_gaps(
                                 example, run_id, new_policy=new_policy)

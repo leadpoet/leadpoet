@@ -123,7 +123,8 @@ _TRAINING_REASONS = frozenset({
     "execution_model_call_missing", "full_thinking_route_unverified",
     "readable_full_thinking_unverified", "full_thinking_unavailable",
     "full_thinking_call_missing", "selected_run_evidence_invalid",
-    "training_coverage_incomplete", "provider_response_truncated", "accepted_output_unavailable",
+    "training_coverage_incomplete", "provider_response_truncated", "provider_output_untrainable",
+    "accepted_output_unavailable",
     "missing_reasoning_share_exceeded", "selected_artifact_temporarily_unavailable",
 })
 _TRAINING_COUNT_KEYS = {

@@ -3,8 +3,12 @@
 import copy
 import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from lab_arena import broker, lab_arena_codex as codex, operations, reasoning_capture
@@ -81,9 +85,98 @@ def test_full_hosted_continuation_rejects_unknown_or_unbounded_shapes(change):
             {"model": "openai/gpt-4o-mini", "input": [item]}, allow_full_thinking=True)
 
 
+@pytest.mark.parametrize("policy", [None, "", "other", reasoning_capture.POLICY])
+@pytest.mark.parametrize("stream", [False, True])
+def test_bridge_search_replay_matches_frozen_policy(monkeypatch, policy, stream):
+    if policy is None:
+        monkeypatch.delenv("LAB_ARENA_REASONING_CAPTURE_POLICY", raising=False)
+    else:
+        monkeypatch.setenv("LAB_ARENA_REASONING_CAPTURE_POLICY", policy)
+    original = response(output=hosted_output())
+    snapshot = copy.deepcopy(original)
+    raw = json.dumps(original, separators=(",", ":")).encode()
+    monkeypatch.setattr(codex, "_dispatch", lambda *_args, **_kwargs: (200, raw))
+    with codex.ResponsesBridge("/unused-policy-test.sock", web_search="live") as bridge:
+        with httpx.Client(trust_env=False) as client:
+            result = client.post(bridge.base_url + "/responses",
+                headers={"Authorization": "Bearer " + bridge.token},
+                json={"model": "openai/gpt-4o-mini", "input": "Find evidence.", "stream": stream})
+    assert result.status_code == 200
+    if stream:
+        # The default encoder is the historical replay: no provider type rewrite.
+        enabled = policy == reasoning_capture.POLICY
+        expected = b"".join(codex.response_events(original, native_web_search=enabled))
+        assert result.content == expected
+        completed = [json.loads(line[6:]) for line in result.content.splitlines()
+                     if line.startswith(b"data: ")][-1]["response"]
+        expected_type = "web_search_call" if enabled else "openrouter:web_search"
+        assert [item["type"] for item in completed["output"]
+                if item["id"].startswith("st-")] == [expected_type, expected_type]
+    else:
+        assert result.content == raw
+    assert original == snapshot
+
+
+@pytest.mark.parametrize("full_policy", [False, True])
+def test_standalone_search_projection_is_independent_of_policy(monkeypatch, full_policy):
+    if full_policy:
+        monkeypatch.setenv("LAB_ARENA_REASONING_CAPTURE_POLICY", reasoning_capture.POLICY)
+    else:
+        monkeypatch.delenv("LAB_ARENA_REASONING_CAPTURE_POLICY", raising=False)
+    original = response(output=hosted_output())
+    monkeypatch.setattr(codex, "_dispatch", lambda *_args, **_kwargs:
+                        (200, json.dumps(original).encode()))
+    with codex.ResponsesBridge("/unused-policy-test.sock", web_search="live") as bridge:
+        with httpx.Client(trust_env=False) as client:
+            result = client.post(bridge.base_url + "/alpha/search",
+                headers={"Authorization": "Bearer " + bridge.token},
+                json={"model": "openai/gpt-4o-mini", "commands": {"search_query": [{"q": "fixture"}]},
+                      "settings": {"external_web_access": True}})
+    assert result.status_code == 200
+    assert result.content == codex._standalone_search_output(original)
+    assert "https://example.com/source" in result.json()["output"]
+
+
+@pytest.mark.parametrize("full_policy", [False, True])
+def test_policy_hint_works_in_isolated_staged_module(tmp_path, full_policy):
+    # Production mounts this file without the lab_arena package. Exercise that
+    # same import boundary and the existing runner/shim policy vocabulary.
+    from lab_arena import shim
+    staged = tmp_path / "lab_arena_codex.py"
+    staged.write_bytes(Path(codex.__file__).read_bytes())
+    payload = response(output=hosted_output())
+    script = """
+import importlib.util,json,pathlib,sys,urllib.request
+path=pathlib.Path(sys.argv[1])
+spec=importlib.util.spec_from_file_location('staged_codex',path)
+c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
+document=json.loads(sys.stdin.read())
+c._dispatch=lambda *_args,**_kwargs:(200,json.dumps(document).encode())
+with c.ResponsesBridge('/unused-policy-test.sock',web_search='live') as bridge:
+    request=urllib.request.Request(bridge.base_url+'/responses',
+        data=json.dumps({'model':'openai/gpt-4o-mini','input':'fixture','stream':True}).encode(),
+        headers={'Authorization':'Bearer '+bridge.token,'Content-Type':'application/json'})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request) as reply:
+        result=reply.read()
+assert 'lab_arena' not in sys.modules
+sys.stdout.buffer.write(result)
+"""
+    environment = {"PATH": os.environ.get("PATH", "")}
+    if full_policy:
+        environment[shim.REASONING_POLICY_ENV] = shim.FULL_THINKING_POLICY
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", script, str(staged)],
+        input=json.dumps(payload).encode(), capture_output=True, env=environment, timeout=10, check=True)
+    assert result.stdout == b"".join(codex.response_events(payload, native_web_search=full_policy))
+
+
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="requires pinned Codex 0.154.0")
-def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp_path):
+@pytest.mark.parametrize("full_policy", [False, True])
+def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp_path, full_policy):
     _pin_real_codex(monkeypatch)
+    if full_policy:
+        monkeypatch.setenv("LAB_ARENA_REASONING_CAPTURE_POLICY", reasoning_capture.POLICY)
+    else:
+        monkeypatch.delenv("LAB_ARENA_REASONING_CAPTURE_POLICY", raising=False)
     posts = []
     items = hosted_output()
     items.append({"id": "ct-local", "type": "custom_tool_call", "status": "completed",
@@ -97,10 +190,13 @@ def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp
         # This is the exact history sent onward to the provider, after Codex's
         # typed parser and local tool execution. No fixtures substitute it.
         searches = [item for item in parameters["input"] if item.get("type") == "web_search_call"]
-        assert [item["action"] for item in searches] == [
+        expected_searches = [
             {"type": "search", "query": "current fixture revenue"},
             {"type": "search", "query": "fixture confirmation"},
         ]
+        # Historical Codex drops the unrecognized provider item. Only opted-in
+        # execution receives the native type that its typed history preserves.
+        assert [item["action"] for item in searches] == (expected_searches if full_policy else [])
         # Codex's existing typed serializer omits sources, annotations and IDs.
         # Do not change agent behavior by injecting those fields back in.
         messages = [item for item in parameters["input"] if item.get("role") == "assistant"]

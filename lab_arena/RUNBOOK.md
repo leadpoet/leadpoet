@@ -469,6 +469,15 @@ Run `tests/test_arena_reviewer_identity_schema_seam.py` with those variables.
 Set `ARENA_IDENTITY_COMPOSED_SOURCE` to the scorer file from the new image to
 run all 14 identity controls against that exact composed verifier as well.
 
+For an optional first-party auxiliary whose submitted company name differs
+from the verified name, add `--auxiliary-source-name-binding` during build and
+`--verify-image`. This exact-function correction
+(`first_party_auxiliary_exact_name_binding_v1`) omits only the auxiliary that
+the unchanged paragraph reviewer already rejects. Shared source validation,
+verified signals and matched company evidence remain unchanged. Unknown source
+fails closed; an exactly corrected function is accepted without another change.
+Preserve the prior runtime's explicit correction options when adding this option.
+
 Deploy a verified composition through the trusted reviewer-runtime mapping.
 The mapping is separate from frozen round configuration. A score lease pins
 the selected runtime when its generation starts. A later deployment cannot

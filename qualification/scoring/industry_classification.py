@@ -132,9 +132,15 @@ def request_payload(packet, *, model):
             page = {"source_id": source_id, "source_url": source_url,
                     "spans": source_spans[start:start + 3]}
             messages.append({"role": "user", "content": _canonical({"untrusted_source_pages": [page]})})
-    # Exact membership is checked by the host. Avoid a large redundant enum
-    # and prose-width constraints in the provider's decoding grammar.
+    # The native corpus has at most 105 spans. Constrain decoding to these
+    # exact references so commentary cannot corrupt an otherwise valid ID.
+    # resolve() still checks membership independently of provider compliance.
     schema = deepcopy(SCHEMA)
+    citations = schema['properties']['evidence_span_ids']
+    if spans:
+        citations['items']['enum'] = list(spans)
+    else:
+        citations['maxItems'] = 0
     return {"model": model, "max_tokens": 2000,
             "reasoning": {"effort": "low", "exclude": True}, "messages": messages,
             "response_format": {"type": "json_schema", "json_schema": {

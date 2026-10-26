@@ -67,6 +67,36 @@ def test_request_has_no_prior_verdict_and_uses_frozen_role():
     assert len(request['messages']) == 4
 
 
+def test_decoder_citations_are_limited_to_this_packet():
+    value = packet()
+    request = industry.request_payload(value, model=industry.DEFAULT_MODEL)
+    schema = request['response_format']['json_schema']['schema']
+    allowed = schema['properties']['evidence_span_ids']['items']['enum']
+    assert allowed == list(value.spans())
+    malformed = allowed[0] + ' full?'
+    assert malformed not in allowed
+    other = industry.prepare({**CRITERION, 'industry': 'Other'}, COMPANY, [
+        {'source_id': sid, 'body': body, 'source_url': url}
+        for sid, body, url in value.pages])
+    assert not set(other.spans()).intersection(allowed)
+    # Provider constraints do not replace host validation.
+    with pytest.raises(ValueError, match='unknown or foreign'):
+        industry.resolve(value, proposal(value, evidence_span_ids=[malformed]))
+    assert 'enum' not in industry.SCHEMA['properties']['evidence_span_ids']['items']
+
+
+def test_no_sources_permit_only_an_empty_citation_list():
+    value = industry.prepare(CRITERION, COMPANY, [])
+    request = industry.request_payload(value, model=industry.DEFAULT_MODEL)
+    citations = request['response_format']['json_schema']['schema']['properties']['evidence_span_ids']
+    assert citations['maxItems'] == 0
+    assert 'enum' not in citations['items']
+    result = industry.resolve(value, proposal(
+        value, decision='unavailable', role='unresolved',
+        missing_requirements=['No source evidence']))
+    assert result['resolved_evidence'] == []
+
+
 @pytest.mark.parametrize('body', ['Product evidence. ' * 1500, '"' * 24000],
                          ids=['ordinary', 'json-escaping'])
 def test_full_native_corpus_passes_arena_request_bounds_without_losing_text(body):

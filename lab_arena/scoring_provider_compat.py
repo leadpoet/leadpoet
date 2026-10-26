@@ -271,6 +271,17 @@ def route_for(
             "timeout": upstream_timeout_ms,
             "storeInCache": False,
         }
+        if frozen_catalog is not None:
+            try:
+                # This route promises raw HTML. PDF extraction uses the
+                # judge's bounded exact-URL document recovery instead of
+                # Firecrawl's default per-page parser. Older frozen schemas
+                # that lack this option keep their original request shape.
+                payload = deepline_catalog.validate_payload(
+                    frozen_catalog, FIRECRAWL_TOOL, {**payload, "parsers": []},
+                )
+            except deepline_catalog.CatalogError:
+                pass  # The broker still validates the original route.
         return MinerScoreRoute(
             requested_operation_id=operation_id,
             effective_operation_id=EFFECTIVE_OPERATION_ID,
@@ -425,6 +436,14 @@ def _firecrawl_response(
     status = metadata.get("statusCode")
     if isinstance(status, bool) or not isinstance(status, int) or not 100 <= status <= 599:
         raise CompatibilityResponseError("missing_firecrawl_target_status")
+    content_type = metadata.get("contentType")
+    if (
+        isinstance(content_type, str)
+        and content_type.split(";", 1)[0].strip().casefold() == "application/pdf"
+    ) or raw_html.lstrip("\ufeff\t\r\n ").startswith(("%PDF-", "JVBERi0")):
+        # Do not present binary/base64 or provider-parsed documents as HTML.
+        # The existing unavailable-source path can recover exact document text.
+        raise CompatibilityResponseError("missing_firecrawl_raw_html")
     if operations.provider_status_is_infrastructure(status) or (
         200 <= status < 300 and (
             not raw_html.strip()

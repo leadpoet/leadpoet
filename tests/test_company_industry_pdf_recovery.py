@@ -4,6 +4,7 @@ These controls prove bounded PDF text recovery, not live provider coverage or
 classification accuracy. The original binary document never becomes evidence.
 """
 import asyncio
+import json
 
 import pytest
 
@@ -13,6 +14,54 @@ from tests.test_company_evidence_refusal_fallback import _install_loop, URL
 
 
 QUOTE = "Coreworks supplies analysis and reporting software to customers."
+
+
+@pytest.mark.parametrize("funding_source", ["host", "miner_key"])
+@pytest.mark.parametrize("document", ["%PDF-1.7 binary", "JVBERi0xLjcKbase64"])
+def test_broker_pdf_refusal_preserves_bill_and_native_exact_url_recovery(
+    monkeypatch, funding_source, document,
+):
+    from tests.lab_arena.score_compat_capability_test import (
+        firecrawl_catalog, routed_broker, score_context,
+    )
+    from tests.lab_arena.test_lab_arena_broker import FakeTransport
+
+    transport = FakeTransport([(200, {
+        "status": "completed", "billing": {"credits_charged": 0.02},
+        "result": {"data": {"rawHtml": document, "metadata": {
+            "url": URL, "sourceURL": URL, "statusCode": 200,
+            "contentType": "application/pdf"}}},
+    })])
+    broker, store, _ = routed_broker(funding_source=funding_source, transport=transport)
+    run, calls, _ = _install_loop(
+        monkeypatch, target="industry", finding=_industry_finding(),
+        contents=(200, {"results": [{"url": URL, "text": QUOTE}]}),
+    )
+    receipts = []
+
+    async def native_broker_fetch(_session, _url, **kwargs):
+        requested = kwargs["params"]["url"]
+        result = broker.execute(
+            score_context(firecrawl_catalog(parsers={"type": "array"})),
+            operation_id="scrapingdog.scrape", parameters={"url": requested},
+            action_sequence=1, timeout_ms=30_000,
+        )
+        receipts.append(result)
+        assert result.status == 502
+        raise c._ArenaProviderFetchError(
+            "source unavailable", broker_status=result.status,
+            broker_error_code=json.loads(result.body)["error"]["code"],
+        )
+
+    monkeypatch.setattr(c, "_fetch_bounded_html", native_broker_fetch)
+    result = asyncio.run(run())
+    assert len(transport.sent) == len(store.calls) == len(receipts) == 1
+    assert receipts[0].call["actual_microusd"] > 0
+    assert json.loads(transport.sent[0]["body"])["payload"]["parsers"] == []
+    assert len(calls["contents"]) == 1
+    assert result["usage"]["fetch_calls"] == 2
+    assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result[c.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] == QUOTE
 
 
 def test_pdf_locator_uses_existing_text_provider_without_html_rendering(monkeypatch):

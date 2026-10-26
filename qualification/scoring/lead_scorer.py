@@ -11470,6 +11470,13 @@ def _matched_first_party_source_context(
     from qualification.scoring.intent_details import _source_overlap_score, _source_term_overlap
 
     identity = verified_identity_receipt([company_fit.receipt("company_fit")])
+    # The paragraph reviewer requires this exact name binding for auxiliaries.
+    if (
+        not isinstance(identity, Mapping)
+        or _compact_company_name(company.company_name)
+        != _compact_company_name(identity.get("observed_name"))
+    ):
+        return None
     matched_urls = {context["url"] for context in
                     _matched_investigator_source_contexts(company_fit, source_cache)}
     for url, entry in source_cache.items():

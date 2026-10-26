@@ -241,6 +241,82 @@ def test_eof_after_json_whitespace_is_still_the_actual_end_of_argument_bytes():
     assert training_thinking.verified_cap_truncated_target(example, call)
 
 
+@pytest.mark.parametrize('tail', ['reasoning', 'empty', 'whitespace', 'empty_parts', 'mixed'])
+def test_inferred_cap_cut_can_precede_only_reasoning_and_empty_scaffolding(tail):
+    example = cap_example('openrouter.responses')
+    call = example['provider_calls'][0]
+    reasoning = deepcopy(call['response']['output'][0])
+    reasoning['id'] = 'trailing-reasoning'
+    message = {'type':'message', 'id':'trailing-empty', 'status':'completed', 'role':'assistant',
+               'content':[] if tail == 'empty_parts' else [{'type':'output_text', 'text':' \n\t' if tail == 'whitespace' else ''}]}
+    call['response']['output'].extend([reasoning, message] if tail == 'mixed' else [reasoning if tail == 'reasoning' else message])
+    refresh_response_links(example, 0)
+    before = deepcopy(example)
+    assert training_thinking.verified_cap_truncated_target(example, call)
+    result = training_eligibility.assess_capture(submission(), {'run':example}, ['run'], enabled=True)
+    assert result['eligible'], result
+    assert result['counts']['truncated_model_calls'] == 1
+    assert result['counts']['completed_untruncated_verified_reasoning_tokens'] == 17
+    splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    records = splits['train'] + splits['eval']
+    assert len(records) == 2
+    assert all(row['source_refs'][0]['call_identity'] != call['call_identity'] for row in records)
+    assert example == before
+
+
+@pytest.mark.parametrize('cut_index,complete_index,expected', [(1,0,True),(0,1,False),(1,1,False),(1,None,False)])
+def test_inferred_chat_cap_cut_uses_complete_unique_provider_indexes(cut_index, complete_index, expected):
+    example = cap_example('openrouter.chat')
+    call = example['provider_calls'][0]
+    tools = call['response']['choices'][0]['message']['tool_calls']
+    cut = tools[0]
+    cut['index'] = cut_index
+    complete = deepcopy(cut)
+    complete.update(id='complete-other')
+    complete['function']['arguments'] = '{}'
+    if complete_index is None:
+        complete.pop('index')
+    else:
+        complete['index'] = complete_index
+    tools.append(complete)
+    refresh_response_links(example, 0)
+    assert training_thinking.verified_cap_truncated_target(example, call) is expected
+
+
+@pytest.mark.parametrize('tail', [
+    {'type':'reasoning', 'status':'incomplete', 'content':[]},
+    {'type':'reasoning', 'status':'completed', 'content':[], 'unknown':'data'},
+    {'type':'message', 'status':'completed', 'role':'assistant', 'content':[], 'unknown':'data'},
+    {'type':'message', 'status':'incomplete', 'role':'assistant', 'content':[]},
+    {'type':'message', 'status':'completed', 'role':'user', 'content':[]},
+    {'type':'message', 'status':'completed', 'role':'assistant',
+     'content':[{'type':'output_text', 'text':'', 'annotations':[{'type':'url_citation', 'url':'https://example.com', 'title':'Source'}]}]},
+])
+def test_cap_cut_never_excuses_invalid_or_nonempty_metadata_in_trailing_frames(tail):
+    example = cap_example('openrouter.responses')
+    call = example['provider_calls'][0]
+    call['response']['output'].append(deepcopy(tail))
+    refresh_response_links(example, 0)
+    assert not training_thinking.verified_cap_truncated_target(example, call)
+    result = training_eligibility.assess_capture(submission(), {'run':example}, ['run'], enabled=True, minimum_coverage_percent=80)
+    assert not result['eligible']
+
+
+def test_citation_after_cut_is_not_empty_even_when_hosted_search_is_declared():
+    from tests.lab_arena.hosted_search_continuation_test import hosted_request
+    example = cap_example('openrouter.responses')
+    call = example['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    body['tools'].extend(hosted_request()['tools'])
+    body['max_tool_calls'] = hosted_request()['max_tool_calls']
+    call['request']['outbound']['body_sha256'] = contracts.document_hash(body)
+    call['response']['output'].append({'type':'message', 'status':'completed', 'role':'assistant',
+        'content':[{'type':'output_text', 'text':'', 'annotations':[
+            {'type':'url_citation', 'url':'https://example.com', 'title':'Source'}]}]})
+    refresh_response_links(example, 0)
+    assert not training_thinking.verified_cap_truncated_target(example, call)
+
+
 @pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
 def test_valid_object_json_at_the_exact_cap_remains_usable(api):
     example = cap_example(api)
@@ -285,7 +361,6 @@ def test_excessive_argument_json_nesting_is_rejected_without_crashing(api, new_p
     ('openrouter.chat', 'tool_call'),
     ('openrouter.responses', 'tool_call'),
     ('openrouter.responses', 'message'),
-    ('openrouter.responses', 'reasoning'),
 ])
 def test_inferred_cap_cut_cannot_precede_retained_complete_output(api, trailing):
     example = cap_example(api)
@@ -304,9 +379,6 @@ def test_inferred_cap_cut_cannot_precede_retained_complete_output(api, trailing)
         elif trailing == 'message':
             following = {'type': 'message', 'role': 'assistant', 'status': 'completed',
                          'content': [{'type': 'output_text', 'text': 'Later retained output.'}]}
-        else:
-            following = deepcopy(output[0])
-            following['id'] = 'following-reasoning'
         output.append(following)
     refresh_response_links(example, 0)
     original = deepcopy(example)
@@ -334,6 +406,8 @@ def test_only_the_final_argument_can_be_an_inferred_cap_cut(api, earlier_unfinis
         calls = call['response']['choices'][0]['message']['tool_calls']
         earlier = deepcopy(calls[-1])
         earlier['id'] = 'earlier-call'
+        earlier['index'] = 0
+        calls[-1]['index'] = 1
         if not earlier_unfinished:
             earlier['function']['arguments'] = '{}'
         calls.insert(0, earlier)

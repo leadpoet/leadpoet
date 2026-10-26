@@ -1296,6 +1296,7 @@ def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
         if not navigation_locators:
             document.pop("untrusted_homepage_navigation_locators", None)
     optional_context_keys = (
+        "untrusted_alternative_first_party_source_context",
         "untrusted_non_rejected_source_context",
         "untrusted_alternative_public_stage_context",
     )
@@ -1656,6 +1657,60 @@ def _untrusted_product_citation_repairs(
         if len(contexts) == 3:
             break
     return contexts
+
+
+def _untrusted_geography_citation_context(
+    rejected: Sequence[Mapping[str, Any]], *,
+    submitted_findings: Mapping[str, Mapping[str, Any]],
+    fetched_pages: Mapping[str, str],
+    fetched_final_urls: Optional[Mapping[str, str]],
+    first_party_domains: set[str], identity_names: set[str],
+) -> list[dict[str, str]]:
+    """Offer one loaded first-party excerpt, never a replacement finding."""
+    if not identity_names or not any(
+        finding.get("target") == "geography"
+        and finding.get("reason") == (
+            "headquarters evidence must use independently bound first-party "
+            "requested and fetched final URLs"
+        )
+        for finding in rejected
+    ):
+        return []
+    submitted = submitted_findings.get("geography") or {}
+    quote = str(submitted.get("evidence_quote") or "")
+    for url, page in fetched_pages.items():
+        safe_url = _safe_https_url(url)
+        final_url = _safe_https_url((fetched_final_urls or {}).get(url))
+        domain = _registrable_domain(safe_url)
+        if (
+            not safe_url or not final_url or url == submitted.get("evidence_url")
+            or domain not in first_party_domains
+            or _registrable_domain(final_url) != domain
+            or not _quote_occurs(quote, page)
+        ):
+            continue
+        try:
+            public_http_url(safe_url)
+            public_http_url(final_url)
+        except (TypeError, ValueError):
+            continue
+        context = _source_context_for_quote(quote, page)[:2000]
+        if not (
+            _quote_occurs(quote, context)
+            and _quote_names_company(context, identity_names)
+        ):
+            continue
+        return [{
+            "target": "geography", "source_url": safe_url,
+            "untrusted_source_context": context,
+            "instruction": (
+                "Context only, not proof. Reassess the requested headquarters "
+                "and company identity. Select an exact continuous company-bound "
+                "quote only if supported; all source, identity, quote and "
+                "geography guards still apply."
+            ),
+        }]
+    return []
 
 
 def _strip_untrusted_product_feedback(claims: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -6118,10 +6173,22 @@ async def investigate_company_evidence(
                             forced_next_tool = "search_web"
                         elif force_quote_recovery_search:
                             forced_next_tool = "search_web"
+                        alternative_geography_context = (
+                            _untrusted_geography_citation_context(
+                                rejected, submitted_findings=submitted_findings,
+                                fetched_pages=fetched_pages,
+                                fetched_final_urls=fetched_final_urls,
+                                first_party_domains=first_party_domains,
+                                identity_names=identity_names,
+                            )
+                        )
                         tool_result = {
                             "ok": False,
                             "error": "deterministic_evidence_validation_failed",
                             "rejected_findings": rejected,
+                            **({"untrusted_alternative_first_party_source_context":
+                                alternative_geography_context}
+                               if alternative_geography_context else {}),
                             **({"product_coverage": {
                                 "original_criterion": requested_product_service[:1200],
                                 "status": (product_coverage or {}).get("status", "UNPROVEN"),

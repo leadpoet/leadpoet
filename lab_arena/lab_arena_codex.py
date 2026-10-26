@@ -750,7 +750,15 @@ class ResponsesBridge:
             def log_message(self, *args: Any) -> None:
                 pass
 
+            def _release_active(self) -> None:
+                if getattr(self, "_owns_active", False):
+                    self._owns_active = False
+                    owner._active.release()
+
             def reply(self, status: int, body: bytes, content_type: str = "application/json") -> None:
+                # Processing is complete. Publish no reply while still owning
+                # admission: its client can immediately send the next request.
+                self._release_active()
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
@@ -773,6 +781,7 @@ class ResponsesBridge:
                 if not acquired:
                     self.reply(429, b'{"error":{"message":"request already in progress"}}')
                     return
+                self._owns_active = True
                 def client_closed() -> bool:
                     try:
                         readable, _, _ = select.select(
@@ -969,7 +978,7 @@ class ResponsesBridge:
                 except (OSError, CodexRuntimeError):
                     self.reply(502, b'{"error":{"message":"Arena broker unavailable"}}')
                 finally:
-                    owner._active.release()
+                    self._release_active()
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)

@@ -175,6 +175,44 @@ def test_unproven_industry_review_cannot_leave_an_old_pass(monkeypatch):
     assert old['industry_matches'] is True
 
 
+@pytest.mark.parametrize('decision', ['match', 'unavailable'])
+def test_final_industry_review_replaces_a_rejected_legacy_quote(monkeypatch, decision):
+    run, _, _, reviews = install(monkeypatch, decision=decision,
+        missing=[] if decision == 'match' else ['Account workflow integration'],
+        finding=_finding('industry', status='VERIFIED', evidence_url=URL,
+            evidence_quote='An invented quote absent from every fetched page.',
+            activity_role='supplier_operator', observed_industry='Software'))
+    result = asyncio.run(run())
+    assert reviews
+    assert result['claims']['industry']['_industry_review']['decision'] == decision
+    assert result['_completed_submit'] is True
+    assert result['failure_reason'] == ''
+    assert result['claims']['industry']['status'] == (
+        'VERIFIED' if decision == 'match' else 'UNPROVEN')
+
+
+def test_final_industry_review_preserves_unrelated_quote_failure(monkeypatch):
+    from tests.test_company_evidence_investigator import _attribute_finding
+    run, _, _, reviews = install(monkeypatch, finding=[
+        _finding('industry'),
+        _attribute_finding('VERIFIED', url=URL,
+                           quote='An invented subscription quote absent from every source.'),
+    ])
+    original = c.investigate_company_evidence
+
+    async def invoke(**kwargs):
+        kwargs['targets'] = ('industry', 'required_attribute')
+        return await original(**kwargs)
+
+    monkeypatch.setattr(c, 'investigate_company_evidence', invoke)
+    result = asyncio.run(run())
+    assert reviews
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert result['claims']['required_attribute']['status'] == 'UNPROVEN'
+    assert result['_completed_submit'] is False
+    assert result['failure_reason'] == 'malformed_response'
+
+
 @pytest.mark.parametrize('mutation', [
     lambda result: result['evidence_span_ids'].append('foreign-span'),
     lambda result: result.update(missing_requirements=['Unsupported capability']),

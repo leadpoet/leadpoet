@@ -54,6 +54,34 @@ latest-main integration, 645 checks passed with one Linux-only skip, 153 further
 capture/failure checks passed, and the 829-check release gate passed. The Linux
 sandbox and installed-source checks are recorded after deployment below.
 
+The optional Linux smoke exposed a pre-existing test error: its 60-second
+deadline could not cover the bridge's existing 65-second host allowance and
+two-second margin. PR #787 changes only that fixture to 90 seconds inside a
+120-second sandbox and adds bounded synthetic diagnostics. The corrected test
+passed in real gVisor against both the previous and final source. Production
+timeouts and model behavior are unchanged.
+
+Independent replay against `fcf91e654` preserved all five original evidence
+sets. Readable views matched exactly and every checked event resolved to its
+raw source. The successful `focused04` component test retained four exact
+targets, 342 reasoning tokens, both local error/recovery results and the strict
+final JSON. Original files and prior S3-read evidence were not rewritten.
+
+The later review's remaining points do not justify changing the runtime rules:
+
+- Hosted search counts toward provider-visible capture coverage. Its export is
+  labeled `provider_executed_trajectory`; internal provider prompts and search
+  content that were not returned remain unavailable. This is not proof of a
+  reproducible local training example. No internal context is invented.
+- The code-review claim types form three disjoint class sets. Repeated evidence
+  for an allowed claim already passes. There is no extra same-class claim in
+  the current vocabulary; accepting a conflicting claim would weaken validation.
+- The Exa scorer change still needs measured accuracy evidence before a new
+  scorer image is selected. This release does not publish or select that image.
+- A suitable baseline, training-use permission and a successful scored run
+  under the new coverage policy remain activation prerequisites. The policy
+  stays off; these capture checks do not establish activation readiness.
+
 Current-task OpenRouter accounting is $0.8872432620 confirmed and $6.989051
 reserved for uncertain attempts, within $10. The two later TYCHE runs used
 $0.096 in research-provider calls; the shared research ledger accounts for

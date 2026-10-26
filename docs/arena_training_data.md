@@ -530,17 +530,25 @@ training filter. Incomplete investigations and older records retain their gaps.
 
 The agent-step exporter prepares **observed next-response candidates**, not a
 complete agent imitation dataset. It supports self-contained text and local
-function-call contexts in managed chat and Responses requests. Each candidate
-retains the actual outbound context, the acknowledged assistant reply, and exact
-source references. It verifies the request, worker artifact, host write, agent
-read acknowledgment, and matching stored response. A later billing recovery
-cannot substitute an unreceived reply. Judge calls and future judgments never
+function-call contexts in managed Chat Completions and Responses requests,
+plus exposed hosted-search output in Responses.
+Each candidate retains the actual outbound context, provider reply, and exact
+source references. It verifies the request, worker artifact, host write, and
+matching stored response. Historical policies also require the agent's read
+acknowledgment; the new policy does not require miner callbacks or prove client
+consumption. A later billing recovery cannot substitute a response without
+matching host-write evidence. Judge calls and future judgments never
 enter the input. A whole run can be incomplete while one independently verified
 model call is usable as a candidate.
 
-Unsupported shapes, hosted tools, unresolved history, streams, truncated replies,
-missing acknowledgments, and privacy-filtered context or targets are excluded
-with reasons. Provider reasoning summaries stay in separate teacher metadata.
+Unsupported shapes, unresolved history, streams, truncated replies, missing
+required evidence, and privacy-filtered context or targets are excluded with
+reasons. Hosted search retains the exposed event order and citations as a
+`provider_executed_trajectory`. It does not supply unseen internal prompts or
+search content, or make the whole result a reproducible local next-action
+example. These records count toward provider-visible capture coverage; training
+consumers must use their declared scope. Provider reasoning summaries stay in
+separate teacher metadata.
 An otherwise exact visible answer can be retained when only opaque reasoning
 was removed from the response; its metadata says exact provider replay is false.
 Encrypted reasoning is never emitted. This does not request extra reasoning.

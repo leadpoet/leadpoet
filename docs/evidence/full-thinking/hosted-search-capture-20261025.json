@@ -470,5 +470,85 @@
     },
     "historical_limit": "Old stored records remain valid; fresh affected full-policy requests change canonical identity. No configured production full-thinking rounds exist. Do not hot-swap this broker into an active old full-policy run.",
     "merge_commit": "a11c9662eaa438076088f45d2649b54f34a1859b"
+  },
+  "final_preservation_followup": {
+    "pr": 786,
+    "merge_commit": "fcf91e65446b1c4f6de8c65183d39b239d77c834",
+    "changes": [
+      "Restore historical Codex stream encoding when the policy is off.",
+      "Require an inferred cap cut to be the final output argument."
+    ],
+    "migration_required": false,
+    "tests": {
+      "focused_passed": 645,
+      "mac_linux_only_skip": 1,
+      "preservation_passed": 153,
+      "release_gate_passed": 829
+    },
+    "independent_saved_evidence": {
+      "artifact_sha256": "6ec315905b5425f5e191dfb5a1b8a6039cef0a0a3b986e294be2d61f439787c8",
+      "all_originals_unchanged": true,
+      "cases": [
+        {
+          "case": "focused03",
+          "candidate_count": 2,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 97,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        },
+        {
+          "case": "history-broker01",
+          "candidate_count": 1,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 67,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        },
+        {
+          "case": "tyche02",
+          "candidate_count": 76,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 7662,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        },
+        {
+          "case": "tyche03",
+          "candidate_count": 0,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 18290,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        },
+        {
+          "case": "focused04",
+          "candidate_count": 4,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 204,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        }
+      ]
+    },
+    "linux_test_correction": {
+      "pr": 787,
+      "test_commit": "65efa7f436f2ed7a6393df0c56c1aaafb9c523bb",
+      "cause": "Historical 60-second fixture deadline was shorter than the existing 67-second bridge allowance.",
+      "production_changed": false,
+      "corrected_test_passed_prior_and_final_source": true,
+      "provider": "synthetic; no paid calls"
+    },
+    "deployment": "Final installation verification pending; no activation."
   }
 }

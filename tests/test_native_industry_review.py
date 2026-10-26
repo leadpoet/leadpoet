@@ -82,6 +82,7 @@ def test_native_discovery_requests_pass_the_real_arena_request_validator(monkeyp
 def test_native_source_selection_receives_verified_source_gaps_before_research(monkeypatch):
     """The source picker must see the actual gap, not only a broad category."""
     seen = []
+    search_options = []
 
     def initial_gap(result):
         seen.append(result)
@@ -102,6 +103,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
 
     async def gap_search(session, query, **kwargs):
         calls['search'].append(query)
+        search_options.append(kwargs)
         return {'results': [{'url': URL, 'text': 'Account workflows'}],
                 'notice': 'discovery_only_not_evidence'}
 
@@ -117,6 +119,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     brief = document['industry_source_research_brief']
     assert brief['missing_requirements'] == ['Account workflow integration']
     assert brief['decision'] == 'unavailable'
+    assert search_options[0]['include_domains'] == ('coreworks.ai',)
     assert 'not proof' in brief['notice']
     assert calls['model'][0]['tool_choice']['function']['name'] == 'search_web'
     assert calls['model'][0]['model'] == MODEL

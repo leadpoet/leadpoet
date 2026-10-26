@@ -2393,12 +2393,18 @@ async def _search_web(
     query: str,
     *,
     key: str,
+    include_domains: Sequence[str] = (),
 ) -> dict[str, Any]:
+    payload = {"query": query[:500], "type": "auto", "numResults": MAX_SEARCH_RESULTS}
+    if include_domains:
+        # Exa's semantic query does not enforce a textual site: restriction.
+        # Use the existing provider field for host-bound industry discovery.
+        payload["includeDomains"] = list(include_domains)
     status, body = await _post_json(
         session,
         "https://api.exa.ai/search",
         headers={"x-api-key": key, "Content-Type": "application/json"},
-        payload={"query": query[:500], "type": "auto", "numResults": MAX_SEARCH_RESULTS},
+        payload=payload,
     )
     if status != 200:
         raise RuntimeError("search_provider_unavailable")
@@ -2414,7 +2420,7 @@ async def _search_web(
         if not isinstance(item, Mapping):
             continue
         url = _safe_https_url(item.get("url") or item.get("id"))
-        if not url:
+        if not url or (include_domains and _registrable_domain(url) not in include_domains):
             continue
         # Search publication metadata can date a republication instead of the
         # transaction. Keep discovery to locators; fetched text owns chronology.
@@ -5965,8 +5971,17 @@ async def investigate_company_evidence(
                             tool_result = {"ok": False, "error": "invalid_query"}
                         else:
                             search_calls += 1
+                            search_options = {}
+                            if forced_industry_search_call and industry_review_model:
+                                search_options["include_domains"] = tuple(sorted(
+                                    domain for domain in first_party_domains
+                                    if _independently_bound_first_party_url(
+                                        f"https://{domain}/", first_party_domains,
+                                        identity_anchor,
+                                    )
+                                ))
                             tool_result = await _search_web(
-                                session, query.strip(), key=exa_key
+                                session, query.strip(), key=exa_key, **search_options
                             )
                             if forced_stage_search_call:
                                 current_stage_search_succeeded = True

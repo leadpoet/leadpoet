@@ -106,6 +106,10 @@ _REPAIR = '''                if (
                     continue
 '''
 
+_NATIVE_REPAIR = _REPAIR.replace("_turn + 1 < MAX_REASONING_TURNS",
+                                  "_turn + 1 < reasoning_turn_limit")
+
+
 def convert_protocol_repair_seam(source: bytes) -> bytes:
     try:
         text = source.decode("utf-8")
@@ -126,6 +130,12 @@ def convert_protocol_repair_seam(source: bytes) -> bytes:
     lines = text.splitlines(keepends=True)
     loop = functions["investigate_company_evidence"][0]
     loop_text = "".join(lines[loop.lineno - 1:loop.end_lineno])
+    # Keep the frozen research budget, including turns reserved for review.
+    bounds = [bound for bound in ("MAX_REASONING_TURNS", "reasoning_turn_limit")
+              if f"for _turn in range({bound} + 1):" in loop_text]
+    if len(bounds) != 1:
+        raise ProtocolRepairSeamError("unrecognized protocol turn bound")
+    repair = _REPAIR if bounds[0] == "MAX_REASONING_TURNS" else _NATIVE_REPAIR
     uses = [node for node in ast.walk(module) if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id == "_valid_multi_research_reply"]
@@ -137,15 +147,15 @@ def convert_protocol_repair_seam(source: bytes) -> bytes:
         helper_text = "".join(lines[helper.lineno - 1:helper.end_lineno])
         if (helper_text != _HELPER.rstrip("\n") + "\n"
                 or text.count(_HELPER) != 1 or len(uses) != 1
-                or loop_text.count(_REPAIR + _LOOP_OLD) != 1):
+                or loop_text.count(repair + _LOOP_OLD) != 1):
             raise ProtocolRepairSeamError("partially corrected protocol source")
         return source
-    if uses or _REPAIR in text:
+    if uses or _REPAIR in text or _NATIVE_REPAIR in text:
         raise ProtocolRepairSeamError("partially corrected protocol source")
     anchor = "def _safe_https_url(value: Any) -> str:\n"
     if text.count(anchor) != 1:
         raise ProtocolRepairSeamError("unrecognized URL helper anchor")
     text = text.replace(anchor, _HELPER + anchor, 1)
-    text = text.replace(_LOOP_OLD, _REPAIR + _LOOP_OLD, 1)
+    text = text.replace(_LOOP_OLD, repair + _LOOP_OLD, 1)
     compile(text, "frozen_protocol_repair.py", "exec")
     return text.encode("utf-8")

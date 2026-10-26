@@ -26,6 +26,10 @@ _NEW = """            for _turn in range(MAX_REASONING_TURNS + 1):
                 )
                 if correction_turn and not final_correction_pending:
 """
+# The industry review reserves turns from the same fixed total. Preserve the
+# frozen loop's bound; this correction changes only the pending predicate.
+_NATIVE_OLD = _OLD.replace("MAX_REASONING_TURNS", "reasoning_turn_limit")
+_NATIVE_NEW = _NEW.replace("MAX_REASONING_TURNS", "reasoning_turn_limit")
 
 
 def convert_budget_seam(source: bytes) -> bytes:
@@ -49,12 +53,17 @@ def convert_budget_seam(source: bytes) -> bytes:
         or "correction_turn and final_correction_pending" not in body
     ):
         raise BudgetSeamError("reviewer admission interface is missing")
-    counts = body.count(_OLD), body.count(_NEW)
+    variants = ((_OLD, _NEW), (_NATIVE_OLD, _NATIVE_NEW))
+    matches = [(old, new) for old, new in variants if old in body or new in body]
+    if len(matches) != 1:
+        raise BudgetSeamError("unrecognized or partial pending-correction block")
+    old, new = matches[0]
+    counts = body.count(old), body.count(new)
     if counts == (0, 1):
         return source
     if counts != (1, 0):
         raise BudgetSeamError("unrecognized or partial pending-correction block")
-    lines[node.lineno - 1:node.end_lineno] = [body.replace(_OLD, _NEW, 1)]
+    lines[node.lineno - 1:node.end_lineno] = [body.replace(old, new, 1)]
     result = "".join(lines)
     compile(result, "frozen_budget_correction.py", "exec")
     return result.encode("utf-8")

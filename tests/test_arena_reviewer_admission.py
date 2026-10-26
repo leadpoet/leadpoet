@@ -111,6 +111,17 @@ def test_hooked_source_is_returned_byte_for_byte():
     assert convert_admission_seam(_hooked_source()) == _hooked_source()
 
 
+@pytest.mark.parametrize("followup_state", ["False", "industry_gap_search_needed"])
+def test_admission_conversion_does_not_own_industry_followup_state(followup_state):
+    source = _unhooked_source(repaired=False).replace(
+        b"industry_followup_pending = industry_gap_search_needed",
+        ("industry_followup_pending = " + followup_state).encode(), 1)
+    expected = _hooked_source().replace(
+        b"industry_followup_pending = industry_gap_search_needed",
+        ("industry_followup_pending = " + followup_state).encode(), 1)
+    assert convert_admission_seam(source) == expected
+
+
 def test_complete_hook_receives_only_existing_correction_eligibility():
     source = _hooked_source().replace(_CORRECTION_ELIGIBILITY_ARGUMENT.encode(), b"", 1)
     assert convert_admission_seam(source) == _hooked_source()

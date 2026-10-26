@@ -161,11 +161,14 @@ def test_source_access_correction_is_explicit_and_composes(negative_finality):
 
 @pytest.mark.parametrize("negative_finality", [False, True])
 @pytest.mark.parametrize("source_access", [False, True])
+@pytest.mark.parametrize("reserved_industry_turns", [False, True])
 def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
-    negative_finality, source_access,
+    negative_finality, source_access, reserved_industry_turns,
 ):
     from scripts import build_arena_reviewer_runtime as builder
-    from scripts.arena_reviewer_budget_seam import _OLD, _NEW, convert_budget_seam
+    from scripts.arena_reviewer_budget_seam import (
+        _OLD, _NEW, _NATIVE_OLD, _NATIVE_NEW, convert_budget_seam,
+    )
 
     names = [builder.GRADER_FILE, *builder.ENTRYPOINT_FILES]
     if negative_finality or source_access:
@@ -175,6 +178,11 @@ def test_pending_final_correction_is_explicit_and_changes_only_its_predicate(
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    if reserved_industry_turns:
+        _OLD, _NEW = _NATIVE_OLD, _NATIVE_NEW
+    else:
+        original[builder.GRADER_FILE] = original[builder.GRADER_FILE].replace(
+            _NATIVE_NEW.encode(), _NEW.encode(), 1)
     # Reproduce the original frozen loop; do not import current grading behavior.
     assert original[builder.GRADER_FILE].count(_NEW.encode()) == 1
     original[builder.GRADER_FILE] = original[builder.GRADER_FILE].replace(

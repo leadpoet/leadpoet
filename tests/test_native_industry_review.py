@@ -172,6 +172,26 @@ def test_an_unbound_source_does_not_reach_strong_judge(monkeypatch):
     assert result['claims']['industry']['status'] == 'UNPROVEN'
 
 
+def test_identity_navigation_metadata_alone_is_not_industry_evidence(monkeypatch):
+    import time
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail('Identity-only metadata must not be sent to the industry model')
+
+    monkeypatch.setattr(c, '_post_json', forbidden)
+    url = 'https://acme.example/'
+    finding, failure, calls = asyncio.run(c._review_industry_sources(
+        None, model=MODEL, openrouter_key='offline-key', started=time.monotonic(),
+        company_locator={'name':'Acme','website':url},
+        criteria={'industry':'Software','subindustry':'','product_service':'Reporting'},
+        fetched_pages={url:c._IDENTITY_LINK_CONTEXT_MARKER + '\nhttps://acme.example/reporting'},
+        fetched_final_urls={url:url}, first_party_domains={'acme.example'},
+        identity_anchor={'submitted_domain':'acme.example','observed_domain':'acme.example',
+                         'verified_domain':'acme.example'}, identity_names={'acme'}))
+    assert finding['status'] == 'UNPROVEN'
+    assert calls == 0 and not failure
+
+
 @pytest.mark.parametrize('enabled', [False, True])
 def test_frozen_policy_controls_industry_model_and_blocks_ambient_override(enabled):
     models = dict(scoring.DEFAULT_JUDGE_MODELS)
@@ -243,7 +263,8 @@ def test_cached_judgment_preserves_all_industry_sources_and_separates_frozen_pol
 
 
 @pytest.mark.parametrize('decision,expected', [('match', 'match'), ('unavailable', 'unavailable')])
-def test_full_company_reverification_retains_multi_source_industry_receipt(monkeypatch, decision, expected):
+@pytest.mark.parametrize('identity_footer', [False, True])
+def test_full_company_reverification_retains_multi_source_industry_receipt(monkeypatch, decision, expected, identity_footer):
     """Run the real caller, source review, projection, fit result and JSON receipt."""
     import time
     from tests.test_company_evidence_investigator import _company, _icp, _complete_verdict
@@ -253,6 +274,10 @@ def test_full_company_reverification_retains_multi_source_industry_receipt(monke
     monkeypatch.setenv('OPENROUTER_API_KEY', 'offline-key')
     pages = {'https://acme.example/tickets': 'Acme supplies ticket management software.',
              'https://acme.example/accounts': 'Acme connects customer accounts to its ticket workflows.'}
+    visible_pages = dict(pages)
+    if identity_footer:
+        pages = {url: text + '\n' + c._IDENTITY_LINK_CONTEXT_MARKER + '\nhttps://acme.example/'
+                 for url, text in pages.items()}
     calls = []
 
     async def provider(**kwargs):
@@ -310,9 +335,9 @@ def test_full_company_reverification_retains_multi_source_industry_receipt(monke
     assert stored['dimension_decisions']['geography'] == 'match'
     evidence = stored['dimension_evidence']['industry']
     if decision == 'match':
-        assert evidence['quote'] == pages['https://acme.example/tickets']
+        assert evidence['quote'] == visible_pages['https://acme.example/tickets']
         assert evidence['supporting_evidence'] == [
-            {'url':'https://acme.example/accounts','quote':pages['https://acme.example/accounts']}]
+            {'url':'https://acme.example/accounts','quote':visible_pages['https://acme.example/accounts']}]
     else:
         assert not evidence['quote']
     assert len(stored['investigation_receipt']['claims']['industry']['_industry_review']['evidence']) == 2

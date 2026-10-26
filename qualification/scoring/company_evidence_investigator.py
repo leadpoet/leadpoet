@@ -2324,11 +2324,13 @@ async def _review_industry_sources(
             _independently_bound_first_party_url(url, first_party_domains, identity_anchor)
             or _registrable_domain(url) in rebrand_domains))
 
-    pages = [
-        {'source_id': f's{index}', 'source_url': url, 'body': text}
-        for index, (url, text) in enumerate(fetched_pages.items())
-        if bound(url) and bound(fetched_final_urls.get(url, '')) and text
-    ]
+    pages = []
+    for index, (url, raw_text) in enumerate(fetched_pages.items()):
+        # Identity-only link destinations are host metadata, not source facts.
+        # Use exactly the surface that the native quote verifier can ground.
+        text = _visible_quote_surface(raw_text).strip()
+        if bound(url) and bound(fetched_final_urls.get(url, '')) and text:
+            pages.append({'source_id': f's{index}', 'source_url': url, 'body': text})
     if not pages:
         review['missing_requirements'] = ['Company-bound source text for the requested activity']
         return unproven, '', 0

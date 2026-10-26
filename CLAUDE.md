@@ -1,3 +1,23 @@
+## Scoped authorization: October 25 industry precision and recall repair
+
+On 2026-10-25 the user renewed the permanent industry-fit repair. Compare the
+full 98 formerly unavailable and 69 prior-pass representative cases against
+original scoring and all coherent previous attempts. Use a simple general
+mechanism; no company exceptions, altered ICPs, fabricated evidence or release
+regressions. The user authorized implementation, safe merge and canonical
+deployment only after meaningful improvement in both error types is proven,
+with independent review and deployed-output verification. Preserve unrelated
+qualification, identity, supplier-role, billing, credentials, historical scores,
+published results, rewards, weights and concurrent work. Tests use isolated
+state and must not write judgments into production. The additional test grant
+is $12 OpenRouter; other providers retain only $1.79237559 of the previous
+approved budget. Count all previous charges and reservations. The new phase
+has cumulative ceilings of $29.22562441 OpenRouter and $77 across providers.
+Do not merge the unsuccessful draft PR 764 as a prerequisite or claim that a
+recorded-evidence diagnostic proves fresh production retrieval. Authority ends
+when the requested repair and production verification are complete. Keep
+AGENTS.md and CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 25 publication read performance
 
 On 2026-10-25 the user renewed the request to fix the confirmed duplicate

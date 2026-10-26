@@ -18,6 +18,7 @@ ERROR = "headquarters evidence must use independently bound first-party requeste
 KEY = "untrusted_alternative_first_party_source_context"
 PAGES = {URL: NATIVE["source_text"], PROFILE: NATIVE["profile_text"]}
 FINALS = {URL: URL, PROFILE: PROFILE}
+ANCHOR = {"submitted_domain": "airwallex.com", "observed_domain": "airwallex.com"}
 IDENTITY = {"normalized_name": "airwallex", "registrable_dns_domain": "airwallex.com",
             "linkedin_company_slug": "airwallex"}
 
@@ -28,12 +29,13 @@ def geography(*, url=PROFILE, quote=QUOTE, status="VERIFIED"):
         evidence_quote=quote, reason="Model-authored headquarters judgment")
 
 
-def hint(*, pages=PAGES, finals=FINALS, finding=None, reason=ERROR, names={"airwallex"}):
+def hint(*, pages=PAGES, finals=FINALS, finding=None, reason=ERROR, names={"airwallex"},
+         anchor=ANCHOR):
     return i._untrusted_geography_citation_context(
         [{"target": "geography", "reason": reason}],
         submitted_findings={"geography": finding or geography()},
         fetched_pages=pages, fetched_final_urls=finals,
-        first_party_domains={"airwallex.com"}, identity_names=names)
+        first_party_domains={"airwallex.com"}, identity_names=names, identity_anchor=anchor)
 
 
 def validate(finding, *, pages=PAGES, finals=FINALS):
@@ -107,8 +109,11 @@ def test_original_quote_remains_rejected_and_named_span_passes():
     assert validate(geography(url=URL, quote=NATIVE["named_quote"]))["status"] == "VERIFIED"
 
 
-@pytest.mark.parametrize("final", ["named", "repeat_unnamed", "unproven"])
-def test_final_scoped_correction_receives_context_without_extra_research(monkeypatch, final):
+@pytest.mark.parametrize("final,binding", [
+    ("named", "matched"), ("repeat_unnamed", "matched"), ("unproven", "matched"),
+    ("unproven", "submitted_only"), ("unproven", "unmatched"),
+])
+def test_final_scoped_correction_receives_context_without_extra_research(monkeypatch, final, binding):
     requests, research, corrections = [], [], []
     attribute_quote = "Founded in Melbourne in 2015, Airwallex holds 85+ licenses across North America, Europe, the Middle East, and Asia-Pacific, forming one of the most comprehensive financial infrastructures in the world."
     attribute = _finding("required_attribute", status="VERIFIED", activity_role="supplier_operator",
@@ -148,20 +153,25 @@ def test_final_scoped_correction_receives_context_without_extra_research(monkeyp
     monkeypatch.setattr(i, "_post_json", post)
     monkeypatch.setattr(i, "_search_web", deny)
     monkeypatch.setattr(i, "_fetch_page", deny)
+    observations = {"submitted_source_urls": list(PAGES), "observed_company_name": "Airwallex",
+                    "observed_company_linkedin": PROFILE}
+    if binding != "submitted_only":
+        observations["observed_company_website"] = (
+            "https://www.airwallex.com" if binding == "matched" else "https://unrelated.example")
     result = asyncio.run(i.investigate_company_evidence(
         company_locator=NATIVE["company_locator"], targets=("geography", "required_attribute"),
         requested_geography="Singapore", requested_attribute="Holds financial-services licenses",
-        positive_semantic_review=True, verified_homepage_identity=IDENTITY,
-        prior_observations={"submitted_source_urls": list(PAGES),
-                            "observed_company_name": "Airwallex",
-                            "observed_company_website": "https://www.airwallex.com",
-                            "observed_company_linkedin": PROFILE},
+        positive_semantic_review=True, verified_homepage_identity=IDENTITY if binding == "matched" else {},
+        prior_observations=observations,
         prefetched_pages={u: {"final_url": FINALS[u], "text": t} for u, t in PAGES.items()}))
     assert len(requests) == 3 and research == []
     assert len(corrections) == 1
     contexts = corrections[0].get(KEY, [])
-    assert len(contexts) == 1 and contexts[0]["source_url"] == URL
-    assert i._quote_occurs(QUOTE, contexts[0]["untrusted_source_context"])
+    if binding == "matched":
+        assert len(contexts) == 1 and contexts[0]["source_url"] == URL
+        assert i._quote_occurs(QUOTE, contexts[0]["untrusted_source_context"])
+    else:
+        assert contexts == []
     assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["evidence_quote"] == attribute_quote
     assert KEY not in json.dumps(result["claims"])
@@ -201,4 +211,25 @@ def test_both_bound_urls_must_pass_public_url_validation(monkeypatch, which):
             raise ValueError("not public")
         return original(value)
     monkeypatch.setattr(i, "public_http_url", public)
+    assert hint(pages={URL: NATIVE["source_text"]}, finals={URL: final_url}) == []
+
+
+@pytest.mark.parametrize("anchor", [
+    {}, {"submitted_domain": "airwallex.com"},
+    {"submitted_domain": "airwallex.com", "observed_domain": "unrelated.example"},
+    {"submitted_domain": "airwallex.com", "observed_domain": "unrelated.example",
+     "verified_domain": "unrelated.example"},
+])
+def test_submitted_domain_alone_cannot_bind_alternative_context(anchor):
+    assert hint(anchor=anchor) == []
+
+
+@pytest.mark.parametrize("which", ["requested", "final"])
+def test_both_urls_need_independent_first_party_binding(monkeypatch, which):
+    final_url = URL + "?fetched=1"
+    reject = URL if which == "requested" else final_url
+    original = i._independently_bound_first_party_url
+    def bound(url, domains, anchor):
+        return url != reject and original(url, domains, anchor)
+    monkeypatch.setattr(i, "_independently_bound_first_party_url", bound)
     assert hint(pages={URL: NATIVE["source_text"]}, finals={URL: final_url}) == []

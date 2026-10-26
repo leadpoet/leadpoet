@@ -1665,6 +1665,7 @@ def _untrusted_geography_citation_context(
     fetched_pages: Mapping[str, str],
     fetched_final_urls: Optional[Mapping[str, str]],
     first_party_domains: set[str], identity_names: set[str],
+    identity_anchor: Mapping[str, Any],
 ) -> list[dict[str, str]]:
     """Offer one loaded first-party excerpt, never a replacement finding."""
     if not identity_names or not any(
@@ -1684,7 +1685,12 @@ def _untrusted_geography_citation_context(
         domain = _registrable_domain(safe_url)
         if (
             not safe_url or not final_url or url == submitted.get("evidence_url")
-            or domain not in first_party_domains
+            or not _independently_bound_first_party_url(
+                safe_url, first_party_domains, identity_anchor,
+            )
+            or not _independently_bound_first_party_url(
+                final_url, first_party_domains, identity_anchor,
+            )
             or _registrable_domain(final_url) != domain
             or not _quote_occurs(quote, page)
         ):
@@ -6180,6 +6186,7 @@ async def investigate_company_evidence(
                                 fetched_final_urls=fetched_final_urls,
                                 first_party_domains=first_party_domains,
                                 identity_names=identity_names,
+                                identity_anchor=identity_anchor,
                             )
                         )
                         tool_result = {

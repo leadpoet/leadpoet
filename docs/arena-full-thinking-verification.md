@@ -1147,10 +1147,11 @@ The native Codex Linux control accepted hosted search continuation and the real
 TYCHE MCP transport. It repeated tools until the six-POST diagnostic limit and
 did not produce final JSON. Earlier focused failures, including an uncited URL
 and unavailable facts, remain recorded rather than repaired. Current TYCHE
-hardcodes a Luna model and Luna-specific code-mode instructions. The approved
-DeepSeek native route exposes a different tool interface. Prior model/plain-tool
-settings changed in memory do not prove unchanged TYCHE code-mode success.
-No miner code change, logging callback or receipt protocol was added.
+hardcodes a Luna model and derives its code-mode choice from that model setting.
+Choosing DeepSeek selects TYCHE's existing plain-MCP path automatically. The
+earlier in-memory MODEL and CODE_MODE overrides reproduced that model-dependent
+setting; they did not add a new architecture. A complete Linux TYCHE scoring run
+is still unverified. No miner logging callback or receipt protocol was added.
 
 The deployed component checks cost $0.092186 in OpenRouter calls. Current-task
 confirmed spend is $0.5985062620; $3.757891 remains reserved for older uncertain

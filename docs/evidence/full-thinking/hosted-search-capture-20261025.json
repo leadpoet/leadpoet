@@ -310,7 +310,7 @@
       "result": "Current SQL capture passed; one uncited URL failed local validation. No final output repair."
     }
   ],
-  "tyche_unchanged_code_mode_limit": "The current TYCHE source hardcodes its default Luna model and a Luna-specific code-mode instruction path. The approved DeepSeek native request exposed exec_command and plain MCP tools, not that code-mode tool interface. Prior probes changed MODEL and CODE_MODE in memory. These do not prove unchanged TYCHE code-mode completion, and no miner source workaround or extra protocol was added.",
+  "tyche_unchanged_code_mode_limit": "TYCHE hardcodes its default Luna model and derives CODE_MODE from MODEL at import. Selecting DeepSeek automatically uses its existing plain-MCP path. The prior in-memory MODEL and CODE_MODE=False overrides reproduce that model-dependent setting, not a new agent architecture. The approved DeepSeek native request lacks the Luna-specific code-mode interface, but this is not an established Arena incompatibility. A complete Linux TYCHE scoring run remains unverified; no logging or receipt protocol was added.",
   "test_budget": {
     "openrouter_cap_usd": "10",
     "confirmed_task_usd": "0.5985062620",

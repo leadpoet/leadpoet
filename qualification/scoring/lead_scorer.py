@@ -7660,7 +7660,7 @@ def _positive_semantic_review_needed(
     active_attribute = str(
         getattr(icp, "required_attribute", "") or ""
     ).strip()
-    if not active_attribute:
+    if not active_attribute and not os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip():
         return False
     details = result.details if isinstance(result.details, Mapping) else {}
     raw_dimensions = details.get("dimension_decisions")
@@ -7668,7 +7668,7 @@ def _positive_semantic_review_needed(
     if dimensions.get("industry") != COMPANY_FIT_MATCH:
         return False
     attribute_decision = details.get("required_attribute_decision")
-    if attribute_decision not in {
+    if active_attribute and attribute_decision not in {
         COMPANY_FIT_MATCH,
         COMPANY_FIT_UNAVAILABLE,
     }:

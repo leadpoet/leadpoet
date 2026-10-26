@@ -1026,6 +1026,16 @@ def _plain_text(value: str) -> str:
     # Keep their full visible surface. The shared parser still excludes hidden,
     # executable, fallback, navigation, and related-page markup.
     decoded = html.unescape(visible_html_text(value, include_scroll_reveal=True))
+    if (
+        os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        and len(decoded) > MAX_PAGE_CHARACTERS
+    ):
+        # A visible div-based menu can fill the source window before its facts.
+        # Prefer an explicit main landmark only for oversized company pages.
+        # Keep tables, visibility checks, the existing cap and older policies.
+        decoded = html.unescape(visible_html_text(
+            value, include_scroll_reveal=True, prefer_main=True,
+        ))
     # Script and style bodies are not visible page evidence. Remove them before
     # applying the fixed page-text bound so they cannot displace visible text.
     for tag in ("script", "style"):
@@ -3809,14 +3819,14 @@ async def investigate_company_evidence(
         os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
         if "industry" in requested_targets else ""
     )
-    # The final industry judgment uses one existing reasoning turn, not a new
-    # research budget. Other dimensions and older frozen policies are unchanged.
+    # Reserve the final judgment inside the existing reasoning budget. An
+    # initial source assessment, when possible, uses another existing turn.
     reasoning_turn_limit = MAX_REASONING_TURNS - bool(industry_review_model)
     research_system_prompt = _SYSTEM_PROMPT
     if industry_review_model:
         research_system_prompt += (
             "\nIndustry: research the full criterion, including capabilities and "
-            "customer roles. Fetch relevant product/technical/customer pages for "
+            "customer roles. Use the source-research brief to select evidence for "
             "missing facts within budget. A final review uses all fetched text. "
             "Submit industry UNPROVEN with empty citations; judge other targets normally."
         )
@@ -4559,6 +4569,46 @@ async def investigate_company_evidence(
                 input_document["investigation_limits"]["remaining_search_calls"] = (
                     MAX_SEARCH_CALLS - search_calls
                 )
+            industry_review_calls = 0
+            industry_research_brief = None
+            industry_review_arguments = {
+                'model': industry_review_model, 'openrouter_key': openrouter_key,
+                'started': started, 'company_locator': company_locator,
+                'criteria': {'industry': requested_industry or '',
+                             'subindustry': requested_subindustry or '',
+                             'product_service': requested_product_service or ''},
+                'fetched_pages': fetched_pages, 'fetched_final_urls': fetched_final_urls,
+                'first_party_domains': first_party_domains,
+                'identity_anchor': identity_anchor, 'identity_names': identity_names,
+            }
+            if industry_review_model:
+                initial_industry, initial_failure, industry_review_calls = (
+                    await _review_industry_sources(session, **industry_review_arguments)
+                )
+                if initial_failure:
+                    _record_failure(diagnostic, initial_failure)
+                    return {'claims': {}, 'failure_reason': initial_failure}
+                initial_review = initial_industry['_industry_review']
+                industry_research_brief = {
+                    key: initial_review[key]
+                    for key in ('decision', 'missing_requirements', 'reason', 'packet_sha256')
+                    if key in initial_review
+                }
+                industry_research_brief['notice'] = (
+                    'Fallible assessment of loaded company-bound sources, not proof. '
+                    'Use remaining research to resolve these specific capability or '
+                    'customer-role gaps. Search for the missing fact, then select '
+                    'specific product/service documentation, technical brochures, '
+                    'or company customer/project evidence from the results. Choose '
+                    'sources that can support OR contradict the requirement. Generic '
+                    'category pages, internal use and a separate partner offering '
+                    'do not resolve a missing supplied capability. PDF brochures '
+                    'are eligible locators. Never treat snippets as proof. '
+                    'Keep all other requested targets and existing research limits.'
+                )
+                input_document['industry_source_research_brief'] = industry_research_brief
+                reasoning_turn_limit -= industry_review_calls
+                input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
             messages: list[dict[str, Any]] = [{
                 "role": "user",
                 "content": _bounded_message_json(
@@ -4569,7 +4619,24 @@ async def investigate_company_evidence(
                 ),
             }]
             final_correction_pending = False
-            forced_next_tool = ""
+            industry_gap_search_needed = bool(
+                industry_research_brief
+                and industry_review_calls
+                and industry_research_brief['decision'] == 'unavailable'
+                and industry_research_brief['missing_requirements']
+                and search_calls < MAX_SEARCH_CALLS
+                and fetch_calls < MAX_FETCH_CALLS
+                and time.monotonic() - started
+                < ADMISSION_DEADLINE_SECONDS - JUDGMENT_ADMISSION_RESERVE_SECONDS
+            )
+            forced_next_tool = 'search_web' if industry_gap_search_needed else ''
+            if industry_gap_search_needed:
+                messages.append({'role': 'user', 'content': (
+                    'Use the next search_web call to target the unresolved industry '
+                    'capability or customer-role facts in industry_source_research_brief. '
+                    'Search results are locators only; select a relevant source and '
+                    'fetch it before using it as evidence.'
+                )})
             forced_stage_search_pending = False
             incomplete_submit_retries = 0
             incomplete_submit_retry_pending = False
@@ -4579,7 +4646,7 @@ async def investigate_company_evidence(
                 serialization_grace_seconds=SERIALIZATION_REPAIR_GRACE_SECONDS,
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
-            industry_followup_pending = False
+            industry_followup_pending = industry_gap_search_needed
             industry_followup_search_completed = False
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
@@ -4627,7 +4694,9 @@ async def investigate_company_evidence(
                         ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
                     ),
                     "usage": {
-                        "reasoning_turns": reasoning_turns,
+                        "reasoning_turns": reasoning_turns + industry_review_calls,
+                        **({'industry_review_calls': industry_review_calls}
+                           if industry_review_model else {}),
                         "search_calls": search_calls,
                         "fetch_calls": fetch_calls,
                         "prefetched_pages": prefetched_count,
@@ -5774,23 +5843,15 @@ async def investigate_company_evidence(
                                 for target in requested_targets
                             }
                         industry_review_failure = ""
-                        industry_review_calls = 0
                         if industry_review_model:
-                            claims["industry"], industry_review_failure, industry_review_calls = (
+                            claims["industry"], industry_review_failure, final_review_calls = (
                                 await _review_industry_sources(
-                                    session, model=industry_review_model,
-                                    openrouter_key=openrouter_key, started=started,
-                                    company_locator=company_locator,
-                                    criteria={"industry": requested_industry or "",
-                                              "subindustry": requested_subindustry or "",
-                                              "product_service": requested_product_service or ""},
-                                    fetched_pages=fetched_pages,
-                                    fetched_final_urls=fetched_final_urls,
-                                    first_party_domains=first_party_domains,
-                                    identity_anchor=identity_anchor, identity_names=identity_names,
+                                    session, **industry_review_arguments,
                                     rebrand_finding=claims.get("rebrand"),
                                 )
                             )
+                            industry_review_calls += final_review_calls
+                            claims['industry']['_industry_review']['research_brief'] = industry_research_brief
                         stage_finding = claims.get("stage") or {}
                         required_stage_incomplete = bool(
                             required_stage_discovery_failure_reason

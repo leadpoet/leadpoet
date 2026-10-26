@@ -78,6 +78,57 @@ def test_native_discovery_requests_pass_the_real_arena_request_validator(monkeyp
         validate_operation_request('openrouter.chat', request)
 
 
+def test_native_source_selection_receives_verified_source_gaps_before_research(monkeypatch):
+    """The source picker must see the actual gap, not only a broad category."""
+    seen = []
+
+    def initial_gap(result):
+        seen.append(result)
+        if len(seen) == 1:
+            result.update(decision='unavailable', missing_requirements=['Account workflow integration'])
+
+    run, calls, _, reviews = install(monkeypatch, mutation=initial_gap)
+    original_post = c._post_json
+
+    async def planned_post(session, url, *, headers, payload):
+        if (payload.get('model') != MODEL
+                and payload.get('tool_choice') == {
+                    'type': 'function', 'function': {'name': 'search_web'}}):
+            from tests.test_company_evidence_judgment_reserve import _response
+            calls['model'].append(payload)
+            return 200, _response('search_web', {'query': 'Coreworks account workflow integration'})
+        return await original_post(session, url, headers=headers, payload=payload)
+
+    async def gap_search(session, query, **kwargs):
+        calls['search'].append(query)
+        return {'results': [{'url': URL, 'text': 'Account workflows'}],
+                'notice': 'discovery_only_not_evidence'}
+
+    monkeypatch.setattr(c, '_post_json', planned_post)
+    monkeypatch.setattr(c, '_search_web', gap_search)
+    homepage = 'https://www.coreworks.ai/'
+    result = asyncio.run(run(
+        prior_observations={'submitted_source_urls': [homepage]},
+        prefetched_pages={homepage: {'final_url': homepage, 'text': FEATURES}},
+        requested_product_service='Supplies reporting and account workflows'))
+    first = calls['model'][0]['messages'][1]['content']
+    document = json.loads(first[first.index('{'):])
+    brief = document['industry_source_research_brief']
+    assert brief['missing_requirements'] == ['Account workflow integration']
+    assert brief['decision'] == 'unavailable'
+    assert 'not proof' in brief['notice']
+    assert calls['model'][0]['tool_choice']['function']['name'] == 'search_web'
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert len(reviews) == result['usage']['industry_review_calls'] == 2
+    assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
+    assert document['investigation_limits']['reasoning_turns'] == c.MAX_REASONING_TURNS - 2
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
+    assert result['usage']['search_calls'] <= c.MAX_SEARCH_CALLS
+    from lab_arena.operations import validate_operation_request
+    for request in [*calls['model'], *reviews]:
+        validate_operation_request('openrouter.chat', request)
+
+
 def test_unproven_industry_review_cannot_leave_an_old_pass(monkeypatch):
     run, _, _, _ = install(monkeypatch, decision='unavailable', missing=['Voice support'])
     result = asyncio.run(run())
@@ -159,3 +210,110 @@ def test_new_industry_review_preserves_an_independent_final_rejection(monkeypatc
     })
     assert lead_scorer._positive_semantic_review_needed(
         result, SimpleNamespace(required_attribute=''), ()) is False
+
+
+def test_cached_judgment_preserves_all_industry_sources_and_separates_frozen_policies(monkeypatch):
+    from lab_arena import company_judgments, contracts
+    from tests.lab_arena.company_judgments_test import _input, _refs, _raw, _evidence
+    document = _input()
+    current = _refs(document)[0]
+    old_document = json.loads(json.dumps(document))
+    old_document['scorer_policy']['judge_models'].pop('industry_evidence_review')
+    previous = _refs(old_document)[0]
+    assert current['cache_key'] != previous['cache_key']
+    raw = _raw()
+    evidence = {'url': URL, 'quote': FEATURES, 'supporting_evidence': [
+        {'url': 'https://www.coreworks.ai/workflows', 'quote': 'Coreworks connects account workflows.'}]}
+    receipt = raw['verifier_gate_receipts'][0]
+    receipt['dimension_evidence']['industry'] = evidence
+    receipt['investigation_receipt'] = {'claims': {'industry': {'_industry_review': {
+        'decision': 'match', 'evidence': [
+            {'url': URL, 'quote': FEATURES}, *evidence['supporting_evidence']]}}}}
+    # Use the unchanged native cache envelope, with its normal provenance checks.
+    import tests.lab_arena.company_judgments_test as fixtures
+    monkeypatch.setattr(fixtures, '_raw', lambda score=81.0: raw)
+    snapshot = _evidence(current)
+    restored = company_judgments.validate_evidence_snapshot(
+        json.loads(json.dumps(snapshot)), cache_key=current['cache_key'],
+        company_input_hash=current['company_input_hash'], authority_slot=0,
+        evidence_hash=contracts.document_hash(snapshot))
+    saved_receipt = restored['raw_judgment']['verifier_gate_receipts'][0]
+    assert saved_receipt['dimension_evidence']['industry'] == evidence
+    assert len(saved_receipt['investigation_receipt']['claims']['industry']['_industry_review']['evidence']) == 2
+
+
+@pytest.mark.parametrize('decision,expected', [('match', 'match'), ('unavailable', 'unavailable')])
+def test_full_company_reverification_retains_multi_source_industry_receipt(monkeypatch, decision, expected):
+    """Run the real caller, source review, projection, fit result and JSON receipt."""
+    import time
+    from tests.test_company_evidence_investigator import _company, _icp, _complete_verdict
+    from qualification.scoring.company_fit_decision import company_fit_match
+    from lab_arena.contracts import check_strict_document
+    monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', MODEL)
+    monkeypatch.setenv('OPENROUTER_API_KEY', 'offline-key')
+    pages = {'https://acme.example/tickets': 'Acme supplies ticket management software.',
+             'https://acme.example/accounts': 'Acme connects customer accounts to its ticket workflows.'}
+    calls = []
+
+    async def provider(**kwargs):
+        return _complete_verdict(), ''
+
+    async def keep_size(verdict, *args, **kwargs):
+        return verdict
+
+    async def review_post(session, url, *, headers, payload):
+        calls.append(payload)
+        ids = [span['span_id'] for msg in payload['messages'][2:]
+               for page in json.loads(msg['content'])['untrusted_source_pages']
+               for span in page['spans']]
+        response = {'observed_activity': 'Ticket and account workflow software',
+                    'reason': 'The two company pages describe the connected offering.',
+                    'missing_requirements': [] if decision == 'match' else ['Account workflow integration'],
+                    'role': 'supplier_operator', 'evidence_span_ids': ids, 'decision': decision}
+        return 200, {'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(response)}}]}
+
+    async def investigate(**kwargs):
+        assert kwargs['targets'] == ('industry',)
+        finding, failure, count = await c._review_industry_sources(
+            None, model=MODEL, openrouter_key='offline-key', started=time.monotonic(),
+            company_locator=kwargs['company_locator'],
+            criteria={'industry': kwargs['requested_industry'],
+                      'subindustry': kwargs['requested_subindustry'],
+                      'product_service': kwargs['requested_product_service']},
+            fetched_pages=pages, fetched_final_urls={u:u for u in pages},
+            first_party_domains={'acme.example'}, identity_names={'acme'},
+            identity_anchor={'submitted_domain':'acme.example','observed_domain':'acme.example',
+                             'verified_domain':'acme.example','submitted_name':'Acme',
+                             'observed_name':'Acme','verified_name':'Acme'})
+        assert not failure and count == 1
+        return {'claims': {'industry': finding}, '_completed_submit': True,
+                'failure_reason': '', 'usage': {'reasoning_turns': 1, 'search_calls': 0, 'fetch_calls': 0},
+                c.PRIVATE_FETCHED_PAGES_KEY: {u:{'final_url':u,'text':s} for u,s in pages.items()}}
+
+    monkeypatch.setattr(lead_scorer, '_request_company_reverify_json', provider)
+    monkeypatch.setattr(lead_scorer, '_refresh_linkedin_employee_size_observation', keep_size)
+    monkeypatch.setattr(lead_scorer, 'investigate_company_evidence', investigate)
+    monkeypatch.setattr(c, '_post_json', review_post)
+    identity = company_fit_match('Fixture homepage binding', details={
+        'identity': {'decision':'match','evidence_source':'company_homepage','observed_name':'acme',
+                     'observed_domain':'acme.example','observed_linkedin_slug':'acme'},
+        'verified_homepage_transport_domain':'acme.example'})
+    result = asyncio.run(lead_scorer._llm_reverify_company(
+        _company(), _icp(product_service='Supplies ticket and account workflow software.'),
+        require_company_fit_dimensions=True, evidence_investigator=True,
+        verified_homepage_identity=identity))
+    stored = json.loads(json.dumps(result.receipt('company_fit')))
+    check_strict_document(stored)
+    assert stored['decision'] == expected
+    assert stored['dimension_decisions']['industry'] == expected
+    assert stored['dimension_decisions']['employee_size'] == 'match'
+    assert stored['dimension_decisions']['geography'] == 'match'
+    evidence = stored['dimension_evidence']['industry']
+    if decision == 'match':
+        assert evidence['quote'] == pages['https://acme.example/tickets']
+        assert evidence['supporting_evidence'] == [
+            {'url':'https://acme.example/accounts','quote':pages['https://acme.example/accounts']}]
+    else:
+        assert not evidence['quote']
+    assert len(stored['investigation_receipt']['claims']['industry']['_industry_review']['evidence']) == 2
+    assert len(calls) == 1

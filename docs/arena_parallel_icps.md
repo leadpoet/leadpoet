@@ -238,10 +238,16 @@ unchanged, including its complete-baseline final publication gate. Other
 execution policies keep their existing behavior.
 Migration 401 adds proxy-based model admission without changing these gates.
 
-The readiness guard reserves 2 GiB for each active slot, 2 GiB for the host,
-and another 128 MiB for each slot. Twenty slots therefore require 44.5 GiB;
-plan for approximately 45 GiB of available memory. Readiness derives the safe
-slot count from available host and cgroup memory. It reduces concurrent slots
+The readiness guard reserves the full 2 GiB sandbox limit for each active slot,
+512 MiB for further host growth, and another 32 MiB for each slot's launcher
+overhead. Memory already used by host services is excluded by `MemAvailable`
+and finite cgroup headroom before these extra reserves are applied. Ten slots
+require 20.8125 GiB of available memory; twenty require 41.125 GiB. This is an
+admission policy, not a smaller sandbox limit or a fixed minimum slot count.
+The smaller extra reserves leave less room for unexpected host or launcher
+growth, so verify available memory and OOM counters after deployment.
+Readiness derives the slot count from the tighter available host and cgroup
+memory. It reduces concurrent slots
 when memory is limited, retains all verified proxy profiles for slot rotation,
 and stops scoring startup if even one slot cannot fit. The weight loop remains
 independent.

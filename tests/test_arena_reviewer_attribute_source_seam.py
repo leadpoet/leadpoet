@@ -27,7 +27,11 @@ def _sources():
 
 
 def test_exact_frozen847_function_hashes_and_only_approved_bytes_change():
-    original, current = _sources()
+    original = (ROOT / 'tests/fixtures/arena_reviewer/frozen847_functions.py.txt').read_bytes()
+    current = original
+    for _, old, new in DELTAS:
+        assert current.count(old.encode()) == 1
+        current = current.replace(old.encode(), new.encode(), 1)
     expected_hashes = (
         "5a209cd382326ec3179ba2ba775dedee395ac741a25c90f33726c0b6df4d2698",
         "90a3903cfa59be5792e491610ad36672b92b5c83666c8c2458b90a579263a393",

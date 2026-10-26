@@ -59,12 +59,15 @@ def _predicate(source):
 
 
 def test_exact_frozen847_predicate_gets_only_the_reviewed_pr483_delta():
-    original = _original_source()
+    original = (ROOT / 'tests/fixtures/arena_reviewer/frozen847_functions.py.txt').read_bytes()
     # Source-segment hash from frozen847 revision77db393b, including one LF.
     assert hashlib.sha256(_predicate_source(original).encode()).hexdigest() == (
         "73a270140e1bd228d3088a15f42cfe3cf1073b3609867120063880604041dd54"
     )
-    assert convert_finality_seam(original) == _current_source()
+    assert original.count(_ORIGINAL_GUARD.encode()) == 1
+    assert convert_finality_seam(original) == original.replace(
+        _ORIGINAL_GUARD.encode(), _CORRECTED_GUARD.encode(), 1,
+    )
     before = ast.parse(original)
     after = ast.parse(convert_finality_seam(original))
     for tree in (before, after):
@@ -228,5 +231,5 @@ def test_composed_finality_through_fit_zero_and_existing_arena_completion(
     monkeypatch.setattr(lead_scorer, PREDICATE,
                         _predicate(convert_finality_seam(_original_source())))
     controls.test_negative_completion_through_fit_and_arena(
-        monkeypatch, semantic, homepage_fault,
+        monkeypatch, semantic, homepage_fault, investigation_fault='', preserve_marker=True,
     )

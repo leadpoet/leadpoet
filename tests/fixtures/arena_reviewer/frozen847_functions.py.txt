@@ -1,0 +1,510 @@
+# Exact function source from qualification/scoring/lead_scorer.py at 77db393b.
+# Kept independent of current grading for immutable repair controls.
+
+def _has_explicitly_unproven_fit_dimensions(
+    verdict: Mapping[str, Any],
+    incomplete: tuple[str, ...],
+    *,
+    icp: Optional[ICPPrompt] = None,
+    linkedin_refresh_outcome: str = "",
+    identity_receipt: Optional[Mapping[str, Any]] = None,
+    investigation_receipt: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """Recognize unavailable proof after one complete repair response."""
+
+    fields = {
+        "employee_size": (
+            "observed_employee_count",
+            "employee_size_matches",
+            "employee_size_evidence_url",
+            "employee_size_evidence_quote",
+        ),
+        "industry": (
+            "observed_industry",
+            "observed_subindustry",
+            "industry_matches",
+            "industry_activity_role",
+            "industry_evidence_url",
+            "industry_evidence_quote",
+        ),
+        "stage": (
+            "observed_company_stage",
+            "stage_matches",
+            "stage_evidence_url",
+            "stage_evidence_quote",
+        ),
+    }
+    if not incomplete or any(
+        dimension not in {*fields, "identity", "required_attribute", "geography"}
+        for dimension in incomplete
+    ):
+        return False
+    usage = (
+        investigation_receipt.get("usage")
+        if isinstance(investigation_receipt, Mapping)
+        else None
+    )
+    fetch_outcomes = (
+        usage.get("fetch_outcomes") if isinstance(usage, Mapping) else None
+    )
+    # Outcomes belong to this company's investigation. A later evidenced fetch
+    # can recover the same source; another source cannot clear its failure.
+    latest_source_outcomes = {}
+    unbound_transport_fault = False
+    for outcome in fetch_outcomes if isinstance(fetch_outcomes, list) else ():
+        if not isinstance(outcome, Mapping):
+            continue
+        transport_fault = (
+            outcome.get("ok") is False
+            and outcome.get("error_class") not in {
+                "provider_request_refused", "source_not_found", "source_gone",
+            }
+        )
+        source_hash = outcome.get("url_sha256")
+        if (
+            not isinstance(source_hash, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
+        ):
+            unbound_transport_fault |= transport_fault
+            continue
+        if outcome.get("ok") is False:
+            latest_source_outcomes[source_hash] = transport_fault
+        elif (
+            outcome.get("ok") is True
+            and type(outcome.get("loaded_text_length")) is int
+            and outcome["loaded_text_length"] > 0
+        ):
+            latest_source_outcomes[source_hash] = False
+    review_has_transport_fault = (
+        unbound_transport_fault or any(latest_source_outcomes.values())
+    )
+    investigation_claims = (
+        investigation_receipt.get("claims")
+        if isinstance(investigation_receipt, Mapping)
+        else None
+    )
+    completed_investigation = bool(
+        isinstance(investigation_receipt, Mapping)
+        and investigation_receipt.get("gate") == "company_evidence_investigation"
+        and investigation_receipt.get("completed_submitted_findings") is True
+        and investigation_receipt.get("failure_reason") == ""
+        and not review_has_transport_fault
+        and linkedin_refresh_outcome != "retryable_failure"
+    )
+    for dimension in incomplete:
+        investigation_target = {
+            "employee_size": "headcount",
+            "stage": "stage",
+            "industry": "industry",
+            "geography": "geography",
+        }.get(dimension)
+        finding = (
+            investigation_claims.get(investigation_target)
+            if isinstance(investigation_claims, Mapping) and investigation_target
+            else None
+        )
+        if (
+            completed_investigation
+            and investigation_target in (investigation_receipt.get("targets") or ())
+            and isinstance(finding, Mapping)
+            and finding.get("target") == investigation_target
+            and finding.get("status") == "UNPROVEN"
+            and finding.get("evidence_url") == ""
+            and finding.get("evidence_quote") == ""
+        ):
+            # A validated, completed investigation can reject the earlier
+            # broad observation without clearing its cached fields. Its typed
+            # finding proves exhausted company evidence, not a broken judge.
+            continue
+        if dimension == "geography":
+            # Geography has no legacy empty-observation shortcut. Only the
+            # completed typed investigation above establishes exhaustion.
+            return False
+        if dimension == "required_attribute":
+            claims = (
+                investigation_receipt.get("claims")
+                if isinstance(investigation_receipt, Mapping)
+                else None
+            )
+            finding = (
+                claims.get("required_attribute")
+                if isinstance(claims, Mapping)
+                else None
+            )
+            grounding = verdict.get(_REQUIRED_ATTRIBUTE_GROUNDING)
+            if not (
+                isinstance(investigation_receipt, Mapping)
+                and investigation_receipt.get("gate")
+                == "company_evidence_investigation"
+                and investigation_receipt.get("completed_submitted_findings")
+                is True
+                and investigation_receipt.get("failure_reason") == ""
+                and "required_attribute" in (
+                    investigation_receipt.get("targets") or ()
+                )
+                and isinstance(finding, Mapping)
+                and finding.get("status") == "UNPROVEN"
+                and isinstance(grounding, Mapping)
+                and grounding.get("status") == "unproven"
+                and not review_has_transport_fault
+                and linkedin_refresh_outcome != "retryable_failure"
+            ):
+                return False
+            continue
+        if dimension == "identity":
+            if not (
+                _is_same_domain_unproven_web_identity(identity_receipt)
+                or _is_verified_homepage_web_identity_conflict(identity_receipt)
+                or (
+                    isinstance(identity_receipt, Mapping)
+                    and identity_receipt.get("decision") == COMPANY_FIT_UNAVAILABLE
+                    and identity_receipt.get("reason_code")
+                    == "rebrand_continuity_unproven"
+                    and identity_receipt.get("evidence_source")
+                    == "company_web_reverification"
+                    # The submitted LinkedIn URL is optional. An explicit
+                    # empty slug can establish exhausted proof, but a missing
+                    # or malformed receipt field cannot.
+                    and isinstance(
+                        identity_receipt.get("submitted_linkedin_slug"), str
+                    )
+                    and (
+                        identity_receipt["submitted_linkedin_slug"] == ""
+                        or bool(
+                            identity_receipt["submitted_linkedin_slug"].strip()
+                        )
+                    )
+                    and all(
+                        isinstance(identity_receipt.get(field), str)
+                        and bool(identity_receipt[field].strip())
+                        for field in (
+                            "submitted_name", "submitted_domain",
+                            "observed_name", "observed_domain",
+                            "observed_linkedin_slug",
+                        )
+                    )
+                    and identity_receipt["submitted_domain"]
+                    != identity_receipt["observed_domain"]
+                    and isinstance(investigation_receipt, Mapping)
+                    and investigation_receipt.get("gate")
+                    == "company_evidence_investigation"
+                    and investigation_receipt.get("completed_submitted_findings")
+                    is True
+                    and investigation_receipt.get("failure_reason") == ""
+                    and "rebrand" in (investigation_receipt.get("targets") or ())
+                    and isinstance(investigation_receipt.get("claims"), Mapping)
+                    and isinstance(
+                        investigation_receipt["claims"].get("rebrand"), Mapping
+                    )
+                    and investigation_receipt["claims"]["rebrand"].get("status")
+                    == "UNPROVEN"
+                    and not review_has_transport_fault
+                    and linkedin_refresh_outcome != "retryable_failure"
+                )
+            ):
+                return False
+            continue
+        if dimension == "industry":
+            if not all(field in verdict for field in fields[dimension]):
+                return False
+            observed_industry = verdict.get("observed_industry")
+            observed_subindustry = verdict.get("observed_subindustry")
+            effective_evidence = _dimension_web_evidence(verdict, dimension)
+            if (
+                icp is None
+                or not isinstance(observed_industry, str)
+                or not observed_industry.strip()
+                or not isinstance(observed_subindustry, str)
+                or verdict.get("industry_matches") is not False
+                or verdict.get("industry_activity_role") != "supplier_operator"
+                or not effective_evidence.get("url")
+                or not effective_evidence.get("quote")
+                or _industry_evidence_decision(
+                    observed_industry,
+                    observed_subindustry,
+                    icp.industry,
+                    verdict.get("industry_matches"),
+                    semantic_evidence=effective_evidence,
+                    industry_activity_role=verdict.get(
+                        "industry_activity_role"
+                    ),
+                )
+                != COMPANY_FIT_UNAVAILABLE
+            ):
+                return False
+            continue
+        if (
+            dimension == "employee_size"
+            and linkedin_refresh_outcome == "retryable_failure"
+        ):
+            return False
+        observed, matches, evidence_url, evidence_quote = fields[dimension]
+        if not all(
+            field in verdict
+            for field in (observed, matches, evidence_url, evidence_quote)
+        ):
+            return False
+        observed_value = verdict.get(observed)
+        if dimension == "employee_size":
+            if observed_value is not None:
+                effective_evidence = _dimension_web_evidence(
+                    verdict, dimension
+                )
+                if (
+                    icp is not None
+                    and isinstance(observed_value, str)
+                    and bool(observed_value.strip())
+                    and observed_value not in LINKEDIN_EMPLOYEE_BUCKETS
+                    and _decision_from_observed_employee_size(
+                        dict(verdict), icp
+                    )
+                    == COMPANY_FIT_UNAVAILABLE
+                    and bool(effective_evidence.get("url"))
+                    and bool(effective_evidence.get("quote"))
+                ):
+                    # A complete direct citation paired with a noncanonical
+                    # employee value proves no supported size bucket. After
+                    # the one fresh repair this is insufficient evidence, not
+                    # a provider failure. A failed LinkedIn refresh returned
+                    # above and remains retryable.
+                    continue
+                return False
+        elif observed_value is not None and observed_value != "":
+            normalized_stage = _normalize_company_stage(observed_value)
+            effective_evidence = _dimension_web_evidence(verdict, dimension)
+            if normalized_stage and not _stage_quote_supports_observation(
+                normalized_stage,
+                effective_evidence["quote"],
+            ):
+                continue
+            return False
+        if verdict.get(matches) is not None:
+            return False
+        if verdict.get(evidence_url) != "" or verdict.get(evidence_quote) != "":
+            return False
+        effective_evidence = _dimension_web_evidence(verdict, dimension)
+        if effective_evidence.get("url") or effective_evidence.get("quote"):
+            return False
+    return True
+
+def _targeted_company_investigation_dimensions(
+    result: CompanyFitDecisionResult,
+    *,
+    icp_stage: str,
+    employee_size_conflict: bool,
+    company: Optional[CompanyOutput] = None,
+    verified_rebrand_redirect: Optional[Mapping[str, str]] = None,
+    verified_homepage_identity: Optional[Mapping[str, Any]] = None,
+    verified_structured_identity: Optional[Mapping[str, Any]] = None,
+    verified_transport_domain: str = "",
+    homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
+) -> tuple[str, ...]:
+    """Select only fact gaps and unsupported semantic company disputes."""
+
+    details = result.details if isinstance(result.details, Mapping) else {}
+    raw_dimensions = details.get("dimension_decisions")
+    dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
+    targets: list[str] = []
+    provider_observations = details.get("provider_observations")
+    observations = (
+        provider_observations
+        if isinstance(provider_observations, Mapping)
+        else {}
+    )
+    submitted_stage_conflict = bool(
+        company
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+        and _submitted_intent_stage_conflicts(company, icp_stage)
+    )
+    current_public_stage_check = bool(
+        _normalize_company_stage(icp_stage) == "public"
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+    )
+    current_venture_stage_check = bool(
+        _normalize_company_stage(icp_stage)
+        in {"seed", "series a", "series b", "series c+"}
+        and dimensions.get("stage") == COMPANY_FIT_MATCH
+    )
+    if (
+        icp_stage
+        and (
+            dimensions.get("stage")
+            in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+            or submitted_stage_conflict
+            or current_public_stage_check
+            or current_venture_stage_check
+        )
+    ):
+        targets.append("stage")
+    identity = details.get("identity_receipt")
+    homepage_alias_slug = str(
+        (verified_homepage_identity or {}).get("linkedin_company_slug") or ""
+    ).casefold()
+    structured_alias_slug = (
+        _bound_structured_legal_brand_alias_slug(
+            identity, verified_structured_identity, verified_transport_domain,
+        )
+        if isinstance(identity, Mapping) else ""
+    )
+    if homepage_alias_slug and homepage_alias_slug != structured_alias_slug:
+        structured_alias_slug = ""
+    if details.get("identity_decision") != COMPANY_FIT_MATCH and (
+        bool(verified_rebrand_redirect)
+        or (
+            isinstance(identity, Mapping)
+            and (
+                (
+                    identity.get("submitted_domain")
+                    and identity.get("observed_domain")
+                    and identity.get("submitted_domain")
+                    != identity.get("observed_domain")
+                )
+                or (
+                    identity.get("evidence_source")
+                    == "company_web_reverification"
+                    and _same_domain_name_alias({
+                        **identity,
+                        "verified_linkedin_slug": (
+                            homepage_alias_slug or structured_alias_slug
+                        ),
+                    })
+                )
+            )
+        )
+    ):
+        targets.append("rebrand")
+    conflict_receipt = details.get("employee_size_conflict_receipt")
+    linkedin_primary = bool(
+        isinstance(conflict_receipt, Mapping)
+        and conflict_receipt.get("resolution")
+        == "structured_linkedin_employee_count_range_primary"
+    )
+    if not linkedin_primary and (
+        employee_size_conflict
+        or dimensions.get("employee_size")
+        in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+    ):
+        targets.append("headcount")
+    dimension_evidence = details.get("dimension_evidence")
+    industry_evidence = (
+        dimension_evidence.get("industry", {})
+        if isinstance(dimension_evidence, Mapping)
+        else {}
+    )
+    reviewable_industry_mismatch = bool(
+        dimensions.get("industry") == COMPANY_FIT_MISMATCH
+        and (
+            (
+                observations.get("industry_activity_role") == "unresolved"
+                and observations.get("industry_matches") is False
+            )
+            or (
+                observations.get("industry_activity_role")
+                in _NON_SUPPLIER_INDUSTRY_ACTIVITY_ROLES
+                and observations.get("industry_matches") in {True, False}
+            )
+        )
+        and isinstance(industry_evidence, Mapping)
+        and industry_evidence.get("url")
+        and industry_evidence.get("quote")
+    )
+    if (
+        dimensions.get("industry") == COMPANY_FIT_UNAVAILABLE
+        or reviewable_industry_mismatch
+    ):
+        targets.append("industry")
+    # A proven outside-region headquarters remains terminal. Research is used
+    # only when the broad verifier did not establish a usable headquarters.
+    if dimensions.get("geography") == COMPANY_FIT_UNAVAILABLE:
+        targets.append("geography")
+    elif dimensions.get("geography") == COMPANY_FIT_MATCH:
+        # A third-party HQ match cannot bypass a known first-party contact or
+        # about page. The locator is only a fetch target, never an HQ claim.
+        raw_evidence = (
+            details.get("dimension_evidence", {}).get("geography", {})
+            if isinstance(details.get("dimension_evidence"), Mapping)
+            else {}
+        )
+        web_evidence = (
+            raw_evidence.get("web_evidence") or raw_evidence
+            if isinstance(raw_evidence, Mapping)
+            else {}
+        )
+        evidence_url = (
+            _valid_web_evidence_url(web_evidence.get("url"))
+            if isinstance(web_evidence, Mapping)
+            else ""
+        )
+        anchor = (
+            verified_homepage_identity
+            if isinstance(verified_homepage_identity, Mapping)
+            else {}
+        )
+        first_party_domain = str(
+            anchor.get("registrable_dns_domain") or ""
+        ).strip().casefold()
+        evidence_domain = _registrable_domain(evidence_url) if evidence_url else ""
+        if (
+            details.get("identity_decision") == COMPANY_FIT_MATCH
+            and first_party_domain
+            and evidence_domain
+            and evidence_domain != first_party_domain
+            and _priority_headquarters_navigation_source(
+                ("geography",),
+                _validated_homepage_navigation_locators(
+                    homepage_navigation_locators,
+                    positive_semantic_review=False,
+                    headquarters_review=True,
+                    verified_homepage_identity=anchor,
+                ),
+            )
+        ):
+            targets.append("geography")
+    return tuple(targets)
+
+def _positive_semantic_review_needed(
+    result: CompanyFitDecisionResult,
+    icp: ICPPrompt,
+    investigation_targets: Sequence[str],
+) -> bool:
+    """Audit a narrow positive that could still become an eligible company."""
+
+    active_attribute = str(
+        getattr(icp, "required_attribute", "") or ""
+    ).strip()
+    if not active_attribute:
+        return False
+    details = result.details if isinstance(result.details, Mapping) else {}
+    raw_dimensions = details.get("dimension_decisions")
+    dimensions = raw_dimensions if isinstance(raw_dimensions, Mapping) else {}
+    if dimensions.get("industry") != COMPANY_FIT_MATCH:
+        return False
+    attribute_decision = details.get("required_attribute_decision")
+    if attribute_decision not in {
+        COMPANY_FIT_MATCH,
+        COMPANY_FIT_UNAVAILABLE,
+    }:
+        return False
+    if result.decision in {COMPANY_FIT_MATCH, COMPANY_FIT_UNAVAILABLE}:
+        return True
+
+    target_dimensions = {
+        {
+            "stage": "stage",
+            "headcount": "employee_size",
+            "rebrand": "identity",
+            "industry": "industry",
+            "geography": "geography",
+        }[target]
+        for target in investigation_targets
+    }
+    mismatches = {
+        dimension
+        for dimension, decision in dimensions.items()
+        if decision == COMPANY_FIT_MISMATCH
+    }
+    if details.get("identity_decision") == COMPANY_FIT_MISMATCH:
+        mismatches.add("identity")
+    if details.get("required_attribute_decision") == COMPANY_FIT_MISMATCH:
+        mismatches.add("required_attribute")
+    return bool(mismatches) and mismatches.issubset(target_dimensions)

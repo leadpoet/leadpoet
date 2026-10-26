@@ -1,4 +1,149 @@
-# Draft PR verification — 2026-10-23
+# Reasoning capture verification
+
+## Final capture audit, October 26
+
+PR #790 fixes three reproduced defects on source `70f2a4b0a`:
+
+- Codex and the broker now share the existing search-history shape check.
+  Unsupported provider items stay unchanged. Policy-off SSE remains unchanged.
+- Chat citation annotations now appear in the readable timeline with their
+  original source paths, values and order. Raw responses were already retained.
+- A long production baseline exceeded the final export's 2-million-node budget.
+  Each joined call and input snapshot now has that budget, with a separate shared
+  envelope budget. Every value still passes the same privacy and depth checks.
+  Individual request and response limits are unchanged.
+
+The defects failed before their fixes. Independent review checked preserved
+policy-off behavior, privacy, malformed search events and export limits. The
+829-check release gate passed. The final affected privacy/export checks passed
+490 tests; an independent reviewer passed 177 further checks and compared
+4,000 unchanged default sanitization cases.
+
+Current-source replay also preserved the original 25-route proof: 75 strict
+input/output pairs, 66 full-thinking replies, nine explicit zero-token replies,
+and all 76 original wire hashes. All 1,943 previous readable values or aliases
+remain represented. This is an offline replay of prior live compatibility tests,
+not a new paid run or proof of scored training eligibility.
+
+The full CI run timed out after reporting failures outside the focused gates.
+Across 4,745 test identities shared with the parent run, no parent-passing test
+newly failed. Representative unit and PostgreSQL failures reproduced on both
+commits. Another 208 failures or errors were not reached by parent CI and are
+not all attributed. Full CI is not a passing verification claim.
+
+Canonical gateway and primary-validator deployment completed at 08:23 UTC on
+October 26. Installed source hashes match `70f2a4b0a`; the restart guard and locks
+were released. Captured leases were preserved through the normal drain.
+Existing round settings, scorer image, costs and schema permissions are unchanged.
+
+Fresh exports from six actual baseline and miner executions contain 3,099 calls.
+A separate paginated SQL and object-store read matched all 3,099 saved requests,
+2,954 returned response bodies, privacy projections and accounting states, with
+zero mismatches. The other 145 records have no returned body and remain marked
+uncertain. The readable views preserve 35,538 checked source values, 503 reasoning
+text paths and 132 Chat citation arrays, with no projection truncation. These
+are fresh reads of existing production executions, not six new model runs.
+The installed helper also passed policy-on/off HTTP-stream checks; the installed
+broker preserved the original TYCHE request and its verified search normalization.
+
+Full-thinking activation stays off: a compatible baseline and a successful
+scored full-policy workflow remain required. Training-use permission remains
+unconfirmed. Legacy capture gaps and incomplete scoring authority remain visible;
+these exports do not prove that every run qualifies for a training dataset.
+
+Capture completeness refers to retained provider-visible evidence. It does not
+prove that written reasoning caused an action, expose private provider thoughts,
+or reconstruct search pages the provider did not return. Strict dataset
+eligibility remains separate from successful collection. Historical gaps stay
+visible and are not filled with inferred data.
+
+## Latest follow-up, October 25
+
+PR #732 is merged and deployed. Full-thinking activation remains off. Later
+entries below retain their original dates and do not represent current status.
+
+Three narrow follow-ups addressed real TYCHE failures and final review findings.
+They are merged; see the October 26 entry for the latest installation status.
+PR #783 keeps
+verified provider output failures within the existing 80% ICP coverage rule.
+It does not accept malformed outputs as training targets or relax provenance,
+privacy or cost checks. PR #784 translates a completed native hosted-search
+history event to OpenRouter's required type at the provider boundary. The
+original miner request remains stored unchanged; no miner code changes are
+required. PR #786 restores policy-off Codex stream bytes and requires an inferred
+cap cut to be the final generated argument. These changes need no migration,
+new miner settings, receipts or logging.
+
+The exact original TYCHE request returned HTTP 400. A controlled comparison
+changed only the search event type and returned HTTP 200. The corrected broker
+then sent byte-identical normalized input through the actual Linux gVisor
+runner, worker socket, disposable capture SQL through migration 574 and private
+S3. It returned HTTP 200, one validated next-response candidate and no provider
+capture gaps. The fixture does not test migration 575's separate scoring repair.
+The provider reported 1,202 reasoning tokens with text and $0.006329604,
+accounted as 6,330 microUSD.
+This was a saved-request replay, not a fresh TYCHE research or scoring run.
+
+Two genuine Linux TYCHE runs retained their source unchanged and enabled hosted
+search through the model's existing settings. Independent checks matched 396
+S3 reads for TYCHE02 and 639 for TYCHE03. TYCHE03 retained exposed thinking text
+in all 71 successful replies with positive reasoning usage, totaling 18,000
+reported reasoning tokens. Another 22 replies explicitly reported zero. Six
+hosted events and five citations were preserved. Neither run found a company.
+TYCHE03 also has 19 dispatch-only records from a private test budget-guard error
+before provider dispatch. That test guard is now fixed;
+its original incomplete records remain excluded. These runs do not establish
+successful lead sourcing, a complete scored trajectory or activation readiness.
+The historical tc35 7/8 approximate replay is not used as verified evidence.
+
+The native continuation fix passed 562 focused checks and the 829-check release
+gate. Independent review passed 341 checks, with one optional native test skipped;
+the owner's focused run included the pinned native binary. Old saved full-policy
+records remain valid, but resubmitting an affected old request after upgrading
+changes its canonical identity. Production has zero configured full-thinking
+rounds. This fix must be installed before activation, not during an old
+full-policy run.
+
+Final review of #786 independently compared policy-off SSE with the pre-PR
+encoder and ran pinned Codex 0.154 in both policy modes. Compound tests preserve
+strict rejection of altered evidence and nonfinal malformed arguments. On the
+latest-main integration, 645 checks passed with one Linux-only skip, 153 further
+capture/failure checks passed, and the 829-check release gate passed. The Linux
+sandbox and installed-source checks are recorded after deployment below.
+
+The optional Linux smoke exposed a pre-existing test error: its 60-second
+deadline could not cover the bridge's existing 65-second host allowance and
+two-second margin. PR #787 changes only that fixture to 90 seconds inside a
+120-second sandbox and adds bounded synthetic diagnostics. The corrected test
+passed in real gVisor against both the previous and final source. Production
+timeouts and model behavior are unchanged.
+
+Independent replay against `fcf91e654` preserved all five original evidence
+sets. Readable views matched exactly and every checked event resolved to its
+raw source. The successful `focused04` component test retained four exact
+targets, 342 reasoning tokens, both local error/recovery results and the strict
+final JSON. Original files and prior S3-read evidence were not rewritten.
+
+The later review's remaining points do not justify changing the runtime rules:
+
+- Hosted search counts toward provider-visible capture coverage. Its export is
+  labeled `provider_executed_trajectory`; internal provider prompts and search
+  content that were not returned remain unavailable. This is not proof of a
+  reproducible local training example. No internal context is invented.
+- The code-review claim types form three disjoint class sets. Repeated evidence
+  for an allowed claim already passes. There is no extra same-class claim in
+  the current vocabulary; accepting a conflicting claim would weaken validation.
+- The Exa scorer change still needs measured accuracy evidence before a new
+  scorer image is selected. This release does not publish or select that image.
+- A suitable baseline, training-use permission and a successful scored run
+  under the new coverage policy remain activation prerequisites. The policy
+  stays off; these capture checks do not establish activation readiness.
+
+Current-task OpenRouter accounting is $0.8872432620 confirmed and $6.989051
+reserved for uncertain attempts, within $10. The two later TYCHE runs used
+$0.096 in research-provider calls; the shared research ledger accounts for
+$7.703750 of its $10 limit. Uncertain charges were not released. No new miner
+receipts, logging requirements, scoring changes or policy activation were added.
 
 ## Provider options for every approved model, October 25
 
@@ -1107,3 +1252,74 @@ TYCHE source archive was unchanged, but model and plain-tool settings were
 changed in memory; this is not proof of the unchanged configuration or production
 sandbox. Confirmed model cost was $0.073593; neither run proves a complete scored
 ICP or successful lead sourcing.
+
+
+## October 25 deployed capture verification
+
+PR #732 merged as `b967993769e17b50789f0f285ced156dfde9c890`.
+The exact committed migrations 565–570 were applied. Canonical gateway and
+validator deployment completed, and independent reads verified both live source
+identities, 24 release-critical SQL function hashes and privileges, and schema
+permissions. Existing frozen scoring, cost caps, published rankings and the
+inactive reasoning policy were preserved. Deployment did not activate the new
+policy. Later main commit `a4bce6a92` changed tests only.
+
+The final isolated component test ran the deployed source in the actual Linux
+gVisor runner, through the worker socket, broker, disposable current Arena SQL
+fixture and private S3 storage. It completed hosted search, local tool validation,
+a real error result, a corrected tool call, and strict final JSON. Four actual
+provider replies produced four valid step candidates. Three replies exposed
+342 reasoning tokens with text; the hosted reply explicitly reported zero.
+Two hosted events and five citations retained their original order.
+
+Independent checks compared exact wire bytes with SQL, worker writes, exports
+and readable output. All 36 independent S3 reads matched. The final JSON matched
+the actual provider reply and local tool result; all five official cited pages
+returned HTTP 200. The local error tested a canonical-name requirement: the
+model changed “Azure cloud platform” to “Microsoft Azure”. This is not evidence
+that the first phrase was factually wrong. Original arguments and both tool
+results remain stored. No model answer or acknowledgement was synthesized.
+
+This diagnostic was not a scored Arena round. Its strict export correctly keeps
+`scoring_label_unavailable`; candidate shape validation does not create a valid
+training label. The SQL fixture matched all 24 relevant production functions
+and 196 of its 198 total functions. Two auxiliary telemetry/chain functions use
+earlier fixture versions and were not exercised. Fixture seeding temporarily
+supplied a required default, which was removed before execution. Production SQL
+was not altered for the test.
+
+The native Codex Linux control accepted hosted search continuation and the real
+TYCHE MCP transport. It repeated tools until the six-POST diagnostic limit and
+did not produce final JSON. Earlier focused failures, including an uncited URL
+and unavailable facts, remain recorded rather than repaired. Current TYCHE
+hardcodes a Luna model and derives its code-mode choice from that model setting.
+Choosing DeepSeek selects TYCHE's existing plain-MCP path automatically. The
+earlier in-memory MODEL and CODE_MODE overrides reproduced that model-dependent
+setting; they did not add a new architecture. A complete Linux TYCHE scoring run
+is still unverified. No miner logging callback or receipt protocol was added.
+
+The deployed component checks cost $0.092186 in OpenRouter calls. Current-task
+confirmed spend is $0.5985062620; $3.757891 remains reserved for older uncertain
+attempts under the $10 cap. Unused component reservations were released only
+after reconciliation. No separate search or scraping provider calls were made;
+hosted search charges are included in the OpenRouter total.
+
+The required local release gate passed 829 checks. Independent review and the
+preserved-behavior suites are recorded above. The PR-head and later-main CI runs
+hit the 60-minute limit. Of 203 observed PR-head failures, 193 are demonstrated
+on pre-PR code: 190 reproduce locally with the same errors, and the earlier
+Linux CI provides additional evidence. The remaining ten pass on both versions
+locally; their CI cause remains unresolved. One additional later-main CI failure
+also passes on both versions locally. No PR-only failure was found in these
+comparisons. This is not a green full suite: the local comparison substitutes
+macOS/native PostgreSQL for Linux/Docker, and the timeout leaves tests unrun.
+
+A separate canonical validator restart completed at 00:54 UTC on October 26.
+Independent reads at 00:55–00:56 confirmed both services ready on `b96799376`,
+free restart locks, all 1,648 validator source files and eight critical gateway
+modules matching, and application weights/scoring readiness events. This task
+did not interrupt the concurrent restart. No new scored production run or
+post-restart finalized weight reveal was established in this observation window.
+Full-thinking activation still requires a compatible baseline and the separate
+activation checks. Capture correctness does not prove lead quality or that a
+model's written thinking faithfully explains its decisions.

@@ -1,6 +1,6 @@
 {
   "schema_version": "hosted-capture-verification.v1",
-  "execution": "Actual OpenRouter through broker, worker socket, disposable PostgreSQL RPC/SQL ledger and local object store; no production execution claimed.",
+  "execution": "Evidence is scoped per scenario: earlier local compatibility probes, followed by deployed Linux/gVisor component tests using actual OpenRouter, disposable SQL and private S3. No successful scored TYCHE production round is claimed.",
   "scenarios": [
     {
       "case": "fireworks-04",
@@ -218,5 +218,423 @@
     "limitation": "This run proves capture and error retention, not successful lead sourcing, unchanged configuration, hosted-search choice, gVisor parity or a complete scored ICP.",
     "model_POSTs": 70,
     "tyche_tracked_source_unchanged": true
+  },
+  "deployed_release": {
+    "merge_commit": "b967993769e17b50789f0f285ced156dfde9c890",
+    "pr": 732,
+    "gateway_identity_verified": true,
+    "validator_identity_verified": true,
+    "production_migrations_applied": [
+      565,
+      566,
+      567,
+      568,
+      569,
+      570
+    ],
+    "production_functions_verified": 24,
+    "schema_acl_preserved": true,
+    "existing_publication_rankings_verified": 34,
+    "full_thinking_policy_activated": false,
+    "frozen_scorer_changed": false,
+    "existing_round_caps_changed": false
+  },
+  "deployed_linux_capture_flow": {
+    "case": "focused04",
+    "mode": "operator component diagnostic, not an eligible or scored Arena round",
+    "runtime": "Actual deployed Linux gVisor runner and worker socket",
+    "source_files_verified": 1648,
+    "database": "Disposable PostgreSQL 16; current Arena migration fixture",
+    "database_parity": {
+      "release_critical_functions_matching": 24,
+      "fixture_functions_matching": 196,
+      "fixture_functions_compared": 198,
+      "excluded_function_differences": [
+        "append_validator_events_v1: validator telemetry",
+        "record_chain_outcome_v1: validator chain outcome"
+      ]
+    },
+    "objects": "Actual private S3 storage with independent readback",
+    "model": "deepseek/deepseek-v4.1-flash-1017",
+    "provider": "together",
+    "api": "openrouter.responses",
+    "provider_calls": 4,
+    "successful_provider_calls": 4,
+    "hosted_search_events": 2,
+    "citation_urls": 5,
+    "full_thinking_calls": 3,
+    "reported_reasoning_tokens": 342,
+    "explicit_zero_reasoning_calls": 1,
+    "raw_wire_SQL_worker_export_match": true,
+    "readable_provider_order_preserved": true,
+    "valid_step_candidates": 4,
+    "candidate_errors": [],
+    "provider_capture_gaps": [],
+    "strict_final_json": true,
+    "final_json_equals_actual_provider_and_tool_output": true,
+    "independent_s3_readbacks": 36,
+    "independent_s3_mismatches": 0,
+    "official_citation_http_checks": 5,
+    "official_citation_http_successes": 5,
+    "confirmed_cost_microusd": 9633,
+    "local_validation_recovery": "One local canonical-name validator rejected Azure cloud platform; the model changed it to Microsoft Azure. The original phrase was not shown to be factually false. Both original arguments and actual error/success results were preserved.",
+    "custom_miner_acknowledgements": 0,
+    "strict_trajectory_complete": false,
+    "strict_trajectory_incomplete_reasons": [
+      "scoring_label_unavailable"
+    ]
+  },
+  "deployed_linux_other_controls": [
+    {
+      "case": "focused01",
+      "successful_calls": 2,
+      "candidate_count": 2,
+      "result": "Preserved actual placeholder URL failure; no final output repair."
+    },
+    {
+      "case": "native01",
+      "successful_calls": 6,
+      "candidate_count": 6,
+      "result": "Codex 0.154 accepted hosted continuation and actual TYCHE MCP transport; model repeated tools and did not finish before the six-POST diagnostic limit. Not the full TYCHE workflow."
+    },
+    {
+      "case": "focused02",
+      "successful_calls": 3,
+      "candidate_count": 3,
+      "result": "Final JSON and capture passed, but model said facts were not verifiable. Not a factual-quality pass."
+    },
+    {
+      "case": "focused03",
+      "successful_calls": 2,
+      "candidate_count": 2,
+      "result": "Current SQL capture passed; one uncited URL failed local validation. No final output repair."
+    }
+  ],
+  "tyche_unchanged_code_mode_limit": "TYCHE hardcodes its default Luna model and derives CODE_MODE from MODEL at import. Selecting DeepSeek automatically uses its existing plain-MCP path. The prior in-memory MODEL and CODE_MODE=False overrides reproduce that model-dependent setting, not a new agent architecture. The approved DeepSeek native request lacks the Luna-specific code-mode interface, but this is not an established Arena incompatibility. A complete Linux TYCHE scoring run remains unverified; no logging or receipt protocol was added.",
+  "test_budget": {
+    "openrouter_cap_usd": "10",
+    "confirmed_task_usd": "0.8872432620",
+    "unresolved_attempt_reservations_usd": "6.989051",
+    "deployed_component_confirmed_usd": "0.092186",
+    "uncertain_charges_released": false,
+    "separate_search_scraping_provider_spend_usd": "0.096",
+    "hosted_search_cost_included_in_openrouter": true,
+    "shared_search_scraping_accounted_usd": "7.703750",
+    "shared_search_scraping_cap_usd": "10"
+  },
+  "later_live_read": {
+    "observed_at": "2026-10-26T00:35:23Z",
+    "gateway_ready": true,
+    "validator_ready": false,
+    "validator_state": "deactivating/stop-sigterm; separate canonical restart draining active work",
+    "restart_target_commit": "b967993769e17b50789f0f285ced156dfde9c890",
+    "restart_owner_lock_held": true,
+    "source_files_verified": 1648,
+    "source_mismatches": 0,
+    "restart_interrupted_by_this_task": false,
+    "new_postrestart_finalized_reveal_proven": false
+  },
+  "ci_comparison": {
+    "pr_ci_run": 40245855208,
+    "base_ci_run": 40244335677,
+    "later_main_ci_run": 40246425911,
+    "base_commit": "edf89acd19ea17e75da7986cebc431ee472d28ab",
+    "tested_head_commit": "d483adbf93cbcb7df13c58a025123617585e0c27",
+    "merge_commit": "b967993769e17b50789f0f285ced156dfde9c890",
+    "full_ci_status": "cancelled_at_60_minute_limit",
+    "observed_failure_count": 203,
+    "preexisting_failures_demonstrated": 193,
+    "same_failure_reproduced_locally_on_both_refs": 190,
+    "same_failure_observed_in_base_linux_ci": 69,
+    "passed_base_failed_head_in_observed_linux_overlap": 0,
+    "remaining_ci_failures_not_reproduced_on_either_ref": [
+      "tests/lab_arena/funding_proof_throughput554_postgres_test.py::test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history",
+      "tests/lab_arena/held_recovery_admission539_postgres_test.py::test_settled_boundary_restoration_still_reaches_ordinary_publication",
+      "tests/lab_arena/infrastructure_cost_lookup482_postgres_test.py::test_production_cardinality_lookup_is_indexed_and_bounded",
+      "tests/lab_arena/judge_final_deadline530_postgres_test.py::test_full_service_late_publication_preserves_verified_real_scores",
+      "tests/lab_arena/legacy_partial_postgres_test.py::test_signed_failure_persists_then_retry_scores_only_unresolved_and_final_cache_accepts",
+      "tests/lab_arena/model_policy_supersession517_postgres_test.py::test_saved_outputs_regrade_through_service_persistence_and_publication",
+      "tests/lab_arena/owner_stopped_score_drain454_postgres_test.py::test_held_owner_drain_preserves_costs_frozen_claim_and_authorizes[1]",
+      "tests/lab_arena/recovery_lock_order523_postgres_test.py::test_saved_outputs_still_accept_persist_and_publish",
+      "tests/lab_arena/restore_recorded_results538_postgres_test.py::test_archived_authority_restores_through_ordinary_aggregate_and_publication[False]",
+      "tests/lab_arena/restore_recorded_results538_postgres_test.py::test_archived_authority_restores_through_ordinary_aggregate_and_publication[True]"
+    ],
+    "pr_only_failure_found": false,
+    "limitations": [
+      "Full CI did not complete and is not green.",
+      "Local comparisons used macOS and native PostgreSQL15/17; Linux CI uses Ubuntu and Docker PostgreSQL.",
+      "Tests not reached before timeout are not covered by this attribution.",
+      "One additional later-main CI failure passed on both refs locally and remains unclassified."
+    ]
+  },
+  "post_drain_live_read": {
+    "observed_at": "2026-10-26T00:56:31Z",
+    "gateway_ready": true,
+    "validator_ready": true,
+    "release_commit": "b967993769e17b50789f0f285ced156dfde9c890",
+    "validator_source_files_verified": 1648,
+    "gateway_critical_source_files_verified": 8,
+    "source_mismatches": 0,
+    "restart_locks_free": true,
+    "application_weights_ready_observed": true,
+    "application_scoring_ready_observed": true,
+    "policy_activation_configured": false,
+    "new_scored_run_proven": false,
+    "new_finalized_reveal_proven": false
+  },
+  "tyche_linux_followup": {
+    "source_commit": "dcaeb4bacbb864bc10575fe1758cf487a3466324",
+    "codex_version": "0.154.0",
+    "miner_source_changed": false,
+    "hosted_web_enabled": true,
+    "model_setting": "DeepSeek through the existing model-dependent plain-MCP path",
+    "fresh_scored_sourcing_success": false,
+    "tyche02": {
+      "artifact_sha256": "865ca224a10d8e6f203e3f1f4ee5f852be9c89ee87bfbf2a0e89b4e066d0c8a3",
+      "wire_response_count": 107,
+      "exact_terminal_wire_sql_worker_export_count": 85,
+      "thinking_tokens": {
+        "reported_total": 25743
+      },
+      "hosted_search_events": 1,
+      "citation_urls": [],
+      "companies_count": 0,
+      "strict_capture_complete": false,
+      "independent_s3_get_count": 396,
+      "independent_s3_gets_match": true
+    },
+    "tyche03": {
+      "artifact_sha256": "7b7d3d4a08cb0c8a04d4047c0da242ddf60691a163514b7765c2914ad2131e41",
+      "wire_response_count": 183,
+      "reasoning_usage": {
+        "reported_reasoning_tokens": 18000,
+        "explicit_zero_reasoning_calls": 22,
+        "positive_missing_or_opaque_calls": 0,
+        "opaque_calls": 0
+      },
+      "hosted_search_events": 6,
+      "citation_count": 5,
+      "companies_count": 0,
+      "independent_s3_get_count": 639,
+      "independent_s3_all_match": true
+    },
+    "limitations": [
+      "TYCHE02 used shorter private wall-clock and call limits. TYCHE03 restored normal wall-clock and provider call quotas, with a separate paid-test allowance.",
+      "TYCHE03 has 19 dispatch-only records caused by the private budget guard raising an untyped error before a provider request. The guard was fixed and tested separately; the original incomplete records remain unchanged.",
+      "Both runs returned zero companies and are not successful sourcing/scoring or eligible training runs.",
+      "The separate tc35 7/8 replay is not independently verified and is not used as release proof."
+    ]
+  },
+  "provider_failure_followup": {
+    "pr": 783,
+    "merge_commit": "b222c02dfeaa50c193b9cb48b6fa403cc4c7127c",
+    "change": "Verified malformed provider outputs and precisely verified unavailable-upstream failures consume incomplete ICP coverage instead of disqualifying the entire entrant. Strict training targets remain excluded.",
+    "coverage_floor": 0.8,
+    "tampering_provenance_privacy_cost_guards_preserved": true,
+    "migration_required": false
+  },
+  "native_history_followup": {
+    "pr": 784,
+    "source_commit": "e0d08a138fc8126a1e1b40d42c5e88c5e9f8f986",
+    "change": "Normalize completed native web_search_call search history with an existing ID and query to the OpenRouter provider alias. Keep original miner request capture unchanged.",
+    "controlled_provider_comparison": {
+      "original_status": 400,
+      "one_type_field_change_status": 200,
+      "fixed_outbound_sha256": "4795da9014bf1be26700ce36fff4e311eb1f32efd8b35e6354c5928d87b857d2"
+    },
+    "real_broker_probe": {
+      "runtime": "Linux gVisor",
+      "postgres": "Disposable capture SQL fixture through migration574, excludes migration575 scoring repair",
+      "objects": "private S3",
+      "successful_provider_calls": 1,
+      "valid_step_candidates": 1,
+      "reported_reasoning_tokens": 1202,
+      "confirmed_cost_microusd": 6330,
+      "native_cli_exercised": false,
+      "scored": false,
+      "provider_capture_gaps": [],
+      "strict_trajectory_complete": false,
+      "strict_trajectory_incomplete_reasons": [
+        "scoring_label_unavailable"
+      ],
+      "independent_s3_readbacks": 22,
+      "independent_s3_mismatches": 0,
+      "reasoning_text_characters": 4443,
+      "independent_audit_sha256": "28b17872c4b59297cf2ac27da3dadf67583e0a69bd86cde3546119a5dd80e2ca"
+    },
+    "validation": {
+      "focused_passed": 562,
+      "independent_passed": 341,
+      "independent_optional_native_skip": 1,
+      "release_gate_passed": 829
+    },
+    "historical_limit": "Old stored records remain valid; fresh affected full-policy requests change canonical identity. No configured production full-thinking rounds exist. Do not hot-swap this broker into an active old full-policy run.",
+    "merge_commit": "a11c9662eaa438076088f45d2649b54f34a1859b"
+  },
+  "final_preservation_followup": {
+    "pr": 786,
+    "merge_commit": "fcf91e65446b1c4f6de8c65183d39b239d77c834",
+    "changes": [
+      "Restore historical Codex stream encoding when the policy is off.",
+      "Require an inferred cap cut to be the final output argument."
+    ],
+    "migration_required": false,
+    "tests": {
+      "focused_passed": 645,
+      "mac_linux_only_skip": 1,
+      "preservation_passed": 153,
+      "release_gate_passed": 829
+    },
+    "independent_saved_evidence": {
+      "artifact_sha256": "6ec315905b5425f5e191dfb5a1b8a6039cef0a0a3b986e294be2d61f439787c8",
+      "all_originals_unchanged": true,
+      "cases": [
+        {
+          "case": "focused03",
+          "candidate_count": 2,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 97,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        },
+        {
+          "case": "history-broker01",
+          "candidate_count": 1,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 67,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        },
+        {
+          "case": "tyche02",
+          "candidate_count": 76,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 7662,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        },
+        {
+          "case": "tyche03",
+          "candidate_count": 0,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 18290,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        },
+        {
+          "case": "focused04",
+          "candidate_count": 4,
+          "readable_equals_original": true,
+          "event_source_paths": {
+            "event_values_checked": 204,
+            "unresolved": 0,
+            "mismatches": 0
+          }
+        }
+      ]
+    },
+    "linux_test_correction": {
+      "pr": 787,
+      "test_commit": "65efa7f436f2ed7a6393df0c56c1aaafb9c523bb",
+      "cause": "Historical 60-second fixture deadline was shorter than the existing 67-second bridge allowance.",
+      "production_changed": false,
+      "corrected_test_passed_prior_and_final_source": true,
+      "provider": "synthetic; no paid calls"
+    },
+    "deployment": "Final installation verification pending; no activation."
+  },
+  "final_production_capture_audit_20261026": {
+    "source_commit": "70f2a4b0ab8b17a728b46d0d94f97c134b54278a",
+    "fix_pr": 790,
+    "fixes": [
+      "Share broker and Codex search-history shape validation without changing policy-off output.",
+      "Keep Chat citation annotations in the readable timeline.",
+      "Bound final aggregate privacy traversal per joined call/snapshot, retaining shared envelope and existing privacy/depth limits."
+    ],
+    "deployment": {
+      "completed_at": "2026-10-26T08:23:42.998752+00:00",
+      "gateway_and_primary_validator_installed": true,
+      "critical_source_hashes_match": true,
+      "canonical_guard_released": true,
+      "captured_leases_preserved": true,
+      "frozen_round_settings_unchanged": true,
+      "scorer_image_unchanged": true,
+      "schema_acl_unchanged": true,
+      "reasoning_policy_activated": false
+    },
+    "fresh_production_readback": {
+      "scope": "Fresh exports of existing actual baseline and miner executions, followed by independent SQL and object-store reads. No new provider calls.",
+      "runs": 6,
+      "provider_calls": 3099,
+      "saved_requests_compared": 3099,
+      "returned_bodies_compared": 2954,
+      "body_unavailable_uncertain_records": 145,
+      "mismatches": 0,
+      "latest_read_at": "2026-10-26T08:33:05.817297+00:00",
+      "export_sha256_by_sample": {
+        "deepseek26": "bda8ff855bd2384b2b7bd572aee6fbb75c239285b148a8be13609d5b463d931a",
+        "gptoss26": "e319cd209888bf4827125d5578799ad298b29d65ecc11954c01b532fc4b9af13",
+        "gemma26": "a2a670939e4d47607257361b7d3269438df66dce3352d06b0eb3c67338a89936",
+        "miner25": "118cc4053c3843833fe6c42ebb0be1bdcfb329ba0387857524e9c39b6e926389",
+        "baseline26": "dc60777b890848d331a59c062483781c5f6d90b266db1801df4ef94ebe4cf98c",
+        "baseline25": "b5b8b2d228f13d51377c8b28dbf36d2a829a134a30a6ad1334c0f2a55ec2ab8c"
+      }
+    },
+    "readable_view": {
+      "checked_source_values": 35538,
+      "reasoning_text_source_paths": 503,
+      "chat_citation_arrays": 132,
+      "all_source_paths_resolve": true,
+      "all_checked_reasoning_and_citations_preserved": true,
+      "projection_truncation": false,
+      "scope": "These production samples use Chat; native Responses order and hosted search are covered by the separate original TYCHE and live component evidence."
+    },
+    "stored_route_matrix": {
+      "routes": 25,
+      "strict_input_output_pairs": 75,
+      "thinking_replies": 66,
+      "explicit_zero_reasoning_replies": 9,
+      "wire_hashes_preserved": 76,
+      "original_files_unchanged": 236,
+      "scope": "Independent offline replay of original live tests on current source, not new paid calls or scored eligibility proof."
+    },
+    "validation": {
+      "release_gate_passed": 829,
+      "affected_privacy_export_checks_passed": 490,
+      "independent_review_checks_passed": 177,
+      "default_sanitization_differential_cases": 4000,
+      "installed_codex_policy_on_off_http_streams": "passed; synthetic provider boundary",
+      "installed_native_tyche_request_normalization": "passed; original captured request, no provider call",
+      "installed_provider_output_gap_classification": "passed; original TYCHE evidence",
+      "full_ci": "Not passing. Timed out after failures; focused gates passed. No parent-pass to current-fail among 4,745 shared identities. 208 failure/error identities were not reached by parent CI and are not all attributed."
+    },
+    "remaining_limits": [
+      "No compatible selected baseline or successful representative scored full-policy workflow; activation remains off.",
+      "Training-use permission is unconfirmed.",
+      "Legacy missing bodies, redactions, unresolved costs and incomplete score/source authority stay explicit and can exclude training rows.",
+      "Provider-hidden thoughts and unreturned hosted-search content cannot be reconstructed.",
+      "Capturing generated reasoning does not prove it caused the action.",
+      "No blanket zero-bug or full-CI claim."
+    ],
+    "independent_export_comparison": {
+      "all_six_preserve_captured_values_and_array_order": true,
+      "four_byte_identical": true,
+      "other_two_differences": [
+        "competition_cost_eligibility.observed_at",
+        "derived example_hash"
+      ],
+      "tool_calls_visible": 471,
+      "citation_items_visible": 1980,
+      "strict_thinking_train_eval_rows": 0,
+      "limit": "Existing legacy gaps, score and permission requirements remain. Data preservation is not complete-runtime or activation proof."
+    }
   }
 }

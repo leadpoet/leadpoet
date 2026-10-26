@@ -11,6 +11,7 @@ import json
 from collections.abc import Mapping, Sequence
 from urllib.parse import urlsplit
 
+MAX_SEARCH_LOCATOR_EXCERPT_CHARS = 400
 MAX_SOURCE_REFS = 24
 MAX_MESSAGES = 64
 MAX_MESSAGE_CHARS = 512_000
@@ -101,8 +102,14 @@ def _checked_source_provenance(request_document, messages, claims):
                 return
             digest = _hash(text)
         else:
-            # The host search adapter exposes just these exact locator fields.
-            if set(value) - {"url", "title"} or not isinstance(value.get("title", ""), str):
+            # An excerpt helps select a URL. Hash it as locator context only;
+            # it is never loaded evidence or a source of citation authority.
+            excerpt = value.get("discovery_excerpt")
+            if (set(value) - {"url", "title", "discovery_excerpt"}
+                    or not isinstance(value.get("title", ""), str)
+                    or (excerpt is not None and (
+                        not isinstance(excerpt, str) or not excerpt
+                        or len(excerpt) > MAX_SEARCH_LOCATOR_EXCERPT_CHARS))):
                 return
             digest = _hash(value)
         dedup = (kind, locator_ref["url_sha256"], digest)

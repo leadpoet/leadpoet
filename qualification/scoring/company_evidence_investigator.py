@@ -33,7 +33,9 @@ from qualification.competition_models import public_http_url
 from qualification.scoring.company_fit_decision import (
     _company_name, verified_homepage_brand_name,
 )
-from qualification.scoring.checked_sources import checked_source_provenance
+from qualification.scoring.checked_sources import (
+    MAX_SEARCH_LOCATOR_EXCERPT_CHARS, checked_source_provenance,
+)
 from qualification.scoring import industry_classification
 from qualification.scoring.country_data import US_STATES
 from qualification.scoring.company_verification import (
@@ -2410,8 +2412,11 @@ async def _search_web(
     *,
     key: str,
     include_domains: Sequence[str] = (),
+    discovery_highlights: bool = False,
 ) -> dict[str, Any]:
     payload = {"query": query[:500], "type": "auto", "numResults": MAX_SEARCH_RESULTS}
+    if discovery_highlights:
+        payload["contents"] = {"highlights": {"maxCharacters": MAX_SEARCH_LOCATOR_EXCERPT_CHARS}}
     if include_domains:
         # Exa's semantic query does not enforce a textual site: restriction.
         # Use the existing provider field for host-bound industry discovery.
@@ -2438,12 +2443,25 @@ async def _search_web(
         url = _safe_https_url(item.get("url") or item.get("id"))
         if not url or (include_domains and _registrable_domain(url) not in include_domains):
             continue
+        try:
+            public_http_url(url)
+        except ValueError:
+            continue
         # Search publication metadata can date a republication instead of the
         # transaction. Keep discovery to locators; fetched text owns chronology.
-        locators.append({
+        locator = {
             "url": url,
             "title": str(item.get("title") or "")[:300],
-        })
+        }
+        highlights = item.get("highlights")
+        if discovery_highlights and isinstance(highlights, list):
+            first = next((v for v in highlights if isinstance(v, str) and v.strip()), "")
+            excerpt = " ".join(re.sub(
+                r"[\x00-\x1f\x7f]", " ", first[:MAX_SEARCH_LOCATOR_EXCERPT_CHARS],
+            ).split())
+            if excerpt:
+                locator["discovery_excerpt"] = excerpt
+        locators.append(locator)
     return {"results": locators, "notice": "discovery_only_not_evidence"}
 
 
@@ -6003,6 +6021,7 @@ async def investigate_company_evidence(
                             search_calls += 1
                             search_options = {}
                             if forced_industry_search_call and industry_review_model:
+                                search_options["discovery_highlights"] = True
                                 search_options["include_domains"] = tuple(sorted(
                                     domain for domain in first_party_domains
                                     if _independently_bound_first_party_url(

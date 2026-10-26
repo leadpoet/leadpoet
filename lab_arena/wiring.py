@@ -616,6 +616,7 @@ def build_service_from_environment(mode: str):
             provider_funding_source_for=(
                 submission_keys.provider_funding_source_for
             ),
+            champion_score_for=submission_keys.champion_score_for,
             retry_miner_credential_for=(
                 submission_keys.retry_miner_credential_for
             ),

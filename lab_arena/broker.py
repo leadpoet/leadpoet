@@ -3709,6 +3709,7 @@ class Broker:
         provider_funding_source_for: Optional[
             Callable[[RunContext, str], str]
         ] = None,
+        champion_score_for: Optional[Callable[[RunContext], bool]] = None,
         retry_miner_credential_for: Optional[
             Callable[[RunContext], bool]
         ] = None,
@@ -3731,6 +3732,7 @@ class Broker:
         self._credential_for = credential_for
         self._funding_source_for = funding_source_for
         self._provider_funding_source_for = provider_funding_source_for
+        self._champion_score_for = champion_score_for
         self._retry_miner_credential_for = retry_miner_credential_for
         self._mark_provider_fallback = mark_provider_fallback
         self._provider_restart_required_for = provider_restart_required_for
@@ -4604,6 +4606,13 @@ class Broker:
                 parameters=normalized,
                 timeout_ms=route_timeout_ms,
                 allow_host_shadow_score=host_shadow_score_compat,
+                allow_champion_score=(
+                    getattr(context, "kind", "execute") == "score"
+                    and funding_source == "host"
+                    and operation.provider == "scrapingdog"
+                    and self._champion_score_for is not None
+                    and self._champion_score_for(context)
+                ),
                 source_content_fallback=source_content_fallback,
                 source_content_response_url=source_content_response_url,
                 frozen_catalog=context.deepline_catalog,
@@ -4638,6 +4647,15 @@ class Broker:
                         })
                 raise
             setup_phase = "credential_resolution"
+            # Compatibility routes can change the billed provider. Resolve its
+            # immutable payer before selecting its credential and reserving cost.
+            if (effective_operation.provider != operation.provider
+                    and self._provider_funding_source_for is not None):
+                funding_source = self._provider_funding_source_for(
+                    context, effective_operation.provider
+                )
+                if funding_source not in ("host", "miner_key"):
+                    raise BrokerError("broker_unavailable")
             secret = self._credential_for(context, effective_operation.provider) if self._credential_for else self._key_for(effective_operation.provider)
             if not isinstance(secret, str) or not secret:
                 raise BrokerError("miner_credentials_unavailable" if funding_source == "miner_key" else "broker_unavailable")

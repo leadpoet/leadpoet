@@ -1167,3 +1167,12 @@ run or post-restart finalized weight reveal was established in the observation
 window. Full-thinking activation still requires a compatible baseline and the
 separate activation checks. Capture correctness does not prove lead quality or
 that a model's written thinking faithfully explains its decisions.
+
+
+A later read at 00:35 UTC on October 26 found a separate canonical validator
+restart still draining active work. Its target remains `b96799376`, all 1,648
+checked source files match that release, and its restart lock is held by the
+owning script. The gateway remains ready. This task did not interrupt that
+restart. Current validator readiness and a post-restart finalized reveal remain
+unverified until that concurrent drain completes; the earlier successful
+deployment check is not used as proof of current readiness.

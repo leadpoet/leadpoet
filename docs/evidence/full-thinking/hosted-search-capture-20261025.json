@@ -319,5 +319,17 @@
     "uncertain_charges_released": false,
     "separate_search_scraping_provider_spend_usd": "0",
     "hosted_search_cost_included_in_openrouter": true
+  },
+  "later_live_read": {
+    "observed_at": "2026-10-26T00:35:23Z",
+    "gateway_ready": true,
+    "validator_ready": false,
+    "validator_state": "deactivating/stop-sigterm; separate canonical restart draining active work",
+    "restart_target_commit": "b967993769e17b50789f0f285ced156dfde9c890",
+    "restart_owner_lock_held": true,
+    "source_files_verified": 1648,
+    "source_mismatches": 0,
+    "restart_interrupted_by_this_task": false,
+    "new_postrestart_finalized_reveal_proven": false
   }
 }

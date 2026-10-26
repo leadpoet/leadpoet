@@ -231,10 +231,15 @@ def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_co
 
 
 def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
-                            max_nodes: int = MAX_VALUE_NODES) -> tuple[Any, list[str]]:
-    """Redact private material without truncation; report every redaction class."""
+                            max_nodes: int = MAX_VALUE_NODES,
+                            aggregate_parts: bool = False) -> tuple[Any, list[str]]:
+    """Redact private material without truncation; report every redaction class.
+
+    Final joined examples may budget each top-level call and input snapshot
+    separately. All other context shares the envelope limit; paths stay intact.
+    """
     reasons: set[str] = set()
-    count = 0
+    envelope_budget = [0]
     variants = set()
     for secret in secrets:
         if isinstance(secret, str) and len(secret) >= 4:
@@ -318,10 +323,21 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         return (len(path) == 4 and path[3] in _PARAMETER_KEYS
                 or path[3:] == ("outbound", "body"))
 
-    def clean(item: Any, path: tuple[str, ...] = ()) -> Any:
-        nonlocal count
-        count += 1
-        if count > max_nodes or len(path) > 64:
+    def clean(item: Any, path: tuple[str, ...] = (), budget=None) -> Any:
+        if budget is None:
+            budget = envelope_budget
+        if (aggregate_parts and len(path) == 2 and isinstance(value, Mapping)
+                and (path[0] == "provider_calls" and isinstance(value.get(path[0]), list)
+                     or path[0] == "input_snapshots" and isinstance(value.get(path[0]), Mapping))):
+            # Joined evidence has independently bounded calls and snapshots.
+            # Keep their original paths and scan every leaf. Their roots still
+            # count against the envelope, whose other context shares one cap.
+            envelope_budget[0] += 1
+            if envelope_budget[0] > max_nodes:
+                raise CaptureError("request_structure_limit")
+            budget = [0]
+        budget[0] += 1
+        if budget[0] > max_nodes or len(path) > 64:
             raise CaptureError("request_structure_limit")
         if isinstance(item, str):
             text = clean_text(item)
@@ -361,7 +377,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                     reasons.add("credential")
                 elif (normalized == "reasoning_content" and isinstance(child, str)
                       and approved_history_reasoning_content(value, path, item)):
-                    result[key] = clean(child, (*path, key))
+                    result[key] = clean(child, (*path, key), budget)
                 elif opaque_reasoning_field(normalized, child, item_kind, safe_config, path):
                     if empty_value(child):
                         result[key] = child
@@ -372,16 +388,16 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                     entries = []
                     for index, entry in enumerate(child):
                         if readable_reasoning_item(entry) or empty_value(entry):
-                            entries.append(clean(entry, (*path, key, str(index))))
+                            entries.append(clean(entry, (*path, key, str(index)), budget))
                         else:
                             entries.append("[REDACTED]")
                             reasons.add("hidden_reasoning")
                     result[key] = entries
                 else:
-                    result[key] = clean(child, (*path, key))
+                    result[key] = clean(child, (*path, key), budget)
             return result
         if isinstance(item, (list, tuple)):
-            return [clean(child, (*path, str(index))) for index, child in enumerate(item)]
+            return [clean(child, (*path, str(index)), budget) for index, child in enumerate(item)]
         if item is None or isinstance(item, (bool, int, float)):
             return item
         raise CaptureError("request_value_invalid")

@@ -1,8 +1,9 @@
-# Full generated thinking: draft implementation scope
+# Full generated thinking policy
 
-This change is for review in a draft PR. It does not activate the policy, change
-an existing round, or deploy any service. The policy name is
-`full_generated_thinking_v1`.
+PR #732 is merged and its capture changes are deployed. The policy remains off
+and existing rounds keep their frozen settings. The policy name is
+`full_generated_thinking_v1`. See the [verification record](arena-full-thinking-verification.md)
+for deployed follow-ups, test evidence and remaining limits.
 
 ## Admission rule
 
@@ -267,8 +268,8 @@ and label checks remain separate; they are not new champion score rules.
 
 Only future opted-in rounds use these requirements. This PR stays default off.
 The final PR migrations are 565 through 570. They were applied in production
-on October 25 with the existing mainline schema preserved. The gateway and
-validator run merge commit `b967993769e17b50789f0f285ced156dfde9c890`.
+on October 25 with the existing mainline schema preserved. The initial gateway and
+validator deployment used merge commit `b967993769e17b50789f0f285ced156dfde9c890`.
 The policy remains off; deployment does not activate future full-thinking rounds.
 
 ## Review fixes — 2026-10-24
@@ -280,7 +281,7 @@ characters. This is a context floor, not proof that the reviewer is correct. An
 `unverified` assessment uses the existing bounded retry policy; a clearly fixed
 workflow still fails eligibility.
 
-Migration568 lets the real publication validator accept a coherent
+Migration569 lets the real publication validator accept a coherent
 `training_data_incomplete` result while preserving measured scores and all cost
 guards. Missing training data disqualifies that contender; it must not stop the
 round, hide other results, or prevent an eligible peer from becoming champion.

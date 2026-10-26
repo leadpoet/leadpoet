@@ -460,7 +460,7 @@
       "independent_s3_readbacks": 22,
       "independent_s3_mismatches": 0,
       "reasoning_text_characters": 4443,
-      "independent_audit_sha256": "dd2f442ac16efc9cbd1fc101fabf01ba7578653271e9341a016c5b31620961c4"
+      "independent_audit_sha256": "28b17872c4b59297cf2ac27da3dadf67583e0a69bd86cde3546119a5dd80e2ca"
     },
     "validation": {
       "focused_passed": 562,

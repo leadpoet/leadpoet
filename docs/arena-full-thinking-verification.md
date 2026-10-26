@@ -1,4 +1,4 @@
-# Draft PR verification — 2026-10-23
+# Reasoning capture verification
 
 ## Latest follow-up, October 25
 
@@ -18,8 +18,9 @@ changed only the search event type and returned HTTP 200. The corrected broker
 then sent byte-identical normalized input through the actual Linux gVisor
 runner, worker socket, disposable capture SQL through migration 574 and private
 S3. It returned HTTP 200, one validated next-response candidate and no provider
-capture gaps. The fixture does not test migration 575's separate scoring repair. The provider reported
-1,202 reasoning tokens with text and $0.006329604, accounted as 6,330 microUSD.
+capture gaps. The fixture does not test migration 575's separate scoring repair.
+The provider reported 1,202 reasoning tokens with text and $0.006329604,
+accounted as 6,330 microUSD.
 This was a saved-request replay, not a fresh TYCHE research or scoring run.
 
 Two genuine Linux TYCHE runs retained their source unchanged and enabled hosted
@@ -27,9 +28,9 @@ search through the model's existing settings. Independent checks matched 396
 S3 reads for TYCHE02 and 639 for TYCHE03. TYCHE03 retained exposed thinking text
 in all 71 successful replies with positive reasoning usage, totaling 18,000
 reported reasoning tokens. Another 22 replies explicitly reported zero. Six
-hosted events and five citations were preserved. Neither run
-found a company. TYCHE03 also has 19 dispatch-only records from a private test
-budget-guard error before provider dispatch. That test guard is now fixed;
+hosted events and five citations were preserved. Neither run found a company.
+TYCHE03 also has 19 dispatch-only records from a private test budget-guard error
+before provider dispatch. That test guard is now fixed;
 its original incomplete records remain excluded. These runs do not establish
 successful lead sourcing, a complete scored trajectory or activation readiness.
 The historical tc35 7/8 approximate replay is not used as verified evidence.

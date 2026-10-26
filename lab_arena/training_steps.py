@@ -418,7 +418,7 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
         value = receipt.get('response')
         if value is None:
             target = receipt.get('response_ref') or {}
-            if target.get('field') == 'response' and target.get('entry_id') == call.get('terminal_entry_id'):
+            if target.get('field') == 'response' and target.get('entry_id') == training_export.response_entry_id(call):
                 value = call.get('response')
             else:
                 linked = [r for r in receipts if r.get('entry_id') == target.get('entry_id') and 'response' in r]
@@ -469,7 +469,7 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
                  and provenance.get('selected_response_acknowledged') is not True
                  and provenance.get('worker_error_body_acknowledged') is not True, 'agent_read_unverified')
     if provenance.get('selected_response_acknowledged') is True:
-        _require(call.get('terminal_entry_id') in {row['entry_id'] for row in matches}, 'agent_read_identity_mismatch')
+        _require(training_export.response_entry_id(call) in {row['entry_id'] for row in matches}, 'agent_read_identity_mismatch')
     return {'response': values[0], 'write': write, 'receipts': matches}
 
 
@@ -562,7 +562,7 @@ def _candidate(example, call):
             value = receipt.get('response')
             if value is None:
                 ref = receipt.get('response_ref') or {}
-                if ref.get('field') == 'response' and ref.get('entry_id') == call.get('terminal_entry_id'):
+                if ref.get('field') == 'response' and ref.get('entry_id') == training_export.response_entry_id(call):
                     value = call.get('response')
                 else:
                     linked = [r for r in receipts if r.get('entry_id') == ref.get('entry_id') and 'response' in r]

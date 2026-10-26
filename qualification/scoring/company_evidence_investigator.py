@@ -4623,6 +4623,37 @@ async def investigate_company_evidence(
                 input_document["investigation_limits"]["remaining_search_calls"] = (
                     MAX_SEARCH_CALLS - search_calls
                 )
+            # Read the existing industry locator before diagnosing source gaps.
+            # Prior quotes remain untrusted: only a fresh, company-bound page
+            # enters the same source map and the unchanged fetch budget.
+            industry_source_url = _safe_https_url(
+                bounded_prior_observations.get("industry_evidence_url")
+            )
+            if (
+                industry_review_model
+                and industry_source_url
+                and industry_source_url not in fetched_pages
+                and _independently_bound_first_party_url(
+                    industry_source_url, first_party_domains, identity_anchor
+                )
+                and fetch_calls < MAX_FETCH_CALLS
+                and time.monotonic() - started
+                < ADMISSION_DEADLINE_SECONDS - JUDGMENT_ADMISSION_RESERVE_SECONDS
+            ):
+                industry_source = await fetch_fresh_page(industry_source_url)
+                if industry_source.get("ok"):
+                    fetched_pages[industry_source_url] = str(industry_source["text"])
+                    fetched_final_urls[industry_source_url] = str(
+                        industry_source.get("final_url") or industry_source_url
+                    )
+                    input_document["prefetched_sources"] = [
+                        {"url": url, "text": text}
+                        for url, text in fetched_pages.items()
+                    ]
+                input_document["investigation_limits"].update(
+                    remaining_fetch_calls=max(0, MAX_FETCH_CALLS - fetch_calls),
+                    server_prefetch_fetch_calls=fetch_calls,
+                )
             industry_review_calls = 0
             industry_research_brief = None
             industry_review_arguments = {

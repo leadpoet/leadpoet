@@ -474,3 +474,92 @@ def test_industry_source_brief_exposes_the_exact_reviewed_source_set(monkeypatch
     assert result['_completed_submit']
     assert result['claims']['industry']['status'] == 'VERIFIED'
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
+
+
+@pytest.mark.parametrize('cached', [False, True])
+def test_existing_industry_locator_is_read_before_initial_gap_review(monkeypatch, cached):
+    run, calls, _, reviews = install(monkeypatch)
+    homepage = 'https://www.coreworks.ai/'
+    industry_url = 'https://www.coreworks.ai/workflows'
+    pages = {homepage: {'final_url': homepage, 'text': FEATURES}}
+    if cached:
+        pages[industry_url] = {'final_url': industry_url, 'text': FEATURES}
+    result = asyncio.run(run(
+        prior_observations={'submitted_source_urls': list(pages),
+                            'industry_evidence_url': industry_url,
+                            'industry_evidence_quote': 'Untrusted prior assertion.'},
+        prefetched_pages=pages))
+    initial_sources = [page for msg in reviews[0]['messages'][2:]
+                       for page in json.loads(msg['content'])['untrusted_source_pages']]
+    assert industry_url in {p['source_url'] for p in initial_sources}
+    assert calls['primary'].count(industry_url) == (0 if cached else 1)
+    if not cached:
+        assert calls['primary'][0] == industry_url
+    assert 'Untrusted prior assertion.' not in json.dumps(initial_sources)
+    document_text = calls['model'][0]['messages'][1]['content']
+    document = json.loads(document_text[document_text.index('{'):])
+    assert any(p['url'] == industry_url for p in document['prefetched_sources'])
+    assert document['investigation_limits']['remaining_fetch_calls'] == c.MAX_FETCH_CALLS - (0 if cached else 1)
+    assert result['_completed_submit']
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
+
+
+@pytest.mark.parametrize('case', ['old_policy', 'third_party', 'unbound_identity', 'deadline', 'fetch_cap'])
+def test_existing_industry_locator_prefetch_keeps_identity_policy_and_budgets(monkeypatch, case):
+    run, calls, clock, _ = install(monkeypatch)
+    industry_url = ('https://marketplace.example/coreworks' if case == 'third_party'
+                    else 'https://www.coreworks.ai/workflows')
+    if case == 'old_policy':
+        monkeypatch.delenv('ARENA_INDUSTRY_EVIDENCE_MODEL')
+    if case == 'unbound_identity':
+        original = c.investigate_company_evidence
+
+        async def unbound(**kwargs):
+            kwargs['verified_homepage_identity'] = {}
+            return await original(**kwargs)
+
+        monkeypatch.setattr(c, 'investigate_company_evidence', unbound)
+    if case in {'deadline', 'fetch_cap'}:
+        original_fetch = c._fetch_page
+
+        async def consume_priority(*args, **kwargs):
+            result = await original_fetch(*args, **kwargs)
+            if case == 'deadline':
+                clock.now = c.ADMISSION_DEADLINE_SECONDS - c.JUDGMENT_ADMISSION_RESERVE_SECONDS
+            return result
+
+        monkeypatch.setattr(c, '_fetch_page', consume_priority)
+        if case == 'fetch_cap':
+            monkeypatch.setattr(c, 'MAX_FETCH_CALLS', 1)
+    prior = {'industry_evidence_url': industry_url}
+    if case in {'deadline', 'fetch_cap'}:
+        prior['submitted_source_urls'] = ['https://www.coreworks.ai/product']
+    asyncio.run(run(prior_observations=prior))
+    assert industry_url not in calls['primary']
+    if case in {'deadline', 'fetch_cap'}:
+        assert calls['primary'][0] == 'https://www.coreworks.ai/product'
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_existing_industry_locator_does_not_trust_failure_or_cross_company_redirect(monkeypatch, failed):
+    run, calls, _, reviews = install(monkeypatch)
+    industry_url = 'https://www.coreworks.ai/workflows'
+    original_fetch = c._fetch_page
+
+    async def fetch(session, url, **kwargs):
+        if url != industry_url:
+            return await original_fetch(session, url, **kwargs)
+        calls['primary'].append(url)
+        return ({'ok': False, 'error': 'http_403'} if failed else {
+            'ok': True, 'url': url, 'final_url': 'https://other.example/workflows',
+            'text': 'Other Company supplies all required software.'})
+
+    monkeypatch.setattr(c, '_fetch_page', fetch)
+    result = asyncio.run(run(prior_observations={'industry_evidence_url': industry_url}))
+    reviewed_urls = {page['source_url'] for request in reviews
+                     for message in request['messages'][2:]
+                     for page in json.loads(message['content'])['untrusted_source_pages']}
+    assert industry_url not in reviewed_urls
+    assert calls['primary'].count(industry_url) == 1
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
+    assert len(result['usage']['fetch_outcomes']) == len(calls['primary'])

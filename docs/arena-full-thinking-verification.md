@@ -1,12 +1,69 @@
 # Reasoning capture verification
 
+## Final capture audit, October 26
+
+PR #790 fixes three reproduced defects on source `70f2a4b0a`:
+
+- Codex and the broker now share the existing search-history shape check.
+  Unsupported provider items stay unchanged. Policy-off SSE remains unchanged.
+- Chat citation annotations now appear in the readable timeline with their
+  original source paths, values and order. Raw responses were already retained.
+- A long production baseline exceeded the final export's 2-million-node budget.
+  Each joined call and input snapshot now has that budget, with a separate shared
+  envelope budget. Every value still passes the same privacy and depth checks.
+  Individual request and response limits are unchanged.
+
+The defects failed before their fixes. Independent review checked preserved
+policy-off behavior, privacy, malformed search events and export limits. The
+829-check release gate passed. The final affected privacy/export checks passed
+490 tests; an independent reviewer passed 177 further checks and compared
+4,000 unchanged default sanitization cases.
+
+Current-source replay also preserved the original 25-route proof: 75 strict
+input/output pairs, 66 full-thinking replies, nine explicit zero-token replies,
+and all 76 original wire hashes. All 1,943 previous readable values or aliases
+remain represented. This is an offline replay of prior live compatibility tests,
+not a new paid run or proof of scored training eligibility.
+
+The full CI run timed out after reporting failures outside the focused gates.
+Across 4,745 test identities shared with the parent run, no parent-passing test
+newly failed. Representative unit and PostgreSQL failures reproduced on both
+commits. Another 208 failures or errors were not reached by parent CI and are
+not all attributed. Full CI is not a passing verification claim.
+
+Canonical gateway and primary-validator deployment completed at 08:23 UTC on
+October 26. Installed source hashes match `70f2a4b0a`; the restart guard and locks
+were released. Captured leases were preserved through the normal drain.
+Existing round settings, scorer image, costs and schema permissions are unchanged.
+
+Fresh exports from six actual baseline and miner executions contain 3,099 calls.
+A separate paginated SQL and object-store read matched all 3,099 saved requests,
+2,954 returned response bodies, privacy projections and accounting states, with
+zero mismatches. The other 145 records have no returned body and remain marked
+uncertain. The readable views preserve 35,538 checked source values, 503 reasoning
+text paths and 132 Chat citation arrays, with no projection truncation. These
+are fresh reads of existing production executions, not six new model runs.
+The installed helper also passed policy-on/off HTTP-stream checks; the installed
+broker preserved the original TYCHE request and its verified search normalization.
+
+Full-thinking activation stays off: a compatible baseline and a successful
+scored full-policy workflow remain required. Training-use permission remains
+unconfirmed. Legacy capture gaps and incomplete scoring authority remain visible;
+these exports do not prove that every run qualifies for a training dataset.
+
+Capture completeness refers to retained provider-visible evidence. It does not
+prove that written reasoning caused an action, expose private provider thoughts,
+or reconstruct search pages the provider did not return. Strict dataset
+eligibility remains separate from successful collection. Historical gaps stay
+visible and are not filled with inferred data.
+
 ## Latest follow-up, October 25
 
 PR #732 is merged and deployed. Full-thinking activation remains off. Later
 entries below retain their original dates and do not represent current status.
 
-Three narrow follow-ups address real TYCHE failures and final review findings.
-They are merged; final installation is waiting for active runs to drain.
+Three narrow follow-ups addressed real TYCHE failures and final review findings.
+They are merged; see the October 26 entry for the latest installation status.
 PR #783 keeps
 verified provider output failures within the existing 80% ICP coverage rule.
 It does not accept malformed outputs as training targets or relax provenance,

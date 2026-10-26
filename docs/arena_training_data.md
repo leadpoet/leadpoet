@@ -170,7 +170,9 @@ this policy. The gateway applies it to miner and baseline execution calls,
 including subagents; judges and already-created rounds keep their existing rules.
 
 The future policy sets both execution admission and competition cost eligibility
-to $6 per ICP. Admission counts actual settled charges and pending reservations.
+to $6 per ICP. Admission counts confirmed charges only. Pending charges do not
+create monetary admission holds; recovery records them when confirmed.
+Active provider calls still block final publication.
 Scoring keeps its existing successful-call and infrastructure-failure distinctions.
 No capture failure or empty thinking response stops scoring or publication.
 If activation prerequisites are missing, round creation continues with its old

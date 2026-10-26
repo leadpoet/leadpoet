@@ -81,7 +81,7 @@ finalization, and it does not change the request body.
 
 Codex posts to a private `127.0.0.1` Responses listener. The helper sends an
 `openrouter.responses` frame to the existing worker Unix socket. The gateway
-checks the closed request schema, reserves the existing budget, injects the
+checks the closed request schema and existing budget, injects the
 submission's credential and posts to OpenRouter `/api/v1/responses`.
 
 The upstream request is non-streaming and stateless (`stream=false`,
@@ -104,24 +104,29 @@ including reasoning. Callers can choose 1–32,768; the bridge refuses requests
 above the session allowance. With migration 321, sourcing admission counts only
 confirmed settlement costs; output estimates and pending bills do not reserve
 money or block another request. Current-policy judge admission also uses confirmed
-charges, under its separate existing cap. Direct Responses
-calls still default to 4,096; Chat and judge caps remain 4,096. Raising the
+charges, under its separate existing cap. Without the full-thinking policy,
+direct Responses calls default to 4,096 and Chat calls are capped at 4,096.
+Full-thinking execution uses the frozen route's allowance. Judge caps remain
+4,096. Raising the
 per-call allowance does not raise the round's budget or guarantee that a model
 can finish a turn within it.
 
 Supported reasoning effort settings are `none`, `minimal`, `low`, `medium`,
 `high`, `xhigh` and `max`, subject to the selected model's support. The helper
-starts one Codex agent and disables hosted search, image generation and
-automatic subagents. Any model must be available through OpenRouter's
+starts one Codex agent. Hosted search is off by default; `web_search="live"`
+enables the supported OpenRouter search path. Image generation and automatic
+subagents remain disabled. Any model must be available through OpenRouter's
 Responses endpoint and admitted by the round's price table. This is a shared
 text/local-tool runtime, not a claim that every provider model or hosted tool
 is available.
 
-Only text, local function/custom tools and their returned history are accepted.
-Hosted tools, remote images/files, server-side conversation IDs, background
-work and caller-selected routing are rejected. Research-provider calls still
-use the harness's Arena broker adapter. Codex's built-in hosted web search is
-disabled.
+Text, local function/custom tools and supported hosted-search history are
+accepted. Other hosted tools, remote images/files, server-side conversation IDs,
+background work and unapproved routing remain rejected. Full-thinking execution
+can select one approved provider with `provider.only`. Research-provider
+calls still use the harness's Arena broker adapter. Hosted-search evidence is
+limited to what OpenRouter returns; unavailable internal search content is not
+invented. Miners need no extra logging or acknowledgements.
 Codex HTTP and streaming retries are disabled. A transport failure or HTTP 5xx
 can have an unknown bill, so it must not create an automatic duplicate paid POST.
 The original call remains tracked for exact billing recovery. The runner may retry a Responses request at most twice only after

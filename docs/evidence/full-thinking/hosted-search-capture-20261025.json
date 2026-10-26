@@ -550,5 +550,91 @@
       "provider": "synthetic; no paid calls"
     },
     "deployment": "Final installation verification pending; no activation."
+  },
+  "final_production_capture_audit_20261026": {
+    "source_commit": "70f2a4b0ab8b17a728b46d0d94f97c134b54278a",
+    "fix_pr": 790,
+    "fixes": [
+      "Share broker and Codex search-history shape validation without changing policy-off output.",
+      "Keep Chat citation annotations in the readable timeline.",
+      "Bound final aggregate privacy traversal per joined call/snapshot, retaining shared envelope and existing privacy/depth limits."
+    ],
+    "deployment": {
+      "completed_at": "2026-10-26T08:23:42.998752+00:00",
+      "gateway_and_primary_validator_installed": true,
+      "critical_source_hashes_match": true,
+      "canonical_guard_released": true,
+      "captured_leases_preserved": true,
+      "frozen_round_settings_unchanged": true,
+      "scorer_image_unchanged": true,
+      "schema_acl_unchanged": true,
+      "reasoning_policy_activated": false
+    },
+    "fresh_production_readback": {
+      "scope": "Fresh exports of existing actual baseline and miner executions, followed by independent SQL and object-store reads. No new provider calls.",
+      "runs": 6,
+      "provider_calls": 3099,
+      "saved_requests_compared": 3099,
+      "returned_bodies_compared": 2954,
+      "body_unavailable_uncertain_records": 145,
+      "mismatches": 0,
+      "latest_read_at": "2026-10-26T08:33:05.817297+00:00",
+      "export_sha256_by_sample": {
+        "deepseek26": "bda8ff855bd2384b2b7bd572aee6fbb75c239285b148a8be13609d5b463d931a",
+        "gptoss26": "e319cd209888bf4827125d5578799ad298b29d65ecc11954c01b532fc4b9af13",
+        "gemma26": "a2a670939e4d47607257361b7d3269438df66dce3352d06b0eb3c67338a89936",
+        "miner25": "118cc4053c3843833fe6c42ebb0be1bdcfb329ba0387857524e9c39b6e926389",
+        "baseline26": "dc60777b890848d331a59c062483781c5f6d90b266db1801df4ef94ebe4cf98c",
+        "baseline25": "b5b8b2d228f13d51377c8b28dbf36d2a829a134a30a6ad1334c0f2a55ec2ab8c"
+      }
+    },
+    "readable_view": {
+      "checked_source_values": 35538,
+      "reasoning_text_source_paths": 503,
+      "chat_citation_arrays": 132,
+      "all_source_paths_resolve": true,
+      "all_checked_reasoning_and_citations_preserved": true,
+      "projection_truncation": false,
+      "scope": "These production samples use Chat; native Responses order and hosted search are covered by the separate original TYCHE and live component evidence."
+    },
+    "stored_route_matrix": {
+      "routes": 25,
+      "strict_input_output_pairs": 75,
+      "thinking_replies": 66,
+      "explicit_zero_reasoning_replies": 9,
+      "wire_hashes_preserved": 76,
+      "original_files_unchanged": 236,
+      "scope": "Independent offline replay of original live tests on current source, not new paid calls or scored eligibility proof."
+    },
+    "validation": {
+      "release_gate_passed": 829,
+      "affected_privacy_export_checks_passed": 490,
+      "independent_review_checks_passed": 177,
+      "default_sanitization_differential_cases": 4000,
+      "installed_codex_policy_on_off_http_streams": "passed; synthetic provider boundary",
+      "installed_native_tyche_request_normalization": "passed; original captured request, no provider call",
+      "installed_provider_output_gap_classification": "passed; original TYCHE evidence",
+      "full_ci": "Not passing. Timed out after failures; focused gates passed. No parent-pass to current-fail among 4,745 shared identities. 208 failure/error identities were not reached by parent CI and are not all attributed."
+    },
+    "remaining_limits": [
+      "No compatible selected baseline or successful representative scored full-policy workflow; activation remains off.",
+      "Training-use permission is unconfirmed.",
+      "Legacy missing bodies, redactions, unresolved costs and incomplete score/source authority stay explicit and can exclude training rows.",
+      "Provider-hidden thoughts and unreturned hosted-search content cannot be reconstructed.",
+      "Capturing generated reasoning does not prove it caused the action.",
+      "No blanket zero-bug or full-CI claim."
+    ],
+    "independent_export_comparison": {
+      "all_six_preserve_captured_values_and_array_order": true,
+      "four_byte_identical": true,
+      "other_two_differences": [
+        "competition_cost_eligibility.observed_at",
+        "derived example_hash"
+      ],
+      "tool_calls_visible": 471,
+      "citation_items_visible": 1980,
+      "strict_thinking_train_eval_rows": 0,
+      "limit": "Existing legacy gaps, score and permission requirements remain. Data preservation is not complete-runtime or activation proof."
+    }
   }
 }

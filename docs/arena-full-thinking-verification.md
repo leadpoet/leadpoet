@@ -1,5 +1,53 @@
 # Draft PR verification — 2026-10-23
 
+## Latest follow-up, October 25
+
+PR #732 is merged and deployed. Full-thinking activation remains off. Later
+entries below retain their original dates and do not represent current status.
+
+Two narrow follow-ups address failures found in real TYCHE tests. PR #783 keeps
+verified provider output failures within the existing 80% ICP coverage rule.
+It does not accept malformed outputs as training targets or relax provenance,
+privacy or cost checks. PR #784 translates a completed native hosted-search
+history event to OpenRouter's required type at the provider boundary. The
+original miner request remains stored unchanged; no miner code changes are
+required. Neither change requires a database migration.
+
+The exact original TYCHE request returned HTTP 400. A controlled comparison
+changed only the search event type and returned HTTP 200. The corrected broker
+then sent byte-identical normalized input through the actual Linux gVisor
+runner, worker socket, disposable capture SQL through migration 574 and private
+S3. It returned HTTP 200, one validated next-response candidate and no provider
+capture gaps. The fixture does not test migration 575's separate scoring repair. The provider reported
+1,202 reasoning tokens with text and $0.006329604, accounted as 6,330 microUSD.
+This was a saved-request replay, not a fresh TYCHE research or scoring run.
+
+Two genuine Linux TYCHE runs retained their source unchanged and enabled hosted
+search through the model's existing settings. Independent checks matched 396
+S3 reads for TYCHE02 and 639 for TYCHE03. TYCHE03 retained exposed thinking text
+in all 71 successful replies with positive reasoning usage, totaling 18,000
+reported reasoning tokens. Another 22 replies explicitly reported zero. Six
+hosted events and five citations were preserved. Neither run
+found a company. TYCHE03 also has 19 dispatch-only records from a private test
+budget-guard error before provider dispatch. That test guard is now fixed;
+its original incomplete records remain excluded. These runs do not establish
+successful lead sourcing, a complete scored trajectory or activation readiness.
+The historical tc35 7/8 approximate replay is not used as verified evidence.
+
+The native continuation fix passed 562 focused checks and the 829-check release
+gate. Independent review passed 341 checks, with one optional native test skipped;
+the owner's focused run included the pinned native binary. Old saved full-policy
+records remain valid, but resubmitting an affected old request after upgrading
+changes its canonical identity. Production has zero configured full-thinking
+rounds. This fix must be installed before activation, not during an old
+full-policy run.
+
+Current-task OpenRouter accounting is $0.8872432620 confirmed and $6.989051
+reserved for uncertain attempts, within $10. The two later TYCHE runs used
+$0.096 in research-provider calls; the shared research ledger accounts for
+$7.703750 of its $10 limit. Uncertain charges were not released. No new miner
+receipts, logging requirements, scoring changes or policy activation were added.
+
 ## Provider options for every approved model, October 25
 
 The draft registry now contains **25 model/API/provider routes**, up from seven,
@@ -1160,19 +1208,21 @@ after reconciliation. No separate search or scraping provider calls were made;
 hosted search charges are included in the OpenRouter total.
 
 The required local release gate passed 829 checks. Independent review and the
-preserved-behavior suites are recorded above. At this verification, the PR-head
-and later-main CI runs were still pending; the merged-head run was cancelled by
-the later push. These are not reported as CI passes. No new scored production
-run or post-restart finalized weight reveal was established in the observation
-window. Full-thinking activation still requires a compatible baseline and the
-separate activation checks. Capture correctness does not prove lead quality or
-that a model's written thinking faithfully explains its decisions.
+preserved-behavior suites are recorded above. The PR-head and later-main CI runs
+hit the 60-minute limit. Of 203 observed PR-head failures, 193 are demonstrated
+on pre-PR code: 190 reproduce locally with the same errors, and the earlier
+Linux CI provides additional evidence. The remaining ten pass on both versions
+locally; their CI cause remains unresolved. One additional later-main CI failure
+also passes on both versions locally. No PR-only failure was found in these
+comparisons. This is not a green full suite: the local comparison substitutes
+macOS/native PostgreSQL for Linux/Docker, and the timeout leaves tests unrun.
 
-
-A later read at 00:35 UTC on October 26 found a separate canonical validator
-restart still draining active work. Its target remains `b96799376`, all 1,648
-checked source files match that release, and its restart lock is held by the
-owning script. The gateway remains ready. This task did not interrupt that
-restart. Current validator readiness and a post-restart finalized reveal remain
-unverified until that concurrent drain completes; the earlier successful
-deployment check is not used as proof of current readiness.
+A separate canonical validator restart completed at 00:54 UTC on October 26.
+Independent reads at 00:55–00:56 confirmed both services ready on `b96799376`,
+free restart locks, all 1,648 validator source files and eight critical gateway
+modules matching, and application weights/scoring readiness events. This task
+did not interrupt the concurrent restart. No new scored production run or
+post-restart finalized weight reveal was established in this observation window.
+Full-thinking activation still requires a compatible baseline and the separate
+activation checks. Capture correctness does not prove lead quality or that a
+model's written thinking faithfully explains its decisions.

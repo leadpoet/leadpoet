@@ -313,12 +313,14 @@
   "tyche_unchanged_code_mode_limit": "TYCHE hardcodes its default Luna model and derives CODE_MODE from MODEL at import. Selecting DeepSeek automatically uses its existing plain-MCP path. The prior in-memory MODEL and CODE_MODE=False overrides reproduce that model-dependent setting, not a new agent architecture. The approved DeepSeek native request lacks the Luna-specific code-mode interface, but this is not an established Arena incompatibility. A complete Linux TYCHE scoring run remains unverified; no logging or receipt protocol was added.",
   "test_budget": {
     "openrouter_cap_usd": "10",
-    "confirmed_task_usd": "0.5985062620",
-    "unresolved_attempt_reservations_usd": "3.757891",
+    "confirmed_task_usd": "0.8872432620",
+    "unresolved_attempt_reservations_usd": "6.989051",
     "deployed_component_confirmed_usd": "0.092186",
     "uncertain_charges_released": false,
-    "separate_search_scraping_provider_spend_usd": "0",
-    "hosted_search_cost_included_in_openrouter": true
+    "separate_search_scraping_provider_spend_usd": "0.096",
+    "hosted_search_cost_included_in_openrouter": true,
+    "shared_search_scraping_accounted_usd": "7.703750",
+    "shared_search_scraping_cap_usd": "10"
   },
   "later_live_read": {
     "observed_at": "2026-10-26T00:35:23Z",
@@ -331,5 +333,142 @@
     "source_mismatches": 0,
     "restart_interrupted_by_this_task": false,
     "new_postrestart_finalized_reveal_proven": false
+  },
+  "ci_comparison": {
+    "pr_ci_run": 40245855208,
+    "base_ci_run": 40244335677,
+    "later_main_ci_run": 40246425911,
+    "base_commit": "edf89acd19ea17e75da7986cebc431ee472d28ab",
+    "tested_head_commit": "d483adbf93cbcb7df13c58a025123617585e0c27",
+    "merge_commit": "b967993769e17b50789f0f285ced156dfde9c890",
+    "full_ci_status": "cancelled_at_60_minute_limit",
+    "observed_failure_count": 203,
+    "preexisting_failures_demonstrated": 193,
+    "same_failure_reproduced_locally_on_both_refs": 190,
+    "same_failure_observed_in_base_linux_ci": 69,
+    "passed_base_failed_head_in_observed_linux_overlap": 0,
+    "remaining_ci_failures_not_reproduced_on_either_ref": [
+      "tests/lab_arena/funding_proof_throughput554_postgres_test.py::test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history",
+      "tests/lab_arena/held_recovery_admission539_postgres_test.py::test_settled_boundary_restoration_still_reaches_ordinary_publication",
+      "tests/lab_arena/infrastructure_cost_lookup482_postgres_test.py::test_production_cardinality_lookup_is_indexed_and_bounded",
+      "tests/lab_arena/judge_final_deadline530_postgres_test.py::test_full_service_late_publication_preserves_verified_real_scores",
+      "tests/lab_arena/legacy_partial_postgres_test.py::test_signed_failure_persists_then_retry_scores_only_unresolved_and_final_cache_accepts",
+      "tests/lab_arena/model_policy_supersession517_postgres_test.py::test_saved_outputs_regrade_through_service_persistence_and_publication",
+      "tests/lab_arena/owner_stopped_score_drain454_postgres_test.py::test_held_owner_drain_preserves_costs_frozen_claim_and_authorizes[1]",
+      "tests/lab_arena/recovery_lock_order523_postgres_test.py::test_saved_outputs_still_accept_persist_and_publish",
+      "tests/lab_arena/restore_recorded_results538_postgres_test.py::test_archived_authority_restores_through_ordinary_aggregate_and_publication[False]",
+      "tests/lab_arena/restore_recorded_results538_postgres_test.py::test_archived_authority_restores_through_ordinary_aggregate_and_publication[True]"
+    ],
+    "pr_only_failure_found": false,
+    "limitations": [
+      "Full CI did not complete and is not green.",
+      "Local comparisons used macOS and native PostgreSQL15/17; Linux CI uses Ubuntu and Docker PostgreSQL.",
+      "Tests not reached before timeout are not covered by this attribution.",
+      "One additional later-main CI failure passed on both refs locally and remains unclassified."
+    ]
+  },
+  "post_drain_live_read": {
+    "observed_at": "2026-10-26T00:56:31Z",
+    "gateway_ready": true,
+    "validator_ready": true,
+    "release_commit": "b967993769e17b50789f0f285ced156dfde9c890",
+    "validator_source_files_verified": 1648,
+    "gateway_critical_source_files_verified": 8,
+    "source_mismatches": 0,
+    "restart_locks_free": true,
+    "application_weights_ready_observed": true,
+    "application_scoring_ready_observed": true,
+    "policy_activation_configured": false,
+    "new_scored_run_proven": false,
+    "new_finalized_reveal_proven": false
+  },
+  "tyche_linux_followup": {
+    "source_commit": "dcaeb4bacbb864bc10575fe1758cf487a3466324",
+    "codex_version": "0.154.0",
+    "miner_source_changed": false,
+    "hosted_web_enabled": true,
+    "model_setting": "DeepSeek through the existing model-dependent plain-MCP path",
+    "fresh_scored_sourcing_success": false,
+    "tyche02": {
+      "artifact_sha256": "865ca224a10d8e6f203e3f1f4ee5f852be9c89ee87bfbf2a0e89b4e066d0c8a3",
+      "wire_response_count": 107,
+      "exact_terminal_wire_sql_worker_export_count": 85,
+      "thinking_tokens": {
+        "reported_total": 25743
+      },
+      "hosted_search_events": 1,
+      "citation_urls": [],
+      "companies_count": 0,
+      "strict_capture_complete": false,
+      "independent_s3_get_count": 396,
+      "independent_s3_gets_match": true
+    },
+    "tyche03": {
+      "artifact_sha256": "7b7d3d4a08cb0c8a04d4047c0da242ddf60691a163514b7765c2914ad2131e41",
+      "wire_response_count": 183,
+      "reasoning_usage": {
+        "reported_reasoning_tokens": 18000,
+        "explicit_zero_reasoning_calls": 22,
+        "positive_missing_or_opaque_calls": 0,
+        "opaque_calls": 0
+      },
+      "hosted_search_events": 6,
+      "citation_count": 5,
+      "companies_count": 0,
+      "independent_s3_get_count": 639,
+      "independent_s3_all_match": true
+    },
+    "limitations": [
+      "TYCHE02 used shorter private wall-clock and call limits. TYCHE03 restored normal wall-clock and provider call quotas, with a separate paid-test allowance.",
+      "TYCHE03 has 19 dispatch-only records caused by the private budget guard raising an untyped error before a provider request. The guard was fixed and tested separately; the original incomplete records remain unchanged.",
+      "Both runs returned zero companies and are not successful sourcing/scoring or eligible training runs.",
+      "The separate tc35 7/8 replay is not independently verified and is not used as release proof."
+    ]
+  },
+  "provider_failure_followup": {
+    "pr": 783,
+    "merge_commit": "b222c02dfeaa50c193b9cb48b6fa403cc4c7127c",
+    "change": "Verified malformed provider outputs and precisely verified unavailable-upstream failures consume incomplete ICP coverage instead of disqualifying the entire entrant. Strict training targets remain excluded.",
+    "coverage_floor": 0.8,
+    "tampering_provenance_privacy_cost_guards_preserved": true,
+    "migration_required": false
+  },
+  "native_history_followup": {
+    "pr": 784,
+    "source_commit": "e0d08a138fc8126a1e1b40d42c5e88c5e9f8f986",
+    "change": "Normalize completed native web_search_call search history with an existing ID and query to the OpenRouter provider alias. Keep original miner request capture unchanged.",
+    "controlled_provider_comparison": {
+      "original_status": 400,
+      "one_type_field_change_status": 200,
+      "fixed_outbound_sha256": "4795da9014bf1be26700ce36fff4e311eb1f32efd8b35e6354c5928d87b857d2"
+    },
+    "real_broker_probe": {
+      "runtime": "Linux gVisor",
+      "postgres": "Disposable capture SQL fixture through migration574, excludes migration575 scoring repair",
+      "objects": "private S3",
+      "successful_provider_calls": 1,
+      "valid_step_candidates": 1,
+      "reported_reasoning_tokens": 1202,
+      "confirmed_cost_microusd": 6330,
+      "native_cli_exercised": false,
+      "scored": false,
+      "provider_capture_gaps": [],
+      "strict_trajectory_complete": false,
+      "strict_trajectory_incomplete_reasons": [
+        "scoring_label_unavailable"
+      ],
+      "independent_s3_readbacks": 22,
+      "independent_s3_mismatches": 0,
+      "reasoning_text_characters": 4443,
+      "independent_audit_sha256": "dd2f442ac16efc9cbd1fc101fabf01ba7578653271e9341a016c5b31620961c4"
+    },
+    "validation": {
+      "focused_passed": 562,
+      "independent_passed": 341,
+      "independent_optional_native_skip": 1,
+      "release_gate_passed": 829
+    },
+    "historical_limit": "Old stored records remain valid; fresh affected full-policy requests change canonical identity. No configured production full-thinking rounds exist. Do not hot-swap this broker into an active old full-policy run.",
+    "merge_commit": "a11c9662eaa438076088f45d2649b54f34a1859b"
   }
 }

@@ -318,3 +318,20 @@ def test_per_icp_policy_projects_its_cap_and_omits_legacy_aggregate_cap(policy, 
     assert cost["execution_icp_cap_microusd"] == 4_000_000
     assert cost["per_icp"][2]["eligible"] is False
     assert "execution_cap_microusd" not in cost
+
+
+def test_untrainable_provider_output_reason_is_public_but_provider_text_is_private():
+    row = _published_row(policy=True)
+    ranking = row['publication_doc']['final_ranking'][0]
+    ranking.update(eligible=False, eligibility_reason='training_data_incomplete')
+    ranking['training_data_eligibility'] = {
+        'eligible': False,
+        'reasons': ['provider_output_untrainable'],
+        'capture': {'eligible': False,
+                    'reasons': ['provider_output_untrainable'],
+                    'raw_trace': 'private provider text'},
+    }
+    public = public_dashboard.round_summary(row)['baseline']['training_data_eligibility']
+    assert public['reasons'] == ['provider_output_untrainable']
+    assert public['capture']['reasons'] == ['provider_output_untrainable']
+    assert 'private provider text' not in str(public)

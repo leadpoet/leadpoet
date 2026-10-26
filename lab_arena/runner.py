@@ -4708,10 +4708,14 @@ class AssignmentExecutor:
                     latest_operation_calls, recovered_responses_retries
                 )
             )
+            # A scorer can recover the same tool before a later judge failure.
+            # Keep execution's historical account-failure precedence unchanged.
+            credential_calls = latest_operation_calls if scoring_run else completed_calls
             miner_credentials_failed = any(
                 call.get("funding_source") == "miner_key"
                 and call.get("error_code") == "miner_credentials_unavailable"
-                for call in completed_calls
+                and (not scoring_run or call.get("call_identity") not in recovered_responses_retries)
+                for call in credential_calls
             )
             miner_scoring_funding_failed = scoring_run and any(
                 call.get("funding_source") == "miner_key"

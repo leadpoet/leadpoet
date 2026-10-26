@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -639,6 +640,19 @@ def _standalone_search_output(document: Any) -> bytes:
     return json.dumps({"output": "\n\n".join(text)}, ensure_ascii=False).encode()
 
 
+def replayable_search_shape(item: Any) -> bool:
+    """Shape shared by native SSE adaptation and provider alias replay.
+
+    This is not request admission. The broker still validates the complete
+    item; unsupported provider items remain intact in its raw receipt.
+    """
+    action = item.get("action") if isinstance(item, Mapping) else None
+    return bool(isinstance(item, Mapping) and item.get("status") == "completed"
+                and isinstance(item.get("id"), str) and 1 <= len(item["id"]) <= 256
+                and isinstance(action, Mapping) and action.get("type") == "search"
+                and (action.get("query") or action.get("queries")))
+
+
 def response_events(document: dict[str, Any], *, native_web_search: bool = False) -> Iterator[bytes]:
     """Replay terminal items, optionally using Codex's native search type name."""
 
@@ -652,7 +666,8 @@ def response_events(document: dict[str, Any], *, native_web_search: bool = False
         # which provider fields are replayed on the next request.
         document = dict(document, output=[
             dict(item, type="web_search_call")
-            if isinstance(item, dict) and item.get("type") == "openrouter:web_search"
+            if (isinstance(item, dict) and item.get("type") == "openrouter:web_search"
+                and replayable_search_shape(item))
             else item for item in document["output"]
         ])
     sequence = 0

@@ -46,7 +46,7 @@ def large_example(total_calls=221):
     return values
 
 
-@pytest.mark.parametrize("total_calls", [221, 2636])
+@pytest.mark.parametrize("total_calls", [221, 2636, 4000])
 def test_valid_large_aggregate_exports_without_relaxing_request_limit(total_calls):
     values = large_example(total_calls)
     result = training_export.assemble_example(**values)
@@ -102,3 +102,84 @@ def test_aggregate_keeps_depth_limit_and_private_field_redaction():
     assert "private-reasoning-sentinel" not in json.dumps(result)
     assert result["privacy"]["context_redactions"] == ["credential", "hidden_reasoning"]
     assert result["privacy"]["privacy_filtered"] and not result["privacy"]["exact_replay"]
+
+
+def test_joined_calls_and_repeated_snapshots_have_separate_finite_budgets():
+    value = {
+        'configuration': {'public': [None] * 20},
+        'provider_calls': [{'public': [None] * 60}, {'public': [None] * 60}],
+        'input_snapshots': {'execute': {'public': [None] * 60},
+                            'score-1': {'public': [None] * 60},
+                            'score-2': {'public': [None] * 60}},
+    }
+    original = copy.deepcopy(value)
+    with pytest.raises(training_capture.CaptureError, match='request_structure_limit'):
+        training_capture.sanitize_training_value(value, max_nodes=100)
+    cleaned, redactions = training_capture.sanitize_training_value(
+        value, max_nodes=100, aggregate_parts=True)
+    assert cleaned == value == original and redactions == []
+
+
+@pytest.mark.parametrize('part', ['call', 'snapshot', 'envelope', 'nested_call', 'nested_snapshot'])
+def test_partitioning_cannot_escape_any_part_or_global_context_budget(part):
+    oversized = {'public': [None] * 100}
+    value = {
+        'call': {'provider_calls': [oversized]},
+        'snapshot': {'input_snapshots': {'run': oversized}},
+        'envelope': {'configuration': oversized},
+        'nested_call': {'configuration': {'provider_calls': [{'public': [None] * 60}] * 2}},
+        'nested_snapshot': {'provider_calls': [{'input_snapshots': {
+            'first': {'public': [None] * 60}, 'second': {'public': [None] * 60}}}]},
+    }[part]
+    with pytest.raises(training_capture.CaptureError, match='request_structure_limit'):
+        training_capture.sanitize_training_value(value, max_nodes=100, aggregate_parts=True)
+
+
+@pytest.mark.parametrize('part', ['call', 'snapshot', 'envelope'])
+def test_partitioning_still_checks_keys_values_collisions_and_depth(part):
+    def wrap(value):
+        return {'call': {'provider_calls': [value]},
+                'snapshot': {'input_snapshots': {'run': value}},
+                'envelope': {'configuration': value}}[part]
+    for invalid, reason in (({1: 'bad key'}, 'request_key_invalid'),
+                            ({'public': object()}, 'request_value_invalid'),
+                            ({'private-token-value': 1, '[REDACTED]': 2}, 'request_redaction_key_collision')):
+        with pytest.raises(training_capture.CaptureError, match=reason):
+            training_capture.sanitize_training_value(wrap(invalid), secrets=['private-token-value'],
+                                                     aggregate_parts=True)
+    nested = None
+    for _ in range(65):
+        nested = {'child': nested}
+    with pytest.raises(training_capture.CaptureError, match='request_structure_limit'):
+        training_capture.sanitize_training_value(wrap(nested), aggregate_parts=True)
+
+
+def test_partitioned_privacy_walk_keeps_full_root_path_rules_and_redaction_classes():
+    parameters = {'reasoning': {'effort': 'high'}, 'messages': [
+        {'role': 'assistant', 'reasoning_content': 'Exposed assistant history.'}]}
+    request = {'operation_id': 'openrouter.chat',
+               **{key: copy.deepcopy(parameters) for key in
+                  ('admitted_parameters', 'normalized_parameters', 'effective_parameters', 'hashed_parameters')},
+               'outbound': {'body': copy.deepcopy(parameters)}}
+    value = {
+        'provider_calls': [{'operation_id': 'openrouter.chat', 'request': request,
+            'response': {'choices': [{'message': {'role': 'assistant',
+                'reasoning_content': 'Exposed provider thinking.',
+                'reasoning_details': [{'type': 'reasoning.text', 'text': 'Exposed typed text.'}]}}]},
+            'private': {'authorization': 'private-token-value'}}],
+        'input_snapshots': {'run': {'input': {'reasoning_content': 'unapproved opaque context',
+                                             'public': 'contains private-token-value'}}},
+        'configuration': {'private': {'authorization': 'private-token-value'},
+                          'provider_calls': [{'request': {'outbound': {'body': parameters}}}]},
+    }
+    original = copy.deepcopy(value)
+    expected = training_capture.sanitize_training_value(value, secrets=['private-token-value'])
+    actual = training_capture.sanitize_training_value(value, secrets=['private-token-value'], aggregate_parts=True)
+    assert actual == expected
+    cleaned, redactions = actual
+    assert redactions == ['credential', 'hidden_reasoning']
+    assert cleaned['provider_calls'][0]['request'] == request
+    assert cleaned['provider_calls'][0]['response'] == value['provider_calls'][0]['response']
+    assert cleaned['input_snapshots']['run']['input']['reasoning_content'] == '[REDACTED]'
+    assert 'private-token-value' not in json.dumps(cleaned)
+    assert value == original

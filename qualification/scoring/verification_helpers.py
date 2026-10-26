@@ -50,12 +50,15 @@ class _VisibleHTMLTextParser(HTMLParser):
         hidden_ids: frozenset[str] = frozenset(),
         include_scroll_reveal: bool = False,
         exclude_sidebars: bool = False,
+        disclosure_targets: frozenset[int] = frozenset(),
     ) -> None:
         super().__init__(convert_charrefs=True)
         self._hidden_classes = hidden_classes
         self._hidden_ids = hidden_ids
         self._include_scroll_reveal = include_scroll_reveal
         self._exclude_sidebars = exclude_sidebars
+        self._disclosure_targets = disclosure_targets
+        self._element_index = 0
         self._stack: list[tuple[str, bool, int]] = []
         self._hidden_depth = 0
         self._heading_depth: Optional[int] = None
@@ -103,7 +106,10 @@ class _VisibleHTMLTextParser(HTMLParser):
             tag in self._HIDDEN_ELEMENTS
             or element_id == "cybotcookiebotdialog"
             or "hidden" in values
-            or values.get("aria-hidden", "").strip().casefold() in {"true", "1"}
+            or (
+                values.get("aria-hidden", "").strip().casefold() in {"true", "1"}
+                and self._element_index not in self._disclosure_targets
+            )
             or "display:none" in style
             or ("visibility:hidden" in style and not scroll_reveal)
             or classes & self._hidden_classes
@@ -130,6 +136,7 @@ class _VisibleHTMLTextParser(HTMLParser):
         )
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
+        self._element_index += 1
         lowered = tag.casefold()
         if lowered in self._VOID_ELEMENTS:
             return
@@ -207,6 +214,15 @@ class _VisibleHTMLTextParser(HTMLParser):
         if self._heading_depth is not None and len(self._stack) < self._heading_depth:
             self._heading_depth = None
 
+    def close(self) -> None:
+        # A bounded fetch can end inside a tag/attribute/comment. HTMLParser's
+        # EOF flush otherwise emits that unfinished markup as visible text,
+        # including large base64 image bodies. Preserve literal text such as
+        # "price < 5"; only discard a pending markup token.
+        if re.match(r"<(?:/?[A-Za-z]|!|\?)", self.rawdata):
+            self.rawdata = ""
+        super().close()
+
     def handle_data(self, data: str) -> None:
         if not self._hidden_depth:
             self.parts.append(data)
@@ -240,6 +256,74 @@ class _VisibleHTMLLinkParser(_VisibleHTMLTextParser):
                 self.link_labels.append((href, " ".join(self.parts[start:])))
             self._active_link = None
         super().handle_endtag(tag)
+
+
+class _DisclosureTargetParser(_VisibleHTMLTextParser):
+    """Locate public controls without treating arbitrary hidden text as evidence.
+
+    Only aria-hidden on the panel itself may be lifted. Other hiding rules and
+    hidden ancestors still apply. Missing aria-controls is accepted only for an
+    inert panel immediately after a visible control in the same article.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.controlled_ids: set[str] = set()
+        self.ids: dict[str, list[int]] = {}
+        self.adjacent_targets: set[int] = set()
+        self._nodes: list[tuple[int, bool]] = []
+        self._previous_control: dict[int, bool] = {}
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        values = self._attribute_map(attrs)
+        parent = self._nodes[-1][0] if self._nodes else 0
+        previous_control = self._previous_control.pop(parent, False)
+        adjacent = bool(
+            previous_control and self._stack and self._stack[-1][0] == "article"
+            and "inert" in values
+            and values.get("aria-hidden", "").casefold() == "true"
+        )
+        super().handle_starttag(tag, attrs)
+        element_id = values.get("id", "")
+        if element_id:
+            self.ids.setdefault(element_id, []).append(self._element_index)
+        control = bool(
+            not self._hidden_depth
+            and (tag.casefold() == "button" or values.get("role", "").casefold() == "button")
+            and values.get("aria-expanded", "").casefold() in {"true", "false"}
+            and "disabled" not in values
+            and values.get("aria-disabled", "").casefold() != "true"
+        )
+        if control:
+            self.controlled_ids.update(values.get("aria-controls", "").split())
+        if adjacent:
+            self.adjacent_targets.add(self._element_index)
+        if tag.casefold() not in self._VOID_ELEMENTS:
+            self._nodes.append((self._element_index, control))
+
+    def handle_endtag(self, tag: str) -> None:
+        before = len(self._stack)
+        super().handle_endtag(tag)
+        after = len(self._stack)
+        if after < before:
+            # The outermost closed node is the direct child of the new parent.
+            _, control = self._nodes[after]
+            del self._nodes[after:]
+            parent = self._nodes[-1][0] if self._nodes else 0
+            self._previous_control[parent] = control
+
+    def targets(self) -> frozenset[int]:
+        return frozenset(self.adjacent_targets | {
+            self.ids[element_id][0] for element_id in self.controlled_ids
+            if len(self.ids.get(element_id, [])) == 1
+        })
+
+
+def _disclosure_targets(content: str, **kwargs: Any) -> frozenset[int]:
+    parser = _DisclosureTargetParser(**kwargs)
+    parser.feed(content)
+    parser.close()
+    return parser.targets()
 
 
 _CSS_HIDDEN_DECLARATION_RE = re.compile(
@@ -296,6 +380,7 @@ def _css_hidden_selectors(content: str) -> tuple[frozenset[str], frozenset[str]]
 
 def _visible_html_document(
     content: str, *, include_scroll_reveal: bool = False,
+    include_disclosures: bool = False,
     heading_context_sink: Optional[list[str]] = None,
     archive_articles_sink: Optional[list[str]] = None,
 ) -> tuple[str, str, str]:
@@ -308,6 +393,11 @@ def _visible_html_document(
         include_scroll_reveal=include_scroll_reveal,
     )
     try:
+        if include_disclosures:
+            parser._disclosure_targets = _disclosure_targets(
+                content, hidden_classes=hidden_classes, hidden_ids=hidden_ids,
+                include_scroll_reveal=include_scroll_reveal,
+            )
         parser.feed(content)
         parser.close()
     except Exception:
@@ -347,11 +437,15 @@ def _visible_html_document(
     return text, heading, heading_prefix
 
 
-def visible_html_text(content: str, *, include_scroll_reveal: bool = False) -> str:
+def visible_html_text(
+    content: str, *, include_scroll_reveal: bool = False,
+    include_disclosures: bool = False,
+) -> str:
     """Return page text; company review can include known scroll-reveal copy."""
 
     return _visible_html_document(
         content, include_scroll_reveal=include_scroll_reveal,
+        include_disclosures=include_disclosures,
     )[0]
 
 

@@ -1012,7 +1012,7 @@ def _is_known_provider_diagnostic_only(value: str) -> bool:
     )
 
 
-def _plain_text(value: str) -> str:
+def _plain_text(value: str, *, include_disclosures: bool = False) -> str:
     if _is_known_binary_document(value):
         return ""
     linked_urls = " ".join(
@@ -1024,7 +1024,9 @@ def _plain_text(value: str) -> str:
     # tables and feature grids that an article extractor considers boilerplate.
     # Keep their full visible surface. The shared parser still excludes hidden,
     # executable, fallback, navigation, and related-page markup.
-    decoded = html.unescape(visible_html_text(value, include_scroll_reveal=True))
+    decoded = html.unescape(visible_html_text(
+        value, include_scroll_reveal=True, include_disclosures=include_disclosures,
+    ))
     # Script and style bodies are not visible page evidence. Remove them before
     # applying the fixed page-text bound so they cannot displace visible text.
     for tag in ("script", "style"):
@@ -2455,7 +2457,11 @@ async def _fetch_page(
             ),
         }
     if _is_known_binary_document(raw):
-        return {"ok": False, "error": "unsupported_binary_content"}
+        return {
+            "ok": False, "error": "unsupported_binary_content",
+            **({"_pdf_document": True}
+               if raw.lstrip("\ufeff\t\r\n ").startswith("%PDF-") else {}),
+        }
     text = _plain_text(raw)
     if not text:
         return {"ok": False, "error": "empty_page"}
@@ -4100,13 +4106,22 @@ async def investigate_company_evidence(
                         "broker_http_404" if exc.broker_status == 404
                         else f"http_{exc.broker_status}"
                     )}
+                # A company brochure may be a PDF even at an extensionless URL.
+                # Recover text through the existing exact-URL provider; never
+                # treat decoded PDF bytes as source text or add a local parser.
+                # Keep unrelated investigations and all admission caps unchanged.
+                industry_pdf = bool(
+                    result.pop("_pdf_document", False)
+                    and "industry" in requested_targets
+                    and result.get("error") == "unsupported_binary_content"
+                )
                 fetch_outcomes.append(_fetch_outcome(url, result))
                 if (
-                    result.get("error") in {
+                    (industry_pdf or result.get("error") in {
                         "broker_http_404", "http_502", "http_503", "timeout",
                         "provider_diagnostic_body",
                         "provider_request_refused",
-                    }
+                    })
                     and not result.get("ok")
                     and os.environ.get("EXA_API_KEY")
                     and not archive_targets

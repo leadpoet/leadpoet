@@ -1,3 +1,18 @@
+## Scoped authorization: October 26 final industry repair continuation
+
+The user renewed this task on October 26. Continue researching and implementing
+an industry-fit improvement, compare all 167 fixed cases and independent
+controls, and preserve correct prior verdicts wherever possible. Do not stop
+because a candidate fails. Merge and deploy only after a rigorous improvement
+in accuracy and consistency is shown. The new, final OpenRouter allowance is
+at most $15 additional, including failed calls and reservations. Its immutable
+baseline and absolute limits are in the local approved budget artifact dated
+October 26. Do not spend other-provider credits in this phase. Preserve all
+previous evidence, labels, approvals, and concurrent work. This supersedes the
+previous $12 phase cap for new calls only; no old charge is forgiven. Existing
+source, identity, supplier, billing, scoring, release and production-verification
+guards remain required. Keep these two instruction files byte-identical.
+
 ## Scoped authorization: October 25 industry precision and recall repair
 
 On 2026-10-25 the user renewed the permanent industry-fit repair. Compare the

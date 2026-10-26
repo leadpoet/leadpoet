@@ -5419,7 +5419,9 @@ def test_mislabeled_pdf_body_is_rejected_before_plain_text_extraction(
 
     assert len(pdf_body) > 1_200_000
     assert investigator._plain_text(pdf_body) == ""
-    assert result == {"ok": False, "error": "unsupported_binary_content"}
+    assert result == {
+        "ok": False, "error": "unsupported_binary_content", "_pdf_document": True,
+    }
 
 
 @pytest.mark.parametrize(

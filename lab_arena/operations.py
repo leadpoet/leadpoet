@@ -572,7 +572,8 @@ DEEPLINE_EXECUTE_HEADERS: Mapping[str, str] = MappingProxyType({"x-deepline-exec
 # and body only under rawV2. Intent alone returns a bare result.data string
 # with no target provenance. Keep other tools on their existing contracts,
 # including Exa clients that unwrap result.data. The same builder is used for
-# initial dispatch and a proved same-key recovery.
+# initial dispatch and a proved same-key recovery. Callers must select this
+# contract explicitly; omission retains the legacy result.data envelope.
 DEEPLINE_GENERIC_HTTP_HEADERS: Mapping[str, str] = MappingProxyType({
     "x-deepline-execute-response-contract": "raw-v2",
     "x-deepline-tool-error-schema": "1",
@@ -1033,6 +1034,8 @@ _OPERATION_LIST = (
             # Opaque tool payload: Deepline owns each tool's schema, the
             # structural limits bound it, credential-shaped names are refused.
             "payload": FieldSpec("object", required=True),
+            # Closed opt-in for generic_http_request; not a provider payload field.
+            "response_contract": FieldSpec("str", choices=("raw-v2",)),
         },
         fixed_params={},
         defaults={},
@@ -1357,8 +1360,8 @@ def operation_table_document() -> Dict[str, Any]:
         "payload_forbidden_field_names": sorted(PAYLOAD_FORBIDDEN_FIELD_NAMES),
         "host_account_statuses": sorted(HOST_ACCOUNT_STATUSES),
         "operations": [operation_document(OPERATIONS[key]) for key in sorted(OPERATIONS)],
-        "deepline_tool_outbound_headers": {
-            "generic_http_request": dict(DEEPLINE_GENERIC_HTTP_HEADERS),
+        "deepline_tool_response_contracts": {
+            "generic_http_request": {"raw-v2": dict(DEEPLINE_GENERIC_HTTP_HEADERS)},
         },
     }
 
@@ -1704,6 +1707,9 @@ def validate_operation_request(operation_id: str, parameters: Any, *, deepline_c
     if operation_id == "deepline.execute":
         tool = normalized.get("tool")
         payload = normalized.get("payload")
+        if "response_contract" in parameters and (
+                tool != "generic_http_request" or "response_contract" not in normalized):
+            raise OperationRequestError("invalid_field", "$.response_contract")
         if deepline_catalog is not None:
             from lab_arena import deepline_catalog as catalog
             try:
@@ -2030,7 +2036,8 @@ def _validate_responses(parameters: Mapping[str, Any], *, allow_full_thinking: b
 # ---------------------------------------------------------------------------
 
 
-def check_request_headers(headers: Mapping[str, Any], *, catalog_metadata: bool = False) -> None:
+def check_request_headers(headers: Mapping[str, Any], *, catalog_metadata: bool = False,
+                          deepline_generic_http: bool = False) -> None:
     """Refuse caller credentials and any header outside the allowlist."""
 
     if headers is None:
@@ -2038,10 +2045,17 @@ def check_request_headers(headers: Mapping[str, Any], *, catalog_metadata: bool 
     if not isinstance(headers, Mapping):
         raise OperationRequestError("invalid_request")
     content_type = None
+    native_headers = set()
     for name in headers:
         lowered = str(name).strip().lower()
         if lowered in CREDENTIAL_HEADERS:
             raise OperationRequestError("forbidden_header")
+        if deepline_generic_http and lowered in {**DEEPLINE_EXECUTE_HEADERS, **DEEPLINE_GENERIC_HTTP_HEADERS}:
+            expected = {**DEEPLINE_EXECUTE_HEADERS, **DEEPLINE_GENERIC_HTTP_HEADERS}[lowered]
+            if lowered in native_headers or headers[name] != expected:
+                raise OperationRequestError("invalid_request")
+            native_headers.add(lowered)
+            continue
         if lowered not in ALLOWED_REQUEST_HEADERS and not (catalog_metadata and lowered == "x-deepline-tool-meta-only"):
             raise OperationRequestError("unknown_header")
         if lowered == "content-type":
@@ -2137,7 +2151,10 @@ def match_request(
     """
 
     operation, path_parameters = _match_operation(method, url, catalog_metadata=deepline_catalog is not None)
-    check_request_headers(headers or {}, catalog_metadata=operation.operation_id in CATALOG_OPERATIONS)
+    generic_http = (operation.operation_id == "deepline.execute"
+                    and path_parameters.get("tool") == "generic_http_request")
+    check_request_headers(headers or {}, catalog_metadata=operation.operation_id in CATALOG_OPERATIONS,
+                          deepline_generic_http=generic_http)
     parts = urlsplit(url)
     raw = b"" if body is None else bytes(body)
     if operation.parameter_location == "body":
@@ -2186,6 +2203,16 @@ def match_request(
             if name in parameters:
                 raise OperationRequestError("invalid_query")
             parameters[name] = value
+    if generic_http:
+        native_headers = {str(name).strip().lower(): value for name, value in (headers or {}).items()}
+        contract = native_headers.get("x-deepline-execute-response-contract")
+        if contract is not None:
+            if "response_contract" in parameters and parameters["response_contract"] != contract:
+                raise OperationRequestError("invalid_body")
+            parameters["response_contract"] = contract
+        if ("x-deepline-tool-error-schema" in native_headers
+                and parameters.get("response_contract") != "raw-v2"):
+            raise OperationRequestError("invalid_request")
     return operation.operation_id, validate_operation_request(
         operation.operation_id, parameters, deepline_catalog=deepline_catalog,
         allow_full_thinking=allow_full_thinking,
@@ -2413,7 +2440,8 @@ def build_outbound_request(
             if len(body) > operation.max_request_bytes:
                 raise OperationRequestError("request_too_large")
         headers = operation.outbound_headers
-        if operation_id == "deepline.execute" and normalized["tool"] == "generic_http_request":
+        if (operation_id == "deepline.execute"
+                and normalized.get("response_contract") == "raw-v2"):
             headers = MappingProxyType({**headers, **DEEPLINE_GENERIC_HTTP_HEADERS})
         return OutboundRequest(target, base_url, MappingProxyType({}), body, "application/json", operation.credential, headers)
     query: Dict[str, str] = {name: _query_value(value) for name, value in normalized.items()}

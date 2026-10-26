@@ -1750,7 +1750,9 @@ def _deepline_exact_readback(
             saved = document.get("response")
             inline = saved.get("billing") if isinstance(saved, Mapping) else None
             if (
-                recovery.get("state") == "completed"
+                lookup_max_response_bytes == _DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES
+                and operation == "firecrawl_scrape"
+                and recovery.get("state") == "completed"
                 and type(document.get("responseStatus")) is int
                 and document["responseStatus"] == 200
                 and _deepline_job_request_id(saved) == native_id
@@ -1758,8 +1760,9 @@ def _deepline_exact_readback(
                 and isinstance(inline, Mapping)
                 and inline.get("pricing_status") == "final"
             ):
-                # Same authority as an intact execute receipt. Usage may still
-                # show a temporary hold after the retained reply is final.
+                # Recover a large Firecrawl reply's bill without admitting its
+                # source body. Other tools retain their existing recovery and
+                # final-usage checks, including malformed/conflicting receipts.
                 cost = provider_costs.deepline_cost(saved)
                 if cost is not None and not (
                     inline.get("billing_mode") == "async_hold" and cost.units == 0

@@ -220,6 +220,40 @@ def test_other_deepline_tools_keep_ordinary_lookup_limit():
     assert len(requests) == 1 and store.calls == []
 
 
+@pytest.mark.parametrize("operation", ["exa_search", "parallel_search", "firecrawl_scrape"])
+def test_ordinary_recovery_retains_final_usage_check(operation):
+    """A saved bill must not broaden the large-document recovery exception."""
+    document = {
+        "requestId": NATIVE_REQUEST_ID, "toolId": operation,
+        "executionRecovery": {"idempotencyKey": KEY, "state": "completed"},
+        "responseStatus": 200,
+        "response": {"job_id": NATIVE_REQUEST_ID, "status": "completed",
+                     "result": {"text": "saved evidence"},
+                     "billing": {"pricing_status": "final", "credits_charged": "0.02"}},
+    }
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        assert request.method == "GET"
+        if "/executions/by-key/" in str(request.url):
+            return httpx.Response(200, headers={"x-deepline-idempotency-supported": "true"},
+                                  json=document)
+        return httpx.Response(200, json={"recent": {"entries": []}})
+
+    transport = _transport(respond)
+    try:
+        native, cost = br._deepline_exact_readback(
+            transport=transport, secret=SECRET, request_id=None,
+            execution_key=KEY, operation=operation,
+            reconciliation_deadline=br.time.monotonic() + 5, poll=False,
+        )
+    finally:
+        transport.close()
+    assert native == NATIVE_REQUEST_ID and cost is None
+    assert len(requests) == 2
+
+
 @pytest.mark.parametrize("invalid_bound", [True, 0, 4 * 1024 * 1024, 64 * 1024 * 1024])
 def test_large_lookup_bound_is_fixed_and_rejects_other_values(invalid_bound):
     class NoRequests:

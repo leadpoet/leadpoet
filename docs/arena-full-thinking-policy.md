@@ -175,9 +175,11 @@ user has accepted this tradeoff.
   Codex helper retains its Fireworks default. The existing
   broker uses completed upstream responses; this PR does not add arbitrary
   upstream streaming support. Existing buffered Codex SSE behavior is preserved.
-  Provider-side Responses web search remains unapproved. The latest native test
-  uses TYCHE's exact Codex 0.154.0 version, with the substitutions listed in the
-  verification report. It does not prove a scored or published TYCHE workflow.
+  Hosted web search is supported on these approved Responses routes. Raw
+  search events, citations and interleaved messages retain their provider order.
+  Internal search content the provider does not expose is not reconstructed.
+  The native test uses TYCHE's exact Codex 0.154.0 version, with the limits listed
+  in the verification report. It does not prove a scored or published TYCHE workflow.
   Observed native token coverage supports keeping the provisional 1% setting;
   the small sample does not establish the best threshold or production readiness.
 - Keeping ZDR worked for all 25 approved routes. Relaxing retention does not
@@ -190,7 +192,8 @@ user has accepted this tradeoff.
 - Synthetic compatibility tests do not prove lead quality, a six-dollar full ICP
   run, or production readiness. Before activation, run representative ICPs,
   verify stored/exported artifacts and publication, and review latency, spend,
-  failure rates, and output quality. No production claim is made in this PR.
+  failure rates, and output quality. The merged capture code has been deployed;
+  this does not establish readiness to activate full-thinking rounds.
 - Apply the exact combined migration tail in numeric order through
   `574-lab-arena-review-guard-row-read.sql` before activation.
   This PR's migrations are `565-lab-arena-full-thinking-six-dollar-cap.sql`,
@@ -263,8 +266,10 @@ review prose or private traces. Training dataset permissions, splits, deduplicat
 and label checks remain separate; they are not new champion score rules.
 
 Only future opted-in rounds use these requirements. This PR stays default off.
-The PR-only migrations are numbered 564 through 568, after main's 563.
-They must be applied in numeric order. No production migration or activation is part of this PR.
+The final PR migrations are 565 through 570. They were applied in production
+on October 25 with the existing mainline schema preserved. The gateway and
+validator run merge commit `b967993769e17b50789f0f285ced156dfde9c890`.
+The policy remains off; deployment does not activate future full-thinking rounds.
 
 ## Review fixes — 2026-10-24
 

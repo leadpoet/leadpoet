@@ -1,6 +1,6 @@
 {
   "schema_version": "hosted-capture-verification.v1",
-  "execution": "Actual OpenRouter through broker, worker socket, disposable PostgreSQL RPC/SQL ledger and local object store; no production execution claimed.",
+  "execution": "Evidence is scoped per scenario: earlier local compatibility probes, followed by deployed Linux/gVisor component tests using actual OpenRouter, disposable SQL and private S3. No successful scored TYCHE production round is claimed.",
   "scenarios": [
     {
       "case": "fireworks-04",
@@ -218,5 +218,106 @@
     "limitation": "This run proves capture and error retention, not successful lead sourcing, unchanged configuration, hosted-search choice, gVisor parity or a complete scored ICP.",
     "model_POSTs": 70,
     "tyche_tracked_source_unchanged": true
+  },
+  "deployed_release": {
+    "merge_commit": "b967993769e17b50789f0f285ced156dfde9c890",
+    "pr": 732,
+    "gateway_identity_verified": true,
+    "validator_identity_verified": true,
+    "production_migrations_applied": [
+      565,
+      566,
+      567,
+      568,
+      569,
+      570
+    ],
+    "production_functions_verified": 24,
+    "schema_acl_preserved": true,
+    "existing_publication_rankings_verified": 34,
+    "full_thinking_policy_activated": false,
+    "frozen_scorer_changed": false,
+    "existing_round_caps_changed": false
+  },
+  "deployed_linux_capture_flow": {
+    "case": "focused04",
+    "mode": "operator component diagnostic, not an eligible or scored Arena round",
+    "runtime": "Actual deployed Linux gVisor runner and worker socket",
+    "source_files_verified": 1648,
+    "database": "Disposable PostgreSQL 16; current Arena migration fixture",
+    "database_parity": {
+      "release_critical_functions_matching": 24,
+      "fixture_functions_matching": 196,
+      "fixture_functions_compared": 198,
+      "excluded_function_differences": [
+        "append_validator_events_v1: validator telemetry",
+        "record_chain_outcome_v1: validator chain outcome"
+      ]
+    },
+    "objects": "Actual private S3 storage with independent readback",
+    "model": "deepseek/deepseek-v4.1-flash-1017",
+    "provider": "together",
+    "api": "openrouter.responses",
+    "provider_calls": 4,
+    "successful_provider_calls": 4,
+    "hosted_search_events": 2,
+    "citation_urls": 5,
+    "full_thinking_calls": 3,
+    "reported_reasoning_tokens": 342,
+    "explicit_zero_reasoning_calls": 1,
+    "raw_wire_SQL_worker_export_match": true,
+    "readable_provider_order_preserved": true,
+    "valid_step_candidates": 4,
+    "candidate_errors": [],
+    "provider_capture_gaps": [],
+    "strict_final_json": true,
+    "final_json_equals_actual_provider_and_tool_output": true,
+    "independent_s3_readbacks": 36,
+    "independent_s3_mismatches": 0,
+    "official_citation_http_checks": 5,
+    "official_citation_http_successes": 5,
+    "confirmed_cost_microusd": 9633,
+    "local_validation_recovery": "One local canonical-name validator rejected Azure cloud platform; the model changed it to Microsoft Azure. The original phrase was not shown to be factually false. Both original arguments and actual error/success results were preserved.",
+    "custom_miner_acknowledgements": 0,
+    "strict_trajectory_complete": false,
+    "strict_trajectory_incomplete_reasons": [
+      "scoring_label_unavailable"
+    ]
+  },
+  "deployed_linux_other_controls": [
+    {
+      "case": "focused01",
+      "successful_calls": 2,
+      "candidate_count": 2,
+      "result": "Preserved actual placeholder URL failure; no final output repair."
+    },
+    {
+      "case": "native01",
+      "successful_calls": 6,
+      "candidate_count": 6,
+      "result": "Codex 0.154 accepted hosted continuation and actual TYCHE MCP transport; model repeated tools and did not finish before the six-POST diagnostic limit. Not the full TYCHE workflow."
+    },
+    {
+      "case": "focused02",
+      "successful_calls": 3,
+      "candidate_count": 3,
+      "result": "Final JSON and capture passed, but model said facts were not verifiable. Not a factual-quality pass."
+    },
+    {
+      "case": "focused03",
+      "successful_calls": 2,
+      "candidate_count": 2,
+      "result": "Current SQL capture passed; one uncited URL failed local validation. No final output repair."
+    }
+  ],
+  "tyche_unchanged_code_mode_limit": "The current TYCHE source hardcodes its default Luna model and a Luna-specific code-mode instruction path. The approved DeepSeek native request exposed exec_command and plain MCP tools, not that code-mode tool interface. Prior probes changed MODEL and CODE_MODE in memory. These do not prove unchanged TYCHE code-mode completion, and no miner source workaround or extra protocol was added.",
+  "test_budget": {
+    "openrouter_cap_usd": "10",
+    "confirmed_task_usd": "0.5985062620",
+    "unresolved_attempt_reservations_usd": "3.757891",
+    "deployed_component_confirmed_usd": "0.092186",
+    "uncertain_charges_released": false,
+    "separate_search_scraping_provider_spend_usd": "0",
+    "hosted_search_cost_included_in_openrouter": true
   }
 }

@@ -1107,3 +1107,62 @@ TYCHE source archive was unchanged, but model and plain-tool settings were
 changed in memory; this is not proof of the unchanged configuration or production
 sandbox. Confirmed model cost was $0.073593; neither run proves a complete scored
 ICP or successful lead sourcing.
+
+
+## October 25 deployed capture verification
+
+PR #732 merged as `b967993769e17b50789f0f285ced156dfde9c890`.
+The exact committed migrations 565–570 were applied. Canonical gateway and
+validator deployment completed, and independent reads verified both live source
+identities, 24 release-critical SQL function hashes and privileges, and schema
+permissions. Existing frozen scoring, cost caps, published rankings and the
+inactive reasoning policy were preserved. Deployment did not activate the new
+policy. Later main commit `a4bce6a92` changed tests only.
+
+The final isolated component test ran the deployed source in the actual Linux
+gVisor runner, through the worker socket, broker, disposable current Arena SQL
+fixture and private S3 storage. It completed hosted search, local tool validation,
+a real error result, a corrected tool call, and strict final JSON. Four actual
+provider replies produced four valid step candidates. Three replies exposed
+342 reasoning tokens with text; the hosted reply explicitly reported zero.
+Two hosted events and five citations retained their original order.
+
+Independent checks compared exact wire bytes with SQL, worker writes, exports
+and readable output. All 36 independent S3 reads matched. The final JSON matched
+the actual provider reply and local tool result; all five official cited pages
+returned HTTP 200. The local error tested a canonical-name requirement: the
+model changed “Azure cloud platform” to “Microsoft Azure”. This is not evidence
+that the first phrase was factually wrong. Original arguments and both tool
+results remain stored. No model answer or acknowledgement was synthesized.
+
+This diagnostic was not a scored Arena round. Its strict export correctly keeps
+`scoring_label_unavailable`; candidate shape validation does not create a valid
+training label. The SQL fixture matched all 24 relevant production functions
+and 196 of its 198 total functions. Two auxiliary telemetry/chain functions use
+earlier fixture versions and were not exercised. Fixture seeding temporarily
+supplied a required default, which was removed before execution. Production SQL
+was not altered for the test.
+
+The native Codex Linux control accepted hosted search continuation and the real
+TYCHE MCP transport. It repeated tools until the six-POST diagnostic limit and
+did not produce final JSON. Earlier focused failures, including an uncited URL
+and unavailable facts, remain recorded rather than repaired. Current TYCHE
+hardcodes a Luna model and Luna-specific code-mode instructions. The approved
+DeepSeek native route exposes a different tool interface. Prior model/plain-tool
+settings changed in memory do not prove unchanged TYCHE code-mode success.
+No miner code change, logging callback or receipt protocol was added.
+
+The deployed component checks cost $0.092186 in OpenRouter calls. Current-task
+confirmed spend is $0.5985062620; $3.757891 remains reserved for older uncertain
+attempts under the $10 cap. Unused component reservations were released only
+after reconciliation. No separate search or scraping provider calls were made;
+hosted search charges are included in the OpenRouter total.
+
+The required local release gate passed 829 checks. Independent review and the
+preserved-behavior suites are recorded above. At this verification, the PR-head
+and later-main CI runs were still pending; the merged-head run was cancelled by
+the later push. These are not reported as CI passes. No new scored production
+run or post-restart finalized weight reveal was established in the observation
+window. Full-thinking activation still requires a compatible baseline and the
+separate activation checks. Capture correctness does not prove lead quality or
+that a model's written thinking faithfully explains its decisions.

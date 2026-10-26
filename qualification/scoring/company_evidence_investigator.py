@@ -4807,6 +4807,12 @@ async def investigate_company_evidence(
                     and industry_followup_pending
                     and not forced_stage_search_pending
                 )
+                industry_selection_model = industry_review_model if (
+                    not force_submit and (
+                        forced_industry_search_call
+                        or (required_tool == "fetch_page" and industry_followup_search_completed)
+                    )
+                ) else ""
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending
                     and required_tool == "submit_findings"
@@ -4829,7 +4835,10 @@ async def investigate_company_evidence(
                         "Content-Type": "application/json",
                     },
                     payload={
-                        "model": (
+                        # The model assessing capability gaps also selects
+                        # the targeted query and its first source. Other
+                        # research and judgments keep their existing model.
+                        "model": industry_selection_model or (
                             POSITIVE_SEMANTIC_REVIEW_MODEL
                             if positive_semantic_review
                             else INVESTIGATOR_MODEL
@@ -4874,12 +4883,11 @@ async def investigate_company_evidence(
                         **(
                             {"reasoning": {"effort": "low"}}
                             if (
-                                positive_semantic_review
-                                and (
-                                    serialization_retry_request
-                                    or force_submit
+                                industry_selection_model
+                                or (positive_semantic_review and (
+                                    serialization_retry_request or force_submit
                                     or required_tool == "submit_findings"
-                                )
+                                ))
                             )
                             else {}
                         ),

@@ -13,17 +13,18 @@ MODEL = 'openai/gpt-6.1-sol'
 
 
 def install(monkeypatch, *, decision='match', missing=None, mutation=None, **kwargs):
+    finding = kwargs.pop('finding', _finding('industry'))
     run, calls, clock = _install_loop(
         monkeypatch, target='industry', status=200,
         body='Coreworks connects account workflows to its analysis and reporting product.',
-        urls=('https://www.coreworks.ai/product', URL), finding=_finding('industry'),
+        urls=('https://www.coreworks.ai/product', URL), finding=finding,
         **kwargs)
     monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', MODEL)
     original = c._post_json
     review_calls = []
 
     async def post(session, url, *, headers, payload):
-        if payload.get('model') != MODEL:
+        if 'response_format' not in payload:
             return await original(session, url, headers=headers, payload=payload)
         review_calls.append(payload)
         pages = [page for message in payload['messages'][2:]
@@ -91,7 +92,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     original_post = c._post_json
 
     async def planned_post(session, url, *, headers, payload):
-        if (payload.get('model') != MODEL
+        if ('response_format' not in payload
                 and payload.get('tool_choice') == {
                     'type': 'function', 'function': {'name': 'search_web'}}):
             from tests.test_company_evidence_judgment_reserve import _response
@@ -118,6 +119,12 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     assert brief['decision'] == 'unavailable'
     assert 'not proof' in brief['notice']
     assert calls['model'][0]['tool_choice']['function']['name'] == 'search_web'
+    assert calls['model'][0]['model'] == MODEL
+    assert calls['model'][1]['tool_choice']['function']['name'] == 'fetch_page'
+    assert calls['model'][1]['model'] == MODEL
+    assert all(request['reasoning']['effort'] == 'low' for request in calls['model'][:2])
+    assert all(request['model'] == c.POSITIVE_SEMANTIC_REVIEW_MODEL
+               for request in calls['model'][2:])
     assert result['claims']['industry']['status'] == 'VERIFIED'
     assert len(reviews) == result['usage']['industry_review_calls'] == 2
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
@@ -127,6 +134,29 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     from lab_arena.operations import validate_operation_request
     for request in [*calls['model'], *reviews]:
         validate_operation_request('openrouter.chat', request)
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+@pytest.mark.parametrize('positive_review', [False, True])
+def test_research_without_industry_gap_keeps_original_model(monkeypatch, enabled, positive_review):
+    run, calls, _, _ = install(monkeypatch, finding=_finding('industry',
+        observed_industry='Software', activity_role='supplier_operator',
+        evidence_url=URL, evidence_quote='Coreworks connects account workflows to its analysis and reporting product.'))
+    monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', MODEL if enabled else '')
+    original = c.investigate_company_evidence
+
+    async def invoke(**kwargs):
+        return await original(**dict(kwargs, positive_semantic_review=positive_review))
+
+    monkeypatch.setattr(c, 'investigate_company_evidence', invoke)
+    result = asyncio.run(run())
+    assert result['_completed_submit']
+    assert calls['model']
+    expected = c.POSITIVE_SEMANTIC_REVIEW_MODEL if positive_review else c.INVESTIGATOR_MODEL
+    assert all(request['model'] == expected for request in calls['model'])
+    assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
+    assert result['usage']['search_calls'] <= c.MAX_SEARCH_CALLS
 
 
 def test_unproven_industry_review_cannot_leave_an_old_pass(monkeypatch):

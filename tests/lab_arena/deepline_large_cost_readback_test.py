@@ -123,11 +123,12 @@ def test_delayed_large_firecrawl_lookup_keeps_default_cap_and_settles_exactly_on
     assert store.calls[0]["actual_microusd"] == 3_000
 
 
+@pytest.mark.parametrize("inline_final", [False, True])
 @pytest.mark.parametrize("change", [
     "foreign_key", "foreign_tool", "synthetic_id", "foreign_bill",
     "credential_echo", "missing_support_header",
 ])
-def test_large_lookup_cannot_settle_from_forged_identity_or_charge(change):
+def test_large_lookup_cannot_settle_from_forged_identity_or_charge(change, inline_final):
     requests = []
 
     def respond(request):
@@ -145,10 +146,16 @@ def test_large_lookup_cannot_settle_from_forged_identity_or_charge(change):
                 patch["requestId"] = "ctx-tool-" + "a" * 32
             elif change == "credential_echo":
                 patch["provider_metadata"] = SECRET
+            document = _lookup(**patch)
+            # A valid final inline bill has its own authority; a foreign usage
+            # entry is relevant only when no such receipt is present.
+            if inline_final and change != "foreign_bill":
+                document["response"].update(job_id=NATIVE_REQUEST_ID,
+                    billing={"pricing_status": "final", "credits_charged": "0.02"})
             return httpx.Response(200,
                 headers=({} if change == "missing_support_header" else
                          {"x-deepline-idempotency-supported": "true"}),
-                json=_lookup(**patch))
+                json=document)
         return httpx.Response(200, json=exact_bill(
             request_id="another-native-id" if change == "foreign_bill" else NATIVE_REQUEST_ID))
 
@@ -175,7 +182,7 @@ def test_firecrawl_lookup_remains_bounded_above_existing_envelope_allowance():
         assert "/executions/by-key/" in str(request.url)
         return httpx.Response(200,
             headers={"x-deepline-idempotency-supported": "true"},
-            content=b"x" * (br._DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES + 16_385))
+            content=b"x" * (br._DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES + 1))
 
     transport = _transport(respond)
     store = ReconciliationStore()
@@ -213,7 +220,7 @@ def test_other_deepline_tools_keep_ordinary_lookup_limit():
     assert len(requests) == 1 and store.calls == []
 
 
-@pytest.mark.parametrize("invalid_bound", [True, 0, 4 * 1024 * 1024, 32 * 1024 * 1024])
+@pytest.mark.parametrize("invalid_bound", [True, 0, 4 * 1024 * 1024, 64 * 1024 * 1024])
 def test_large_lookup_bound_is_fixed_and_rejects_other_values(invalid_bound):
     class NoRequests:
         def send(self, **_request):
@@ -225,3 +232,85 @@ def test_large_lookup_bound_is_fixed_and_rejects_other_values(invalid_bound):
         reconciliation_deadline=br.time.monotonic() + 5, poll=False,
         lookup_max_response_bytes=invalid_bound,
     ) == (None, None)
+
+
+def _oversized_final_receipt(key=KEY):
+    saved = _original_response()
+    saved.update(job_id=NATIVE_REQUEST_ID,
+                 billing={"pricing_status": "final", "credits_charged": "0.02"})
+    saved["result"]["data"]["rawHtml"] = "x" * (20 * 1024 * 1024)
+    return _lookup(key, response=saved)
+
+
+def test_oversized_source_remains_rejected_but_its_saved_final_bill_settles():
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(200, json=_oversized_final_receipt()["response"])
+        assert "/executions/by-key/" in str(request.url)
+        key = unquote(str(request.url).rsplit("/", 1)[-1])
+        return httpx.Response(200, headers={"x-deepline-idempotency-supported": "true"},
+                              json=_oversized_final_receipt(key))
+
+    transport = _transport(respond)
+    store = FakeLedgerStore(openrouter_capacity=10_000_000)
+    broker, _, _ = make_broker(store=store, transport=transport,
+        credential_for=lambda _context, _provider: DL_KEY,
+        funding_source_for=lambda _context: "host",
+        host_shadow_score_compat_round_id=ROUND_ID,
+        host_shadow_score_compat_source_round_id=ROUND_ID)
+    try:
+        result = broker.execute(_score_context(), operation_id="scrapingdog.scrape",
+            parameters={"url": "https://example.com/about"}, action_sequence=0, timeout_ms=30_000)
+    finally:
+        transport.close()
+    assert result.status == 502
+    assert result.call["actual_microusd"] == 2_000
+    assert store.calls[result.call["call_identity"]]["actual"] == 2_000
+    assert [r.method for r in requests] == ["POST", "GET"]
+
+
+@pytest.mark.parametrize("change", [None, "foreign_body_id", "conflicting_body_id",
+    "pending_price", "pending_execution", "pending_body", "bad_status", "bool_status",
+    "hold_zero", "negative_cost", "missing_price"])
+def test_saved_inline_bill_requires_exact_terminal_receipt(change):
+    document = _lookup()
+    saved = document["response"]
+    saved.update(job_id=NATIVE_REQUEST_ID,
+                 billing={"pricing_status": "final", "credits_charged": "0.02"})
+    if change == "foreign_body_id": saved["job_id"] = "foreign-native-id"
+    if change == "conflicting_body_id": saved["requestId"] = "foreign-native-id"
+    if change == "pending_price": saved["billing"]["pricing_status"] = "pending"
+    if change == "pending_execution": document["executionRecovery"]["state"] = "running"
+    if change == "pending_body": saved["status"] = "running"
+    if change == "bad_status": document["responseStatus"] = 502
+    if change == "bool_status": document["responseStatus"] = True
+    if change == "hold_zero": saved["billing"].update(billing_mode="async_hold", credits_charged="0")
+    if change == "negative_cost": saved["billing"]["credits_charged"] = "-1"
+    if change == "missing_price": del saved["billing"]["pricing_status"]
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        assert request.method == "GET"
+        if "/executions/by-key/" in str(request.url):
+            return httpx.Response(200, headers={"x-deepline-idempotency-supported": "true"}, json=document)
+        # A pending usage read must not be converted into a final bill.
+        return httpx.Response(200, json={"recent": {"entries": []}})
+
+    transport = _transport(respond)
+    try:
+        native, cost = br._deepline_exact_readback(transport=transport, secret=SECRET,
+            request_id=None, execution_key=KEY, operation="firecrawl_scrape",
+            reconciliation_deadline=br.time.monotonic() + 5, poll=False,
+            lookup_max_response_bytes=br._DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES)
+    finally:
+        transport.close()
+    assert native == NATIVE_REQUEST_ID
+    if change is None:
+        assert cost is not None and cost.microusd == 2_000
+        assert len(requests) == 1
+    else:
+        assert cost is None and len(requests) == 2

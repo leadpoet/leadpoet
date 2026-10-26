@@ -191,8 +191,9 @@ _CREDENTIAL_FINGERPRINT_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Broker-internal only: the observed Firecrawl envelope was 5,271,155 bytes.
 # The requested Scrapingdog-compatible response keeps its existing 2 MiB cap.
 _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES = 16 * 1024 * 1024
-# Completed key lookups include the original Firecrawl response envelope.
-_DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES = _DEEPLINE_FIRECRAWL_ENVELOPE_MAX_BYTES + 16_384
+# Billing key lookups retain even source replies rejected by the 16 MiB cap.
+# Read their bill within a separate fixed bound; never return that source body.
+_DEEPLINE_FIRECRAWL_LOOKUP_MAX_BYTES = 32 * 1024 * 1024
 # Documented post-mortem billing identity:
 # https://openrouter.ai/docs/guides/features/router-metadata#error-responses
 _OPENROUTER_GENERATION_HEADER = "x-generation-id"
@@ -1746,6 +1747,24 @@ def _deepline_exact_readback(
             ):
                 return None, None
             native_id = recovered_id
+            saved = document.get("response")
+            inline = saved.get("billing") if isinstance(saved, Mapping) else None
+            if (
+                recovery.get("state") == "completed"
+                and type(document.get("responseStatus")) is int
+                and document["responseStatus"] == 200
+                and _deepline_job_request_id(saved) == native_id
+                and saved.get("status") == "completed"
+                and isinstance(inline, Mapping)
+                and inline.get("pricing_status") == "final"
+            ):
+                # Same authority as an intact execute receipt. Usage may still
+                # show a temporary hold after the retained reply is final.
+                cost = provider_costs.deepline_cost(saved)
+                if cost is not None and not (
+                    inline.get("billing_mode") == "async_hold" and cost.units == 0
+                ):
+                    return native_id, cost
             # Key recovery is a read, not a polling interval. Read the charge
             # within this same deadline before the next paced poll.
             remaining = deadline - time.monotonic()

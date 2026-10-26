@@ -611,3 +611,49 @@ def test_private_cli_writes_text_and_versioned_manifest(tmp_path):
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["dataset_version"].startswith("sha256:")
     assert manifest["training_permission"]["status"] == "unconfirmed"
+
+
+@pytest.mark.parametrize('delivery', ['selected_terminal', 'terminal_receipt'])
+def test_chat_citation_annotations_are_readable_with_exact_order_and_source_path(delivery):
+    # Schema observed in production Chat replies; all values are synthetic.
+    example = full_example()
+    call = example['provider_calls'][0]
+    response = call['response']
+    root = ['provider_calls', 0, 'response']
+    if delivery == 'terminal_receipt':
+        response = copy.deepcopy(response)
+        call['response_receipts'][0]['response'] = response
+        root = ['provider_calls', 0, 'response_receipts', 0, 'response']
+    message = response['choices'][0]['message']
+    annotations = [
+        {'type': 'url_citation', 'url_citation': {
+            'url': 'https://example.com/source-b', 'title': 'Second source',
+            'start_index': 8, 'end_index': 11}},
+        {'type': 'url_citation', 'url_citation': {
+            'url': 'https://example.com/source-a', 'title': 'First source',
+            'start_index': 12, 'end_index': 15}},
+    ]
+    message['content'] = 'Sources [1] [2].'
+    message['annotations'] = annotations
+    seal(example)
+    original = copy.deepcopy(example)
+    report = training_thinking.readable_trace(example)
+    path = root + ['choices', 0, 'message', 'annotations']
+    events = [event for event in report['calls'][0]['events']
+              if event.get('source_path') == path]
+    assert len(events) == 1
+    event = events[0]
+    assert event['kind'] == 'citation_annotations'
+    assert event['delivery'] == delivery
+    assert event['value'] == annotations
+    assert event['value_sha256'] == contracts.document_hash(annotations)
+    value = example
+    for part in path:
+        value = value[part]
+    assert value == event['value']
+    markdown = training_thinking.readable_trace_markdown(report)
+    assert 'Sources [1] [2].' in markdown
+    assert markdown.index('https://example.com/source-b') < markdown.index('https://example.com/source-a')
+    assert 'Second source' in markdown and 'First source' in markdown
+    assert contracts.canonical_json(path) in markdown
+    assert example == original

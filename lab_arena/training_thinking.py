@@ -1043,6 +1043,8 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
                         base = path + ["choices", choice_index, "message"]
                         if "content" in message:
                             add("assistant_output", base + ["content"], message["content"], delivery=delivery)
+                        if isinstance(message.get("annotations"), list) and message["annotations"]:
+                            add("citation_annotations", base + ["annotations"], message["annotations"], delivery=delivery)
                         for tool_index, tool in enumerate(message.get("tool_calls") or []):
                             add("tool_call", base + ["tool_calls", tool_index], tool, delivery=delivery)
             elif operation == "openrouter.responses":

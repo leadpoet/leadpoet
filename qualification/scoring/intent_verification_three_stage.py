@@ -4831,6 +4831,27 @@ def _same_event_resolution_outcome(
 # ─────────────────────────────────────────────────────────────────────
 
 
+def _verified_submitted_source_pages(
+    source_pages: Any, source_urls: Sequence[str], identity: Any, *, company_name: str,
+) -> Dict[str, Dict[str, str]]:
+    """Project bounded private fetched text for the exact submitted resource only."""
+    from qualification.scoring.lead_scorer import (
+        _MAX_RETAINED_INVESTIGATOR_CONTEXTS, _validated_first_party_source_context,
+    )
+
+    if not isinstance(source_pages, Mapping) or len(source_pages) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS:
+        return {}
+    pages = {}
+    for url in source_urls:
+        entry = source_pages.get(url)
+        context = _validated_first_party_source_context(
+            url, entry, identity, company_name=company_name,
+        )
+        if context and _normalize_url(context["final_url"]) == _normalize_url(url):
+            pages[url] = {"final_url": context["final_url"], "text": context["text"]}
+    return pages
+
+
 async def verify_three_stage(
     client: httpx.AsyncClient,
     *,
@@ -4854,6 +4875,7 @@ async def verify_three_stage(
     buyer_max_age_days: Optional[int] = None,
     evidence_bundle: Optional[List[Dict[str, Any]]] = None,
     verified_funding_stage_context: Optional[Sequence[Mapping[str, str]]] = None,
+    verified_source_pages: Optional[Mapping[str, Mapping[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Intent verification using fetched evidence and a source-grounded judge.
 
@@ -5259,8 +5281,9 @@ async def verify_three_stage(
                     if item.get("source_publication_date")
                 ))
                 fetched_urls = {selected_key}
+    retained_fallback_original = None
     if not contents["results"] or incomplete_bundle:
-        return {
+        unavailable_result = {
             "client_ready": False,
             # Two independent fetch paths can establish that the exact source
             # URL is absent. That is a semantic failure to prove the claim, not
@@ -5296,6 +5319,25 @@ async def verify_three_stage(
                 }],
             },
         }
+
+        # This cache retains text, not HEAD or job metadata. Preserve every
+        # usable fresh result. An exact retained page can only recover an
+        # unavailable single-source read, subject to affirmative grounding below.
+        retained_pages = _verified_submitted_source_pages(
+            verified_source_pages, row["claimed_source_urls"], verified_company_identity,
+            company_name=company_name,
+        ) if (integrity_policy and not is_hiring_claim and not source_absent
+              and row.get("_declared_source") != "job_board"
+              and not _is_job_board_url(fetch_source_url)
+              and len(row["claimed_source_urls"]) == 1
+              and not contents["results"] and unavailable_source_resolution is None) else {}
+        if not retained_pages:
+            return unavailable_result
+        retained_fallback_original = unavailable_result
+        contents = {"results": [{"url": url, "text": page["text"],
+                                 "meta": {"final_url": page["final_url"]}}
+                                for url, page in retained_pages.items()],
+                    "statuses": contents.get("statuses") or []}
 
     # ── PRE-STAGE-3: deterministic domain-brand presence check ─────
     # A positive-only cost pre-filter, NOT the entity judge — Stage 3
@@ -5563,6 +5605,35 @@ async def verify_three_stage(
     s3_verdict_raw = (s3_envelope.get("answer") or {})
     s3_verdict = _apply_guardrails(row, s3_verdict_raw)
     s3_item = ((s3_verdict.get("signal_evaluations") or [{}]) or [{}])[0]
+    if retained_fallback_original is not None:
+        from qualification.scoring.arena_integrity import source_dates_from_verdict, source_grounded_date_verdict
+        from qualification.scoring.evaluation_clock import evaluation_date
+        grounded_quotes = [str(quote) for quote in s3_item.get("supporting_quotes") or []
+                           if _grounded_exact_text(combined_text, quote)]
+        event_date, _ = source_dates_from_verdict(s3_item)
+        date_verdict = source_grounded_date_verdict(
+            event_date=event_date, publication_dates=[],
+            buyer_cap_days=buyer_max_age_days or 365, evaluated_on=evaluation_date(),
+        )
+        # This is the original submitted resource, not a discovered alternate.
+        # A grounded model paraphrase needs no alternate-event marker.
+        if (date_verdict.verdict == "uncertain"
+            or _decision(s3_verdict, company_quality=company_quality,
+                         require_same_entity=require_ats_employer_identity) != "approve"
+            or not _has_grounded_source_event_date(s3_item, "\n".join(grounded_quotes))
+            or s3_item.get("verification_mode") != "source_grounded"
+            or s3_item.get("signal_id") != row["id"]
+            or s3_item.get("same_entity_check") != "pass"
+            or len(s3_verdict.get("signal_evaluations") or []) != 1
+            or s3_item.get("unsupported_parts") or s3_item.get("contradicting_quotes")
+            or not isinstance(s3_item.get("evidence_urls_used"), list)
+            or not s3_item.get("evidence_urls_used")
+            or not all(isinstance(cited, str) and _normalize_url(cited) == _normalize_url(fetch_source_url)
+                       for cited in s3_item["evidence_urls_used"])
+            or not grounded_quotes):
+            # Incomplete retained text cannot turn a failed read into a
+            # negative decision, or confer a guessed publication/event date.
+            return retained_fallback_original
     _bind_approximate_event_month(s3_item, combined_text, str(row["claim"]))
     same_event_resolution = unavailable_source_resolution
     if unavailable_source_resolution is not None:

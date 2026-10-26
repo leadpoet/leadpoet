@@ -1,9 +1,9 @@
 """Miner-funded scoring routes for legacy judge provider calls.
 
 The pinned judge still issues a small set of ScrapingDog-shaped requests.
-Only a miner-funded scoring run translates those requests to the miner's
-Deepline workspace.  Host-funded scoring and miner model execution do not use
-this module's routes.
+Miner-funded scoring and verified promoted-baseline scoring translate those
+requests to Deepline, using the frozen payer for that provider. Ordinary
+host-funded scoring and miner model execution do not use these routes.
 
 The broker keeps the requested operation identity in the ledger.  This module
 only supplies the effective Deepline request and converts the bounded raw
@@ -181,6 +181,7 @@ def route_for(
     parameters: Mapping[str, Any],
     timeout_ms: Optional[int] = None,
     allow_host_shadow_score: bool = False,
+    allow_champion_score: bool = False,
     source_content_fallback: bool = False,
     source_content_response_url: Optional[str] = None,
     frozen_catalog: Optional[Mapping[str, Any]] = None,
@@ -189,7 +190,9 @@ def route_for(
 
     if kind != "score" or not (
         funding_source == "miner_key"
-        or (funding_source == "host" and allow_host_shadow_score is True)
+        or (funding_source == "host" and (
+            allow_host_shadow_score is True or allow_champion_score is True
+        ))
     ):
         return None
     # The upstream must finish before the broker stops reading its response.

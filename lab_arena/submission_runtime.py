@@ -92,6 +92,15 @@ class SubmissionProviderKeys:
             self._submission(context)
         )
 
+    def champion_score_for(self, context: RunContext) -> bool:
+        """Keep the promoted baseline's scorer routes when its payer changes."""
+
+        if context.kind != "score":
+            return False
+        return self._is_baseline(self._submission(context)) and (
+            self._provider_funding(context, "deepline")["champion_funding"] is True
+        )
+
     def provider_restart_required_for(
         self, context: RunContext, provider: str
     ) -> bool:

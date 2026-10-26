@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 
 import pytest
@@ -101,6 +102,56 @@ def test_active_model_direction_is_bound_to_full_source_and_prompt_is_untrusted(
     assert "explanation" not in result.research_control
 
 
+@pytest.mark.parametrize("field,value", [
+    ("policy_id", "a_different_model_echo"),
+    ("policy_hash", "sha256:" + "1" * 64),
+    ("source_archive_sha256", "sha256:" + "2" * 64),
+    ("source_manifest_sha256", "sha256:" + "3" * 64),
+    ("policy_hash", "sha256:short-generated-echo"),
+])
+def test_generated_binding_echo_cannot_override_host_binding(field, value):
+    prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
+    assessment = _assessment(prepared)
+    assessment[field] = value
+    result = code_review.parse_response(_response(prepared, assessment), prepared)
+    assert result.passed
+    assert result.research_control["policy_id"] == code_review.RESEARCH_POLICY_ID
+    assert result.research_control["policy_hash"] == code_review.RESEARCH_POLICY_HASH
+    assert result.research_control["source_archive_sha256"] == prepared.source_archive_sha256
+    assert result.research_control["source_manifest_sha256"] == prepared.source_manifest_sha256
+
+
+@pytest.mark.parametrize("field,value", [
+    ("policy_id", None), ("policy_id", {}), ("policy_id", ""), ("policy_id", "x" * 129),
+    ("policy_hash", False), ("policy_hash", "x" * 129),
+    ("source_archive_sha256", []), ("source_archive_sha256", ""),
+    ("source_manifest_sha256", {}), ("source_manifest_sha256", " " * 10),
+])
+def test_binding_echo_shape_remains_closed(field, value):
+    prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
+    assessment = _assessment(prepared)
+    assessment[field] = value
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(_response(prepared, assessment), prepared)
+    assert failure.value.response_reason == "research_binding"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("source_archive_sha256", None), ("source_archive_sha256", "not-a-digest"),
+    ("source_manifest_sha256", None), ("source_manifest_sha256", "sha256:" + "0" * 64),
+])
+def test_invalid_host_binding_cannot_be_repaired_by_model_echo(field, value):
+    prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
+    response = _response(prepared, _assessment(prepared))
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(response, replace(prepared, **{field: value}))
+    assert failure.value.response_reason == "research_binding"
+
+
+def test_binding_fix_keeps_existing_research_policy_identity():
+    assert code_review.RESEARCH_POLICY_HASH == "sha256:1d30b4c2d838e84692b3cd9aa0fe0da3ff908f37b3836863b3937a3d93c9a73c"
+
+
 def test_research_evidence_rejects_one_character_quote_but_accepts_code_context():
     prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
     assessment = _assessment(prepared)
@@ -122,7 +173,7 @@ def test_active_nonqualifying_classification_is_structured(classification):
 
 @pytest.mark.parametrize("mutation,reason", [
     (lambda x: x.pop("research_control"), "document_keys"),
-    (lambda x: x["research_control"].update(source_archive_sha256="sha256:" + "0" * 64), "research_binding"),
+    (lambda x: x["research_control"].update(source_archive_sha256=None), "research_binding"),
     (lambda x: x["research_control"]["evidence"][0].update(excerpt="invented unreachable code"), "research_evidence_mismatch"),
     (lambda x: x["research_control"].update(evidence=x["research_control"]["evidence"][:1]), "research_classification"),
     (lambda x: x.update(reviewed_files=[]), "coverage"),
@@ -237,3 +288,61 @@ def test_frozen_round_policy_is_authoritative_over_submission_fields():
     assert reviewer.review(row)["status"] == "passed"
     sent = json.loads(transport.sent[0]["body"])
     assert "research_control" not in json.loads(sent["messages"][1]["content"])
+
+
+def test_runtime_stores_host_bindings_and_bills_once_despite_generated_echoes():
+    payload = _archive(SOURCE)
+    prepared = code_review.prepare_request(payload, research_control=True)
+    store = _RoundStore({"reasoning_capture_policy": "full_generated_thinking_v1"})
+    def reply(parameters):
+        result = _review_body(parameters)
+        document = json.loads(result["choices"][0]["message"]["content"])
+        assessment = _assessment(prepared)
+        for key in ("policy_id", "policy_hash", "source_archive_sha256", "source_manifest_sha256"):
+            assessment[key] = "generated-echo-is-not-authority"
+        document["research_control"] = assessment
+        result["choices"][0]["message"]["content"] = json.dumps(document)
+        return {"body": result}
+    transport = ReviewTransport(reply)
+    reviewer = SubmissionCodeReviewer(store=store, objects=_Objects(payload),
+                                      credential_for=lambda _row: MINER_KEY,
+                                      price_table=_price_table(), transport=transport)
+    row = {**SUBMISSION, "source_size_bytes": len(payload),
+           "source_archive_sha256": code_review.contracts.hash_bytes(payload)}
+    assert reviewer.review(row)["status"] == "passed"
+    saved = store.finish_calls[0][4]["research_control"]
+    assert saved["policy_id"] == code_review.RESEARCH_POLICY_ID
+    assert saved["policy_hash"] == code_review.RESEARCH_POLICY_HASH
+    assert saved["source_archive_sha256"] == prepared.source_archive_sha256
+    assert saved["source_manifest_sha256"] == prepared.source_manifest_sha256
+    assert "generated-echo" not in repr(saved)
+    assert store.finish_calls[0][5] == 1234
+    assert reviewer.review(row)["status"] == "existing"
+    assert len(transport.sent) == len(store.finish_calls) == 1
+
+
+def test_saved_source_identity_still_blocks_cross_source_review_before_dispatch():
+    payload = _archive(SOURCE)
+    other = _archive(dict(SOURCE, **{"prompt.txt": b"A different admitted source archive.\n"}))
+    store = _RoundStore({"reasoning_capture_policy": "full_generated_thinking_v1"})
+    transport = ReviewTransport(lambda _parameters: pytest.fail("source identity mismatch must not dispatch"))
+    reviewer = SubmissionCodeReviewer(store=store, objects=_Objects(payload),
+                                      credential_for=lambda _row: MINER_KEY,
+                                      price_table=_price_table(), transport=transport)
+    row = {**SUBMISSION, "source_size_bytes": len(payload),
+           "source_archive_sha256": code_review.contracts.hash_bytes(other)}
+    assert reviewer.review(row)["status"] == "error"
+    assert transport.sent == []
+    document = store.finish_calls[0][4]
+    assert document["error_code"] == "code_review_source_digest_mismatch"
+    assert document["retryable"] is False
+    assert store.finish_calls[0][5] == 0
+
+
+def test_changed_prepared_file_content_still_fails_host_manifest_binding():
+    prepared = code_review.prepare_request(_archive(SOURCE), research_control=True)
+    changed = replace(prepared.files[0], content=prepared.files[0].content + "\n# changed\n")
+    tampered = replace(prepared, files=(changed, *prepared.files[1:]))
+    with pytest.raises(code_review.CodeReviewError) as failure:
+        code_review.parse_response(_response(prepared, _assessment(prepared)), tampered)
+    assert failure.value.response_reason == "research_binding"

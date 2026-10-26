@@ -421,6 +421,8 @@ def test_empty_native_history_does_not_broaden_opaque_export():
     assert removed is True
     assert projected == {"output": [{"type": "reasoning", "summary": [], "encrypted_content": None,
                                       "content": [{"type": "reasoning_text", "text": "Read the source."}]}]}
+    projected["output"][0]["summary"].append({"type": "summary_text", "text": "Changed copy."})
+    assert value["output"][0]["summary"] == []
 
 
 def test_export_filter_keeps_alias_only_in_provider_response_path():

@@ -61,7 +61,7 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
                     if (item.get("type") == "reasoning" and kind == "readable"
                             and (key == "summary" and isinstance(child, list) and not child
                                  or key == "encrypted_content" and child is None)):
-                        result[key] = child
+                        result[key] = walk(child, (*path, normalized))
                     else:
                         removed = removed or not empty_value(child)
                 else:

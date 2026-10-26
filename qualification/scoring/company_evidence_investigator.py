@@ -2314,7 +2314,8 @@ async def _review_industry_sources(
     """
     unproven = _unproven_findings(('industry',), 'No company-bound industry evidence')['industry']
     review = {'schema': 'industry_evidence_review_v1', 'model': model,
-              'decision': 'unavailable', 'missing_requirements': [], 'evidence': []}
+              'decision': 'unavailable', 'missing_requirements': [], 'evidence': [],
+              'source_urls': []}
     unproven['_industry_review'] = review
     if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
         return unproven, ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON, 0
@@ -2340,6 +2341,7 @@ async def _review_industry_sources(
     packet = industry_classification.prepare(criteria, {
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
     }, pages)
+    review['source_urls'] = [page['source_url'] for page in pages]
     status, body = await _post_openrouter_json(
         session, 'https://openrouter.ai/api/v1/chat/completions',
         headers={'Authorization': f'Bearer {openrouter_key}', 'Content-Type': 'application/json'},
@@ -4643,11 +4645,25 @@ async def investigate_company_evidence(
                 initial_review = initial_industry['_industry_review']
                 industry_research_brief = {
                     key: initial_review[key]
-                    for key in ('decision', 'missing_requirements', 'reason', 'packet_sha256')
+                    for key in ('decision', 'missing_requirements', 'reason', 'packet_sha256', 'source_urls')
                     if key in initial_review
                 }
+                # The shared researcher also sees sources admitted for other
+                # dimensions. Those must not silently close an industry gap
+                # when the final industry review cannot use them.
+                industry_research_brief['excluded_source_urls'] = [
+                    url for url in fetched_pages
+                    if url not in initial_review['source_urls']
+                ]
                 industry_research_brief['notice'] = (
                     'Fallible assessment of loaded company-bound sources, not proof. '
+                    'source_urls lists the loaded pages eligible for industry review. '
+                    'excluded_source_urls remain available for other targets under '
+                    'their own rules, but cannot establish industry capabilities. '
+                    'A marketplace or third-party description cannot close these '
+                    'industry gaps; find the company-bound source for that fact. '
+                    'New industry sources need independently bound first-party '
+                    'requested and final URLs, or separately verified rebrand continuity. '
                     'Use remaining research to resolve these specific capability or '
                     'customer-role gaps. Search for the missing fact, then select '
                     'specific product/service documentation, technical brochures, '

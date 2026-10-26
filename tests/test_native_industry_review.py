@@ -422,3 +422,55 @@ def test_full_company_reverification_retains_multi_source_industry_receipt(monke
         assert not evidence['quote']
     assert len(stored['investigation_receipt']['claims']['industry']['_industry_review']['evidence']) == 2
     assert len(calls) == 1
+
+
+def test_industry_source_brief_exposes_the_exact_reviewed_source_set(monkeypatch):
+    """A source usable for another target must not silently close an industry gap."""
+    assessments = []
+
+    def missing(result):
+        assessments.append(result)
+        if len(assessments) == 1:
+            result.update(decision='unavailable', missing_requirements=['Account workflows'])
+
+    run, calls, _, reviews = install(monkeypatch, mutation=missing)
+    original_post = c._post_json
+
+    async def post(session, url, *, headers, payload):
+        if ('response_format' not in payload and payload.get('tool_choice') == {
+                'type': 'function', 'function': {'name': 'search_web'}}):
+            from tests.test_company_evidence_judgment_reserve import _response
+            calls['model'].append(payload)
+            return 200, _response('search_web', {'query': 'Coreworks account workflows'})
+        return await original_post(session, url, headers=headers, payload=payload)
+
+    async def search(*args, **kwargs):
+        return {'results': [{'url': URL, 'title': 'Workflows'}],
+                'notice': 'discovery_only_not_evidence'}
+
+    monkeypatch.setattr(c, '_post_json', post)
+    monkeypatch.setattr(c, '_search_web', search)
+    homepage = 'https://www.coreworks.ai/'
+    marketplace = 'https://marketplace.example/coreworks'
+    result = asyncio.run(run(
+        prior_observations={'submitted_source_urls': [homepage, marketplace]},
+        prefetched_pages={
+            homepage: {'final_url': homepage, 'text': FEATURES},
+            marketplace: {'final_url': marketplace,
+                          'text': 'Coreworks supplies account workflows through this listing.'},
+        }))
+    document_text = calls['model'][0]['messages'][1]['content']
+    document = json.loads(document_text[document_text.index('{'):])
+    brief = document['industry_source_research_brief']
+    assert brief['source_urls'] == [homepage]
+    assert brief['excluded_source_urls'] == [marketplace]
+    assert 'remain available for other targets' in brief['notice']
+    # The original loaded page survives for independent attribute/stage checks.
+    assert any(page['url'] == marketplace for page in document['prefetched_sources'])
+    reviewed_urls = {page['source_url'] for request in reviews
+                    for message in request['messages'][2:]
+                    for page in json.loads(message['content'])['untrusted_source_pages']}
+    assert marketplace not in reviewed_urls
+    assert result['_completed_submit']
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS

@@ -15,6 +15,20 @@ from tests.test_company_evidence_refusal_fallback import _install_loop, URL
 QUOTE = "Coreworks supplies analysis and reporting software to customers."
 
 
+def test_pdf_locator_uses_existing_text_provider_without_html_rendering(monkeypatch):
+    url = 'https://www.coreworks.ai/brochure.PDF'
+    finding = _finding('industry', status='VERIFIED', evidence_url=url,
+                       evidence_quote=QUOTE, activity_role='supplier_operator',
+                       observed_industry='Software')
+    run, calls, _ = _install_loop(monkeypatch, status=200, body='', urls=(url,),
+        target='industry', finding=finding,
+        contents=(200, {'results': [{'url': url, 'text': QUOTE}]}))
+    result = asyncio.run(run())
+    assert calls['primary'] == []
+    assert len(calls['contents']) == result['usage']['fetch_calls'] == 1
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+
+
 def _industry_finding(status="VERIFIED", quote=QUOTE):
     return _finding(
         "industry", status=status, evidence_url=URL, evidence_quote=quote,

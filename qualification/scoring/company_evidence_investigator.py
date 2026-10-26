@@ -34,6 +34,7 @@ from qualification.scoring.company_fit_decision import (
     _company_name, verified_homepage_brand_name,
 )
 from qualification.scoring.checked_sources import checked_source_provenance
+from qualification.scoring import industry_classification
 from qualification.scoring.country_data import US_STATES
 from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH,
@@ -70,8 +71,8 @@ from qualification.scoring.verification_helpers import (
     visible_html_text,
 )
 
-# Use only scorer models already pinned by the signed Arena policy. This does
-# not add a new model or role to that policy.
+# The signed Arena policy pins the models. Older policies do not enable the
+# dedicated industry review and keep their existing investigator behavior.
 INVESTIGATOR_MODEL = os.environ.get(
     "ARENA_ROLE_BATCH_MODEL", "google/gemini-3.5-flash-lite",
 )
@@ -2288,6 +2289,93 @@ async def _post_openrouter_json(
     )
 
 
+async def _review_industry_sources(
+    session, *, model, openrouter_key, started, company_locator, criteria,
+    fetched_pages, fetched_final_urls, first_party_domains, identity_anchor,
+    identity_names, rebrand_finding=None,
+):
+    """Use one reserved turn for the full criterion; retain every bound quote.
+
+    Source authority is decided before inference. A model can select exact
+    passages, but cannot establish a new company domain or supply source text.
+    """
+    unproven = _unproven_findings(('industry',), 'No company-bound industry evidence')['industry']
+    review = {'schema': 'industry_evidence_review_v1', 'model': model,
+              'decision': 'unavailable', 'missing_requirements': [], 'evidence': []}
+    unproven['_industry_review'] = review
+    if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
+        return unproven, ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON, 0
+    rebrand = rebrand_finding or {}
+    rebrand_domains = ({rebrand.get('old_domain'), rebrand.get('new_domain')}
+                       if rebrand.get('status') == 'VERIFIED' else set()) - {None, ''}
+
+    def bound(url):
+        return bool(_safe_https_url(url) and (
+            _independently_bound_first_party_url(url, first_party_domains, identity_anchor)
+            or _registrable_domain(url) in rebrand_domains))
+
+    pages = [
+        {'source_id': f's{index}', 'source_url': url, 'body': text}
+        for index, (url, text) in enumerate(fetched_pages.items())
+        if bound(url) and bound(fetched_final_urls.get(url, '')) and text
+    ]
+    if not pages:
+        review['missing_requirements'] = ['Company-bound source text for the requested activity']
+        return unproven, '', 0
+    packet = industry_classification.prepare(criteria, {
+        key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
+    }, pages)
+    status, body = await _post_openrouter_json(
+        session, 'https://openrouter.ai/api/v1/chat/completions',
+        headers={'Authorization': f'Bearer {openrouter_key}', 'Content-Type': 'application/json'},
+        payload=industry_classification.request_payload(packet, model=model), started=started,
+    )
+    if status != 200 or not isinstance(body, Mapping) or body.get('error') or body.get('errors'):
+        raise RuntimeError('industry_review_provider_unavailable')
+    choices = body.get('choices')
+    if (not isinstance(choices, list) or len(choices) != 1
+            or not isinstance(choices[0], Mapping)
+            or choices[0].get('finish_reason') != 'stop'):
+        raise ValueError('industry_review_response_malformed')
+    message = choices[0].get('message')
+    if not isinstance(message, Mapping) or message.get('refusal') or message.get('tool_calls'):
+        raise ValueError('industry_review_response_malformed')
+    result = industry_classification.resolve(packet, message.get('content'))
+    evidence = [{'url': item['source_url'], 'quote': item['text']}
+                for item in result['resolved_evidence']]
+    review.update(packet_sha256=packet.digest, decision=result['decision'],
+                  missing_requirements=result['missing_requirements'], evidence=evidence,
+                  reason=result['reason'])
+    finding = dict(unproven)
+    finding['reason'] = result['reason'][:300]
+    if result['decision'] != 'unavailable':
+        primary = evidence[0]
+        raw = {'target': 'industry',
+               'status': 'VERIFIED' if result['decision'] == 'match' else 'CONTRADICTED',
+               'observed_industry': result['observed_activity'],
+               'activity_role': {'partner_other': 'third_party'}.get(result['role'], result['role']),
+               'evidence_url': primary['url'], 'evidence_quote': primary['quote'],
+               'reason': result['reason']}
+        # Reuse the native relationship and source gates, including the existing
+        # treatment of a supplier whose offered activity does not match.
+        arguments = {'findings': [raw]}
+        targets = ('industry',)
+        if rebrand.get('status') == 'VERIFIED':
+            arguments['findings'].append(dict(rebrand))
+            targets = ('industry', 'rebrand')
+        validated = _validated_findings(arguments, targets=targets,
+            fetched_pages=fetched_pages, fetched_final_urls=fetched_final_urls,
+            first_party_domains=first_party_domains, identity_anchor=identity_anchor,
+            identity_names=identity_names)
+        if validated is None:
+            raise ValueError('industry_review_finding_malformed')
+        finding = validated['industry']
+        if finding['status'] in {'VERIFIED', 'CONTRADICTED'}:
+            finding['supporting_evidence'] = evidence[1:]
+        finding['_industry_review'] = review
+    return finding, '', 1
+
+
 async def _search_web(
     session: aiohttp.ClientSession,
     query: str,
@@ -3717,6 +3805,21 @@ async def investigate_company_evidence(
     """Run one bounded tool loop and return validated tri-state findings."""
 
     requested_targets = tuple(dict.fromkeys(str(value) for value in targets))
+    industry_review_model = (
+        os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+        if "industry" in requested_targets else ""
+    )
+    # The final industry judgment uses one existing reasoning turn, not a new
+    # research budget. Other dimensions and older frozen policies are unchanged.
+    reasoning_turn_limit = MAX_REASONING_TURNS - bool(industry_review_model)
+    research_system_prompt = _SYSTEM_PROMPT
+    if industry_review_model:
+        research_system_prompt += (
+            "\nIndustry: research the full criterion, including capabilities and "
+            "customer roles. Fetch relevant product/technical/customer pages for "
+            "missing facts within budget. A final review uses all fetched text. "
+            "Submit industry UNPROVEN with empty citations; judge other targets normally."
+        )
     if not requested_targets or any(value not in TARGETS for value in requested_targets):
         return {"claims": {}, "failure_reason": "invalid_targets"}
     if "required_attribute" in requested_targets and not str(
@@ -3880,7 +3983,7 @@ async def investigate_company_evidence(
         "prior_observations": bounded_prior_observations,
         "verified_homepage_identity": dict(verified_homepage_identity or {}),
         "investigation_limits": {
-            "reasoning_turns": MAX_REASONING_TURNS,
+            "reasoning_turns": reasoning_turn_limit,
             "search_calls": MAX_SEARCH_CALLS,
             "fetch_calls": MAX_FETCH_CALLS,
             "admission_deadline_seconds": ADMISSION_DEADLINE_SECONDS,
@@ -4067,6 +4170,17 @@ async def investigate_company_evidence(
             async def fetch_fresh_page(url: str) -> dict[str, Any]:
                 nonlocal fetch_calls
                 fetch_calls += 1
+                if (
+                    "industry" in requested_targets
+                    and urlsplit(url).path.casefold().endswith(".pdf")
+                    and os.environ.get("EXA_API_KEY")
+                ):
+                    # The HTML rendering route does not supply PDF source text.
+                    # Use the existing bounded exact-URL text request directly,
+                    # avoiding an unnecessary rendering/document-parser charge.
+                    result = await _fetch_exa_exact_page(session, url)
+                    fetch_outcomes.append(_fetch_outcome(url, result))
+                    return result
                 archive_targets = (
                     tuple(
                         article_url for article_url in fetched_pages
@@ -4523,9 +4637,9 @@ async def investigate_company_evidence(
                     PRIVATE_FETCHED_PAGES_KEY: retained_fetched_pages(),
                 }
 
-            for _turn in range(MAX_REASONING_TURNS + 1):
+            for _turn in range(reasoning_turn_limit + 1):
                 correction_turn = (
-                    _turn == MAX_REASONING_TURNS or final_correction_pending
+                    _turn == reasoning_turn_limit or final_correction_pending
                 )
                 if correction_turn and not final_correction_pending:
                     break
@@ -4566,9 +4680,9 @@ async def investigate_company_evidence(
                     or (
                         not required_tool
                         and _turn >= (
-                            MAX_REASONING_TURNS - 4
+                            reasoning_turn_limit - 4
                             if stage_search_reserve
-                            else MAX_REASONING_TURNS - 1
+                            else reasoning_turn_limit - 1
                         )
                     )
                 )
@@ -4650,7 +4764,7 @@ async def investigate_company_evidence(
                             else INVESTIGATOR_MODEL
                         ),
                         "messages": [
-                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "system", "content": research_system_prompt},
                             *messages,
                         ],
                         "tools": [
@@ -4728,7 +4842,7 @@ async def investigate_company_evidence(
                     and empty_tool_message.get("tool_calls") in (None, [])
                     and empty_tool_message.get("content") in (None, "")
                     and not correction_turn
-                    and _turn + 1 < MAX_REASONING_TURNS
+                    and _turn + 1 < reasoning_turn_limit
                     and incomplete_submit_retries < MAX_INCOMPLETE_SUBMIT_RETRIES
                     and time.monotonic() - started < (
                         ADMISSION_DEADLINE_SECONDS
@@ -4789,7 +4903,7 @@ async def investigate_company_evidence(
                         ),
                     )
                     and not correction_turn
-                    and _turn + 1 < MAX_REASONING_TURNS
+                    and _turn + 1 < reasoning_turn_limit
                     and incomplete_submit_retries < MAX_INCOMPLETE_SUBMIT_RETRIES
                     and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
                 ):
@@ -4846,7 +4960,7 @@ async def investigate_company_evidence(
                 try:
                     arguments = json.loads(raw_arguments or "{}")
                 except (TypeError, ValueError):
-                    ordinary_turn_remains = _turn + 1 < MAX_REASONING_TURNS
+                    ordinary_turn_remains = _turn + 1 < reasoning_turn_limit
                     retry_incomplete_submit = bool(
                         name == "submit_findings"
                         and not correction_turn
@@ -4928,6 +5042,14 @@ async def investigate_company_evidence(
                     forced_next_tool = ""
                     forced_stage_search_pending = False
                 if name == "submit_findings":
+                    if industry_review_model and isinstance(arguments, Mapping):
+                        arguments = copy.deepcopy(arguments)
+                        raw_findings = arguments.get("findings")
+                        if isinstance(raw_findings, list):
+                            for raw in raw_findings:
+                                if isinstance(raw, dict) and raw.get("target") == "industry":
+                                    raw.update(status="UNPROVEN", evidence_url="",
+                                               evidence_quote="", activity_role="unresolved")
                     claims = _validated_findings(
                         arguments,
                         targets=active_submit_targets,
@@ -4948,7 +5070,7 @@ async def investigate_company_evidence(
                     if claims is None:
                         if (
                             not correction_turn
-                            and _turn + 1 < MAX_REASONING_TURNS
+                            and _turn + 1 < reasoning_turn_limit
                             and incomplete_submit_retries < MAX_INCOMPLETE_SUBMIT_RETRIES
                             and time.monotonic() - started < (
                                 ADMISSION_DEADLINE_SECONDS
@@ -5051,7 +5173,7 @@ async def investigate_company_evidence(
                     unproven_without_search = bool(
                         not scoped_correction_active
                         and not force_submit
-                        and _turn < MAX_REASONING_TURNS - 3
+                        and _turn < reasoning_turn_limit - 3
                         and search_calls == 0
                         and search_calls < MAX_SEARCH_CALLS
                         and fetch_calls < MAX_FETCH_CALLS
@@ -5085,7 +5207,7 @@ async def investigate_company_evidence(
                             or rejected_other_activity_contradiction
                         )
                         and not force_submit
-                        and _turn < MAX_REASONING_TURNS - 3
+                        and _turn < reasoning_turn_limit - 3
                         and (
                             search_calls == 0
                             or (
@@ -5148,7 +5270,7 @@ async def investigate_company_evidence(
                         not scoped_correction_active
                         and quote_presence_rejected_targets & quote_repair_targets
                         and not force_submit
-                        and _turn < MAX_REASONING_TURNS - 3
+                        and _turn < reasoning_turn_limit - 3
                         and search_calls < MAX_SEARCH_CALLS
                         and fetch_calls < MAX_FETCH_CALLS
                         and time.monotonic() - started
@@ -5264,7 +5386,7 @@ async def investigate_company_evidence(
                         and not public_stage_unproven_rereviewed
                         and not correction_turn
                         and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
-                        and _turn < MAX_REASONING_TURNS - 1
+                        and _turn < reasoning_turn_limit - 1
                     )
                     if (
                         rejected or force_industry_followup
@@ -5651,6 +5773,24 @@ async def investigate_company_evidence(
                                 )
                                 for target in requested_targets
                             }
+                        industry_review_failure = ""
+                        industry_review_calls = 0
+                        if industry_review_model:
+                            claims["industry"], industry_review_failure, industry_review_calls = (
+                                await _review_industry_sources(
+                                    session, model=industry_review_model,
+                                    openrouter_key=openrouter_key, started=started,
+                                    company_locator=company_locator,
+                                    criteria={"industry": requested_industry or "",
+                                              "subindustry": requested_subindustry or "",
+                                              "product_service": requested_product_service or ""},
+                                    fetched_pages=fetched_pages,
+                                    fetched_final_urls=fetched_final_urls,
+                                    first_party_domains=first_party_domains,
+                                    identity_anchor=identity_anchor, identity_names=identity_names,
+                                    rebrand_finding=claims.get("rebrand"),
+                                )
+                            )
                         stage_finding = claims.get("stage") or {}
                         required_stage_incomplete = bool(
                             required_stage_discovery_failure_reason
@@ -5676,7 +5816,7 @@ async def investigate_company_evidence(
                                 for finding in claims.values()
                             )
                         )
-                        failure_reason = (
+                        failure_reason = industry_review_failure or (
                             required_stage_discovery_failure_reason
                             if required_stage_incomplete
                             else PROVIDER_ERROR_FAILURE_REASON
@@ -5715,7 +5855,9 @@ async def investigate_company_evidence(
                             ),
                             "failure_reason": failure_reason,
                             "usage": {
-                                "reasoning_turns": _turn + 1,
+                                "reasoning_turns": _turn + 1 + industry_review_calls,
+                                **({"industry_review_calls": industry_review_calls}
+                                   if industry_review_model else {}),
                                 "search_calls": search_calls,
                                 "fetch_calls": fetch_calls,
                                 "prefetched_pages": prefetched_count,

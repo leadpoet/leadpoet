@@ -1,3 +1,19 @@
+## Scoped authorization: October 26 native industry integration
+
+The user explicitly renewed implementation, testing, review, safe merge,
+canonical deployment, and fresh OnePatch/Sentry plus production verification.
+Integrate the stronger industry classifier and all source evidence into the
+existing Arena judging flow. Review and include PR793 PDF/HTML recovery.
+Preserve frozen round policies, baseline/miner fairness, billing, accepted
+results, source and identity guards, unrelated scoring, and concurrent work.
+Additional reasonable test spending is authorized; the initial task cap is
+$30 additional total ($20 OpenRouter and $10 retrieval). Preserve all previous
+charges and reservations. Do not change production judgments or rewards for
+testing; use isolated historical replays and reward-disabled shadow validation.
+Do not deploy a regression. This supersedes the earlier final-$15 restriction
+for new-phase testing only. No permission to send incident/chat messages or
+create recurring monitors is granted. Keep both instruction files identical.
+
 ## Scoped authorization: October 26 final industry repair continuation
 
 The user renewed this task on October 26. Continue researching and implementing

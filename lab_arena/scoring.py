@@ -30,6 +30,7 @@ DEFAULT_JUDGE_MODELS = {
     "intent_three_stage_stage3": "perplexity/sonar-pro",
     "intent_fetched_evidence": "openai/gpt-6-luna",
     "role_batch_check": "google/gemini-3.5-flash-lite",
+    "industry_evidence_review": "openai/gpt-6.1-sol",
 }
 CREDENTIAL_ENV_NAMES = (
     "OPENROUTER_API_KEY",
@@ -147,6 +148,12 @@ def apply_policy_to_environment(
         "ARENA_INTENT_DETAILS_REVIEW_MODEL": models.get("intent_details_review"),
         "ARENA_ROLE_BATCH_MODEL": models.get("role_batch_check"),
     }
+    # Absence in a frozen older policy explicitly disables the new review.
+    # An ambient setting must not change an older round's judging behavior.
+    industry_model = models.get("industry_evidence_review", "")
+    if bindings.get("ARENA_INDUSTRY_EVIDENCE_MODEL", industry_model) != industry_model:
+        raise ScorerPolicyConflict("industry reviewer conflicts with the frozen model policy")
+    bindings["ARENA_INDUSTRY_EVIDENCE_MODEL"] = industry_model
     for name, model in model_bindings.items():
         if model:
             if bindings.get(name, model) != model:

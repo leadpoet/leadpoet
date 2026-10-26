@@ -2345,7 +2345,8 @@ def _dimension_web_evidence(verdict: Mapping[str, Any], dimension: str) -> dict[
     # Linked PE proof remains auditable through projection and fit calculation.
     # These receipts prove nothing without the internally validated finding.
     support = nested_value.get("supporting_evidence")
-    if dimension == "stage" and isinstance(support, list) and 0 < len(support) <= 2:
+    support_limit = {"stage": 2, "industry": 7}.get(dimension, 0)
+    if isinstance(support, list) and 0 < len(support) <= support_limit:
         if all(
             isinstance(item, Mapping)
             and _valid_web_evidence_url(item.get("url")) == item.get("url")
@@ -7991,6 +7992,16 @@ def _project_investigator_industry(
 
     projected = dict(verdict)
     value = finding or {}
+    review = value.get("_industry_review")
+    if isinstance(review, Mapping) and review.get("schema") == "industry_evidence_review_v1":
+        # This field is built by the host, never accepted from model output.
+        # A completed review that lacks proof cannot retain an older positive.
+        projected.update(industry_matches=None, industry_activity_role="unresolved",
+                         observed_industry="", observed_subindustry="",
+                         industry_evidence_url="", industry_evidence_quote="")
+        dimensions = dict(projected.get("dimension_evidence") or {})
+        dimensions["industry"] = {"url": "", "quote": ""}
+        projected["dimension_evidence"] = dimensions
     status = value.get("status")
     role = _strict_industry_activity_role(value.get("activity_role"))
     observed_industry = str(value.get("observed_industry") or "").strip()[:200]
@@ -8016,10 +8027,14 @@ def _project_investigator_industry(
         industry_evidence_url=url,
         industry_evidence_quote=quote,
     )
-    nested = verdict.get("dimension_evidence")
-    if isinstance(nested, Mapping):
-        nested_copy = dict(nested)
+    nested = projected.get("dimension_evidence")
+    if isinstance(nested, Mapping) or review:
+        nested_copy = dict(nested or {})
         nested_copy["industry"] = {"url": url, "quote": quote}
+        if review and value.get("supporting_evidence"):
+            nested_copy["industry"]["supporting_evidence"] = [
+                dict(item) for item in value["supporting_evidence"]
+            ]
         projected["dimension_evidence"] = nested_copy
     return projected
 

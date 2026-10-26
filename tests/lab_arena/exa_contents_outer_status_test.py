@@ -23,6 +23,7 @@ def _review(monkeypatch, *, primary=404, status=404, body=None, direct=False,
             trusted_primary=False):
     calls = {"fetch": 0, "exa": 0, "model": 0}
     broker_results = []
+    model_tools = []
 
     def broker_response(operation, parameters, http_status, response_body):
         broker, ledger, transport = make_broker(
@@ -81,13 +82,21 @@ def _review(monkeypatch, *, primary=404, status=404, body=None, direct=False,
                     result = broker_response("exa.contents", payload, status, contents)
                 return response(url, result)
             calls["model"] += 1
-            if calls["model"] == 1:
+            choice = payload.get("tool_choice")
+            forced = choice.get("function", {}).get("name") if isinstance(choice, dict) else None
+            if forced == "search_web":
+                name, arguments = "search_web", {"query": "Acme software company evidence"}
+            elif calls["fetch"] == 0:
                 name, arguments = "fetch_page", {"url": URL}
             else:
-                name, arguments = "submit_findings", {"findings": [_finding(
-                    "stage", status="UNPROVEN", observed_value=None,
-                    evidence_url="", evidence_quote="", reason="No company-bound stage proof.",
-                )]}
+                name, arguments = "submit_findings", {"findings": [
+                    _finding("stage", status="UNPROVEN", observed_value=None,
+                        evidence_url="", evidence_quote="", reason="No company-bound stage proof."),
+                    _finding("industry", status="UNPROVEN", observed_value=None,
+                        evidence_url="", evidence_quote="", product_coverage="UNPROVEN",
+                        reason="No company-bound product proof."),
+                ]}
+            model_tools.append(name)
             model_body = {"choices": [{"message": {"tool_calls": [{
                 "id": str(calls["model"]), "type": "function",
                 "function": {"name": name, "arguments": json.dumps(arguments)},
@@ -107,9 +116,18 @@ def _review(monkeypatch, *, primary=404, status=404, body=None, direct=False,
     monkeypatch.setattr(investigator, "_search_web", search)
     receipt = asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://example.com"},
-        targets=("stage",), requested_stage="Private Equity",
+        targets=("stage", "industry"), requested_stage="Private Equity",
+        requested_industry="Software", requested_product_service="software",
+        positive_semantic_review=True,
+        prior_observations={"submitted_source_urls": [URL]},
     ))
-    assert calls == {"fetch": 1, "exa": 0 if trusted_primary else 1, "model": 2}
+    # The known source settles before reasoning; native product review then
+    # performs its two bounded searches and complete negative submissions.
+    assert calls == {"fetch": 1, "exa": 0 if trusted_primary else 1, "model": 4}
+    assert model_tools == ["search_web", "submit_findings", "search_web", "submit_findings"]
+    assert set(receipt["claims"]) == {"stage", "industry"}
+    assert receipt["claims"]["industry"]["status"] == "UNPROVEN"
+    assert receipt["claims"]["industry"]["product_coverage"].get("status") == "UNPROVEN"
     assert receipt["usage"]["fetch_calls"] == (1 if trusted_primary else 2)
     if not direct and not trusted_primary:
         assert broker_results[-1][0] == "exa.contents"
@@ -129,9 +147,10 @@ def _final_score(monkeypatch, receipt, attempts):
             stage_evidence_url=URL, stage_evidence_quote="Acme launched its public product.",
         ), ""
 
-    async def investigation(*, diagnostic, **_):
+    async def investigation(*, diagnostic, targets, **_):
         # Replay this actual investigator receipt through the existing retry
         # policy; no further provider request is needed to prove finality.
+        assert set(targets) == set(receipt["claims"])
         attempts.append(True)
         diagnostic[investigator.VERIFIER_FAILURE_REASON_KEY] = receipt.get("failure_reason", "")
         return receipt

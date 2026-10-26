@@ -279,3 +279,108 @@ def test_excessive_argument_json_nesting_is_rejected_without_crashing(api, new_p
     assert not splits['train'] and not splits['eval']
     if new_policy:
         assert training_thinking.coverage([example])['trajectories']['ineligible'] == 1
+
+
+@pytest.mark.parametrize('api,trailing', [
+    ('openrouter.chat', 'tool_call'),
+    ('openrouter.responses', 'tool_call'),
+    ('openrouter.responses', 'message'),
+    ('openrouter.responses', 'reasoning'),
+])
+def test_inferred_cap_cut_cannot_precede_retained_complete_output(api, trailing):
+    example = cap_example(api)
+    call = example['provider_calls'][0]
+    if api == 'openrouter.chat':
+        tools = call['response']['choices'][0]['message']['tool_calls']
+        following = deepcopy(tools[0])
+        following['id'] = 'following-call'
+        following['function']['arguments'] = '{}'
+        tools.append(following)
+    else:
+        output = call['response']['output']
+        if trailing == 'tool_call':
+            following = deepcopy(output[-1])
+            following.update(id='following-item', call_id='following-call', arguments='{}')
+        elif trailing == 'message':
+            following = {'type': 'message', 'role': 'assistant', 'status': 'completed',
+                         'content': [{'type': 'output_text', 'text': 'Later retained output.'}]}
+        else:
+            following = deepcopy(output[0])
+            following['id'] = 'following-reasoning'
+        output.append(following)
+    refresh_response_links(example, 0)
+    original = deepcopy(example)
+    assert not training_thinking.verified_cap_truncated_target(example, call)
+    with pytest.raises(ValueError, match='^tool_call_shape_unsupported$'):
+        training_steps._candidate(example, call)
+    result = training_eligibility.assess_capture(
+        submission(), {'run': example}, ['run'], enabled=True, minimum_coverage_percent=80)
+    assert not result['eligible'] and 'selected_run_evidence_invalid' in result['reasons']
+    report = training_thinking.coverage([example])
+    assert report['trajectories']['ineligible'] == 1
+    assert 'target_omission_reason' not in report['attempts'][0]
+    assert 'target_omission_reason' not in training_thinking.readable_trace(example)['calls'][0]
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    assert not strict['train'] and not strict['eval']
+    assert example == original
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('earlier_unfinished', [False, True])
+def test_only_the_final_argument_can_be_an_inferred_cap_cut(api, earlier_unfinished):
+    example = cap_example(api)
+    call = example['provider_calls'][0]
+    if api == 'openrouter.chat':
+        calls = call['response']['choices'][0]['message']['tool_calls']
+        earlier = deepcopy(calls[-1])
+        earlier['id'] = 'earlier-call'
+        if not earlier_unfinished:
+            earlier['function']['arguments'] = '{}'
+        calls.insert(0, earlier)
+    else:
+        output = call['response']['output']
+        earlier = deepcopy(output[-1])
+        earlier.update(id='earlier-item', call_id='earlier-call')
+        if not earlier_unfinished:
+            earlier['arguments'] = '{}'
+        output.insert(-1, earlier)
+    refresh_response_links(example, 0)
+    original = deepcopy(example)
+    assert training_thinking.verified_cap_truncated_target(example, call) is (not earlier_unfinished)
+    result = training_eligibility.assess_capture(
+        submission(), {'run': example}, ['run'], enabled=True)
+    assert result['eligible'] is (not earlier_unfinished)
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    rows = strict['train'] + strict['eval']
+    assert len(rows) == (0 if earlier_unfinished else 2)
+    assert all(row['source_refs'][0]['call_identity'] != call['call_identity'] for row in rows)
+    assert example == original
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+def test_explicit_provider_length_stop_does_not_depend_on_inferred_cut_position(api):
+    example = cap_example(api)
+    call = example['provider_calls'][0]
+    if api == 'openrouter.chat':
+        choice = call['response']['choices'][0]
+        following = deepcopy(choice['message']['tool_calls'][0])
+        following['id'] = 'following-call'
+        following['function']['arguments'] = '{}'
+        choice['message']['tool_calls'].append(following)
+        choice['finish_reason'] = 'length'
+    else:
+        call['response']['output'].append({'type': 'message', 'role': 'assistant', 'status': 'completed',
+            'content': [{'type': 'output_text', 'text': 'Retained output before explicit length stop.'}]})
+        call['response'].update(status='incomplete', incomplete_details={'reason': 'max_output_tokens'})
+    refresh_response_links(example, 0)
+    original = deepcopy(example)
+    assert not training_thinking.verified_cap_truncated_target(example, call)
+    with pytest.raises(ValueError, match='^response_not_complete$'):
+        training_steps._candidate(example, call)
+    assert training_eligibility.assess_capture(
+        submission(), {'run': example}, ['run'], enabled=True)['eligible']
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    rows = strict['train'] + strict['eval']
+    assert len(rows) == 2
+    assert all(row['source_refs'][0]['call_identity'] != call['call_identity'] for row in rows)
+    assert example == original

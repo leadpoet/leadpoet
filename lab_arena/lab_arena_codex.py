@@ -923,7 +923,12 @@ class ResponsesBridge:
                     elif 200 <= status < 300 and streaming:
                         try:
                             response = b"".join(response_events(
-                                json.loads(response), native_web_search=True,
+                                json.loads(response),
+                                # The runner supplies this parse hint only for
+                                # opted-in execution. Keep historical SSE exact.
+                                native_web_search=os.environ.get(
+                                    "LAB_ARENA_REASONING_CAPTURE_POLICY"
+                                ) == "full_generated_thinking_v1",
                             ))
                         except (ValueError, TypeError, KeyError, CodexRuntimeError):
                             raise CodexRuntimeError("invalid Responses reply") from None

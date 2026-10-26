@@ -851,7 +851,14 @@ def verified_cap_truncated_target(example, call) -> bool:
             allow_reasoning_history=True, argument_validator=argument_shape,
             allow_tool_error_history=True)
         training_steps._validate_target_tools(body, target, operation)
-        return bool(unfinished)
+        # A cap cut can end only the final generated argument. Later retained
+        # output disproves that inference, even if it is otherwise well formed.
+        if len(unfinished) != 1:
+            return False
+        if operation == "openrouter.chat":
+            return target["tool_calls"][-1]["function"]["arguments"] == unfinished[0]
+        final = response["output"][-1]
+        return final.get("type") == "function_call" and final.get("arguments") == unfinished[0]
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return False
 

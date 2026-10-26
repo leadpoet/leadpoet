@@ -55,7 +55,15 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
                         and approved_history_reasoning_content(value, path, item)):
                     result[key] = walk(child, (*path, normalized))
                 elif opaque_reasoning_field(normalized, child, kind, safe_config, path):
-                    removed = removed or not empty_value(child)
+                    # Native readable history can include these empty optional
+                    # fields. Removing them changes the retained request hash,
+                    # although there are no private bytes to exclude.
+                    if (item.get("type") == "reasoning" and kind == "readable"
+                            and (key == "summary" and isinstance(child, list) and not child
+                                 or key == "encrypted_content" and child is None)):
+                        result[key] = child
+                    else:
+                        removed = removed or not empty_value(child)
                 else:
                     result[key] = walk(child, (*path, normalized))
             return result

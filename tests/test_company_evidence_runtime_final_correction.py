@@ -60,6 +60,7 @@ def _run_correction(monkeypatch, *, final, cross_after=8, positive=False):
     monkeypatch.setattr(investigator, "_fetch_page", no_research)
     result = _run_industry(
         monkeypatch, post, clock, positive_semantic_review=positive,
+        requested_product_service="",
     )
     return result, requests
 

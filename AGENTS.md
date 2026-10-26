@@ -1,3 +1,22 @@
+## Scoped production authorization: October 24 industry-fit accuracy repair
+
+On 2026-10-24 the user authorized the permanent industry-fit repair and repeated
+validation of all 98 previously unavailable company/ICP pairs plus the 69
+previously passed pairs. This includes narrow shared scorer and investigator
+changes, independent source research, regression tests, protected read-only
+request capture, isolated organizer-funded provider tests, safe push and merge,
+and canonical deployment with live verification after the accuracy and safety
+checks pass. The user raised the cumulative test limits on 2026-10-25 to
+$20 OpenRouter and $65 across all providers. Preserve exact
+frozen ICP requirements, identity and supplier-role checks, unrelated scoring,
+provider accounting, credentials, accepted historical judgments, published
+results, rewards, weights and concurrent work. Do not tune company exceptions,
+regrade frozen rounds, fabricate proof or bypass release gates. Use isolated
+shadow state for tests; never write test judgments into production. Report
+remaining uncertainty and observed errors honestly. Authority ends when this
+repair is deployed and its affected paths are verified. Keep AGENTS.md and
+CLAUDE.md byte-identical.
+
 ## Scoped production authorization: October 25 publication read performance
 
 On 2026-10-25 the user renewed the request to fix the confirmed duplicate

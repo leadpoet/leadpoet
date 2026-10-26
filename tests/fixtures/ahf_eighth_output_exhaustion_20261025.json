@@ -1,0 +1,59 @@
+{
+  "truncated": {
+    "capture": 18266,
+    "capture_sha256": "509a174c6e42441a71fbb9f54883cb542655d1009591906c9ce460f6b8fea93c",
+    "source_commit": "aa4524c32600f7cb78ba9333da56a5098fbc9d29",
+    "response": {
+      "choices": [
+        {
+          "index": 0,
+          "logprobs": null,
+          "finish_reason": "tool_calls",
+          "native_finish_reason": "max_output_tokens",
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "refusal": null,
+            "tool_calls": [
+              {
+                "type": "function",
+                "index": 0,
+                "id": "call_7EGYonP0slkSa41iizz6khPU",
+                "function": {
+                  "name": "submit_findings",
+                  "arguments": "{\"findings\":[{\"activity_role\":\"unresolved\",\"evidence_quote\":\"An affiliate of Paceline Equity Partners, LLC (\u201cPaceline\u201d), a Dallas-based private equity manager, announced it has closed the acquisition of AHF Products (\u201cAHF\u201d, or the \u201cCompany\u201d), a leading North American hard surface flooring manufacturer.\",\"evidence_url\":\"https://www.ahfproducts.com/en-us/press/paceline-equity-partners-completes-acquisition-of-leading-hard-surface-flooring-manufacturer-ahf-products.html\",\"new_domain\":\"ahfproducts.com\",\"new_name\":\"AHF Products\",\"observed_country\":\"\",\"observed_industry\":\"\",\"observed_state\":\"\",\"observed_subindustry\":\"\",\"observed_value\":\"Private Equity\",\"old_domain\":\"ahfproducts.com\",\"old_name\":\"AHF Products\",\"ownership\":{\"control_status\":\"current_control\",\"controlling_owner\":\"Paceline Equity Partners, LLC\",\"owner_type\":\"private_equity\"},\"product_coverage\":null,\"reason\":\"The company\u2019s first-party announcement says an affiliate of Paceline Equity Partners, a private equity manager, closed its acquisition of AHF Products. Paceline\u2019s fetched portfolio page currently lists AHF Products, LLC in its portfolio under the private-equity asset class, supporting continued control rather than only historical ownership. No later completed exit or other stage-changing event appeared in the loaded current-stage discovery.\",\"shared_linkedin_slug\":\"ahfproducts\",\"status\":\"VERIFIED\",\"supporting_evidence_quote_1\":\"AHF Products, LLC - Paceline Equity Partners About Our Firm Focus Areas Team Portfolio News Careers ESG Contact Buildings center Portfolio text Back to All Portfolio AHF Products, LLC Acquisition of AHF Products, LLC is a leading North American hard surface flooring manufacturer.\",\"supporting_evidence_quote_2\":\"\",\"supporting_evidence_url_1\":\"https://pacelineequity.com/portfolio/ahf-products/\",\"supporting_evidence_url_2\":\"\",\"target\":\"stage\"},{\"activity_role\":\"supplier_operator\",\"evidence_quote\":\"\",\"evidence_url\":\"\",\"new_domain\":\"ahfproducts.com\",\"new_name\":\"AHF Products\",\"observed_country\":\"\",\"observed_industry\":\"Hard-surface flooring manufacturing\",\"observed_state\":\"\",\"observed_subindustry\":\"Flooring products for residential and commercial markets\",\"observed_value\":null,\"old_domain\":\"ahfproducts.com\",\"old_name\":\"AHF"
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "usage": {
+        "completion_tokens": 4096
+      }
+    }
+  },
+  "empty": {
+    "capture": 18337,
+    "capture_sha256": "2d860602fac55d59749bc054fe2a4010d276be2a796f07920f9436cb64dfc091",
+    "source_commit": "aa4524c32600f7cb78ba9333da56a5098fbc9d29",
+    "response": {
+      "choices": [
+        {
+          "index": 0,
+          "logprobs": null,
+          "finish_reason": "length",
+          "native_finish_reason": "max_output_tokens",
+          "message": {
+            "role": "assistant",
+            "content": null,
+            "refusal": null
+          }
+        }
+      ],
+      "usage": {
+        "completion_tokens": 4096
+      }
+    }
+  }
+}

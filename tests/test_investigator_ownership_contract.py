@@ -724,7 +724,7 @@ def test_captured_insurance_owner_contradiction_gets_one_bounded_unproven_correc
             "function": {"name": "submit_findings", "arguments": json.dumps({"findings": [raw]})},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": []}
@@ -776,7 +776,7 @@ def test_contract_rejection_uses_existing_bounded_correction_and_source_provenan
             "function": {"name": "submit_findings", "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": []}

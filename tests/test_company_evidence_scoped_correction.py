@@ -8,6 +8,9 @@ import pytest
 
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import (
+    native_product_post, validated_industry_finding,
+)
 
 
 PRODUCT_URL = "https://rapid7.com/products/insightcloudsec/"
@@ -80,6 +83,7 @@ def _industry_finding(**overrides):
 
 def _run_scoped_correction(
     monkeypatch, responses, *, max_turns=2, reserve_after_first=True,
+    attach_offline_coverage=True,
 ):
     requests = []
 
@@ -94,23 +98,29 @@ def _run_scoped_correction(
                 investigator.ADMISSION_DEADLINE_SECONDS,
             )
         findings = responses[len(requests) - 1]
-        return 200, {"choices": [{"message": {"tool_calls": [{
+        arguments = findings if isinstance(findings, str) else json.dumps({"findings": findings})
+        return 200, {"choices": [{"finish_reason": (
+            "length" if isinstance(findings, str) else "tool_calls"
+        ), "message": {"tool_calls": [{
             "id": f"call-{len(requests)}",
             "type": "function",
             "function": {
                 "name": "submit_findings",
-                "arguments": json.dumps({"findings": findings}),
+                "arguments": arguments,
             },
         }]}}]}
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         return {"results": []}
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", max_turns)
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
+    monkeypatch.setattr(
+        investigator, "_post_json",
+        native_product_post(fake_post_json) if attach_offline_coverage else fake_post_json,
+    )
     monkeypatch.setattr(investigator, "_search_web", fake_search)
 
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -176,6 +186,39 @@ def _submit_tool(payload):
     return tool
 
 
+@pytest.mark.parametrize("final_mode", ["missing_verdict", "conflicting_verdict", "complete_negative"])
+def test_retained_stage_cannot_hide_incomplete_product_verdict(monkeypatch, final_mode):
+    last_verdict = {
+        "missing_verdict": None,
+        "conflicting_verdict": "VERIFIED",
+        "complete_negative": "UNPROVEN",
+    }[final_mode]
+    negative_fields = {"status": "UNPROVEN", "observed_industry": "",
+                       "evidence_url": "", "evidence_quote": ""}
+    first = _industry_finding(**negative_fields, product_coverage="VERIFIED")
+    last = _industry_finding(**negative_fields, product_coverage=last_verdict,
+                             reason="The stage finding was retained.")
+    responses = [[_finding("stage"), first], [last]]
+    if final_mode != "complete_negative":
+        responses.append([_industry_finding(
+            **negative_fields, product_coverage="UNPROVEN",
+            reason="No complete company-bound proof of the requested criterion.",
+        )])
+    result, requests = _run_scoped_correction(
+        monkeypatch, responses, max_turns=2, attach_offline_coverage=False,
+    )
+    assert len(requests) == (2 if final_mode == "complete_negative" else 3)
+    assert _submit_tool(requests[1])["parameters"]["properties"]["findings"]["items"]["properties"]["target"]["enum"] == ["industry"]
+    assert result["claims"]["stage"]["status"] == "VERIFIED"
+    assert result["_completed_submit"] is True
+    if final_mode != "complete_negative":
+        feedback = json.loads(requests[2]["messages"][-1]["content"])
+        assert feedback["rejected_findings"] == [{
+            "target": "industry", "reason": "missing or conflicting whole-product verdict",
+        }]
+    assert result["claims"]["industry"]["product_coverage"]["status"] == "UNPROVEN"
+
+
 def test_submit_only_correction_scopes_and_merges_valid_pending_target(monkeypatch):
     result, requests = _run_scoped_correction(
         monkeypatch,
@@ -202,9 +245,8 @@ def test_submit_only_correction_scopes_and_merges_valid_pending_target(monkeypat
     assert scope["correction_targets"] == ["stage"]
     assert "server retained unrelated findings" in scope["instruction"]
     assert result["claims"]["stage"]["status"] == "VERIFIED"
-    assert result["claims"]["industry"] == investigator._validated_findings(
-        {"findings": [_industry_finding()]},
-        targets=("industry",),
+    assert result["claims"]["industry"] == validated_industry_finding(
+        _industry_finding(), "Security software and services",
         fetched_pages={PRODUCT_URL: PRODUCT_QUOTE},
         fetched_final_urls={PRODUCT_URL: PRODUCT_URL},
         first_party_domains={"rapid7.com"},
@@ -220,10 +262,10 @@ def test_submit_only_correction_scopes_and_merges_valid_pending_target(monkeypat
             "verified_domain": "rapid7.com",
             "verified_linkedin_slug": "rapid7",
         },
-    )["industry"]
+    )
 
 
-def test_malformed_then_unproven_corrections_do_not_erase_valid_industry(
+def test_unproven_stage_clears_unused_quote_without_erasing_valid_industry(
     monkeypatch,
 ):
     malformed_unproven = _finding(
@@ -247,120 +289,41 @@ def test_malformed_then_unproven_corrections_do_not_erase_valid_industry(
         [_initial_findings(), [malformed_unproven], [final_unproven]],
     )
 
-    assert len(requests) == 3
+    assert len(requests) == 2
     assert requests[0]["tool_choice"] == "required"
     assert all(
         _submit_tool(request)["parameters"]["properties"]["findings"]
         ["items"]["properties"]["target"]["enum"] == ["stage"]
         for request in requests[1:]
     )
-    second_feedback = json.loads(requests[2]["messages"][-1]["content"])
-    assert len(second_feedback["rejected_findings"]) == 1
-    rejected = second_feedback["rejected_findings"][0]
-    assert rejected["target"] == "stage"
-    assert rejected["reason"] == (
-        "UNPROVEN must have empty evidence_url and evidence_quote fields"
-    )
-    assert rejected["source_url"] == SEC_URL
-    assert rejected["source_context"].startswith("Rapid7, Inc.")
+    assert requests[1]["tool_choice"]["function"]["name"] == "submit_findings"
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == PRODUCT_QUOTE
 
 
 @pytest.mark.parametrize("retry_completes", [True, False])
-def test_scoped_incomplete_submit_retry_uses_pending_schema_once(
+def test_serialization_retry_then_scoped_correction_preserves_valid_industry(
     monkeypatch, retry_completes,
 ):
-    requests = []
-
-    async def fake_post_json(_session, _url, *, headers, payload):
-        del headers
-        arena_operations.validate_operation_request("openrouter.chat", payload)
-        requests.append(payload)
-        turn = len(requests)
-        if turn == 1:
-            monkeypatch.setattr(
-                investigator,
-                "JUDGMENT_ADMISSION_RESERVE_SECONDS",
-                investigator.ADMISSION_DEADLINE_SECONDS,
-            )
-            arguments = json.dumps({"findings": _initial_findings()})
-            finish_reason = "tool_calls"
-        elif turn == 2 or not retry_completes:
-            arguments = '{"findings":[{"target":"stage"'
-            finish_reason = "length"
-        else:
-            arguments = json.dumps({"findings": [_finding("stage")]})
-            finish_reason = "tool_calls"
-        return 200, {"choices": [{
-            "finish_reason": finish_reason,
-            "message": {"tool_calls": [{
-                "id": f"call-{turn}",
-                "type": "function",
-                "function": {
-                    "name": "submit_findings",
-                    "arguments": arguments,
-                },
-            }]},
-        }]}
-
-    async def fake_search(_session, _query, *, key):
-        del key
-        return {"results": []}
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 3)
-    monkeypatch.setattr(investigator, "_post_json", fake_post_json)
-    monkeypatch.setattr(investigator, "_search_web", fake_search)
-
-    result = asyncio.run(investigator.investigate_company_evidence(
-        company_locator={
-            "name": "Rapid7",
-            "website": "https://rapid7.com",
-            "linkedin": "https://www.linkedin.com/company/rapid7",
-        },
-        targets=("stage", "industry"),
-        requested_stage="Public",
-        requested_industry="Security software and services",
-        requested_subindustry="Cloud security and identity protection",
-        positive_semantic_review=True,
-        prior_observations={
-            "observed_company_name": "Rapid7",
-            "observed_company_website": "https://rapid7.com",
-            "observed_company_linkedin": (
-                "https://www.linkedin.com/company/rapid7"
-            ),
-            "submitted_source_urls": [NASDAQ_URL, SEC_URL, PRODUCT_URL],
-        },
-        verified_homepage_identity={
-            "normalized_name": "Rapid7",
-            "registrable_dns_domain": "rapid7.com",
-            "linkedin_company_slug": "rapid7",
-        },
-        prefetched_pages={
-            NASDAQ_URL: {"final_url": NASDAQ_URL, "text": NASDAQ_QUOTE},
-            SEC_URL: {"final_url": SEC_URL, "text": SEC_PAGE},
-            PRODUCT_URL: {"final_url": PRODUCT_URL, "text": PRODUCT_QUOTE},
-        },
-    ))
+    malformed = '{"findings":[{"target":"stage"'
+    result, requests = _run_scoped_correction(
+        monkeypatch,
+        [malformed, _initial_findings(),
+         [_finding("stage")] if retry_completes else malformed],
+        max_turns=3,
+        reserve_after_first=False,
+    )
 
     assert len(requests) == 3
     assert requests[0]["tool_choice"] == "required"
-    for request in requests[1:]:
-        schema = _submit_tool(request)["parameters"]["properties"][
-            "findings"
-        ]
-        assert schema["minItems"] == schema["maxItems"] == 1
-        assert schema["items"]["properties"]["target"]["enum"] == [
-            "stage"
-        ]
+    assert requests[1]["tool_choice"]["function"]["name"] == "submit_findings"
+    schema = _submit_tool(requests[2])["parameters"]["properties"]["findings"]
+    assert schema["minItems"] == schema["maxItems"] == 1
+    assert schema["items"]["properties"]["target"]["enum"] == ["stage"]
     assert requests[2]["reasoning"] == {"effort": "low"}
     retry_feedback = json.loads(requests[2]["messages"][-1]["content"])
-    assert retry_feedback["error"] == "incomplete_submit_findings"
-    assert "Correction targets: stage." in retry_feedback["instruction"]
-    assert "every requested target" not in retry_feedback["instruction"]
+    assert retry_feedback["rejected_findings"][0]["target"] == "stage"
     if retry_completes:
         assert result["claims"]["stage"]["status"] == "VERIFIED"
         assert result["claims"]["industry"]["status"] == "VERIFIED"
@@ -410,7 +373,7 @@ def test_scoped_candidate_preserves_valid_finding_on_admission_timeout(
             },
         }]}}]}
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         return {"results": []}
 
@@ -494,7 +457,7 @@ def test_timeout_preserves_only_server_validated_stage_metadata(monkeypatch):
             },
         }]}}]}
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         return {"results": []}
 
@@ -559,10 +522,8 @@ def test_scoped_correction_rejects_unrelated_extra_target(monkeypatch):
     )
 
     assert len(requests) == 2
-    assert result == {
-        "claims": {},
-        "failure_reason": investigator.MALFORMED_RESPONSE_FAILURE_REASON,
-    }
+    assert result["claims"] == {}
+    assert result["failure_reason"] == investigator.MALFORMED_RESPONSE_FAILURE_REASON
 
 
 @pytest.mark.parametrize(

@@ -79,7 +79,7 @@ def test_repeated_quote_failure_can_use_second_existing_search(
             ),
         ]})
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         searches.append(query)
         return {"results": [{"url": recovered_url}]}
 
@@ -163,7 +163,7 @@ def test_ciso_quote_repair_failure_forces_one_remaining_search_and_fetch(monkeyp
             ),
         ]})
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": [{"url": sec_url}]}
@@ -220,7 +220,7 @@ def test_ciso_quote_repair_failure_forces_one_remaining_search_and_fetch(monkeyp
     }
     document = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
     assert document["investigation_limits"]["prefetched_pages"] == 1
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 4
 
 
 def test_unibuddy_industry_only_quote_failure_uses_remaining_search(monkeypatch):
@@ -267,7 +267,7 @@ def test_unibuddy_industry_only_quote_failure_uses_remaining_search(monkeypatch)
             ),
         ]})
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": [{"url": homepage_url}]}

@@ -5,6 +5,8 @@ import json
 from unittest.mock import AsyncMock
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import initial_investigation_content
+from tests.product_coverage_fixtures import native_product_post
 
 
 def _finding(url: str, quote: str) -> dict[str, object]:
@@ -169,7 +171,7 @@ def test_positive_industry_review_prefetches_submitted_first_party_source(
     assert fetch.await_args.args[1] == url
     search.assert_awaited_once()
     document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert document["server_priority_submitted_source"] == {
         "url": url,
@@ -178,7 +180,7 @@ def test_positive_industry_review_prefetches_submitted_first_party_source(
         "notice": "server_selected_first_party_locator_is_untrusted_evidence",
     }
     assert document["prefetched_sources"] == [{"url": url, "text": quote}]
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 2
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
     assert document["server_current_stage_discovery"]["ok"] is True
 
 
@@ -223,10 +225,10 @@ def test_positive_industry_review_reuses_prefetched_priority_source(monkeypatch)
     assert result["usage"]["fetch_calls"] == 0
     fetch.assert_not_awaited()
     document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert document["server_priority_submitted_source"]["cache_hit"] is True
-    assert document["investigation_limits"]["remaining_fetch_calls"] == 3
+    assert document["investigation_limits"]["remaining_fetch_calls"] == 4
 
 
 def test_subscription_review_prefers_late_admitted_pricing_navigation(monkeypatch):
@@ -254,7 +256,7 @@ def test_subscription_review_prefers_late_admitted_pricing_navigation(monkeypatc
         "text": quote,
     })
     _set_keys(monkeypatch)
-    monkeypatch.setattr(investigator, "_post_json", fake_post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(fake_post))
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
 
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -286,7 +288,7 @@ def test_subscription_review_prefers_late_admitted_pricing_navigation(monkeypatc
     fetch.assert_awaited_once()
     assert fetch.await_args.args[1] == pricing_url
     document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert document["server_priority_submitted_source"]["url"] == pricing_url
 
@@ -349,7 +351,7 @@ def test_subscription_navigation_prefetch_requires_explicit_intent_and_valid_loc
     ))
     assert fetched_urls == [submitted_url]
     assert "server_priority_submitted_source" in json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
 
     asyncio.run(run_case(
@@ -358,7 +360,7 @@ def test_subscription_navigation_prefetch_requires_explicit_intent_and_valid_loc
     ))
     assert fetched_urls == [submitted_url]
     assert json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )["server_priority_submitted_source"]["url"] == submitted_url
 
 
@@ -426,7 +428,7 @@ def test_priority_source_does_not_expand_three_page_prefetch_bound(monkeypatch):
     assert result["usage"]["fetch_calls"] == 0
     fetch.assert_not_awaited()
     document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert len(document["prefetched_sources"]) == 3
     assert "server_priority_submitted_source" not in document

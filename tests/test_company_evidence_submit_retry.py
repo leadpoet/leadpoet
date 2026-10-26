@@ -8,6 +8,7 @@ import pytest
 
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import native_product_post
 from qualification.scoring.linkedin_company_size import (
     MALFORMED_RESPONSE_FAILURE_REASON,
     VERIFIER_FAILURE_REASON_KEY,
@@ -83,7 +84,7 @@ def _reasoning_exhausted_without_tool_call():
 def _run(monkeypatch, post_json, *, positive_semantic_review: bool = True):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", post_json)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(post_json))
     return asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
         targets=("industry",),
@@ -110,45 +111,63 @@ class _Clock:
 
 
 @pytest.mark.parametrize("search_limit", [1, 2])
-def test_time_forced_unproven_with_unused_research_is_incomplete(
-    monkeypatch, search_limit,
+@pytest.mark.parametrize("required_research", [False, True], ids=["ordinary", "required"])
+def test_reserve_denial_marks_only_unfinished_required_research_incomplete(
+    monkeypatch, search_limit, required_research,
 ):
     clock = _Clock()
     monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", search_limit)
     monkeypatch.setattr(
         investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
     )
-    requests = []
+    requests, searches = [], []
+    negative = _finding(
+        status="UNPROVEN", observed_value="", observed_industry="",
+        observed_subindustry="", activity_role="unresolved",
+        evidence_url="", evidence_quote="", reason="Full product proof is missing.",
+    )
 
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
         if len(requests) == 1:
+            # A voluntary search creates no pending obligation. An unresolved
+            # product submission instead causes the host to require research.
+            if required_research:
+                return 200, _tool_response(
+                    "submit_findings", json.dumps({"findings": [negative]}),
+                )
             return 200, _tool_response(
-                "search_web", json.dumps({"query": "Acme enrollment proof"})
+                "search_web", json.dumps({"query": "Acme enrollment proof"}),
             )
         if len(requests) == 2:
             clock.now = (
                 investigator.ADMISSION_DEADLINE_SECONDS
                 - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS + 1
             )
+            if required_research:
+                assert payload["tool_choice"]["function"]["name"] == "search_web"
+                return 200, _tool_response(
+                    "search_web", json.dumps({"query": "Acme missing product proof"}),
+                )
             return 200, _tool_response(
-                "fetch_page", json.dumps({"url": "https://acme.example/news"})
+                "fetch_page", json.dumps({"url": "https://acme.example/news"}),
             )
         return 200, _tool_response(
-            "submit_findings", json.dumps({"findings": [_finding(
-                status="UNPROVEN", observed_value="", observed_industry="",
-                observed_subindustry="", activity_role="unresolved",
-                evidence_url="", evidence_quote="", reason="No proof loaded.",
-            )]})
+            "submit_findings", json.dumps({"findings": [negative]}),
         )
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
+        searches.append(query)
         clock.now = 50.0
         return {"results": []}
 
+    async def forbid_fetch(*_args, **_kwargs):
+        pytest.fail("reserve-denied fetch must not dispatch")
+
     monkeypatch.setattr(investigator, "_search_web", fake_search)
+    monkeypatch.setattr(investigator, "_fetch_page", forbid_fetch)
     result = _run(monkeypatch, fake_post_json)
 
     assert len(requests) == 3
@@ -158,12 +177,16 @@ def test_time_forced_unproven_with_unused_research_is_incomplete(
     assert json.loads(requests[2]["messages"][-1]["content"])["error"] == (
         "judgment_time_reserved"
     )
-    assert result["usage"]["search_calls"] == 1
+    assert searches == ([] if required_research else ["Acme enrollment proof"])
+    assert result["usage"]["search_calls"] == int(not required_research)
     assert result["usage"]["fetch_calls"] == 0
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
-    assert result.get("_completed_submit") is not True
+    assert result["claims"]["industry"]["evidence_quote"] == ""
+    assert result["claims"]["industry"]["evidence_url"] == ""
+    assert result["_completed_submit"] is not required_research
     assert result["failure_reason"] == (
         investigator.ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON
+        if required_research else ""
     )
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] == QUOTE
 
@@ -194,7 +217,7 @@ def test_grounded_finding_stays_complete_with_or_without_reserve_denial(
             "submit_findings", json.dumps({"findings": [_finding()]})
         )
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         clock.now = 50.0
         return {"results": []}
@@ -210,6 +233,7 @@ def test_grounded_finding_stays_complete_with_or_without_reserve_denial(
 
 def test_voluntary_unproven_after_search_stays_complete(monkeypatch):
     clock = _Clock()
+    monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
     monkeypatch.setattr(
         investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
     )
@@ -230,7 +254,7 @@ def test_voluntary_unproven_after_search_stays_complete(monkeypatch):
             )]})
         )
 
-    async def fake_search(_session, _query, *, key):
+    async def fake_search(_session, _query, *, key, max_results=5):
         del key
         clock.now = 50.0
         return {"results": []}
@@ -245,7 +269,7 @@ def test_voluntary_unproven_after_search_stays_complete(monkeypatch):
 
 
 @pytest.mark.parametrize("positive_semantic_review", [False, True])
-def test_normal_reasoning_request_keeps_existing_provider_default(
+def test_normal_reasoning_request_uses_pinned_product_model(
     monkeypatch, positive_semantic_review,
 ):
     routed = []
@@ -270,14 +294,26 @@ def test_normal_reasoning_request_keeps_existing_provider_default(
 
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     payload, normalized, outbound = routed[0]
-    assert payload["max_tokens"] == normalized["max_tokens"] == 3000
-    assert "reasoning" not in payload
-    assert "reasoning" not in normalized
-    assert "reasoning" not in outbound
+    expected_tokens = (
+        investigator.PRODUCT_REVIEW_MAX_TOKENS
+        if positive_semantic_review else investigator.REASONING_MAX_TOKENS
+    )
+    assert payload["max_tokens"] == normalized["max_tokens"] == expected_tokens
+    assert payload["model"] == normalized["model"] == (
+        investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
+    )
+    if positive_semantic_review:
+        assert payload["reasoning"] == normalized["reasoning"] == outbound["reasoning"] == {
+            "effort": "medium",
+        }
+    else:
+        assert payload["reasoning"] == normalized["reasoning"] == outbound["reasoning"] == {
+            "effort": "low",
+        }
 
 
 @pytest.mark.parametrize("response_exhausted", [False, True])
-def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
+def test_forced_positive_submit_uses_medium_and_keeps_format_retry_low(
     monkeypatch, response_exhausted,
 ):
     monkeypatch.setattr(
@@ -303,18 +339,25 @@ def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
 
     result = _run(monkeypatch, fake_post_json)
 
-    assert len(requests) == 1
+    assert len(requests) == (2 if response_exhausted else 1)
+    assert all(
+        request[0]["tool_choice"] == {
+            "type": "function", "function": {"name": "submit_findings"},
+        } and request[0]["reasoning"] == {"effort": "medium" if index == 0 else "low"}
+        and request[0]["max_tokens"] == (4096 if index == 0 else 3000)
+        for index, request in enumerate(requests)
+    )
     payload, normalized, outbound = requests[0]
     assert payload["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
     assert payload["tool_choice"] == {
         "type": "function", "function": {"name": "submit_findings"},
     }
-    assert payload["max_tokens"] == normalized["max_tokens"] == 3000
+    assert payload["max_tokens"] == normalized["max_tokens"] == 4096
     assert payload["reasoning"] == normalized["reasoning"] == (
         outbound["reasoning"]
-    ) == {"effort": "low"}
+    ) == {"effort": "medium"}
     if response_exhausted:
-        # Low effort is a prevention measure, not a fabricated verifier pass.
+        # Repeated empty output cannot become a fabricated verifier pass.
         assert result["claims"] == {}
         assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
     else:
@@ -329,7 +372,7 @@ def test_forced_positive_submit_uses_low_reasoning_before_provider_response(
         ("length", None),
         # Retained actions 80 and 108 reported tool_calls, but both consumed
         # the request's exact 3,000 completion-token allowance.
-        ("tool_calls", investigator.REASONING_MAX_TOKENS),
+        ("tool_calls", investigator.PRODUCT_REVIEW_MAX_TOKENS),
     ],
 )
 def test_incomplete_submit_retries_once_inside_ordinary_turn_budget(
@@ -371,7 +414,7 @@ def test_incomplete_submit_retries_once_inside_ordinary_turn_budget(
         "type": "function",
         "function": {"name": "submit_findings"},
     }
-    assert "reasoning" not in requests[0]
+    assert requests[0]["reasoning"] == {"effort": "medium"}
     assert requests[1]["reasoning"] == {"effort": "low"}
     replayed_arguments = outbound_requests[1]["messages"][-2]["tool_calls"][0][
         "function"
@@ -386,6 +429,12 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
     requests = []
     fabricated_quote = "Acme supplies payroll software to hospitals worldwide."
 
+    async def fake_search(_session, _query, *, key, max_results=5):
+        del key
+        return {"results": []}
+
+    monkeypatch.setattr(investigator, "_search_web", fake_search)
+
     async def fake_post_json(_session, _url, *, headers, payload):
         del headers
         requests.append(payload)
@@ -393,7 +442,7 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
             return 200, _tool_response(
                 "submit_findings",
                 '{"findings":[{"evidence_quote":"Acme',
-                completion_tokens=investigator.REASONING_MAX_TOKENS,
+                completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
             )
         if len(requests) == 2:
             arguments = json.dumps({"findings": [_finding(
@@ -403,18 +452,23 @@ def test_retry_still_applies_exact_evidence_validation(monkeypatch):
                 evidence_quote=fabricated_quote,
             )]})
             return 200, _tool_response("submit_findings", arguments)
+        if len(requests) == 3:
+            return 200, _tool_response(
+                "search_web", json.dumps({"query": "Acme enrollment software universities"})
+            )
         return 200, _tool_response(
             "submit_findings", json.dumps({"findings": [_finding()]})
         )
 
     result = _run(monkeypatch, fake_post_json)
 
-    assert len(requests) == 3
-    assert "reasoning" not in requests[0]
+    assert len(requests) == 4
+    assert requests[0]["reasoning"] == {"effort": "medium"}
     assert requests[1]["reasoning"] == {"effort": "low"}
-    assert "reasoning" not in requests[2]
+    assert requests[2]["reasoning"] == {"effort": "medium"}
     validation_feedback = json.loads(requests[2]["messages"][-1]["content"])
     assert validation_feedback["error"] == "deterministic_evidence_validation_failed"
+    assert requests[2]["tool_choice"] == "required"
     assert result["claims"]["industry"]["evidence_quote"] == QUOTE
 
 
@@ -536,7 +590,7 @@ def test_late_positive_submit_reuses_one_forced_low_reasoning_repair(
         if len(requests) == 1:
             response = _tool_response(
                 "submit_findings", '{"findings":[{"target":"industry"',
-                completion_tokens=investigator.REASONING_MAX_TOKENS,
+                completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
             )
             response["usage"]["completion_tokens_details"] = {
                 "reasoning_tokens": 2863,
@@ -550,12 +604,15 @@ def test_late_positive_submit_reuses_one_forced_low_reasoning_repair(
 
     assert len(requests) == 2
     assert requests[0]["tool_choice"] == "required"
-    assert "reasoning" not in requests[0]
+    assert requests[0]["reasoning"] == {"effort": "medium"}
     assert requests[1]["tool_choice"] == {
         "type": "function", "function": {"name": "submit_findings"},
     }
     assert requests[1]["reasoning"] == {"effort": "low"}
-    assert all(request["max_tokens"] == 3000 for request in requests)
+    assert [request["max_tokens"] for request in requests] == [
+        investigator.PRODUCT_REVIEW_MAX_TOKENS,
+        investigator.REASONING_MAX_TOKENS,
+    ]
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["industry"]["evidence_quote"] == QUOTE
     assert result["usage"]["reasoning_turns"] == 2
@@ -576,7 +633,7 @@ def test_late_submit_repair_does_not_repeat_or_bypass_turn_limit(monkeypatch):
         clock.now = 113.557
         return 200, _tool_response(
             "submit_findings", '{"findings":[',
-            completion_tokens=investigator.REASONING_MAX_TOKENS,
+            completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
         )
 
     result = _run(monkeypatch, fake_post_json)
@@ -617,7 +674,7 @@ def test_expired_pending_repair_fails_malformed_without_paid_dispatch(
         response_seen = True
         return 200, _tool_response(
             "submit_findings", '{"findings":[',
-            completion_tokens=investigator.REASONING_MAX_TOKENS,
+            completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
         )
 
     result = _run(monkeypatch, fake_post_json)
@@ -641,7 +698,7 @@ def test_late_repair_still_rejects_fabricated_quote(monkeypatch):
         if len(requests) == 1:
             return 200, _tool_response(
                 "submit_findings", '{"findings":[',
-                completion_tokens=investigator.REASONING_MAX_TOKENS,
+                completion_tokens=investigator.PRODUCT_REVIEW_MAX_TOKENS,
             )
         return 200, _tool_response(
             "submit_findings",
@@ -650,9 +707,27 @@ def test_late_repair_still_rejects_fabricated_quote(monkeypatch):
             )]}),
         )
 
+    async def forbid_research(*_args, **_kwargs):
+        pytest.fail("quote correction must not dispatch new research")
+
+    monkeypatch.setattr(investigator, "_search_web", forbid_research)
+    monkeypatch.setattr(investigator, "_fetch_page", forbid_research)
     result = _run(monkeypatch, fake_post_json)
-    assert len(requests) == 2
-    assert result["claims"]["industry"]["status"] != "VERIFIED"
+    assert result.get("_completed_submit") is not True
+    assert result.get("claims", {}).get("industry", {}).get("status") != "VERIFIED"
+    # Serialization repair can be followed by one existing final citation
+    # correction. Both remain submit-only and validate the exact source text.
+    assert len(requests) == 3
+    for request in requests[1:]:
+        assert request["tool_choice"]["function"]["name"] == "submit_findings"
+    assert [tool["function"]["name"] for tool in requests[2]["tools"]] == [
+        "submit_findings",
+    ]
+    feedback = json.loads(requests[2]["messages"][-1]["content"])
+    assert feedback["error"] == "deterministic_evidence_validation_failed"
+    assert feedback["rejected_findings"][0]["reason"] == (
+        "submitted quote was not present in fetched source"
+    )
 
 
 @pytest.mark.parametrize("case", ["other_tool", "semantic_correction", "transient"])
@@ -661,9 +736,10 @@ def test_late_grace_does_not_admit_other_work(monkeypatch, case):
     monkeypatch.setattr(
         investigator, "time", SimpleNamespace(monotonic=clock.monotonic)
     )
-    requests = []
+    requests, research_dispatches = [], []
 
     async def forbid_late_research(*_args, **_kwargs):
+        research_dispatches.append((_args, _kwargs))
         raise AssertionError("late research must not be admitted")
 
     monkeypatch.setattr(investigator, "_search_web", forbid_late_research)
@@ -687,7 +763,16 @@ def test_late_grace_does_not_admit_other_work(monkeypatch, case):
         )
 
     result = _run(monkeypatch, fake_post_json)
-    assert len(requests) == 1
+    assert research_dispatches == []
+    assert len(requests) == (2 if case == "other_tool" else 1)
+    if case == "other_tool":
+        # The host offers a final judgment, but must not execute either
+        # research request when the model ignores that submit-only schema.
+        assert requests[1]["tool_choice"]["function"]["name"] == "submit_findings"
+        assert [tool["function"]["name"] for tool in requests[1]["tools"]] == [
+            "submit_findings",
+        ]
+    assert result.get("_completed_submit") is not True
     assert result["claims"].get("industry", {}).get("status") != "VERIFIED"
 
 

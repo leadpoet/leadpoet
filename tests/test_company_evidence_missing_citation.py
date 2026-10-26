@@ -15,6 +15,7 @@ def _validate(finding):
         {"findings": [finding]},
         targets=("industry",),
         fetched_pages={URL: QUOTE},
+        fetched_final_urls={URL: URL},
         first_party_domains={"acme.example"},
         identity_names={"acme"},
         identity_anchor={
@@ -105,7 +106,7 @@ def test_missing_citation_repairs_loaded_evidence_without_new_research(
 
     monkeypatch.setattr(investigator, "_fetch_page", unexpected_research)
     monkeypatch.setattr(investigator, "_search_web", required_negative_search)
-    result = _run_industry(monkeypatch, post, _Clock())
+    result = _run_industry(monkeypatch, post, _Clock(), requested_product_service="")
 
     assert len(requests) == (2 if corrected_status == "VERIFIED" else 4)
     assert result["_completed_submit"] is True
@@ -130,7 +131,7 @@ def test_repeated_missing_citations_do_not_extend_existing_turn_limit(monkeypatc
 
     monkeypatch.setattr(investigator, "_fetch_page", unexpected_research)
     monkeypatch.setattr(investigator, "_search_web", unexpected_research)
-    result = _run_industry(monkeypatch, post, _Clock())
+    result = _run_industry(monkeypatch, post, _Clock(), requested_product_service="")
 
     assert len(requests) == investigator.MAX_REASONING_TURNS + 1
     # Preserve the existing bounded negative decision; never manufacture proof

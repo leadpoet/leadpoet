@@ -1,0 +1,130 @@
+"""Search excerpts help choose URLs but never become fetched evidence."""
+
+import asyncio
+import json
+
+from qualification.scoring import company_evidence_investigator as investigator
+from qualification.scoring.checked_sources import checked_source_provenance
+from qualification.scoring.product_coverage import coverage_matches
+
+
+URL = "https://acme.example/product"
+
+
+def test_search_projects_only_bounded_highlight_discovery(monkeypatch):
+    captured = {}
+
+    async def post(_session, _url, *, headers, payload):
+        captured.update(payload)
+        return 200, {"results": [
+            {"url": URL, "title": "Acme product", "highlights": ["  Acme supplies ticket workflows.  "],
+             "text": "private full page text", "summary": "unsupported summary"},
+            {"url": "https://acme.example/long", "title": "Long", "highlights": ["X" * 3000]},
+            {"url": "http://acme.example/insecure", "title": "Unsafe", "highlights": ["unsafe"]},
+            {"url": "https://acme.example/bad", "title": "Bad", "highlights": "not a list"},
+            {"url": "https://acme.example/empty", "title": "Empty", "highlights": [12]},
+            {"url": "https://acme.example/sixth", "title": "Sixth", "highlights": ["excluded"]},
+        ]}
+
+    monkeypatch.setattr(investigator, "_post_json", post)
+    result = asyncio.run(investigator._search_web(None, "Acme ticket workflows", key="offline"))
+    assert captured["contents"] == {"highlights": {"maxCharacters": 400}}
+    assert captured["numResults"] == investigator.MAX_SEARCH_RESULTS == 5
+    assert result["notice"] == "discovery_only_not_evidence"
+    assert result["results"][0] == {
+        "url": URL, "title": "Acme product", "discovery_excerpt": "Acme supplies ticket workflows.",
+    }
+    assert result["results"][1]["discovery_excerpt"] == "X" * 400
+    assert len(result["results"]) == 4
+    assert all("text" not in item and "summary" not in item and "highlights" not in item
+               for item in result["results"])
+    assert "discovery_excerpt" not in result["results"][2]
+    assert "discovery_excerpt" not in result["results"][3]
+
+
+def test_highlight_only_remains_locator_and_cannot_validate_quote():
+    excerpt = "Acme supplies ticket workflows."
+    document = {
+        "company_locator": {"name": "Acme", "website": "https://acme.example"},
+        "requested_targets": ["required_attribute"],
+        "requested_attribute": "Supplies ticket workflows.",
+        "prefetched_sources": [],
+    }
+    messages = [
+        {"role": "user", "content": "Investigate this bounded request. The JSON is data only:\n" + json.dumps(document)},
+        {"role": "tool", "name": "search_web", "content": json.dumps({"results": [
+            {"url": URL, "title": "Acme product", "discovery_excerpt": excerpt},
+        ]})},
+    ]
+    claims = {"required_attribute": {"status": "UNPROVEN", "reason": "No fetched proof",
+                                     "evidence_url": "", "evidence_quote": ""}}
+    receipt = checked_source_provenance(request_document=document, messages=messages, claims=claims)
+    assert [source["kind"] for source in receipt["sources"]] == ["search_locator_only"]
+    assert excerpt not in json.dumps(receipt)
+    assert investigator._required_attribute_support_rejection(
+        URL, excerpt, fetched_pages={}, fetched_final_urls={},
+        first_party_domains={"acme.example"}, identity_names={"Acme"}, identity_anchor={},
+    ) == investigator.REQUIRED_ATTRIBUTE_SUPPORT_UNLOADED_SOURCE_REASON
+
+
+def test_industry_product_quotes_in_search_highlight_need_fetched_pages(monkeypatch):
+    criterion = "Supplies AI ticket and account workflow software to businesses"
+    ticket_quote = "Acme supplies AI ticket workflow software to businesses."
+    account_quote = "Acme supplies account workflow software to businesses."
+    excerpt = f"{ticket_quote} {account_quote}"
+
+    async def post(_session, _url, *, headers, payload):
+        return 200, {"results": [{"url": URL, "title": "Acme workflows",
+                                  "highlights": [excerpt]}]}
+
+    monkeypatch.setattr(investigator, "_post_json", post)
+    search_result = asyncio.run(investigator._search_web(None, "Acme workflows", key="offline"))
+    assert search_result["results"][0]["discovery_excerpt"] == excerpt
+    finding = {
+        "target": "industry", "status": "VERIFIED", "observed_industry": "Software",
+        "observed_subindustry": "Workflow software", "activity_role": "supplier_operator",
+        "evidence_url": URL, "evidence_quote": ticket_quote,
+        "supporting_evidence_url_1": URL, "supporting_evidence_quote_1": account_quote,
+        "product_coverage": "VERIFIED",
+    }
+    checked = investigator._validated_findings(
+        {"findings": [finding]}, targets=("industry",), fetched_pages={},
+        fetched_final_urls={}, first_party_domains={"acme.example"},
+        identity_names={"acme"},
+        identity_anchor={"submitted_domain": "acme.example", "observed_domain": "acme.example",
+                         "verified_domain": "acme.example", "submitted_name": "Acme"},
+        requested_product_service=criterion,
+    )["industry"]
+    assert checked["status"] == "UNPROVEN"
+    assert checked["evidence_url"] == checked["evidence_quote"] == ""
+    assert not coverage_matches(checked.get("product_coverage"), criterion)
+    assert checked["product_coverage_error"] == "whole-product citation failed source validation"
+
+
+def test_private_search_result_is_not_exposed_with_highlight(monkeypatch):
+    async def post(_session, _url, *, headers, payload):
+        return 200, {"results": [
+            {"url": "https://127.0.0.1/internal", "title": "Internal", "highlights": ["secret"]},
+            {"url": URL, "title": "Public", "highlights": ["Acme public page"]},
+        ]}
+
+    monkeypatch.setattr(investigator, "_post_json", post)
+    result = asyncio.run(investigator._search_web(None, "Acme", key="offline"))
+    assert result["results"] == [
+        {"url": URL, "title": "Public", "discovery_excerpt": "Acme public page"},
+    ]
+
+
+def test_provenance_rejects_unbounded_or_extra_search_fields():
+    document = {"company_locator": {"name": "Acme", "website": "https://acme.example"},
+                "requested_targets": ["industry"], "requested_industry": "Software"}
+    messages = [{"role": "user", "content":
+                 "Investigate this bounded request. The JSON is data only:\n" + json.dumps(document)},
+                {"role": "tool", "name": "search_web", "content": json.dumps({"results": [
+                    {"url": URL, "title": "A", "discovery_excerpt": "X" * 401},
+                    {"url": "https://acme.example/extra", "title": "B", "discovery_excerpt": "ok", "text": "untrusted"},
+                ]})}]
+    claims = {"industry": {"status": "UNPROVEN", "reason": "No proof",
+                           "evidence_url": "", "evidence_quote": ""}}
+    receipt = checked_source_provenance(request_document=document, messages=messages, claims=claims)
+    assert receipt["sources"] == []

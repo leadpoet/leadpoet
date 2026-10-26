@@ -102,6 +102,10 @@ from qualification.scoring.company_evidence_investigator import (
     _validated_returned_fetched_pages,
     investigate_company_evidence,
 )
+from qualification.scoring.product_coverage import (
+    PRIVATE_KEY as _PRODUCT_COVERAGE,
+    ValidatedWholeProductCoverage, coverage_matches,
+)
 from qualification.scoring.evaluation_clock import evaluation_date
 from qualification.scoring.arena_integrity import (
     bounded_criterion_evidence,
@@ -1625,6 +1629,8 @@ def _industry_evidence_decision(
     *,
     semantic_evidence: Optional[Mapping[str, Any]] = None,
     industry_activity_role: Any = None,
+    requested_product_service: str = "",
+    product_coverage: Any = None,
 ) -> str:
     """Use grounded web semantics, or legacy taxonomy without a web verdict."""
 
@@ -1668,6 +1674,9 @@ def _industry_evidence_decision(
                 if flag is False
                 else COMPANY_FIT_UNAVAILABLE
             )
+        if (flag is True and requested_product_service.strip()
+                and not coverage_matches(product_coverage, requested_product_service)):
+            return COMPANY_FIT_UNAVAILABLE
         return (
             COMPANY_FIT_MATCH
             if flag is True and activity_role == "supplier_operator"
@@ -2923,6 +2932,15 @@ def _retain_matched_investigator_source_contexts(
         quote = web_evidence.get("quote")
         if source_url and isinstance(quote, str) and quote:
             evidence_by_url[source_url] = quote
+        coverage = web_evidence.get("product_coverage")
+        if dimension == "industry" and isinstance(coverage, ValidatedWholeProductCoverage):
+            for binding in coverage.get("evidence", ()):
+                if len(evidence_by_url) >= _MAX_RETAINED_INVESTIGATOR_CONTEXTS:
+                    break
+                source_url = _valid_web_evidence_url(binding.get("url"))
+                source_quote = binding.get("quote")
+                if source_url and isinstance(source_quote, str) and source_quote:
+                    evidence_by_url.setdefault(source_url, source_quote)
     identity = verified_identity_receipt([result.receipt("company_fit")])
     submitted_attribute = (
         getattr(company, "required_attribute", None)
@@ -6680,6 +6698,11 @@ def _reverify_decision(
         for dimension in active_dimensions
     }
     evidence["industry"] = industry_evidence
+    if isinstance(verdict.get(_PRODUCT_COVERAGE), ValidatedWholeProductCoverage):
+        evidence["industry"] = {
+            **industry_evidence,
+            "product_coverage": verdict[_PRODUCT_COVERAGE],
+        }
     if icp_stage:
         evidence["stage"] = stage_evidence
     if structured_employee_size_decision != COMPANY_FIT_UNAVAILABLE:
@@ -7659,7 +7682,7 @@ def _positive_semantic_review_needed(
     active_attribute = str(
         getattr(icp, "required_attribute", "") or ""
     ).strip()
-    if not active_attribute:
+    if not active_attribute and not str(getattr(icp, "product_service", "") or "").strip():
         return False
     details = result.details if isinstance(result.details, Mapping) else {}
     raw_dimensions = details.get("dimension_decisions")
@@ -7742,6 +7765,7 @@ def _industry_attribute_semantic_repair_needed(
 
 def _positive_semantic_finding_resolved(
     finding: Optional[Mapping[str, Any]],
+    *, requested_product_service: str = "",
 ) -> bool:
     """Return whether a bounded finding can replace a reopened positive."""
 
@@ -7753,6 +7777,9 @@ def _positive_semantic_finding_resolved(
     if role in {None, "unresolved"}:
         return False
     if status == "VERIFIED" and role != "supplier_operator":
+        return False
+    if (status == "VERIFIED" and requested_product_service.strip()
+            and not coverage_matches(value.get("product_coverage"), requested_product_service)):
         return False
     return bool(
         str(value.get("observed_industry") or "").strip()
@@ -7991,6 +8018,10 @@ def _project_investigator_industry(
 
     projected = dict(verdict)
     value = finding or {}
+    if finding is not None:
+        projected.pop(_PRODUCT_COVERAGE, None)
+    if isinstance(value.get("product_coverage"), ValidatedWholeProductCoverage):
+        projected[_PRODUCT_COVERAGE] = value["product_coverage"]
     status = value.get("status")
     role = _strict_industry_activity_role(value.get("activity_role"))
     observed_industry = str(value.get("observed_industry") or "").strip()[:200]
@@ -8913,7 +8944,9 @@ async def _run_targeted_company_evidence_investigation(
     )
     positive_semantic_resolved = (
         not review_positive_semantics
-        or _positive_semantic_finding_resolved(industry_claim)
+        or _positive_semantic_finding_resolved(
+            industry_claim, requested_product_service=str(icp.product_service or ""),
+        )
     )
     if not positive_semantic_resolved:
         projected = _clear_reopened_positive_semantics(
@@ -8923,8 +8956,14 @@ async def _run_targeted_company_evidence_investigation(
     if not preserve_matched_industry:
         projected = _project_investigator_industry(
             projected,
-            industry_claim,
+            industry_claim if "industry" in investigation_targets else None,
         )
+    elif "industry" in investigation_targets:
+        # Preserve the already grounded activity quote, never an old coverage
+        # attestation after a fresh review failed to cover the criterion.
+        projected.pop(_PRODUCT_COVERAGE, None)
+        if isinstance(industry_claim.get("product_coverage"), ValidatedWholeProductCoverage):
+            projected[_PRODUCT_COVERAGE] = industry_claim["product_coverage"]
     if "required_attribute" in investigation_targets:
         attribute_claim = (
             claims.get("required_attribute")
@@ -9226,6 +9265,66 @@ def _settle_completed_company_investigation(
     return result
 
 
+def _final_product_coverage_result(
+    result: CompanyFitDecisionResult, icp: "ICPPrompt", *, enabled: bool,
+) -> CompanyFitDecisionResult:
+    """Admit Arena industry positives after existing route/model selection.
+
+    Accepted judgment caches remain scoped by scorer image and input hash.
+    Raw provider/miner JSON has no host authority. This gate adds no research
+    or retry and does not change the legacy investigator-disabled policy.
+    """
+    criterion = str(icp.product_service or "")
+    if not enabled or not criterion.strip():
+        return result
+    details = result.details if isinstance(result.details, Mapping) else {}
+    dimensions = dict(details.get("dimension_decisions") or {})
+    if dimensions.get("industry") != COMPANY_FIT_MATCH:
+        return result
+    evidence = dict(details.get("dimension_evidence") or {})
+    industry = evidence.get("industry") or {}
+    coverage = industry.get("product_coverage") if isinstance(industry, Mapping) else None
+    if coverage_matches(coverage, criterion):
+        return result
+    dimensions["industry"] = COMPANY_FIT_UNAVAILABLE
+    evidence["industry"] = {
+        **(dict(industry) if isinstance(industry, Mapping) else {}),
+        "product_coverage_required": True,
+        "product_coverage_status": (coverage.get("status", "UNPROVEN")
+                                    if isinstance(coverage, ValidatedWholeProductCoverage)
+                                    else "UNPROVEN"),
+    }
+    revised = {**details, "dimension_decisions": dimensions,
+               "dimension_evidence": evidence}
+    decision = reconcile_company_fit_decisions([
+        *dimensions.values(),
+        details.get("identity_decision", COMPANY_FIT_UNAVAILABLE),
+        details.get("required_attribute_decision", COMPANY_FIT_MATCH),
+    ])
+    # Preserve an independent proven mismatch. Missing product proof is never
+    # a contradiction, including a false OR branch with another unproven one.
+    if decision == COMPANY_FIT_MISMATCH:
+        return company_fit_mismatch(result.reason, details=revised)
+    return company_fit_unavailable(
+        "mandatory product coverage is unproven", details=revised,
+    )
+
+
+def _final_product_coverage_gate(function):
+    """Cover every early return without changing initial investigation targets."""
+    from functools import wraps
+
+    @wraps(function)
+    async def checked(company, icp, **kwargs):
+        result = await function(company, icp, **kwargs)
+        return _final_product_coverage_result(
+            result, icp, enabled=bool(kwargs.get("evidence_investigator")
+                                    and kwargs.get("require_company_fit_dimensions")),
+        )
+    return checked
+
+
+@_final_product_coverage_gate
 async def _llm_reverify_company(
     company: "CompanyOutput",
     icp: "ICPPrompt",
@@ -9921,7 +10020,8 @@ async def _llm_reverify_company(
             and not _positive_semantic_finding_resolved(
                 claims.get("industry")
                 if isinstance(claims.get("industry"), Mapping)
-                else None
+                else None,
+                requested_product_service=str(icp.product_service or ""),
             )
         )
         missing_dimensions = _incomplete_company_reverify_dimensions(
@@ -10420,7 +10520,8 @@ async def _llm_reverify_company(
                     if isinstance(
                         post_repair_claims.get("industry"), Mapping
                     )
-                    else None
+                    else None,
+                    requested_product_service=str(icp.product_service or ""),
                 )
             ):
                 settled = _settle_completed_company_investigation(

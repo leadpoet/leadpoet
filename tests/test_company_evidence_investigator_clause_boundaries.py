@@ -62,6 +62,37 @@ def test_original_prompt_preserves_conflict_and_qualifier_limits():
     assert len(investigator._SYSTEM_PROMPT) <= OPENROUTER_MAX_CONTENT_CHARS
 
 
+@pytest.mark.parametrize("targets", [("industry",), ("industry", "required_attribute"), ("stage",)])
+def test_product_coverage_precedes_global_status_without_changing_fields(targets):
+    submit = next(t for t in investigator._tools(targets) if t["name"] == "submit_findings")
+    item = submit["parameters"]["properties"]["findings"]["items"]
+    order = list(item["properties"])
+    expected = ["target", "product_coverage", "status"] if "industry" in targets else ["target", "status"]
+    assert order[:len(expected)] == expected
+    assert item["required"][:len(expected)] == expected
+    if "industry" in targets:
+        field = item["properties"]["product_coverage"]
+        assert field["type"] == ["string", "null"] and field["maxLength"] == 16
+        assert "one explicit VERIFIED, CONTRADICTED or UNPROVEN judgment" in field["description"]
+    else:
+        assert "product_coverage" not in item["properties"]
+
+
+def test_industry_purpose_inference_preserves_core_capability_and_actual_event_rules():
+    """Prompt contract only; live adjudication quality needs separate evidence."""
+    prompt = " ".join(investigator._SYSTEM_PROMPT.split())
+    assert "designs/develops does not require shipments" in prompt
+    assert "Company-bound functional/performance facts may jointly establish intended use" in prompt
+    assert "target customers and unquantified performance/cost benefits by reasonable inference" in prompt
+    assert "Do not add named deployments, public prices or benchmarks unless required" in prompt
+    assert "Prove all core capabilities AND customer/market restrictions" in prompt
+    assert "Compatibility, enabling technology, or adjacent products do not establish a missing core capability" in prompt
+    assert "Explicit manufacture/sale/deployment/milestone conditions need actual corresponding facts" in prompt
+    assert "Never invent sales/deployments for any check" in prompt
+    assert "Conditions also stated in product/service remain mandatory in BOTH checks" in prompt
+    assert len(investigator._SYSTEM_PROMPT) < OPENROUTER_MAX_CONTENT_CHARS
+
+
 @pytest.mark.parametrize(
     ("requested_stage", "quote", "loaded_text", "expected"),
     [

@@ -7,6 +7,9 @@ import json
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import initial_investigation_content
+from tests.product_coverage_fixtures import initial_loaded_sources
+from tests.product_coverage_fixtures import native_product_post
 from tests.test_company_evidence_investigator import _finding
 
 HOME = "https://acme.example/"
@@ -57,7 +60,13 @@ def run_case(monkeypatch, *, stage_cached=True, geography=False, pricing=False,
     if geography:
         findings.append(_finding("geography", status="UNPROVEN", observed_value=None,
                                  evidence_url="", evidence_quote=""))
-    actions = actions or [("submit_findings", {"findings": findings})]
+    actions = list(actions or [("submit_findings", {"findings": findings})])
+    if not expire_after_fetch:
+        # Current combined stage/product review allocates one early product
+        # search. Empty results leave these priority and cap checks unchanged.
+        actions.insert(0, ("search_web", {
+            "query": "Acme security platform customers",
+        }))
 
     async def post(_session, _url, *, headers, payload):
         name, args = actions[len(requests)]
@@ -78,13 +87,13 @@ def run_case(monkeypatch, *, stage_cached=True, geography=False, pricing=False,
             )
         return {"ok": True, "url": url, "final_url": url, "text": text}
 
-    async def search(_session, query, *, key):
+    async def search(_session, query, *, key, max_results=5):
         queries.append(query)
         return {"results": []}
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
-    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(post))
     monkeypatch.setattr(investigator, "_fetch_page", fetch)
     monkeypatch.setattr(investigator, "_search_web", search)
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -94,33 +103,33 @@ def run_case(monkeypatch, *, stage_cached=True, geography=False, pricing=False,
         positive_semantic_review=True, prior_observations=prior,
         verified_homepage_identity={"normalized_name": "acme", "registrable_dns_domain": "acme.example", "linkedin_company_slug": "acme"},
         homepage_navigation_locators=navigation, prefetched_pages=pages))
-    initial = (json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    initial = (json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
                if requests else None)
     return result, initial, fetched, queries, requests
 
 
 @pytest.mark.parametrize("pricing", [False, True])
 def test_cached_series_b_and_homepage_admit_terms_with_pricing_preferred(monkeypatch, pricing):
-    result, initial, fetched, queries, _ = run_case(monkeypatch, pricing=pricing)
+    result, initial, fetched, queries, requests = run_case(monkeypatch, pricing=pricing)
     selected = PRICING if pricing else TERMS
     assert fetched == [selected]
     assert initial["server_priority_submitted_source"] == {
         "url": selected, "ok": True, "cache_hit": False,
         "notice": "server_selected_first_party_locator_is_untrusted_evidence"}
-    assert {page["url"] for page in initial["prefetched_sources"]} == {HOME, STAGE, selected}
+    assert {page["url"] for page in initial_loaded_sources(requests[0])} == {HOME, STAGE, selected}
     assert result["claims"]["stage"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["status"] == "VERIFIED"
     assert result["usage"]["fetch_calls"] == 1
-    assert len(queries) == 1 and initial["server_current_stage_discovery"]["ok"] is True
+    assert len(queries) == 2 and initial["server_current_stage_discovery"]["ok"] is True
 
 
 def test_cached_disputed_stage_remains_loaded_and_current_search_required(monkeypatch):
-    result, initial, fetched, queries, _ = run_case(monkeypatch, dispute=True)
+    result, initial, fetched, queries, requests = run_case(monkeypatch, dispute=True)
     assert fetched == [TERMS]
-    assert any(page == {"url": STAGE, "text": STAGE_QUOTE}
-               for page in initial["prefetched_sources"])
+    assert any(page["url"] == STAGE and page["text"] == STAGE_QUOTE
+               for page in initial_loaded_sources(requests[0]))
     assert initial["prior_observations"]["stage_dispute_urls"] == [STAGE]
-    assert len(queries) == 1
+    assert len(queries) == 2
     assert result["claims"]["stage"]["status"] == "VERIFIED"
 
 
@@ -130,7 +139,7 @@ def test_fresh_stage_or_headquarters_preserves_existing_priority(monkeypatch, ge
                                               attribute_proven=False)
     assert fetched == [expected]
     assert initial["server_priority_submitted_source"]["url"] == expected
-    assert len(queries) == 1
+    assert len(queries) == 2
 
 
 @pytest.mark.parametrize("third_cached,terms", [(False, False), (True, True)])
@@ -142,7 +151,7 @@ def test_no_admissible_fresh_source_keeps_cached_stage_marker(monkeypatch, third
     assert initial["server_priority_submitted_source"]["cache_hit"] is True
     assert result["usage"]["fetch_calls"] == 0
     assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
-    assert len(queries) == 1
+    assert len(queries) == 2
 
 
 def test_fresh_locator_does_not_force_attribute_acceptance(monkeypatch):
@@ -151,36 +160,44 @@ def test_fresh_locator_does_not_force_attribute_acceptance(monkeypatch):
     assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
 
 
-def test_server_terms_fetch_counts_against_three_call_cap(monkeypatch):
-    fresh = [HOME + f"fresh-{i}" for i in range(3)]
+def test_server_terms_fetch_counts_against_five_product_call_cap(monkeypatch):
+    fresh = [HOME + f"fresh-{i}" for i in range(5)]
     actions = [("fetch_page", {"url": url}) for url in fresh]
     actions.append(("submit_findings", {"findings": [
         _finding("stage", status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote=""),
         _finding("industry", status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote=""),
         _finding("required_attribute", status="UNPROVEN", observed_value=None, evidence_url="", evidence_quote=""),
     ]}))
-    result, _, fetched, _, requests = run_case(monkeypatch, actions=actions)
-    assert fetched == [TERMS, *fresh[:2]]
-    assert result["usage"]["fetch_calls"] == 3
+    result, initial, fetched, _, requests = run_case(monkeypatch, actions=actions)
+    assert initial["investigation_limits"]["fetch_calls"] == 5
+    assert initial["investigation_limits"]["remaining_fetch_calls"] == 4
+    assert initial["investigation_limits"]["server_prefetch_fetch_calls"] == 1
+    assert fetched == [TERMS, *fresh[:4]]
+    assert result["usage"]["fetch_calls"] == 5
     assert json.loads(requests[-1]["messages"][-1]["content"])["error"] == "fetch_budget_exhausted"
-    assert (investigator.MAX_FETCH_CALLS, investigator.MAX_PAGE_CHARACTERS,
-            investigator.ADMISSION_DEADLINE_SECONDS) == (3, 24_000, 110.0)
+    assert (investigator.MAX_FETCH_CALLS, investigator.MAX_PRODUCT_FETCH_CALLS,
+            investigator.MAX_PAGE_CHARACTERS, investigator.ADMISSION_DEADLINE_SECONDS
+            ) == (4, 5, 24_000, 110.0)
 
 
 def test_terms_fetch_does_not_extend_admission_deadline(monkeypatch):
     result, initial, fetched, queries, requests = run_case(monkeypatch, expire_after_fetch=True)
     assert fetched == [TERMS]
-    assert queries == requests == []
-    assert initial is None
-    assert result["usage"]["reasoning_turns"] == 0
+    assert queries == []
+    assert len(requests) == 1
+    assert requests[0]["tool_choice"] == {
+        "type": "function", "function": {"name": "submit_findings"},
+    }
+    assert initial["investigation_limits"]["admission_deadline_seconds"] == 110.0
+    assert result["usage"]["reasoning_turns"] == 1
     assert result["claims"]["stage"]["status"] == "UNPROVEN"
 
 
 def test_fresh_terms_keeps_page_and_model_message_text_bounds(monkeypatch):
     result, initial, fetched, _, requests = run_case(monkeypatch, long_text=True)
     assert fetched == [TERMS]
-    terms = next(page for page in initial["prefetched_sources"] if page["url"] == TERMS)
+    terms = next(page for page in initial_loaded_sources(requests[0]) if page["url"] == TERMS)
     assert len(terms["text"]) <= investigator.MAX_PAGE_CHARACTERS
     assert terms["text"].startswith(TERMS_QUOTE)
-    assert len(requests[0]["messages"][1]["content"]) <= investigator.OPENROUTER_MAX_CONTENT_CHARS
+    assert len(initial_investigation_content(requests[0])) <= investigator.OPENROUTER_MAX_CONTENT_CHARS
     assert len(result[investigator.PRIVATE_FETCHED_PAGES_KEY][TERMS]["text"]) == 24_000

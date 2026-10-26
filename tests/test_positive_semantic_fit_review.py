@@ -6,6 +6,7 @@ import pytest
 
 from gateway.qualification.models import CompanyOutput, ICPPrompt
 from qualification.scoring import lead_scorer
+from qualification.scoring.product_coverage import validate_whole_coverage
 from qualification.scoring.company_fit_decision import (
     COMPANY_FIT_MATCH,
     COMPANY_FIT_MISMATCH,
@@ -134,6 +135,15 @@ def _finding(target: str, **overrides):
         "reason": "verified",
     }
     values.update(overrides)
+    if target == "industry" and values["status"] == "VERIFIED":
+        # The investigator is mocked below. Supply its host-validated receipt
+        # as well as its global finding; source admission is tested separately.
+        criterion = _icp().product_service
+        values["product_coverage"] = validate_whole_coverage(
+            "VERIFIED", criterion=criterion, whole_status="VERIFIED",
+            bindings=[{"url": values["evidence_url"], "quote": values["evidence_quote"]}],
+            citation_rejection=lambda url, quote: None,
+        )
     return values
 
 

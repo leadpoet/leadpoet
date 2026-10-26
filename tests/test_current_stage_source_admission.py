@@ -872,7 +872,7 @@ def test_pe_rejected_prefetch_uses_remaining_search_and_fetch(monkeypatch):
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}}]}
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         return {"results": [{"url": strong_url}]}

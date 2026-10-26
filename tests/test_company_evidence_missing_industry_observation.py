@@ -21,6 +21,7 @@ FINDING = CASE["finding"]
 URL = CASE["source"]["url"]
 QUOTE = FINDING["evidence_quote"]
 OBSERVATION = "DNA sequencing and multi-omics technology for research markets"
+PRODUCT = "DNA sequencing platform for research markets"
 
 
 def _validate(finding, *, source_text=None):
@@ -99,8 +100,8 @@ def test_contradicted_industry_requires_metadata_and_correct_activity_role():
     ({"activity_role": "unresolved"}, None,
      investigator.INDUSTRY_RELATIONSHIP_UNPROVEN_REASON),
     ({"evidence_url": "https://other.example/product"}, None,
-     "activity and headquarters evidence must use an independently bound "
-     "first-party company domain"),
+     "industry evidence must use independently bound "
+     "first-party requested and fetched final URLs"),
     ({"evidence_quote": "Other Company supplies sequencing products."},
      "Other Company supplies sequencing products.",
      "source quote did not identify the investigated company"),
@@ -139,7 +140,7 @@ def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
                 - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS
             )
             return 200, _response("submit_findings", {
-                "findings": [FINDING, {
+                "findings": [{**FINDING, "product_coverage": "VERIFIED"}, {
                     **retained,
                     **({"evidence_quote": "An invented attribute quote."}
                        if attribute_quote_rejected else {}),
@@ -176,6 +177,7 @@ def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
         )
         assert "nonempty source-grounded" in properties["observed_industry"]["description"]
         corrected = {**FINDING, "observed_industry": OBSERVATION} if repair else FINDING
+        corrected = {**corrected, "product_coverage": "VERIFIED"}
         return 200, _response("submit_findings", {
             "findings": [corrected, retained] if attribute_quote_rejected else [corrected],
         }, call=len(requests))
@@ -194,10 +196,7 @@ def test_metadata_feedback_reuses_quote_and_preserves_other_finding(
         targets=("industry", "required_attribute"),
         requested_industry="Biotechnology",
         requested_subindustry="Therapeutics and platform biotech",
-        requested_product_service=(
-            "A biotechnology company developing therapeutic, diagnostic, or "
-            "platform-based life sciences products for clinical or commercial use."
-        ),
+        requested_product_service=PRODUCT,
         requested_attribute=(
             "Develops regulated biological products, therapeutic candidates, "
             "or platform technologies for the life sciences market."

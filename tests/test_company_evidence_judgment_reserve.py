@@ -32,6 +32,7 @@ def _finding(
 ) -> dict[str, object]:
     return {
         "target": "industry",
+        "product_coverage": status,
         "status": status,
         "observed_value": (
             "University enrollment software" if status != "UNPROVEN" else None
@@ -71,6 +72,9 @@ def _response(name: str, arguments: dict[str, object] | str, *, call: int = 1):
 
 
 def _run_industry(monkeypatch, post_json, clock: _Clock, **kwargs):
+    requested_product_service = kwargs.pop(
+        "requested_product_service", "Enrollment software for universities",
+    )
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
     monkeypatch.setattr(investigator, "_post_json", post_json)
@@ -80,7 +84,7 @@ def _run_industry(monkeypatch, post_json, clock: _Clock, **kwargs):
         targets=("industry",),
         requested_industry="Education",
         requested_subindustry="Higher education services",
-        requested_product_service="Enrollment software for universities",
+        requested_product_service=requested_product_service,
         prior_observations={"submitted_source_urls": [URL]},
         verified_homepage_identity={
             "normalized_name": "acme",
@@ -140,10 +144,15 @@ def test_late_tool_is_not_dispatched_and_loaded_evidence_is_judged(
         "type": "function",
         "function": {"name": "submit_findings"},
     }
-    assert "reasoning" not in requests[0]
-    assert requests[1].get("reasoning") == (
-        {"effort": "low"} if positive_semantic_review else None
+    assert requests[0].get("reasoning") == (
+        {"effort": "medium"} if positive_semantic_review else {"effort": "low"}
     )
+    assert requests[1].get("reasoning") == (
+        {"effort": "medium"} if positive_semantic_review else {"effort": "low"}
+    )
+    assert requests[1]["max_tokens"] == (4096 if positive_semantic_review else 3000)
+    assert all(request["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
+               for request in requests)
     feedback = json.loads(requests[1]["messages"][-1]["content"])
     assert feedback["error"] == "judgment_time_reserved"
     assert result["claims"]["industry"]["status"] == "VERIFIED"
@@ -258,10 +267,15 @@ def test_reserved_judgment_cannot_turn_missing_evidence_positive(
     )
 
     assert len(requests) == 3
-    assert "reasoning" not in requests[0]
-    assert requests[1].get("reasoning") == (
-        {"effort": "low"} if positive_semantic_review else None
+    assert requests[0].get("reasoning") == (
+        {"effort": "medium"} if positive_semantic_review else {"effort": "low"}
     )
+    assert requests[1].get("reasoning") == (
+        {"effort": "medium"} if positive_semantic_review else {"effort": "low"}
+    )
+    assert requests[1]["max_tokens"] == (4096 if positive_semantic_review else 3000)
+    assert all(request["model"] == investigator.POSITIVE_SEMANTIC_REVIEW_MODEL
+               for request in requests)
     correction = json.loads(requests[2]["messages"][-1]["content"])
     assert correction["error"] == "deterministic_evidence_validation_failed"
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
@@ -273,7 +287,7 @@ def test_mandatory_current_stage_discovery_precedes_reserved_submit(monkeypatch)
     searches = []
     requests = []
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         clock.now = (
@@ -319,7 +333,7 @@ def test_reserve_overrides_pending_stage_recovery_without_marking_search_success
     searches = []
     requests = []
 
-    async def unavailable_search(_session, query, *, key):
+    async def unavailable_search(_session, query, *, key, max_results=5):
         del key
         searches.append(query)
         raise RuntimeError("search unavailable")
@@ -519,7 +533,7 @@ def test_inner_deadline_final_submit_retains_usage(monkeypatch, late_tool):
     assert provider_calls == []
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
     assert len(requests) == 2
-    assert result["usage"] == {
+    assert {k: v for k, v in result["usage"].items() if k != "product_plan"} == {
         "reasoning_turns": 2,
         "search_calls": 0,
         "fetch_calls": 0,
@@ -527,6 +541,8 @@ def test_inner_deadline_final_submit_retains_usage(monkeypatch, late_tool):
         "total_loaded_pages": 1,
         "fetch_outcomes": [],
     }
+    # An ordinary late research call is not dispatched. The complete,
+    # validated UNPROVEN submission remains a terminal negative judgment.
     assert result["_completed_submit"] is True
     assert result["failure_reason"] == ""
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL] == {
@@ -593,13 +609,15 @@ def test_reserved_submit_completes_validated_bounded_judgment(
             return 200, _response(
                 "search_web", {"query": "Acme enrollment software"}, call=1,
             )
+        if payload.get("tool_choice") == {"type": "function", "function": {"name": "search_web"}}:
+            return 200, _response("search_web", {"query": "Acme enrollment software"}, call=len(requests))
         return 200, _response(
             "submit_findings",
             {"findings": [_finding(status=finding_status)]},
             call=2,
         )
 
-    async def fake_search(_session, query, *, key):
+    async def fake_search(_session, query, *, key, max_results=5):
         del query, key
         if reserve_time:
             clock.now = (
@@ -612,17 +630,19 @@ def test_reserved_submit_completes_validated_bounded_judgment(
         monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 2)
     if research_exhausted:
         monkeypatch.setattr(investigator, "MAX_SEARCH_CALLS", 1)
-        monkeypatch.setattr(investigator, "MAX_FETCH_CALLS", 0)
+        monkeypatch.setattr(investigator, "MAX_PRODUCT_FETCH_CALLS", 0)
     monkeypatch.setattr(investigator, "_search_web", fake_search)
     result = _run_industry(monkeypatch, fake_post, clock)
 
-    assert len(requests) == 2
+    whole_gap_followup = (not reserve_time and finding_status == "UNPROVEN"
+                          and not reasoning_turn_cap and not research_exhausted)
+    assert len(requests) == (4 if whole_gap_followup else 2)
     assert result["claims"]["industry"]["status"] == finding_status
     # A complete validated UNPROVEN submission is an honest bounded judgment;
     # unused research capacity does not turn it into an infrastructure failure.
     assert result["_completed_submit"] is True
     assert result["failure_reason"] == ""
-    assert result["usage"]["search_calls"] == 1
+    assert result["usage"]["search_calls"] == (2 if whole_gap_followup else 1)
     assert result["usage"]["fetch_calls"] == 0
 
 

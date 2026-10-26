@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import initial_investigation_content, initial_loaded_sources
 
 
 UNIBUDDY_URL = "https://unibuddy.com/"
@@ -100,6 +101,9 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
             "communication."
         ),
     )
+    # This declares a model whole-criterion judgment; the host still validates
+    # the quote and supplier role. It is not a real-world entailment label.
+    finding["product_coverage"] = "VERIFIED"
     requests = []
 
     async def fake_post(_session, _url, *, headers, payload):
@@ -167,14 +171,14 @@ def test_unibuddy_full_criterion_reaches_prompt_and_verified_final_validation(
     assert result["claims"]["industry"]["evidence_quote"] == UNIBUDDY_QUOTE
     assert len(requests) == 1
     request_document = json.loads(
-        requests[0]["messages"][1]["content"].split("\n", 1)[1]
+        initial_investigation_content(requests[0]).split("\n", 1)[1]
     )
     assert request_document["requested_industry"] == requested_industry
     assert request_document["requested_subindustry"] == requested_subindustry
     assert request_document["requested_product_service"] == requested_product_service
     assert request_document["requested_attribute"] == requested_attribute
-    assert request_document["prefetched_sources"] == [
-        {"url": UNIBUDDY_URL, "text": UNIBUDDY_QUOTE}
+    assert initial_loaded_sources(requests[0]) == [
+        {"url": UNIBUDDY_URL, "final_url": UNIBUDDY_URL, "text": UNIBUDDY_QUOTE}
     ]
 
 
@@ -307,9 +311,11 @@ def test_prompt_preserves_negative_controls_and_all_required_conjuncts():
         "own internal console or workflow remain customer_user or internal_function"
     ) in prompt
     assert (
-        "prove every independent mandatory condition that is not separately checked "
-        "by the required attribute" in prompt
+        "prove every mandatory product/service condition, including any also checked "
+        "by required_attribute" in prompt
     )
+    assert "condition that is not separately checked by the required attribute" not in prompt
+    assert "return one explicit whole-criterion product_coverage verdict" in prompt
     assert "The independent required-attribute check must still prove" in prompt
     assert "An adjacent activity for the same customer group is UNPROVEN" in prompt
     assert "criterion explicitly lists those capabilities or sectors as OR alternatives" in prompt

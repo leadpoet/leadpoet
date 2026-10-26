@@ -70,7 +70,7 @@ _TRANSIENT_FETCH_ATTEMPTS = 2
 _TRANSIENT_FETCH_RETRY_DELAY_SECS = 0.25
 _MAX_ORGANIZATION_LEGAL_NAME_ALIASES = 3
 _MAX_ORGANIZATION_NAME_LENGTH = 200
-MAX_HOMEPAGE_NAVIGATION_LOCATORS = 40
+MAX_HOMEPAGE_NAVIGATION_LOCATORS = 50
 MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH = 200
 MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS = 6_000
 VERIFIED_REBRAND_REDIRECT_KEY = "verified_rebrand_redirect"
@@ -608,7 +608,10 @@ def _organization_identity_records(value) -> list[dict[str, object]]:
             continue
         raw_type = node.get("@type", "")
         types = raw_type if isinstance(raw_type, list) else [raw_type]
-        if not any(str(item or "").casefold() == "organization" for item in types):
+        if not any(
+            str(item or "").casefold() in {"organization", "corporation"}
+            for item in types
+        ):
             continue
         raw_same_as = node.get("sameAs", [])
         same_as_candidates = (
@@ -649,7 +652,8 @@ def _organization_same_as_urls(value) -> list[str]:
             raw_type = node.get("@type", "")
             types = raw_type if isinstance(raw_type, list) else [raw_type]
             is_organization = any(
-                str(item or "").casefold() == "organization" for item in types
+                str(item or "").casefold() in {"organization", "corporation"}
+                for item in types
             )
             if is_organization:
                 raw_same_as = node.get("sameAs", [])
@@ -977,8 +981,8 @@ def _homepage_navigation_locators(
         if canonical in seen:
             continue
         seen.add(canonical)
-        # Large menus can hide relevant commercial and company pages after the
-        # first 40 links. Preserve these locators within the existing limits.
+        # Large menus can hide relevant commercial and company pages after
+        # dozens of links. Preserve these locators within the existing limits.
         words = set(re.findall(
             r"[a-z]+", f"{parsed.path} {label}".casefold()
         ))
@@ -1271,9 +1275,11 @@ class _ArenaProviderFetchError(aiohttp.ClientError):
             else None
         )
         self.broker_error_code = (
-            "provider_request_refused"
-            if self.broker_status == 403
-            and broker_error_code == "provider_request_refused"
+            broker_error_code
+            if (self.broker_status, broker_error_code) in {
+                (403, "provider_request_refused"),
+                (415, "unsupported_source"),
+            }
             else ""
         )
 
@@ -1281,6 +1287,7 @@ class _ArenaProviderFetchError(aiohttp.ClientError):
 _ARENA_PROVIDER_REQUEST_REFUSED_BODY = (
     b'{"error":{"code":"provider_request_refused"}}'
 )
+_ARENA_UNSUPPORTED_SOURCE_BODY = b'{"error":{"code":"unsupported_source"}}'
 
 
 async def _fetch_bounded_html(
@@ -1298,26 +1305,37 @@ async def _fetch_bounded_html(
             and getattr(resp, "_lab_arena_response_url_validated", None) is False
         ):
             broker_error_code = ""
+            expected_error_body = b""
+            expected_error_code = ""
             if (
                 resp.status == 403
                 and bool(getattr(resp, "headers", {}).get(
                     "x-leadpoet-call-identity"
                 ))
             ):
-                # The broker's fixed refusal has no target URL. Read at most
-                # one byte beyond its exact envelope; never return this body
-                # or the shim's request-URL fallback as page evidence.
+                expected_error_body = _ARENA_PROVIDER_REQUEST_REFUSED_BODY
+                expected_error_code = "provider_request_refused"
+            elif resp.status == 415:
+                # A source policy can refuse an unsupported document before
+                # provider dispatch, so it has no paid call identity. Only the
+                # trusted worker response marker and exact error envelope
+                # identify this refusal. It supplies no URL or source text.
+                expected_error_body = _ARENA_UNSUPPORTED_SOURCE_BODY
+                expected_error_code = "unsupported_source"
+            if expected_error_body:
+                # Read one byte beyond the exact envelope. Never expose the
+                # error body or the shim's fallback URL as page evidence.
                 raw_error = bytearray()
-                while len(raw_error) <= len(_ARENA_PROVIDER_REQUEST_REFUSED_BODY):
+                while len(raw_error) <= len(expected_error_body):
                     chunk = await resp.content.read(
-                        len(_ARENA_PROVIDER_REQUEST_REFUSED_BODY) + 1
+                        len(expected_error_body) + 1
                         - len(raw_error)
                     )
                     if not chunk:
                         break
                     raw_error.extend(chunk)
-                if bytes(raw_error) == _ARENA_PROVIDER_REQUEST_REFUSED_BODY:
-                    broker_error_code = "provider_request_refused"
+                if bytes(raw_error) == expected_error_body:
+                    broker_error_code = expected_error_code
             raise _ArenaProviderFetchError(
                 "website fetch error: Arena provider response unavailable",
                 broker_status=resp.status,
@@ -1442,8 +1460,10 @@ async def verify_company_exists(
             str(e),
             failure_reason_code=(
                 "source_blocked"
-                if e.broker_status == 403
-                and e.broker_error_code == "provider_request_refused"
+                if (e.broker_status, e.broker_error_code) in {
+                    (403, "provider_request_refused"),
+                    (415, "unsupported_source"),
+                }
                 else "provider_error"
             ),
         )

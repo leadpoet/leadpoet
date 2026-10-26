@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import native_product_post
 from tests.test_company_evidence_judgment_reserve import (
     QUOTE, URL, _Clock, _finding, _response,
 )
@@ -13,7 +15,7 @@ from tests.test_company_evidence_judgment_reserve import (
 def _investigate(monkeypatch, post, clock, *, loaded=True, positive=False):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("EXA_API_KEY", "test-exa-key")
-    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(post))
     monkeypatch.setattr(investigator, "time", clock)
     return asyncio.run(investigator.investigate_company_evidence(
         company_locator={"name": "Acme", "website": "https://acme.example"},
@@ -202,7 +204,7 @@ def test_late_failure_cannot_create_a_final_judgment(monkeypatch, failure):
 @pytest.mark.parametrize("bad_final", [
     "fabricated_quote", "research_tool", "provider_failure",
 ])
-def test_late_final_turn_cannot_relax_evidence_or_start_another_turn(
+def test_late_final_correction_cannot_relax_evidence_or_execute_research(
     monkeypatch, bad_final,
 ):
     clock = _Clock()
@@ -213,7 +215,17 @@ def test_late_final_turn_cannot_relax_evidence_or_start_another_turn(
         if len(requests) == 1:
             clock.now = 122.5
             return 200, _response("fetch_page", {"url": URL})
-        assert len(requests) == 2
+        assert len(requests) <= 3
+        assert payload["tool_choice"]["function"]["name"] == "submit_findings"
+        assert [tool["function"]["name"] for tool in payload["tools"]] == [
+            "submit_findings",
+        ]
+        if len(requests) == 3:
+            assert bad_final == "fabricated_quote"
+            feedback = json.loads(payload["messages"][-1]["content"])
+            assert feedback["rejected_findings"][0]["reason"] == (
+                "submitted quote was not present in fetched source"
+            )
         if bad_final == "provider_failure":
             return 503, {"error": "unavailable"}
         if bad_final == "research_tool":
@@ -222,14 +234,19 @@ def test_late_final_turn_cannot_relax_evidence_or_start_another_turn(
             _finding(quote="A fabricated statement absent from the loaded source."),
         ]}, call=2)
 
+    async def forbid_research(*_args, **_kwargs):
+        pytest.fail("late final judgment must not execute research")
+
+    monkeypatch.setattr(investigator, "_search_web", forbid_research)
+    monkeypatch.setattr(investigator, "_fetch_page", forbid_research)
     result = _investigate(monkeypatch, post, clock)
 
-    assert len(requests) == 2
     assert result.get("_completed_submit") is not True
+    assert result.get("claims", {}).get("industry", {}).get("status") != "VERIFIED"
+    assert len(requests) == (3 if bad_final == "fabricated_quote" else 2)
     assert result["failure_reason"] in {
         "admission_budget_interrupted", "malformed_response", "provider_error",
     }
-    assert result.get("claims", {}).get("industry", {}).get("status") != "VERIFIED"
 
 
 @pytest.mark.parametrize("elapsed,expected_calls", [(122.5, 3), (140.0, 2)])

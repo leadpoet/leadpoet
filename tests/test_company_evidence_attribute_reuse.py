@@ -13,6 +13,9 @@ import pytest
 
 from lab_arena import operations as arena_operations
 from qualification.scoring import company_evidence_investigator as investigator
+from tests.product_coverage_fixtures import initial_investigation_content
+from tests.product_coverage_fixtures import initial_loaded_sources
+from tests.product_coverage_fixtures import native_product_post
 
 
 URL = "https://changefinancial.com/"
@@ -72,7 +75,7 @@ def _run(monkeypatch, replies, *, attribute=ATTRIBUTE, product=PRODUCT, extra_te
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setenv("EXA_API_KEY", "test-key")
     monkeypatch.setattr(investigator, "MAX_REASONING_TURNS", 1)
-    monkeypatch.setattr(investigator, "_post_json", post)
+    monkeypatch.setattr(investigator, "_post_json", native_product_post(post))
     monkeypatch.setattr(investigator, "_search_web", no_research)
     monkeypatch.setattr(investigator, "_fetch_page", no_research)
     result = asyncio.run(investigator.investigate_company_evidence(
@@ -160,10 +163,10 @@ def test_industry_pass_does_not_override_semantic_negative_or_retry_it(
     assert result["_completed_submit"] is True
     assert result["claims"]["industry"]["status"] == "VERIFIED"
     assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
-    sent = json.loads(requests[0]["messages"][1]["content"].split("\n", 1)[1])
+    sent = json.loads(initial_investigation_content(requests[0]).split("\n", 1)[1])
     assert sent["requested_attribute"] == attribute
     assert sent["requested_product_service"] == PRODUCT
-    assert extra_text in sent["prefetched_sources"][0]["text"] or not extra_text
+    assert extra_text in initial_loaded_sources(requests[0])[0]["text"] or not extra_text
     prompt = " ".join(requests[0]["messages"][0]["content"].split())
     assert "every mandatory condition still needs proof there" in prompt
     assert len(requests[0]["messages"][0]["content"]) < arena_operations.OPENROUTER_MAX_CONTENT_CHARS
@@ -190,7 +193,10 @@ def test_attribute_correction_does_not_repeat_or_relax_evidence_validation(monke
         assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
         assert result["claims"]["required_attribute"]["evidence_url"] == ""
         assert result["usage"]["search_calls"] == result["usage"]["fetch_calls"] == 0
-        assert result["_completed_submit"] is True
+        # A repeated bad positive citation cannot become a completed judgment.
+        assert result.get("_completed_submit") is (final == "unproven")
+        if final != "unproven":
+            assert result["failure_reason"] == "malformed_response"
 
 
 def test_simple_or_can_reuse_quote_without_a_correction(monkeypatch):

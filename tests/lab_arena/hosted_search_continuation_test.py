@@ -52,6 +52,16 @@ def hosted_request():
                                        "required": ["ok"], "additionalProperties": False}}}}
 
 
+def unsupported_search_outputs():
+    changes = [{"status": status} for status in ("failed", "searching", "in_progress", "incomplete", None)]
+    changes += [{"id": None}, {"id": ""},
+                {"action": {"type": "open_page", "url": "https://example.com/source"}},
+                {"action": {"type": "find_in_page", "url": "https://example.com/source", "pattern": "fact"}},
+                {"action": {"type": "search"}}]
+    return [{key: value for key, value in dict(hosted_output()[2], **change).items() if value is not None}
+            for change in changes]
+
+
 def test_full_hosted_continuation_preserves_native_output_and_local_json():
     request = hosted_request()
     normalized = broker.normalized_request("openrouter.responses", request,
@@ -68,6 +78,74 @@ def test_policy_off_still_rejects_new_provider_item():
     request = {"model": "openai/gpt-4o-mini", "input": [hosted_output()[2]]}
     with pytest.raises(operations.OperationRequestError):
         operations.validate_operation_request("openrouter.responses", request)
+
+
+@pytest.mark.parametrize("change,renamed", [
+    ({}, True),
+    ({"action": {"type": "search", "queries": ["first", "second"]}}, True),
+    ({"status": "failed"}, False), ({"status": "searching"}, False),
+    ({"status": "in_progress"}, False), ({"status": "incomplete"}, False),
+    ({"status": None}, False), ({"id": None}, False), ({"id": ""}, False),
+    ({"action": {"type": "open_page", "url": "https://example.com/source"}}, False),
+    ({"action": {"type": "find_in_page", "url": "https://example.com/source", "pattern": "fact"}}, False),
+    ({"action": {"type": "search"}}, False),
+])
+def test_bridge_renames_only_shapes_supported_by_provider_replay(change, renamed):
+    item = dict(hosted_output()[2], **change)
+    item = {key: value for key, value in item.items() if value is not None}
+    original = response(output=[item])
+    snapshot = copy.deepcopy(original)
+    events = b"".join(codex.response_events(original, native_web_search=True))
+    completed = [json.loads(line[6:]) for line in events.splitlines()
+                 if line.startswith(b"data: ")][-1]["response"]
+    projected = completed["output"][0]
+    assert projected == (dict(item, type="web_search_call") if renamed else item)
+    if renamed:
+        # Replaying the transport copy changes only its type back. It does
+        # not claim what Codex's typed serializer retains on a later turn.
+        parameters = {"model": "openai/gpt-4o-mini", "input": [projected]}
+        normalized = broker.openrouter_normalized(parameters, allow_full_thinking=True)
+        assert normalized["input"] == [item]
+        operations.validate_operation_request("openrouter.responses", normalized, allow_full_thinking=True)
+    assert original == snapshot
+    assert b"".join(codex.response_events(original)) == b"".join(codex.response_events(snapshot))
+
+
+@pytest.mark.parametrize("full_policy", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+def test_http_bridge_keeps_unsupported_search_shapes_and_raw_receipt(monkeypatch, full_policy, stream):
+    if full_policy:
+        monkeypatch.setenv("LAB_ARENA_REASONING_CAPTURE_POLICY", reasoning_capture.POLICY)
+    else:
+        monkeypatch.delenv("LAB_ARENA_REASONING_CAPTURE_POLICY", raising=False)
+    original = response(output=[hosted_output()[2], *unsupported_search_outputs()])
+    snapshot = copy.deepcopy(original)
+    raw = json.dumps(original).encode()
+    monkeypatch.setattr(codex, "_dispatch", lambda *_args, **_kwargs: (200, raw))
+    with codex.ResponsesBridge("/unused-shape-test.sock", web_search="live") as bridge:
+        with httpx.Client(trust_env=False) as client:
+            result = client.post(bridge.base_url + "/responses",
+                headers={"Authorization": "Bearer " + bridge.token},
+                json={"model": "openai/gpt-4o-mini", "input": "Find evidence.", "stream": stream})
+    assert result.status_code == 200
+    if stream:
+        assert result.content == b"".join(codex.response_events(original, native_web_search=full_policy))
+        completed = [json.loads(line[6:]) for line in result.content.splitlines()
+                     if line.startswith(b"data: ")][-1]["response"]
+        assert completed["output"][1:] == original["output"][1:]
+        assert completed["output"][0]["type"] == ("web_search_call" if full_policy else "openrouter:web_search")
+    else:
+        assert result.content == raw
+    assert original == snapshot
+
+
+def test_shared_shape_rule_does_not_change_existing_native_caller_normalization():
+    for provider_item in [hosted_output()[2], *unsupported_search_outputs()]:
+        item = dict(provider_item, type="web_search_call")
+        request = {"model": "openai/gpt-4o-mini", "input": [item], "max_output_tokens": 100}
+        assert broker.openrouter_normalized(request) == request
+        expected = dict(provider_item) if codex.replayable_search_shape(item) else item
+        assert broker.openrouter_normalized(request, allow_full_thinking=True)["input"] == [expected]
 
 
 @pytest.mark.parametrize("change", [
@@ -171,7 +249,8 @@ sys.stdout.buffer.write(result)
 
 @pytest.mark.skipif(not os.environ.get("ARENA_TEST_CODEX_BINARY"), reason="requires pinned Codex 0.154.0")
 @pytest.mark.parametrize("full_policy", [False, True])
-def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp_path, full_policy):
+@pytest.mark.parametrize("provider_ids", [False, True])
+def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp_path, full_policy, provider_ids):
     _pin_real_codex(monkeypatch)
     if full_policy:
         monkeypatch.setenv("LAB_ARENA_REASONING_CAPTURE_POLICY", reasoning_capture.POLICY)
@@ -179,6 +258,10 @@ def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp
         monkeypatch.delenv("LAB_ARENA_REASONING_CAPTURE_POLICY", raising=False)
     posts = []
     items = hosted_output()
+    if provider_ids:
+        items[2]["id"] = "st_tmp_fixture_source"
+        items[3]["id"] = "st_tmp_fixture_empty"
+    items.extend(unsupported_search_outputs())
     items.append({"id": "ct-local", "type": "custom_tool_call", "status": "completed",
                   "call_id": "call-local", "name": "exec", "namespace": "functions",
                   "input": 'text("LOCAL_OK")'})
@@ -197,11 +280,15 @@ def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp
         # Historical Codex drops the unrecognized provider item. Only opted-in
         # execution receives the native type that its typed history preserves.
         assert [item["action"] for item in searches] == (expected_searches if full_policy else [])
-        # Codex's existing typed serializer omits sources, annotations and IDs.
-        # Do not change agent behavior by injecting those fields back in.
+        # Codex retains the provider's observed st_tmp_ IDs, while dropping
+        # arbitrary fixture IDs. It omits sources and annotations in either
+        # case. Do not inject fields its normal serializer omits.
         messages = [item for item in parameters["input"] if item.get("role") == "assistant"]
         assert any(item["content"] == [{"type": "output_text", "text": "Found a source."}] for item in messages)
-        assert all("id" not in item for item in searches)
+        if provider_ids and full_policy:
+            assert [item["id"] for item in searches] == ["st_tmp_fixture_source", "st_tmp_fixture_empty"]
+        else:
+            assert all("id" not in item for item in searches)
         assert not any(item.get("type") == "openrouter:web_search" for item in parameters["input"])
         assert any(item.get("type") == "custom_tool_call_output" for item in parameters["input"])
         operations.validate_operation_request("openrouter.responses", parameters, allow_full_thinking=True)
@@ -230,11 +317,13 @@ def test_native_stream_adaptation_preserves_raw_provider_receipt():
     assert original == snapshot
 
 
-def test_full_hosted_broker_preserves_receipts_privacy_and_budget_settlement():
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_full_hosted_broker_preserves_receipts_privacy_and_budget_settlement(unsupported):
     registry = _reviewed_registry(api="openrouter.responses")
     context = replace(CONTEXT, reasoning_capture_policy=reasoning_capture.POLICY,
                       reasoning_route_registry=registry)
-    first_reply = response(output=hosted_output(), usage={"input_tokens": 10, "output_tokens": 10,
+    output = hosted_output() + (unsupported_search_outputs() if unsupported else [])
+    first_reply = response(output=output, usage={"input_tokens": 10, "output_tokens": 10,
                                                        "total_tokens": 20, "cost": "0.03125"})
     transport = FakeTransport([(200, first_reply), (200, response(id="gen-final"))])
     service, store, transport = make_broker(transport=transport)
@@ -245,6 +334,8 @@ def test_full_hosted_broker_preserves_receipts_privacy_and_budget_settlement():
                for index, request in enumerate((initial, continuation))]
     assert all(result.status == 200 for result in results)
     assert json.loads(results[0].body) == first_reply
+    terminal = store.calls[results[0].call["call_identity"]]["terminal"]
+    assert broker._decode_terminal(terminal)[2] == results[0].body
     assert store.log == ["reserve", "dispatch", "settle"] * 2
     assert results[0].call["actual_microusd"] == 31_250
     for request, result, sent in zip((initial, continuation), results, transport.sent):

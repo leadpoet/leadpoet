@@ -39,6 +39,7 @@ import httpx
 from lab_arena import contracts, deepline_catalog, operations, provider_costs, reasoning_capture, scoring_provider_compat
 from lab_arena import telemetry, training_capture
 from lab_arena.contracts import ArenaContractError
+from lab_arena.lab_arena_codex import replayable_search_shape
 from lab_arena.store import ArenaStoreError, ArenaStoreUnavailable, safe_store_error_metadata
 
 PRICE_TABLE_SCHEMA_VERSION = "leadpoet.lab_arena.openrouter_price_table.v1"
@@ -879,12 +880,8 @@ def openrouter_normalized(parameters: Mapping[str, Any], *, allow_full_thinking:
         # never invent an ID or restore sources omitted by the client.
         normalized["input"] = []
         for item in parameters["input"]:
-            action = item.get("action") if isinstance(item, Mapping) else None
             if (isinstance(item, Mapping) and item.get("type") == "web_search_call"
-                    and item.get("status") == "completed"
-                    and isinstance(item.get("id"), str) and 1 <= len(item["id"]) <= 256
-                    and isinstance(action, Mapping) and action.get("type") == "search"
-                    and (action.get("query") or action.get("queries"))):
+                    and replayable_search_shape(item)):
                 item = copy.deepcopy(dict(item))
                 item["type"] = "openrouter:web_search"
             normalized["input"].append(item)

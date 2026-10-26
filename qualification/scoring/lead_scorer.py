@@ -2345,7 +2345,9 @@ def _dimension_web_evidence(verdict: Mapping[str, Any], dimension: str) -> dict[
     # Linked PE proof remains auditable through projection and fit calculation.
     # These receipts prove nothing without the internally validated finding.
     support = nested_value.get("supporting_evidence")
-    support_limit = {"stage": 2, "industry": 7}.get(dimension, 0)
+    # Industry retains up to eight model citations plus one host-selected
+    # company identity passage as the primary quote.
+    support_limit = {"stage": 2, "industry": 8}.get(dimension, 0)
     if isinstance(support, list) and 0 < len(support) <= support_limit:
         if all(
             isinstance(item, Mapping)

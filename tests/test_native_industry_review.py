@@ -126,8 +126,13 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     assert calls['model'][1]['tool_choice']['function']['name'] == 'fetch_page'
     assert calls['model'][1]['model'] == MODEL
     assert all(request['reasoning']['effort'] == 'low' for request in calls['model'][:2])
+    # Selecting the next source is still industry research. Do not hand it
+    # back to the weaker general reviewer after just one page was fetched.
+    assert calls['model'][2]['model'] == MODEL
     assert all(request['model'] == c.POSITIVE_SEMANTIC_REVIEW_MODEL
-               for request in calls['model'][2:])
+               for request in calls['model']
+               if request.get('tool_choice') == {
+                   'type': 'function', 'function': {'name': 'submit_findings'}})
     assert result['claims']['industry']['status'] == 'VERIFIED'
     assert len(reviews) == result['usage']['industry_review_calls'] == 2
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
@@ -303,7 +308,8 @@ def test_new_industry_review_preserves_an_independent_final_rejection(monkeypatc
         result, SimpleNamespace(required_attribute=''), ()) is False
 
 
-def test_cached_judgment_preserves_all_industry_sources_and_separates_frozen_policies(monkeypatch):
+@pytest.mark.parametrize('support_count', [1, 8])
+def test_cached_judgment_preserves_all_industry_sources_and_separates_frozen_policies(monkeypatch, support_count):
     from lab_arena import company_judgments, contracts
     from tests.lab_arena.company_judgments_test import _input, _refs, _raw, _evidence
     document = _input()
@@ -314,7 +320,9 @@ def test_cached_judgment_preserves_all_industry_sources_and_separates_frozen_pol
     assert current['cache_key'] != previous['cache_key']
     raw = _raw()
     evidence = {'url': URL, 'quote': FEATURES, 'supporting_evidence': [
-        {'url': 'https://www.coreworks.ai/workflows', 'quote': 'Coreworks connects account workflows.'}]}
+        {'url': f'https://www.coreworks.ai/workflows/{i}', 'quote': 'Coreworks connects account workflows.'}
+        for i in range(support_count)]}
+    assert lead_scorer._dimension_web_evidence({'dimension_evidence': {'industry': evidence}}, 'industry') == evidence
     receipt = raw['verifier_gate_receipts'][0]
     receipt['dimension_evidence']['industry'] = evidence
     receipt['investigation_receipt'] = {'claims': {'industry': {'_industry_review': {
@@ -330,7 +338,7 @@ def test_cached_judgment_preserves_all_industry_sources_and_separates_frozen_pol
         evidence_hash=contracts.document_hash(snapshot))
     saved_receipt = restored['raw_judgment']['verifier_gate_receipts'][0]
     assert saved_receipt['dimension_evidence']['industry'] == evidence
-    assert len(saved_receipt['investigation_receipt']['claims']['industry']['_industry_review']['evidence']) == 2
+    assert len(saved_receipt['investigation_receipt']['claims']['industry']['_industry_review']['evidence']) == 1 + support_count
 
 
 @pytest.mark.parametrize('decision,expected', [('match', 'match'), ('unavailable', 'unavailable')])

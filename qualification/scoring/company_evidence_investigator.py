@@ -2355,6 +2355,21 @@ async def _review_industry_sources(
     result = industry_classification.resolve(packet, message.get('content'))
     evidence = [{'url': item['source_url'], 'quote': item['text']}
                 for item in result['resolved_evidence']]
+    # The legacy projection needs one primary quote. Prefer a cited passage
+    # that names the company; preserve every other bound passage as support.
+    # Citation order must not discard an otherwise attributable verdict.
+    primary_index = next((i for i, item in enumerate(evidence)
+                          if _quote_names_company(item['quote'], identity_names)), None)
+    if primary_index is not None:
+        evidence.insert(0, evidence.pop(primary_index))
+    elif result['decision'] in {'match', 'mismatch'}:
+        # Capability passages may use a shorter brand name or "we". Retain
+        # one explicit identity passage from this same independently bound
+        # corpus. It adds attribution, never a capability or a model verdict.
+        identity_span = next((item for item in packet.spans().values()
+                              if _quote_names_company(item['text'], identity_names)), None)
+        if identity_span:
+            evidence.insert(0, {'url': identity_span['source_url'], 'quote': identity_span['text']})
     review.update(packet_sha256=packet.digest, decision=result['decision'],
                   missing_requirements=result['missing_requirements'], evidence=evidence,
                   reason=result['reason'])
@@ -4612,6 +4627,9 @@ async def investigate_company_evidence(
                     'category pages, internal use and a separate partner offering '
                     'do not resolve a missing supplied capability. PDF brochures '
                     'are eligible locators. Never treat snippets as proof. '
+                    'After fetching a page, check the remaining gaps; one new '
+                    'page does not by itself resolve them. Use remaining '
+                    'research for specific unanswered facts before submitting. '
                     'Keep all other requested targets and existing research limits.'
                 )
                 input_document['industry_source_research_brief'] = industry_research_brief
@@ -4814,8 +4832,9 @@ async def investigate_company_evidence(
                     and not forced_stage_search_pending
                 )
                 industry_selection_model = industry_review_model if (
-                    not force_submit and (
-                        forced_industry_search_call
+                    not force_submit and required_tool != "submit_findings" and (
+                        industry_gap_search_needed
+                        or forced_industry_search_call
                         or (required_tool == "fetch_page" and industry_followup_search_completed)
                     )
                 ) else ""
@@ -4842,8 +4861,8 @@ async def investigate_company_evidence(
                     },
                     payload={
                         # The model assessing capability gaps also selects
-                        # the targeted query and its first source. Other
-                        # research and judgments keep their existing model.
+                        # the sources until bounded research ends. Explicit
+                        # final/correction judgments keep their existing model.
                         "model": industry_selection_model or (
                             POSITIVE_SEMANTIC_REVIEW_MODEL
                             if positive_semantic_review

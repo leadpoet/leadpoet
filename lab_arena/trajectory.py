@@ -55,6 +55,11 @@ _KEY_VALUE_RE = re.compile(
     r"(?i)\b(api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|"
     r"refresh[-_ ]?token|lease[-_ ]?token)\s*[:=]\s*((?:basic|bearer)\s+[^\s,;]+|[^\s,;]{4,})"
 )
+# A closing delimiter after an existing marker is markup, not secret material.
+# Any other suffix still follows the ordinary credential-redaction path.
+_REDACTED_VALUE_RE = re.compile(
+    r'''(?:\[REDACTED\]|"\[REDACTED\]"|'\[REDACTED\]')[\])}]*'''
+)
 _QUOTED_KEY_VALUE_RE = re.compile(
     r"(?i)([\"'](?:api[-_ ]?key|(?:proxy[-_ ]?)?authorization|password|secret|access[-_ ]?token|"
     r"refresh[-_ ]?token|lease[-_ ]?token)[\"']\s*:\s*)([\"'])([^\"']{1,})([\"'])"
@@ -99,7 +104,7 @@ def redact_auth_schemes(text: str) -> str:
 
     def redact_authorization_value(match: re.Match[str]) -> str:
         value = match[0][len(match[1]):]
-        if value in ("[REDACTED]", '"[REDACTED]"', "'[REDACTED]'"):
+        if _REDACTED_VALUE_RE.fullmatch(value):
             return match[0]
         return match[1] + "[REDACTED]"
 
@@ -163,7 +168,7 @@ def redact_text(value: str, secrets: Sequence[str] = (), *, escape_nul: bool = T
         # example. Reformatting its separator would falsely mark exact
         # training evidence as credential-filtered. A longer value still
         # contains material that must be removed.
-        if match.group(2) in ("[REDACTED]", '"[REDACTED]"', "'[REDACTED]'"):
+        if _REDACTED_VALUE_RE.fullmatch(match.group(2)):
             return match.group(0)
         return "%s=[REDACTED]" % match.group(1)
 

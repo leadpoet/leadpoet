@@ -5352,6 +5352,84 @@ class Broker:
                 "response_hash": contracts.hash_bytes(cached_body),
             })
             return BrokerResult(cached_status, cached_headers, cached_body, summary)
+        billing_terminal = reserved.get("terminal_response")
+        delayed_error_settlement = (
+            status == "settled" and isinstance(billing_terminal, Mapping)
+            and billing_terminal.get("call_succeeded") is not True
+            and isinstance(billing_terminal.get("provider_cost"), Mapping)
+            and billing_terminal["provider_cost"].get("basis") == "openrouter_generation_cost"
+        )
+        if effective_operation.provider == "openrouter" and (status == "uncertain" or delayed_error_settlement):
+            # Billing-only reconciliation changes the ledger head, not the error
+            # already delivered to the worker. Reuse the existing terminal shape
+            # from bound uncertainty history; raw upstream receipts have no replay
+            # authority. Old records without this optional reply keep their path.
+            ledger_entries = self._store.list_ledger(call_identity=call_identity, limit=64)
+            if not isinstance(ledger_entries, Sequence) or isinstance(ledger_entries, (str, bytes)):
+                return _error_result("broker_unavailable", summary)
+            if (status == "uncertain" and ledger_entries
+                and isinstance(ledger_entries[-1], Mapping)
+                and ledger_entries[-1].get("entry_kind") == "settlement"):
+                # The exact bill can arrive after reserve but before this read.
+                # Refresh the same identity once, then validate the entire
+                # observed history against the refreshed authoritative head.
+                reserved = self._store.reserve_call(**reservation_arguments)
+                status = reserved.get("status")
+            saved_errors = []
+            for entry in ledger_entries:
+                entry_doc = entry.get("entry_doc") if isinstance(entry, Mapping) else None
+                saved_call = entry_doc.get("call") if isinstance(entry_doc, Mapping) else None
+                if (isinstance(entry, Mapping) and entry.get("entry_kind") == "uncertain" and isinstance(saved_call, Mapping)
+                    and "openrouter_terminal_response" in saved_call):
+                    saved_errors.append(saved_call)
+            if saved_errors:
+                if len(saved_errors) != 1 or not _reservation_readback_matches(
+                    self._store, reservation_arguments, reserved,
+                    confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
+                    ledger_entries=ledger_entries,
+                ):
+                    return _error_result("broker_unavailable", summary)
+                saved_call = saved_errors[0]
+                saved_terminal = saved_call["openrouter_terminal_response"]
+                generation = saved_call.get("openrouter_generation_id")
+                try:
+                    if (saved_call.get("reason") != "missing_provider_cost"
+                        or saved_call.get("call_succeeded") is not False
+                        or saved_call.get("provider_status") not in (400, 401, 402, 403, 404, 422, 429)
+                        or saved_call.get("openrouter_generation_present") is not True
+                        or (generation is not None and (
+                            not isinstance(generation, str)
+                            or _OPENROUTER_GENERATION_ID_RE.fullmatch(generation) is None))
+                        or saved_call.get("credential_fingerprint") != _credential_fingerprint(secret)
+                        or not isinstance(saved_terminal, Mapping)
+                        or type(saved_terminal.get("status")) is not int
+                        or saved_terminal.get("call_succeeded") is not False):
+                        raise BrokerError("broker_unavailable")
+                    saved_status, saved_headers, saved_body = _decode_terminal(saved_terminal, secret=secret)
+                    if (saved_status not in (400, 402, 403, 404, 422, 502)
+                        or _response_contains_credential(ProviderResponse(saved_status, saved_headers, saved_body), secret)):
+                        raise BrokerError("broker_unavailable")
+                    evidence = _validated_account_failure_evidence(saved_terminal.get("account_failure_evidence"))
+                    if evidence is not None and not _account_failure_matches_call(
+                        evidence, base_call_identity=base_call_identity,
+                        provider_attempt=provider_attempt, action_sequence=action_sequence,
+                    ):
+                        raise BrokerError("broker_unavailable")
+                except BrokerError:
+                    return _error_result("broker_unavailable", summary)
+                summary.update(outcome=status, idempotent=True, status=saved_status,
+                    provider_status=saved_call["provider_status"], response_hash=contracts.hash_bytes(saved_body))
+                if status == "settled":
+                    summary["actual_microusd"] = reserved["amount_microusd"]
+                if evidence is not None:
+                    summary["account_failure_evidence"] = dict(evidence)
+                try:
+                    error_code = json.loads(saved_body).get("error", {}).get("code")
+                except (ValueError, AttributeError):
+                    error_code = None
+                if isinstance(error_code, str) and error_code in GENERIC_ERRORS:
+                    summary["error_code"] = error_code
+                return BrokerResult(saved_status, saved_headers, saved_body, summary)
         deepline_recovery_response: Optional[ProviderResponse] = None
         deepline_response_recovery = False
         terminal_document = reserved.get("terminal_response")
@@ -6392,10 +6470,20 @@ class Broker:
             missing_deepline_cost = (
                 effective_operation.provider == "deepline" and raw_actual is None
             )
+            # A tracking ID is not a charge or a no-bill proof. In particular,
+            # generation GET 404 can precede delayed billing for a failed call.
+            retained_openrouter_error = (
+                effective_operation.provider == "openrouter"
+                and openrouter_generation_present
+                and response.status in (400, 401, 402, 403, 404, 422, 429)
+                and not openrouter_canonical_response_error
+                and raw_actual is None
+            )
             missing_openrouter_cost = (
                 effective_operation.provider == "openrouter"
                 and (
                     openrouter_canonical_response_error
+                    or retained_openrouter_error
                     or response.status
                     not in (400, 401, 402, 403, 404, 422, 429)
                 )
@@ -6491,6 +6579,15 @@ class Broker:
                     uncertain_doc["account_failure_evidence"] = (
                         account_failure_evidence
                     )
+                if retained_openrouter_error:
+                    # Malformed/conflicting provider IDs remain unknown, but
+                    # must never be sent to the exact-generation GET endpoint.
+                    uncertain_doc["openrouter_generation_present"] = True
+                    uncertain_doc["credential_fingerprint"] = provider_credential_fingerprint
+                    uncertain_doc["openrouter_terminal_response"] = _terminal_response_document(
+                        sanitized_status, sanitized_headers, sanitized_body, call_succeeded=False,
+                        account_failure_evidence=account_failure_evidence,
+                    )
                 if judgment_cache_eligible:
                     uncertain_doc["judgment_cache_response"] = (
                         _terminal_response_document(
@@ -6580,6 +6677,17 @@ class Broker:
                     return _error_result("provider_request_refused", summary)
                 if miner_credential_failure:
                     return _error_result("miner_credentials_unavailable", summary)
+                if retained_openrouter_error and uncertain_state.get("status") in ("uncertain", "settled"):
+                    if uncertain_state["status"] == "settled":
+                        saved_actual = uncertain_state.get("amount_microusd", uncertain_state.get("actual_microusd"))
+                        if type(saved_actual) is not int or saved_actual < 0:
+                            return _error_result("broker_unavailable", summary)
+                        summary.update(outcome="settled", actual_microusd=saved_actual)
+                    summary["status"] = sanitized_status
+                    if (sanitized_status == operations.GENERIC_UNAVAILABLE_STATUS
+                        and sanitized_body == operations.GENERIC_UNAVAILABLE_BODY):
+                        return _error_result("provider_unavailable", summary)
+                    return BrokerResult(sanitized_status, sanitized_headers, sanitized_body, summary)
                 if (deepline_host_payment_refusal
                     and uncertain_state.get("status") in ("uncertain", "settled")):
                     if uncertain_state.get("status") == "settled":

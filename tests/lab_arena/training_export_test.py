@@ -386,6 +386,45 @@ def test_export_filter_keeps_readable_reasoning_and_removes_opaque_state():
                                                 "reasoning_content": "Visible alias text."}
 
 
+def test_assembled_export_preserves_empty_native_history_and_request_hashes():
+    values = fixture()
+    add_call(values, operation="openrouter.responses")
+    history = {"type": "reasoning", "id": "r-history", "summary": [],
+               "encrypted_content": None,
+               "content": [{"type": "reasoning_text", "text": "Read the company source."}]}
+    parameters = {"model": "test", "input": [history]}
+    request_hash = contracts.document_hash(parameters)
+    request = {"operation_id": "openrouter.responses", "request_hash": request_hash,
+               **{key: copy.deepcopy(parameters) for key in
+                  ("admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters")},
+               "outbound": {"body": copy.deepcopy(parameters), "body_sha256": request_hash}}
+    pointer = training_capture.RequestCapture(values["objects"])(request)
+    assert pointer["redacted"] is False
+    for row in values["ledger_rows"]:
+        row["entry_doc"].update(request_hash=request_hash, request_capture=pointer)
+    example = assemble_example(**values)
+    saved = example["provider_calls"][0]["request"]
+    assert saved["hashed_parameters"] == parameters
+    assert contracts.document_hash(saved["hashed_parameters"]) == saved["request_hash"] == request_hash
+    assert contracts.document_hash(saved["outbound"]["body"]) == saved["outbound"]["body_sha256"]
+    for key in ("admitted_parameters", "normalized_parameters", "effective_parameters"):
+        assert saved[key] == parameters
+
+
+def test_empty_native_history_does_not_broaden_opaque_export():
+    value = {"output": [{"type": "reasoning", "summary": [], "encrypted_content": None,
+                         "unknown_state": {}, "signature": "SEALED",
+                         "content": [{"type": "reasoning_text", "text": "Read the source."}]},
+                        {"type": "reasoning", "summary": [], "encrypted_content": None}],
+             "encrypted_content": None}
+    projected, removed = without_hidden_reasoning(value)
+    assert removed is True
+    assert projected == {"output": [{"type": "reasoning", "summary": [], "encrypted_content": None,
+                                      "content": [{"type": "reasoning_text", "text": "Read the source."}]}]}
+    projected["output"][0]["summary"].append({"type": "summary_text", "text": "Changed copy."})
+    assert value["output"][0]["summary"] == []
+
+
 def test_export_filter_keeps_alias_only_in_provider_response_path():
     result, removed = without_hidden_reasoning({"provider_calls": [{
         "request": {"choices": [{"message": {"reasoning_content": "request state"}}]},

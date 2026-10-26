@@ -55,7 +55,15 @@ def without_hidden_reasoning(value: Any) -> tuple[Any, bool]:
                         and approved_history_reasoning_content(value, path, item)):
                     result[key] = walk(child, (*path, normalized))
                 elif opaque_reasoning_field(normalized, child, kind, safe_config, path):
-                    removed = removed or not empty_value(child)
+                    # Native readable history can include these empty optional
+                    # fields. Removing them changes the retained request hash,
+                    # although there are no private bytes to exclude.
+                    if (item.get("type") == "reasoning" and kind == "readable"
+                            and (key == "summary" and isinstance(child, list) and not child
+                                 or key == "encrypted_content" and child is None)):
+                        result[key] = walk(child, (*path, normalized))
+                    else:
+                        removed = removed or not empty_value(child)
                 else:
                     result[key] = walk(child, (*path, normalized))
             return result
@@ -516,8 +524,36 @@ def _call_order(call, run_order):
             numeric(call.get("reservation_entry_id", call.get("refusal_entry_id"))), call["call_identity"])
 
 
+def response_entry_id(call):
+    """Select retained delivery evidence without changing the accounting head."""
+    terminal = call.get("terminal_entry_id")
+    if "response_entry_id" not in call:
+        return terminal
+    selected = call["response_entry_id"]
+    receipts = [row for row in call.get("response_receipts", []) if row.get("entry_id") == selected]
+    if (call.get("provider") != "openrouter" or type(selected) is not int
+        or type(terminal) is not int or not 0 < selected <= terminal or len(receipts) != 1):
+        raise ExportError("retained_provider_error_identity_invalid")
+    receipt = receipts[0]
+    if (receipt.get("terminal_source") != "entry_doc.call.openrouter_terminal_response"
+        or receipt.get("entry_kind") != "uncertain"
+        or (receipt.get("metadata") or {}).get("call_succeeded") is not False
+        or (receipt.get("metadata") or {}).get("status") != call.get("response_status")
+        or call.get("response_status") not in (400, 402, 403, 404, 422, 502)
+        or receipt.get("response_sha256") != call.get("response_sha256")
+        or receipt.get("response_ref") != {"field": "response", "entry_id": selected}):
+        raise ExportError("retained_provider_error_identity_invalid")
+    if selected != terminal:
+        heads = [row for row in call.get("lifecycle", []) if row.get("entry_id") == terminal]
+        if (len(heads) != 1 or heads[0].get("entry_kind") != "settlement"
+            or (heads[0].get("accounting") or {}).get("openrouter_delayed_reconciliation") is not True
+            or (heads[0].get("accounting") or {}).get("reconciled_uncertainty_entry_id") != selected):
+            raise ExportError("retained_provider_error_identity_invalid")
+    return selected
+
+
 def _calls(rows, run_ids, objects, run_order):
-    from lab_arena.broker import BrokerError, broker_observations
+    from lab_arena.broker import BrokerError, _decode_terminal, broker_observations
 
     def observations(document):
         try:
@@ -543,6 +579,37 @@ def _calls(rows, run_ids, objects, run_order):
         dispatches = [row for row in entries if row.get("entry_kind") == "dispatch"]
         terminals = [row for row in entries if row.get("entry_kind") in
                      {"settlement", "uncertain", "recovery", "refusal"}]
+        response_terminals = terminals
+        retained = []
+        if reserves and reserves[0].get("provider") == "openrouter":
+            for row in terminals:
+                saved = (row.get("entry_doc") or {}).get("call") or {}
+                if row["entry_kind"] != "uncertain" or "openrouter_terminal_response" not in saved:
+                    continue
+                terminal = saved["openrouter_terminal_response"]
+                try:
+                    status, _, _ = _decode_terminal(terminal)
+                    if (saved.get("reason") != "missing_provider_cost"
+                        or saved.get("call_succeeded") is not False
+                        or saved.get("openrouter_generation_present") is not True
+                        or terminal.get("call_succeeded") is not False
+                        or status not in (400, 402, 403, 404, 422, 502)):
+                        raise BrokerError("broker_unavailable")
+                except BrokerError as exc:
+                    raise ExportError("retained_provider_error_invalid") from exc
+                retained.append(dict(row, terminal_response=terminal,
+                    retained_terminal_source="entry_doc.call.openrouter_terminal_response"))
+            if retained:
+                if len(retained) != 1:
+                    raise ExportError("retained_provider_error_ambiguous")
+                saved = retained[0]
+                # A delayed bill's generic 502 is an accounting placeholder,
+                # not another response delivered to the model. Its immutable
+                # cost and lifecycle remain authoritative below.
+                response_terminals = [saved] + [row for row in terminals
+                    if row["entry_id"] != saved["entry_id"]
+                    and not ((row.get("entry_doc") or {}).get("openrouter_delayed_reconciliation") is True
+                        and (row.get("entry_doc") or {}).get("reconciled_uncertainty_entry_id") == saved["entry_id"])]
         standalone_refusal = (not reserves and not dispatches and len(entries) == 1
                               and entries[0].get("entry_kind") == "refusal"
                               and entries[0].get("amount_microusd") == 0
@@ -664,8 +731,9 @@ def _calls(rows, run_ids, objects, run_order):
         call["response_receipts"] = []
         if standalone_refusal:
             terminals = []  # Admission denial has no provider terminal or generation.
-        latest_id = max((int(row["entry_id"]) for row in terminals), default=None)
-        latest_terminal = next((row.get("terminal_response") or {} for row in terminals if row["entry_id"] == latest_id), {})
+            response_terminals = []
+        latest_id = max((int(row["entry_id"]) for row in response_terminals), default=None)
+        latest_terminal = next((row.get("terminal_response") or {} for row in response_terminals if row["entry_id"] == latest_id), {})
         latest_response, latest_redactions, latest_digest = None, [], None
         try:
             latest_response, latest_redactions = _response_value(latest_terminal, reserve.get("provider"))
@@ -673,12 +741,14 @@ def _calls(rows, run_ids, objects, run_order):
         except Exception:
             pass  # Missing receipt is recorded below; no failed proof is hidden.
         saved_bodies = {}
-        for row in sorted(terminals, key=lambda row: int(row["entry_id"])):
+        for row in sorted(response_terminals, key=lambda row: int(row["entry_id"])):
             terminal = row.get("terminal_response") or {}
             receipt = {"entry_id": row["entry_id"], "entry_kind": row["entry_kind"],
                        "created_at": row.get("created_at"),
                        "metadata": {key: copy.deepcopy(value) for key, value in terminal.items()
                                     if key not in {"body_b64", "upstream_response_receipt"}}}
+            if row.get("retained_terminal_source"):
+                receipt["terminal_source"] = row["retained_terminal_source"]
             receipt["metadata"].update(copy.deepcopy(observations(terminal)))
             try:
                 response, redactions = _response_value(terminal, reserve.get("provider"))
@@ -744,7 +814,9 @@ def _calls(rows, run_ids, objects, run_order):
                 call["response_sha256"] = latest_digest
                 call["response_hidden_reasoning_removed"] = "hidden_reasoning" in latest_redactions
                 call["response_privacy_redactions"] = latest_redactions
-                call["response_status"] = terminal.get("status")
+                call["response_status"] = latest_terminal.get("status")
+                if retained:
+                    call["response_entry_id"] = latest_id
             else:
                 call_reasons.add("full_response_unavailable")
             for key in ("judgment_cache_source_call_identity", "judgment_cache_source_run_id"):
@@ -858,7 +930,7 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
         ref = {"run_id": run["run_id"], "id": row["id"], "payload_sha256": snapshot["payload_sha256"]}
         call["response_provenance"].setdefault("agent_receipt_refs", []).append(ref)
         call["response_provenance"]["agent_receipt"] = "reported_exact_body_received"
-        latest_acknowledged = call.get("terminal_entry_id") in call["response_provenance"]["worker_received_receipt_entry_ids"]
+        latest_acknowledged = response_entry_id(call) in call["response_provenance"]["worker_received_receipt_entry_ids"]
         call["response_provenance"]["selected_response_acknowledged"] = latest_acknowledged
         if not latest_acknowledged and call["response_provenance"].get("worker_body_source") == "worker_error_observation":
             call["response_provenance"]["worker_error_body_acknowledged"] = True

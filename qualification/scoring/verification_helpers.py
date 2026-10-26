@@ -389,6 +389,33 @@ def visible_html_text(
     )[0]
 
 
+def visible_html_dialog_only(content: str) -> bool:
+    """Detect a rendered dialog with no visible body text outside it.
+
+    This is a retrieval diagnostic. It never makes hidden page content usable.
+    Short substantive pages and pages without a visible dialog are unaffected.
+    """
+    class BodyParser(_VisibleHTMLTextParser):
+        _HIDDEN_ELEMENTS = _VisibleHTMLTextParser._HIDDEN_ELEMENTS | {'head', 'title'}
+        saw_dialog = False
+
+        def _is_hidden(self, tag, attrs):
+            hidden = super()._is_hidden(tag, attrs)
+            values = self._attribute_map(attrs)
+            dialog = (values.get('role', '').casefold() in {'dialog', 'alertdialog'}
+                      or (tag == 'dialog' and 'open' in values))
+            if dialog and not hidden and not self._hidden_depth:
+                self.saw_dialog = True
+            return hidden or dialog
+
+    hidden_classes, hidden_ids = _css_hidden_selectors(content)
+    parser = BodyParser(hidden_classes=hidden_classes, hidden_ids=hidden_ids,
+                        include_scroll_reveal=True)
+    parser.feed(content)
+    parser.close()
+    return parser.saw_dialog and not any(part.strip() for part in parser.parts)
+
+
 def visible_html_links(content: str) -> tuple[str, ...]:
     """Return link targets from visible HTML elements in document order."""
 

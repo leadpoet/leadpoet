@@ -66,6 +66,7 @@ from qualification.scoring.linkedin_company_size import (
 )
 from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.verification_helpers import (
+    visible_html_dialog_only,
     visible_html_link_labels,
     visible_html_links,
     visible_html_text,
@@ -2581,6 +2582,9 @@ async def _fetch_page(
             **({"_pdf_document": True}
                if raw.lstrip("\ufeff\t\r\n ").startswith("%PDF-") else {}),
         }
+    if (os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+            and visible_html_dialog_only(raw)):
+        return {"ok": False, "error": "empty_page"}
     text = _plain_text(raw)
     if not text:
         return {"ok": False, "error": "empty_page"}
@@ -2690,6 +2694,9 @@ async def _fetch_exa_exact_page(
     raw = page.get("text")
     if not isinstance(raw, str) or _is_known_binary_document(raw):
         return {"ok": False, "error": "unsupported_binary_content"}
+    if (os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+            and visible_html_dialog_only(raw)):
+        return {"ok": False, "error": "empty_or_diagnostic_contents"}
     text = _plain_text(raw)
     if not text or _is_known_provider_diagnostic_only(text):
         return {"ok": False, "error": "empty_or_diagnostic_contents"}
@@ -4260,9 +4267,13 @@ async def investigate_company_evidence(
                     and "industry" in requested_targets
                     and result.get("error") == "unsupported_binary_content"
                 )
+                industry_empty = bool(
+                    industry_review_model and "industry" in requested_targets
+                    and result.get("error") == "empty_page"
+                )
                 fetch_outcomes.append(_fetch_outcome(url, result))
                 if (
-                    (industry_pdf or result.get("error") in {
+                    (industry_pdf or industry_empty or result.get("error") in {
                         "broker_http_404", "http_502", "http_503", "timeout",
                         "provider_diagnostic_body",
                         "provider_request_refused",

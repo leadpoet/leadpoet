@@ -1,19 +1,21 @@
 """Offline observed next-response candidates. No trajectory or action-quality claim.
 
-Only self-contained text/function chat and Responses calls are supported. A
-positive run result or HTTP status never makes an observed action correct.
-Explicit retrieval markers are excluded. Provider-internal retrieval without
-visible markers cannot be proved absent from the retained response.
+Self-contained text, local tools, and exposed hosted-search Responses are
+supported. Hosted targets retain the provider-executed trajectory verbatim;
+they do not imply local tool execution or invent intermediate model inputs.
+A positive run result or HTTP status never makes an observed action correct.
 """
 from __future__ import annotations
 
 import copy
+import base64
 import json
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
-from lab_arena import contracts, integrity, training_capture, training_export, training_dataset
+from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset, training_coverage, reasoning_capture
 
 SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_dataset.v1'
 RECORD_SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_candidate.v1'
@@ -38,6 +40,20 @@ def _require(condition, reason):
 
 
 def _exact(value, *, response=False):
+    def comparable(item):
+        if isinstance(item, dict):
+            return {key: comparable(child) for key, child in item.items()
+                    if not (item.get('type') == 'reasoning'
+                            and ((key in {'summary', 'content', 'text'}
+                                  and (child is None or child == '' or child == []))
+                                 or key == 'encrypted_content' and child is None))}
+        if isinstance(item, list):
+            return [comparable(child) for child in item]
+        return item
+
+    # Empty native optional fields contain no private bytes. Compare their
+    # privacy projection without rewriting the retained request or response.
+    value = comparable(value)
     if response and isinstance(value, dict):
         value = copy.deepcopy(value)
         for choice in value.get('choices', []) if isinstance(value.get('choices'), list) else []:
@@ -48,8 +64,9 @@ def _exact(value, *, response=False):
                         msg.pop(field)
     clean, removed = training_export.without_hidden_reasoning(value)
     sanitized, redactions = training_capture.sanitize_training_value(value)
-    return (not removed and not redactions and clean == value and sanitized == value
-            and not re.search(r'\[REDACTED\]|%5[Bb]REDACTED%5[Dd]', contracts.canonical_json(value)))
+    # A provider can return the marker literally. Callers verify capture and
+    # receipt redaction flags plus request/response hashes separately.
+    return not removed and not redactions and clean == value and sanitized == value
 
 
 def _reject_constant(value):
@@ -61,81 +78,176 @@ def _arguments(value):
         return False
     try:
         return isinstance(json.loads(value, parse_constant=_reject_constant), dict)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return False
 
 
-def _tool_calls(calls):
+def _tool_calls(calls, *, argument_validator=_arguments):
     _require(isinstance(calls, list) and calls, 'tool_call_shape_unsupported')
     ids = set()
     for call in calls:
-        _require(isinstance(call, dict) and set(call) <= {'id', 'type', 'function'}
+        _require(isinstance(call, dict) and set(call) <= {'id', 'type', 'function', 'index'}
                  and call.get('type') == 'function' and isinstance(call.get('id'), str)
                  and bool(call['id']) and call['id'] not in ids, 'tool_call_shape_unsupported')
+        _require('index' not in call or type(call['index']) is int and call['index'] >= 0,
+                 'tool_call_shape_unsupported')
         ids.add(call['id'])
         fn = call.get('function') or {}
         _require(set(fn) == {'name', 'arguments'} and isinstance(fn['name'], str)
-                 and bool(fn['name']) and _arguments(fn['arguments']), 'tool_call_shape_unsupported')
+                 and bool(fn['name']) and argument_validator(fn['arguments']), 'tool_call_shape_unsupported')
 
 
-def _chat_messages(messages):
+def _chat_messages(messages, *, allow_reasoning_history=False, allow_tool_error_history=False, tools=()):
     _require(isinstance(messages, list) and messages, 'input_shape_unsupported')
     pending = set()
+    seen, malformed_ids = set(), set()
+    declared = [(tool.get('function') or {}).get('name') for tool in tools
+                if isinstance(tool, dict) and tool.get('type') == 'function']
     for msg in messages:
-        _require(isinstance(msg, dict) and set(msg) <= {'role', 'content', 'name', 'tool_call_id', 'tool_calls'}
+        allowed = {'role', 'content', 'name', 'tool_call_id', 'tool_calls'}
+        if allow_reasoning_history:
+            allowed |= {'reasoning', 'reasoning_content', 'reasoning_details', 'refusal'}
+        _require(isinstance(msg, dict) and set(msg) <= allowed
                  and msg.get('role') in {'system', 'developer', 'user', 'assistant', 'tool'}
                  and (isinstance(msg.get('content'), str) or msg.get('content') is None), 'input_shape_unsupported')
+        _require('refusal' not in msg or msg['role'] == 'assistant' and msg['refusal'] is None,
+                 'input_shape_unsupported')
+        if any(field in msg for field in ('reasoning', 'reasoning_content', 'reasoning_details')):
+            _require(allow_reasoning_history and msg['role'] == 'assistant', 'reasoning_history_unsupported')
+            for field in ('reasoning', 'reasoning_content'):
+                _require(field not in msg or msg[field] is None or isinstance(msg[field], str),
+                         'reasoning_history_unsupported')
+            details = msg.get('reasoning_details')
+            _require(details is None or isinstance(details, list) and all(
+                training_capture.readable_reasoning_item(item) for item in details),
+                'reasoning_history_unsupported')
         if msg['role'] == 'tool':
             _require(msg.get('tool_call_id') in pending, 'tool_context_unresolved')
+            if allow_tool_error_history and msg['tool_call_id'] in malformed_ids:
+                _require(isinstance(msg.get('content'), str), 'tool_context_unresolved')
             pending.remove(msg['tool_call_id'])
         else:
             _require(not pending, 'tool_context_unresolved')
             if msg.get('tool_calls'):
                 _require(msg['role'] == 'assistant', 'tool_context_unresolved')
-                _tool_calls(msg['tool_calls'])
+                # A prior failed call is inert input text. Only its paired
+                # result closes the history; generated targets stay JSON-only.
+                _tool_calls(msg['tool_calls'], argument_validator=(
+                    lambda value: isinstance(value, str)) if allow_tool_error_history else _arguments)
+                for item in msg['tool_calls']:
+                    identifier, function = item['id'], item['function']
+                    malformed = not _arguments(function['arguments'])
+                    if allow_tool_error_history:
+                        _require(identifier not in malformed_ids, 'tool_context_unresolved')
+                        if malformed:
+                            _require(identifier not in seen and function['name'] in declared,
+                                     'tool_context_unresolved')
+                            malformed_ids.add(identifier)
+                    seen.add(identifier)
                 pending = {item['id'] for item in msg['tool_calls']}
     _require(not pending, 'tool_context_unresolved')
 
 
-def _responses_input(value):
+_HOSTED_SEARCH_TYPES = {'openrouter:web_search', 'web_search_call'}
+
+
+def _hosted_search_declared(body):
+    return any(isinstance(tool, dict) and tool.get('type') == 'openrouter:web_search'
+               for tool in body.get('tools', []))
+
+
+def _hosted_search_history(value):
+    return isinstance(value, list) and any(
+        isinstance(item, dict) and item.get('type') in _HOSTED_SEARCH_TYPES for item in value)
+
+
+def _responses_input(value, *, tools=(), max_tool_calls=None, allow_reasoning_history=False, allow_tool_error_history=False):
+    # Reuse the paid boundary's closed native schema. Keep the original values;
+    # this validation must never normalize or rewrite captured request bytes.
+    try:
+        operations.validate_operation_request('openrouter.responses', {
+            'model': 'training/input', 'input': value, 'tools': list(tools),
+            **({'max_tool_calls': max_tool_calls} if max_tool_calls is not None else {}),
+        }, allow_full_thinking=allow_reasoning_history)
+    except operations.OperationError as exc:
+        raise ValueError('input_shape_unsupported') from exc
     if isinstance(value, str):
         return
-    _require(isinstance(value, list) and value, 'input_shape_unsupported')
-    pending = set()
+    pending = {}
+    seen, malformed_ids = set(), set()
+    declared = (_response_tool_definitions({'input': value, 'tools': list(tools)})
+                if allow_tool_error_history else {})
     for item in value:
-        _require(isinstance(item, dict), 'input_shape_unsupported')
         kind = item.get('type', 'message')
         if kind == 'message':
-            _require(not pending and set(item) <= {'type', 'role', 'content'}
-                     and item.get('role') in {'system', 'developer', 'user', 'assistant'}, 'input_shape_unsupported')
-            content = item.get('content')
-            _require(isinstance(content, (str, list)), 'input_shape_unsupported')
+            _require(not pending, 'tool_context_unresolved')
+            content = item['content']
             if isinstance(content, list):
-                _require(all(isinstance(part, dict) and set(part) <= {'type', 'text'}
-                             and part.get('type') in {'input_text', 'output_text'}
-                             and isinstance(part.get('text'), str) for part in content), 'input_shape_unsupported')
-        elif kind == 'function_call':
-            _require(set(item) <= {'type', 'call_id', 'name', 'arguments', 'id', 'status'}
-                     and all(isinstance(item.get(k), str) for k in ('call_id', 'name', 'arguments'))
-                     and item['call_id'] and item['name'] and _arguments(item['arguments'])
-                     and item['call_id'] not in pending, 'tool_context_unresolved')
-            pending.add(item['call_id'])
-        elif kind == 'function_call_output':
-            _require(set(item) <= {'type', 'call_id', 'output'} and item.get('call_id') in pending
-                     and isinstance(item.get('output'), str), 'tool_context_unresolved')
-            pending.remove(item['call_id'])
-        else:
-            raise ValueError('input_shape_unsupported')
+                _require(not any(part.get('annotations') for part in content)
+                         or _hosted_search_declared({'tools': tools})
+                         or _hosted_search_history(value), 'retrieval_context_unsupported')
+        elif kind in {'function_call', 'custom_tool_call'}:
+            _require(item['call_id'] not in pending, 'tool_context_unresolved')
+            if allow_tool_error_history:
+                _require(item['call_id'] not in malformed_ids, 'tool_context_unresolved')
+            # Preserve prior failed-call text only inside a closed local-tool
+            # exchange. This never changes the generated target validator.
+            if kind == 'function_call' and not _arguments(item['arguments']):
+                _require(allow_tool_error_history and item['call_id'] not in seen,
+                         'tool_context_unresolved')
+                declaration = declared.get((item.get('namespace'), item['name'])) or {}
+                _require(declaration.get('type') == 'function', 'tool_context_unresolved')
+                malformed_ids.add(item['call_id'])
+            seen.add(item['call_id'])
+            pending[item['call_id']] = kind
+        elif kind in {'function_call_output', 'custom_tool_call_output'}:
+            expected = 'function_call' if kind == 'function_call_output' else 'custom_tool_call'
+            _require(pending.get(item['call_id']) == expected, 'tool_context_unresolved')
+            pending.pop(item['call_id'])
+        elif kind == 'reasoning':
+            _require(allow_reasoning_history and _exact(item), 'reasoning_history_unsupported')
+        elif kind in _HOSTED_SEARCH_TYPES:
+            # Native history is captured input, not a new execution request.
+            # A later turn can remove the search declaration without removing
+            # previously exposed provider events or inventing local results.
+            _require(item.get('status') == 'completed', 'retrieval_context_unsupported')
+        elif kind != 'additional_tools':
+            raise ValueError('retrieval_context_unsupported')
     _require(not pending, 'tool_context_unresolved')
 
 
-def _target(body, response, operation):
+def _response_tool_definitions(body):
+    """Resolve exact local declarations, including native additional tools."""
+    declared = {}
+
+    def collect(tools, namespace=None):
+        for tool in tools:
+            if tool['type'] == 'openrouter:web_search' and namespace is None:
+                continue
+            if tool['type'] == 'namespace':
+                collect(tool['tools'], tool['name'])
+                continue
+            _require(tool['type'] in {'function', 'custom'}, 'hosted_tool_unsupported')
+            key = (namespace, tool['name'])
+            _require(key not in declared or declared[key] == tool, 'tool_definition_unsupported')
+            declared[key] = tool
+
+    collect(body.get('tools', []))
+    if isinstance(body.get('input'), list):
+        for item in body['input']:
+            if item.get('type') == 'additional_tools':
+                collect(item['tools'])
+    return declared
+
+
+def _target(body, response, operation, *, allow_reasoning_history=False, argument_validator=_arguments, allow_tool_error_history=False):
     _require(isinstance(response, dict), 'response_shape_unsupported')
     _require(not any(response.get(field) for field in ('citations', 'search_results', 'annotations')),
              'retrieval_context_unsupported')
     reasoning = []
     if operation == 'openrouter.chat':
-        _chat_messages(body.get('messages'))
+        _chat_messages(body.get('messages'), allow_reasoning_history=allow_reasoning_history,
+                       allow_tool_error_history=allow_tool_error_history, tools=body.get('tools', []))
         choices = response.get('choices')
         _require(isinstance(choices, list) and len(choices) == 1, 'response_choice_ambiguous')
         choice = choices[0]
@@ -157,47 +269,225 @@ def _target(body, response, operation):
         msg.pop('refusal', None)
         if msg.get('tool_calls'):
             _require(choice['finish_reason'] == 'tool_calls', 'tool_finish_mismatch')
-            _tool_calls(msg['tool_calls'])
+            _tool_calls(msg['tool_calls'], argument_validator=argument_validator)
         else:
             _require(choice['finish_reason'] == 'stop' and isinstance(msg.get('content'), str)
                      and bool(msg['content']), 'assistant_shape_unsupported')
         return msg, reasoning
-    _responses_input(body.get('input'))
+    _responses_input(body.get('input'), tools=body.get('tools', []),
+                     max_tool_calls=body.get('max_tool_calls'),
+                     allow_reasoning_history=allow_reasoning_history,
+                     allow_tool_error_history=allow_tool_error_history)
     _require(response.get('status') == 'completed' and not response.get('error')
              and not response.get('incomplete_details'), 'response_not_complete')
     output = response.get('output')
     _require(isinstance(output, list) and output, 'response_shape_unsupported')
+    hosted = _hosted_search_history(output)
+    _require(not hosted or _hosted_search_declared(body), 'hosted_tool_undeclared')
     target = []
     for item in output:
         _require(isinstance(item, dict), 'response_shape_unsupported')
         kind = item.get('type')
         if kind == 'reasoning':
-            _require(set(item) <= {'id', 'type', 'summary', 'status'}, 'reasoning_shape_unsupported')
+            _require(set(item) <= ({'id', 'type', 'summary', 'content', 'text', 'status'}
+                                      | ({'format'} if allow_reasoning_history else set())), 'reasoning_shape_unsupported')
+            _require('format' not in item or isinstance(item['format'], str)
+                     and 1 <= len(item['format']) <= 128, 'reasoning_shape_unsupported')
+            _require('id' not in item or isinstance(item['id'], str) and 1 <= len(item['id']) <= 256,
+                     'reasoning_shape_unsupported')
+            _require(item.get('status') in (None, 'completed'), 'response_not_complete')
             summary = item.get('summary', [])
             _require(isinstance(summary, list) and all(isinstance(part, dict)
                      and set(part) == {'type', 'text'} and part['type'] == 'summary_text'
                      and isinstance(part['text'], str) for part in summary), 'reasoning_shape_unsupported')
             reasoning.extend(summary)
+            content = item.get('content', [])
+            _require(isinstance(content, list) and all(isinstance(part, dict)
+                     and set(part) == {'type', 'text'} and part['type'] == 'reasoning_text'
+                     and isinstance(part['text'], str) for part in content), 'reasoning_shape_unsupported')
+            reasoning.extend(content)
+            if 'text' in item:
+                _require(isinstance(item['text'], str), 'reasoning_shape_unsupported')
+                reasoning.append({'type': 'reasoning_text', 'text': item['text']})
+            if hosted:
+                target.append(copy.deepcopy(item))
         elif kind == 'message':
-            _require(set(item) <= {'id', 'type', 'status', 'role', 'content'}
+            _require(set(item) <= {'id', 'type', 'status', 'role', 'content', 'phase'}
                      and item.get('role') == 'assistant' and item.get('status') == 'completed'
                      and isinstance(item.get('content'), list) and item['content'], 'assistant_shape_unsupported')
-            _require(all(isinstance(part, dict) and set(part) <= {'type', 'text', 'annotations'}
+            _require(item.get('phase') in (None, 'commentary', 'final_answer'), 'assistant_shape_unsupported')
+            _require(all(isinstance(part, dict) and set(part) <= {'type', 'text', 'annotations', 'logprobs'}
                          and part.get('type') == 'output_text' and isinstance(part.get('text'), str)
-                         and not part.get('annotations') for part in item['content']), 'assistant_shape_unsupported')
+                         and (not part.get('annotations') or _hosted_search_declared(body)
+                              or _hosted_search_history(body.get('input')))
+                         for part in item['content']), 'assistant_shape_unsupported')
+            try:
+                operations.validate_operation_request('openrouter.responses', {
+                    'model': body['model'], 'input': [item],
+                }, allow_full_thinking=allow_reasoning_history)
+            except operations.OperationError as exc:
+                raise ValueError('assistant_shape_unsupported') from exc
             target.append(copy.deepcopy(item))
-        elif kind == 'function_call':
-            _require(set(item) <= {'id', 'type', 'status', 'call_id', 'name', 'arguments'}
-                     and item.get('status') == 'completed'
-                     and all(isinstance(item.get(k), str) and item[k] for k in ('call_id', 'name', 'arguments'))
-                     and _arguments(item['arguments']), 'tool_call_shape_unsupported')
+        elif kind in _HOSTED_SEARCH_TYPES:
+            try:
+                operations.validate_operation_request('openrouter.responses', {
+                    'model': body['model'], 'input': [item],
+                }, allow_full_thinking=allow_reasoning_history)
+            except operations.OperationError as exc:
+                raise ValueError('hosted_tool_shape_unsupported') from exc
+            _require(item.get('status') == 'completed', 'response_not_complete')
+            target.append(copy.deepcopy(item))
+        elif kind in {'function_call', 'custom_tool_call'}:
+            try:
+                # A target may have no output yet; schema validation is separate
+                # from the closed input-history pairing check above.
+                operations.validate_operation_request('openrouter.responses', {
+                    'model': body['model'], 'input': [item],
+                }, allow_full_thinking=allow_reasoning_history)
+            except operations.OperationError as exc:
+                raise ValueError('tool_call_shape_unsupported') from exc
+            _require(item.get('status') == 'completed'
+                     and (kind != 'function_call' or argument_validator(item['arguments'])),
+                     'tool_call_shape_unsupported')
             target.append(copy.deepcopy(item))
         else:
             raise ValueError('response_shape_unsupported')
-    _require(bool(target) and (len(target) == 1 or all(item['type'] == 'function_call' for item in target)), 'response_choice_ambiguous')
-    _require(len({item['call_id'] for item in target if item['type'] == 'function_call'})
-             == sum(item['type'] == 'function_call' for item in target), 'tool_call_shape_unsupported')
+    call_kinds = {'function_call', 'custom_tool_call'}
+    messages = [item for item in target if item['type'] == 'message']
+    calls = [item for item in target if item['type'] in call_kinds]
+    # A completed turn may state its next action and issue local tool calls.
+    # Preserve their wire order. Hosted output is a provider-executed
+    # trajectory and can contain intermediate messages around search events.
+    # Ordinary turns still require one unambiguous next action.
+    _require(bool(target) and (hosted or len(messages) <= 1)
+             and not (calls and any(item.get('phase') == 'final_answer' for item in messages)),
+             'response_choice_ambiguous')
+    _require(len({item['call_id'] for item in target if item['type'] in call_kinds})
+             == sum(item['type'] in call_kinds for item in target), 'tool_call_shape_unsupported')
     return target, reasoning
+
+
+def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False):
+    """Resolve saved gateway bytes against one existing host socket write.
+
+    The caller keeps route, cost, privacy-admission and target-schema policy.
+    Client read reports are optional only for the validated new frozen policy;
+    an existing report must still agree. No consumption claim is synthesized.
+    """
+    provenance = call.get('response_provenance') or {}
+    run_id = call.get('run_id')
+    request = call.get('request') or {}
+    capture = call.get('request_capture') or {}
+    permitted_redactions = {'hidden_reasoning'} if call.get('operation_id') in {'openrouter.chat', 'openrouter.responses'} else set()
+    if not allow_privacy:
+        _require(not capture.get('redacted') and _exact(request), 'request_privacy_nonexact')
+    _require(isinstance(request, dict) and request.get('operation_id') == call.get('operation_id')
+             and request.get('request_hash') == call.get('request_hash'), 'request_identity_mismatch')
+    if not (allow_privacy and capture.get('redacted') is True):
+        _require(isinstance(request.get('hashed_parameters'), dict)
+                 and contracts.document_hash(request['hashed_parameters']) == call.get('request_hash'),
+                 'request_identity_mismatch')
+    artifact = (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
+    payload = artifact.get('payload') or {}
+    digest = contracts.document_hash(payload)
+    _require(artifact.get('payload_sha256') == digest, 'worker_payload_hash_mismatch')
+    ref = provenance.get('worker_receipt_ref') or {}
+    writes = [row for row in payload.get('response_receipts') or [] if row.get('ordinal') == ref.get('ordinal')]
+    _require(provenance.get('delivery_to_worker') == 'socket_written'
+             and ref.get('run_id') == run_id and ref.get('payload_sha256') == digest
+             and len(writes) == 1, 'worker_write_unverified')
+    write = writes[0]
+    _require(write.get('write_state') == 'socket_written'
+             and all(write.get(key) == call.get(key) for key in ('call_identity', 'operation_id', 'action_sequence'))
+             and type(write.get('status')) is int and 100 <= write['status'] <= 599
+             and type(write.get('body_bytes')) is int and write['body_bytes'] >= 0
+             and isinstance(write.get('body_sha256'), str)
+             and contracts.SHA256_RE.fullmatch(write['body_sha256']) is not None,
+             'worker_write_identity_mismatch')
+    receipts = call.get('response_receipts') or []
+    matches = [receipt for receipt in receipts
+               if receipt.get('entry_id') in (provenance.get('worker_received_receipt_entry_ids') or [])
+               and receipt.get('wire_body_sha256') == write['body_sha256']
+               and receipt.get('wire_body_bytes') == write['body_bytes']
+               and (receipt.get('metadata') or {}).get('status') == write['status']]
+    values = []
+    for receipt in matches:
+        _require(not receipt.get('response_unavailable'), 'delivered_response_unresolved')
+        if not allow_privacy:
+            _require(set(receipt.get('privacy_redactions') or []) <= permitted_redactions, 'response_privacy_nonexact')
+        value = receipt.get('response')
+        if value is None:
+            target = receipt.get('response_ref') or {}
+            if target.get('field') == 'response' and target.get('entry_id') == call.get('terminal_entry_id'):
+                value = call.get('response')
+            else:
+                linked = [r for r in receipts if r.get('entry_id') == target.get('entry_id') and 'response' in r]
+                _require(len(linked) == 1, 'response_reference_unresolved')
+                value = linked[0]['response']
+        _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
+        if not allow_privacy:
+            _require(_exact(value, response=True), 'response_privacy_nonexact')
+        values.append(value)
+    if not values and allow_worker_error:
+        error_ref = provenance.get('worker_error_observation_ref') or {}
+        _require(not any(row.get('wire_body_sha256') for row in receipts)
+                 and error_ref.get('run_id') == run_id and error_ref.get('payload_sha256') == digest,
+                 'delivered_response_unresolved')
+        observations = [row for row in payload.get('observations') or [] if row.get('ordinal') == error_ref.get('ordinal')]
+        _require(len(observations) == 1, 'delivered_response_unresolved')
+        observed = observations[0]
+        response = (observed.get('outcome') or {}).get('response') or {}
+        _require((observed.get('privacy') or {}).get('redacted') is False
+                 and all(observed.get(key) == call.get(key) for key in ('call_identity', 'operation_id', 'action_sequence'))
+                 and response.get('status') == write['status'], 'worker_write_identity_mismatch')
+        raw = base64.b64decode(response['body_b64'], validate=True)
+        _require(len(raw) == write['body_bytes'] and contracts.hash_bytes(raw) == write['body_sha256'],
+                 'response_hash_mismatch')
+        _require((observed.get('request') or {}).get('admitted_parameters') == request.get('admitted_parameters'),
+                 'request_identity_mismatch')
+        values.append(json.loads(raw))
+    _require(values and len({contracts.document_hash(value) for value in values}) == 1,
+             'delivered_response_unresolved' if not values else 'delivered_response_ambiguous')
+    # Optional cooperative telemetry cannot contradict the trusted result.
+    refs = provenance.get('agent_receipt_refs') or []
+    reads = [row for row in payload.get('agent_observations') or [] if row.get('kind') == 'response_received'
+             and ((row.get('data') or {}).get('call_identity') == call.get('call_identity')
+                  or any(ref.get('id') == row.get('id') for ref in refs))]
+    required = not training_coverage.uses_host_result_evidence(example.get('configuration') or {})
+    if required or reads or refs or provenance.get('agent_receipt') == 'reported_exact_body_received':
+        _require(reads and provenance.get('agent_receipt') == 'reported_exact_body_received'
+                 and len(refs) == len(reads), 'agent_read_unverified')
+        for read in reads:
+            _require((read.get('privacy') or {}).get('redacted') is False
+                     and any(ref.get('id') == read.get('id') and ref.get('run_id') == run_id
+                             and ref.get('payload_sha256') == digest for ref in refs)
+                     and all((read.get('data') or {}).get(key) == write.get(key)
+                             for key in ('call_identity', 'status', 'body_sha256', 'body_bytes')),
+                     'agent_read_identity_mismatch')
+    else:
+        _require(provenance.get('agent_receipt') in (None, 'not_reported')
+                 and provenance.get('selected_response_acknowledged') is not True
+                 and provenance.get('worker_error_body_acknowledged') is not True, 'agent_read_unverified')
+    if provenance.get('selected_response_acknowledged') is True:
+        _require(call.get('terminal_entry_id') in {row['entry_id'] for row in matches}, 'agent_read_identity_mismatch')
+    return {'response': values[0], 'write': write, 'receipts': matches}
+
+
+def _validate_target_tools(body, target, op):
+    tools = body.get('tools', [])
+    if op == 'openrouter.chat':
+        definitions = [(tool.get('function') or {}) for tool in tools]
+        _require(all(isinstance(fn, dict) and isinstance(fn.get('name'), str) and fn['name']
+                     and isinstance(fn.get('parameters', {}), dict) for fn in definitions), 'tool_definition_unsupported')
+        declared = {fn['name'] for fn in definitions}
+        _require(len(declared) == len(definitions), 'tool_definition_unsupported')
+        _require(all(item['function']['name'] in declared for item in target.get('tool_calls', [])), 'undeclared_tool_call')
+    else:
+        declared = _response_tool_definitions(body)
+        _require(all((item.get('namespace'), item['name']) in declared
+                     and declared[(item.get('namespace'), item['name'])]['type'] == (
+                         'function' if item['type'] == 'function_call' else 'custom')
+                     for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
 
 
 def _candidate(example, call):
@@ -205,6 +495,10 @@ def _candidate(example, call):
     op = call.get('operation_id')
     _require(call.get('provider') == 'openrouter' and op in {'openrouter.chat', 'openrouter.responses'}, 'operation_unsupported')
     request = call.get('request') or {}
+    annotation = call.get('reasoning_capture') or {}
+    if isinstance(annotation, Mapping) and annotation.get('policy') == reasoning_capture.POLICY:
+        _require(reasoning_capture.explicit_provider_matches(request, annotation.get('provider_route')),
+                 'request_provider_route_mismatch')
     _require(not (call.get('request_capture') or {}).get('redacted') and _exact(request), 'request_privacy_nonexact')
     _require(request.get('operation_id') == op and request.get('request_hash') == call.get('request_hash')
              and isinstance(request.get('hashed_parameters'), dict)
@@ -224,65 +518,88 @@ def _candidate(example, call):
              and body.get('web_search_options') is None and body.get('n', 1) == 1, 'request_continuation_or_stream_unsupported')
     _require('instructions' not in body or isinstance(body['instructions'], str), 'input_shape_unsupported')
     tools = body.get('tools', [])
-    _require(isinstance(tools, list) and all(isinstance(tool, dict) and tool.get('type') == 'function' for tool in tools), 'hosted_tool_unsupported')
-    provenance = call.get('response_provenance') or {}
-    _require(provenance.get('agent_receipt') == 'reported_exact_body_received'
-             and provenance.get('delivery_to_worker') == 'socket_written', 'agent_read_unverified')
-    snapshot = (example.get('worker_observation_artifacts') or {}).get(call['run_id']) or {}
-    payload = snapshot.get('payload') or {}
-    _require(contracts.document_hash(payload) == snapshot.get('payload_sha256'), 'worker_payload_hash_mismatch')
-    refs = provenance.get('agent_receipt_refs') or []
-    acks = [row for row in payload.get('agent_observations', []) if row.get('kind') == 'response_received'
-            and any(ref.get('id') == row.get('id') and ref.get('run_id') == call['run_id']
-                    and ref.get('payload_sha256') == snapshot.get('payload_sha256') for ref in refs)]
-    _require(acks and all(not (row.get('privacy') or {}).get('redacted') for row in acks), 'agent_read_unverified')
-    identities = {contracts.canonical_json(row.get('data')) for row in acks}
-    _require(len(identities) == 1, 'agent_read_ambiguous')
-    data = acks[0]['data']
-    _require(data.get('call_identity') == call['call_identity'] and data.get('status') == 200, 'agent_read_identity_mismatch')
-    worker_ref = provenance.get('worker_receipt_ref') or {}
-    worker_receipts = [row for row in payload.get('response_receipts', [])
-                       if row.get('ordinal') == worker_ref.get('ordinal')]
-    _require(worker_ref.get('run_id') == call['run_id'] and worker_ref.get('payload_sha256') == snapshot.get('payload_sha256')
-             and len(worker_receipts) == 1, 'worker_write_unverified')
-    worker = worker_receipts[0]
-    _require(worker.get('write_state') == 'socket_written' and worker.get('operation_id') == op
-             and worker.get('action_sequence') == call.get('action_sequence')
-             and all(worker.get(key) == data.get(key) for key in ('call_identity', 'status', 'body_sha256', 'body_bytes')), 'worker_write_identity_mismatch')
-    receipts = call.get('response_receipts') or []
-    matches = [r for r in receipts if r.get('entry_id') in provenance.get('worker_received_receipt_entry_ids', [])
-               and r.get('wire_body_sha256') == data.get('body_sha256')
-               and r.get('wire_body_bytes') == data.get('body_bytes') and (r.get('metadata') or {}).get('status') == 200]
-    _require(bool(matches), 'delivered_response_unresolved')
-    responses = []
-    for receipt in matches:
-        _require(set(receipt.get('privacy_redactions') or []) <= {'hidden_reasoning'} and not receipt.get('response_unavailable'), 'response_privacy_nonexact')
-        value = receipt.get('response')
-        if value is None:
-            ref = receipt.get('response_ref') or {}
-            if ref.get('field') == 'response' and ref.get('entry_id') == call.get('terminal_entry_id'):
-                value = call.get('response')
-            else:
-                linked = [r for r in receipts if r.get('entry_id') == ref.get('entry_id') and 'response' in r]
-                _require(len(linked) == 1, 'response_reference_unresolved')
-                value = linked[0]['response']
-        _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
-        _require(_exact(value, response=True), 'response_privacy_nonexact')
-        responses.append(value)
-    _require(len({contracts.document_hash(value) for value in responses}) == 1, 'delivered_response_ambiguous')
-    target, reasoning = _target(body, responses[0], op)
-    definitions = [(tool.get('function') or {}) if op == 'openrouter.chat' else tool for tool in tools]
-    _require(all(isinstance(fn, dict) and isinstance(fn.get('name'), str) and fn['name']
-                 and isinstance(fn.get('parameters', {}), dict) for fn in definitions), 'tool_definition_unsupported')
-    declared = {fn['name'] for fn in definitions}
-    _require(len(declared) == len(definitions), 'tool_definition_unsupported')
-    emitted = [item['function']['name'] for item in target.get('tool_calls', [])] if isinstance(target, dict) else [item['name'] for item in target if item['type'] == 'function_call']
-    _require(all(name in declared for name in emitted), 'undeclared_tool_call')
+    _require(isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools), 'hosted_tool_unsupported')
+    if op == 'openrouter.chat':
+        _require(all(tool.get('type') == 'function' for tool in tools), 'hosted_tool_unsupported')
+    if training_coverage.uses_host_result_evidence(example.get('configuration') or {}):
+        evidence = _host_result(example, call)
+        _require(evidence['write']['status'] == 200, 'agent_read_identity_mismatch')
+        responses = [evidence['response']]
+        matches = evidence['receipts']
+    else:
+        provenance = call.get('response_provenance') or {}
+        _require(provenance.get('agent_receipt') == 'reported_exact_body_received'
+                 and provenance.get('delivery_to_worker') == 'socket_written', 'agent_read_unverified')
+        snapshot = (example.get('worker_observation_artifacts') or {}).get(call['run_id']) or {}
+        payload = snapshot.get('payload') or {}
+        _require(contracts.document_hash(payload) == snapshot.get('payload_sha256'), 'worker_payload_hash_mismatch')
+        refs = provenance.get('agent_receipt_refs') or []
+        acks = [row for row in payload.get('agent_observations', []) if row.get('kind') == 'response_received'
+                and any(ref.get('id') == row.get('id') and ref.get('run_id') == call['run_id']
+                        and ref.get('payload_sha256') == snapshot.get('payload_sha256') for ref in refs)]
+        _require(acks and all(not (row.get('privacy') or {}).get('redacted') for row in acks), 'agent_read_unverified')
+        identities = {contracts.canonical_json(row.get('data')) for row in acks}
+        _require(len(identities) == 1, 'agent_read_ambiguous')
+        data = acks[0]['data']
+        _require(data.get('call_identity') == call['call_identity'] and data.get('status') == 200, 'agent_read_identity_mismatch')
+        worker_ref = provenance.get('worker_receipt_ref') or {}
+        worker_receipts = [row for row in payload.get('response_receipts', [])
+                           if row.get('ordinal') == worker_ref.get('ordinal')]
+        _require(worker_ref.get('run_id') == call['run_id'] and worker_ref.get('payload_sha256') == snapshot.get('payload_sha256')
+                 and len(worker_receipts) == 1, 'worker_write_unverified')
+        worker = worker_receipts[0]
+        _require(worker.get('write_state') == 'socket_written' and worker.get('operation_id') == op
+                 and worker.get('action_sequence') == call.get('action_sequence')
+                 and all(worker.get(key) == data.get(key) for key in ('call_identity', 'status', 'body_sha256', 'body_bytes')), 'worker_write_identity_mismatch')
+        receipts = call.get('response_receipts') or []
+        matches = [r for r in receipts if r.get('entry_id') in provenance.get('worker_received_receipt_entry_ids', [])
+                   and r.get('wire_body_sha256') == data.get('body_sha256')
+                   and r.get('wire_body_bytes') == data.get('body_bytes') and (r.get('metadata') or {}).get('status') == 200]
+        _require(bool(matches), 'delivered_response_unresolved')
+        responses = []
+        for receipt in matches:
+            _require(set(receipt.get('privacy_redactions') or []) <= {'hidden_reasoning'} and not receipt.get('response_unavailable'), 'response_privacy_nonexact')
+            value = receipt.get('response')
+            if value is None:
+                ref = receipt.get('response_ref') or {}
+                if ref.get('field') == 'response' and ref.get('entry_id') == call.get('terminal_entry_id'):
+                    value = call.get('response')
+                else:
+                    linked = [r for r in receipts if r.get('entry_id') == ref.get('entry_id') and 'response' in r]
+                    _require(len(linked) == 1, 'response_reference_unresolved')
+                    value = linked[0]['response']
+            _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
+            _require(_exact(value, response=True), 'response_privacy_nonexact')
+            responses.append(value)
+        _require(len({contracts.document_hash(value) for value in responses}) == 1, 'delivered_response_ambiguous')
+    annotation = call.get('reasoning_capture') or {}
+    full_history = (isinstance(annotation, dict)
+                    and annotation.get('policy') == 'full_generated_thinking_v1'
+                    and annotation.get('requested') is True
+                    and annotation.get('reviewed_route') is True)
+    target, reasoning = _target(body, responses[0], op,
+                                allow_reasoning_history=full_history,
+                                allow_tool_error_history=training_coverage.uses_host_result_evidence(
+                                    example.get('configuration') or {}))
+    _validate_target_tools(body, target, op)
+    target_provenance = {}
+    if op == 'openrouter.responses':
+        hosted = any(item.get('type') in _HOSTED_SEARCH_TYPES for item in responses[0]['output'])
+        target_provenance['target_source_paths'] = [
+            ['output', index] for index, item in enumerate(responses[0]['output'])
+            if hosted or item.get('type') != 'reasoning']
+        if hosted:
+            target_provenance.update(target_semantics='provider_executed_trajectory',
+                                     hosted_tool_execution='provider')
     return {'schema_version': RECORD_SCHEMA_VERSION, 'format': op, 'input': copy.deepcopy(body),
             'target': target,
             'quality': {'status': 'unreviewed', 'correct_action': 'not_established'},
             'source_refs': [{'example_hash': example['example_hash'], 'run_id': call['run_id'],
                              'call_identity': call['call_identity'], 'teacher_reasoning_metadata': reasoning,
+                             **({'capture_scope': 'provider_visible_request_result', 'client_consumption': 'not_proved'}
+                                if training_coverage.uses_host_result_evidence(example.get('configuration') or {}) else {}),
+                             **target_provenance,
+                             'delivered_response_sha256': contracts.document_hash(responses[0]),
                              'response_projection': {'opaque_reasoning_omitted': any('hidden_reasoning' in (r.get('privacy_redactions') or []) for r in matches), 'exact_provider_replay': not any(r.get('privacy_redactions') for r in matches)}, 'attempt': example.get('attempt'),
                              'round_id': example.get('round_id'), 'model': body['model'],
                              'production': bool(training_dataset._PRODUCTION_ROUND_RE.fullmatch(str(example.get('round_id', '')))
@@ -350,8 +667,9 @@ def build(examples, rules=None):
     manifest = {'schema_version': SCHEMA_VERSION, 'rules': asdict(rules),
                 'training_permission': copy.deepcopy(training_dataset.TRAINING_PERMISSION),
                 'eligibility_limits': ['observed_next_response_only', 'quality_unreviewed', 'not_a_complete_trajectory',
-                                       'no_training_permission_confirmed', 'text_and_local_function_calls_only',
-                                       'exact_agent_read_required', 'no_encrypted_reasoning'],
+                                       'no_training_permission_confirmed', 'text_local_tools_and_exposed_hosted_search_only',
+                                       'hosted_internal_prompts_not_observed',
+                                       'host_delivery_required_for_new_policy', 'agent_read_required_for_historical_policy', 'no_encrypted_reasoning'],
                 'counts': {'examples': len(sources), 'candidate_executions': len({ref['run_id'] for r in candidates.values() for ref in r['source_refs']}),
                            'records_by_split': {k: len(v) for k, v in splits.items()}, 'exclusion_reasons': dict(sorted(counts.items()))},
                 'sources': sorted(sources), 'split_hashes': {k: contracts.document_hash(v) for k, v in splits.items()}}

@@ -639,13 +639,22 @@ def _standalone_search_output(document: Any) -> bytes:
     return json.dumps({"output": "\n\n".join(text)}, ensure_ascii=False).encode()
 
 
-def response_events(document: dict[str, Any]) -> Iterator[bytes]:
-    """Replay terminal Responses items without translating their tool protocol."""
+def response_events(document: dict[str, Any], *, native_web_search: bool = False) -> Iterator[bytes]:
+    """Replay terminal items, optionally using Codex's native search type name."""
 
     if (not isinstance(document, dict) or document.get("object") != "response"
             or document.get("status") not in ("completed", "incomplete", "failed")
             or not isinstance(document.get("output"), list)):
         raise CodexRuntimeError("invalid Responses reply")
+    if native_web_search:
+        # Codex 0.154 recognizes the native item name only. Adapt a transport
+        # copy, never the broker receipt. Its normal typed history decides
+        # which provider fields are replayed on the next request.
+        document = dict(document, output=[
+            dict(item, type="web_search_call")
+            if isinstance(item, dict) and item.get("type") == "openrouter:web_search"
+            else item for item in document["output"]
+        ])
     sequence = 0
 
     def event(kind: str, **fields: Any) -> bytes:
@@ -913,7 +922,9 @@ class ResponsesBridge:
                         self.reply(status, _standalone_search_output(json.loads(response)))
                     elif 200 <= status < 300 and streaming:
                         try:
-                            response = b"".join(response_events(json.loads(response)))
+                            response = b"".join(response_events(
+                                json.loads(response), native_web_search=True,
+                            ))
                         except (ValueError, TypeError, KeyError, CodexRuntimeError):
                             raise CodexRuntimeError("invalid Responses reply") from None
                         self.reply(status, response, "text/event-stream")

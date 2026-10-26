@@ -1,0 +1,4705 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-10-23",
+  "catalog_source": "https://openrouter.ai/api/v1/models",
+  "catalog_sha256": "09d241b72d45f29f0c50e5bb93a452bec5e9a8fe2a47617821ef5748e3746b52",
+  "purpose": "Discovery inventory only. Runtime admission uses lab_arena/reasoning_models.json. Every exact model/provider/API requires independent protocol and semantic evidence. No nationality or open-weight restriction.",
+  "counts": {
+    "catalog_entries": 469,
+    "reasoning_advertised": 341,
+    "reasoning_non_batch": 277,
+    "new_production_approvals": 0,
+    "classification_counts": {
+      "Generated thinking candidate": 121,
+      "Unverified text exposure": 47,
+      "Summary only; excluded": 144,
+      "No advertised reasoning": 128,
+      "Dynamic alias or router; unresolved": 23,
+      "Version-dependent; unresolved": 5,
+      "Redacted; excluded": 1
+    }
+  },
+  "models": [
+    {
+      "id": "moonshotai/kimi-k3.1-pro",
+      "name": "MoonshotAI: Kimi K3.1 Pro",
+      "canonical_slug": "moonshotai/kimi-k3.1-pro-20261023",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "recursive/flint-v1.0:free",
+      "name": "Recursive: Flint (free)",
+      "canonical_slug": "recursive/flint-v1.0-20261021",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-m3.1-flash",
+      "name": "MiniMax: MiniMax M3.1 Flash",
+      "canonical_slug": "minimax/minimax-m3.1-flash-20261019",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.minimax.io/docs/guides/text-m3-function-call",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash-1017",
+      "name": "DeepSeek: DeepSeek V4.1 Flash 1017",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20261017",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "elorian/glimpse",
+      "name": "Elorian: Glimpse",
+      "canonical_slug": "elorian/glimpse-20261016",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "xingchen-agi/xing4.0-29b-a4b:free",
+      "name": "XingChen: Xing4.0 29B A4B (free)",
+      "canonical_slug": "xingchen-agi/xing4.0-29b-a4b-20261015",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "reflection/beam-1.0-501b-a23b",
+      "name": "Reflection: Beam 1.0 501B A23B",
+      "canonical_slug": "reflection/beam-1.0-501b-a23b-20261016",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://developers.reflection.ai/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "inception/mercury-3",
+      "name": "Inception: Mercury 3",
+      "canonical_slug": "inception/mercury-3-20261019",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://docs.inceptionlabs.ai/api-reference/chat/create-a-chat-completion",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moondream/moondream3-preview",
+      "name": "Moondream: Moondream 3 Preview",
+      "canonical_slug": "moondream/moondream3-preview-20261013",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moondream/moondream3.1-9b-a2b",
+      "name": "Moondream: Moondream 3.1",
+      "canonical_slug": "moondream/moondream3.1-9b-a2b-20261013",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta/muse-spark-open",
+      "name": "Meta: Muse Spark Open",
+      "canonical_slug": "meta/muse-spark-open-20261015",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://dev.meta.ai/docs/muse-spark-open/prompting",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3.5-super-vl",
+      "name": "NVIDIA: Nemotron 3.5 Super VL",
+      "canonical_slug": "nvidia/nemotron-3.5-super-vl-20261015",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3.5-super-vl:free",
+      "name": "NVIDIA: Nemotron 3.5 Super VL (free)",
+      "canonical_slug": "nvidia/nemotron-3.5-super-vl-20261015",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "unbiased/pareto-26.10",
+      "name": "Pareto 26.10",
+      "canonical_slug": "unbiased/pareto-26.10-20261015",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~unbiased/pareto-latest",
+      "name": "Pareto Latest",
+      "canonical_slug": "~unbiased/pareto-latest",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "unbiased/pareto-26.9",
+      "name": "Pareto 26.9",
+      "canonical_slug": "unbiased/pareto-26.9-20260917",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "liquid/lfm-2.5-24b-a2b",
+      "name": "LiquidAI: LFM2.5-24B-A2B",
+      "canonical_slug": "liquid/lfm-2.5-24b-a2b-20261012",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-4-argon",
+      "name": "Google: Gemini 4 Argon",
+      "canonical_slug": "google/gemini-4-argon-20261013",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-4-argon:batch",
+      "name": "Google: Gemini 4 Argon (batch)",
+      "canonical_slug": "google/gemini-4-argon-20261013",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "scaledown/summarize",
+      "name": "ScaleDown: Summarize",
+      "canonical_slug": "scaledown/summarize-20260928",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "scaledown/extract",
+      "name": "ScaleDown: Extract",
+      "canonical_slug": "scaledown/extract-20260928",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta/muse-wonder",
+      "name": "Meta: Muse Wonder",
+      "canonical_slug": "meta/muse-wonder-20261012",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://dev.meta.ai/docs/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "stepfun/step-5-preview",
+      "name": "StepFun: Step 5 Preview",
+      "canonical_slug": "stepfun/step-5-preview-20261008",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.stepfun.ai/cookbook/step-5-tool-calling",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-haiku-5.5",
+      "name": "Anthropic: Claude Haiku 5.5",
+      "canonical_slug": "anthropic/claude-haiku-5.5-20261007",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-haiku-5.5:batch",
+      "name": "Anthropic: Claude Haiku 5.5 (batch)",
+      "canonical_slug": "anthropic/claude-haiku-5.5-20261007",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-nano-banana-2.1",
+      "name": "Google: Nano Banana 2.1",
+      "canonical_slug": "google/gemini-nano-banana-2.1-20261006",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-large-4-0",
+      "name": "Mistral: Mistral Large 4",
+      "canonical_slug": "mistralai/mistral-large-4-0-20261006",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "inclusionai/ling-3.1-flash",
+      "name": "inclusionAI: Ling 3.1 Flash",
+      "canonical_slug": "inclusionai/ling-3.1-flash-20261002",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/inclusionAI/Ling-3.1-flash",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6.1-sol-pro",
+      "name": "OpenAI: GPT-6.1 Sol Pro",
+      "canonical_slug": "openai/gpt-6.1-sol-pro-20260929",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6.1-sol-pro:batch",
+      "name": "OpenAI: GPT-6.1 Sol Pro (batch)",
+      "canonical_slug": "openai/gpt-6.1-sol-pro-20260929",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6.1-sol",
+      "name": "OpenAI: GPT-6.1 Sol",
+      "canonical_slug": "openai/gpt-6.1-sol-20260929",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6.1-sol:batch",
+      "name": "OpenAI: GPT-6.1 Sol (batch)",
+      "canonical_slug": "openai/gpt-6.1-sol-20260929",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-sonnet-5.5",
+      "name": "Anthropic: Claude Sonnet 5.5",
+      "canonical_slug": "anthropic/claude-sonnet-5.5-20260928",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-sonnet-5.5:batch",
+      "name": "Anthropic: Claude Sonnet 5.5 (batch)",
+      "canonical_slug": "anthropic/claude-sonnet-5.5-20260928",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "typesafe/jev-router",
+      "name": "TypeSafe: Jev Router",
+      "canonical_slug": "typesafe/jev-router",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "perceptron/perceptron-mk1.5",
+      "name": "Perceptron: Perceptron Mk1.5",
+      "canonical_slug": "perceptron/perceptron-mk1.5-20260925",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "fireworks/ember-1",
+      "name": "Fireworks: Ember-1",
+      "canonical_slug": "fireworks/ember-1-20260923",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5.3-prime",
+      "name": "Z.ai: GLM 5.3 Prime",
+      "canonical_slug": "z-ai/glm-5.3-prime-20260921",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.8-max-prime",
+      "name": "Qwen: Qwen3.8 Max Prime",
+      "canonical_slug": "qwen/qwen3.8-max-prime-20260923",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "aion-labs/aion-3.5-mini",
+      "name": "AionLabs: Aion 3.5 Mini",
+      "canonical_slug": "aion-labs/aion-3.5-mini-20260923",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "aion-labs/aion-3.5",
+      "name": "AionLabs: Aion 3.5",
+      "canonical_slug": "aion-labs/aion-3.5-20260923",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "upstage/solar-mini4",
+      "name": "Upstage: Solar Mini 4",
+      "canonical_slug": "upstage/solar-mini4-20260922",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "cohere/command-a-plus",
+      "name": "Cohere: Command A+",
+      "canonical_slug": "cohere/command-a-plus-05-2026",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.cohere.com/docs/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-luna-pro",
+      "name": "OpenAI: GPT-6 Luna Pro",
+      "canonical_slug": "openai/gpt-6-luna-pro-20260922",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-luna-pro:batch",
+      "name": "OpenAI: GPT-6 Luna Pro (batch)",
+      "canonical_slug": "openai/gpt-6-luna-pro-20260922",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-luna",
+      "name": "OpenAI: GPT-6 Luna",
+      "canonical_slug": "openai/gpt-6-luna-20260922",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-luna:batch",
+      "name": "OpenAI: GPT-6 Luna (batch)",
+      "canonical_slug": "openai/gpt-6-luna-20260922",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-sol-pro",
+      "name": "OpenAI: GPT-6 Sol Pro",
+      "canonical_slug": "openai/gpt-6-sol-pro-20260922",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-sol-pro:batch",
+      "name": "OpenAI: GPT-6 Sol Pro (batch)",
+      "canonical_slug": "openai/gpt-6-sol-pro-20260922",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-sol",
+      "name": "OpenAI: GPT-6 Sol",
+      "canonical_slug": "openai/gpt-6-sol-20260922",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-sol:batch",
+      "name": "OpenAI: GPT-6 Sol (batch)",
+      "canonical_slug": "openai/gpt-6-sol-20260922",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-5.5",
+      "name": "Anthropic: Claude Opus 5.5",
+      "canonical_slug": "anthropic/claude-opus-5.5-20260921",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-5.5:batch",
+      "name": "Anthropic: Claude Opus 5.5 (batch)",
+      "canonical_slug": "anthropic/claude-opus-5.5-20260921",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/switchyard",
+      "name": "NVIDIA: Switchyard",
+      "canonical_slug": "nvidia/switchyard",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-pro-ultraspeed",
+      "name": "Xiaomi: MiMo-V2.6-Pro-UltraSpeed",
+      "canonical_slug": "xiaomi/mimo-v2.6-pro-ultraspeed-20260921",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://mimo.mi.com/docs/en-US/quick-start/usage-guide/other/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-flash",
+      "name": "Xiaomi: MiMo-V2.6-Flash",
+      "canonical_slug": "xiaomi/mimo-v2.6-flash-20260921",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://mimo.mi.com/docs/en-US/quick-start/usage-guide/other/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-pro",
+      "name": "Xiaomi: MiMo-V2.6-Pro",
+      "canonical_slug": "xiaomi/mimo-v2.6-pro-20260921",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://mimo.mi.com/docs/en-US/quick-start/usage-guide/other/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "x-ai/grok-4.7",
+      "name": "SpaceXAI: Grok 4.7",
+      "canonical_slug": "x-ai/grok-4.7-20260916",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.8-omni-flash",
+      "name": "Qwen: Qwen3.8 Omni Flash",
+      "canonical_slug": "qwen/qwen3.8-omni-flash-20260918",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "prism-ml/ternary-bonsai-2-27b",
+      "name": "PrismML: Ternary Bonsai 2 27B",
+      "canonical_slug": "prism-ml/ternary-bonsai-2-27b-20260918",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5.3-flashx",
+      "name": "Z.ai: GLM 5.3 FlashX",
+      "canonical_slug": "z-ai/glm-5.3-flashx-20260918",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~deepseek/deepseek-pro-latest",
+      "name": "DeepSeek: DeepSeek Pro Latest",
+      "canonical_slug": "~deepseek/deepseek-pro-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~deepseek/deepseek-flash-latest",
+      "name": "DeepSeek: DeepSeek Flash Latest",
+      "canonical_slug": "~deepseek/deepseek-flash-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "inference-net/schematron-v2-turbo",
+      "name": "Inference.net: Schematron V2 Turbo",
+      "canonical_slug": "inference-net/schematron-v2-turbo-20260902",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "inference-net/schematron-v2-small",
+      "name": "Inference.net: Schematron V2 Small",
+      "canonical_slug": "inference-net/schematron-v2-small-20260902",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~openai/gpt-astra-latest",
+      "name": "OpenAI: GPT Astra Latest",
+      "canonical_slug": "~openai/gpt-astra-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~openai/gpt-sol-latest",
+      "name": "OpenAI: GPT Sol Latest",
+      "canonical_slug": "~openai/gpt-sol-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~openai/gpt-terra-latest",
+      "name": "OpenAI: GPT Terra Latest",
+      "canonical_slug": "~openai/gpt-terra-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~openai/gpt-luna-latest",
+      "name": "OpenAI: GPT Luna Latest",
+      "canonical_slug": "~openai/gpt-luna-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "sakana/fugu-ultra-v2",
+      "name": "Sakana: Fugu Ultra v2",
+      "canonical_slug": "sakana/fugu-ultra-v2-20260911",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "sakana/fugu-max",
+      "name": "Sakana: Fugu Max",
+      "canonical_slug": "sakana/fugu-max-20260911",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "inclusionai/ling-3.0-flash-vl",
+      "name": "inclusionAI: Ling 3.0 Flash VL",
+      "canonical_slug": "inclusionai/ling-3.0-flash-vl-20260910",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/inclusionAI/Ling-3.1-flash",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash",
+      "name": "DeepSeek: DeepSeek V4.1 Flash",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash:batch",
+      "name": "DeepSeek: DeepSeek V4.1 Flash (batch)",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "inception/mercury-2.5",
+      "name": "Inception: Mercury 2.5",
+      "canonical_slug": "inception/mercury-2.5-20260908",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://docs.inceptionlabs.ai/api-reference/chat/create-a-chat-completion",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nex-agi/nex-n2.5-mini",
+      "name": "Nex AGI: Nex-N2.5-Mini",
+      "canonical_slug": "nex-agi/nex-n2.5-mini-20260908",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nex-agi/nex-n2.5-pro",
+      "name": "Nex AGI: Nex-N2.5-Pro",
+      "canonical_slug": "nex-agi/nex-n2.5-pro-20260907",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-astra",
+      "name": "OpenAI: GPT-6 Astra",
+      "canonical_slug": "openai/gpt-6-astra-20260903",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-astra:batch",
+      "name": "OpenAI: GPT-6 Astra (batch)",
+      "canonical_slug": "openai/gpt-6-astra-20260903",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-astra-pro",
+      "name": "OpenAI: GPT-6 Astra Pro",
+      "canonical_slug": "openai/gpt-6-astra-pro-20260903",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-6-astra-pro:batch",
+      "name": "OpenAI: GPT-6 Astra Pro (batch)",
+      "canonical_slug": "openai/gpt-6-astra-pro-20260903",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.8-max-0902",
+      "name": "Qwen: Qwen3.8 Max (0902)",
+      "canonical_slug": "qwen/qwen3.8-max-20260902",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta/muse-spark-1.3-contributor",
+      "name": "Meta: Muse Spark 1.3 Contributor",
+      "canonical_slug": "meta/muse-spark-1.3-contributor-20260902",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://dev.meta.ai/docs/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta/muse-spark-1.3",
+      "name": "Meta: Muse Spark 1.3",
+      "canonical_slug": "meta/muse-spark-1.3-20260902",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://dev.meta.ai/docs/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.8-flash",
+      "name": "Google: Gemini 3.8 Flash",
+      "canonical_slug": "google/gemini-3.8-flash-20260902",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.8-flash:batch",
+      "name": "Google: Gemini 3.8 Flash (batch)",
+      "canonical_slug": "google/gemini-3.8-flash-20260902",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-fable-5.1",
+      "name": "Anthropic: Claude Fable 5.1",
+      "canonical_slug": "anthropic/claude-fable-5.1-20260831",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-fable-5.1:batch",
+      "name": "Anthropic: Claude Fable 5.1 (batch)",
+      "canonical_slug": "anthropic/claude-fable-5.1-20260831",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "ibm-granite/granite-4.2-8b",
+      "name": "IBM: Granite 4.2 8B",
+      "canonical_slug": "ibm-granite/granite-4.2-8b-20260831",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "tencent/hy4-preview",
+      "name": "Tencent: Hy4 preview",
+      "canonical_slug": "tencent/hy4-preview-20260827",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://intl.cloud.tencent.com/zh/document/product/1300/80695",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~z-ai/glm-flash-latest",
+      "name": "Z.ai: GLM Flash Latest",
+      "canonical_slug": "~z-ai/glm-flash-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.8-flash",
+      "name": "Qwen: Qwen3.8 Flash",
+      "canonical_slug": "qwen/qwen3.8-flash-20260826",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "name": "Z.ai: GLM 5.3 Flash",
+      "canonical_slug": "z-ai/glm-5.3-flash-20260826",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5.3-flash:batch",
+      "name": "Z.ai: GLM 5.3 Flash (batch)",
+      "canonical_slug": "z-ai/glm-5.3-flash-20260826",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta/muse-spark-1.2-contributor",
+      "name": "Meta: Muse Spark 1.2 Contributor",
+      "canonical_slug": "meta/muse-spark-1.2-contributor-20260805",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://dev.meta.ai/docs/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-vision-exp",
+      "name": "DeepSeek: DeepSeek V4 Flash Vision Exp",
+      "canonical_slug": "deepseek/deepseek-v4-flash-vision-exp-20260821",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "tencent/hy-mt2-1.8b",
+      "name": "Tencent: Hy-MT2-1.8B",
+      "canonical_slug": "tencent/hy-mt2-1.8b-20260521",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "tencent/hy-mt2-30b-a3b",
+      "name": "Tencent: Hy-MT2-30B-A3B",
+      "canonical_slug": "tencent/hy-mt2-30b-a3b-20260521",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~z-ai/glm-latest",
+      "name": "Z.ai: GLM Latest",
+      "canonical_slug": "~z-ai/glm-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "tencent/hy-mt2-7b",
+      "name": "Tencent: Hy-MT2-7B",
+      "canonical_slug": "tencent/hy-mt2-7b-20260521",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5.3",
+      "name": "Z.ai: GLM 5.3",
+      "canonical_slug": "z-ai/glm-5.3-20260816",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5.3:batch",
+      "name": "Z.ai: GLM 5.3 (batch)",
+      "canonical_slug": "z-ai/glm-5.3-20260816",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.8-27b",
+      "name": "Qwen: Qwen3.8 27B",
+      "canonical_slug": "qwen/qwen3.8-27b-20260814",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "dots-studio/dots-3-note-preview:free",
+      "name": "Dots Studio: Dots3-Note Preview (free)",
+      "canonical_slug": "dots-studio/dots-3-note-preview-20260813",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.7-flash",
+      "name": "Google: Gemini 3.7 Flash",
+      "canonical_slug": "google/gemini-3.7-flash-20260813",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.7-flash:batch",
+      "name": "Google: Gemini 3.7 Flash (batch)",
+      "canonical_slug": "google/gemini-3.7-flash-20260813",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "bytedance-seed/seed-2-1-turbo",
+      "name": "ByteDance Seed: Seed 2.1 Turbo",
+      "canonical_slug": "bytedance-seed/seed-2-1-turbo-20260810",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://docs.volcengine.com/docs/ark/deep-thinking?lang=en",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.8-2.4t-a95b",
+      "name": "Qwen: Qwen3.8 2.4T A95B",
+      "canonical_slug": "qwen/qwen3.8-2.4t-a95b-20260812",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "bytedance-seed/seed-2.0-code",
+      "name": "ByteDance Seed: Seed-2.0-Code",
+      "canonical_slug": "bytedance-seed/seed-2.0-code-20260730",
+      "text_exposure_class": "Version-dependent; unresolved",
+      "source_url": "https://docs.volcengine.com/docs/ark/deep-thinking?lang=en",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro-0813",
+      "name": "DeepSeek: DeepSeek V4 Pro 0813",
+      "canonical_slug": "deepseek/deepseek-v4-pro-20260813",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "x-ai/grok-4.6",
+      "name": "SpaceXAI: Grok 4.6",
+      "canonical_slug": "x-ai/grok-4.6-20260810",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "liquid/lfm-2.5-2.6b:free",
+      "name": "LiquidAI: LFM2.5-2.6B (free)",
+      "canonical_slug": "liquid/lfm-2.5-2.6b-20260811",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3.5-lightning",
+      "name": "NVIDIA: Nemotron 3.5 Lightning",
+      "canonical_slug": "nvidia/nemotron-3.5-lightning-20260807",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3.5-lightning:free",
+      "name": "NVIDIA: Nemotron 3.5 Lightning (free)",
+      "canonical_slug": "nvidia/nemotron-3.5-lightning-20260807",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "sakana/sakana-namazu",
+      "name": "Sakana: Sakana Namazu",
+      "canonical_slug": "sakana/namazu-20260811",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "upstage/solar-pro4",
+      "name": "Upstage: Solar Pro 4",
+      "canonical_slug": "upstage/solar-pro4-20260810",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta/muse-glimmer-30b",
+      "name": "Meta: Muse Glimmer 30B",
+      "canonical_slug": "meta/muse-glimmer-30b-20260810",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta/muse-spark-1.2",
+      "name": "Meta: Muse Spark 1.2",
+      "canonical_slug": "meta/muse-spark-1.2-20260805",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://dev.meta.ai/docs/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~deepseek/deepseek-v4-flash-latest",
+      "name": "DeepSeek: DeepSeek V4 Flash Latest",
+      "canonical_slug": "~deepseek/deepseek-v4-flash-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-0731",
+      "name": "DeepSeek: DeepSeek V4 Flash 0731",
+      "canonical_slug": "deepseek/deepseek-v4-flash-20260731",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "thinkingmachines/inkling-small",
+      "name": "Thinking Machines: Inkling Small",
+      "canonical_slug": "thinkingmachines/inkling-small-20260730",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/openai/",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "thinkingmachines/inkling-small:free",
+      "name": "Thinking Machines: Inkling Small (free)",
+      "canonical_slug": "thinkingmachines/inkling-small-20260730",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/openai/",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.7-flash",
+      "name": "Qwen: Qwen3.7 Flash",
+      "canonical_slug": "qwen/qwen3.7-flash-20260727",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-5",
+      "name": "Anthropic: Claude Opus 5",
+      "canonical_slug": "anthropic/claude-opus-5-20260723",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-5:batch",
+      "name": "Anthropic: Claude Opus 5 (batch)",
+      "canonical_slug": "anthropic/claude-opus-5-20260723",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "inclusionai/ling-3.0-flash",
+      "name": "inclusionAI: Ling 3.0 Flash",
+      "canonical_slug": "inclusionai/ling-3.0-flash-20260723",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/inclusionAI/Ling-3.1-flash",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "poolside/laguna-s-2.1",
+      "name": "Poolside: Laguna S 2.1",
+      "canonical_slug": "poolside/laguna-s-2.1-20260720",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "poolside/laguna-s-2.1:free",
+      "name": "Poolside: Laguna S 2.1 (free)",
+      "canonical_slug": "poolside/laguna-s-2.1-20260720",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.6-flash",
+      "name": "Google: Gemini 3.6 Flash",
+      "canonical_slug": "google/gemini-3.6-flash-20260721",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.6-flash:batch",
+      "name": "Google: Gemini 3.6 Flash (batch)",
+      "canonical_slug": "google/gemini-3.6-flash-20260721",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.5-flash-lite",
+      "name": "Google: Gemini 3.5 Flash Lite",
+      "canonical_slug": "google/gemini-3.5-flash-lite-20260721",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.5-flash-lite:batch",
+      "name": "Google: Gemini 3.5 Flash Lite (batch)",
+      "canonical_slug": "google/gemini-3.5-flash-lite-20260721",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meituan/longcat-2.0",
+      "name": "Meituan: LongCat 2.0",
+      "canonical_slug": "meituan/longcat-2.0-20260720",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "thinkingmachines/inkling",
+      "name": "Thinking Machines: Inkling",
+      "canonical_slug": "thinkingmachines/inkling-20260715",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/openai/",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "thinkingmachines/inkling:free",
+      "name": "Thinking Machines: Inkling (free)",
+      "canonical_slug": "thinkingmachines/inkling-20260715",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://tinker-docs.thinkingmachines.ai/tinker/compatible-apis/openai/",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openrouter/auto-beta",
+      "name": "Auto Router (Beta)",
+      "canonical_slug": "openrouter/auto-beta",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moonshotai/kimi-k3",
+      "name": "MoonshotAI: Kimi K3",
+      "canonical_slug": "moonshotai/kimi-k3-20260715",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moonshotai/kimi-k3:batch",
+      "name": "MoonshotAI: Kimi K3 (batch)",
+      "canonical_slug": "moonshotai/kimi-k3-20260715",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta/muse-spark-1.1",
+      "name": "Meta: Muse Spark 1.1",
+      "canonical_slug": "meta/muse-spark-1.1-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://dev.meta.ai/docs/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-luna-pro",
+      "name": "OpenAI: GPT-5.6 Luna Pro",
+      "canonical_slug": "openai/gpt-5.6-luna-pro-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-luna-pro:batch",
+      "name": "OpenAI: GPT-5.6 Luna Pro (batch)",
+      "canonical_slug": "openai/gpt-5.6-luna-pro-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-luna",
+      "name": "OpenAI: GPT-5.6 Luna",
+      "canonical_slug": "openai/gpt-5.6-luna-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-luna:batch",
+      "name": "OpenAI: GPT-5.6 Luna (batch)",
+      "canonical_slug": "openai/gpt-5.6-luna-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-terra-pro",
+      "name": "OpenAI: GPT-5.6 Terra Pro",
+      "canonical_slug": "openai/gpt-5.6-terra-pro-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-terra-pro:batch",
+      "name": "OpenAI: GPT-5.6 Terra Pro (batch)",
+      "canonical_slug": "openai/gpt-5.6-terra-pro-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-terra",
+      "name": "OpenAI: GPT-5.6 Terra",
+      "canonical_slug": "openai/gpt-5.6-terra-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-terra:batch",
+      "name": "OpenAI: GPT-5.6 Terra (batch)",
+      "canonical_slug": "openai/gpt-5.6-terra-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-sol-pro",
+      "name": "OpenAI: GPT-5.6 Sol Pro",
+      "canonical_slug": "openai/gpt-5.6-sol-pro-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-sol-pro:batch",
+      "name": "OpenAI: GPT-5.6 Sol Pro (batch)",
+      "canonical_slug": "openai/gpt-5.6-sol-pro-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-sol",
+      "name": "OpenAI: GPT-5.6 Sol",
+      "canonical_slug": "openai/gpt-5.6-sol-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.6-sol:batch",
+      "name": "OpenAI: GPT-5.6 Sol (batch)",
+      "canonical_slug": "openai/gpt-5.6-sol-20260709",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "x-ai/grok-4.5",
+      "name": "SpaceXAI: Grok 4.5",
+      "canonical_slug": "x-ai/grok-4.5-20260708",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~x-ai/grok-latest",
+      "name": "xAI: Grok Latest",
+      "canonical_slug": "~x-ai/grok-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "aion-labs/aion-3.0-mini",
+      "name": "AionLabs: Aion-3.0-Mini",
+      "canonical_slug": "aion-labs/aion-3.0-mini-20260707",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "aion-labs/aion-3.0",
+      "name": "AionLabs: Aion-3.0",
+      "canonical_slug": "aion-labs/aion-3.0-20260707",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "tencent/hy3",
+      "name": "Tencent: Hy3",
+      "canonical_slug": "tencent/hy3-20260706",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://intl.cloud.tencent.com/zh/document/product/1300/80695",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "poolside/laguna-xs-2.1",
+      "name": "Poolside: Laguna XS 2.1",
+      "canonical_slug": "poolside/laguna-xs-2.1-20260625",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "poolside/laguna-xs-2.1:free",
+      "name": "Poolside: Laguna XS 2.1 (free)",
+      "canonical_slug": "poolside/laguna-xs-2.1-20260625",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-sonnet-5",
+      "name": "Anthropic: Claude Sonnet 5",
+      "canonical_slug": "anthropic/claude-sonnet-5-20260630",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-sonnet-5:batch",
+      "name": "Anthropic: Claude Sonnet 5 (batch)",
+      "canonical_slug": "anthropic/claude-sonnet-5-20260630",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite-image",
+      "name": "Google: Nano Banana 2 Lite (Gemini 3.1 Flash Lite Image)",
+      "canonical_slug": "google/gemini-3.1-flash-lite-image-20260630",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "sakana/fugu-ultra",
+      "name": "Sakana: Fugu Ultra",
+      "canonical_slug": "sakana/fugu-ultra-20260615",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-flash-image",
+      "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image)",
+      "canonical_slug": "google/gemini-3.1-flash-image-20260528",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3-pro-image",
+      "name": "Google: Nano Banana Pro (Gemini 3 Pro Image)",
+      "canonical_slug": "google/gemini-3-pro-image-20260528",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "cohere/north-mini-code:free",
+      "name": "Cohere: North Mini Code (free)",
+      "canonical_slug": "cohere/north-mini-code-20260617",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5.2",
+      "name": "Z.ai: GLM 5.2",
+      "canonical_slug": "z-ai/glm-5.2-20260616",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openrouter/fusion",
+      "name": "OpenRouter: Fusion",
+      "canonical_slug": "openrouter/fusion",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias",
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moonshotai/kimi-k2.7-code",
+      "name": "MoonshotAI: Kimi K2.7 Code",
+      "canonical_slug": "moonshotai/kimi-k2.7-code-20260612",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~anthropic/claude-fable-latest",
+      "name": "Anthropic: Claude Fable Latest",
+      "canonical_slug": "~anthropic/claude-fable-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-fable-5",
+      "name": "Anthropic: Claude Fable 5",
+      "canonical_slug": "anthropic/claude-5-fable-20260609",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-fable-5:batch",
+      "name": "Anthropic: Claude Fable 5 (batch)",
+      "canonical_slug": "anthropic/claude-5-fable-20260609",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3.5-content-safety",
+      "name": "NVIDIA: Nemotron 3.5 Content Safety",
+      "canonical_slug": "nvidia/nemotron-3.5-content-safety-20260604",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3.5-content-safety:free",
+      "name": "NVIDIA: Nemotron 3.5 Content Safety (free)",
+      "canonical_slug": "nvidia/nemotron-3.5-content-safety-20260604",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON",
+        "Specialized model; not a general sales-agent approval",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3-ultra-550b-a55b",
+      "name": "NVIDIA: Nemotron 3 Ultra",
+      "canonical_slug": "nvidia/nemotron-3-ultra-550b-a55b-20260604",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "name": "NVIDIA: Nemotron 3 Ultra (free)",
+      "canonical_slug": "nvidia/nemotron-3-ultra-550b-a55b-20260604",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.7-plus",
+      "name": "Qwen: Qwen3.7 Plus",
+      "canonical_slug": "qwen/qwen3.7-plus-20260602",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.7-plus:batch",
+      "name": "Qwen: Qwen3.7 Plus (batch)",
+      "canonical_slug": "qwen/qwen3.7-plus-20260602",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-m3",
+      "name": "MiniMax: MiniMax M3",
+      "canonical_slug": "minimax/minimax-m3-20260531",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.minimax.io/docs/guides/text-m3-function-call",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "stepfun/step-3.7-flash",
+      "name": "StepFun: Step 3.7 Flash",
+      "canonical_slug": "stepfun/step-3.7-flash-20260528",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.stepfun.ai/cookbook/step-5-tool-calling",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.8",
+      "name": "Anthropic: Claude Opus 4.8",
+      "canonical_slug": "anthropic/claude-4.8-opus-20260528",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.8:batch",
+      "name": "Anthropic: Claude Opus 4.8 (batch)",
+      "canonical_slug": "anthropic/claude-4.8-opus-20260528",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.7-max",
+      "name": "Qwen: Qwen3.7 Max",
+      "canonical_slug": "qwen/qwen3.7-max-20260520",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "x-ai/grok-build-0.1",
+      "name": "SpaceXAI: Grok Build 0.1",
+      "canonical_slug": "x-ai/grok-build-0.1-20260520",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.5-flash",
+      "name": "Google: Gemini 3.5 Flash",
+      "canonical_slug": "google/gemini-3.5-flash-20260519",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.5-flash:batch",
+      "name": "Google: Gemini 3.5 Flash (batch)",
+      "canonical_slug": "google/gemini-3.5-flash-20260519",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "perceptron/perceptron-mk1",
+      "name": "Perceptron: Perceptron Mk1",
+      "canonical_slug": "perceptron/perceptron-mk1-20260512",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite",
+      "name": "Google: Gemini 3.1 Flash Lite",
+      "canonical_slug": "google/gemini-3.1-flash-lite-20260507",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite:batch",
+      "name": "Google: Gemini 3.1 Flash Lite (batch)",
+      "canonical_slug": "google/gemini-3.1-flash-lite-20260507",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-chat-latest",
+      "name": "OpenAI: GPT Chat Latest",
+      "canonical_slug": "openai/gpt-chat-latest-20260505",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "x-ai/grok-4.3",
+      "name": "SpaceXAI: Grok 4.3",
+      "canonical_slug": "x-ai/grok-4.3-20260430",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "x-ai/grok-4.3:batch",
+      "name": "SpaceXAI: Grok 4.3 (batch)",
+      "canonical_slug": "x-ai/grok-4.3-20260430",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-medium-3-5",
+      "name": "Mistral: Mistral Medium 3.5",
+      "canonical_slug": "mistralai/mistral-medium-3.5-20260430",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-medium-3-5:batch",
+      "name": "Mistral: Mistral Medium 3.5 (batch)",
+      "canonical_slug": "mistralai/mistral-medium-3.5-20260430",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "name": "NVIDIA: Nemotron 3 Nano Omni (free)",
+      "canonical_slug": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning-20260428",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON",
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~anthropic/claude-haiku-latest",
+      "name": "Anthropic: Claude Haiku Latest",
+      "canonical_slug": "~anthropic/claude-haiku-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~openai/gpt-mini-latest",
+      "name": "OpenAI: GPT Mini Latest",
+      "canonical_slug": "~openai/gpt-mini-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~google/gemini-pro-latest",
+      "name": "Google: Gemini Pro Latest",
+      "canonical_slug": "~google/gemini-pro-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~moonshotai/kimi-latest",
+      "name": "MoonshotAI: Kimi Latest",
+      "canonical_slug": "~moonshotai/kimi-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~google/gemini-flash-latest",
+      "name": "Google: Gemini Flash Latest",
+      "canonical_slug": "~google/gemini-flash-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~anthropic/claude-sonnet-latest",
+      "name": "Anthropic: Claude Sonnet Latest",
+      "canonical_slug": "~anthropic/claude-sonnet-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.5-plus-20260420",
+      "name": "Qwen: Qwen3.5 Plus 2026-04-20",
+      "canonical_slug": "qwen/qwen3.5-plus-20260420",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.6-flash",
+      "name": "Qwen: Qwen3.6 Flash",
+      "canonical_slug": "qwen/qwen3.6-flash",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.6-35b-a3b",
+      "name": "Qwen: Qwen3.6 35B A3B",
+      "canonical_slug": "qwen/qwen3.6-35b-a3b-20260415",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.6-27b",
+      "name": "Qwen: Qwen3.6 27B",
+      "canonical_slug": "qwen/qwen3.6-27b-20260422",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.5-pro",
+      "name": "OpenAI: GPT-5.5 Pro",
+      "canonical_slug": "openai/gpt-5.5-pro-20260423",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.5-pro:batch",
+      "name": "OpenAI: GPT-5.5 Pro (batch)",
+      "canonical_slug": "openai/gpt-5.5-pro-20260423",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.5",
+      "name": "OpenAI: GPT-5.5",
+      "canonical_slug": "openai/gpt-5.5-20260423",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.5:batch",
+      "name": "OpenAI: GPT-5.5 (batch)",
+      "canonical_slug": "openai/gpt-5.5-20260423",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro",
+      "name": "DeepSeek: DeepSeek V4 Pro 0423",
+      "canonical_slug": "deepseek/deepseek-v4-pro-20260423",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash",
+      "name": "DeepSeek: DeepSeek V4 Flash 0423",
+      "canonical_slug": "deepseek/deepseek-v4-flash-20260423",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "tencent/hy3-preview",
+      "name": "Tencent: Hy3 preview",
+      "canonical_slug": "tencent/hy3-preview-20260421",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://intl.cloud.tencent.com/zh/document/product/1300/80695",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "xiaomi/mimo-v2.5-pro",
+      "name": "Xiaomi: MiMo-V2.5-Pro",
+      "canonical_slug": "xiaomi/mimo-v2.5-pro-20260422",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://mimo.mi.com/docs/en-US/quick-start/usage-guide/other/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "xiaomi/mimo-v2.5",
+      "name": "Xiaomi: MiMo-V2.5",
+      "canonical_slug": "xiaomi/mimo-v2.5-20260422",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://mimo.mi.com/docs/en-US/quick-start/usage-guide/other/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4-image-2",
+      "name": "OpenAI: GPT-5.4 Image 2",
+      "canonical_slug": "openai/gpt-5.4-image-2-20260421",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "~anthropic/claude-opus-latest",
+      "name": "Anthropic: Claude Opus Latest",
+      "canonical_slug": "~anthropic/claude-opus-latest",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openrouter/pareto-code",
+      "name": "Pareto Code Router",
+      "canonical_slug": "openrouter/pareto-code",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moonshotai/kimi-k2.6",
+      "name": "MoonshotAI: Kimi K2.6",
+      "canonical_slug": "moonshotai/kimi-k2.6-20260420",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.7",
+      "name": "Anthropic: Claude Opus 4.7",
+      "canonical_slug": "anthropic/claude-4.7-opus-20260416",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.7:batch",
+      "name": "Anthropic: Claude Opus 4.7 (batch)",
+      "canonical_slug": "anthropic/claude-4.7-opus-20260416",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5.1",
+      "name": "Z.ai: GLM 5.1",
+      "canonical_slug": "z-ai/glm-5.1-20260406",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemma-4-26b-a4b-it",
+      "name": "Google: Gemma 4 26B A4B ",
+      "canonical_slug": "google/gemma-4-26b-a4b-it-20260403",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://ai.google.dev/gemma/docs/core/model_card_4",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemma-4-26b-a4b-it:free",
+      "name": "Google: Gemma 4 26B A4B  (free)",
+      "canonical_slug": "google/gemma-4-26b-a4b-it-20260403",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://ai.google.dev/gemma/docs/core/model_card_4",
+      "cautions": [
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemma-4-31b-it",
+      "name": "Google: Gemma 4 31B",
+      "canonical_slug": "google/gemma-4-31b-it-20260402",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://ai.google.dev/gemma/docs/core/model_card_4",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemma-4-31b-it:free",
+      "name": "Google: Gemma 4 31B (free)",
+      "canonical_slug": "google/gemma-4-31b-it-20260402",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://ai.google.dev/gemma/docs/core/model_card_4",
+      "cautions": [
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.6-plus",
+      "name": "Qwen: Qwen3.6 Plus",
+      "canonical_slug": "qwen/qwen3.6-plus-04-02",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5v-turbo",
+      "name": "Z.ai: GLM 5V Turbo",
+      "canonical_slug": "z-ai/glm-5v-turbo-20260401",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "arcee-ai/trinity-large-thinking",
+      "name": "Arcee AI: Trinity Large Thinking",
+      "canonical_slug": "arcee-ai/trinity-large-thinking",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/arcee-ai/Trinity-Large-Thinking",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "x-ai/grok-4.20-multi-agent",
+      "name": "SpaceXAI: Grok 4.20 Multi-Agent",
+      "canonical_slug": "x-ai/grok-4.20-multi-agent-20260309",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "x-ai/grok-4.20",
+      "name": "SpaceXAI: Grok 4.20",
+      "canonical_slug": "x-ai/grok-4.20-20260309",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/lyria-3-pro-preview",
+      "name": "Google: Lyria 3 Pro Preview",
+      "canonical_slug": "google/lyria-3-pro-preview-20260330",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/lyria-3-clip-preview",
+      "name": "Google: Lyria 3 Clip Preview",
+      "canonical_slug": "google/lyria-3-clip-preview-20260330",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "rekaai/reka-edge",
+      "name": "Reka Edge",
+      "canonical_slug": "rekaai/reka-edge-2603",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-m2.7",
+      "name": "MiniMax: MiniMax M2.7",
+      "canonical_slug": "minimax/minimax-m2.7-20260318",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.minimax.io/docs/guides/text-m3-function-call",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4-nano",
+      "name": "OpenAI: GPT-5.4 Nano",
+      "canonical_slug": "openai/gpt-5.4-nano-20260317",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4-nano:batch",
+      "name": "OpenAI: GPT-5.4 Nano (batch)",
+      "canonical_slug": "openai/gpt-5.4-nano-20260317",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4-mini",
+      "name": "OpenAI: GPT-5.4 Mini",
+      "canonical_slug": "openai/gpt-5.4-mini-20260317",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4-mini:batch",
+      "name": "OpenAI: GPT-5.4 Mini (batch)",
+      "canonical_slug": "openai/gpt-5.4-mini-20260317",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-small-2603",
+      "name": "Mistral: Mistral Small 4",
+      "canonical_slug": "mistralai/mistral-small-2603",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-small-2603:batch",
+      "name": "Mistral: Mistral Small 4 (batch)",
+      "canonical_slug": "mistralai/mistral-small-2603",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5-turbo",
+      "name": "Z.ai: GLM 5 Turbo",
+      "canonical_slug": "z-ai/glm-5-turbo-20260315",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3-super-120b-a12b",
+      "name": "NVIDIA: Nemotron 3 Super",
+      "canonical_slug": "nvidia/nemotron-3-super-120b-a12b-20230311",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3-super-120b-a12b:free",
+      "name": "NVIDIA: Nemotron 3 Super (free)",
+      "canonical_slug": "nvidia/nemotron-3-super-120b-a12b-20230311",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [
+        "Free route has separate availability/rate/provider requirements"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "bytedance-seed/seed-2.0-lite",
+      "name": "ByteDance Seed: Seed-2.0-Lite",
+      "canonical_slug": "bytedance-seed/seed-2.0-lite-20260309",
+      "text_exposure_class": "Version-dependent; unresolved",
+      "source_url": "https://docs.volcengine.com/docs/ark/deep-thinking?lang=en",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.5-9b",
+      "name": "Qwen: Qwen3.5-9B",
+      "canonical_slug": "qwen/qwen3.5-9b-20260310",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4-pro",
+      "name": "OpenAI: GPT-5.4 Pro",
+      "canonical_slug": "openai/gpt-5.4-pro-20260305",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4-pro:batch",
+      "name": "OpenAI: GPT-5.4 Pro (batch)",
+      "canonical_slug": "openai/gpt-5.4-pro-20260305",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4",
+      "name": "OpenAI: GPT-5.4",
+      "canonical_slug": "openai/gpt-5.4-20260305",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.4:batch",
+      "name": "OpenAI: GPT-5.4 (batch)",
+      "canonical_slug": "openai/gpt-5.4-20260305",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "inception/mercury-2",
+      "name": "Inception: Mercury 2",
+      "canonical_slug": "inception/mercury-2-20260304",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://docs.inceptionlabs.ai/api-reference/chat/create-a-chat-completion",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite-preview",
+      "name": "Google: Gemini 3.1 Flash Lite Preview",
+      "canonical_slug": "google/gemini-3.1-flash-lite-preview-20260303",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "bytedance-seed/seed-2.0-mini",
+      "name": "ByteDance Seed: Seed-2.0-Mini",
+      "canonical_slug": "bytedance-seed/seed-2.0-mini-20260224",
+      "text_exposure_class": "Version-dependent; unresolved",
+      "source_url": "https://docs.volcengine.com/docs/ark/deep-thinking?lang=en",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-flash-image-preview",
+      "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image Preview)",
+      "canonical_slug": "google/gemini-3.1-flash-image-preview-20260226",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.5-35b-a3b",
+      "name": "Qwen: Qwen3.5-35B-A3B",
+      "canonical_slug": "qwen/qwen3.5-35b-a3b-20260224",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.5-27b",
+      "name": "Qwen: Qwen3.5-27B",
+      "canonical_slug": "qwen/qwen3.5-27b-20260224",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.5-122b-a10b",
+      "name": "Qwen: Qwen3.5-122B-A10B",
+      "canonical_slug": "qwen/qwen3.5-122b-a10b-20260224",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.5-flash-02-23",
+      "name": "Qwen: Qwen3.5-Flash",
+      "canonical_slug": "qwen/qwen3.5-flash-20260224",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-pro-preview-customtools",
+      "name": "Google: Gemini 3.1 Pro Preview Custom Tools",
+      "canonical_slug": "google/gemini-3.1-pro-preview-customtools-20260219",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.3-codex",
+      "name": "OpenAI: GPT-5.3-Codex",
+      "canonical_slug": "openai/gpt-5.3-codex-20260224",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "aion-labs/aion-2.0",
+      "name": "AionLabs: Aion-2.0",
+      "canonical_slug": "aion-labs/aion-2.0-20260223",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-pro-preview",
+      "name": "Google: Gemini 3.1 Pro Preview",
+      "canonical_slug": "google/gemini-3.1-pro-preview-20260219",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3.1-pro-preview:batch",
+      "name": "Google: Gemini 3.1 Pro Preview (batch)",
+      "canonical_slug": "google/gemini-3.1-pro-preview-20260219",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-sonnet-4.6",
+      "name": "Anthropic: Claude Sonnet 4.6",
+      "canonical_slug": "anthropic/claude-4.6-sonnet-20260217",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-sonnet-4.6:batch",
+      "name": "Anthropic: Claude Sonnet 4.6 (batch)",
+      "canonical_slug": "anthropic/claude-4.6-sonnet-20260217",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.5-plus-02-15",
+      "name": "Qwen: Qwen3.5 Plus 2026-02-15",
+      "canonical_slug": "qwen/qwen3.5-plus-20260216",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3.5-397b-a17b",
+      "name": "Qwen: Qwen3.5 397B A17B",
+      "canonical_slug": "qwen/qwen3.5-397b-a17b-20260216",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-m2.5",
+      "name": "MiniMax: MiniMax M2.5",
+      "canonical_slug": "minimax/minimax-m2.5-20260211",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.minimax.io/docs/guides/text-m3-function-call",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-5",
+      "name": "Z.ai: GLM 5",
+      "canonical_slug": "z-ai/glm-5-20260211",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.6",
+      "name": "Anthropic: Claude Opus 4.6",
+      "canonical_slug": "anthropic/claude-4.6-opus-20260205",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.6:batch",
+      "name": "Anthropic: Claude Opus 4.6 (batch)",
+      "canonical_slug": "anthropic/claude-4.6-opus-20260205",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-coder-next",
+      "name": "Qwen: Qwen3 Coder Next",
+      "canonical_slug": "qwen/qwen3-coder-next-2025-02-03",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openrouter/free",
+      "name": "Free Models Router",
+      "canonical_slug": "openrouter/free",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "stepfun/step-3.5-flash",
+      "name": "StepFun: Step 3.5 Flash",
+      "canonical_slug": "stepfun/step-3.5-flash",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.stepfun.ai/cookbook/step-5-tool-calling",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moonshotai/kimi-k2.5",
+      "name": "MoonshotAI: Kimi K2.5",
+      "canonical_slug": "moonshotai/kimi-k2.5-0127",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "upstage/solar-pro-3",
+      "name": "Upstage: Solar Pro 3",
+      "canonical_slug": "upstage/solar-pro-3",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-m2-her",
+      "name": "MiniMax: MiniMax M2-her",
+      "canonical_slug": "minimax/minimax-m2-her-20260123",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "writer/palmyra-x5",
+      "name": "Writer: Palmyra X5",
+      "canonical_slug": "writer/palmyra-x5-20250428",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-audio",
+      "name": "OpenAI: GPT Audio",
+      "canonical_slug": "openai/gpt-audio",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-audio-mini",
+      "name": "OpenAI: GPT Audio Mini",
+      "canonical_slug": "openai/gpt-audio-mini",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-4.7-flash",
+      "name": "Z.ai: GLM 4.7 Flash",
+      "canonical_slug": "z-ai/glm-4.7-flash-20260119",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.2-codex",
+      "name": "OpenAI: GPT-5.2-Codex",
+      "canonical_slug": "openai/gpt-5.2-codex-20260114",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "bytedance-seed/seed-1.6-flash",
+      "name": "ByteDance Seed: Seed 1.6 Flash",
+      "canonical_slug": "bytedance-seed/seed-1.6-flash-20250625",
+      "text_exposure_class": "Version-dependent; unresolved",
+      "source_url": "https://docs.volcengine.com/docs/ark/deep-thinking?lang=en",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "bytedance-seed/seed-1.6",
+      "name": "ByteDance Seed: Seed 1.6",
+      "canonical_slug": "bytedance-seed/seed-1.6-20250625",
+      "text_exposure_class": "Version-dependent; unresolved",
+      "source_url": "https://docs.volcengine.com/docs/ark/deep-thinking?lang=en",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-m2.1",
+      "name": "MiniMax: MiniMax M2.1",
+      "canonical_slug": "minimax/minimax-m2.1",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.minimax.io/docs/guides/text-m3-function-call",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-4.7",
+      "name": "Z.ai: GLM 4.7",
+      "canonical_slug": "z-ai/glm-4.7-20251222",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3-flash-preview",
+      "name": "Google: Gemini 3 Flash Preview",
+      "canonical_slug": "google/gemini-3-flash-preview-20251217",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3-flash-preview:batch",
+      "name": "Google: Gemini 3 Flash Preview (batch)",
+      "canonical_slug": "google/gemini-3-flash-preview-20251217",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nvidia/nemotron-3-nano-30b-a3b",
+      "name": "NVIDIA: Nemotron 3 Nano 30B A3B",
+      "canonical_slug": "nvidia/nemotron-3-nano-30b-a3b",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.2-chat",
+      "name": "OpenAI: GPT-5.2 Chat",
+      "canonical_slug": "openai/gpt-5.2-chat-20251211",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.2-pro",
+      "name": "OpenAI: GPT-5.2 Pro",
+      "canonical_slug": "openai/gpt-5.2-pro-20251211",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.2-pro:batch",
+      "name": "OpenAI: GPT-5.2 Pro (batch)",
+      "canonical_slug": "openai/gpt-5.2-pro-20251211",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.2",
+      "name": "OpenAI: GPT-5.2",
+      "canonical_slug": "openai/gpt-5.2-20251211",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.2:batch",
+      "name": "OpenAI: GPT-5.2 (batch)",
+      "canonical_slug": "openai/gpt-5.2-20251211",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/devstral-2512",
+      "name": "Mistral: Devstral 2 2512",
+      "canonical_slug": "mistralai/devstral-2512",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "relace/relace-search",
+      "name": "Relace: Relace Search",
+      "canonical_slug": "relace/relace-search-20251208",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-4.6v",
+      "name": "Z.ai: GLM 4.6V",
+      "canonical_slug": "z-ai/glm-4.6-20251208",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openrouter/bodybuilder",
+      "name": "Body Builder (beta)",
+      "canonical_slug": "openrouter/bodybuilder",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias",
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.1-codex-max",
+      "name": "OpenAI: GPT-5.1-Codex-Max",
+      "canonical_slug": "openai/gpt-5.1-codex-max-20251204",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "amazon/nova-2-lite-v1",
+      "name": "Amazon: Nova 2 Lite",
+      "canonical_slug": "amazon/nova-2-lite-v1",
+      "text_exposure_class": "Redacted; excluded",
+      "source_url": "https://docs.aws.amazon.com/nova/latest/nova2-userguide/reasoning-capabilities.html",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/ministral-14b-2512",
+      "name": "Mistral: Ministral 3 14B 2512",
+      "canonical_slug": "mistralai/ministral-14b-2512",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/ministral-8b-2512",
+      "name": "Mistral: Ministral 3 8B 2512",
+      "canonical_slug": "mistralai/ministral-8b-2512",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/ministral-8b-2512:batch",
+      "name": "Mistral: Ministral 3 8B 2512 (batch)",
+      "canonical_slug": "mistralai/ministral-8b-2512",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/ministral-3b-2512",
+      "name": "Mistral: Ministral 3 3B 2512",
+      "canonical_slug": "mistralai/ministral-3b-2512",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-large-2512",
+      "name": "Mistral: Mistral Large 3 2512",
+      "canonical_slug": "mistralai/mistral-large-2512",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-large-2512:batch",
+      "name": "Mistral: Mistral Large 3 2512 (batch)",
+      "canonical_slug": "mistralai/mistral-large-2512",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v3.2",
+      "name": "DeepSeek: DeepSeek V3.2",
+      "canonical_slug": "deepseek/deepseek-v3.2-20251201",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.5",
+      "name": "Anthropic: Claude Opus 4.5",
+      "canonical_slug": "anthropic/claude-4.5-opus-20251124",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.5:batch",
+      "name": "Anthropic: Claude Opus 4.5 (batch)",
+      "canonical_slug": "anthropic/claude-4.5-opus-20251124",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-3-pro-image-preview",
+      "name": "Google: Nano Banana Pro (Gemini 3 Pro Image Preview)",
+      "canonical_slug": "google/gemini-3-pro-image-preview-20251120",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.1",
+      "name": "OpenAI: GPT-5.1",
+      "canonical_slug": "openai/gpt-5.1-20251113",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.1:batch",
+      "name": "OpenAI: GPT-5.1 (batch)",
+      "canonical_slug": "openai/gpt-5.1-20251113",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.1-codex",
+      "name": "OpenAI: GPT-5.1-Codex",
+      "canonical_slug": "openai/gpt-5.1-codex-20251113",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5.1-codex-mini",
+      "name": "OpenAI: GPT-5.1-Codex-Mini",
+      "canonical_slug": "openai/gpt-5.1-codex-mini-20251113",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moonshotai/kimi-k2-thinking",
+      "name": "MoonshotAI: Kimi K2 Thinking",
+      "canonical_slug": "moonshotai/kimi-k2-thinking-20251106",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "amazon/nova-premier-v1",
+      "name": "Amazon: Nova Premier 1.0",
+      "canonical_slug": "amazon/nova-premier-v1",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "perplexity/sonar-pro-search",
+      "name": "Perplexity: Sonar Pro Search",
+      "canonical_slug": "perplexity/sonar-pro-search",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/voxtral-small-24b-2507",
+      "name": "Mistral: Voxtral Small 24B 2507",
+      "canonical_slug": "mistralai/voxtral-small-24b-2507",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-oss-safeguard-20b",
+      "name": "OpenAI: gpt-oss-safeguard-20b",
+      "canonical_slug": "openai/gpt-oss-safeguard-20b",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-m2",
+      "name": "MiniMax: MiniMax M2",
+      "canonical_slug": "minimax/minimax-m2",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.minimax.io/docs/guides/text-m3-function-call",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "ibm-granite/granite-4.0-h-micro",
+      "name": "IBM: Granite 4.0 Micro",
+      "canonical_slug": "ibm-granite/granite-4.0-h-micro",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5-image-mini",
+      "name": "OpenAI: GPT-5 Image Mini",
+      "canonical_slug": "openai/gpt-5-image-mini",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-haiku-4.5",
+      "name": "Anthropic: Claude Haiku 4.5",
+      "canonical_slug": "anthropic/claude-4.5-haiku-20251001",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-haiku-4.5:batch",
+      "name": "Anthropic: Claude Haiku 4.5 (batch)",
+      "canonical_slug": "anthropic/claude-4.5-haiku-20251001",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-vl-8b-instruct",
+      "name": "Qwen: Qwen3 VL 8B Instruct",
+      "canonical_slug": "qwen/qwen3-vl-8b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5-image",
+      "name": "OpenAI: GPT-5 Image",
+      "canonical_slug": "openai/gpt-5-image",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-2.5-flash-image",
+      "name": "Google: Nano Banana (Gemini 2.5 Flash Image)",
+      "canonical_slug": "google/gemini-2.5-flash-image",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Specialized model; not a general sales-agent approval"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-vl-30b-a3b-thinking",
+      "name": "Qwen: Qwen3 VL 30B A3B Thinking",
+      "canonical_slug": "qwen/qwen3-vl-30b-a3b-thinking",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-vl-30b-a3b-instruct",
+      "name": "Qwen: Qwen3 VL 30B A3B Instruct",
+      "canonical_slug": "qwen/qwen3-vl-30b-a3b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5-pro",
+      "name": "OpenAI: GPT-5 Pro",
+      "canonical_slug": "openai/gpt-5-pro-2025-10-06",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5-pro:batch",
+      "name": "OpenAI: GPT-5 Pro (batch)",
+      "canonical_slug": "openai/gpt-5-pro-2025-10-06",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-4.6",
+      "name": "Z.ai: GLM 4.6",
+      "canonical_slug": "z-ai/glm-4.6",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-sonnet-4.5",
+      "name": "Anthropic: Claude Sonnet 4.5",
+      "canonical_slug": "anthropic/claude-4.5-sonnet-20250929",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-sonnet-4.5:batch",
+      "name": "Anthropic: Claude Sonnet 4.5 (batch)",
+      "canonical_slug": "anthropic/claude-4.5-sonnet-20250929",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v3.2-exp",
+      "name": "DeepSeek: DeepSeek V3.2 Exp",
+      "canonical_slug": "deepseek/deepseek-v3.2-exp",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "thedrummer/cydonia-24b-v4.1",
+      "name": "TheDrummer: Cydonia 24B V4.1",
+      "canonical_slug": "thedrummer/cydonia-24b-v4.1",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "relace/relace-apply-3",
+      "name": "Relace: Relace Apply 3",
+      "canonical_slug": "relace/relace-apply-3",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-vl-235b-a22b-instruct",
+      "name": "Qwen: Qwen3 VL 235B A22B Instruct",
+      "canonical_slug": "qwen/qwen3-vl-235b-a22b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-v3.1-terminus",
+      "name": "DeepSeek: DeepSeek V3.1 Terminus",
+      "canonical_slug": "deepseek/deepseek-v3.1-terminus",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-coder-flash",
+      "name": "Qwen: Qwen3 Coder Flash",
+      "canonical_slug": "qwen/qwen3-coder-flash",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-next-80b-a3b-thinking",
+      "name": "Qwen: Qwen3 Next 80B A3B Thinking",
+      "canonical_slug": "qwen/qwen3-next-80b-a3b-thinking-2509",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-next-80b-a3b-instruct",
+      "name": "Qwen: Qwen3 Next 80B A3B Instruct",
+      "canonical_slug": "qwen/qwen3-next-80b-a3b-instruct-2509",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moonshotai/kimi-k2-0905",
+      "name": "MoonshotAI: Kimi K2 0905",
+      "canonical_slug": "moonshotai/kimi-k2-0905",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nousresearch/hermes-4-405b",
+      "name": "Nous: Hermes 4 405B",
+      "canonical_slug": "nousresearch/hermes-4-405b",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-chat-v3.1",
+      "name": "DeepSeek: DeepSeek V3.1",
+      "canonical_slug": "deepseek/deepseek-chat-v3.1",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-medium-3.1",
+      "name": "Mistral: Mistral Medium 3.1",
+      "canonical_slug": "mistralai/mistral-medium-3.1",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-medium-3.1:batch",
+      "name": "Mistral: Mistral Medium 3.1 (batch)",
+      "canonical_slug": "mistralai/mistral-medium-3.1",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-4.5v",
+      "name": "Z.ai: GLM 4.5V",
+      "canonical_slug": "z-ai/glm-4.5v",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5",
+      "name": "OpenAI: GPT-5",
+      "canonical_slug": "openai/gpt-5-2025-08-07",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5:batch",
+      "name": "OpenAI: GPT-5 (batch)",
+      "canonical_slug": "openai/gpt-5-2025-08-07",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5-mini",
+      "name": "OpenAI: GPT-5 Mini",
+      "canonical_slug": "openai/gpt-5-mini-2025-08-07",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5-mini:batch",
+      "name": "OpenAI: GPT-5 Mini (batch)",
+      "canonical_slug": "openai/gpt-5-mini-2025-08-07",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5-nano",
+      "name": "OpenAI: GPT-5 Nano",
+      "canonical_slug": "openai/gpt-5-nano-2025-08-07",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-5-nano:batch",
+      "name": "OpenAI: GPT-5 Nano (batch)",
+      "canonical_slug": "openai/gpt-5-nano-2025-08-07",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-oss-120b",
+      "name": "OpenAI: gpt-oss-120b",
+      "canonical_slug": "openai/gpt-oss-120b",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://developers.openai.com/cookbook/articles/gpt-oss/handle-raw-cot",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-oss-120b:batch",
+      "name": "OpenAI: gpt-oss-120b (batch)",
+      "canonical_slug": "openai/gpt-oss-120b",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://developers.openai.com/cookbook/articles/gpt-oss/handle-raw-cot",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-oss-20b",
+      "name": "OpenAI: gpt-oss-20b",
+      "canonical_slug": "openai/gpt-oss-20b",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://developers.openai.com/cookbook/articles/gpt-oss/handle-raw-cot",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-oss-20b:batch",
+      "name": "OpenAI: gpt-oss-20b (batch)",
+      "canonical_slug": "openai/gpt-oss-20b",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://developers.openai.com/cookbook/articles/gpt-oss/handle-raw-cot",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.1",
+      "name": "Anthropic: Claude Opus 4.1",
+      "canonical_slug": "anthropic/claude-4.1-opus-20250805",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthropic/claude-opus-4.1:batch",
+      "name": "Anthropic: Claude Opus 4.1 (batch)",
+      "canonical_slug": "anthropic/claude-4.1-opus-20250805",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://platform.claude.com/docs/en/build-with-claude/thinking",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/codestral-2508",
+      "name": "Mistral: Codestral 2508",
+      "canonical_slug": "mistralai/codestral-2508",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/codestral-2508:batch",
+      "name": "Mistral: Codestral 2508 (batch)",
+      "canonical_slug": "mistralai/codestral-2508",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-coder-30b-a3b-instruct",
+      "name": "Qwen: Qwen3 Coder 30B A3B Instruct",
+      "canonical_slug": "qwen/qwen3-coder-30b-a3b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-30b-a3b-instruct-2507",
+      "name": "Qwen: Qwen3 30B A3B Instruct 2507",
+      "canonical_slug": "qwen/qwen3-30b-a3b-instruct-2507",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-4.5",
+      "name": "Z.ai: GLM 4.5",
+      "canonical_slug": "z-ai/glm-4.5",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "z-ai/glm-4.5-air",
+      "name": "Z.ai: GLM 4.5 Air",
+      "canonical_slug": "z-ai/glm-4.5-air",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-235b-a22b-thinking-2507",
+      "name": "Qwen: Qwen3 235B A22B Thinking 2507",
+      "canonical_slug": "qwen/qwen3-235b-a22b-thinking-2507",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-coder",
+      "name": "Qwen: Qwen3 Coder 480B A35B",
+      "canonical_slug": "qwen/qwen3-coder-480b-a35b-07-25",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "bytedance/ui-tars-1.5-7b",
+      "name": "ByteDance: UI-TARS 7B ",
+      "canonical_slug": "bytedance/ui-tars-1.5-7b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-2.5-flash-lite",
+      "name": "Google: Gemini 2.5 Flash Lite",
+      "canonical_slug": "google/gemini-2.5-flash-lite",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-235b-a22b-2507",
+      "name": "Qwen: Qwen3 235B A22B Instruct 2507",
+      "canonical_slug": "qwen/qwen3-235b-a22b-07-25",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "moonshotai/kimi-k2",
+      "name": "MoonshotAI: Kimi K2 0711",
+      "canonical_slug": "moonshotai/kimi-k2",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+      "name": "Venice: Uncensored",
+      "canonical_slug": "venice/uncensored",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "tencent/hunyuan-a13b-instruct",
+      "name": "Tencent: Hunyuan A13B Instruct",
+      "canonical_slug": "tencent/hunyuan-a13b-instruct",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://intl.cloud.tencent.com/zh/document/product/1300/80695",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "morph/morph-v3-large",
+      "name": "Morph: Morph V3 Large",
+      "canonical_slug": "morph/morph-v3-large",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "morph/morph-v3-fast",
+      "name": "Morph: Morph V3 Fast",
+      "canonical_slug": "morph/morph-v3-fast",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-small-3.2-24b-instruct",
+      "name": "Mistral: Mistral Small 3.2 24B",
+      "canonical_slug": "mistralai/mistral-small-3.2-24b-instruct-2506",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-m1",
+      "name": "MiniMax: MiniMax M1",
+      "canonical_slug": "minimax/minimax-m1",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://platform.minimax.io/docs/guides/text-m3-function-call",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-2.5-flash",
+      "name": "Google: Gemini 2.5 Flash",
+      "canonical_slug": "google/gemini-2.5-flash",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-2.5-pro",
+      "name": "Google: Gemini 2.5 Pro",
+      "canonical_slug": "google/gemini-2.5-pro",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o3-pro",
+      "name": "OpenAI: o3 Pro",
+      "canonical_slug": "openai/o3-pro-2025-06-10",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemini-2.5-pro-preview",
+      "name": "Google: Gemini 2.5 Pro Preview 06-05",
+      "canonical_slug": "google/gemini-2.5-pro-preview-06-05",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://ai.google.dev/gemini-api/docs/thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-r1-0528",
+      "name": "DeepSeek: R1 0528",
+      "canonical_slug": "deepseek/deepseek-r1-0528",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://api-docs.deepseek.com/guides/thinking_mode/",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-medium-3",
+      "name": "Mistral: Mistral Medium 3",
+      "canonical_slug": "mistralai/mistral-medium-3",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta-llama/llama-guard-4-12b",
+      "name": "Meta: Llama Guard 4 12B",
+      "canonical_slug": "meta-llama/llama-guard-4-12b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-30b-a3b",
+      "name": "Qwen: Qwen3 30B A3B",
+      "canonical_slug": "qwen/qwen3-30b-a3b-04-28",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-14b",
+      "name": "Qwen: Qwen3 14B",
+      "canonical_slug": "qwen/qwen3-14b-04-28",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen3-32b",
+      "name": "Qwen: Qwen3 32B",
+      "canonical_slug": "qwen/qwen3-32b-04-28",
+      "text_exposure_class": "Generated thinking candidate",
+      "source_url": "https://www.alibabacloud.com/help/en/model-studio/deep-thinking",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o4-mini-high",
+      "name": "OpenAI: o4 Mini High",
+      "canonical_slug": "openai/o4-mini-high-2025-04-16",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o3",
+      "name": "OpenAI: o3",
+      "canonical_slug": "openai/o3-2025-04-16",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o3:batch",
+      "name": "OpenAI: o3 (batch)",
+      "canonical_slug": "openai/o3-2025-04-16",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o4-mini",
+      "name": "OpenAI: o4 Mini",
+      "canonical_slug": "openai/o4-mini-2025-04-16",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o4-mini:batch",
+      "name": "OpenAI: o4 Mini (batch)",
+      "canonical_slug": "openai/o4-mini-2025-04-16",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4.1",
+      "name": "OpenAI: GPT-4.1",
+      "canonical_slug": "openai/gpt-4.1-2025-04-14",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4.1:batch",
+      "name": "OpenAI: GPT-4.1 (batch)",
+      "canonical_slug": "openai/gpt-4.1-2025-04-14",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4.1-mini",
+      "name": "OpenAI: GPT-4.1 Mini",
+      "canonical_slug": "openai/gpt-4.1-mini-2025-04-14",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4.1-mini:batch",
+      "name": "OpenAI: GPT-4.1 Mini (batch)",
+      "canonical_slug": "openai/gpt-4.1-mini-2025-04-14",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4.1-nano",
+      "name": "OpenAI: GPT-4.1 Nano",
+      "canonical_slug": "openai/gpt-4.1-nano-2025-04-14",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4.1-nano:batch",
+      "name": "OpenAI: GPT-4.1 Nano (batch)",
+      "canonical_slug": "openai/gpt-4.1-nano-2025-04-14",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta-llama/llama-4-maverick",
+      "name": "Meta: Llama 4 Maverick",
+      "canonical_slug": "meta-llama/llama-4-maverick-17b-128e-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta-llama/llama-4-scout",
+      "name": "Meta: Llama 4 Scout",
+      "canonical_slug": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-chat-v3-0324",
+      "name": "DeepSeek: DeepSeek V3 0324",
+      "canonical_slug": "deepseek/deepseek-chat-v3-0324",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o1-pro",
+      "name": "OpenAI: o1-pro",
+      "canonical_slug": "openai/o1-pro",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-small-3.1-24b-instruct",
+      "name": "Mistral: Mistral Small 3.1 24B",
+      "canonical_slug": "mistralai/mistral-small-3.1-24b-instruct-2503",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemma-3-4b-it",
+      "name": "Google: Gemma 3 4B",
+      "canonical_slug": "google/gemma-3-4b-it",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemma-3-12b-it",
+      "name": "Google: Gemma 3 12B",
+      "canonical_slug": "google/gemma-3-12b-it",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "cohere/command-a",
+      "name": "Cohere: Command A",
+      "canonical_slug": "cohere/command-a-03-2025",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "rekaai/reka-flash-3",
+      "name": "Reka Flash 3",
+      "canonical_slug": "rekaai/reka-flash-3",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemma-3-27b-it",
+      "name": "Google: Gemma 3 27B",
+      "canonical_slug": "google/gemma-3-27b-it",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "thedrummer/skyfall-36b-v2",
+      "name": "TheDrummer: Skyfall 36B V2",
+      "canonical_slug": "thedrummer/skyfall-36b-v2",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "perplexity/sonar-reasoning-pro",
+      "name": "Perplexity: Sonar Reasoning Pro",
+      "canonical_slug": "perplexity/sonar-reasoning-pro",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "perplexity/sonar-pro",
+      "name": "Perplexity: Sonar Pro",
+      "canonical_slug": "perplexity/sonar-pro",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "perplexity/sonar-deep-research",
+      "name": "Perplexity: Sonar Deep Research",
+      "canonical_slug": "perplexity/sonar-deep-research",
+      "text_exposure_class": "Unverified text exposure",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-saba",
+      "name": "Mistral: Saba",
+      "canonical_slug": "mistralai/mistral-saba-2502",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o3-mini-high",
+      "name": "OpenAI: o3 Mini High",
+      "canonical_slug": "openai/o3-mini-high-2025-01-31",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "aion-labs/aion-rp-llama-3.1-8b",
+      "name": "AionLabs: Aion-RP 1.0 (8B)",
+      "canonical_slug": "aion-labs/aion-rp-llama-3.1-8b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen2.5-vl-72b-instruct",
+      "name": "Qwen: Qwen2.5 VL 72B Instruct",
+      "canonical_slug": "qwen/qwen2.5-vl-72b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen-plus",
+      "name": "Qwen: Qwen-Plus",
+      "canonical_slug": "qwen/qwen-plus-2025-01-25",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o3-mini",
+      "name": "OpenAI: o3 Mini",
+      "canonical_slug": "openai/o3-mini-2025-01-31",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o3-mini:batch",
+      "name": "OpenAI: o3 Mini (batch)",
+      "canonical_slug": "openai/o3-mini-2025-01-31",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-small-24b-instruct-2501",
+      "name": "Mistral: Mistral Small 3",
+      "canonical_slug": "mistralai/mistral-small-24b-instruct-2501",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "perplexity/sonar",
+      "name": "Perplexity: Sonar",
+      "canonical_slug": "perplexity/sonar",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "minimax/minimax-01",
+      "name": "MiniMax: MiniMax-01",
+      "canonical_slug": "minimax/minimax-01",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "microsoft/phi-4",
+      "name": "Microsoft: Phi 4",
+      "canonical_slug": "microsoft/phi-4",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "deepseek/deepseek-chat",
+      "name": "DeepSeek: DeepSeek V3",
+      "canonical_slug": "deepseek/deepseek-chat-v3",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/o1",
+      "name": "OpenAI: o1",
+      "canonical_slug": "openai/o1-2024-12-17",
+      "text_exposure_class": "Summary only; excluded",
+      "source_url": "https://developers.openai.com/api/docs/guides/reasoning#reasoning-summaries",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "cohere/command-r7b-12-2024",
+      "name": "Cohere: Command R7B (12-2024)",
+      "canonical_slug": "cohere/command-r7b-12-2024",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta-llama/llama-3.3-70b-instruct",
+      "name": "Meta: Llama 3.3 70B Instruct",
+      "canonical_slug": "meta-llama/llama-3.3-70b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "amazon/nova-lite-v1",
+      "name": "Amazon: Nova Lite 1.0",
+      "canonical_slug": "amazon/nova-lite-v1",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "amazon/nova-micro-v1",
+      "name": "Amazon: Nova Micro 1.0",
+      "canonical_slug": "amazon/nova-micro-v1",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "amazon/nova-pro-v1",
+      "name": "Amazon: Nova Pro 1.0",
+      "canonical_slug": "amazon/nova-pro-v1",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4o-2024-11-20",
+      "name": "OpenAI: GPT-4o (2024-11-20)",
+      "canonical_slug": "openai/gpt-4o-2024-11-20",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-large-2407",
+      "name": "Mistral Large 2407",
+      "canonical_slug": "mistralai/mistral-large-2407",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen-2.5-coder-32b-instruct",
+      "name": "Qwen2.5 Coder 32B Instruct",
+      "canonical_slug": "qwen/qwen-2.5-coder-32b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "thedrummer/unslopnemo-12b",
+      "name": "TheDrummer: UnslopNemo 12B",
+      "canonical_slug": "thedrummer/unslopnemo-12b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "anthracite-org/magnum-v4-72b",
+      "name": "Magnum v4 72B",
+      "canonical_slug": "anthracite-org/magnum-v4-72b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen-2.5-7b-instruct",
+      "name": "Qwen: Qwen2.5 7B Instruct",
+      "canonical_slug": "qwen/qwen-2.5-7b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta-llama/llama-3.2-1b-instruct",
+      "name": "Meta: Llama 3.2 1B Instruct",
+      "canonical_slug": "meta-llama/llama-3.2-1b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence",
+        "Structured-output control not advertised; validate actual JSON"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta-llama/llama-3.2-3b-instruct",
+      "name": "Meta: Llama 3.2 3B Instruct",
+      "canonical_slug": "meta-llama/llama-3.2-3b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "qwen/qwen-2.5-72b-instruct",
+      "name": "Qwen2.5 72B Instruct",
+      "canonical_slug": "qwen/qwen-2.5-72b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "cohere/command-r-08-2024",
+      "name": "Cohere: Command R (08-2024)",
+      "canonical_slug": "cohere/command-r-08-2024",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "cohere/command-r-plus-08-2024",
+      "name": "Cohere: Command R+ (08-2024)",
+      "canonical_slug": "cohere/command-r-plus-08-2024",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "sao10k/l3.1-euryale-70b",
+      "name": "Sao10K: Llama 3.1 Euryale 70B v2.2",
+      "canonical_slug": "sao10k/l3.1-euryale-70b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nousresearch/hermes-3-llama-3.1-70b",
+      "name": "Nous: Hermes 3 70B Instruct",
+      "canonical_slug": "nousresearch/hermes-3-llama-3.1-70b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "nousresearch/hermes-3-llama-3.1-405b",
+      "name": "Nous: Hermes 3 405B Instruct",
+      "canonical_slug": "nousresearch/hermes-3-llama-3.1-405b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "sao10k/l3-lunaris-8b",
+      "name": "Sao10K: Llama 3 8B Lunaris",
+      "canonical_slug": "sao10k/l3-lunaris-8b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4o-2024-08-06",
+      "name": "OpenAI: GPT-4o (2024-08-06)",
+      "canonical_slug": "openai/gpt-4o-2024-08-06",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta-llama/llama-3.1-70b-instruct",
+      "name": "Meta: Llama 3.1 70B Instruct",
+      "canonical_slug": "meta-llama/llama-3.1-70b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "meta-llama/llama-3.1-8b-instruct",
+      "name": "Meta: Llama 3.1 8B Instruct",
+      "canonical_slug": "meta-llama/llama-3.1-8b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-nemo",
+      "name": "Mistral: Mistral Nemo",
+      "canonical_slug": "mistralai/mistral-nemo",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4o-mini",
+      "name": "OpenAI: GPT-4o-mini",
+      "canonical_slug": "openai/gpt-4o-mini",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4o-mini-2024-07-18",
+      "name": "OpenAI: GPT-4o-mini (2024-07-18)",
+      "canonical_slug": "openai/gpt-4o-mini-2024-07-18",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4o-mini:batch",
+      "name": "OpenAI: GPT-4o-mini (batch)",
+      "canonical_slug": "openai/gpt-4o-mini",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "google/gemma-2-27b-it",
+      "name": "Google: Gemma 2 27B",
+      "canonical_slug": "google/gemma-2-27b-it",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4o",
+      "name": "OpenAI: GPT-4o",
+      "canonical_slug": "openai/gpt-4o",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4o-2024-05-13",
+      "name": "OpenAI: GPT-4o (2024-05-13)",
+      "canonical_slug": "openai/gpt-4o-2024-05-13",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4o:batch",
+      "name": "OpenAI: GPT-4o (batch)",
+      "canonical_slug": "openai/gpt-4o",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mixtral-8x22b-instruct",
+      "name": "Mistral: Mixtral 8x22B Instruct",
+      "canonical_slug": "mistralai/mixtral-8x22b-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4-turbo",
+      "name": "OpenAI: GPT-4 Turbo",
+      "canonical_slug": "openai/gpt-4-turbo",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4-turbo:batch",
+      "name": "OpenAI: GPT-4 Turbo (batch)",
+      "canonical_slug": "openai/gpt-4-turbo",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mistralai/mistral-large",
+      "name": "Mistral Large",
+      "canonical_slug": "mistralai/mistral-large",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-3.5-turbo-0613",
+      "name": "OpenAI: GPT-3.5 Turbo (older v0613)",
+      "canonical_slug": "openai/gpt-3.5-turbo-0613",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openrouter/auto",
+      "name": "Auto Router",
+      "canonical_slug": "openrouter/auto",
+      "text_exposure_class": "Dynamic alias or router; unresolved",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Unresolved or mutable router/alias"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-3.5-turbo-instruct",
+      "name": "OpenAI: GPT-3.5 Turbo Instruct",
+      "canonical_slug": "openai/gpt-3.5-turbo-instruct",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-3.5-turbo-16k",
+      "name": "OpenAI: GPT-3.5 Turbo 16k",
+      "canonical_slug": "openai/gpt-3.5-turbo-16k",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "mancer/weaver",
+      "name": "Mancer: Weaver (alpha)",
+      "canonical_slug": "mancer/weaver",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "undi95/remm-slerp-l2-13b",
+      "name": "ReMM SLERP 13B",
+      "canonical_slug": "undi95/remm-slerp-l2-13b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "gryphe/mythomax-l2-13b",
+      "name": "MythoMax 13B",
+      "canonical_slug": "gryphe/mythomax-l2-13b",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Native tools not advertised; requires separate compatibility evidence"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-3.5-turbo",
+      "name": "OpenAI: GPT-3.5 Turbo",
+      "canonical_slug": "openai/gpt-3.5-turbo",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-3.5-turbo:batch",
+      "name": "OpenAI: GPT-3.5 Turbo (batch)",
+      "canonical_slug": "openai/gpt-3.5-turbo",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [
+        "Batch transport: not approved for synchronous agent turns"
+      ],
+      "route_approval": "not_granted_by_catalog"
+    },
+    {
+      "id": "openai/gpt-4",
+      "name": "OpenAI: GPT-4",
+      "canonical_slug": "openai/gpt-4",
+      "text_exposure_class": "No advertised reasoning",
+      "source_url": "https://openrouter.ai/docs/guides/best-practices/reasoning-tokens",
+      "cautions": [],
+      "route_approval": "not_granted_by_catalog"
+    }
+  ]
+}

@@ -577,22 +577,28 @@ def test_authoritative_quota_failure_without_output_completes_as_provider_error(
         "error_class": "provider_unavailable",
         "reason": "provider_error",
     }
-    with pytest.raises(contracts.ArenaContractError, match="infrastructure reason"):
-        scoring.build_scoring_plan(
-            round_id="arena-2026-09-16",
-            stage=1,
-            runs=[
-                {
-                    "run_id": "run-1",
-                    "submission_id": "submission-1",
-                    "stage": 1,
-                    "icp_position": 0,
-                    "attempt": 1,
-                    "status": "failed",
-                    "terminal_cause": result["terminal_status"],
-                }
-            ],
-        )
+    plan = scoring.build_scoring_plan(
+        round_id="arena-2026-09-16",
+        stage=1,
+        runs=[
+            {
+                "run_id": "run-1",
+                "submission_id": "submission-1",
+                "stage": 1,
+                "icp_position": 0,
+                "attempt": 1,
+                "status": "failed",
+                "terminal_cause": result["terminal_status"],
+            }
+        ],
+    )
+
+    # Main isolates infrastructure failures instead of stopping other work.
+    assert plan["work_items"] == [] and plan["zero_rows"] == []
+    assert plan["incomplete_rows"] == [{
+        "submission_id": "submission-1", "icp_position": 0,
+        "cause": "provider_error",
+    }]
 
 
 def test_cached_quota_read_volume_does_not_change_model_terminal(tmp_path):

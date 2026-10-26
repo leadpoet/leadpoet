@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.lab_arena.reviewer_rejected_final_packet_seam_test import frozen_reviewer_source
+
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from scripts.arena_reviewer_admission_seam import (
     AdmissionSeamError, _CORRECTION_ELIGIBILITY_ARGUMENT, _REPLACEMENTS,
@@ -86,13 +88,14 @@ def test_final_correction_does_not_extend_serialization_retry_grace():
 
 
 def _hooked_source():
-    return (Path(__file__).resolve().parents[1] / "qualification/scoring"
-            / "company_evidence_investigator.py").read_bytes()
+    native = (Path(__file__).resolve().parents[1] / "qualification/scoring"
+              / "company_evidence_investigator.py").read_bytes()
+    return frozen_reviewer_source(native)
 
 
 def _unhooked_source(*, repaired):
-    # Construct both reviewed statement shapes from the real current module.
-    # This keeps the fixture small and does not substitute any grading body.
+    # Construct both reviewed statement shapes at the historical fixture
+    # boundary; the operational converter still rejects raw compact source.
     text = _hooked_source().decode()
     for index, (alternatives, replacement) in enumerate(_REPLACEMENTS):
         old = alternatives[int(repaired) if 0 < index < 7 else 0]
@@ -100,6 +103,13 @@ def _unhooked_source(*, repaired):
         text = text.replace(replacement, old, 1)
     compile(text, "unhooked_investigator.py", "exec")
     return text.encode()
+
+
+def test_raw_native_compact_source_is_not_a_reviewed_admission_shape():
+    native = (Path(__file__).resolve().parents[1] / "qualification/scoring"
+              / "company_evidence_investigator.py").read_bytes()
+    with pytest.raises(AdmissionSeamError, match="unrecognized reviewer admission block"):
+        convert_admission_seam(native)
 
 
 @pytest.mark.parametrize("repaired", [False, True])

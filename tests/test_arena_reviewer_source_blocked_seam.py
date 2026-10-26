@@ -13,6 +13,8 @@ import pytest
 
 from scripts import arena_reviewer_source_blocked_seam as seam
 from scripts import build_arena_reviewer_runtime as composer
+from scripts.arena_reviewer_admission_seam import AdmissionSeamError, convert_admission_seam
+from tests.lab_arena.reviewer_rejected_final_packet_seam_test import frozen_reviewer_source
 from scripts.arena_reviewer_source_access_seam import INVESTIGATOR_DELTAS
 from tests import test_company_evidence_source_blocked as controls
 
@@ -31,8 +33,13 @@ def _original_files(prior_flags=False):
     files = {name: (composer.ROOT / ("lab_arena/scorer_entrypoint.py"
                                    if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in names}
-    files[composer.GRADER_FILE] = _sources()[0]
+    files[composer.GRADER_FILE] = frozen_reviewer_source(_sources()[0])
     return files
+
+
+def test_native_compact_source_remains_outside_historical_admission_contract():
+    with pytest.raises(AdmissionSeamError, match="unrecognized reviewer admission block"):
+        convert_admission_seam(_sources()[0])
 
 
 def test_only_one_reviewed_block_changes_and_replay_is_identical():

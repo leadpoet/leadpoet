@@ -16,6 +16,7 @@ import asyncio
 import base64
 from collections import deque
 import contextvars
+import copy
 import hashlib
 import hmac
 import json
@@ -872,6 +873,21 @@ def openrouter_normalized(parameters: Mapping[str, Any], *, allow_full_thinking:
         raise BrokerError("invalid_request")
     normalized = dict(parameters)
     normalized[token_field] = max_tokens
+    if allow_full_thinking and isinstance(parameters.get("input"), list):
+        # Codex replays the native type name. OpenRouter requires its provider
+        # alias for this completed search shape. Preserve every other field;
+        # never invent an ID or restore sources omitted by the client.
+        normalized["input"] = []
+        for item in parameters["input"]:
+            action = item.get("action") if isinstance(item, Mapping) else None
+            if (isinstance(item, Mapping) and item.get("type") == "web_search_call"
+                    and item.get("status") == "completed"
+                    and isinstance(item.get("id"), str) and 1 <= len(item["id"]) <= 256
+                    and isinstance(action, Mapping) and action.get("type") == "search"
+                    and (action.get("query") or action.get("queries"))):
+                item = copy.deepcopy(dict(item))
+                item["type"] = "openrouter:web_search"
+            normalized["input"].append(item)
     return normalized
 
 
@@ -924,17 +940,23 @@ def agent_reasoning_parameters(
         raise BrokerError(code) from exc
     if annotation is None or not annotation["changes"]:
         return dict(parameters), annotation
+    try:
+        # Validate schema and encoded-size limits on the provider-compatible
+        # representation that will be hashed and sent.
+        if policy == reasoning_capture.POLICY:
+            updated = openrouter_normalized(updated, allow_full_thinking=True)
+        updated = operations.validate_operation_request(
+            operation_id, updated, deepline_catalog=deepline_catalog,
+            allow_full_thinking=policy == reasoning_capture.POLICY,
+        )
+        if policy != reasoning_capture.POLICY:
+            updated = openrouter_normalized(updated)
+    except (operations.OperationError, BrokerError) as exc:
+        raise BrokerError("invalid_request") from exc
     if policy == reasoning_capture.POLICY:
         output_field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
         if bounded_input_tokens(updated) + updated[output_field] > annotation["context_tokens"]:
             raise BrokerError("invalid_request")
-    try:
-        updated = openrouter_normalized(operations.validate_operation_request(
-            operation_id, updated, deepline_catalog=deepline_catalog,
-            allow_full_thinking=policy == reasoning_capture.POLICY,
-        ), allow_full_thinking=policy == reasoning_capture.POLICY)
-    except (operations.OperationError, BrokerError) as exc:
-        raise BrokerError("invalid_request") from exc
     return updated, annotation
 
 

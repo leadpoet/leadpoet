@@ -849,15 +849,27 @@ def verified_cap_truncated_target(example, call) -> bool:
         # never returns a training candidate or inserts missing JSON syntax.
         target, _ = training_steps._target(body, response, operation,
             allow_reasoning_history=True, argument_validator=argument_shape,
-            allow_tool_error_history=True)
+            allow_tool_error_history=True, allow_empty_messages=True)
         training_steps._validate_target_tools(body, target, operation)
-        # A cap cut can end only the final generated argument. Later retained
-        # output disproves that inference, even if it is otherwise well formed.
+        # A cut must be the final generated action. Reasoning and empty
+        # response frames may follow in provider output without proving that
+        # another action was completed. All frames were validated above.
         if len(unfinished) != 1:
             return False
         if operation == "openrouter.chat":
-            return target["tool_calls"][-1]["function"]["arguments"] == unfinished[0]
-        final = response["output"][-1]
+            calls = target['tool_calls']
+            if any('index' in item for item in calls):
+                indexes = [item.get('index') for item in calls]
+                if (any(type(index) is not int for index in indexes)
+                        or len(set(indexes)) != len(indexes)):
+                    return False
+                final = max(calls, key=lambda item: item['index'])
+            else:
+                final = calls[-1]
+            return final['function']['arguments'] == unfinished[0]
+        actions = [item for item in response['output'] if item['type'] != 'reasoning'
+                   and not training_steps._empty_target_message(item)]
+        final = actions[-1]
         return final.get("type") == "function_call" and final.get("arguments") == unfinished[0]
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return False

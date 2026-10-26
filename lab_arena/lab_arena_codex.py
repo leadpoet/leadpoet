@@ -663,11 +663,14 @@ def response_events(document: dict[str, Any], *, native_web_search: bool = False
     if native_web_search:
         # Codex 0.154 recognizes the native item name only. Adapt a transport
         # copy, never the broker receipt. Its normal typed history decides
-        # which provider fields are replayed on the next request.
+        # which provider fields are replayed on the next request. Keep this
+        # adaptation on the observed st_tmp_ IDs preserved by 0.154; arbitrary
+        # IDs can be omitted by its typed history. Other items stay unadapted,
+        # rather than creating history without the ID needed for alias replay.
         document = dict(document, output=[
             dict(item, type="web_search_call")
             if (isinstance(item, dict) and item.get("type") == "openrouter:web_search"
-                and replayable_search_shape(item))
+                and replayable_search_shape(item) and item['id'].startswith('st_tmp_'))
             else item for item in document["output"]
         ])
     sequence = 0

@@ -80,6 +80,24 @@ def test_policy_off_still_rejects_new_provider_item():
         operations.validate_operation_request("openrouter.responses", request)
 
 
+@pytest.mark.parametrize('search_id,renamed', [
+    ('st_tmp_fixture_source', True), ('st-source', False), ('ws_fixture', False),
+])
+def test_bridge_adapts_only_the_observed_replayable_search_id_form(search_id, renamed):
+    item = dict(hosted_output()[2], id=search_id)
+    original = response(output=[item])
+    before = copy.deepcopy(original)
+    events = b''.join(codex.response_events(original, native_web_search=True))
+    terminal = [json.loads(line[6:]) for line in events.splitlines() if line.startswith(b'data: ')][-1]['response']
+    assert terminal['output'] == [dict(item, type='web_search_call') if renamed else item]
+    assert original == before
+    # The bridge restriction does not remove broker support for a native
+    # caller that actually retained its arbitrary provider ID.
+    native = dict(item, type='web_search_call')
+    assert broker.openrouter_normalized({'input':[native], 'max_output_tokens':100},
+        allow_full_thinking=True)['input'] == [item]
+
+
 @pytest.mark.parametrize("change,renamed", [
     ({}, True),
     ({"action": {"type": "search", "queries": ["first", "second"]}}, True),
@@ -91,7 +109,8 @@ def test_policy_off_still_rejects_new_provider_item():
     ({"action": {"type": "search"}}, False),
 ])
 def test_bridge_renames_only_shapes_supported_by_provider_replay(change, renamed):
-    item = dict(hosted_output()[2], **change)
+    item = dict(hosted_output()[2], id='st_tmp_fixture_source')
+    item.update(change)
     item = {key: value for key, value in item.items() if value is not None}
     original = response(output=[item])
     snapshot = copy.deepcopy(original)
@@ -118,7 +137,7 @@ def test_http_bridge_keeps_unsupported_search_shapes_and_raw_receipt(monkeypatch
         monkeypatch.setenv("LAB_ARENA_REASONING_CAPTURE_POLICY", reasoning_capture.POLICY)
     else:
         monkeypatch.delenv("LAB_ARENA_REASONING_CAPTURE_POLICY", raising=False)
-    original = response(output=[hosted_output()[2], *unsupported_search_outputs()])
+    original = response(output=[dict(hosted_output()[2], id='st_tmp_fixture_source'), *unsupported_search_outputs()])
     snapshot = copy.deepcopy(original)
     raw = json.dumps(original).encode()
     monkeypatch.setattr(codex, "_dispatch", lambda *_args, **_kwargs: (200, raw))
@@ -187,7 +206,7 @@ def test_bridge_search_replay_matches_frozen_policy(monkeypatch, policy, stream)
         assert result.content == expected
         completed = [json.loads(line[6:]) for line in result.content.splitlines()
                      if line.startswith(b"data: ")][-1]["response"]
-        expected_type = "web_search_call" if enabled else "openrouter:web_search"
+        expected_type = "openrouter:web_search"  # These arbitrary IDs are never adapted.
         assert [item["type"] for item in completed["output"]
                 if item["id"].startswith("st-")] == [expected_type, expected_type]
     else:
@@ -279,16 +298,16 @@ def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp
         ]
         # Historical Codex drops the unrecognized provider item. Only opted-in
         # execution receives the native type that its typed history preserves.
-        assert [item["action"] for item in searches] == (expected_searches if full_policy else [])
-        # Codex retains the provider's observed st_tmp_ IDs, while dropping
-        # arbitrary fixture IDs. It omits sources and annotations in either
-        # case. Do not inject fields its normal serializer omits.
+        assert [item["action"] for item in searches] == (expected_searches if full_policy and provider_ids else [])
+        # Only the observed st_tmp_ IDs are adapted. Other provider IDs stay
+        # on their historical provider-typed/drop path rather than becoming
+        # native history without IDs. Do not synthesize client-omitted fields.
         messages = [item for item in parameters["input"] if item.get("role") == "assistant"]
         assert any(item["content"] == [{"type": "output_text", "text": "Found a source."}] for item in messages)
         if provider_ids and full_policy:
             assert [item["id"] for item in searches] == ["st_tmp_fixture_source", "st_tmp_fixture_empty"]
         else:
-            assert all("id" not in item for item in searches)
+            assert not searches
         assert not any(item.get("type") == "openrouter:web_search" for item in parameters["input"])
         assert any(item.get("type") == "custom_tool_call_output" for item in parameters["input"])
         operations.validate_operation_request("openrouter.responses", parameters, allow_full_thinking=True)
@@ -303,6 +322,7 @@ def test_pinned_codex_replays_hosted_search_with_native_history(monkeypatch, tmp
 
 def test_native_stream_adaptation_preserves_raw_provider_receipt():
     original = response(output=hosted_output())
+    original['output'][2]['id'] = 'st_tmp_fixture_source'
     snapshot = copy.deepcopy(original)
     def completed(data):
         return [json.loads(line[6:]) for line in data.splitlines() if line.startswith(b"data: ")][-1]["response"]
@@ -311,7 +331,7 @@ def test_native_stream_adaptation_preserves_raw_provider_receipt():
     assert raw == snapshot == original
     expected = copy.deepcopy(original)
     for item in expected["output"]:
-        if item["type"] == "openrouter:web_search":
+        if item["type"] == "openrouter:web_search" and item['id'].startswith('st_tmp_'):
             item["type"] = "web_search_call"
     assert native == expected
     assert original == snapshot

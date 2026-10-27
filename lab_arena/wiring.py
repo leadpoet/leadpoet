@@ -605,7 +605,9 @@ def build_service_from_environment(mode: str):
         )
         if (route_requested or frozen_route_marker) and host_shadow_route_round_id is None:
             raise broker_module.BrokerError("broker_unavailable")
-        judge_models = sorted({str(model) for model in ((configuration.get("scorer_policy") or {}).get("judge_models") or {}).values() if model})
+        # Preserve the frozen role map: only newly opted-in industry review
+        # uses its bounded regional route. Old rounds keep their own routing.
+        judge_models = dict((configuration.get("scorer_policy") or {}).get("judge_models") or {})
         return broker_module.Broker(
             store=store, key_for=key_for, judge_models=judge_models,
             price_table=price_table, transport=broker_module.HttpxProviderTransport(),

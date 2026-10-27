@@ -49,6 +49,7 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 OPENROUTER_GENERATION_URL = "https://openrouter.ai/api/v1/generation?id="
 OPENROUTER_LUNA_RESPONSES_MODEL = "openai/gpt-5.6-luna"
 OPENROUTER_GPT6_LUNA_RESPONSES_MODEL = "openai/gpt-6-luna"
+OPENROUTER_INDUSTRY_REVIEW_MODEL = "openai/gpt-6.1-sol"
 OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS = frozenset(
     (OPENROUTER_LUNA_RESPONSES_MODEL, OPENROUTER_GPT6_LUNA_RESPONSES_MODEL)
 )
@@ -784,10 +785,15 @@ def _openrouter_host_route(
     model: str,
     pricing: Mapping[str, Any],
     parameters: Mapping[str, Any],
+    industry_review_model: Optional[str] = None,
 ) -> Optional[OpenRouterHostRoute]:
-    """Return the one source-controlled execution route that differs by model."""
+    """Return a source-controlled route for an opted-in model and run role."""
 
-    if (
+    industry_route = (
+        kind == "score" and operation_id == "openrouter.chat"
+        and model == industry_review_model == OPENROUTER_INDUSTRY_REVIEW_MODEL
+    )
+    if not industry_route and (
         kind != "execute"
         or operation_id != "openrouter.responses"
         or model not in OPENROUTER_REGIONAL_LUNA_RESPONSES_MODELS
@@ -798,7 +804,21 @@ def _openrouter_host_route(
         * OPENROUTER_LUNA_REGIONAL_PRICE_MULTIPLIER
         for component in PRICED_COMPONENTS
     }
-    if bounded_input_tokens(parameters) >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS:
+    long_context = bounded_input_tokens(parameters) >= OPENROUTER_LUNA_LONG_CONTEXT_MIN_PROMPT_TOKENS
+    if industry_route:
+        # These are the published Sol Azure US/EU prices, not the cheaper
+        # Flex price that may occupy the public model catalog row. Keep a
+        # conservative cache-write ceiling and its published long-input tier.
+        regional = {
+            component: Decimal(str(pricing[component])) for component in PRICED_COMPONENTS
+        }
+        regional["prompt"] = max(
+            regional["prompt"], Decimal("0.0000044" if long_context else "0.0000022")
+        )
+        regional["completion"] = max(
+            regional["completion"], Decimal("0.0000165" if long_context else "0.000011")
+        )
+    elif long_context:
         if model == OPENROUTER_GPT6_LUNA_RESPONSES_MODEL:
             long_prompt_price = OPENROUTER_GPT6_LUNA_LONG_CONTEXT_PROMPT_PRICE
             long_completion_price = (
@@ -3722,7 +3742,7 @@ class Broker:
         store: CallStore,
         key_for: Callable[[str], str],
         price_table: Mapping[str, Any],
-        judge_models: Sequence[str] = (),
+        judge_models: Sequence[str] | Mapping[str, str] = (),
         transport: ProviderTransport,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         lease_ttl_seconds: int = contracts.LEASE_TTL_SECONDS,
@@ -3766,7 +3786,10 @@ class Broker:
         self._price_table = validate_price_table(price_table)
         # Judge models are what scoring runs may call; they are pinned by the
         # scorer policy and priced from the same table.
-        self._judge_models = tuple(str(model) for model in judge_models)
+        self._judge_model_roles = dict(judge_models) if isinstance(judge_models, Mapping) else {}
+        self._judge_models = tuple(str(model) for model in (
+            self._judge_model_roles.values() if isinstance(judge_models, Mapping) else judge_models
+        ))
         for model in self._judge_models:
             if model not in self._price_table["models"]:
                 raise ArenaContractError("judge model %s is missing from the price table" % model)
@@ -4775,6 +4798,7 @@ class Broker:
                     model=normalized["model"],
                     pricing=pricing,
                     parameters=normalized,
+                    industry_review_model=self._judge_model_roles.get("industry_evidence_review"),
                 )
                 if reasoning_annotation is not None and reasoning_annotation.get("policy") == reasoning_capture.POLICY:
                     # Exact tested provider only. OpenRouter must neither pick

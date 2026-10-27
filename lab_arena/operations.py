@@ -2408,6 +2408,15 @@ def build_outbound_request(
                 and policy.get("allow_fallbacks") is False
                 and policy.get("require_parameters") is True
             )
+            industry_region_route = (
+                not allow_full_thinking
+                and operation_id == "openrouter.chat"
+                and normalized.get("model") == "openai/gpt-6.1-sol"
+                and isinstance(policy, dict)
+                and set(policy) == policy_fields | {"only"}
+                and policy.get("only") == ["azure/us", "azure/eu"]
+                and policy.get("allow_fallbacks") is True
+            )
             if (
                 not isinstance(policy, dict)
                 or (set(policy) not in policy_shapes and not exact_full_route)
@@ -2415,6 +2424,7 @@ def build_outbound_request(
                 or (
                     set(policy) != policy_fields
                     and not exact_full_route
+                    and not industry_region_route
                     and (
                         normalized.get("model") not in {
                             "openai/gpt-5.6-luna",
@@ -2429,7 +2439,7 @@ def build_outbound_request(
                 )
                 or policy.get("data_collection") != "deny"
                 or policy.get("zdr") is not True
-                or (operation_id == "openrouter.chat" and not exact_full_route)
+                or (operation_id == "openrouter.chat" and not exact_full_route and not industry_region_route)
                 or type(policy.get("allow_fallbacks")) is not bool
                 or not isinstance(policy.get("max_price"), dict)
                 or set(policy["max_price"]) != price_fields

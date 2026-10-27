@@ -454,6 +454,59 @@ def _bound_admission_refusal(example, call) -> bool:
             and lifecycle[0].get("amount_microusd") == 0)
 
 
+def _legacy_tested_controls_match(call) -> bool:
+    """Retain the old forced shape, without accepting contradictory aliases."""
+    try:
+        request = call["request"]
+        body = request["outbound"]["body"]
+        annotation = call["reasoning_capture"]
+        operation = call["operation_id"]
+        if operation not in reasoning_capture.OPERATIONS:
+            return False
+        field = "max_tokens" if operation == "openrouter.chat" else "max_output_tokens"
+        mode = annotation["mode"]
+        expected = {"max_tokens": mode["budget_tokens"]} if "budget_tokens" in mode else dict(mode)
+        allowed = (expected, {**expected, "exclude": False}) if operation == "openrouter.chat" else (expected,)
+        if (type(body.get(field)) is not int or body[field] != annotation["max_output_tokens"]
+                or body.get("reasoning") not in allowed
+                or "max_tokens" in expected and expected["max_tokens"] >= body[field]):
+            return False
+        for parameters in (body, request.get("hashed_parameters") or {}, request.get("effective_parameters") or {}):
+            if (any(key in parameters for key in ("reasoning_effort", "include_reasoning"))
+                    or any(key in parameters and parameters[key] != body[key] for key in (field, "reasoning"))):
+                return False
+        return True
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
+def _captured_reasoning_controls_match(call, registry) -> bool:
+    """Bind preserved settings to the saved hash, not the route probe's mode."""
+    try:
+        request = call["request"]
+        hashed = request["hashed_parameters"]
+        body = request["outbound"]["body"]
+        operation = call["operation_id"]
+        # Hash agreement alone cannot make Chat-only controls valid Responses
+        # parameters. Validate the saved request without changing its bytes.
+        operations.validate_operation_request(operation, hashed, allow_full_thinking=True)
+        cap_field = "max_tokens" if operation == "openrouter.chat" else "max_output_tokens"
+        fields = (cap_field, "reasoning", "reasoning_effort", "include_reasoning")
+        controls = {key: hashed[key] for key in fields if key in hashed}
+        if (contracts.document_hash(hashed) != call.get("request_hash")
+                or request.get("request_hash") != call.get("request_hash")
+                or type(controls.get(cap_field)) is not int
+                or not 1 <= controls[cap_field] <= operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
+                or controls != {key: body[key] for key in fields if key in body}):
+            return False
+        checked, annotation = reasoning_capture.apply(operation, hashed, policy=POLICY, registry=registry)
+        # Defaults must already be explicit in the hashed provider request.
+        # Reject disabled/ambiguous controls; never repair saved evidence.
+        return annotation is not None and controls == {key: checked[key] for key in fields if key in checked}
+    except (KeyError, TypeError, ValueError, AttributeError, operations.OperationError):
+        return False
+
+
 def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
     """Prove a hidden free throttle recovered by the same request's host write.
 
@@ -500,8 +553,8 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
         if (provider.get("only") != [call["reasoning_capture"]["provider_route"]]
                 or provider.get("allow_fallbacks") is not False or provider.get("zdr") is not True
                 or provider.get("data_collection") != "deny" or provider.get("require_parameters") is not True
-                or body.get("max_output_tokens") != call["reasoning_capture"]["max_output_tokens"]
-                or body.get("reasoning") != call["reasoning_capture"]["mode"]):
+                or not (_legacy_tested_controls_match(call)
+                        or _captured_reasoning_controls_match(call, registry))):
             return False
         settlements = [row for row in call.get("lifecycle") or []
                        if row.get("entry_id") == terminal_id and row.get("entry_kind") == "settlement"]
@@ -828,7 +881,9 @@ def verified_cap_truncated_target(example, call) -> bool:
                                  (example.get("configuration") or {}).get("reasoning_route_registry"))
         if (operation not in reasoning_capture.OPERATIONS or evidence["write"]["status"] != 200
                 or type(cap) is not int or cap < 1
-                or cap != (call.get("reasoning_capture") or {}).get("max_output_tokens")
+                or not (_legacy_tested_controls_match(call)
+                        or _captured_reasoning_controls_match(call,
+                            (example.get("configuration") or {}).get("reasoning_route_registry")))
                 or type(usage.get(usage_key)) is not int or usage[usage_key] != cap
                 or not state["requested"] or not state["route_reviewed"]
                 or not state["provider_route_verified"] or state["redactions"]):

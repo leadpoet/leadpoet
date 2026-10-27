@@ -424,10 +424,14 @@ def _diagnostic_host_route(route, *, responses_compat=False):
 def _parameters(model, messages, turn, operation_id, mode, route, *,
                 diagnostic_tool_choice_auto=False, diagnostic_responses_compat=False,
                 tool_choice="named", final_format="json_schema", parallel_tool_calls=None):
-    output_limit = min(2048, int(route["max_output_tokens"]))
+    # A full probe explicitly exercises its declared settings. The production
+    # capture policy must not inflate this caller's cap or reasoning effort.
+    output_limit = int(route["max_output_tokens"]) if mode == "full" else min(2048, int(route["max_output_tokens"]))
     if operation_id == "openrouter.responses":
         value = {"model": model, "input": copy.deepcopy(messages),
                  "max_output_tokens": output_limit}
+        if mode == "full":
+            value["reasoning"] = copy.deepcopy(route["mode"])
         if mode == "summary_diagnostic":
             value["reasoning"] = {"effort": route["mode"].get("effort", "high"),
                                   "summary": "auto" if diagnostic_responses_compat else "detailed"}
@@ -446,6 +450,10 @@ def _parameters(model, messages, turn, operation_id, mode, route, *,
         return value
     value = {"model": model, "messages": copy.deepcopy(messages),
              "max_tokens": output_limit}
+    if mode == "full":
+        value["reasoning"] = {**({"max_tokens": route["mode"]["budget_tokens"]}
+                                  if "budget_tokens" in route["mode"] else route["mode"]),
+                              "exclude": False}
     if mode == "summary_diagnostic":
         value["reasoning"] = {**route["mode"], "exclude": False}
     if turn < 2:

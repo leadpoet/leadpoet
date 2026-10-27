@@ -68,13 +68,16 @@ def test_metadata_stays_incomplete_through_snapshot_and_journal(tmp_path):
     assert buffer.append_agent_observation(row()) == 0
     document = buffer.document()
     assert document["complete"] is False
-    assert document["failures"] == ["capture_incomplete"]
+    assert document["failures"] == [obs.OPTIONAL_CAPTURE_INCOMPLETE]
     assert document["agent_observation_count"] == 1
     assert document["response_receipt_count"] == document["observation_count"] == 0
     assert journal._prepare() and journal._send_pending()
     segments, prefix, failure = obs.read_journal_prefix(objects, "r1", "execute", 1, CLAIM_HASH)
     assert len(segments) == 1 and failure is None
-    assert prefix == document
+    assert segments[0]["payload"]["failures"] == [obs.OPTIONAL_CAPTURE_INCOMPLETE]
+    # A journal prefix still lacks the final snapshot and keeps a hard gap.
+    assert prefix == {**document, "failures": ["capture_incomplete"]}
+    assert not obs.optional_capture_only(prefix)
     service.handle_training_observations("r1", TOKEN, document)
     assert obs.read_snapshot(objects, "r1", "execute", 1, CLAIM_HASH)["payload"] == document
     forged = {**document, "complete": True, "failures": []}

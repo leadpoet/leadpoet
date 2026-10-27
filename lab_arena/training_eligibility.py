@@ -246,7 +246,7 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
         return False
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
-    if (payload.get("complete") is not True
+    if (not training_thinking._provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)):
         return False
     selected = [call for call in example.get("provider_calls") or []
@@ -378,7 +378,7 @@ def _selected_privacy_cascade_verified(example, run_id):
         return False
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
-    if (payload.get("complete") is not True
+    if (not training_thinking._provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(training_thinking._required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")

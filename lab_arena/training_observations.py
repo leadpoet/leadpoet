@@ -34,6 +34,8 @@ JOURNAL_SCHEMA_VERSION = "leadpoet.lab_arena.training_observation_journal.v1"
 MAX_SEGMENT_BYTES = 16 * 1024 * 1024
 MAX_SEGMENTS = 1024
 MAX_JOURNAL_ATTEMPTS = 10_000_000
+OPTIONAL_CAPTURE_INCOMPLETE = "optional_capture_incomplete"
+_FAILURES = frozenset({"capture_incomplete", OPTIONAL_CAPTURE_INCOMPLETE})
 _V1_FIELDS = frozenset({"observations", "observation_count", "local_refusal_count", "complete", "failures"})
 _V2_FIELDS = _V1_FIELDS | {"response_receipts", "response_receipt_count", "agent_observations", "agent_observation_count"}
 _AGENT_REF_RE = re.compile(r"agent:(0|[1-9][0-9]*)\Z")
@@ -358,6 +360,65 @@ def clean_agent_observation(value: Mapping[str, Any], secrets: Sequence[str] = (
             "privacy": {"redacted": bool(redactions), "redactions": redactions}}
 
 
+def optional_capture_failure(row: Mapping[str, Any]) -> bool:
+    """Classify only validated optional HTTP evidence, never an unknown fault."""
+    kind, data = row["kind"], row["data"]
+    if kind == "http_response_metadata":
+        return True
+    if kind in {"web_fetch", "web_fetch_binary"}:
+        return data.get("capture", {}).get("complete") is False
+    if kind != "state_snapshot" or data["name"] != "automatic_capture_summary":
+        return False
+    value = data["value"]
+    if (not isinstance(value, dict) or value.get("source") != "runtime_http_v1"
+            or value.get("complete") is not False or type(value.get("pending_queue")) is not int
+            or value["pending_queue"] != 0 or type(value.get("inflight")) is not int
+            or value["inflight"] != 0 or not isinstance(value.get("counts"), dict)):
+        return False
+    counts = value["counts"]
+    normal = {"responses_started", "responses_complete", "responses_partial", "checkpoint_failure",
+              "provider_ack_written", "response_metadata_written", "web_written"}
+    optional = {"checkpoint_failure_" + category + "_" + reason
+                for category in ("web_fetch", "web_fetch_binary", "http_response_metadata")
+                for reason in ("timeout", "host_rejected", "transport_error", "invalid_response",
+                               "invalid_frame", "socket_unavailable")}
+    if any(not isinstance(key, str) or type(count) is not int or count < 0
+           or key not in normal | optional and not key.startswith("client_")
+           for key, count in counts.items()):
+        return False
+    failures = sum(counts.get(key, 0) for key in optional)
+    return (counts.get("checkpoint_failure", 0) == failures
+            and counts.get("responses_started", 0) == counts.get("responses_complete", 0) + counts.get("responses_partial", 0)
+            and counts.get("responses_started", 0) == failures + sum(counts.get(key, 0) for key in (
+                "provider_ack_written", "response_metadata_written", "web_written"))
+            and (failures > 0 or counts.get("responses_partial", 0) > 0))
+
+
+def optional_capture_only(document: Mapping[str, Any]) -> bool:
+    """A new explicit failure tag cannot excuse missing required host evidence."""
+    try:
+        if (set(document) != _V2_FIELDS or document["complete"] is not False
+                or document["failures"] != [OPTIONAL_CAPTURE_INCOMPLETE]
+                or _validate_payload(document) != document
+                or any(document[count] != len(document[rows]) for count, rows in (
+                    ("observation_count", "observations"), ("response_receipt_count", "response_receipts"),
+                    ("agent_observation_count", "agent_observations")))
+                or document["local_refusal_count"] != sum(row["kind"] == "local_refusal" for row in document["observations"])
+                or any(row["write_state"] != "socket_written" for row in document["response_receipts"])
+                or any(row["privacy"]["redacted"] for row in document["observations"])
+                or any(row["privacy"]["redacted"] for row in document["agent_observations"]
+                       if row["kind"] == "response_received")):
+            return False
+        rows = [row for row in document["agent_observations"]
+                if row["kind"] in {"capture_failure", "http_response_metadata"}
+                or row["kind"] in {"web_fetch", "web_fetch_binary"} and row["data"].get("capture", {}).get("complete") is False
+                or row["kind"] == "state_snapshot" and row["data"]["name"] == "automatic_capture_summary"
+                and isinstance(row["data"]["value"], dict) and row["data"]["value"].get("complete") is False]
+        return bool(rows) and all(optional_capture_failure(row) for row in rows)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
 @dataclass
 class Buffer:
     observations: list[dict] = field(default_factory=list)
@@ -462,7 +523,8 @@ class Buffer:
                     and cleaned["data"]["name"] == "automatic_capture_summary"
                     and isinstance(cleaned["data"]["value"], dict)
                     and cleaned["data"]["value"].get("complete") is False):
-                self.failures.add("capture_incomplete")
+                self.failures.add(OPTIONAL_CAPTURE_INCOMPLETE if optional_capture_failure(cleaned)
+                                  else "capture_incomplete")
             return cleaned["id"]
         except Exception:
             self.failures.add("capture_incomplete")
@@ -487,7 +549,7 @@ def _validate_payload(document: Mapping[str, Any], secrets: Sequence[str] = ()) 
     rows = document["observations"]
     if not isinstance(rows, list) or len(rows) > MAX_OBSERVATIONS:
         raise ObservationError("count_invalid")
-    if any(type(document[key]) is not int or document[key] < 0 for key in ("observation_count", "local_refusal_count")) or type(document["complete"]) is not bool or not isinstance(document["failures"], list) or any(x != "capture_incomplete" for x in document["failures"]):
+    if any(type(document[key]) is not int or document[key] < 0 for key in ("observation_count", "local_refusal_count")) or type(document["complete"]) is not bool or not isinstance(document["failures"], list) or any(not isinstance(x, str) or x not in _FAILURES for x in document["failures"]):
         raise ObservationError("counts_invalid")
     cleaned = [clean_observation(row, secrets) for row in rows]
     ordinals = [row["ordinal"] for row in cleaned]
@@ -630,7 +692,7 @@ def _clean_segment_payload(value: Mapping[str, Any], secrets: Sequence[str] = ()
                 "local_refusal_count", "response_receipt_count", "agent_observation_count"):
         if type(value[key]) is not int or not 0 <= value[key] <= MAX_JOURNAL_ATTEMPTS:
             raise ObservationError("segment_count_invalid")
-    if not isinstance(value["failures"], list) or any(x != "capture_incomplete" for x in value["failures"]):
+    if not isinstance(value["failures"], list) or any(not isinstance(x, str) or x not in _FAILURES for x in value["failures"]):
         raise ObservationError("segment_failure_invalid")
     for key in ("observations", "response_receipts", "receipt_updates", "agent_observations"):
         if not isinstance(value[key], list) or len(value[key]) > MAX_OBSERVATIONS:

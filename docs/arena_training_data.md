@@ -296,6 +296,19 @@ separate fetches still remain separate events. The token is not stored in the
 artifact. This runs on the existing background sender and does not retry a
 provider call. Process death can still lose evidence that has not been uploaded.
 
+New captures distinguish `optional_capture_incomplete` from the existing generic
+`capture_incomplete` failure in the same stored failure list. The optional tag
+applies only to validated partial web/header observations or a fully attributed
+HTTP recorder summary. Unknown failures, provider callback failures and unfinished
+queues keep the generic tag. Both tags retain `complete: false`. Only validated
+new frozen host-result policies can exclude the optional tag from provider-visible
+training checks, after every affected run passes full snapshot, count, privacy
+and exact host-result checks. Old generic failures are never reclassified.
+Deploy the gateway readers before runners that emit this tag. Old readers reject
+the new tag; they do not accept incomplete evidence as complete. A rollback must
+restore the old producers first. Historical artifacts and frozen round rules do
+not change, and provider-visible eligibility does not claim complete web capture.
+
 The existing mounted `lab_arena_checkpoint` module still provides `record_web_fetch`,
 `record_response_received` and `record_state_snapshot`. They are best-effort calls:
 capture failure must not change the agent result or accounting. Existing explicit

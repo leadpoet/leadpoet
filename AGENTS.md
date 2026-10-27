@@ -1,3 +1,16 @@
+## Scoped authorization: October 27 PDF and HTML evidence recovery
+
+The user authorized review, integration, safe merge, canonical deployment and
+production verification of PR793 PDF/HTML recovery and evidence improvements.
+This isolated release keeps document text on the existing exact-URL path and
+recovers only exact completed Firecrawl bills. Preserve source/identity checks,
+research and accounting limits, frozen scoring policies, miner/baseline fairness,
+published results and rewards. Do not enable the broader classifier until its
+accuracy is proven. The user explicitly waived waiting for independent reviewer
+capacity; reproducible checks and production verification remain required.
+Do not write test judgments into production or apply unrelated migrations.
+Keep both instruction files identical.
+
 ## Scoped production authorization: October 27 runtime 486 reveal proof
 
 The user authorized the narrow measured Subtensor runtime 486 compatibility

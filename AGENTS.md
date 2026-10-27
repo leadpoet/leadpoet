@@ -57,7 +57,12 @@ fresh OnePatch/Sentry and direct production checks. This narrow release fixes
 HTML rendering whitespace in quote matching only. Preserve all source, identity,
 scoring, billing, historical-result and reward rules. Do not activate the broader
 industry candidate until its accuracy is proven. Use reward-disabled validation;
-do not rewrite production judgments or apply unrelated migrations.
+do not rewrite production judgments or apply unrelated migrations. The release
+is blocked by the restart guard rejecting valid older-stage judge continuations.
+The same task authorizes the narrow, exact committed migration 581 to reuse the
+existing continuation proof in the drain checks, after regression tests and safe
+merge. Apply it through the Keychain-backed migration helper, then use canonical
+restarts. Preserve capture/owner, stopped-host, accounting and retry guards.
 
 ## Scoped production authorization: October 25 publication read performance
 

@@ -1,3 +1,18 @@
+## Scoped authorization: October 27 independent verifier accuracy audit
+
+The user authorized independently checking the October 26/27 judge audit,
+reproducing actual scoring errors, implementing the smallest proven root-cause
+fixes, and pushing, merging and canonically deploying them. The coordinating
+task may run reward-disabled historical scoring replays with an aggregate
+OpenRouter limit of $8 for this task. Use isolated task state and exact source
+and image identities; stop paid admission on unknown charges. Preserve the
+original company/ICP inputs, frozen comparison labels, evidence binding, correct
+rejections, scoring standards, privacy, billing, published results and rewards.
+Do not change or stop concurrent PR793/PR825 work. Internal implementation agents
+may commit only. The coordinator owns independent review, production rollout,
+affected-flow verification and fresh OnePatch/Sentry checks. This authority ends
+when the scoped fixes and production verification are complete.
+
 ## Scoped authorization: October 27 Tyche rejected-request capture
 
 The user authorized auditing the actual Tyche submission and October 28

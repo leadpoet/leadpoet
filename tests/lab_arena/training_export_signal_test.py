@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import copy
+import base64
 import json
 
 import pytest
 
-from lab_arena import company_judgments, contracts, scoring, signal_judgments, verify
+from lab_arena import broker, company_judgments, contracts, scoring, signal_judgments, training_capture, verify
 from lab_arena.training_export import ExportError, _signal_authority_evidence, assemble_example
 from scripts.export_arena_training import export_run
 from tests.lab_arena.training_export_test import (
@@ -210,8 +211,32 @@ def test_whole_company_cache_hit_resolves_original_signal_use_after_index_change
         )
 
 
-def test_export_entrypoint_fetches_original_signal_ledger_without_current_charge():
+def test_export_entrypoint_fetches_original_signal_ledger_without_current_charge(tmp_path):
     values = _signal_fixture()
+    parameters = {"model": "test", "reasoning": {"effort": "low"}, "messages": [
+        {"role": "assistant", "content": None, "reasoning_content": "Prior source reasoning."},
+        {"role": "user", "content": "Verify the source."}]}
+    request_hash = contracts.document_hash(parameters)
+    request = {"operation_id": "openrouter.chat", "request_hash": request_hash,
+               **{key: copy.deepcopy(parameters) for key in (
+                   "admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters")},
+               "outbound": {"body": copy.deepcopy(parameters), "body_sha256": request_hash}}
+    pointer = training_capture.RequestCapture(values["objects"])(request)
+    assert pointer["redacted"] is False
+    for row in values["signal_source_ledger_rows"]:
+        row["entry_doc"] = {**row["entry_doc"], "request_hash": request_hash, "request_capture": pointer}
+    terminal = values["signal_source_ledger_rows"][-1]
+    earlier = copy.deepcopy(terminal)
+    earlier.update(entry_kind="uncertain", amount_microusd=0)
+    terminal["entry_id"] = 4
+    values["signal_source_ledger_rows"].insert(-1, earlier)
+    response = {"choices": [{"message": {"role": "assistant", "content": "Verified source.",
+                                        "reasoning_content": "Selected source reasoning."}}]}
+    raw = contracts.canonical_json(response).encode()
+    terminal["terminal_response"]["body_b64"] = base64.b64encode(raw).decode()
+    terminal["terminal_response"]["upstream_response_receipt"] = broker._capture_upstream_response(
+        broker.ProviderResponse(200, {"content-type": "application/json"}, raw),
+        operation_id="openrouter.chat", request_hash=request_hash, call_identity=terminal["call_identity"])
 
     class Store:
         def get_run(self, run_id):
@@ -247,6 +272,31 @@ def test_export_entrypoint_fetches_original_signal_ledger_without_current_charge
     assert result["judgment"]["signal_source_provider_calls"][0]["run_id"] == "judge:source"
     assert result["judgment"]["signal_source_provider_call_refs"][0]["location"] == "signal_source_provider_calls"
     assert result["costs"]["confirmed_actual_microusd"] == 0
+    source_call = result["judgment"]["signal_source_provider_calls"][0]
+    assert "full_request_unavailable" not in source_call["evidence_gaps"]
+    for key in ("admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters"):
+        assert source_call["request"][key] == parameters
+    assert source_call["request"]["outbound"]["body"] == parameters
+    assert contracts.document_hash(source_call["request"]["hashed_parameters"]) == request_hash
+    assert source_call["response"] == response
+    assert source_call["response_receipts"][0]["response"]["choices"][0]["message"]["reasoning_content"] == "PRIVATE THOUGHT"
+    assert source_call["upstream_response_receipts"][0]["response"] == response
+    assert result["judgment"]["signal_source_cost_attribution"]["confirmed_actual_microusd"] == 42
+    assert result["privacy"]["hidden_reasoning_removed"] is False
+
+    from scripts.export_arena_training import write_private
+    from scripts.render_arena_training_trace import main as render_trace
+    source = tmp_path / "export.json"
+    write_private(source, result)
+    output = tmp_path / "readable"
+    assert render_trace(["--example", str(source), "--output", str(output)]) == 0
+    report = json.loads((output / "readable-trace.json").read_text())
+    judgment_context = next(row for row in report["document_context"] if row["field"] == "judgment")
+    assert judgment_context["value"]["signal_source_provider_calls"][0] == source_call
+    markdown = (output / "readable-trace.md").read_text()
+    assert '"effort": "low"' in markdown
+    assert "Prior source reasoning." in markdown and "Selected source reasoning." in markdown
+    assert json.loads((output / "raw-export.json").read_text()) == result
 
 
 def test_original_signal_from_current_score_links_existing_charge_once():

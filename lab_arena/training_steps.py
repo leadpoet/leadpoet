@@ -410,7 +410,8 @@ def _receipt_response(call, receipt):
     return value
 
 
-def _host_response(example, call, *, write_state, allow_privacy=False, allow_worker_error=False):
+def _host_response(example, call, *, write_state, allow_privacy=False, allow_worker_error=False,
+                   require_client_ack=None):
     provenance = call.get('response_provenance') or {}
     run_id = call.get('run_id')
     request = call.get('request') or {}
@@ -487,7 +488,8 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
                  and provenance.get('selected_response_acknowledged') is not True
                  and provenance.get('worker_error_body_acknowledged') is not True, 'agent_read_unverified')
         return {'response': values[0], 'write': write, 'receipts': matches}
-    required = not training_coverage.uses_host_result_evidence(example.get('configuration') or {})
+    required = (not training_coverage.uses_host_result_evidence(example.get('configuration') or {})
+                if require_client_ack is None else require_client_ack)
     if required or reads or refs or provenance.get('agent_receipt') == 'reported_exact_body_received':
         _require(reads and provenance.get('agent_receipt') == 'reported_exact_body_received'
                  and len(refs) == len(reads), 'agent_read_unverified')
@@ -559,11 +561,16 @@ def _model_request(example, call):
     return op, body, tools
 
 
-def _candidate(example, call):
+def _candidate(example, call, *, host_observed=False):
     op, body, tools = _model_request(example, call)
     request = call.get('request') or {}
-    if training_coverage.uses_host_result_evidence(example.get('configuration') or {}):
-        evidence = _host_result(example, call)
+    provider_visible = host_observed or training_coverage.uses_host_result_evidence(
+        example.get('configuration') or {})
+    if provider_visible:
+        # Generic observed steps prove only the exact provider-visible pair.
+        # Strict policy callers keep their existing frozen read-proof rules.
+        evidence = (_host_response(example, call, write_state='socket_written', require_client_ack=False)
+                    if host_observed else _host_result(example, call))
         _require(evidence['write']['status'] == 200, 'agent_read_identity_mismatch')
         responses = [evidence['response']]
         matches = evidence['receipts']
@@ -638,7 +645,7 @@ def _candidate(example, call):
             'source_refs': [{'example_hash': example['example_hash'], 'run_id': call['run_id'],
                              'call_identity': call['call_identity'], 'teacher_reasoning_metadata': reasoning,
                              **({'capture_scope': 'provider_visible_request_result', 'client_consumption': 'not_proved'}
-                                if training_coverage.uses_host_result_evidence(example.get('configuration') or {}) else {}),
+                                if provider_visible else {}),
                              **target_provenance,
                              'delivered_response_sha256': contracts.document_hash(responses[0]),
                              'response_projection': {'opaque_reasoning_omitted': any('hidden_reasoning' in (r.get('privacy_redactions') or []) for r in matches), 'exact_provider_replay': not any(r.get('privacy_redactions') for r in matches)}, 'attempt': example.get('attempt'),
@@ -649,8 +656,8 @@ def _candidate(example, call):
                              'source_quality': copy.deepcopy(example.get('completeness') or {})}]}
 
 
-def build(examples, rules=None):
-    """Return deterministic candidate splits and an eligibility manifest."""
+def _build(examples, rules=None, *, host_observed=False):
+    """Keep strict policy evidence separate from generic host observations."""
     rules = rules or Rules()
     candidates, analysis, sources = {}, [], set()
     clusters = training_dataset._Clusters()
@@ -685,7 +692,8 @@ def build(examples, rules=None):
                 analysis.append({'source_example_hash': source, 'call_ref_hash': None, 'reason': 'malformed_call'})
                 continue
             try:
-                record = _candidate(example, call)
+                record = (_candidate(example, call, host_observed=True) if host_observed
+                          else _candidate(example, call))
                 digest = contracts.document_hash({k: record[k] for k in ('format', 'input', 'target')})
                 if digest in candidates:
                     candidates[digest]['source_refs'].extend(record['source_refs'])
@@ -710,9 +718,16 @@ def build(examples, rules=None):
                 'eligibility_limits': ['observed_next_response_only', 'quality_unreviewed', 'not_a_complete_trajectory',
                                        'no_training_permission_confirmed', 'text_local_tools_and_exposed_hosted_search_only',
                                        'hosted_internal_prompts_not_observed',
-                                       'host_delivery_required_for_new_policy', 'agent_read_required_for_historical_policy', 'no_encrypted_reasoning'],
+                                       *(['host_delivery_required', 'client_consumption_not_proved'] if host_observed else
+                                         ['host_delivery_required_for_new_policy', 'agent_read_required_for_historical_policy']),
+                                       'no_encrypted_reasoning'],
                 'counts': {'examples': len(sources), 'candidate_executions': len({ref['run_id'] for r in candidates.values() for ref in r['source_refs']}),
                            'records_by_split': {k: len(v) for k, v in splits.items()}, 'exclusion_reasons': dict(sorted(counts.items()))},
                 'sources': sorted(sources), 'split_hashes': {k: contracts.document_hash(v) for k, v in splits.items()}}
     manifest['dataset_version'] = contracts.document_hash(manifest)
     return splits, manifest
+
+
+def build(examples, rules=None):
+    """Export exact host-observed pairs without asserting client consumption."""
+    return _build(examples, rules, host_observed=True)

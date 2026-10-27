@@ -557,9 +557,14 @@ function-call contexts in managed Chat Completions and Responses requests,
 plus exposed hosted-search output in Responses.
 Each candidate retains the actual outbound context, provider reply, and exact
 source references. It verifies the request, worker artifact, host write, and
-matching stored response. Historical policies also require the agent's read
-acknowledgment; the new policy does not require miner callbacks or prove client
-consumption. A later billing recovery cannot substitute a response without
+matching stored response. This generic export uses the existing host evidence
+for historical and new rounds. It does not require miner callbacks or prove
+client consumption. Any saved read report must still match the host evidence.
+Each source reference declares `provider_visible_request_result` capture and
+`client_consumption: not_proved`. The frozen strict full-thinking and champion
+checks keep their separate historical read-proof requirements; this export
+does not change round policy, source records, or training permission.
+A later billing recovery cannot substitute a response without
 matching host-write evidence. Judge calls and future judgments never
 enter the input. A whole run can be incomplete while one independently verified
 model call is usable as a candidate.

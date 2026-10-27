@@ -578,6 +578,12 @@ DEEPLINE_GENERIC_HTTP_HEADERS: Mapping[str, str] = MappingProxyType({
     "x-deepline-execute-response-contract": "raw-v2",
     "x-deepline-tool-error-schema": "1",
 })
+# Target-page headers, selected only by the broker's HTML source fallback.
+# Caller payload headers remain forbidden by the frozen company-only policy.
+SOURCE_HTML_REQUEST_HEADERS: Mapping[str, str] = MappingProxyType({
+    "User-Agent": "Leadpoet-Arena/1.0",
+    "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+})
 # Exa attaches extracted ``entities`` (people with employers and education) to
 # search and contents results. Nothing in the judge reads them, so the broker
 # drops person entities before a model or the ledger sees them; the people
@@ -2332,6 +2338,7 @@ def build_outbound_request(
     openrouter_provider_policy: Optional[Mapping[str, Any]] = None,
     deepline_catalog: Optional[Mapping[str, Any]] = None,
     allow_full_thinking: bool = False,
+    source_html_profile: bool = False,
 ) -> OutboundRequest:
     """Build the credential-free outbound request from validated parameters.
 
@@ -2339,12 +2346,20 @@ def build_outbound_request(
     The broker may narrow an OpenRouter call with one host-owned provider
     policy derived from its source-controlled model route.  The broker places
     the credential per ``operation.credential`` and adds nothing else from the
-    model request.
+    model request. Only the broker's HTML fallback selects the fixed target
+    header profile; it is not a caller request field.
     """
 
     operation = _operation(operation_id)
     normalized = validate_operation_request(operation_id, parameters, deepline_catalog=deepline_catalog,
                                             allow_full_thinking=allow_full_thinking)
+    if type(source_html_profile) is not bool or source_html_profile and (
+        operation_id != "deepline.execute"
+        or normalized.get("tool") != "generic_http_request"
+        or normalized["payload"].get("method") != "GET"
+        or "headers" in normalized["payload"]
+    ):
+        raise OperationRequestError("invalid_request")
     if allow_full_thinking and (operation_id not in {"openrouter.chat", "openrouter.responses"}
                                 or openrouter_provider_policy is None):
         raise OperationRequestError("invalid_request")
@@ -2431,6 +2446,16 @@ def build_outbound_request(
                     raise OperationRequestError("invalid_request")
             document["provider"] = policy
         document = _wrap_body(operation, normalized, document, deepline_catalog=deepline_catalog)
+        if source_html_profile:
+            document = {**document, "payload": {
+                **document["payload"], "headers": dict(SOURCE_HTML_REQUEST_HEADERS),
+            }}
+            if deepline_catalog is not None:
+                from jsonschema import Draft202012Validator
+                from lab_arena import deepline_catalog as catalog
+                schema = catalog.tool_entry(deepline_catalog, normalized["tool"])["input_schema"]
+                if not Draft202012Validator(schema).is_valid(document["payload"]):
+                    raise OperationRequestError("invalid_request")
         body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         if schema_expanded:
             try:

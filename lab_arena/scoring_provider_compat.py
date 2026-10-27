@@ -24,6 +24,9 @@ from lab_arena import deepline_catalog, operations
 
 
 COMPATIBILITY_VERSION = "miner-score-deepline-compat:v1"
+# A changed fixed header profile needs a new wire version. Existing keyed v1
+# reservations must continue to reproduce their original header-free payload.
+SOURCE_HTTP_COMPATIBILITY_VERSION = "miner-score-deepline-source-http:v2"
 EFFECTIVE_OPERATION_ID = "deepline.execute"
 SHADOW_REPLAY_ROUTE_PREFIX = (
     "https://arena.invalid/saved-output-replay/miner-score-route/"
@@ -80,10 +83,11 @@ class MinerScoreRoute:
     adapter: str
     requested_parameters: Mapping[str, Any]
     evaluation_date: Optional[date] = None
+    compatibility_version: str = COMPATIBILITY_VERSION
 
     def summary(self) -> dict[str, str]:
         return {
-            "compatibility_version": COMPATIBILITY_VERSION,
+            "compatibility_version": self.compatibility_version,
             "effective_operation_id": self.effective_operation_id,
             "adapter": self.adapter,
         }
@@ -248,20 +252,34 @@ def route_for(
             )
             if not response_url:
                 raise operations.OperationRequestError("invalid_url", "response_url")
+            effective_parameters = {
+                "tool": GENERIC_HTTP_TOOL,
+                "payload": {
+                    "url": response_url,
+                    "method": "GET",
+                    "follow_redirects": True,
+                    "timeout_ms": upstream_timeout_ms,
+                },
+            }
+            wire_version = SOURCE_HTTP_COMPATIBILITY_VERSION
+            if frozen_catalog is not None:
+                try:
+                    operations.build_outbound_request(
+                        EFFECTIVE_OPERATION_ID, effective_parameters,
+                        deepline_catalog=frozen_catalog, source_html_profile=True,
+                    )
+                except operations.OperationError:
+                    # A frozen tool may admit the original GET but not these
+                    # fixed headers. Keep its existing v1 route; normal caller
+                    # validation still precedes any reservation or dispatch.
+                    wire_version = COMPATIBILITY_VERSION
             return MinerScoreRoute(
                 requested_operation_id=operation_id,
                 effective_operation_id=EFFECTIVE_OPERATION_ID,
-                effective_parameters={
-                    "tool": GENERIC_HTTP_TOOL,
-                    "payload": {
-                        "url": response_url,
-                        "method": "GET",
-                        "follow_redirects": True,
-                        "timeout_ms": upstream_timeout_ms,
-                    },
-                },
+                effective_parameters=effective_parameters,
                 adapter="generic_http_raw_html",
                 requested_parameters=requested,
+                compatibility_version=wire_version,
             )
         payload = {
             "url": requested["url"],

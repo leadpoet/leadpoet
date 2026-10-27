@@ -4638,6 +4638,10 @@ class Broker:
             )
             effective_operation_id = route.effective_operation_id if route else operation_id
             effective_parameters = route.effective_parameters if route else normalized
+            source_html_profile = (
+                route is not None and route.adapter == "generic_http_raw_html"
+                and route.compatibility_version == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
+            )
             effective_operation = operations.OPERATIONS[effective_operation_id]
             try:
                 effective_normalized = operations.validate_operation_request(
@@ -4890,7 +4894,10 @@ class Broker:
         prepared_capture: Optional[training_capture.PreparedRequest] = None
         request_capture = {}
         capture_request = getattr(self, "_capture_request", None)
-        if capture_request is not None:
+
+        def prepare_request_capture() -> None:
+            nonlocal captured_outbound, prepared_capture, request_capture
+            captured_outbound, prepared_capture, request_capture = None, None, {}
             try:
                 # Construct only a credential-free plan. Successful construction
                 # is reused below; failed observation leaves the original path
@@ -4898,6 +4905,7 @@ class Broker:
                 captured_outbound = operations.build_outbound_request(
                     effective_operation_id, effective_normalized,
                     deepline_catalog=context.deepline_catalog,
+                    source_html_profile=source_html_profile,
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
                         if openrouter_host_route is not None else None
@@ -4911,7 +4919,10 @@ class Broker:
                     "admitted_parameters": parameters,
                     "normalized_parameters": requested_normalized,
                     "effective_operation_id": effective_operation_id,
-                    "effective_parameters": effective_normalized,
+                    "effective_parameters": ({
+                        **effective_normalized,
+                        "payload": json.loads(captured_outbound.body)["payload"],
+                    } if source_html_profile else effective_normalized),
                     **({"reasoning_capture": reasoning_annotation} if reasoning_annotation is not None else {}),
                     "route": route.summary() if route is not None else {},
                     "outbound": {
@@ -4933,6 +4944,9 @@ class Broker:
                     request_capture = training_capture.unavailable()
             except Exception:
                 request_capture = training_capture.unavailable()
+
+        if capture_request is not None:
+            prepare_request_capture()
         reservation_arguments = dict(
             run_id=context.run_id,
             lease_token_hash=context.lease_token_hash,
@@ -5182,6 +5196,17 @@ class Broker:
             if type(saved_timeout) is not int or not 1 <= saved_timeout <= 60_000:
                 return _error_result("broker_unavailable", summary)
             saved_doc = reservations[0]["entry_doc"]
+            saved_version = saved_doc.get("compatibility_version")
+            if saved_version not in (
+                scoring_provider_compat.COMPATIBILITY_VERSION,
+                scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION,
+            ):
+                return _error_result("broker_unavailable", summary)
+            # Capture is optional. The existing durable route version, URL and
+            # timeout reproduce the exact body under this idempotency key.
+            source_html_profile = saved_version == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
+            reservation_arguments["call_doc"]["compatibility_version"] = saved_version
+            summary["compatibility_version"] = saved_version
             if "source_content_fallback_url" in saved_doc:
                 saved_url = saved_doc["source_content_fallback_url"]
                 if (
@@ -5208,8 +5233,14 @@ class Broker:
                 "payload": {**effective_normalized["payload"], "timeout_ms": saved_timeout,
                             "url": saved_url},
             }
-            route = replace(route, effective_parameters=effective_normalized)
+            route = replace(route, effective_parameters=effective_normalized,
+                            compatibility_version=saved_version)
             captured_outbound = None
+            if capture_request is not None:
+                # Repair only a blob named by the existing durable pointer.
+                # Rebuild its original version/URL/timeout before comparing it.
+                prepare_request_capture()
+                reservation_arguments["call_doc"]["request_capture"] = request_capture
         # Terminal admission replies such as stale and refused do not create a
         # reservation. Preserve their normal classification. A response-loss
         # state, and an idempotent reservation that could still dispatch, must
@@ -5524,6 +5555,7 @@ class Broker:
                     recovery_outbound = operations.build_outbound_request(
                         effective_operation_id, effective_normalized,
                         deepline_catalog=context.deepline_catalog,
+                        source_html_profile=source_html_profile,
                     )
                     recovery_url, recovery_headers = inject_credential(recovery_outbound, secret)
                     recovery_headers["idempotency-key"] = request_accounting["deepline_execution_key"]
@@ -5783,6 +5815,19 @@ class Broker:
                 billing_deadline
                 - operations.PROVIDER_BILLING_RECONCILIATION_SECONDS,
             )
+        if route is not None and route.adapter == "generic_http_raw_html" and captured_outbound is None:
+            try:
+                # Restore the saved wire version before this check. An older
+                # reservation must not require the new profile's schema.
+                captured_outbound = operations.build_outbound_request(
+                    effective_operation_id, effective_normalized,
+                    deepline_catalog=context.deepline_catalog,
+                    source_html_profile=source_html_profile,
+                )
+            except operations.OperationError:
+                return _error_result("capability_unavailable", {
+                    **summary, "outcome": "not_dispatched", "actual_microusd": 0,
+                })
         dispatched = ({"status": "dispatched", "idempotent": False}
             if deepline_response_recovery else self._store.mark_dispatched(
                 run_id=context.run_id,
@@ -5803,6 +5848,7 @@ class Broker:
             effective_operation_id,
             effective_normalized,
             deepline_catalog=context.deepline_catalog,
+            source_html_profile=source_html_profile,
             openrouter_provider_policy=(
                 openrouter_host_route.provider_policy
                 if openrouter_host_route is not None

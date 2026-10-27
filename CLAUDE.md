@@ -1,3 +1,15 @@
+## Scoped authorization: October 27 oversized source script payloads
+
+The user authorized the confirmed Firecrawl HTML source fix that prevents one
+complete oversized script payload from consuming the existing text allowance.
+Blank only script content larger than the requested operation response cap;
+preserve its exact tags and all other source bytes. Preserve source/final-URL,
+status, PDF, visibility and ownership checks, request routing, response limits,
+billing, scoring and rewards. Internal implementation agents may commit only.
+The coordinating task owns independent review, native validation and any later
+push, merge or canonical deployment. Do not add provider calls or recovery paths.
+This authority ends after the fix and affected-flow verification are complete.
+
 ## Scoped authorization: October 27 Tyche rejected-request capture
 
 The user authorized auditing the actual Tyche submission and October 28

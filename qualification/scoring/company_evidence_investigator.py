@@ -2335,6 +2335,7 @@ async def _review_industry_sources(
     session, *, model, openrouter_key, started, company_locator, criteria,
     fetched_pages, fetched_final_urls, first_party_domains, identity_anchor,
     identity_names, rebrand_finding=None, research=False,
+    admitted_final_judgment=False,
 ):
     """Use one reserved turn for the full criterion; retain every bound quote.
 
@@ -2346,7 +2347,10 @@ async def _review_industry_sources(
               'decision': 'unavailable', 'missing_requirements': [], 'evidence': [],
               'source_urls': []}
     unproven['_industry_review'] = review
-    if time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
+    # The shared loop can settle an already admitted submission after research
+    # closes. Its reserved industry judgment is part of that submission, not
+    # another research turn. Do not erase its loaded evidence at this boundary.
+    if not admitted_final_judgment and time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS:
         return unproven, ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON, 0
     rebrand = rebrand_finding or {}
     rebrand_domains = ({rebrand.get('old_domain'), rebrand.get('new_domain')}
@@ -6137,6 +6141,7 @@ async def investigate_company_evidence(
                                 await _review_industry_sources(
                                     session, **industry_review_arguments,
                                     rebrand_finding=claims.get("rebrand"),
+                                    admitted_final_judgment=True,
                                 )
                             )
                             industry_review_calls += final_review_calls

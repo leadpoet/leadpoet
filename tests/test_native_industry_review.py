@@ -358,11 +358,13 @@ def test_invalid_strong_positive_is_not_an_admission(monkeypatch, mutation):
     assert not result.get('_completed_submit')
 
 
-def test_no_extra_model_call_after_admission_deadline(monkeypatch):
-    run, _, _, reviews = install(monkeypatch, case='deadline')
+def test_reserved_industry_judgment_finishes_after_admitted_fetch(monkeypatch):
+    run, calls, _, reviews = install(monkeypatch, case='deadline')
     result = asyncio.run(run())
-    assert not reviews
-    assert result['failure_reason'] == 'admission_budget_interrupted'
+    assert len(reviews) == result['usage']['industry_review_calls'] == 1
+    assert result['_completed_submit'] is True
+    assert result['failure_reason'] == ''
+    assert len(calls['primary']) == 2 and not calls['search']
 
 
 @pytest.mark.parametrize('fault', ['truncated', 'invalid_json', 'missing_role', 'foreign_citation'])

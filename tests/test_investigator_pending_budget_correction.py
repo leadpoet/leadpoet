@@ -11,7 +11,7 @@ import pytest
 
 from scripts.arena_reviewer_admission_seam import convert_admission_seam
 from scripts.arena_reviewer_budget_seam import (
-    BudgetSeamError, _NEW, _OLD, convert_budget_seam,
+    BudgetSeamError, _NATIVE_NEW as _NEW, _NATIVE_OLD as _OLD, convert_budget_seam,
 )
 from tests.test_company_evidence_investigator import _finding
 
@@ -163,7 +163,8 @@ def test_final_correction_cannot_research_or_accept_fabricated_proof(monkeypatch
     if correction == "research":
         assert result["failure_reason"] == "malformed_response"
     else:
-        assert result["_completed_submit"] is True
+        assert result["_completed_submit"] is False
+        assert result["failure_reason"] == "malformed_response"
         assert result["claims"]["required_attribute"]["status"] == "UNPROVEN"
         assert result["claims"]["required_attribute"]["evidence_quote"] == ""
 
@@ -180,13 +181,13 @@ def test_budget_seam_changes_only_reviewed_predicate_and_is_idempotent():
 def test_budget_seam_rejects_unknown_or_partial_shapes(corruption):
     source = _source(repaired=False)
     if corruption == "unknown":
-        source = source.replace(b"correction_turn = _turn == MAX_REASONING_TURNS", b"correction_turn = False", 1)
+        source = source.replace(b"correction_turn = _turn == reasoning_turn_limit", b"correction_turn = False", 1)
     elif corruption == "duplicate":
         source = source.replace(_OLD.encode(), (_OLD + _OLD).encode(), 1)
     elif corruption == "missing_hook":
         source = source.replace(b"turn_admission = admission.next_turn(", b"turn_admission = other.next_turn(", 1)
     elif corruption == "partial":
-        source = source.replace(b"correction_turn = _turn == MAX_REASONING_TURNS", b"correction_turn = final_correction_pending", 1)
+        source = source.replace(b"correction_turn = _turn == reasoning_turn_limit", b"correction_turn = final_correction_pending", 1)
     else:
         source = source.replace(b"\n", b"\r\n")
     with pytest.raises(BudgetSeamError):

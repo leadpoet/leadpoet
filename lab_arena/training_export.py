@@ -23,6 +23,10 @@ MAX_RECEIPT_BYTES = 16 * 1024 * 1024
 # The final privacy pass bounds each joined call and input snapshot separately,
 # plus one shared envelope budget. Per-request/response limits remain unchanged.
 MAX_EXAMPLE_NODES = 2_000_000
+_RETAINED_ERROR_STATUSES = {
+    "openrouter": (400, 402, 403, 404, 422, 502),
+    "deepline": (400, 402, 403, 404, 422),
+}
 
 
 class ExportError(ValueError):
@@ -530,23 +534,26 @@ def response_entry_id(call):
     if "response_entry_id" not in call:
         return terminal
     selected = call["response_entry_id"]
+    provider = call.get("provider")
     receipts = [row for row in call.get("response_receipts", []) if row.get("entry_id") == selected]
-    if (call.get("provider") != "openrouter" or type(selected) is not int
+    if (provider not in _RETAINED_ERROR_STATUSES or type(selected) is not int
         or type(terminal) is not int or not 0 < selected <= terminal or len(receipts) != 1):
         raise ExportError("retained_provider_error_identity_invalid")
     receipt = receipts[0]
-    if (receipt.get("terminal_source") != "entry_doc.call.openrouter_terminal_response"
+    if (receipt.get("terminal_source") != f"entry_doc.call.{provider}_terminal_response"
         or receipt.get("entry_kind") != "uncertain"
         or (receipt.get("metadata") or {}).get("call_succeeded") is not False
         or (receipt.get("metadata") or {}).get("status") != call.get("response_status")
-        or call.get("response_status") not in (400, 402, 403, 404, 422, 502)
+        or call.get("response_status") not in _RETAINED_ERROR_STATUSES[provider]
         or receipt.get("response_sha256") != call.get("response_sha256")
         or receipt.get("response_ref") != {"field": "response", "entry_id": selected}):
         raise ExportError("retained_provider_error_identity_invalid")
     if selected != terminal:
         heads = [row for row in call.get("lifecycle", []) if row.get("entry_id") == terminal]
         if (len(heads) != 1 or heads[0].get("entry_kind") != "settlement"
-            or (heads[0].get("accounting") or {}).get("openrouter_delayed_reconciliation") is not True
+            or (heads[0].get("accounting") or {}).get(f"{provider}_delayed_reconciliation") is not True
+            or any(f"{name}_delayed_reconciliation" in (heads[0].get("accounting") or {})
+                   for name in _RETAINED_ERROR_STATUSES if name != provider)
             or (heads[0].get("accounting") or {}).get("reconciled_uncertainty_entry_id") != selected):
             raise ExportError("retained_provider_error_identity_invalid")
     return selected
@@ -581,34 +588,52 @@ def _calls(rows, run_ids, objects, run_order):
                      {"settlement", "uncertain", "recovery", "refusal"}]
         response_terminals = terminals
         retained = []
-        if reserves and reserves[0].get("provider") == "openrouter":
+        provider = reserves[0].get("provider") if reserves else None
+        if provider in _RETAINED_ERROR_STATUSES:
+            terminal_field = f"{provider}_terminal_response"
             for row in terminals:
                 saved = (row.get("entry_doc") or {}).get("call") or {}
-                if row["entry_kind"] != "uncertain" or "openrouter_terminal_response" not in saved:
+                if row["entry_kind"] != "uncertain" or terminal_field not in saved:
                     continue
-                terminal = saved["openrouter_terminal_response"]
+                terminal = saved[terminal_field]
                 try:
-                    status, _, _ = _decode_terminal(terminal)
+                    status, _, body = _decode_terminal(terminal)
                     if (saved.get("reason") != "missing_provider_cost"
                         or saved.get("call_succeeded") is not False
-                        or saved.get("openrouter_generation_present") is not True
                         or terminal.get("call_succeeded") is not False
-                        or status not in (400, 402, 403, 404, 422, 502)):
+                        or status not in _RETAINED_ERROR_STATUSES[provider]
+                        or provider == "openrouter" and saved.get("openrouter_generation_present") is not True):
                         raise BrokerError("broker_unavailable")
+                    if provider == "deepline" and status == 402:
+                        from lab_arena.operations import GENERIC_UNAVAILABLE_BODY
+                        if (reserves[0].get("funding_source") != "host"
+                            or saved.get("deepline_host_payment_refusal") is not True
+                            or saved.get("provider_status") != 402
+                            or body != GENERIC_UNAVAILABLE_BODY):
+                            raise BrokerError("broker_unavailable")
                 except BrokerError as exc:
                     raise ExportError("retained_provider_error_invalid") from exc
                 retained.append(dict(row, terminal_response=terminal,
-                    retained_terminal_source="entry_doc.call.openrouter_terminal_response"))
+                    retained_terminal_source=f"entry_doc.call.{terminal_field}"))
             if retained:
                 if len(retained) != 1:
                     raise ExportError("retained_provider_error_ambiguous")
                 saved = retained[0]
+                for row in terminals:
+                    accounting = row.get("entry_doc") or {}
+                    markers = {f"{name}_delayed_reconciliation" for name in _RETAINED_ERROR_STATUSES
+                               if f"{name}_delayed_reconciliation" in accounting}
+                    if markers and (
+                        markers != {f"{provider}_delayed_reconciliation"}
+                        or accounting.get(f"{provider}_delayed_reconciliation") is not True
+                        or accounting.get("reconciled_uncertainty_entry_id") != saved["entry_id"]):
+                        raise ExportError("retained_provider_error_identity_invalid")
                 # A delayed bill's generic 502 is an accounting placeholder,
                 # not another response delivered to the model. Its immutable
                 # cost and lifecycle remain authoritative below.
                 response_terminals = [saved] + [row for row in terminals
                     if row["entry_id"] != saved["entry_id"]
-                    and not ((row.get("entry_doc") or {}).get("openrouter_delayed_reconciliation") is True
+                    and not ((row.get("entry_doc") or {}).get(f"{provider}_delayed_reconciliation") is True
                         and (row.get("entry_doc") or {}).get("reconciled_uncertainty_entry_id") == saved["entry_id"])]
         standalone_refusal = (not reserves and not dispatches and len(entries) == 1
                               and entries[0].get("entry_kind") == "refusal"
@@ -815,7 +840,7 @@ def _calls(rows, run_ids, objects, run_order):
                 call["response_hidden_reasoning_removed"] = "hidden_reasoning" in latest_redactions
                 call["response_privacy_redactions"] = latest_redactions
                 call["response_status"] = latest_terminal.get("status")
-                if retained:
+                if retained and latest_id == retained[0]["entry_id"]:
                     call["response_entry_id"] = latest_id
             else:
                 call_reasons.add("full_response_unavailable")

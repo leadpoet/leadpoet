@@ -385,6 +385,32 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
     Client read reports are optional only for the validated new frozen policy;
     an existing report must still agree. No consumption claim is synthesized.
     """
+    return _host_response(example, call, write_state='socket_written',
+                          allow_privacy=allow_privacy, allow_worker_error=allow_worker_error)
+
+
+def _failed_host_result(example, call):
+    """Validate a saved response whose host write failed; never a target/read."""
+    return _host_response(example, call, write_state='socket_write_failed')
+
+
+def _receipt_response(call, receipt):
+    """Resolve one retained ledger response without changing its reference."""
+    value = receipt.get('response')
+    if value is None:
+        target = receipt.get('response_ref') or {}
+        if target.get('field') == 'response' and target.get('entry_id') == training_export.response_entry_id(call):
+            value = call.get('response')
+        else:
+            linked = [r for r in call.get('response_receipts') or []
+                      if r.get('entry_id') == target.get('entry_id') and 'response' in r]
+            _require(len(linked) == 1, 'response_reference_unresolved')
+            value = linked[0]['response']
+    _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
+    return value
+
+
+def _host_response(example, call, *, write_state, allow_privacy=False, allow_worker_error=False):
     provenance = call.get('response_provenance') or {}
     run_id = call.get('run_id')
     request = call.get('request') or {}
@@ -404,11 +430,12 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
     _require(artifact.get('payload_sha256') == digest, 'worker_payload_hash_mismatch')
     ref = provenance.get('worker_receipt_ref') or {}
     writes = [row for row in payload.get('response_receipts') or [] if row.get('ordinal') == ref.get('ordinal')]
-    _require(provenance.get('delivery_to_worker') == 'socket_written'
+    _require(provenance.get('delivery_to_worker') == write_state
              and ref.get('run_id') == run_id and ref.get('payload_sha256') == digest
              and len(writes) == 1, 'worker_write_unverified')
     write = writes[0]
-    _require(write.get('write_state') == 'socket_written'
+    _require(write.get('write_state') == write_state
+             and (write_state != 'socket_write_failed' or write.get('socket_written_at') is None)
              and all(write.get(key) == call.get(key) for key in ('call_identity', 'operation_id', 'action_sequence'))
              and type(write.get('status')) is int and 100 <= write['status'] <= 599
              and type(write.get('body_bytes')) is int and write['body_bytes'] >= 0
@@ -426,16 +453,7 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
         _require(not receipt.get('response_unavailable'), 'delivered_response_unresolved')
         if not allow_privacy:
             _require(set(receipt.get('privacy_redactions') or []) <= permitted_redactions, 'response_privacy_nonexact')
-        value = receipt.get('response')
-        if value is None:
-            target = receipt.get('response_ref') or {}
-            if target.get('field') == 'response' and target.get('entry_id') == training_export.response_entry_id(call):
-                value = call.get('response')
-            else:
-                linked = [r for r in receipts if r.get('entry_id') == target.get('entry_id') and 'response' in r]
-                _require(len(linked) == 1, 'response_reference_unresolved')
-                value = linked[0]['response']
-        _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
+        value = _receipt_response(call, receipt)
         if not allow_privacy:
             _require(_exact(value, response=True), 'response_privacy_nonexact')
         values.append(value)
@@ -464,6 +482,11 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
     reads = [row for row in payload.get('agent_observations') or [] if row.get('kind') == 'response_received'
              and ((row.get('data') or {}).get('call_identity') == call.get('call_identity')
                   or any(ref.get('id') == row.get('id') for ref in refs))]
+    if write_state == 'socket_write_failed':
+        _require(not reads and not refs and provenance.get('agent_receipt') in (None, 'not_reported')
+                 and provenance.get('selected_response_acknowledged') is not True
+                 and provenance.get('worker_error_body_acknowledged') is not True, 'agent_read_unverified')
+        return {'response': values[0], 'write': write, 'receipts': matches}
     required = not training_coverage.uses_host_result_evidence(example.get('configuration') or {})
     if required or reads or refs or provenance.get('agent_receipt') == 'reported_exact_body_received':
         _require(reads and provenance.get('agent_receipt') == 'reported_exact_body_received'
@@ -501,7 +524,8 @@ def _validate_target_tools(body, target, op):
                      for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
 
 
-def _candidate(example, call):
+def _model_request(example, call):
+    """Shared exact model request checks, independent of delivery or target."""
     _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
     op = call.get('operation_id')
     _require(call.get('provider') == 'openrouter' and op in {'openrouter.chat', 'openrouter.responses'}, 'operation_unsupported')
@@ -532,6 +556,12 @@ def _candidate(example, call):
     _require(isinstance(tools, list) and all(isinstance(tool, dict) for tool in tools), 'hosted_tool_unsupported')
     if op == 'openrouter.chat':
         _require(all(tool.get('type') == 'function' for tool in tools), 'hosted_tool_unsupported')
+    return op, body, tools
+
+
+def _candidate(example, call):
+    op, body, tools = _model_request(example, call)
+    request = call.get('request') or {}
     if training_coverage.uses_host_result_evidence(example.get('configuration') or {}):
         evidence = _host_result(example, call)
         _require(evidence['write']['status'] == 200, 'agent_read_identity_mismatch')

@@ -870,6 +870,8 @@ def openrouter_normalized(parameters: Mapping[str, Any], *, allow_full_thinking:
     requested = parameters.get(token_field)
     cap = (operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS
            if token_field == "max_output_tokens" or allow_full_thinking else operations.OPENROUTER_MAX_OUTPUT_TOKENS)
+    if allow_full_thinking and requested is not None and (type(requested) is not int or requested > cap):
+        raise BrokerError("invalid_request")
     max_tokens = operations.OPENROUTER_MAX_OUTPUT_TOKENS if requested is None else min(int(requested), cap)
     if max_tokens < 1:
         raise BrokerError("invalid_request")
@@ -906,7 +908,8 @@ def normalized_request(
         allow_full_thinking=reasoning_capture_policy == reasoning_capture.POLICY,
     )
     if operations.OPERATIONS[operation_id].provider == "openrouter":
-        normalized = openrouter_normalized(normalized)
+        normalized = openrouter_normalized(
+            normalized, allow_full_thinking=reasoning_capture_policy == reasoning_capture.POLICY)
         normalized, _ = agent_reasoning_parameters(
             operation_id, normalized, policy=reasoning_capture_policy,
             registry=reasoning_route_registry,
@@ -924,8 +927,8 @@ def agent_reasoning_parameters(
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Apply a round's frozen reasoning policy to one validated agent call.
 
-    The full-thinking policy admits only an exact reviewed route. A request
-    that cannot carry its pinned thinking form is refused before dispatch.
+    The full-thinking policy admits only an exact reviewed route. Explicit
+    enabled reasoning settings and output limits remain the caller's choice.
     """
 
     try:
@@ -934,9 +937,9 @@ def agent_reasoning_parameters(
             registry=registry,
         )
     except ValueError as exc:
-        code = "invalid_request" if str(exc) in {"reasoning_route_unsupported", "reasoning_headroom_unavailable"} else "broker_unavailable"
+        code = "invalid_request" if str(exc) in {"reasoning_route_unsupported", "reasoning_headroom_unavailable", "reasoning_controls_invalid"} else "broker_unavailable"
         raise BrokerError(code) from exc
-    if annotation is None or not annotation["changes"]:
+    if annotation is None:
         return dict(parameters), annotation
     try:
         # Validate schema and encoded-size limits on the provider-compatible
@@ -3802,13 +3805,14 @@ class Broker:
                 time.sleep(min(backoff, remaining))
                 backoff = min(backoff * 2, _ACCOUNTING_STORE_MAX_BACKOFF_SECONDS)
 
-    def _openrouter_parameters(self, parameters: Mapping[str, Any], *, kind: str = "execute") -> Tuple[Dict[str, Any], int]:
+    def _openrouter_parameters(self, parameters: Mapping[str, Any], *, kind: str = "execute",
+                               allow_full_thinking: bool = False) -> Tuple[Dict[str, Any], int]:
         model = str(parameters.get("model") or "")
         if kind == "score" and model not in self._judge_models:
             raise BrokerError("model_not_allowed")
         if model not in self._price_table["models"]:
             raise BrokerError("model_not_allowed")
-        normalized = openrouter_normalized(parameters)
+        normalized = openrouter_normalized(parameters, allow_full_thinking=allow_full_thinking)
         return normalized, int(normalized.get("max_output_tokens", normalized.get("max_tokens")))
 
     def reconcile_openrouter_cost(
@@ -4742,7 +4746,10 @@ class Broker:
             if effective_operation.provider == "openrouter":
                 # Record the request's price bound. Full-thinking admission
                 # holds this amount; historical policies keep their rules.
-                effective_normalized, max_output_tokens = self._openrouter_parameters(effective_normalized, kind=getattr(context, "kind", "execute"))
+                effective_normalized, max_output_tokens = self._openrouter_parameters(
+                    effective_normalized, kind=getattr(context, "kind", "execute"),
+                    allow_full_thinking=(getattr(context, "kind", "execute") == "execute"
+                        and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY))
                 if getattr(context, "kind", "execute") == "execute":
                     # Before hashing: identity, capture and the sent body all
                     # bind the reasoning parameters actually requested.

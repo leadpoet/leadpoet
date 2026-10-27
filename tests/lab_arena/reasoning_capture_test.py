@@ -48,7 +48,7 @@ def _reviewed_registry(model="openai/gpt-4o-mini", api="openrouter.chat"):
     route = {
         "model_id": model, "model_version": model,
         "provider": "example/verified", "provider_name": "Example Provider", "api": api,
-        "mode": {"budget_tokens": 1024} if api == "openrouter.chat" else {"effort": "high"},
+        "mode": {"effort": "high"},
         "parser_version": rc.PARSER_VERSION,
         "semantic_class": "full_generated_thinking",
         "full_text_fields": ["reasoning_details.text"] if api == "openrouter.chat" else ["output.content.reasoning_text"],
@@ -225,7 +225,7 @@ def test_exact_route_registry_is_immutable_and_rejects_fallback_or_summary():
     source = _reviewed_registry()
     frozen = rc.validate_registry(source)
     source["approved_routes"][0]["mode"]["budget_tokens"] = 2048
-    assert frozen["approved_routes"][0]["mode"] == {"budget_tokens": 1024}
+    assert frozen["approved_routes"][0]["mode"] == {"effort": "high"}
     for change in ({"allowed_fallback_routes": ["other"]},
                    {"semantic_class": "summary"}, {"status": "candidate"},
                    {"price_ceiling": {"prompt": "NaN", "completion": "0.000001", "request": "0", "internal_reasoning": "0"}},
@@ -244,13 +244,13 @@ def test_exact_route_registry_is_immutable_and_rejects_fallback_or_summary():
         rc.validate_registry(wrong_version)
 
 
-def test_full_policy_forces_exact_mode_and_bounded_answer_room_before_hash():
-    request = chat("openai/gpt-4o-mini", max_tokens=400, reasoning={"enabled": False, "summary": "auto"})
+def test_full_policy_keeps_enabled_request_and_records_frozen_route_before_hash():
+    request = chat("openai/gpt-4o-mini", max_tokens=400, reasoning={"enabled": True, "summary": "auto"})
     updated, annotation = rc.apply("openrouter.chat", request, policy=rc.POLICY,
                                    registry=_reviewed_registry())
-    assert request["reasoning"]["enabled"] is False
-    assert updated["reasoning"] == {"max_tokens": 1024, "exclude": False}
-    assert updated["max_tokens"] >= 2048
+    assert updated == request
+    assert updated["max_tokens"] == 400
+    assert annotation["changes"] == []
     assert annotation["reviewed_route"] is True
     assert annotation["semantic_class"] == "full_generated_thinking"
     assert annotation["full_text_fields"] == ["reasoning_details.text"]
@@ -275,7 +275,7 @@ def test_full_policy_refuses_unapproved_model_api_and_invalid_schema():
                                       policy=rc.POLICY, registry=registry)
 
 
-def test_full_policy_can_add_output_room_above_historical_chat_limit():
+def test_full_policy_keeps_explicit_output_room_above_historical_chat_limit():
     request = chat("openai/gpt-4o-mini", max_tokens=8192)
     updated, _ = br.agent_reasoning_parameters(
         "openrouter.chat", request, policy=rc.POLICY, registry=_reviewed_registry())
@@ -338,8 +338,8 @@ def test_full_policy_binds_frozen_route_hash_cost_and_zdr_without_fallback():
     assert result.status == 200
     sent = json.loads(transport.sent[0]["body"])
     assert sent["model"] == broker_tests.CHAT["model"]
-    assert sent["max_tokens"] == 8192
-    assert sent["reasoning"] == {"max_tokens": 1024, "exclude": False}
+    assert sent["max_tokens"] == broker_tests.CHAT["max_tokens"]
+    assert sent["reasoning"] == {"effort": "high", "exclude": False}
     assert sent["provider"]["only"] == ["example/verified"]
     assert sent["provider"]["allow_fallbacks"] is False
     assert sent["provider"]["require_parameters"] is True

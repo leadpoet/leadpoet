@@ -46,9 +46,11 @@ def evidence():
     assert manifest['schema_version'] == 1
     current = rc.load_registry()
     original_registry(current)
-    additions = current['approved_routes'][ORIGINAL_COUNT:]
-    assert additions, 'a route extension must contain evidence-backed additions'
     captures = manifest['captures']
+    capture_keys = {key(row['route_metadata']) for row in captures}
+    additions = current['approved_routes'][ORIGINAL_COUNT:ORIGINAL_COUNT + len(captures)]
+    assert additions, 'a route extension must contain evidence-backed additions'
+    assert {key(row) for row in additions} == capture_keys
     assert len({key(row['route_metadata']) for row in captures}) == len(captures)
     assert {key(row) for row in additions} == {key(row['route_metadata']) for row in captures}
     return current, additions, manifest, hashlib.sha256(raw).hexdigest()
@@ -58,6 +60,11 @@ def request(route, *, explicit_provider=True):
     value = {'model': route['model_id'], **({'input': 'Inspect the supplied evidence.'}
         if route['api'] == 'openrouter.responses' else
         {'messages': [{'role': 'user', 'content': 'Inspect the supplied evidence.'}]})}
+    cap = 'max_output_tokens' if route['api'] == 'openrouter.responses' else 'max_tokens'
+    value[cap] = route['max_output_tokens']
+    value['reasoning'] = deepcopy(route['mode'])
+    if route['api'] == 'openrouter.chat':
+        value['reasoning']['exclude'] = False
     if explicit_provider:
         value['provider'] = {'only': [route['provider']]}
     return value

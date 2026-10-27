@@ -180,7 +180,10 @@ def _responses_input(value, *, tools=(), max_tool_calls=None, allow_reasoning_hi
     for item in value:
         kind = item.get('type', 'message')
         if kind == 'message':
-            _require(not pending, 'tool_context_unresolved')
+            # One provider turn may expose a tool call followed by assistant
+            # text. That text does not resolve the call; its matching output
+            # must still arrive before any other role or the end of history.
+            _require(not pending or item['role'] == 'assistant', 'tool_context_unresolved')
             content = item['content']
             if isinstance(content, list):
                 _require(not any(part.get('annotations') for part in content)

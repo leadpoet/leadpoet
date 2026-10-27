@@ -33,6 +33,10 @@ def cap_example(api='openrouter.chat'):
         call['reasoning_capture'].update(api=api, full_text_fields=['output.content.reasoning_text'])
         body.pop('messages')
         body.pop('max_tokens', None)
+        # Convert the saved Chat fixture to a valid Responses request. These
+        # Chat controls must not be admitted by the evidence reader either.
+        body['reasoning'].pop('exclude', None)
+        body.pop('tool_choice', None)
         body.update(input=[{'role': 'user', 'content': 'Review the saved company.'}], max_output_tokens=cap,
                     tools=[{'type': 'function', 'name': 'lookup_evidence', 'parameters': {'type': 'object'}}])
         call['response'] = {'status': 'completed', 'error': None, 'output': [

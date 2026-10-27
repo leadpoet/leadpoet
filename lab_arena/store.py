@@ -1752,6 +1752,16 @@ class ArenaStore:
         rows = self._transport.select("lab_arena_rounds", filters={"round_id": round_id}, limit=1)
         return rows[0] if rows else None
 
+    def get_round_baseline_hotkey(self, round_id: str) -> Any:
+        """Read one configured key, not the multi-megabyte round configuration."""
+
+        rows = self._transport.select(
+            "lab_arena_rounds", filters={"round_id": round_id}, limit=1,
+            columns="cfg_baseline_hotkey:configuration_doc->baseline_hotkey::text",
+        )
+        value = rows[0].get("cfg_baseline_hotkey") if rows else None
+        return None if value is None else json.loads(value)
+
     def get_public_submissions_round(self, round_id: str) -> Optional[Dict[str, Any]]:
         """Keep every ranking and disclosure authority without frozen catalogs."""
 

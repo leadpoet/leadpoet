@@ -28,8 +28,8 @@ class SubmissionProviderKeys:
         round_id = str(row.get("round_id") or "")
         if row.get("submission_id") != "baseline-" + round_id.removeprefix("arena-"):
             return False
-        round_row = self._store.get_round(round_id)
-        configured_hotkey = ((round_row or {}).get("configuration_doc") or {}).get("baseline_hotkey")
+        # Runs for every provider call; read only the key, never the round row.
+        configured_hotkey = self._store.get_round_baseline_hotkey(round_id)
         return bool(configured_hotkey and row.get("miner_hotkey") == configured_hotkey and row.get("is_king"))
 
     def funding_source_for(self, context: RunContext) -> str:

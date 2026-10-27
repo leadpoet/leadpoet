@@ -1,3 +1,12 @@
+## Scoped authorization: PR808 baseline hotkey read
+
+The user authorized correcting the test fixtures, merging PR808, and canonical
+redeployment with live verification of the scalar baseline hotkey read. Preserve
+funding, credentials, scoring, dashboard data, rewards, and concurrent work.
+Use the existing guarded gateway and normal-validator release controllers;
+do not apply unrelated migrations or change production results. This authority
+expires when deployment and verification are complete.
+
 ## Scoped authorization: October 27 PDF and HTML evidence recovery
 
 The user authorized review, integration, safe merge, canonical deployment and

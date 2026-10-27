@@ -78,6 +78,40 @@ def test_pdf_locator_uses_existing_text_provider_without_html_rendering(monkeypa
     assert result['claims']['industry']['status'] == 'VERIFIED'
 
 
+
+@pytest.mark.parametrize('case', ['recover', 'cap', 'deadline', 'denied'])
+def test_pdf_suffix_does_not_erase_recoverable_html_or_bypass_limits(monkeypatch, case):
+    url = 'https://www.coreworks.ai/brochure.pdf'
+    urls = tuple(f'https://www.coreworks.ai/page{i}' for i in range(3)) + (url,) if case == 'cap' else (url,)
+    finding = _finding('industry', status='VERIFIED', evidence_url=url,
+                       evidence_quote=QUOTE, activity_role='supplier_operator',
+                       observed_industry='Software')
+    contents = (200, {'results': [{'url': url, 'text': ''}]})
+    if case == 'denied':
+        contents = (200, {'results': [], 'statuses': [{'id': url, 'status': 'error',
+            'error': {'httpStatusCode': 403, 'tag': 'CRAWL_HTTP_403'}}]})
+    run, calls, clock = _install_loop(monkeypatch, status=200, body='<p>' + QUOTE + '</p>',
+        urls=urls, target='industry', finding=finding, contents=contents)
+    original = c._post_json
+    async def post(session, endpoint, **kwargs):
+        result = await original(session, endpoint, **kwargs)
+        if case == 'deadline' and endpoint == 'https://api.exa.ai/contents':
+            clock.now = c.ADMISSION_DEADLINE_SECONDS
+        return result
+    monkeypatch.setattr(c, '_post_json', post)
+    result = asyncio.run(run())
+    assert len(calls['contents']) == 1
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
+    if case == 'recover':
+        assert calls['primary'] == [url]
+        assert result['usage']['fetch_calls'] == 2
+        assert result['claims']['industry']['status'] == 'VERIFIED'
+        assert result['_completed_submit'] is True
+    else:
+        assert url not in calls['primary']
+        assert result['claims']['industry']['status'] != 'VERIFIED'
+
+
 def _industry_finding(status="VERIFIED", quote=QUOTE):
     return _finding(
         "industry", status=status, evidence_url=URL, evidence_quote=quote,

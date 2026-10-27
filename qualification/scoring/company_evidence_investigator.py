@@ -4244,17 +4244,28 @@ async def investigate_company_evidence(
             async def fetch_fresh_page(url: str) -> dict[str, Any]:
                 nonlocal fetch_calls
                 fetch_calls += 1
+                contents_attempted = False
                 if (
                     "industry" in requested_targets
                     and urlsplit(url).path.casefold().endswith(".pdf")
                     and os.environ.get("EXA_API_KEY")
                 ):
-                    # The HTML rendering route does not supply PDF source text.
-                    # Use the existing bounded exact-URL text request directly,
-                    # avoiding an unnecessary rendering/document-parser charge.
+                    # Prefer document text, but a .pdf suffix is not a verified
+                    # content type. Preserve the normal HTML route if this read
+                    # fails and the same admission budget still permits it.
+                    contents_attempted = True
                     result = await _fetch_exa_exact_page(session, url)
                     fetch_outcomes.append(_fetch_outcome(url, result))
-                    return result
+                    if (
+                        result.get("ok")
+                        or result.get("error") in {
+                            "source_not_found", "source_gone", "source_access_denied",
+                        }
+                        or fetch_calls >= MAX_FETCH_CALLS
+                        or time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS
+                    ):
+                        return result
+                    fetch_calls += 1
                 archive_targets = (
                     tuple(
                         article_url for article_url in fetched_pages
@@ -4313,6 +4324,7 @@ async def investigate_company_evidence(
                         "provider_request_refused",
                     })
                     and not result.get("ok")
+                    and not contents_attempted
                     and os.environ.get("EXA_API_KEY")
                     and not archive_targets
                     and not _strict_linkedin_company_profile_url(url)

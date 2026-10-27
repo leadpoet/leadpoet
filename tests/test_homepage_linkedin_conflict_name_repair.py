@@ -106,6 +106,18 @@ def test_wrong_submitted_linkedin_cannot_use_homepage_conflict_repair():
     assert receipt["decision"] == "mismatch"
 
 
+@pytest.mark.parametrize("homepage_slug", ["1234", "acme-old"])
+def test_existing_matched_optional_profile_identity_is_preserved(homepage_slug):
+    anchor = scorer._verified_homepage_identity_anchor(
+        _verified_homepage_identity(observed_linkedin_slug=homepage_slug))
+    receipt = scorer._web_identity_receipt(
+        _company(company_linkedin=""), _complete_verdict(),
+        verified_homepage_identity=anchor, company_quality=True,
+    )
+    assert receipt["decision"] == "match"
+    assert receipt["observed_linkedin_slug"] == "acme"
+
+
 @pytest.mark.parametrize("repair_changes", [
     {"observed_company_name": ""},
     {"observed_company_website": "https://wrong.example/"},

@@ -4495,7 +4495,8 @@ def _web_identity_receipt(
         )
         return receipt
     if (
-        verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
+        receipt.get("decision") in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}
+        and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and receipt.get("submitted_domain")
         == verified_homepage_identity.get("registrable_dns_domain")
         and receipt.get("submitted_linkedin_slug")

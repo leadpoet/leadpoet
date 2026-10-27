@@ -1,3 +1,13 @@
+## Scoped authorization: October 27 promotion RPC access
+
+The user authorized the October 27 champion-integrity fix. Restrict only
+`lab_arena_prepare_promotion(text,jsonb)` and
+`lab_arena_complete_promotion(text,jsonb)` to their owner and canonical
+`lab_arena_service` caller. Test the exact migration, preserve function bodies,
+baseline/publication guards, scoring and existing results. The coordinating
+task owns independent review, push, merge and production deployment. Internal
+implementation agents may commit only; they must not write to production.
+
 ## Scoped authorization: October 27 completed-review recovery
 
 The user authorized the full October 27 Arena watch, permanent fixes, testing,

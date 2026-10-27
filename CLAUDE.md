@@ -4,8 +4,10 @@ The user authorized the verified OCI image materialization repair for a later
 layer that replaces an existing destination symlink, including focused security
 tests, exact candidate image materialization, push, merge and canonical gateway
 and normal-validator rollout. Reject absolute hardlink targets to prevent
-host-file import; preserve relative hardlinks, ancestor containment, whiteout
-checks, image identity, budgets, scoring, costs and rewards. Internal
+host-file import. Create relative hardlinks only to existing contained regular
+files and fail closed on link errors; do not use tarfile archive fallback.
+Preserve hardlink metadata, ancestor containment, whiteout checks, image
+identity, budgets, scoring, costs and rewards. Internal
 implementation agents may commit only; the coordinating task owns independent
 security review and production deployment. Do not change PR 825 scorer behavior
 or unrelated runtime work. This authority ends after deployment and native

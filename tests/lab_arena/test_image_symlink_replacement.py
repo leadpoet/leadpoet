@@ -160,3 +160,82 @@ def test_late_child_write_through_replaced_outside_symlink_is_rejected(tmp_path)
                                 ("destination/victim", "file", b"overwrite")], "replacement")
     assert failure.value.rule_id == images.RULE_LAYER_INVALID
     assert (outside / "victim").read_bytes() == b"host sentinel"
+
+
+def test_hardlink_cannot_resurrect_a_skipped_whiteout_symlink(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    outside = tmp_path / "host-secret"
+    outside.write_bytes(b"host sentinel")
+    outside.chmod(0o600)
+    with pytest.raises(images.ImageError) as failure:
+        apply(tmp_path, rootfs, [(".wh.shadow", "symlink", str(outside)),
+                                ("leak", "hardlink", ".wh.shadow")], "whiteout-link")
+    assert failure.value.rule_id == images.RULE_LAYER_INVALID
+    assert outside.read_bytes() == b"host sentinel"
+    assert outside.stat().st_mode & 0o777 == 0o600
+    assert not (rootfs / "leak").exists() and not (rootfs / "leak").is_symlink()
+
+
+def test_hardlink_cannot_reparent_a_contained_relative_symlink(tmp_path):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    outside = tmp_path / "inside"
+    outside.write_bytes(b"host sentinel")
+    outside.chmod(0o600)
+    apply(tmp_path, rootfs, [("inside", "file", b"image"), ("deep", "dir"),
+                            ("deep/source", "symlink", "../inside")], "base")
+    with pytest.raises(images.ImageError) as failure:
+        apply(tmp_path, rootfs, [("leak", "hardlink", "deep/source")], "reparent")
+    assert failure.value.rule_id == images.RULE_LAYER_INVALID
+    assert outside.read_bytes() == b"host sentinel"
+    assert outside.stat().st_mode & 0o777 == 0o600
+    assert not (rootfs / "leak").exists() and not (rootfs / "leak").is_symlink()
+
+
+def test_failed_hardlink_cannot_fall_back_to_a_skipped_archive_symlink(tmp_path, monkeypatch):
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    # The current filesystem target is a regular file even though the archive
+    # contains a skipped symlink with the same name. Never let tarfile substitute it.
+    (rootfs / ".wh.shadow").write_bytes(b"image target")
+    outside = tmp_path / "host-secret"
+    outside.write_bytes(b"host sentinel")
+    outside.chmod(0o600)
+
+    def refuse_hardlink(*_args, **_kwargs):
+        raise OSError("test refuses hardlink creation")
+
+    monkeypatch.setattr(os, "link", refuse_hardlink)
+    with pytest.raises(images.ImageError) as failure:
+        apply(tmp_path, rootfs, [(".wh.shadow", "symlink", str(outside)),
+                                ("leak", "hardlink", ".wh.shadow")], "forced-link-failure")
+    assert failure.value.rule_id == images.RULE_LAYER_INVALID
+    assert outside.read_bytes() == b"host sentinel"
+    assert outside.stat().st_mode & 0o777 == 0o600
+    assert not (rootfs / "leak").exists() and not (rootfs / "leak").is_symlink()
+
+
+def test_relative_regular_hardlink_preserves_shared_inode_and_tar_metadata(tmp_path):
+    import tarfile
+
+    rootfs = tmp_path / "rootfs"
+    rootfs.mkdir()
+    apply(tmp_path, rootfs, [("source", "file", b"image", 0o600)], "base")
+    archive_path = tmp_path / "metadata.tar"
+    info = tarfile.TarInfo("nested/link")
+    info.type = tarfile.LNKTYPE
+    info.linkname = "source"
+    info.mode = 0o640
+    info.mtime = 1_700_000_000
+    info.uid, info.gid = os.getuid(), os.getgid()
+    with tarfile.open(archive_path, "w") as archive:
+        archive.addfile(info)
+    images.apply_layer(archive_path, rootfs, compressed=False, budget_bytes=1024)
+    source = rootfs / "source"
+    linked = rootfs / "nested/link"
+    assert source.stat().st_ino == linked.stat().st_ino
+    assert linked.read_bytes() == b"image"
+    assert linked.stat().st_mode & 0o777 == 0o640
+    assert linked.stat().st_mtime == 1_700_000_000
+    assert (linked.stat().st_uid, linked.stat().st_gid) == (info.uid, info.gid)

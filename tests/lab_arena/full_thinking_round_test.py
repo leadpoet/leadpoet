@@ -99,46 +99,35 @@ def test_round_before_activation_keeps_four_dollar_limits():
     (approved_registry(), None),
     (approved_registry(), "malformed-digest"),
 ])
-def test_unready_activation_keeps_round_creation_and_legacy_costs(registry, digest, caplog):
+def test_unready_activation_rejects_round_creation(registry, digest, caplog):
     service = opted_in(registry)
     service._config.defaults.reasoning_baseline_source_sha256 = digest
-    config = service.create_round(OPEN)
-    assert "reasoning_capture_policy" not in config
-    assert config["execution_icp_cap_microusd"] == 4_000_000
-    assert config["cost_per_company_microusd"] == 4_000_000
+    service._store.create_round = lambda *_: pytest.fail("must not persist fallback")
+    with pytest.raises(ServiceError, match="reasoning_capture_activation_not_ready") as error:
+        service.create_round(OPEN)
+    assert error.value.status == 503
     assert "arena_full_thinking_not_ready" in caplog.text
-    assert ArenaService._public_round_output_policy(config) == {
-        **ArenaService._public_round_output_policy({
-            key: value for key, value in config.items()
-            if key not in ("reasoning_activation_status", "reasoning_activation_reason")
-        }),
-        "reasoning_activation_status": "not_ready",
-        "reasoning_activation_reason": config["reasoning_activation_reason"],
-    }
 
 
-def test_capture_registry_exception_cannot_stop_round_creation():
+def test_capture_registry_exception_requires_round_creation_retry():
     service = opted_in()
     service._config.reasoning_registry_source = lambda: (_ for _ in ()).throw(RuntimeError("capture metadata down"))
-    config = service.create_round(OPEN)
-    assert config["reasoning_activation_status"] == "not_ready"
-    assert config["reasoning_activation_reason"] == "registry_unavailable"
-    assert "reasoning_capture_policy" not in config
+    with pytest.raises(ServiceError, match="reasoning_capture_activation_not_ready:registry_unavailable") as error:
+        service.create_round(OPEN)
+    assert error.value.status == 503
 
 
 @pytest.mark.parametrize("source_url", [None, "https://github.com/leadpoet/leadpoet-sales-agent/archive/refs/heads/lab.tar.gz",
                                         "https://example.org/archive/" + "b" * 40 + ".tar.gz"])
-def test_unpinned_baseline_source_marks_future_activation_not_ready(source_url):
+def test_unpinned_baseline_source_rejects_future_creation(source_url):
     service = opted_in()
     service._config.defaults.reasoning_baseline_source_url = source_url
-    config = service.create_round(OPEN)
-    assert config["reasoning_activation_status"] == "not_ready"
-    assert config["reasoning_activation_reason"] == "baseline_unready"
-    assert config["execution_icp_cap_microusd"] == 4_000_000
-    assert "reasoning_capture_policy" not in config
+    with pytest.raises(ServiceError, match="reasoning_capture_activation_not_ready:baseline_unready") as error:
+        service.create_round(OPEN)
+    assert error.value.status == 503
 
 
-def test_malformed_baseline_digest_cannot_stop_service_validation_or_round_creation():
+def test_malformed_baseline_digest_allows_startup_but_requires_creation_retry():
     ServiceConfig(
         mode="shadow", store=None, object_store=None, signer=None, chain=None,
         verify_signature=lambda *_args: True, daily_icp_source=lambda **_kwargs: {},
@@ -148,9 +137,9 @@ def test_malformed_baseline_digest_cannot_stop_service_validation_or_round_creat
     )
     service = opted_in()
     service._config.defaults.reasoning_baseline_source_sha256 = "malformed-digest"
-    config = service.create_round(OPEN)
-    assert config["reasoning_activation_status"] == "not_ready"
-    assert config["reasoning_activation_reason"] == "baseline_unready"
+    with pytest.raises(ServiceError, match="reasoning_capture_activation_not_ready:baseline_unready") as error:
+        service.create_round(OPEN)
+    assert error.value.status == 503
 
 
 @pytest.mark.parametrize("field,value", [

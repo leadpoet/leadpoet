@@ -28,7 +28,8 @@ def _service(source=None):
     service.runner_settings = lambda: (["5" * 48], [])
     service._require_round_ownership = lambda _round_id: None
     service._require_integrity_schema = lambda: None
-    service._store = SimpleNamespace(create_round=lambda *_args: {"status": "created"})
+    service._store = SimpleNamespace(get_round=lambda _round_id: None,
+                                     create_round=lambda *_args: {"status": "created"})
     return service
 
 

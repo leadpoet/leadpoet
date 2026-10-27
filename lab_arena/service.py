@@ -1494,10 +1494,24 @@ class ArenaService:
         configuration["call_quotas"] = {**configuration["call_quotas"], "deepline": 0}
         configuration["scoring_call_quotas"] = {**configuration["scoring_call_quotas"], "deepline": 0}
 
+    def _existing_round_configuration_for_create(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        configuration = dict(self._require_round_mode(row).get("configuration_doc") or {})
+        if configuration.get("reasoning_activation_status") == "not_ready":
+            raise ServiceError(
+                "reasoning_capture_activation_not_ready:%s" % (
+                    configuration.get("reasoning_activation_reason") or "unknown"
+                ), 503,
+            )
+        return configuration
+
     def create_round(self, cutoff: datetime, *, round_id: Optional[str] = None) -> Dict[str, Any]:
         defaults = self._config.defaults
         round_id = round_id or round_id_for_cutoff(cutoff)
         self._require_round_ownership(round_id)
+        # Frozen rounds do not depend on today's registry or provider catalog.
+        existing = self._store.get_round(round_id)
+        if existing is not None:
+            return self._existing_round_configuration_for_create(existing)
         runner_hotkeys, banned_hotkeys = self.runner_settings()
         checkpoint_policy = contracts.DEFAULT_CHECKPOINT_DEADLINE_POLICY
         checkpoint_wall, checkpoint_lease = contracts.CHECKPOINT_DEADLINE_PROFILES[
@@ -1681,17 +1695,18 @@ class ArenaService:
                     per_icp_cap * contracts.benchmark_icp_count(document)
                 )
             else:
-                document["reasoning_activation_status"] = "not_ready"
-                document["reasoning_activation_reason"] = unready_reason
                 logger.warning("arena_full_thinking_not_ready round_id=%s reason=%s",
                                round_id, unready_reason)
+                raise ServiceError(
+                    "reasoning_capture_activation_not_ready:%s" % unready_reason, 503,
+                )
         self._freeze_deepline_catalog(document)
         configuration = contracts.validate_round_configuration(document)
         result = self._store.create_round(round_id, configuration)
         if result.get("status") not in ("created", "existing"):
             raise ServiceError("round_create_failed", 500)
         if result.get("status") == "existing":
-            return dict(self._round(round_id).get("configuration_doc") or {})
+            return self._existing_round_configuration_for_create(self._round(round_id))
         return configuration
 
     def ensure_daily_round(self, now: Optional[datetime] = None) -> Dict[str, Any]:

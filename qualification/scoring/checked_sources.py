@@ -135,6 +135,10 @@ def _checked_source_provenance(request_document, messages, claims):
                 result = discovery.get("discovery") or {}
                 for position, item in enumerate(result.get("results") or ()):
                     add("search_locator_only", item, index, position, raw)
+            industry_discovery = document.get('server_industry_discovery') or {}
+            if isinstance(industry_discovery, Mapping):
+                for position, item in enumerate(industry_discovery.get('results') or ()):
+                    add('search_locator_only', item, index, position, raw)
         elif message.get("role") == "tool" and message.get("name") in {"fetch_page", "search_web"}:
             result = json.loads(raw)
             if not isinstance(result, Mapping) or result.get("error"):

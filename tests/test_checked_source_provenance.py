@@ -78,6 +78,21 @@ def test_prefetched_stage_search_and_tool_search_keep_only_discovery_refs():
     assert [item["kind"] for item in result["sources"]] == ["loaded_page_excerpt", "search_locator_only"]
 
 
+def test_host_industry_search_retains_locator_provenance_without_source_authority():
+    document, messages, claims = fixture()
+    document['prefetched_sources'] = []
+    document['server_industry_discovery'] = {
+        'notice': 'discovery_only_not_evidence',
+        'results': [{'url': URL, 'title': 'Discovery title', 'discovery_excerpt': TEXT}],
+    }
+    messages[0]['content'] = PREFIX + json.dumps(document)
+    result = observe(document, messages, claims)
+    assert [item['kind'] for item in result['sources']] == ['search_locator_only']
+    assert TEXT not in json.dumps(result)
+    assert result['sources'][0]['message_content_sha256'] == (
+        'sha256:' + hashlib.sha256(messages[0]['content'].encode()).hexdigest())
+
+
 def test_dedup_bounds_and_query_values_not_copied():
     document, messages, claims = fixture()
     messages += [tool("fetch_page", {"ok": True, "url": URL, "text": TEXT})] * 5

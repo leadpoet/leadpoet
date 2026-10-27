@@ -804,3 +804,127 @@ def test_effective_deepline_wrapper_is_exact_provider_body(tmp_path):
         "provider": "exa", "operation": "exa_search", "payload": {"query": "company market"},
     }
     assert "request_capture" not in result.call
+
+
+def _rejected_model_request():
+    return {"admitted_parameters": {"raw_frame": {
+        "operation_id": "openrouter.responses", "parameters": {
+            "model": "deepseek/deepseek-v4.1-flash-1017", "input": "synthetic",
+            "reasoning": {"effort": "high"}}}}, "timeout_ms": 0}
+
+
+@pytest.mark.parametrize("controls", [
+    {"effort": "high"}, {"summary": "concise", "context": "all_turns"},
+    {"enabled": True, "exclude": False, "max_tokens": 32768},
+    {"enabled": False, "exclude": True}, {},
+])
+def test_rejected_frame_retains_only_validated_control_values(controls):
+    value = _rejected_model_request()
+    value["admitted_parameters"]["raw_frame"]["parameters"]["reasoning"] = controls
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
+def test_rejected_frame_control_capture_does_not_require_request_admission():
+    value = _rejected_model_request()
+    value["admitted_parameters"]["raw_frame"].update(schema_version=[], timeout_ms=False)
+    assert capture.sanitize_training_value(value) == (value, [])
+
+
+@pytest.mark.parametrize("controls", [
+    {"effort": "private prose"}, {"effort": 1}, {"effort": None}, {"summary": "private prose"},
+    {"context": "private prose"}, {"enabled": 1}, {"exclude": "false"},
+    {"max_tokens": True}, {"max_tokens": 0}, {"max_tokens": "123"},
+    {"effort": {"text": "opaque state"}}, {"encrypted_content": "opaque state"},
+    {"effort": "high", "hidden_reasoning": "opaque state"},
+    {"effort": "high", "authorization": "secret-value"},
+])
+def test_rejected_frame_malformed_and_opaque_controls_fail_closed(controls):
+    value = _rejected_model_request()
+    value["admitted_parameters"]["raw_frame"]["parameters"]["reasoning"] = controls
+    cleaned, redactions = capture.sanitize_training_value(value)
+    assert redactions == ["hidden_reasoning"]
+    assert cleaned["admitted_parameters"]["raw_frame"]["parameters"]["reasoning"] == "[REDACTED]"
+
+
+@pytest.mark.parametrize("mutation", [
+    "non_model", "unbound", "missing_model", "non_object_frame", "extra_frame_field",
+    "wrong_timeout", "extra_request_field", "extra_admitted_field",
+    "arbitrary_wrapper", "provider_response", "wrong_observation_kind", "wrong_protocol",
+    "wrong_observation_operation", "paid_identity", "wrong_saved_wrapper",
+    "missing_observation_metadata", "list_schema", "dict_schema",
+    "mapping_observations", "saved_mapping_observations", "list_artifacts",
+    "response_artifacts", "nested_artifacts",
+])
+def test_rejected_frame_cannot_create_trust_from_unrelated_wrappers(mutation):
+    value = _rejected_model_request()
+    frame = value["admitted_parameters"]["raw_frame"]
+    if mutation == "non_model":
+        frame["operation_id"] = "deepline.execute"
+    elif mutation == "unbound":
+        frame["operation_id"] = {"name": "openrouter.responses"}
+    elif mutation == "missing_model":
+        del frame["parameters"]["model"]
+    elif mutation == "non_object_frame":
+        value["admitted_parameters"]["raw_frame"] = [frame]
+    elif mutation == "extra_frame_field":
+        frame["arbitrary"] = True
+    elif mutation == "wrong_timeout":
+        value["timeout_ms"] = 1
+    elif mutation == "extra_request_field":
+        value["other"] = True
+    elif mutation == "extra_admitted_field":
+        value["admitted_parameters"]["other"] = True
+    elif mutation == "arbitrary_wrapper":
+        value = {"nested": value}
+    elif mutation == "provider_response":
+        value = {**value, "object": "response", "output": []}
+    else:
+        row = {"ordinal": 0, "privacy": {"redacted": False, "redactions": []},
+               "kind": "local_parse_error", "operation_id": "unknown", "action_sequence": None,
+               "call_identity": None, "contributes_to_provider_call_count": False,
+               "request": value, "outcome": {"protocol": "frame"}}
+        if mutation == "wrong_observation_kind":
+            row["kind"] = "transport_failure"
+        elif mutation == "wrong_protocol":
+            row["outcome"]["protocol"] = "http"
+        elif mutation == "wrong_observation_operation":
+            row["operation_id"] = "openrouter.responses"
+        elif mutation == "paid_identity":
+            row["call_identity"] = "sha256:" + "1" * 64
+        elif mutation == "missing_observation_metadata":
+            del row["ordinal"]
+        if mutation == "mapping_observations":
+            value = {"observations": {"0": row}}
+        elif mutation == "saved_mapping_observations":
+            value = {"schema_version": "leadpoet.lab_arena.training_observations.v2",
+                     "payload": {"observations": {"0": row}}}
+        elif mutation == "list_artifacts":
+            value = {"worker_observation_artifacts": [{"payload": {"observations": [row]}}]}
+        elif mutation in {"response_artifacts", "nested_artifacts"}:
+            value = {"worker_observation_artifacts": {"run": {"payload": {"observations": [row]}}}}
+            if mutation == "response_artifacts":
+                value.update(object="response", output=[])
+            else:
+                value = {"nested": value}
+        elif mutation in {"wrong_saved_wrapper", "list_schema", "dict_schema"}:
+            value = {"payload": {"observations": [row]}}
+            if mutation != "wrong_saved_wrapper":
+                value["schema_version"] = [] if mutation == "list_schema" else {}
+        else:
+            value = row
+    cleaned, redactions = capture.sanitize_training_value(value)
+    assert redactions == ["hidden_reasoning"]
+    assert '"effort": "high"' not in json.dumps(cleaned)
+
+
+def test_rejected_frame_keeps_credential_and_opaque_guards_and_redaction_fixed_point():
+    value = _rejected_model_request()
+    parameters = value["admitted_parameters"]["raw_frame"]["parameters"]
+    parameters.update(input="synthetic known-private-value", authorization="another-private-value",
+                      hidden_reasoning="opaque-private-value", encrypted_content="sealed-private-value")
+    cleaned, redactions = capture.sanitize_training_value(value, secrets=("known-private-value", "high"))
+    assert redactions == ["credential", "hidden_reasoning"]
+    assert cleaned["admitted_parameters"]["raw_frame"]["parameters"]["reasoning"] == {"effort": "[REDACTED]"}
+    assert not any(word in json.dumps(cleaned) for word in (
+        "known-private-value", "another-private-value", "opaque-private-value", "sealed-private-value"))
+    assert capture.sanitize_training_value(cleaned) == (cleaned, redactions)

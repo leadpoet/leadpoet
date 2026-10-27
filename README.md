@@ -81,7 +81,7 @@ The sandbox blocks direct network access. Keep the baseline's broker transport f
 
 ### Upcoming model whitelist
 
-**Draft policy, not active in current rounds.** When enabled, agents and subagents must use one of these routes:
+In rounds with whitelist enforcement, agents and subagents must use an approved route. Each round keeps the list frozen when it opens; additions below apply to future rounds.
 
 | OpenRouter model | Providers (first is the default) | API |
 | --- | --- | --- |
@@ -91,14 +91,35 @@ The sandbox blocks direct network access. Keep the baseline's broker transport f
 | `deepseek/deepseek-v4.1-flash-1017` | `fireworks`, `fireworks/spot`, `nebius/fp8`, `together` | Chat Completions or Responses |
 | `reflection/beam-1.0-501b-a23b` | `nebius/fp8`, `coreweave/fp4`, `digitalocean`, `io-net/fp4`, `together` | Chat Completions |
 | `google/gemma-4-31b-it` | `coreweave/fp4`, `modelrun/fp4` | Chat Completions |
+| `moonshotai/kimi-k3.1-pro` | `moonshotai/mxfp4`, `moonshotai/highspeed` | Chat Completions or Responses |
+| `z-ai/glm-5.3` | `fireworks`, `coreweave/fp8` | Chat Completions or Responses |
+| `z-ai/glm-5.3-flash` | `fireworks` | Chat Completions or Responses |
+| `z-ai/glm-5.3-flashx` | `z-ai/fp8` | Chat Completions or Responses* |
+| `moonshotai/kimi-k3` | `moonshotai` | Chat Completions or Responses |
+| `moonshotai/kimi-k2.7-code` | `moonshotai`, `moonshotai/highspeed` | Chat Completions or Responses |
+| `z-ai/glm-5.2` | `coreweave/fp4` | Chat Completions |
+| `z-ai/glm-5.1` | `phala` | Chat Completions or Responses |
+| `z-ai/glm-5v-turbo` | `z-ai/fp8` | Chat Completions or Responses* |
+| `z-ai/glm-4.7` | `deepinfra/fp4` | Chat Completions or Responses |
+| `z-ai/glm-4.6v` | `novita/bf16` | Chat Completions or Responses* |
+| `moonshotai/kimi-k2.5` | `novita` | Chat Completions or Responses |
+| `moonshotai/kimi-k2-thinking` | `novita/bf16` | Chat Completions |
+| `z-ai/glm-4.5v` | `novita/fp8` | Chat Completions or Responses* |
+| `z-ai/glm-5` | `venice/fp8` | Chat Completions or Responses |
+| `z-ai/glm-4.6` | `deepinfra/fp4/flex` | Chat Completions or Responses |
+| `moonshotai/kimi-k2.6` | `coreweave/fp4` | Chat Completions or Responses |
 
 Allow your chosen provider in your [OpenRouter settings](https://openrouter.ai/settings/privacy). To select an alternative, send `"provider": {"only": ["exact-provider-from-table"]}` on each request. Keep the same route throughout a tool conversation. Arena keeps ZDR and disables provider fallback. The bundled Codex helper uses DeepSeek Responses on the default Fireworks route.
+
+*For FlashX, GLM-5V and GLM-4.x vision variants, use Chat JSON mode or prompt for JSON on Responses. Native strict JSON-schema output is not verified.
+
+The existing Reflection `nebius/fp8` selector was unavailable in the latest check. Use a listed alternative such as `coreweave/fp4`.
 
 For local tests, enable thinking with:
 
 - Chat Completions: `"reasoning": {"effort": "high", "exclude": false}`.
 - Gemma: `"reasoning": {"enabled": true, "exclude": false}` instead.
-- DeepSeek Responses: `"reasoning": {"effort": "high"}`.
+- Responses: `"reasoning": {"effort": "high"}`.
 
 Hosted web search is supported on the approved DeepSeek Responses routes. Keep normal conversation history and tool-call IDs intact. **Keep your harness and custom tools. No custom logging or receipts are required.** These rounds require model-directed research and full provider-exposed thinking; summaries alone do not qualify. The sourcing cap increases to **$6 per ICP**. Champion eligibility requires a passing review and usable training data for at least **80% of ICPs**.
 

@@ -4,9 +4,9 @@
 One exact OpenRouter route, three sequential synthetic turns. The real Broker,
 HTTP transport, request capture, response receipt, and training-export decoder
 are exercised against disposable PostgreSQL by default. A local file ledger is
-available for diagnostics. No worker socket, agent acknowledgement, complete
-trajectory, or production round is claimed. Candidate route files are admitted
-only in this process.
+available for diagnostics. Optional worker-socket mode verifies delivery through
+the existing worker transport. This is not a complete scored ICP or production
+round. Candidate route files are admitted only in this process.
 """
 from __future__ import annotations
 
@@ -36,13 +36,13 @@ BUDGET_USD = Decimal("8")
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
-def scenario_spec(name: str):
+def scenario_spec(name: str, *, final_format: str = "json_schema"):
     if name == "acme":
-        return {"initial": copy.deepcopy(INITIAL), "evidence": copy.deepcopy(EVIDENCE),
+        spec = {"initial": copy.deepcopy(INITIAL), "evidence": copy.deepcopy(EVIDENCE),
                 "expected": {"company": "Acme Test", "qualified": True,
                              "evidence_ids": ["profile", "headcount"]}}
-    if name == "conflicting_evidence":
-        return {"initial": [{"role": "user", "content": (
+    elif name == "conflicting_evidence":
+        spec = {"initial": [{"role": "user", "content": (
             "Synthetic compatibility test. Decide whether Acme Test is a US B2B software "
             "company with 50-200 current employees. First call lookup_evidence for 'profile', "
             "then for 'headcount', one call per turn. The older profile and the newer official "
@@ -57,7 +57,15 @@ def scenario_spec(name: str):
                                   "observed_on": "2026-10-23", "source": "current official staffing"}},
                 "expected": {"company": "Acme Test", "qualified": False,
                              "evidence_ids": ["profile", "headcount"]}}
-    raise ValueError("unknown_probe_scenario")
+    else:
+        raise ValueError("unknown_probe_scenario")
+    if final_format == "text":
+        # Add the contract once before the first request. All subsequent
+        # requests retain this exact initial message with their tool history.
+        spec["initial"][0]["content"] += ("\nAfter both tool results, use this final output contract. "
+                                         "Return only JSON conforming to this schema: "
+                                         + json.dumps(SCHEMA, sort_keys=True, separators=(",", ":")))
+    return spec
 
 
 def _private_write(path: Path, data: bytes) -> None:
@@ -257,7 +265,8 @@ def ledger_rows(path: Path, *, context, operation_id="openrouter.chat") -> list[
 class WireTransport:
     """Record the exact bounded provider bytes independently of Broker storage."""
 
-    def __init__(self, root: Path, inner=None, *, secret: str = "", operation_id="openrouter.chat"):
+    def __init__(self, root: Path, inner=None, *, secret: str = "", operation_id="openrouter.chat",
+                 request_budget=None, budget_route=None):
         self.root = root
         self.inner = inner or br.HttpxProviderTransport(max_response_bytes=MAX_RESPONSE_BYTES)
         self.secret = secret.encode()
@@ -266,6 +275,10 @@ class WireTransport:
         self.records = []
         self.armed_turn = None
         self.sent_in_turn = False
+        self.request_budget = request_budget
+        self.budget_route = budget_route
+        self.request_reservations = {}
+        self.settled_turns = set()
 
     def arm(self, turn: int):
         self.armed_turn = turn
@@ -276,6 +289,10 @@ class WireTransport:
                     else "https://openrouter.ai/api/v1/responses")
         if kwargs.get("url") != expected or self.armed_turn is None or self.sent_in_turn:
             raise br.ProviderTransportError("probe_additional_http_blocked")
+        if self.request_budget is not None:
+            amount = request_bound(self.budget_route, kwargs["body"])
+            self.request_budget.reserve(amount)
+            self.request_reservations[self.armed_turn] = amount
         self.sent_in_turn = True
         self.attempt += 1
         response = self.inner.send(**kwargs)
@@ -357,6 +374,28 @@ def conservative_bound(route) -> Decimal:
     return bound.quantize(Decimal("0.000001"), rounding=ROUND_UP)
 
 
+def request_bound(route, body: bytes) -> Decimal:
+    """Bound the exact outbound UTF-8 request, using the Broker's byte ceiling.
+
+    The full tested output cap remains reserved. No context metadata is reduced.
+    This synthetic probe has no images, hosted search or other priced tools.
+    """
+    document = json.loads(body)
+    output_field = "max_output_tokens" if route["api"] == "openrouter.responses" else "max_tokens"
+    if (document.get("model") != route["model_id"]
+            or type(document.get(output_field)) is not int
+            or document[output_field] > route["max_output_tokens"]
+            or document[output_field] <= 0
+            or any(item.get("type") != "function" for item in document.get("tools", []))):
+        raise ValueError("request_budget_shape_invalid")
+    price = route["price_ceiling"]
+    amount = (Decimal(br.bounded_input_tokens(document)) * Decimal(price["prompt"])
+              + Decimal(document[output_field]) *
+              (Decimal(price["completion"]) + Decimal(price["internal_reasoning"]))
+              + Decimal(price["request"]))
+    return amount.quantize(Decimal("0.000001"), rounding=ROUND_UP)
+
+
 def _price_table(route):
     return br.validate_price_table({"schema_version": br.PRICE_TABLE_SCHEMA_VERSION,
                                     "fetched_at": "2026-10-23T00:00:00Z",
@@ -383,7 +422,8 @@ def _diagnostic_host_route(route, *, responses_compat=False):
 
 
 def _parameters(model, messages, turn, operation_id, mode, route, *,
-                diagnostic_tool_choice_auto=False, diagnostic_responses_compat=False):
+                diagnostic_tool_choice_auto=False, diagnostic_responses_compat=False,
+                tool_choice="named", final_format="json_schema", parallel_tool_calls=None):
     output_limit = min(2048, int(route["max_output_tokens"]))
     if operation_id == "openrouter.responses":
         value = {"model": model, "input": copy.deepcopy(messages),
@@ -395,11 +435,14 @@ def _parameters(model, messages, turn, operation_id, mode, route, *,
             value.update(tools=[{"type": "function", "name": "lookup_evidence",
                                  "description": "Read synthetic company evidence by ID.",
                                  "parameters": TOOLS[0]["function"]["parameters"]}],
-                         tool_choice="required",
+                         tool_choice="required" if tool_choice == "named" else tool_choice,
                          )
+            if parallel_tool_calls is not None:
+                value["parallel_tool_calls"] = parallel_tool_calls
         else:
-            value["text"] = {"format": {"type": "json_schema", "name": "qualification",
-                                         "strict": True, "schema": SCHEMA}}
+            value["text"] = {"format": ({"type": "json_schema", "name": "qualification",
+                                         "strict": True, "schema": SCHEMA} if final_format == "json_schema"
+                                        else {"type": final_format})}
         return value
     value = {"model": model, "messages": copy.deepcopy(messages),
              "max_tokens": output_limit}
@@ -407,12 +450,45 @@ def _parameters(model, messages, turn, operation_id, mode, route, *,
         value["reasoning"] = {**route["mode"], "exclude": False}
     if turn < 2:
         choice = ("auto" if diagnostic_tool_choice_auto else
-                  {"type": "function", "function": {"name": "lookup_evidence"}})
+                  {"type": "function", "function": {"name": "lookup_evidence"}}
+                  if tool_choice == "named" else tool_choice)
         value.update(tools=TOOLS, tool_choice=choice)
-    else:
-        value["response_format"] = {"type": "json_schema", "json_schema": {
+        if parallel_tool_calls is not None:
+            value["parallel_tool_calls"] = parallel_tool_calls
+    elif final_format != "text":
+        value["response_format"] = ({"type": "json_schema", "json_schema": {
             "name": "qualification", "strict": True, "schema": SCHEMA}}
+            if final_format == "json_schema" else {"type": "json_object"})
     return value
+
+
+def preflight_probe_controls(*, model, route, mode="full", scenario="acme",
+                             tool_choice="named", final_format="json_schema",
+                             parallel_tool_calls=None,
+                             diagnostic_tool_choice_auto=False,
+                             diagnostic_responses_compat=False):
+    """Reject unsupported probe API/settings before any provider attempt.
+
+    Initial and final shapes use the same production validator as execution.
+    Future provider-returned histories still need their normal per-call checks.
+    """
+    if (tool_choice not in {"named", "auto", "required"}
+            or final_format not in {"json_schema", "json_object", "text"}
+            or parallel_tool_calls is not None and type(parallel_tool_calls) is not bool):
+        raise ValueError("invalid_probe_controls")
+    spec = scenario_spec(scenario, final_format=final_format)
+    registry = {"schema_version": 1, "approved_routes": [route], "baseline_route": None}
+    for turn in range(3):
+        parameters = _parameters(model, spec["initial"], turn, route["api"], mode, route,
+                                 tool_choice=tool_choice, final_format=final_format,
+                                 parallel_tool_calls=parallel_tool_calls,
+                                 diagnostic_tool_choice_auto=diagnostic_tool_choice_auto,
+                                 diagnostic_responses_compat=diagnostic_responses_compat)
+        if mode == "full":
+            br.agent_reasoning_parameters(route["api"], parameters, policy=rc.POLICY,
+                                          registry=registry)
+        else:
+            operations.validate_operation_request(route["api"], parameters, allow_full_thinking=True)
 
 
 def _next_message(body, turn, operation_id, spec):
@@ -584,10 +660,16 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
               ledger_mode: str = "postgres", budget_state: Path | None = None,
               mode: str = "full", scenario: str = "acme", worker_socket: bool = False,
               diagnostic_tool_choice_auto: bool = False,
-              diagnostic_responses_compat: bool = False):
+              diagnostic_responses_compat: bool = False,
+              tool_choice: str = "named", final_format: str = "json_schema",
+              budget_bound_mode: str = "context", parallel_tool_calls: bool | None = None):
     registry, route, authority = route_registry(route_file, model)
-    spec = scenario_spec(scenario)
+    spec = scenario_spec(scenario, final_format=final_format)
     operation_id = route["api"]
+    if (tool_choice not in {"named", "auto", "required"}
+            or final_format not in {"json_schema", "json_object", "text"}
+            or budget_bound_mode not in {"context", "request"}):
+        raise ValueError("invalid_probe_controls")
     if mode not in {"full", "summary_diagnostic"}:
         raise ValueError("invalid_probe_mode")
     if (diagnostic_tool_choice_auto or diagnostic_responses_compat) and mode != "summary_diagnostic":
@@ -598,8 +680,14 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
         raise ValueError("diagnostic_responses_compat_requires_responses")
     if worker_socket and ledger_mode != "postgres":
         raise ValueError("worker_socket_requires_disposable_postgres")
+    preflight_probe_controls(model=model, route=route, mode=mode, scenario=scenario,
+                             tool_choice=tool_choice, final_format=final_format,
+                             parallel_tool_calls=parallel_tool_calls,
+                             diagnostic_tool_choice_auto=diagnostic_tool_choice_auto,
+                             diagnostic_responses_compat=diagnostic_responses_compat)
     per_call = conservative_bound(route)
-    if per_call <= 0 or per_call * 3 > budget_usd or budget_usd > BUDGET_USD:
+    if (per_call <= 0 or budget_usd <= 0 or budget_usd > BUDGET_USD
+            or budget_bound_mode == "context" and per_call * 3 > budget_usd):
         raise ValueError("worst_case_three_call_budget_exceeded")
     shared_budget = SharedBudget(budget_state or output.parent / "arena-live-capture-budget.json",
                                  budget_usd)
@@ -624,7 +712,9 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
     if mode == "summary_diagnostic":
         context = replace(context, reasoning_capture_policy=None,
                           reasoning_route_registry=None)
-    wire_transport = WireTransport(output, transport, secret=key, operation_id=operation_id)
+    wire_transport = WireTransport(output, transport, secret=key, operation_id=operation_id,
+                                  request_budget=shared_budget if budget_bound_mode == "request" else None,
+                                  budget_route=route)
     capture = training_capture.RequestCapture(objects)
     broker = br.Broker(store=store, key_for=lambda provider: key if provider == "openrouter" else "",
                        price_table=_price_table(route), transport=wire_transport,
@@ -670,12 +760,13 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
     failure_phase = None
     try:
         for turn in range(3):
-            if spent + reserved_uncertain + per_call > budget_usd:
-                raise ValueError("cumulative_budget_exceeded")
-            shared_budget.reserve(per_call)
+            if budget_bound_mode == "context":
+                if spent + reserved_uncertain + per_call > budget_usd:
+                    raise ValueError("cumulative_budget_exceeded")
+                shared_budget.reserve(per_call)
             # A dispatch may bill even when the response is lost. Reserve the
             # full bound until the provider reports a smaller definite cost.
-            reserved_uncertain += per_call
+                reserved_uncertain += per_call
             wire_transport.arm(turn)
             route_scope = (patch.object(br, "_openrouter_host_route",
                                         return_value=_diagnostic_host_route(
@@ -724,7 +815,9 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                 parameters = _parameters(
                     model, messages, turn, operation_id, mode, route,
                     diagnostic_tool_choice_auto=diagnostic_tool_choice_auto,
-                    diagnostic_responses_compat=diagnostic_responses_compat)
+                    diagnostic_responses_compat=diagnostic_responses_compat,
+                    tool_choice=tool_choice, final_format=final_format,
+                    parallel_tool_calls=parallel_tool_calls)
                 if worker_socket:
                     status, headers, delivered_body = shim.dispatch(operation_id, parameters, 120000)
                     result = socket_api.results[-1]
@@ -743,6 +836,9 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
             outcomes.append({"turn": turn, "status": result.status,
                              "outcome": result.call.get("outcome"),
                              "call_identity": result.call.get("call_identity")})
+            if budget_bound_mode == "request":
+                per_call = wire_transport.request_reservations.get(turn, Decimal(0))
+                reserved_uncertain += per_call
             if result.call.get("outcome") != "settled" or result.status != 200:
                 break
             # Account for a definite provider charge even when the model
@@ -758,6 +854,7 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                 if cost < 0 or cost > per_call:
                     raise ValueError("provider_cost_outside_reserved_bound")
                 shared_budget.settle(per_call, cost)
+                wire_transport.settled_turns.add(turn)
                 reserved_uncertain -= per_call
                 spent += cost
             _, continuation = _next_message(result.body, turn, operation_id, spec)
@@ -773,6 +870,10 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                          and wire_transport.sent_in_turn else
                          "before_provider_http_send")
     finally:
+        if budget_bound_mode == "request":
+            reserved_uncertain = sum((amount for selected_turn, amount in
+                wire_transport.request_reservations.items()
+                if selected_turn not in wire_transport.settled_turns), Decimal(0))
         wire_transport.close()
         worker_snapshot = None
         worker_failure = None
@@ -834,6 +935,15 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                   "diagnostic_tool_choice_auto": diagnostic_tool_choice_auto,
                   "diagnostic_responses_compat": diagnostic_responses_compat,
                   "scenario": scenario,
+                  "tool_choice": tool_choice, "final_format": final_format,
+                  "parallel_tool_calls": parallel_tool_calls,
+                  "native_final_constraint": ({"json_schema": "strict_json_schema",
+                                                "json_object": "json_object_only",
+                                                "text": "unconstrained_text"}[final_format]),
+                  "final_value_validation": "exact_local_qualification_schema_and_expected_values",
+                  "budget_bound_mode": budget_bound_mode,
+                  "request_budget_bounds_usd": {str(k): str(v) for k, v in
+                                                wire_transport.request_reservations.items()},
                   "ledger_mode": ledger_mode,
                   "worker_socket_enabled": worker_socket,
                   "worker_temporary_hold_retry_disabled": worker_socket,
@@ -843,7 +953,14 @@ def run_probe(*, model: str, output: Path, key: str, route_file: Path | None = N
                   "worker_snapshot_payload_sha256": worker_snapshot.get("payload_sha256") if worker_snapshot else None,
                   "operation_id": operation_id, "budget_usd": str(budget_usd),
                   "shared_budget_state": str(shared_budget.path),
-                  "worst_case_per_call_usd": str(per_call),
+                  "worst_case_per_call_usd": str(max(wire_transport.request_reservations.values(),
+                                                      default=Decimal(0))
+                                                    if budget_bound_mode == "request" else per_call),
+                  "budget_bound_note": ("Exact outbound canonical UTF-8 bytes plus Broker token overhead, "
+                                        "full requested output cap and route price ceilings; checked before each HTTP send. "
+                                        "A later continuation can be refused when the shared cap is exhausted."
+                                        if budget_bound_mode == "request" else
+                                        "Full advertised context and tested output cap reserved per turn."),
                   "provider_reported_spend_usd": str(spent),
                   "still_reserved_or_unpriced_usd": str(reserved_uncertain),
                   "turns": outcomes, "readback": readback,
@@ -882,6 +999,12 @@ def main():
     parser.add_argument("--scenario", choices=("acme", "conflicting_evidence"), default="acme")
     parser.add_argument("--worker-socket", action="store_true",
                         help="exercise real local worker socket and SDK acknowledgement")
+    parser.add_argument("--tool-choice", choices=("named", "auto", "required"), default="named")
+    parser.add_argument("--final-format", choices=("json_schema", "json_object", "text"), default="json_schema")
+    parser.add_argument("--serial-tools", action="store_true",
+                        help="explicit test control: send parallel_tool_calls=false on tool turns")
+    parser.add_argument("--budget-bound-mode", choices=("context", "request"), default="context",
+                        help="request: reserve exact serialized outbound input plus full output before HTTP")
     parser.add_argument("--diagnostic-tool-choice-auto", action="store_true",
                         help="summary-only Chat probe: permit an automatic tool decision")
     parser.add_argument("--diagnostic-responses-compat", action="store_true",
@@ -900,6 +1023,9 @@ def main():
                        ledger_mode=args.ledger_mode, budget_state=args.budget_state,
                        mode=args.mode, scenario=args.scenario,
                        worker_socket=args.worker_socket,
+                       tool_choice=args.tool_choice, final_format=args.final_format,
+                       parallel_tool_calls=False if args.serial_tools else None,
+                       budget_bound_mode=args.budget_bound_mode,
                        diagnostic_tool_choice_auto=args.diagnostic_tool_choice_auto,
                        diagnostic_responses_compat=args.diagnostic_responses_compat)
     print(json.dumps({key: result[key] for key in ("model", "provider", "route_authority",

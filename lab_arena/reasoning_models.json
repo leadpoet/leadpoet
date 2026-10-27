@@ -826,6 +826,1261 @@
         "verified_at": "2026-10-25T21:33:20Z",
         "probe_manifest_sha256": "791095427c555854c9000580fe88e23874674329916ad4171856adf22535f2f7"
       }
+    },
+    {
+      "model_id": "moonshotai/kimi-k3.1-pro",
+      "model_version": "moonshotai/kimi-k3.1-pro-20261023",
+      "provider": "moonshotai/mxfp4",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k3.1-pro",
+      "model_version": "moonshotai/kimi-k3.1-pro-20261023",
+      "provider": "moonshotai/mxfp4",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.3",
+      "model_version": "z-ai/glm-5.3-20260816",
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.0000014",
+        "completion": "0.0000044",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.3",
+      "model_version": "z-ai/glm-5.3-20260816",
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.0000014",
+        "completion": "0.0000044",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.3-flash",
+      "model_version": "z-ai/glm-5.3-flash-20260826",
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.00000015",
+        "completion": "0.0000005",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.3-flash",
+      "model_version": "z-ai/glm-5.3-flash-20260826",
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.00000015",
+        "completion": "0.0000005",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.3-flashx",
+      "model_version": "z-ai/glm-5.3-flashx-20260918",
+      "provider": "z-ai/fp8",
+      "provider_name": "Z.AI",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.00000037",
+        "completion": "0.00000125",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.3-flashx",
+      "model_version": "z-ai/glm-5.3-flashx-20260918",
+      "provider": "z-ai/fp8",
+      "provider_name": "Z.AI",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.00000037",
+        "completion": "0.00000125",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k3",
+      "model_version": "moonshotai/kimi-k3-20260715",
+      "provider": "moonshotai",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.000003",
+        "completion": "0.000015",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k3",
+      "model_version": "moonshotai/kimi-k3-20260715",
+      "provider": "moonshotai",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.000003",
+        "completion": "0.000015",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2.7-code",
+      "model_version": "moonshotai/kimi-k2.7-code-20260612",
+      "provider": "moonshotai",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.00000095",
+        "completion": "0.000004",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2.7-code",
+      "model_version": "moonshotai/kimi-k2.7-code-20260612",
+      "provider": "moonshotai",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.00000095",
+        "completion": "0.000004",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.2",
+      "model_version": "z-ai/glm-5.2-20260616",
+      "provider": "coreweave/fp4",
+      "provider_name": "CoreWeave",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.00000062",
+        "completion": "0.00000242",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.1",
+      "model_version": "z-ai/glm-5.1-20260406",
+      "provider": "phala",
+      "provider_name": "Phala",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 202752,
+      "price_ceiling": {
+        "prompt": "0.00000121",
+        "completion": "0.0000042",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.1",
+      "model_version": "z-ai/glm-5.1-20260406",
+      "provider": "phala",
+      "provider_name": "Phala",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 202752,
+      "price_ceiling": {
+        "prompt": "0.00000121",
+        "completion": "0.0000042",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5v-turbo",
+      "model_version": "z-ai/glm-5v-turbo-20260401",
+      "provider": "z-ai/fp8",
+      "provider_name": "Z.AI",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 202752,
+      "price_ceiling": {
+        "prompt": "0.0000012",
+        "completion": "0.000004",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5v-turbo",
+      "model_version": "z-ai/glm-5v-turbo-20260401",
+      "provider": "z-ai/fp8",
+      "provider_name": "Z.AI",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 202752,
+      "price_ceiling": {
+        "prompt": "0.0000012",
+        "completion": "0.000004",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-4.7",
+      "model_version": "z-ai/glm-4.7-20251222",
+      "provider": "deepinfra/fp4",
+      "provider_name": "DeepInfra",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 202752,
+      "price_ceiling": {
+        "prompt": "0.0000004",
+        "completion": "0.00000175",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-4.7",
+      "model_version": "z-ai/glm-4.7-20251222",
+      "provider": "deepinfra/fp4",
+      "provider_name": "DeepInfra",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 202752,
+      "price_ceiling": {
+        "prompt": "0.0000004",
+        "completion": "0.00000175",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-4.6v",
+      "model_version": "z-ai/glm-4.6-20251208",
+      "provider": "novita/bf16",
+      "provider_name": "Novita",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 131072,
+      "price_ceiling": {
+        "prompt": "0.0000003",
+        "completion": "0.0000009",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-4.6v",
+      "model_version": "z-ai/glm-4.6-20251208",
+      "provider": "novita/bf16",
+      "provider_name": "Novita",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 131072,
+      "price_ceiling": {
+        "prompt": "0.0000003",
+        "completion": "0.0000009",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2.5",
+      "model_version": "moonshotai/kimi-k2.5-0127",
+      "provider": "novita",
+      "provider_name": "Novita",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.00000057",
+        "completion": "0.00000285",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2.5",
+      "model_version": "moonshotai/kimi-k2.5-0127",
+      "provider": "novita",
+      "provider_name": "Novita",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.00000057",
+        "completion": "0.00000285",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2-thinking",
+      "model_version": "moonshotai/kimi-k2-thinking-20251106",
+      "provider": "novita/bf16",
+      "provider_name": "Novita",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.0000006",
+        "completion": "0.0000025",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-4.5v",
+      "model_version": "z-ai/glm-4.5v",
+      "provider": "novita/fp8",
+      "provider_name": "Novita",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 16384,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 65536,
+      "price_ceiling": {
+        "prompt": "0.0000006",
+        "completion": "0.0000018",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-4.5v",
+      "model_version": "z-ai/glm-4.5v",
+      "provider": "novita/fp8",
+      "provider_name": "Novita",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 16384,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 65536,
+      "price_ceiling": {
+        "prompt": "0.0000006",
+        "completion": "0.0000018",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.3",
+      "model_version": "z-ai/glm-5.3-20260816",
+      "provider": "coreweave/fp8",
+      "provider_name": "CoreWeave",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.0000012",
+        "completion": "0.000004",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5.3",
+      "model_version": "z-ai/glm-5.3-20260816",
+      "provider": "coreweave/fp8",
+      "provider_name": "CoreWeave",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.0000012",
+        "completion": "0.000004",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k3.1-pro",
+      "model_version": "moonshotai/kimi-k3.1-pro-20261023",
+      "provider": "moonshotai/highspeed",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.000004",
+        "completion": "0.00002",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k3.1-pro",
+      "model_version": "moonshotai/kimi-k3.1-pro-20261023",
+      "provider": "moonshotai/highspeed",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 1048576,
+      "price_ceiling": {
+        "prompt": "0.000004",
+        "completion": "0.00002",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2.7-code",
+      "model_version": "moonshotai/kimi-k2.7-code-20260612",
+      "provider": "moonshotai/highspeed",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.0000019",
+        "completion": "0.000008",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2.7-code",
+      "model_version": "moonshotai/kimi-k2.7-code-20260612",
+      "provider": "moonshotai/highspeed",
+      "provider_name": "Moonshot AI",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.0000019",
+        "completion": "0.000008",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5",
+      "model_version": "z-ai/glm-5-20260211",
+      "provider": "venice/fp8",
+      "provider_name": "Venice",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32000,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 198000,
+      "price_ceiling": {
+        "prompt": "0.000001",
+        "completion": "0.0000032",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-5",
+      "model_version": "z-ai/glm-5-20260211",
+      "provider": "venice/fp8",
+      "provider_name": "Venice",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32000,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 198000,
+      "price_ceiling": {
+        "prompt": "0.000001",
+        "completion": "0.0000032",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-4.6",
+      "model_version": "z-ai/glm-4.6",
+      "provider": "deepinfra/fp4/flex",
+      "provider_name": "DeepInfra",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 202752,
+      "price_ceiling": {
+        "prompt": "0.0000004",
+        "completion": "0.0000016",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "z-ai/glm-4.6",
+      "model_version": "z-ai/glm-4.6",
+      "provider": "deepinfra/fp4/flex",
+      "provider_name": "DeepInfra",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 202752,
+      "price_ceiling": {
+        "prompt": "0.0000004",
+        "completion": "0.0000016",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.z.ai/guides/capabilities/thinking-mode",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2.6",
+      "model_version": "moonshotai/kimi-k2.6-20260420",
+      "provider": "coreweave/fp4",
+      "provider_name": "CoreWeave",
+      "api": "openrouter.chat",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.00000065",
+        "completion": "0.00000341",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
+    },
+    {
+      "model_id": "moonshotai/kimi-k2.6",
+      "model_version": "moonshotai/kimi-k2.6-20260420",
+      "provider": "coreweave/fp4",
+      "provider_name": "CoreWeave",
+      "api": "openrouter.responses",
+      "mode": {
+        "effort": "high"
+      },
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "semantic_class": "full_generated_thinking",
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "answer_headroom_tokens": 1024,
+      "context_tokens": 262144,
+      "price_ceiling": {
+        "prompt": "0.00000065",
+        "completion": "0.00000341",
+        "request": "0",
+        "internal_reasoning": "0"
+      },
+      "allowed_fallback_routes": [],
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.kimi.ai/docs/guide/use-thinking-models",
+        "probe_id": "glm-kimi-real-broker-capture-20261027",
+        "verified_at": "2026-10-27T05:38:03.385626Z",
+        "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
+      }
     }
   ],
   "baseline_route": {

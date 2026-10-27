@@ -25,7 +25,8 @@ def test_selected_baseline_route_is_evidence_bound():
         'model_id': 'deepseek/deepseek-v4.1-flash-1017', 'api': 'openrouter.responses'
     }
     routes = [route for route in registry['approved_routes']
-              if route['api'] == 'openrouter.responses' and route['provider'] == 'fireworks']
+              if route['model_id'] == PROOF['model_id']
+              and route['api'] == 'openrouter.responses' and route['provider'] == 'fireworks']
     assert len(routes) == 1
     route = routes[0]
     assert registry['approved_routes'][6] == route

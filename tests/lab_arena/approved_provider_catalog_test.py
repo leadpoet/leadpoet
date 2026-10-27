@@ -12,13 +12,13 @@ PROOFS = [EVIDENCE / f'alternate-provider-{api}-proof-20261025.json'
           for api in ('chat', 'responses')]
 
 
-def test_original_seven_routes_and_unset_baseline_are_unchanged():
+def test_original_seven_routes_and_provider_defaults_are_unchanged():
     registry = reasoning_capture.load_registry()
     original = deepcopy(registry)
     original['approved_routes'] = original['approved_routes'][:7]
+    original['baseline_route'] = None  # Preserve the historical route-evidence hash.
     assert contracts.document_hash(original) == (
         'sha256:bf758852eb6d47d37260ce7c42df397337ef78779e6d29524481027b507d1d46')
-    assert registry['baseline_route'] is None
     for route in original['approved_routes']:
         params = {'model': route['model_id']}
         _, selected = reasoning_capture.apply(route['api'], params,

@@ -1,6 +1,7 @@
 """Saved synthetic Responses proof binds the seventh reviewed exact route."""
 
 import base64
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
@@ -17,10 +18,12 @@ PATH = Path(__file__).parents[2] / 'docs/evidence/full-thinking/deepseek-firewor
 PROOF = json.loads(PATH.read_text())
 
 
-def test_seventh_route_is_evidence_bound_and_does_not_select_a_baseline():
+def test_selected_baseline_route_is_evidence_bound():
     registry = rc.load_registry()
     assert len(registry['approved_routes']) >= 7
-    assert registry['baseline_route'] is None
+    assert registry['baseline_route'] == {
+        'model_id': 'deepseek/deepseek-v4.1-flash-1017', 'api': 'openrouter.responses'
+    }
     routes = [route for route in registry['approved_routes']
               if route['api'] == 'openrouter.responses' and route['provider'] == 'fireworks']
     assert len(routes) == 1
@@ -76,7 +79,14 @@ def test_actual_responses_wire_readable_and_strict_targets_replay_through_curren
         raw = base64.b64decode(wire['body_b64'], validate=True)
         assert contracts.hash_bytes(raw) == wire['wire_body_sha256']
         assert len(raw) == wire['wire_body_bytes']
-        assert training_export.without_hidden_reasoning(raw_value) == (call['response'], False)
+        # The saved export predates preservation of empty native summary fields.
+        # Keep the evidence immutable and require precisely that added field.
+        expected = deepcopy(call['response'])
+        assert expected['output'][0]['type'] == 'reasoning'
+        assert 'summary' not in expected['output'][0]
+        assert raw_value['output'][0]['summary'] == []
+        expected['output'][0]['summary'] = []
+        assert training_export.without_hidden_reasoning(raw_value) == (expected, False)
         receipt = call['response_receipts'][0]
         assert (receipt['wire_body_sha256'], receipt['wire_body_bytes']) == (wire['wire_body_sha256'], wire['wire_body_bytes'])
         assert call['response_status'] == 200 and call['accounting_state'] == 'settlement' and not call['evidence_gaps']

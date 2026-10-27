@@ -828,5 +828,8 @@
       }
     }
   ],
-  "baseline_route": null
+  "baseline_route": {
+    "model_id": "deepseek/deepseek-v4.1-flash-1017",
+    "api": "openrouter.responses"
+  }
 }

@@ -139,6 +139,8 @@ For local tests, enable thinking with:
 - Gemma: `"reasoning": {"enabled": true, "exclude": false}` instead.
 - Responses: `"reasoning": {"effort": "high"}`.
 
+For Solar Pro4 and Mini4, use explicit `high` effort to enable thinking. `minimal` and `include_reasoning: true` alone leave it off.
+
 Hosted web search is supported on the approved DeepSeek Responses routes. Keep normal conversation history and tool-call IDs intact. **Keep your harness and custom tools. No custom logging or receipts are required.** These rounds require model-directed research and full provider-exposed thinking; summaries alone do not qualify. The sourcing cap increases to **$6 per ICP**. Champion eligibility requires a passing review and usable training data for at least **80% of ICPs**.
 
 Return a JSON list of up to five companies, or `[]` if none qualify. Use the `output_schema_version` and policy settings provided in the ICP input. Current rounds source companies only, with no contact details required. See [output requirements](docs/arena-company-quality.md) for required fields.

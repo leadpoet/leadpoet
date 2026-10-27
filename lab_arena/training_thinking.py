@@ -1801,7 +1801,7 @@ def build(examples, rules: training_steps.Rules | None = None):
     """Return private candidates only for proven full generated thinking."""
     rules = rules or training_steps.Rules()
     examples = list(examples)
-    splits, historical = training_steps.build(examples, rules)
+    splits, historical = training_steps._build(examples, rules)
     # Reuse existing exact request, agent read, receipt and split checks. Its
     # summary-only candidates are merely a search space, never admitted here.
     by_hash = {example.get("example_hash"): example for example in examples}

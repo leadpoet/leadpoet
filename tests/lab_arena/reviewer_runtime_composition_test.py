@@ -198,12 +198,13 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
     from scripts import build_arena_reviewer_runtime as builder
     from scripts.arena_reviewer_investigation_finality_seam import (
         DELTAS, HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        _POST_REPAIR_NEW, _POST_REPAIR_OLD,
         convert_investigation_finality_seam,
     )
     corrected = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
     original = corrected.replace(HELPER.encode(), b'', 1).replace(
         WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
-    )
+    ).replace(_POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1)
     for old, new in DELTAS:
         assert original.count(new.encode()) == 1
         original = original.replace(new.encode(), old.encode(), 1)
@@ -230,19 +231,57 @@ def test_completed_investigation_correction_preserves_all_other_frozen_bytes():
 def test_completed_investigation_upgrades_existing_runtime_finality_only():
     from scripts.arena_reviewer_investigation_finality_seam import (
         HELPER, LEGACY_HELPER, WRAPPER_GUARD_NEW, WRAPPER_GUARD_OLD,
+        _POST_REPAIR_NEW, _POST_REPAIR_OLD,
         convert_investigation_finality_seam,
     )
     corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
     legacy = corrected.replace(HELPER.encode(), LEGACY_HELPER.encode(), 1).replace(
         WRAPPER_GUARD_NEW.encode(), WRAPPER_GUARD_OLD.encode(), 1,
-    )
+    ).replace(_POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1)
     assert convert_investigation_finality_seam(legacy) == corrected
     before, after = ast.parse(legacy), ast.parse(corrected)
     for tree in (before, after):
         tree.body = [node for node in tree.body if getattr(node, 'name', '') not in {
             '_settle_completed_company_investigation', '_verify_company_fit',
+            '_llm_reverify_company',
         }]
     assert ast.dump(before) == ast.dump(after)
+
+
+def test_completed_review_recovers_headcount_on_prior_frozen_runtime():
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        HELPER, PREVIOUS_HELPER, _POST_REPAIR_NEW, _POST_REPAIR_OLD,
+        convert_investigation_finality_seam,
+    )
+    corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
+    prior = corrected.replace(HELPER.encode(), PREVIOUS_HELPER.encode(), 1).replace(
+        _POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1,
+    )
+    actual = convert_investigation_finality_seam(prior)
+    assert actual == corrected
+    assert convert_investigation_finality_seam(actual) == actual
+    # The two narrow edits are the entire frozen-source correction.
+    assert actual.replace(HELPER.encode(), PREVIOUS_HELPER.encode(), 1).replace(
+        _POST_REPAIR_NEW.encode(), _POST_REPAIR_OLD.encode(), 1,
+    ) == prior
+
+
+@pytest.mark.parametrize('fault', ['partial_helper', 'unknown_call', 'duplicate_call'])
+def test_completed_review_rejects_partial_or_unknown_postrepair_source(fault):
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        HELPER, PREVIOUS_HELPER, _POST_REPAIR_NEW,
+        InvestigationFinalitySeamError, convert_investigation_finality_seam,
+    )
+    source = (ROOT / composer.FINALITY_FILE).read_bytes()
+    if fault == 'partial_helper':
+        source = source.replace(HELPER.encode(), PREVIOUS_HELPER.encode(), 1)
+    elif fault == 'unknown_call':
+        source = source.replace(_POST_REPAIR_NEW.encode(), _POST_REPAIR_NEW.replace(
+            'settled is not None', 'settled is None').encode(), 1)
+    else:
+        source = source.replace(_POST_REPAIR_NEW.encode(), (_POST_REPAIR_NEW * 2).encode(), 1)
+    with pytest.raises(InvestigationFinalitySeamError):
+        convert_investigation_finality_seam(source)
 
 
 def test_actual_frozen_base_and_existing_runtime_compose_to_identical_bytes():

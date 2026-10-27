@@ -1,3 +1,12 @@
+## Scoped authorization: October 27 completed-review recovery
+
+The user authorized the full October 27 Arena watch, permanent fixes, testing,
+merge and deployment. This task may correct completed-review finality after an
+optional profile failure, compose and register the exact reviewer-runtime repair,
+and use canonical release controllers. Preserve frozen grading, accepted work,
+provider/identity proof, costs, privacy, promotion and reward rules. Verify actual
+new score leases and the full round before completion. Respect concurrent owners.
+
 ## Scoped authorization: October 27 reasoning capture and October 28 routes
 
 The user authorized testing and expanding verified reasoning routes, preserving

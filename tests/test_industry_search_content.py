@@ -30,6 +30,8 @@ def test_exact_domain_source_text_is_retained_without_trusting_highlights(monkey
         include_domains=('example.com',), discovery_highlights=True, read_source_text=True))
     assert requests[0]['contents'] == {'text':{'maxCharacters':24000}, 'maxAgeHours':0}
     assert requests[0]['numResults'] == 10
+    assert requests[0]['type'] == 'deep'
+    assert set(requests[0]) == {'query', 'type', 'numResults', 'contents', 'includeDomains'}
     assert result.pop('_source_pages') == {
         'https://example.com/service':'Example supplies account workflows.',
         'https://docs.example.com/tickets':'Example supplies ticket management.',

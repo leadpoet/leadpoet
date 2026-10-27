@@ -51,7 +51,7 @@ def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch,
             'contents': {'type': 'object'},
         }, 'required': ['query']}))
     transport = FakeTransport([(200, {
-        'status': 'completed', 'billing': {'credits_charged': 0.1},
+        'status': 'completed', 'billing': {'credits_charged': 0.17 if source_text else 0.1},
         'result': {'data': {'results': [{'url': 'https://coreworks.ai/project', 'title': 'Project',
                                        'text':'Coreworks supplies this service.'}]}},
     })])
@@ -73,6 +73,7 @@ def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch,
     wire = json.loads(transport.sent[0]['body'])
     assert wire['payload']['includeDomains'] == ['coreworks.ai']
     assert wire['payload']['numResults'] == (10 if source_text else investigator.MAX_SEARCH_RESULTS)
+    assert wire['payload']['type'] == ('deep' if source_text else 'auto')
     if source_text:
         assert wire['payload']['contents'] == {'text':{'maxCharacters':24000},'maxAgeHours':0}
         assert result['_source_pages'] == {'https://coreworks.ai/project':'Coreworks supplies this service.'}
@@ -80,4 +81,4 @@ def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch,
         assert '_source_pages' not in result
     assert receipts[0]['funding_source'] == funding_source
     assert receipts[0]['outcome'] == 'settled'
-    assert receipts[0]['actual_microusd'] == 10_000
+    assert receipts[0]['actual_microusd'] == (17_000 if source_text else 10_000)

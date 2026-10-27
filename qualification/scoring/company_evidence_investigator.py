@@ -2460,7 +2460,8 @@ async def _search_web(
     if read_source_text and not (discovery_highlights and include_domains):
         raise ValueError('source text requires scoped industry discovery')
     result_limit = MAX_INDUSTRY_SEARCH_RESULTS if discovery_highlights else MAX_SEARCH_RESULTS
-    payload = {"query": query[:500], "type": "auto", "numResults": result_limit}
+    payload = {"query": query[:500], "type": "deep" if read_source_text else "auto",
+               "numResults": result_limit}
     if read_source_text:
         payload['contents'] = {'text': {'maxCharacters': MAX_PAGE_CHARACTERS}, 'maxAgeHours': 0}
     elif discovery_highlights:

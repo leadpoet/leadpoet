@@ -70,7 +70,7 @@ def test_full_hosted_continuation_preserves_native_output_and_local_json():
     assert normalized["input"] == request["input"]
     assert normalized["tools"] == request["tools"]
     assert normalized["text"] == request["text"]
-    assert normalized["max_output_tokens"] == 8192
+    assert normalized["max_output_tokens"] == operations.OPENROUTER_MAX_OUTPUT_TOKENS
     assert normalized["provider"]["only"] == ["example/verified"]
 
 
@@ -363,7 +363,7 @@ def test_full_hosted_broker_preserves_receipts_privacy_and_budget_settlement(uns
         assert outgoing["input"] == request["input"]
         assert outgoing["tools"] == request["tools"]
         assert outgoing["max_tool_calls"] == request["max_tool_calls"]
-        assert outgoing["max_output_tokens"] == 8192
+        assert outgoing["max_output_tokens"] == operations.OPENROUTER_MAX_OUTPUT_TOKENS
         assert outgoing["text"] == request["text"]
         assert outgoing["provider"]["only"] == ["example/verified"]
         assert outgoing["provider"]["zdr"] is True

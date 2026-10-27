@@ -567,6 +567,30 @@ def test_recognizable_raw_responses_cannot_create_canonical_call_roots(response)
         assert cleaned["choices"] == projected["choices"] == response["choices"]
 
 
+@pytest.mark.parametrize("projection", [
+    "admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters", "outbound",
+])
+@pytest.mark.parametrize("response", [None, {"choices": []}, {"object": "response", "output": []}])
+def test_standalone_chat_history_requires_a_request_root(projection, response):
+    from lab_arena.training_export import without_hidden_reasoning
+
+    parameters = {"messages": [{"role": "assistant", "reasoning_content": "Prior assistant text."}]}
+    request = {"operation_id": "openrouter.chat",
+               projection: {"body": parameters} if projection == "outbound" else parameters}
+    value = {**request, **(response or {})}
+    cleaned, reasons = capture.sanitize_training_value(value)
+    projected, removed = without_hidden_reasoning(value)
+    if response is None:
+        assert cleaned == projected == value
+        assert reasons == [] and removed is False
+    else:
+        body = cleaned[projection]["body"] if projection == "outbound" else cleaned[projection]
+        assert body["messages"][0]["reasoning_content"] == "[REDACTED]"
+        body = projected[projection]["body"] if projection == "outbound" else projected[projection]
+        assert "reasoning_content" not in body["messages"][0]
+        assert reasons == ["hidden_reasoning"] and removed is True
+
+
 @pytest.mark.parametrize("mutation", [
     {"sha256": "sha256:" + "0" * 64}, {"size_bytes": 1},
     {"compressed_bytes": 1}, {"redacted": True}, {"encoding": "identity"},

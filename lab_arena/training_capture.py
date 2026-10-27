@@ -205,6 +205,8 @@ def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: A
     """Keep plain assistant replay text only in a known Chat request message."""
     if not isinstance(item, Mapping) or item.get("role") != "assistant" or not isinstance(root, Mapping):
         return False
+    if isinstance(root.get("choices"), list) or root.get("object") == "response":
+        return False
     if len(path) >= 3 and path[-2] == "messages" and path[-1].isdigit():
         prefix = path[:-2]
     else:

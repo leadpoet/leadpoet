@@ -13,7 +13,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from lab_arena import contracts, lab_arena_checkpoint, operations, training_capture, training_input
@@ -35,6 +35,7 @@ MAX_SEGMENT_BYTES = 16 * 1024 * 1024
 MAX_SEGMENTS = 1024
 MAX_JOURNAL_ATTEMPTS = 10_000_000
 OPTIONAL_CAPTURE_INCOMPLETE = "optional_capture_incomplete"
+OPTIONAL_FAILURE_TAG_CAPABILITY = "training_observation_optional_failure_tag"
 _FAILURES = frozenset({"capture_incomplete", OPTIONAL_CAPTURE_INCOMPLETE})
 _V1_FIELDS = frozenset({"observations", "observation_count", "local_refusal_count", "complete", "failures"})
 _V2_FIELDS = _V1_FIELDS | {"response_receipts", "response_receipt_count", "agent_observations", "agent_observation_count"}
@@ -50,6 +51,19 @@ _BROKER_PROVIDER_UNAVAILABLE_BODY = b'{"error":{"code":"provider_unavailable"}}'
 
 class ObservationError(ValueError):
     """Worker evidence is incomplete or has an invalid identity."""
+
+
+def failure_tags_for_lease(failures: Iterable[str], lease: Mapping[str, Any]) -> list[str]:
+    """Use the optional tag only when the serving gateway explicitly accepts it.
+
+    Project a copied failure list before wire hashes are built. Raw events and
+    the worker buffer keep their original attribution; unknown failures remain
+    invalid, and a required capture failure never becomes optional.
+    """
+    if lease.get(OPTIONAL_FAILURE_TAG_CAPABILITY) is True:
+        return sorted(set(failures))
+    return sorted({"capture_incomplete" if value == OPTIONAL_CAPTURE_INCOMPLETE else value
+                   for value in failures})
 
 
 def object_ref(run_id: str, generation: int, claim_hash: str) -> str:

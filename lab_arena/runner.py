@@ -3799,6 +3799,8 @@ def _record_training_observations(config: RunnerConfig, lease: Mapping[str, Any]
             if state.worker_observations_pending or state.worker_handlers_inflight:
                 state.worker_observations.failures.add("capture_incomplete")
             document = state.worker_observations.document()
+            document["failures"] = training_observations.failure_tags_for_lease(
+                document["failures"], lease)
         summary.update(observation_count=document["observation_count"],
                        local_refusal_count=document["local_refusal_count"], complete=document["complete"])
         send = getattr(config.api, "training_observations", None)
@@ -3865,7 +3867,7 @@ class _ObservationJournal:
                        if row["ordinal"] in self.prepared_receipts and row["write_state"] != "prepared"][:64]
             counts = (buffer.attempted, buffer.local_refusals,
                       buffer.response_receipt_count, buffer.agent_observation_count)
-            failures = sorted(buffer.failures)
+            failures = training_observations.failure_tags_for_lease(buffer.failures, self.lease)
         if not (observations or receipts or agents or changed or tuple(failures) != self.last_failures):
             return False
         while True:

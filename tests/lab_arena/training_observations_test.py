@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_arena import contracts, operations, runner, shim, training_observations as obs
+from lab_arena import contracts, operations, runner, shim, training_capture, training_observations as obs
 from lab_arena.api import create_app
 from lab_arena.service import ServiceError
 from lab_arena.training_export import assemble_example
@@ -82,6 +82,62 @@ def save(values, document, *, generation=1, claim_hash=CLAIM_HASH):
         "status": "stored", "payload_sha256": snapshot["payload_sha256"],
         **{key: document[key] for key in ("observation_count", "local_refusal_count", "complete")}}
     return snapshot
+
+
+@pytest.mark.parametrize("operation", ["openrouter.responses", "openrouter.chat"])
+def test_rejected_model_controls_survive_runner_snapshot_and_export(tmp_path, operation):
+    parameters = {"model": "deepseek/deepseek-v4.1-flash-1017", "reasoning": {"effort": "high"}}
+    history = "synthetic history " * 2100
+    parameters.update({"input": history} if operation == "openrouter.responses" else {
+        "messages": [{"role": "user", "content": history}]})
+    # Exercise the actual legacy admission rejection, without changing its cap.
+    frame = shim.build_operation_frame(operation, parameters, 1000)
+    with pytest.raises(operations.OperationRequestError):
+        shim.decode_operation_frame(frame)
+    state = runner.RunState(lease=lease(), lease_token=TOKEN)
+    api = FakeApi([])
+    server = runner.WorkerSocketServer(tmp_path / "worker.sock", api, state)
+    returned = json.loads(server.handle_frame(frame))
+    document = state.worker_observations.document()
+    row = document["observations"][0]
+    assert row["kind"] == "local_parse_error" and row["outcome"]["response"] == returned
+    assert row["request"]["admitted_parameters"]["raw_frame"] == json.loads(frame)
+    assert row["privacy"] == {"redacted": False, "redactions": []}
+    assert document["complete"] and state.action_sequence == len(state.calls) == len(api.provider_frames) == 0
+
+    values = fixture()
+    snapshot = save(values, document)
+    readback = obs.read_snapshot(values["objects"], "execute:1", "execute", 1, CLAIM_HASH)
+    assert readback == snapshot
+    result = assemble_example(**values)
+    exported = result["worker_observation_artifacts"]["execute:1"]
+    assert exported == snapshot
+    assert result["completeness"]["complete"]
+    assert not result["privacy"]["privacy_filtered"]
+    assert not result["privacy"]["hidden_reasoning_removed"]
+    for value in (row["request"], row, document, snapshot, result):
+        assert training_capture.sanitize_training_value(value) == (value, [])
+        assert json.loads(contracts.canonical_json(value)) == value
+    assert contracts.document_hash(exported["payload"]) == snapshot["payload_sha256"]
+    restored_parameters = exported["payload"]["observations"][0]["request"]["admitted_parameters"]["raw_frame"]["parameters"]
+    assert contracts.document_hash(restored_parameters["reasoning"]) == contracts.document_hash(parameters["reasoning"])
+
+
+def test_rejected_frame_fix_preserves_historical_privacy_flags():
+    row = observation(kind="local_parse_error", operation="unknown", action=None, contributes=False)
+    row["request"] = {"admitted_parameters": {"raw_frame": {
+        "operation_id": "openrouter.responses", "parameters": {
+            "model": "synthetic/model", "reasoning": "[REDACTED]", "input": "synthetic"}}},
+        "timeout_ms": 0}
+    row["outcome"] = {"protocol": "frame", "response": {"error": "invalid_request"}}
+    row["privacy"] = {"redacted": True, "redactions": ["hidden_reasoning"]}
+    values = fixture()
+    snapshot = save(values, payload(row))
+    assert obs.read_snapshot(values["objects"], "execute:1", "execute", 1, CLAIM_HASH) == snapshot
+    result = assemble_example(**values)
+    assert result["worker_observation_artifacts"]["execute:1"] == snapshot
+    assert result["privacy"]["hidden_reasoning_removed"] and result["privacy"]["privacy_filtered"]
+    assert "worker_observation_privacy_nonexact" in result["completeness"]["incomplete_reasons"]
 
 
 def test_owned_endpoint_roundtrip_immutable_and_private(tmp_path):

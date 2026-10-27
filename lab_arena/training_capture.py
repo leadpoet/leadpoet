@@ -186,6 +186,108 @@ def _provider_call_path(path: tuple[str, ...], root: Any = None
     return None
 
 
+def _rejected_frame_config_path(path: tuple[str, ...], root: Any) -> bool:
+    """Recognize only the host's rejected model-frame observation containers.
+
+    Parse errors have no admitted operation identity. Bind controls to the
+    decoded model frame instead, never to arbitrary nested ``parameters``.
+    The same bytes must remain a fixed point in saved and exported evidence.
+    """
+    if path[-3:] != ("admitted_parameters", "raw_frame", "parameters"):
+        return False
+    if not isinstance(root, Mapping) or (isinstance(root.get("choices"), list)
+            or root.get("object") in ("response", "chat.completion", "chat.completion.chunk")):
+        return False
+
+    def at(parts):
+        item = root
+        for part in parts:
+            if isinstance(item, Mapping):
+                item = item.get(part)
+            elif isinstance(item, list) and part.isdigit() and int(part) < len(item):
+                item = item[int(part)]
+            else:
+                return None
+        return item
+
+    request_path = path[:-3]
+    if request_path:
+        # No suffix matching: provider bodies and arbitrary wrappers cannot
+        # establish a host observation by copying canonical field names.
+        if request_path == ("request",):
+            observation = root
+        elif (len(request_path) == 3 and request_path[0] == "observations"
+              and request_path[1].isdigit() and request_path[2] == "request"):
+            observation = at(request_path[:-1])
+        elif (len(request_path) == 4 and request_path[:2] == ("payload", "observations")
+              and request_path[2].isdigit() and request_path[3] == "request"
+              and root.get("schema_version") in (
+                  "leadpoet.lab_arena.training_observations.v1",
+                  "leadpoet.lab_arena.training_observations.v2")):
+            observation = at(request_path[:-1])
+        elif (len(request_path) == 6 and request_path[0] in {
+                "worker_observation_artifacts", "partial_worker_observation_artifacts"}
+              and request_path[2:4] == ("payload", "observations")
+              and request_path[4].isdigit() and request_path[5] == "request"):
+            observation = at(request_path[:-1])
+        else:
+            return False
+        if (request_path != ("request",)
+                and not isinstance(at(request_path[:-2]), list)):
+            return False
+        if (len(request_path) == 6
+                and not isinstance(root.get(request_path[0]), Mapping)):
+            return False
+        if (not isinstance(observation, Mapping)
+                or set(observation) != {"ordinal", "action_sequence", "operation_id", "kind",
+                                       "request", "outcome", "call_identity", "privacy",
+                                       "contributes_to_provider_call_count"}
+                or observation.get("kind") != "local_parse_error"
+                or observation.get("operation_id") != "unknown"
+                or observation.get("action_sequence") is not None
+                or observation.get("call_identity") is not None
+                or observation.get("contributes_to_provider_call_count") is not False
+                or not isinstance(observation.get("outcome"), Mapping)
+                or observation["outcome"].get("protocol") != "frame"):
+            return False
+    request = at(request_path)
+    if (not isinstance(request, Mapping) or set(request) != {"admitted_parameters", "timeout_ms"}
+            or type(request.get("timeout_ms")) is not int or request["timeout_ms"] != 0
+            or not isinstance(request.get("admitted_parameters"), Mapping)
+            or set(request["admitted_parameters"]) != {"raw_frame"}):
+        return False
+    frame = request["admitted_parameters"]["raw_frame"]
+    return (isinstance(frame, Mapping)
+            and {"operation_id", "parameters"} <= set(frame)
+            and set(frame) <= {"schema_version", "operation_id", "parameters", "timeout_ms"}
+            and isinstance(frame["operation_id"], str)
+            and frame["operation_id"] in {"openrouter.chat", "openrouter.responses"}
+            and isinstance(frame["parameters"], Mapping)
+            and isinstance(frame["parameters"].get("model"), str)
+            and bool(frame["parameters"]["model"].strip()))
+
+
+def _rejected_frame_controls(value: Mapping[str, Any]) -> bool:
+    """Allow only control values, not arbitrary strings in control-shaped data."""
+    choices = {
+        "effort": {"none", "minimal", "low", "medium", "high", "xhigh", "max"},
+        "summary": {"auto", "concise", "detailed"},
+        "context": {"auto", "all_turns", "current_turn"},
+    }
+    for key, child in value.items():
+        if child == "[REDACTED]":
+            continue  # Keep credential-filtered controls a fixed point.
+        if key in choices:
+            valid = isinstance(child, str) and child in choices[key]
+        elif key in {"exclude", "enabled"}:
+            valid = type(child) is bool
+        else:
+            valid = key == "max_tokens" and type(child) is int and child > 0
+        if not valid:
+            return False
+    return True
+
+
 def readable_reasoning_content_path(path: tuple[str, ...], root: Any = None) -> bool:
     """Allow the plaintext chat alias only in a provider response message."""
     if (len(path) < 3 or path[-3] != "choices" or not path[-2].isdigit()
@@ -395,11 +497,12 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 normalized = key.lower().replace("-", "_")
                 safe_config = (
                     normalized == "reasoning"
-                    and (request_config_path(path)
-                         or item.get("object") == "response" and isinstance(item.get("output"), list))
                     and isinstance(child, Mapping)
                     and set(child) <= _CONFIG_KEYS
                     and all(isinstance(v, (str, bool, int)) or v is None for v in child.values())
+                    and (request_config_path(path)
+                         or item.get("object") == "response" and isinstance(item.get("output"), list)
+                         or _rejected_frame_config_path(path, value) and _rejected_frame_controls(child))
                 )
                 # False and zero retain the existing sensitive-value handling.
                 empty_credential = child is None or (

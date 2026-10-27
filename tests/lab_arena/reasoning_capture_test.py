@@ -68,7 +68,9 @@ def _reviewed_registry(model="openai/gpt-4o-mini", api="openrouter.chat"):
 def test_committed_registry_approves_only_reviewed_routes():
     registry = rc.load_registry()
     assert {route["model_id"] for route in registry["approved_routes"]} == set(PROBE_FILES) | set(LIVE_CAPTURE_FILES)
-    assert registry["baseline_route"] is None
+    assert registry["baseline_route"] == {
+        "model_id": "deepseek/deepseek-v4.1-flash-1017", "api": "openrouter.responses"
+    }
     with pytest.raises(ValueError, match="reasoning_route_unsupported"):
         rc.apply("openrouter.chat", chat("openai/gpt-4o-mini"), policy=rc.POLICY,
                  registry=registry)

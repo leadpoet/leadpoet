@@ -170,7 +170,8 @@ def readable_reasoning_item(item: Any) -> bool:
 def _provider_call_path(path: tuple[str, ...], root: Any = None
                         ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
     """Split only the two canonical export call roots from their relative path."""
-    if isinstance(root, Mapping) and (isinstance(root.get("choices"), list) or root.get("object") == "response"):
+    if isinstance(root, Mapping) and (isinstance(root.get("choices"), list)
+            or root.get("object") in ("response", "chat.completion", "chat.completion.chunk")):
         return None  # Recognizable raw provider replies cannot establish export roots.
     for collection in (("provider_calls",), ("judgment", "signal_source_provider_calls")):
         index = len(collection)
@@ -205,7 +206,8 @@ def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: A
     """Keep plain assistant replay text only in a known Chat request message."""
     if not isinstance(item, Mapping) or item.get("role") != "assistant" or not isinstance(root, Mapping):
         return False
-    if isinstance(root.get("choices"), list) or root.get("object") == "response":
+    if (isinstance(root.get("choices"), list)
+            or root.get("object") in ("response", "chat.completion", "chat.completion.chunk")):
         return False
     if len(path) >= 3 and path[-2] == "messages" and path[-1].isdigit():
         prefix = path[:-2]

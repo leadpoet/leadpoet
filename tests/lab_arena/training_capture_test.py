@@ -546,6 +546,8 @@ def test_canonical_call_roots_keep_request_settings_history_and_response_aliases
 @pytest.mark.parametrize("response", [
     {"choices": [{"message": {"reasoning_content": "Actual returned text."}}]},
     {"object": "response", "output": []},
+    {"object": "chat.completion"}, {"object": "chat.completion", "choices": None},
+    {"object": "chat.completion.chunk"}, {"object": "chat.completion.chunk", "choices": None},
 ])
 def test_recognizable_raw_responses_cannot_create_canonical_call_roots(response):
     from lab_arena.training_export import without_hidden_reasoning
@@ -570,7 +572,11 @@ def test_recognizable_raw_responses_cannot_create_canonical_call_roots(response)
 @pytest.mark.parametrize("projection", [
     "admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters", "outbound",
 ])
-@pytest.mark.parametrize("response", [None, {"choices": []}, {"object": "response", "output": []}])
+@pytest.mark.parametrize("response", [
+    None, {"choices": []}, {"object": "response", "output": []},
+    {"object": "chat.completion"}, {"object": "chat.completion", "choices": None},
+    {"object": "chat.completion.chunk"}, {"object": "chat.completion.chunk", "choices": None},
+])
 def test_standalone_chat_history_requires_a_request_root(projection, response):
     from lab_arena.training_export import without_hidden_reasoning
 

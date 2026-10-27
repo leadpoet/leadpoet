@@ -101,9 +101,11 @@ def test_completed_negative_review_after_recovered_headcount_keeps_fault_guards(
     assert settled is None or settled.decision == "unavailable"
     assert settled is None or settled.details["dimension_decisions"] == dimensions_before
     terminal = settled is not None and settled.details.get("failure_class") == "insufficient_fit_evidence"
-    assert terminal is (control is None)
+    assert terminal is (control in {None, "source_blocked"})
     if terminal:
-        assert settled.details["investigation_receipt"]["prior_linkedin_refresh_failure_reason"] == "malformed_response"
+        assert settled.details["investigation_receipt"]["prior_linkedin_refresh_failure_reason"] == (
+            "source_blocked" if control == "source_blocked" else "malformed_response"
+        )
 
 
 @pytest.mark.parametrize("phase", ["initial", "post_repair"])

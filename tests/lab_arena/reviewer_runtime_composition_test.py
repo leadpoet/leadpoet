@@ -266,6 +266,18 @@ def test_completed_review_recovers_headcount_on_prior_frozen_runtime():
     ) == prior
 
 
+def test_completed_profile_obligations_upgrade_exact_v2_helper_only():
+    from scripts.arena_reviewer_investigation_finality_seam import (
+        HELPER, PREVIOUS_HELPER_V2, convert_investigation_finality_seam,
+    )
+    corrected = (ROOT / composer.FINALITY_FILE).read_bytes()
+    prior = corrected.replace(HELPER.encode(), PREVIOUS_HELPER_V2.encode(), 1)
+    assert prior != corrected
+    assert convert_investigation_finality_seam(prior) == corrected
+    assert convert_investigation_finality_seam(corrected) == corrected
+    assert corrected.replace(HELPER.encode(), PREVIOUS_HELPER_V2.encode(), 1) == prior
+
+
 @pytest.mark.parametrize('fault', ['partial_helper', 'unknown_call', 'duplicate_call'])
 def test_completed_review_rejects_partial_or_unknown_postrepair_source(fault):
     from scripts.arena_reviewer_investigation_finality_seam import (

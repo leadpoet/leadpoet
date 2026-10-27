@@ -657,3 +657,110 @@ def test_chat_citation_annotations_are_readable_with_exact_order_and_source_path
     assert 'Second source' in markdown and 'First source' in markdown
     assert contracts.canonical_json(path) in markdown
     assert example == original
+
+
+@pytest.mark.parametrize('delivery', ['selected_terminal', 'terminal_receipt'])
+def test_readable_chat_preserves_unindexed_metadata_without_repeating_reasoning(delivery):
+    example = full_example()
+    call = example['provider_calls'][0]
+    response = call['response']
+    root = ['provider_calls', 0, 'response']
+    if delivery == 'terminal_receipt':
+        response = copy.deepcopy(response)
+        call['response_receipts'][0]['response'] = response
+        root = ['provider_calls', 0, 'response_receipts', 0, 'response']
+    choice = response['choices'][0]
+    choice['index'] = 0
+    choice['native_finish_reason'] = 'end_turn'
+    message = choice['message']
+    text = message['reasoning_content']
+    message['reasoning'] = text
+    message['reasoning_details'] = [
+        {'type': 'reasoning.text', 'text': text, 'format': 'unknown', 'index': 2},
+        {'type': 'summary_text', 'text': 'Ancillary summary.'}]
+    message['refusal'] = None
+    message['tool_calls'] = [{'id': 'tool-1', 'type': 'function',
+                              'function': {'name': 'lookup', 'arguments': '{}'}}]
+    response['usage'] = {'completion_tokens': 7}
+    seal(example)
+    original = copy.deepcopy(example)
+    report = training_thinking.readable_trace(example)
+    events = [event for event in report['calls'][0]['events']
+              if event.get('delivery') == delivery and 'source_path' in event]
+    values = {tuple(event['source_path']): event for event in events}
+    base = root + ['choices', 0]
+    expected = [
+        (base + ['index'], 0),
+        (base + ['finish_reason'], choice['finish_reason']),
+        (base + ['message', 'role'], message['role']),
+        (base + ['message', 'reasoning_details', 0, 'type'], 'reasoning.text'),
+        (base + ['message', 'reasoning_details', 0, 'format'], 'unknown'),
+        (base + ['message', 'reasoning_details', 0, 'index'], 2),
+        (base + ['message', 'reasoning_details', 1, 'type'], 'summary_text'),
+        (base + ['message', 'refusal'], None),
+        (base + ['native_finish_reason'], 'end_turn'),
+    ]
+    for path, value in expected:
+        assert tuple(path) in values
+        assert values[tuple(path)]['value'] == value
+    metadata_paths = [event['source_path'] for event in events
+                      if event['kind'] == 'response_metadata' and event['source_path'][:len(base)] == base]
+    assert metadata_paths == [path for path, _ in expected]
+    reasoning = [event for event in events if event.get('value') == text]
+    assert len(reasoning) == 1
+    assert reasoning[0]['source_path'] == base + ['message', 'reasoning']
+    assert reasoning[0]['alias_source_paths'] == [
+        base + ['message', 'reasoning_content'], base + ['message', 'reasoning_details', 0, 'text']]
+    preserved = [event['kind'] for event in events if event['kind'] != 'response_metadata']
+    assert preserved == ['unverified_reasoning_text', 'unverified_reasoning_text',
+                         'usage', 'assistant_output', 'tool_call']
+    for event in events:
+        source = example
+        for key in event['source_path']:
+            source = source[key]
+        assert event['value'] == source
+        assert event['value_sha256'] == contracts.document_hash(source)
+    markdown = training_thinking.readable_trace_markdown(report)
+    assert 'native_finish_reason' in markdown and 'end_turn' in markdown
+    assert example == original
+    assert report['projection_truncated'] is False
+    assert report['capture_limits'] == {
+        'request_max_bytes': training_capture.MAX_OBJECT_BYTES,
+        'receipt_max_bytes': training_export.MAX_RECEIPT_BYTES}
+
+
+def test_readable_generic_provider_output_does_not_drop_reserved_chat_fields():
+    example = full_example()
+    call = example['provider_calls'][0]
+    call['operation_id'] = 'synthetic.tool'
+    call['response'] = {'choices': [{'label': 'first'}],
+                        'output': [{'result': 'Generic tool output.'}], 'usage': None}
+    report = training_thinking.readable_trace(seal(example))
+    events = [event for event in report['calls'][0]['events']
+              if event.get('delivery') == 'selected_terminal']
+    assert [(event['source_path'][3:], event['value']) for event in events] == [
+        (['choices', 0, 'label'], 'first'),
+        (['output', 0, 'result'], 'Generic tool output.'), (['usage'], None)]
+
+
+def test_readable_cli_keeps_raw_bytes_and_renders_native_metadata(tmp_path):
+    from scripts.render_arena_training_trace import main as render_trace
+
+    example = full_example()
+    example['provider_calls'][0]['response']['choices'][0]['native_finish_reason'] = 'end_turn'
+    raw = (json.dumps(seal(example), indent=2) + '\n').encode()
+    source = tmp_path / 'source.json'
+    source.write_bytes(raw)
+    output = tmp_path / 'rendered'
+    assert render_trace(['--example', str(source), '--output', str(output)]) == 0
+    assert (output / 'raw-export.json').read_bytes() == raw
+    trace = json.loads((output / 'readable-trace.json').read_text())
+    path = ['provider_calls', 0, 'response', 'choices', 0, 'native_finish_reason']
+    event = next(event for event in trace['calls'][0]['events']
+                 if event.get('source_path') == path)
+    assert event['value'] == 'end_turn'
+    assert event['value_sha256'] == contracts.document_hash('end_turn')
+    markdown = (output / 'readable-trace.md').read_text()
+    assert 'native_finish_reason' in markdown and 'end_turn' in markdown
+    assert os.stat(output).st_mode & 0o777 == 0o700
+    assert all(os.stat(path).st_mode & 0o777 == 0o600 for path in output.iterdir())

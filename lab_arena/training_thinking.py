@@ -537,7 +537,7 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
                     or receipt.get("body_bytes") != receipt.get("wire_body_bytes")):
                 return False
         payload = ((example.get("worker_observation_artifacts") or {}).get(call["run_id"]) or {}).get("payload") or {}
-        if payload.get("complete") is not True or payload.get("failures") or any(row.get("call_identity") == call.get("call_identity")
+        if not _provider_capture_complete(example, call["run_id"]) or any(row.get("call_identity") == call.get("call_identity")
                for row in payload.get("response_receipts") or []):
             return False
         for recovered in example.get("provider_calls") or []:
@@ -1026,6 +1026,7 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
         def response_events(response, path, delivery):
             if not isinstance(response, Mapping):
                 return
+            first_event = len(events)
             operation = call.get("operation_id")
             for key in sorted(response):
                 if key not in {"choices", "output", "usage"}:
@@ -1080,6 +1081,29 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
                         execution="provider" if hosted else None)
                     add_segments([segment for segment in segments
                                   if segment["source_paths"][0][:2] == ["output", output_index]])
+
+            # Retain fields outside the typed events (for example native Chat
+            # finish reasons and reasoning-detail format/index). Skip whole
+            # indexed values and text aliases so large reasoning is not copied
+            # again. Walk the saved key/list order without moving typed events.
+            indexed = {tuple(source)
+                       for event in events[first_event:]
+                       for source in ([event["source_path"]] if "source_path" in event else [])
+                       + event.get("alias_source_paths", [])}
+
+            def add_unindexed(value, source):
+                if tuple(source) in indexed:
+                    return
+                if isinstance(value, Mapping) and value:
+                    for key, item in value.items():
+                        add_unindexed(item, source + [key])
+                elif isinstance(value, list) and value:
+                    for index, item in enumerate(value):
+                        add_unindexed(item, source + [index])
+                else:
+                    add("response_metadata", source, value, delivery=delivery)
+
+            add_unindexed(response, path)
 
         if isinstance(call.get("response"), Mapping):
             response_events(call["response"], prefix + ["response"], "selected_terminal")
@@ -1380,7 +1404,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
         return None
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
-    if (payload.get("complete") is not True
+    if (not _provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
@@ -1525,7 +1549,7 @@ def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_p
     run_id = example["run_id"]
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
-    if (payload.get("complete") is not True
+    if (not _provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
@@ -1569,6 +1593,66 @@ _LOCAL_WEB_DIAGNOSTICS = frozenset({"direct_web_usage_unverified", "direct_web_c
 _OPTIONAL_LOCAL_KINDS = frozenset({"web_fetch", "web_fetch_binary", "http_response_metadata", "state_snapshot"})
 
 
+def _provider_capture_complete(example, run_id):
+    """Keep old failures hard; only new explicit optional tags narrow capture scope."""
+    from lab_arena import training_observations
+    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+    payload = artifact.get("payload") or {}
+    if payload.get("complete") is True:
+        return not payload.get("failures")
+    return (training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+            and set(artifact) == {"schema_version", "run_id", "kind", "lease_generation",
+                                  "claim_request_hash", "payload", "payload_sha256"}
+            and artifact.get("schema_version") == training_observations.SCHEMA_VERSION
+            and artifact.get("run_id") == run_id
+            and artifact.get("kind") in {"execute", "score"}
+            and type(artifact.get("lease_generation")) is int and artifact["lease_generation"] > 0
+            and isinstance(artifact.get("claim_request_hash"), str)
+            and contracts.SHA256_RE.fullmatch(artifact["claim_request_hash"]) is not None
+            and artifact.get("payload_sha256") == contracts.document_hash(payload)
+            and training_observations.optional_capture_only(payload))
+
+
+def _optional_capture_runs_proven(example):
+    """Every run that contributed the shared gap needs its own full host proof."""
+    rows = example.get("related_run_gap_attribution") or {}
+    attempts = {row.get("run_id"): row for row in example.get("attempts") or []}
+    artifacts = example.get("worker_observation_artifacts") or {}
+    if (not rows or set(rows) != set(attempts) or len(attempts) != len(example.get("attempts") or [])
+            or not set(artifacts) <= set(rows) or example.get("partial_worker_observation_artifacts")):
+        return False
+    affected = []
+    for run_id, row in rows.items():
+        if (row.get("kind") != attempts[run_id].get("kind")
+                or row.get("status") != attempts[run_id].get("status")):
+            return False
+        artifact = artifacts.get(run_id) or {}
+        if ((artifact.get("payload") or {}).get("complete") is False
+                and "worker_observations_incomplete" not in (row.get("research_process_gaps") or [])):
+            return False
+        if "worker_observations_incomplete" in (row.get("research_process_gaps") or []):
+            if not _provider_capture_complete(example, run_id) or artifact.get("kind") != row.get("kind"):
+                return False
+            # A complete unrelated snapshot cannot explain an incomplete journal.
+            payload = example["worker_observation_artifacts"][run_id]["payload"]
+            if payload.get("complete") is not False:
+                return False
+            affected.append(run_id)
+    for run_id in affected:
+        calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
+        delivered = []
+        for call in calls:
+            if verified_recovered_responses_retry(example, call):
+                continue
+            training_steps._host_result(example, call, allow_worker_error=True)
+            delivered.append(call["call_identity"])
+        receipts = example["worker_observation_artifacts"][run_id]["payload"]["response_receipts"]
+        identities = [row["call_identity"] for row in receipts]
+        if len(delivered) != len(set(delivered)) or len(identities) != len(set(identities)) or set(identities) != set(delivered):
+            return False
+    return bool(affected)
+
+
 def _required_observation_redacted(example, row, *, agent=False):
     return ((row.get("privacy") or {}).get("redacted") is not False
             and not (agent and row.get("kind") in _OPTIONAL_LOCAL_KINDS
@@ -1587,6 +1671,8 @@ def _provider_visible_view(example):
     proof = example.get("completeness") or {}
     reasons = set(proof.get("incomplete_reasons") or [])
     ignored = reasons & _LOCAL_WEB_DIAGNOSTICS
+    if "worker_observations_incomplete" in reasons and _optional_capture_runs_proven(example):
+        ignored.add("worker_observations_incomplete")
     artifacts = example.get("worker_observation_artifacts") or {}
     optional_redacted = False
     optional_binary = False

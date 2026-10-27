@@ -1,6 +1,7 @@
 """Current output caps bind new live evidence; old captures keep frozen policy."""
 
 import base64
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
@@ -56,7 +57,24 @@ def test_real_cap_wire_and_worker_readback_roundtrip_through_current_broker(capt
     assert example['example_hash'] == contracts.document_hash({k: v for k, v in example.items() if k != 'example_hash'})
     assert training_capture.sanitize_training_value(example) == (example, [])
     trace = training_thinking.readable_trace(example)
-    assert contracts.document_hash(trace) == capture['readable_trace_sha256']
+    # The immutable digest predates indexing Chat choice/message metadata.
+    # Removing only the new exact metadata events must recover that view,
+    # including the original reasoning/tool order and every source hash.
+    legacy_trace = deepcopy(trace)
+    for call in legacy_trace['calls']:
+        call['events'] = [event for event in call['events']
+                          if not (event['kind'] == 'response_metadata'
+                                  and 'choices' in event['source_path'])]
+    assert contracts.document_hash(legacy_trace) == capture['readable_trace_sha256']
+    for call in trace['calls']:
+        for event in call['events']:
+            if 'source_path' not in event:
+                continue
+            value = example
+            for key in event['source_path']:
+                value = value[key]
+            assert event['value'] == value
+            assert event['value_sha256'] == contracts.document_hash(value)
     assert trace['projection_truncated'] is False
     markdown = training_thinking.readable_trace_markdown(trace)
     registry = rc.load_registry()

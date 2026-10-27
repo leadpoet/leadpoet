@@ -291,6 +291,35 @@ def test_admission_cannot_race_the_locked_configuration_change(database):
         assert cur.fetchone()[0] == target(config)
 
 
+def _assert_historical_registry_preserved(current_registry, registry):
+    assert current_registry['schema_version'] == registry['schema_version']
+    assert current_registry['baseline_route'] == registry['baseline_route']
+    historical_routes = registry['approved_routes']
+    assert current_registry['approved_routes'][:len(historical_routes)] == historical_routes
+
+
+@pytest.mark.parametrize('damage', [None, 'row_evidence', 'order', 'baseline'])
+def test_historical_registry_allows_appended_routes_but_rejects_historical_changes(damage):
+    from lab_arena import reasoning_capture
+
+    original = reasoning_capture.load_registry()
+    current = deepcopy(original)
+    added = deepcopy(original['approved_routes'][0])
+    added['model_id'] = added['model_version'] = 'example/future-reviewed-model'
+    current['approved_routes'].append(added)
+    if damage == 'row_evidence':
+        current['approved_routes'][0]['evidence']['probe_manifest_sha256'] = '0' * 64
+    elif damage == 'order':
+        current['approved_routes'][:2] = current['approved_routes'][1::-1]
+    elif damage == 'baseline':
+        current['baseline_route']['api'] = 'openrouter.chat'
+    if damage is None:
+        _assert_historical_registry_preserved(current, original)
+    else:
+        with pytest.raises(AssertionError):
+            _assert_historical_registry_preserved(current, original)
+
+
 def test_committed_activation_contains_complete_valid_source_and_route_pins():
     from lab_arena import reasoning_capture
 
@@ -304,5 +333,8 @@ def test_committed_activation_contains_complete_valid_source_and_route_pins():
     encoded = re.search(r"registry CONSTANT JSONB := '((?:''|[^'])*)'::JSONB;", text)
     assert encoded is not None
     registry = reasoning_capture.validate_registry(json.loads(encoded[1].replace("''", "'")))
-    assert registry == reasoning_capture.load_registry()
+    current_registry = reasoning_capture.load_registry()
+    # This migration is an immutable historical activation. Later tested
+    # routes can be appended without rewriting its frozen registry or defaults.
+    _assert_historical_registry_preserved(current_registry, registry)
     assert registry['approved_routes'] and registry['baseline_route'] is not None

@@ -29,8 +29,11 @@ def test_original_seven_routes_and_provider_defaults_are_unchanged():
 
 def test_every_added_route_matches_successful_exact_probe_and_can_be_selected():
     registry = reasoning_capture.load_registry()
+    historical_added_count = sum(len(json.loads(path.read_bytes())['captures']) for path in PROOFS)
+    # Keep this exact Oct25 evidence gate over its original appended rows.
+    # New model additions have a separate current evidence manifest.
     pending = {(r['model_id'], r['api'], r['provider']): r
-               for r in registry['approved_routes'][7:]}
+               for r in registry['approved_routes'][7:7 + historical_added_count]}
     for path in PROOFS:
         raw = path.read_bytes()
         for capture in json.loads(raw)['captures']:

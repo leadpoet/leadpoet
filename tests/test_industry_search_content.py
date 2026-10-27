@@ -54,6 +54,72 @@ def test_failed_url_status_cannot_supply_source_text(monkeypatch):
     assert result['_source_pages'] == {}
 
 
+@pytest.mark.parametrize('source_text', [False, True])
+def test_http_result_can_offer_a_secure_locator_but_never_source_text(monkeypatch, source_text):
+    async def post(*args, **kwargs):
+        return 200, {'results': [
+            {'url': 'http://example.com/case-study.pdf', 'title': 'Customer project',
+             'text': 'Unverified HTTP body must not be promoted to HTTPS evidence.',
+             'highlights': ['Unverified HTTP highlight']},
+            {'url': 'http://other.example/case-study.pdf', 'text': 'Other company'},
+            {'url': 'http://example.com.evil.test/case-study.pdf', 'text': 'Lookalike'},
+            {'url': 'http://user:password@example.com/private', 'text': 'Credentials'},
+            {'url': 'http://127.0.0.1/private', 'text': 'Private host'},
+        ]}
+    monkeypatch.setattr(c, '_post_json', post)
+    result = asyncio.run(c._search_web(None, 'customer project', key='test-key',
+        include_domains=('example.com',), discovery_highlights=source_text,
+        read_source_text=source_text))
+    assert result['results'] == ([{'url': 'https://example.com/case-study.pdf',
+                                  'title': 'Customer project'}] if source_text else [])
+    assert not result.get('_source_pages')
+    assert 'Unverified' not in json.dumps(result)
+
+
+def test_native_http_locator_is_fetched_before_its_https_text_becomes_evidence(monkeypatch):
+    from tests.test_native_industry_review import install
+    from tests.test_company_evidence_refusal_fallback import FEATURES
+    search = c._search_web
+    home = 'https://www.coreworks.ai/'
+    service = 'https://www.coreworks.ai/product'
+    fresh = 'Coreworks supplies account workflows, analysis and reporting.'
+    reads = []
+
+    def finding(result):
+        if not reads:
+            result.update(decision='unavailable', missing_requirements=['Account workflows'])
+
+    run, calls, _, _ = install(monkeypatch, mutation=finding)
+    original_post, original_fetch = c._post_json, c._fetch_page
+
+    async def post(session, url, **kwargs):
+        if url == 'https://api.exa.ai/search':
+            return 200, {'results': [{'url': service.replace('https:', 'http:'),
+                                     'text': 'Unsupported HTTP-only claim'}]}
+        return await original_post(session, url, **kwargs)
+
+    async def fetch(session, url, **kwargs):
+        if url == service:
+            reads.append(url)
+            return {'ok': True, 'url': url, 'final_url': url, 'text': fresh}
+        return await original_fetch(session, url, **kwargs)
+
+    monkeypatch.setattr(c, '_post_json', post)
+    monkeypatch.setattr(c, '_fetch_page', fetch)
+    monkeypatch.setattr(c, '_search_web', search)
+    result = asyncio.run(run(prior_observations={'submitted_source_urls': [home]},
+        prefetched_pages={home: {'final_url': home, 'text': FEATURES}},
+        requested_product_service='Supplies analysis, reporting and account workflows'))
+    assert reads == [service]
+    assert calls['model'][0]['tool_choice']['function']['name'] == 'fetch_page'
+    assert result[c.PRIVATE_FETCHED_PAGES_KEY][service] == {'final_url': service, 'text': fresh}
+    evidence = result['claims']['industry']['_industry_review']['evidence']
+    assert any(item == {'url': service, 'quote': fresh} for item in evidence)
+    assert 'Unsupported HTTP-only claim' not in json.dumps(result)
+    assert result['usage']['search_calls'] == 1
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
+
+
 @pytest.mark.parametrize('enabled', [False, True])
 def test_larger_private_source_map_is_only_valid_under_new_frozen_policy(monkeypatch, enabled):
     monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', industry.DEFAULT_MODEL if enabled else '')

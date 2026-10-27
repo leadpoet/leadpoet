@@ -2500,7 +2500,14 @@ async def _search_web(
     for item in results[:result_limit]:
         if not isinstance(item, Mapping):
             continue
-        url = _safe_https_url(item.get("url") or item.get("id"))
+        raw_url = item.get("url") or item.get("id")
+        url = _safe_https_url(raw_url)
+        if (not url and read_source_text and isinstance(raw_url, str)
+                and raw_url.startswith('http://')):
+            # Old indexed addresses can have a working HTTPS counterpart.
+            # Offer it only for a fresh fetch. The exact-URL equality below
+            # prevents HTTP content from becoming evidence for another URL.
+            url = _safe_https_url('https://' + raw_url[len('http://'):])
         if not url or (include_domains and _registrable_domain(url) not in include_domains):
             continue
         try:

@@ -304,10 +304,18 @@ queues keep the generic tag. Both tags retain `complete: false`. Only validated
 new frozen host-result policies can exclude the optional tag from provider-visible
 training checks, after every affected run passes full snapshot, count, privacy
 and exact host-result checks. Old generic failures are never reclassified.
-Deploy the gateway readers before runners that emit this tag. Old readers reject
-the new tag; they do not accept incomplete evidence as complete. A rollback must
-restore the old producers first. Historical artifacts and frozen round rules do
-not change, and provider-visible eligibility does not claim complete web capture.
+The serving gateway advertises `training_observation_optional_failure_tag: true`
+in execute and score leases. A runner uses the optional tag only for literal
+`true`; absent, false or malformed values select the original
+`capture_incomplete` tag. This projection happens before journal hashes and final
+snapshot serialization. Raw observations, receipts and the worker's original
+failure attribution stay unchanged, and pending segment retries keep identical
+bytes. Both forms retain `complete: false`; generic failures stay conservative.
+Deploy readers before producers when possible. Old producers need no capability,
+and old readers remain supported when their leases omit it. A rollback to an old
+reader must first drain leases that advertised the new tag. Historical artifacts
+and frozen round rules do not change, and provider-visible eligibility does not
+claim complete web capture.
 
 The existing mounted `lab_arena_checkpoint` module still provides `record_web_fetch`,
 `record_response_received` and `record_state_snapshot`. They are best-effort calls:

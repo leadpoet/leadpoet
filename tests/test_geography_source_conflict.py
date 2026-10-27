@@ -12,6 +12,16 @@ from qualification.scoring import lead_scorer as scorer
 from qualification.scoring.company_fit_decision import company_fit_mismatch
 
 FIXTURE = json.loads((Path(__file__).parent / 'fixtures/airwallex_oct23_headquarters_conflict.json').read_text())
+# This synthetic private receipt uses the current literal representation.
+# Keep the captured first-party article, submitted company and truth unchanged.
+from qualification.scoring.linkedin_company_size import project_structured_linkedin_company_headquarters
+FIXTURE['headquarters'] = project_structured_linkedin_company_headquarters(
+    'airwallex.com', FIXTURE['headquarters']['url'], 'Airwallex', {
+        'status': 200, 'element': {'name': 'Airwallex', 'website': 'https://airwallex.com/',
+            'linkedinUrl': FIXTURE['headquarters']['url'],
+            'locations': [{'headquarter': True, 'country': FIXTURE['headquarters']['country']}]},
+    },
+)
 IDENTITY = {'normalized_name': 'Airwallex', 'registrable_dns_domain': 'airwallex.com', 'linkedin_company_slug': 'airwallex'}
 ANCHOR = {'submitted_name': 'airwallex', 'observed_name': 'airwallex', 'submitted_domain': 'airwallex.com', 'observed_domain': 'airwallex.com', 'verified_name': 'Airwallex', 'verified_domain': 'airwallex.com', 'verified_linkedin_slug': 'airwallex'}
 
@@ -46,7 +56,8 @@ def verdict():
 
 def result():
     return scorer._reverify_decision(verdict(), '', 'Series C+', icp=icp(), company=company(),
-        verified_homepage_identity=IDENTITY, verified_homepage_transport_domain='airwallex.com', company_quality=True)
+        verified_homepage_identity=IDENTITY, verified_homepage_transport_domain='airwallex.com', company_quality=True,
+        structured_profile_headquarters_evidence=FIXTURE['headquarters'])
 
 
 def finding(quote=None, *, url=None, body=None, status='VERIFIED'):

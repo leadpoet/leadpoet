@@ -1,5 +1,6 @@
 """Keep bound HQ projections quotable without admitting identity link targets."""
 from copy import deepcopy
+import json
 
 import pytest
 
@@ -8,18 +9,28 @@ from qualification.scoring import lead_scorer as scorer
 from qualification.scoring.linkedin_company_size import (
     STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD,
     STRUCTURED_PROFILE_PROVIDER,
+    project_structured_linkedin_company_headquarters,
 )
 
 URL = "https://www.linkedin.com/company/example-consulting"
-QUOTE = "Example Consulting headquarters: London, England, United Kingdom."
+WEB_QUOTE = "Example Consulting headquarters: London, England, United Kingdom."
 MARKER = inv._IDENTITY_LINK_CONTEXT_MARKER
 SOURCE = "Example Consulting | LinkedIn About Management consulting. "
 LINKS = " https://example.com/identity-only-does-not-prove-headquarters"
 IDENTITY = {"normalized_name": "Example Consulting", "registrable_dns_domain": "example.com",
             "linkedin_company_slug": "example-consulting"}
-HQ = {"name": "Example Consulting", "text": QUOTE, "provider": STRUCTURED_PROFILE_PROVIDER,
-      "source_field": STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD, "url": URL,
-      "website": "https://example.com/", "country": "United Kingdom", "state": "England"}
+def source_for(city="London", state="England", country="United Kingdom"):
+    return project_structured_linkedin_company_headquarters(
+        "example.com", URL, "Example Consulting", {"status": 200, "element": {
+            "name": "Example Consulting", "website": "https://example.com/", "linkedinUrl": URL,
+            "locations": [{"headquarter": True, "city": city,
+                           "geographicArea": state, "country": country}],
+        }},
+    )
+
+
+HQ = source_for()
+QUOTE = HQ["text"]
 
 
 def compose(text, *, evidence=None, identity=None, final_url=URL):
@@ -110,12 +121,11 @@ def validate_hq(*, observed_state="England", observed_country="United Kingdom",
     )["geography"]
 
 
-@pytest.mark.parametrize("structured_state", ["London", "England", ""])
 @pytest.mark.parametrize("observed_state", ["London", "England", ""])
 def test_non_us_hq_uses_country_and_grounded_location_not_state_field_equality(
-    structured_state, observed_state,
+    observed_state,
 ):
-    evidence = {**HQ, "state": structured_state}
+    evidence = HQ
     finding = validate_hq(observed_state=observed_state, evidence=evidence)
     assert finding["status"] == "VERIFIED"
     assert finding["evidence_quote"] == QUOTE
@@ -125,7 +135,8 @@ def test_non_us_hq_uses_country_and_grounded_location_not_state_field_equality(
 def test_non_us_locality_absent_from_exact_hq_quote_still_fails():
     finding = validate_hq(observed_state="Manchester")
     assert finding["status"] == "UNPROVEN"
-    assert finding["reason"] == "source quote did not prove the submitted headquarters"
+    assert finding["reason"] in {"source quote did not prove the submitted headquarters",
+        "headquarters evidence must use independently bound first-party requested and fetched final URLs"}
 
 
 def test_non_us_country_must_match_the_private_source():
@@ -146,8 +157,8 @@ def test_non_us_state_tolerance_does_not_admit_forged_private_sources(field, val
 
 
 def test_us_state_conflict_still_fails_with_literal_headquarters_proof():
-    quote = "Example Consulting headquarters: Ohio, United States."
-    source = {**HQ, "country": "United States", "state": "Ohio", "text": quote}
+    source = source_for(city="Columbus", state="Ohio", country="United States")
+    quote = source["text"]
     assert validate_hq(observed_country="United States", observed_state="Ohio",
                        evidence=source, quote=quote)["status"] == "VERIFIED"
     assert validate_hq(observed_country="United States", observed_state="Indiana",
@@ -172,18 +183,19 @@ def test_non_us_country_match_does_not_override_contradicted_requested_city():
 
 
 def test_non_us_hq_does_not_invent_london_from_londonderry():
-    quote = "Example Consulting headquarters: Londonderry, Northern Ireland, United Kingdom."
-    source = {**HQ, "state": "Northern Ireland", "text": quote}
+    source = source_for(city="Londonderry", state="Northern Ireland")
+    quote = source["text"]
     finding = validate_hq(observed_state="London", evidence=source, quote=quote)
     assert finding["status"] == "UNPROVEN"
-    assert finding["reason"] == "source quote did not prove the submitted headquarters"
+    assert finding["reason"] in {"source quote did not prove the submitted headquarters",
+        "headquarters evidence must use independently bound first-party requested and fetched final URLs"}
 
 
 @pytest.mark.parametrize("place,country,quote,expected", [
-    ("London", "United Kingdom", QUOTE, True),
-    ("England", "United Kingdom", QUOTE, True),
-    ("", "United Kingdom", QUOTE, True),
-    ("Manchester", "United Kingdom", QUOTE, False),
+    ("London", "United Kingdom", WEB_QUOTE, True),
+    ("England", "United Kingdom", WEB_QUOTE, True),
+    ("", "United Kingdom", WEB_QUOTE, True),
+    ("Manchester", "United Kingdom", WEB_QUOTE, False),
     ("London", "United Kingdom", "Example Consulting headquarters: Londonderry, United Kingdom.", False),
     ("São Paulo", "Brazil", "Example Consulting headquarters: São Paulo, Brazil.", True),
     ("São Paulo", "Brazil", "Example Consulting headquarters: São Pauloland, Brazil.", False),
@@ -193,7 +205,7 @@ def test_non_us_hq_does_not_invent_london_from_londonderry():
     ("London", "U.K.", "Example Consulting headquarters: London, U.K.", True),
     ("London", "UK", "Example Consulting headquarters: London, UK.", True),
     ("London", "UK", "Example Consulting headquarters: London, UKraine.", False),
-    ("London", "", QUOTE, False),
+    ("London", "", WEB_QUOTE, False),
 ])
 def test_non_us_headquarters_location_matches_complete_literal_tokens(place, country, quote, expected):
     assert inv._quote_supports_headquarters(

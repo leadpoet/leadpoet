@@ -54,7 +54,8 @@ def test_bound_structured_linkedin_projection_keeps_its_existing_provenance():
            "evidence_url": source["url"], "evidence_quote": source["text"]}
     finding = inv._validated_findings(
         {"findings": [raw]}, targets=("geography",),
-        fetched_pages={source["url"]: source["text"]}, fetched_final_urls={},
+        fetched_pages={source["url"]: source["text"]},
+        fetched_final_urls={source["url"]: source["url"]},
         first_party_domains={"airwallex.com"}, identity_names={"airwallex"},
         identity_anchor=ANCHOR, structured_headquarters_evidence=source,
     )["geography"]

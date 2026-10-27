@@ -49,6 +49,18 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped production authorization: October 27 runtime 486 reveal proof
+
+The user authorized the narrow measured Subtensor runtime 486 compatibility
+repair needed to restore Arena weight reveal proofs and prior-epoch recovery.
+Implement, test, independently review, safely push and merge, then canonically
+deploy the exact committed profile and verify all configured normal validators
+against finalized chain evidence. The coordinating task owns production actions.
+Preserve exact network, runtime, metadata, code, signature, event, vector and UID
+ownership checks, existing signed journals, scoring and rewards. Do not add an
+unmeasured runtime profile or change chain state manually. This authority expires
+when the repair and production verification are complete.
+
 ## Scoped authorization: October 26 industry evidence verification
 
 The user authorized implementing, testing, safely merging and canonically

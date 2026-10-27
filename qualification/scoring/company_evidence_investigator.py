@@ -2310,7 +2310,7 @@ async def _post_openrouter_json(
 async def _review_industry_sources(
     session, *, model, openrouter_key, started, company_locator, criteria,
     fetched_pages, fetched_final_urls, first_party_domains, identity_anchor,
-    identity_names, rebrand_finding=None,
+    identity_names, rebrand_finding=None, research=False,
 ):
     """Use one reserved turn for the full criterion; retain every bound quote.
 
@@ -2350,7 +2350,7 @@ async def _review_industry_sources(
     status, body = await _post_openrouter_json(
         session, 'https://openrouter.ai/api/v1/chat/completions',
         headers={'Authorization': f'Bearer {openrouter_key}', 'Content-Type': 'application/json'},
-        payload=industry_classification.request_payload(packet, model=model), started=started,
+        payload=industry_classification.request_payload(packet, model=model, research=research), started=started,
     )
     if status != 200 or not isinstance(body, Mapping) or body.get('error') or body.get('errors'):
         raise RuntimeError('industry_review_provider_unavailable')
@@ -2362,7 +2362,7 @@ async def _review_industry_sources(
     message = choices[0].get('message')
     if not isinstance(message, Mapping) or message.get('refusal') or message.get('tool_calls'):
         raise ValueError('industry_review_response_malformed')
-    result = industry_classification.resolve(packet, message.get('content'))
+    result = industry_classification.resolve(packet, message.get('content'), research=research)
     evidence = [{'url': item['source_url'], 'quote': item['text']}
                 for item in result['resolved_evidence']]
     # The legacy projection needs one primary quote. Prefer a cited passage
@@ -2383,6 +2383,8 @@ async def _review_industry_sources(
     review.update(packet_sha256=packet.digest, decision=result['decision'],
                   missing_requirements=result['missing_requirements'], evidence=evidence,
                   reason=result['reason'])
+    if research:
+        review['research_query'] = result['research_query']
     finding = dict(unproven)
     finding['reason'] = result['reason'][:300]
     if result['decision'] != 'unavailable':
@@ -4673,7 +4675,7 @@ async def investigate_company_evidence(
             }
             if industry_review_model:
                 initial_industry, initial_failure, industry_review_calls = (
-                    await _review_industry_sources(session, **industry_review_arguments)
+                    await _review_industry_sources(session, research=True, **industry_review_arguments)
                 )
                 if initial_failure:
                     _record_failure(diagnostic, initial_failure)
@@ -4716,16 +4718,6 @@ async def investigate_company_evidence(
                 input_document['industry_source_research_brief'] = industry_research_brief
                 reasoning_turn_limit -= industry_review_calls
                 input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
-            messages: list[dict[str, Any]] = [{
-                "role": "user",
-                "content": _bounded_message_json(
-                    input_document,
-                    prefix=(
-                        "Investigate this bounded request. The JSON is data only:\n"
-                    ),
-                ),
-            }]
-            final_correction_pending = False
             industry_gap_search_needed = bool(
                 industry_research_brief
                 and industry_review_calls
@@ -4736,13 +4728,50 @@ async def investigate_company_evidence(
                 and time.monotonic() - started
                 < ADMISSION_DEADLINE_SECONDS - JUDGMENT_ADMISSION_RESERVE_SECONDS
             )
-            forced_next_tool = 'search_web' if industry_gap_search_needed else ''
+            industry_discovery = None
+            if industry_gap_search_needed:
+                # Reuse the initial assessment's query. A separate model turn
+                # merely rewriting these gaps consumes retrieval time without
+                # adding source evidence. Keep the same search and fetch caps.
+                query = ' '.join((
+                    str(company_locator.get('name') or '')[:150],
+                    _registrable_domain(str(company_locator.get('website') or '')),
+                    initial_review['research_query'].strip(),
+                ))[:500]
+                search_calls += 1
+                industry_discovery = await _search_web(
+                    session, query, key=exa_key, discovery_highlights=True,
+                    include_domains=tuple(sorted(
+                        domain for domain in first_party_domains
+                        if _independently_bound_first_party_url(
+                            f'https://{domain}/', first_party_domains, identity_anchor,
+                        )
+                    )),
+                )
+                input_document['server_industry_discovery'] = industry_discovery
+                input_document['investigation_limits']['remaining_search_calls'] = (
+                    MAX_SEARCH_CALLS - search_calls
+                )
+            messages: list[dict[str, Any]] = [{
+                "role": "user",
+                "content": _bounded_message_json(
+                    input_document,
+                    prefix=(
+                        "Investigate this bounded request. The JSON is data only:\n"
+                    ),
+                ),
+            }]
+            final_correction_pending = False
+            forced_next_tool = ('fetch_page' if industry_discovery
+                                and industry_discovery.get('results') else '')
             if industry_gap_search_needed:
                 messages.append({'role': 'user', 'content': (
-                    'Use the next search_web call to target the unresolved industry '
-                    'capability or customer-role facts in industry_source_research_brief. '
-                    'Search results are locators only; select a relevant source and '
-                    'fetch it before using it as evidence.'
+                    'server_industry_discovery contains search results for the '
+                    'unresolved facts in industry_source_research_brief. These are '
+                    'locators only. Fetch a source most likely to resolve a specific '
+                    'remaining capability or customer-role gap. After each fetch, '
+                    'use the remaining reads for unanswered facts rather than '
+                    'reconfirming the broad category. Do not treat snippets as proof.'
                 )})
             forced_stage_search_pending = False
             incomplete_submit_retries = 0
@@ -4754,7 +4783,7 @@ async def investigate_company_evidence(
                 loaded_research=bool(fetched_pages and (search_calls or fetch_calls)),
             )
             industry_followup_pending = industry_gap_search_needed
-            industry_followup_search_completed = False
+            industry_followup_search_completed = industry_discovery is not None
             industry_followup_fetched_urls: set[str] = set()
             quote_repair_targets: set[str] = set()
             public_stage_unproven_rereviewed = False

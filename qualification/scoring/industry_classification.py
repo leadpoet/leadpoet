@@ -112,7 +112,7 @@ def prepare(criteria, company_locator, source_pages):
     return Packet(values, tuple(company_locator.get(k, "") for k in locator_keys), tuple(pages))
 
 
-def request_payload(packet, *, model):
+def request_payload(packet, *, model, research=False):
     """Pure request construction; runner owns all credentials, calls and cost controls."""
     spans = packet.spans()
     metadata = {
@@ -136,6 +136,19 @@ def request_payload(packet, *, model):
     # exact references so commentary cannot corrupt an otherwise valid ID.
     # resolve() still checks membership independently of provider compliance.
     schema = deepcopy(SCHEMA)
+    if research:
+        schema['properties']['research_query'] = {'type': 'string', 'maxLength': 300}
+        schema['required'].append('research_query')
+        messages[0]['content'] += (
+            '\nIf the decision is unavailable, also provide one short research_query '
+            'for the most discriminative unsupported capability or customer role. '
+            'Use the missing fact rather than restating the whole industry. Prefer '
+            'specific product documentation, technical brochures or customer projects '
+            'that could support or contradict it. The host adds the company identity '
+            'and restricts source domains. Do not supply URLs or instructions. '
+            'For a conclusive decision, return an empty research_query. '
+            'A research query is discovery only and cannot establish a match.'
+        )
     citations = schema['properties']['evidence_span_ids']
     if spans:
         citations['items']['enum'] = list(spans)
@@ -156,11 +169,12 @@ def _unique_object(pairs):
     return result
 
 
-def resolve(packet, response):
+def resolve(packet, response, *, research=False):
     """Validate the complete output and every exact reference before projection."""
     if isinstance(response, str):
         response = json.loads(response, object_pairs_hook=_unique_object)
-    if not isinstance(response, dict) or set(response) != set(SCHEMA["required"]):
+    required = set(SCHEMA['required']) | ({'research_query'} if research else set())
+    if not isinstance(response, dict) or set(response) != required:
         raise ValueError("invalid result shape")
     decision, role = response["decision"], response["role"]
     ids, reason = response["evidence_span_ids"], response["reason"]
@@ -178,6 +192,13 @@ def resolve(packet, response):
         raise ValueError("invalid criterion assessment")
     if (decision == "match" and missing) or (decision == "unavailable" and not missing):
         raise ValueError("decision contradicts missing requirements")
+    if research:
+        query = response['research_query']
+        if (not isinstance(query, str) or len(query) > 300
+                or any(ord(c) < 32 for c in query)
+                or (decision == 'unavailable' and not query.strip())
+                or (decision != 'unavailable' and query.strip())):
+            raise ValueError('invalid research query')
     spans = packet.spans()
     if any(i not in spans for i in ids):
         raise ValueError("unknown or foreign source span ID")

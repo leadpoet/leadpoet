@@ -36,6 +36,8 @@ def install(monkeypatch, *, decision='match', missing=None, mutation=None, **kwa
                   'evidence_span_ids': [span['span_id'] for span in spans], 'decision': decision}
         if mutation:
             mutation(result)
+        if 'research_query' in payload['response_format']['json_schema']['schema']['properties']:
+            result['research_query'] = 'account workflow integration' if result['decision'] == 'unavailable' else ''
         return 200, {'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(result)}}]}
 
     monkeypatch.setattr(c, '_post_json', post)
@@ -122,14 +124,15 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     assert search_options[0]['include_domains'] == ('coreworks.ai',)
     assert search_options[0]['discovery_highlights'] is True
     assert 'not proof' in brief['notice']
-    assert calls['model'][0]['tool_choice']['function']['name'] == 'search_web'
+    assert calls['search'][0] == 'Coreworks coreworks.ai account workflow integration'
+    assert document['server_industry_discovery']['notice'] == 'discovery_only_not_evidence'
+    assert calls['model'][0]['tool_choice']['function']['name'] == 'fetch_page'
     assert calls['model'][0]['model'] == MODEL
-    assert calls['model'][1]['tool_choice']['function']['name'] == 'fetch_page'
     assert calls['model'][1]['model'] == MODEL
     assert all(request['reasoning']['effort'] == 'low' for request in calls['model'][:2])
     # Selecting the next source is still industry research. Do not hand it
     # back to the weaker general reviewer after just one page was fetched.
-    assert calls['model'][2]['model'] == MODEL
+    assert len(calls['model']) == 3  # Two fetches and final judgment; no query-only model call.
     assert all(request['model'] == c.POSITIVE_SEMANTIC_REVIEW_MODEL
                for request in calls['model']
                if request.get('tool_choice') == {
@@ -143,6 +146,54 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     from lab_arena.operations import validate_operation_request
     for request in [*calls['model'], *reviews]:
         validate_operation_request('openrouter.chat', request)
+
+
+@pytest.mark.parametrize('limit', ['deadline', 'search_cap', 'fetch_cap'])
+def test_initial_gap_query_obeys_existing_discovery_admission(monkeypatch, limit):
+    run, calls, clock, reviews = install(
+        monkeypatch, decision='unavailable', missing=['Account workflow integration'])
+    original = c._post_json
+
+    async def review(session, url, **kwargs):
+        response = await original(session, url, **kwargs)
+        if 'response_format' in kwargs['payload']:
+            if limit == 'deadline':
+                clock.now = c.ADMISSION_DEADLINE_SECONDS - c.JUDGMENT_ADMISSION_RESERVE_SECONDS
+            elif limit == 'search_cap':
+                monkeypatch.setattr(c, 'MAX_SEARCH_CALLS', 0)
+            else:
+                monkeypatch.setattr(c, 'MAX_FETCH_CALLS', 0)
+        return response
+
+    async def no_search(*args, **kwargs):
+        pytest.fail('Initial query must respect search/fetch/time admission')
+
+    monkeypatch.setattr(c, '_post_json', review)
+    monkeypatch.setattr(c, '_search_web', no_search)
+    homepage = 'https://www.coreworks.ai/'
+    asyncio.run(run(prior_observations={'submitted_source_urls': [homepage]},
+        prefetched_pages={homepage: {'final_url': homepage, 'text': FEATURES}}))
+    assert reviews
+    assert not calls['search']
+
+
+def test_initial_gap_discovery_is_not_evidence_and_does_not_force_an_empty_fetch(monkeypatch):
+    run, calls, _, reviews = install(
+        monkeypatch, decision='unavailable', missing=['Account workflow integration'])
+
+    async def empty_search(session, query, **kwargs):
+        calls['search'].append(query)
+        return {'results': [], 'notice': 'discovery_only_not_evidence'}
+
+    monkeypatch.setattr(c, '_search_web', empty_search)
+    homepage = 'https://www.coreworks.ai/'
+    result = asyncio.run(run(prior_observations={'submitted_source_urls': [homepage]},
+        prefetched_pages={homepage: {'final_url': homepage, 'text': FEATURES}}))
+    assert len(calls['search']) == 1
+    assert calls['model'][0]['tool_choice'] == 'required'
+    assert result['claims']['industry']['status'] == 'UNPROVEN'
+    assert all('discovery_only_not_evidence' not in message['content']
+               for review in reviews for message in review['messages'][2:])
 
 
 @pytest.mark.parametrize('enabled', [False, True])

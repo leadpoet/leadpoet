@@ -152,7 +152,10 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     assert search_options[0]['include_domains'] == ('coreworks.ai',)
     assert search_options[0]['discovery_highlights'] is True
     assert 'not proof' in brief['notice']
-    assert calls['search'][0] == 'Coreworks coreworks.ai account workflow integration'
+    assert calls['search'][0] == (
+        "Find Coreworks's own product documentation or customer projects about: "
+        'Account workflow integration'
+    )
     assert document['server_industry_discovery']['notice'] == 'discovery_only_not_evidence'
     assert calls['model'][0]['tool_choice']['function']['name'] == 'fetch_page'
     assert calls['model'][0]['model'] == MODEL

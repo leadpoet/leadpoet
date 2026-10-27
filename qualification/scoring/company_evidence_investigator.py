@@ -4832,14 +4832,14 @@ async def investigate_company_evidence(
             )
             industry_discovery = None
             if industry_gap_search_needed:
-                # Reuse the initial assessment's query. A separate model turn
-                # merely rewriting these gaps consumes retrieval time without
-                # adding source evidence. Keep the same search and fetch caps.
-                query = ' '.join((
-                    str(company_locator.get('name') or '')[:150],
-                    _registrable_domain(str(company_locator.get('website') or '')),
-                    initial_review['research_query'].strip(),
-                ))[:500]
+                # Exa accepts a natural-language fact request. Reuse the first
+                # missing requirement without another query-writing model call;
+                # company-domain authority stays in the provider filter below.
+                query = (
+                    'Find ' + str(company_locator.get('name') or '')[:100]
+                    + "'s own product documentation or customer projects about: "
+                    + industry_research_brief['missing_requirements'][0].strip()
+                )[:500]
                 search_calls += 1
                 industry_discovery = await _search_web(
                     session, query, key=exa_key, discovery_highlights=True,

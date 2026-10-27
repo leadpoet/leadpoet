@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 DEFAULT_MODEL = "openai/gpt-6.1-sol"
-MAX_PAGES = 17
+MAX_PAGES = 30  # Three prefetch + thirteen retained + four fetch + ten search.
 MAX_PAGE_CHARS = 24_000
 MAX_TOTAL_CHARS = 7 * MAX_PAGE_CHARS
 SPAN_CHARS = 1_600

@@ -62,14 +62,14 @@ def test_larger_private_source_map_is_only_valid_under_new_frozen_policy(monkeyp
     assert bool(actual) is enabled
     # The input prefetch limit never changes.
     assert c._validated_prefetched_pages(pages, submitted_source_urls=tuple(pages)) == ({},{})
-    oversized = {f'https://example.com/{i}':{'final_url':f'https://example.com/{i}', 'text':'Example product'} for i in range(18)}
+    oversized = {f'https://example.com/{i}':{'final_url':f'https://example.com/{i}', 'text':'Example product'} for i in range(c.max_returned_fetched_pages() + 1)}
     assert c._validated_returned_fetched_pages(oversized, submitted_source_urls=tuple(oversized)) == ({},{})
 
 
 def test_larger_source_count_keeps_the_original_total_context_budget():
-    pages = [{'source_id':f's{i}','source_url':f'https://example.com/{i}', 'body':'X'*24000} for i in range(17)]
+    pages = [{'source_id':f's{i}','source_url':f'https://example.com/{i}', 'body':'X'*24000} for i in range(industry.MAX_PAGES)]
     packet = industry.prepare(CRITERION, COMPANY, pages)
-    assert len(packet.pages) == 17
+    assert len(packet.pages) == industry.MAX_PAGES
     assert sum(len(body) for _,body,_ in packet.pages) <= 7*24000
     assert max(len(body) for _,body,_ in packet.pages) - min(len(body) for _,body,_ in packet.pages) <= 1
     validate_operation_request('openrouter.chat', industry.request_payload(packet, model=industry.DEFAULT_MODEL))

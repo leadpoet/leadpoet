@@ -1,5 +1,6 @@
 """Multi-source industry evidence must survive the existing bounded retry path."""
 from copy import deepcopy
+import asyncio
 
 import pytest
 
@@ -64,7 +65,7 @@ def test_primary_dimension_contexts_keep_their_prior_order(monkeypatch):
     ]
 
 
-def test_support_does_not_displace_primary_stage_or_expand_retry_cap(monkeypatch):
+def test_support_does_not_displace_primary_stage(monkeypatch):
     monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "openai/gpt-6.1-sol")
     result, pages = supported_result()
     stage_url = "https://unibuddy.com/funding"
@@ -75,8 +76,115 @@ def test_support_does_not_displace_primary_stage_or_expand_retry_cap(monkeypatch
     }
     sink, restored = retain(result, pages)
     assert len(sink) == 4
-    assert len(restored) == investigator.MAX_PREFETCHED_PAGES
+    assert restored == pages
     assert PLATFORM_URL in restored and stage_url in restored
+
+
+def test_all_cited_sources_reach_industry_retry_without_expanding_shared_prefetch(monkeypatch):
+    from tests.test_matched_company_retry_source_continuity import _company, _icp, _verdict
+    monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "openai/gpt-6.1-sol")
+    result, pages = supported_result()
+    for index in range(2, 6):
+        url = f"https://unibuddy.com/workflows/{index}"
+        quote = f"Unibuddy supplies connected workflow capability {index} to universities."
+        pages[url] = {"final_url": url, "text": quote}
+        result.details["dimension_evidence"]["industry"]["web_evidence"]["supporting_evidence"].append({"url": url, "quote": quote})
+    sink, restored = retain(result, pages)
+    assert sink == restored == pages
+    retry = {}
+    lead_scorer._retain_matched_company_retry_sources(retry, sink, result)
+    captured = []
+
+    async def capture(**kwargs):
+        captured.append(kwargs)
+        return {"claims": {}, "failure_reason": "source unavailable"}
+
+    monkeypatch.setattr(lead_scorer, "investigate_company_evidence", capture)
+    asyncio.run(lead_scorer._run_targeted_company_evidence_investigation(
+        company=_company(), icp=_icp(), verdict=_verdict(),
+        investigation_targets=("industry",), icp_attribute=_icp().required_attribute,
+        icp_stage="", verified_identity=IDENTITY, verified_transport_domain="unibuddy.com",
+        structured_employee_size_evidence=None, structured_public_company_evidence=None,
+        employee_size_conflict=False, company_quality=True,
+        matched_company_retry_source_cache=retry, review_positive_semantics=True,
+    ))
+    assert len(captured) == 1
+    assert len(captured[0]["prefetched_pages"]) == investigator.MAX_PREFETCHED_PAGES == 3
+    assert captured[0]["retained_industry_pages"] == pages
+    assert lead_scorer._matched_company_retry_prefetched_pages(
+        retry, {**IDENTITY, "registrable_dns_domain": "other.example"}
+    ) == {}
+
+
+def test_maximum_citations_and_funding_context_replace_stale_optional_pages(monkeypatch):
+    monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "openai/gpt-6.1-sol")
+    result, pages = supported_result()
+    dimensions = result.details["dimension_evidence"]
+    for index in range(2, 8):
+        url = f"https://unibuddy.com/workflows/{index}"
+        quote = f"Unibuddy supplies workflow capability {index}."
+        pages[url] = {"final_url": url, "text": quote}
+        dimensions["industry"]["web_evidence"]["supporting_evidence"].append({"url": url, "quote": quote})
+    for dimension in ("employee_size", "geography", "stage"):
+        url = f"https://unibuddy.com/{dimension}"
+        quote = f"Unibuddy current {dimension} evidence."
+        pages[url] = {"final_url": url, "text": quote}
+        dimensions[dimension] = {"decision": "match", "web_evidence": {"url": url, "quote": quote}}
+    sink, restored = retain(result, pages)
+    assert sink == restored == pages
+    auxiliary = "https://unibuddy.com/funding-context"
+    sink[auxiliary] = {"final_url": auxiliary, "text": "Unibuddy current funding context."}
+    stale = {f"https://unibuddy.com/stale/{i}": {"final_url": f"https://unibuddy.com/stale/{i}", "text": "Old optional source"}
+             for i in range(investigator.max_matched_retry_pages())}
+    retry = {"verified_identity": IDENTITY, "pages": stale}
+    lead_scorer._retain_matched_company_retry_sources(retry, sink, result,
+        funding_contexts=[{"dimension": "first_party_context", "url": auxiliary, "text": sink[auxiliary]["text"]}])
+    assert lead_scorer._matched_company_retry_prefetched_pages(retry, IDENTITY) == sink
+    overflow = deepcopy(retry)
+    overflow["pages"]["https://unibuddy.com/extra"] = {"final_url": "https://unibuddy.com/extra", "text": "Unibuddy extra source"}
+    assert lead_scorer._matched_company_retry_prefetched_pages(overflow, IDENTITY) == {}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_native_retry_reclassifies_retained_sources_with_existing_guards(monkeypatch, enabled):
+    import json
+    from tests.test_native_industry_review import install
+    from tests.test_company_evidence_refusal_fallback import URL, FEATURES
+    from tests.test_company_evidence_investigator import _finding
+    finding = _finding("industry", status="VERIFIED", evidence_url=URL,
+                       evidence_quote=FEATURES, activity_role="supplier_operator",
+                       observed_industry="Software")
+    run, calls, clock, reviews = install(monkeypatch, finding=finding)
+    monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "openai/gpt-6.1-sol" if enabled else "")
+    pages = {
+        f"https://www.coreworks.ai/capability/{index}": {
+            "final_url": f"https://www.coreworks.ai/capability/{index}",
+            "text": f"Coreworks supplies connected workflow capability {index}.",
+        } for index in range(5)
+    }
+    wrong = "https://other.example/product"
+    pages[wrong] = {"final_url": wrong, "text": "Coreworks capability not on its bound domain."}
+    redirect = "https://www.coreworks.ai/redirect"
+    pages[redirect] = {"final_url": wrong, "text": "Cross-domain content cannot supply proof."}
+    pages[URL] = {"final_url": URL, "text": "Old body must not replace a freshly fetched body."}
+    result = asyncio.run(run(retained_industry_pages=pages,
+        prefetched_pages={URL: {"final_url": URL, "text": FEATURES}},
+        prior_observations={"submitted_source_urls": [URL]}))
+    assert result["_completed_submit"] is True
+    retained = result[investigator.PRIVATE_FETCHED_PAGES_KEY]
+    assert retained[URL]["text"] == FEATURES
+    assert wrong not in retained and redirect not in retained
+    valid = {u for u in pages if "/capability/" in u}
+    assert valid.issubset(retained) is enabled
+    if enabled:
+        final = reviews[-1]
+        seen = {p["source_url"] for m in final["messages"][2:]
+                for p in json.loads(m["content"])["untrusted_source_pages"]}
+        assert valid.issubset(seen)
+        assert result["claims"]["industry"]["status"] == "VERIFIED"
+    assert result["usage"]["prefetched_pages"] <= 3
+    assert result["usage"]["fetch_calls"] <= investigator.MAX_FETCH_CALLS
+    assert result["usage"]["search_calls"] <= investigator.MAX_SEARCH_CALLS
 
 
 @pytest.mark.parametrize("fault", ["absent_quote", "cross_domain", "unmatched", "missing_identity"])

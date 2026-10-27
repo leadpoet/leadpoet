@@ -86,6 +86,7 @@ REASONING_MAX_TOKENS = 3000
 MAX_SEARCH_CALLS = 2
 MAX_FETCH_CALLS = 4
 MAX_PREFETCHED_PAGES = 3
+MAX_MATCHED_RETRY_PAGES = 13  # Four dimensions + eight industry citations + funding context.
 MAX_RETURNED_FETCHED_PAGES = MAX_PREFETCHED_PAGES + MAX_FETCH_CALLS
 MAX_STAGE_ARCHIVE_CARDS = 3
 MAX_SEARCH_RESULTS = 5
@@ -1230,10 +1231,24 @@ def _validated_returned_fetched_pages(
 
 
 def max_returned_fetched_pages() -> int:
-    """Only the new frozen industry policy admits search-returned source text."""
+    """Only the new policy admits search bodies and complete cited retry text."""
     return MAX_RETURNED_FETCHED_PAGES + (
-        MAX_INDUSTRY_SEARCH_RESULTS
+        MAX_INDUSTRY_SEARCH_RESULTS + MAX_MATCHED_RETRY_PAGES
         if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip() else 0
+    )
+
+
+def max_matched_retry_pages() -> int:
+    return (MAX_MATCHED_RETRY_PAGES
+            if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip()
+            else MAX_PREFETCHED_PAGES)
+
+
+def _validated_matched_retry_pages(value: Any) -> tuple[dict[str, str], dict[str, str]]:
+    """Validate an existing identity-scoped host cache; never a public input."""
+    return _validated_server_pages(
+        value, submitted_source_urls=tuple(value) if isinstance(value, Mapping) else (),
+        max_pages=max_matched_retry_pages(),
     )
 
 
@@ -3906,6 +3921,7 @@ async def investigate_company_evidence(
     verified_homepage_rebrand_redirect: Optional[Mapping[str, Any]] = None,
     homepage_navigation_locators: Optional[Sequence[Mapping[str, Any]]] = None,
     prefetched_pages: Optional[Mapping[str, Any]] = None,
+    retained_industry_pages: Optional[Mapping[str, Any]] = None,
     verified_navigation_identity: Optional[Mapping[str, Any]] = None,
     verified_structured_alias_slug: str = "",
     structured_headquarters_evidence: Optional[Mapping[str, Any]] = None,
@@ -4725,6 +4741,18 @@ async def investigate_company_evidence(
                     remaining_fetch_calls=max(0, MAX_FETCH_CALLS - fetch_calls),
                     server_prefetch_fetch_calls=fetch_calls,
                 )
+            if industry_review_model and retained_industry_pages:
+                retry_pages, retry_final_urls = _validated_matched_retry_pages(retained_industry_pages)
+                for url, text in retry_pages.items():
+                    if (_independently_bound_first_party_url(url, first_party_domains, identity_anchor)
+                            and _independently_bound_first_party_url(
+                                retry_final_urls[url], first_party_domains, identity_anchor)):
+                        # Keep the shared researcher's prefetch input unchanged.
+                        # This exact, host-retained corpus is reclassified, never
+                        # treated as a cached verdict. Fresh bodies take priority.
+                        if url not in fetched_pages:
+                            fetched_pages[url] = text
+                            fetched_final_urls[url] = retry_final_urls[url]
             industry_review_calls = 0
             industry_research_brief = None
             industry_review_arguments = {

@@ -79,6 +79,8 @@ from qualification.scoring.company_evidence_investigator import (
     ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
     MAX_PREFETCHED_PAGES,
     max_returned_fetched_pages,
+    max_matched_retry_pages,
+    _validated_matched_retry_pages,
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
@@ -2784,6 +2786,12 @@ _MATCHED_COMPANY_RETRY_IDENTITY_KEY = "verified_identity"
 _MATCHED_COMPANY_RETRY_PAGES_KEY = "pages"
 
 
+def _max_retained_investigator_contexts() -> int:
+    return _MAX_RETAINED_INVESTIGATOR_CONTEXTS + (
+        8 if os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip() else 0
+    )
+
+
 def _industry_supporting_pairs(dimensions: Mapping[str, Any]) -> list[tuple[str, str]]:
     """Keep cited support available for reuse under the new industry policy."""
 
@@ -2918,10 +2926,7 @@ def _matched_company_retry_prefetched_pages(
     raw_pages = retry_cache.get(_MATCHED_COMPANY_RETRY_PAGES_KEY)
     if not isinstance(raw_pages, Mapping):
         return {}
-    pages, final_urls = _validated_prefetched_pages(
-        raw_pages,
-        submitted_source_urls=tuple(raw_pages),
-    )
+    pages, final_urls = _validated_matched_retry_pages(raw_pages)
     return {
         url: {"final_url": final_urls[url], "text": text}
         for url, text in pages.items()
@@ -2988,7 +2993,7 @@ def _retain_matched_investigator_source_contexts(
     if (
         first_party_url
         and first_party_url not in evidence_by_url
-        and len(evidence_by_url) < _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+        and len(evidence_by_url) < _max_retained_investigator_contexts()
     ):
         evidence_by_url[first_party_url] = submitted_quote
     raw_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
@@ -3032,13 +3037,13 @@ def _retain_matched_investigator_source_contexts(
                 candidates.append((phrase_overlap, term_overlap, url))
         for _phrases, _terms, url in sorted(
             candidates, key=lambda item: (-item[0], -item[1], item[2]),
-        )[:min(1, max(0, _MAX_RETAINED_INVESTIGATOR_CONTEXTS - len(evidence_by_url)))]:
+        )[:min(1, max(0, _max_retained_investigator_contexts() - len(evidence_by_url)))]:
             auxiliary_urls.add(url)
     # Preserve the prior primary/attribute/auxiliary priorities. Supporting
     # pages use only remaining storage and still pass the source checks below.
     for url, quote in _industry_supporting_pairs(dimensions):
         if url not in evidence_by_url and (
-            len(set(evidence_by_url) | auxiliary_urls) < _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+            len(set(evidence_by_url) | auxiliary_urls) < _max_retained_investigator_contexts()
         ):
             evidence_by_url[url] = quote
     for stale_url in set(source_sink) - set(evidence_by_url) - auxiliary_urls:
@@ -3141,7 +3146,7 @@ def _retain_matched_company_retry_sources(
         return
     retained = _matched_company_retry_prefetched_pages(retry_cache, identity)
     # A funding retry must keep the already fetched counterevidence alongside
-    # its stage source, within the unchanged three-page prefetch allowance.
+    # its stage source, within the frozen policy's bounded retry allowance.
     auxiliary = next((context for context in funding_contexts
                       if context.get("dimension") == "first_party_context"), None)
     if auxiliary is not None:
@@ -3152,13 +3157,19 @@ def _retain_matched_company_retry_sources(
             "text": context["text"],
         } for context in preferred if context["url"] in source_cache}
         retained = dict(list({**priority, **{url: page for url, page in retained.items()
-                                            if url not in priority}}.items())[:MAX_PREFETCHED_PAGES])
+                                            if url not in priority}}.items())[:max_matched_retry_pages()])
         admitted = {**priority, **admitted}
+    if os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip():
+        # Current matched citations must fit before older optional pages. Do
+        # not let a full earlier cache discard the sources of the new verdict.
+        retained = dict(list({
+            **admitted, **{url: page for url, page in retained.items() if url not in admitted},
+        }.items())[:max_matched_retry_pages()])
     for url, page in admitted.items():
         if url in retained:
             retained[url] = page
             continue
-        if len(retained) >= MAX_PREFETCHED_PAGES:
+        if len(retained) >= max_matched_retry_pages():
             continue
         retained[url] = page
     retry_cache.clear()
@@ -3364,11 +3375,10 @@ def _investigator_prefetched_pages(
         url: {"final_url": homepage_final_urls[url], "text": text}
         for url, text in homepage_pages.items()
     })
-    retry_pages, retry_final_urls = _validated_prefetched_pages(
-        matched_company_retry_pages,
-        submitted_source_urls=submitted_source_urls,
-    )
+    retry_pages, retry_final_urls = _validated_matched_retry_pages(matched_company_retry_pages)
     for url, text in retry_pages.items():
+        if url not in submitted_source_urls:
+            continue
         if len(candidates) >= MAX_PREFETCHED_PAGES:
             break
         candidates.setdefault(
@@ -8736,6 +8746,10 @@ async def _run_targeted_company_evidence_investigation(
             include_structured_headquarters="geography" in investigation_targets,
         ),
         diagnostic=investigation_diagnostic,
+        **({"retained_industry_pages": matched_company_retry_pages}
+           if "industry" in investigation_targets
+           and os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+           and len(matched_company_retry_pages) > MAX_PREFETCHED_PAGES else {}),
     )
     claims = investigation.get("claims")
     if not isinstance(claims, Mapping):
@@ -11432,7 +11446,7 @@ def _matched_investigator_source_contexts(
         )
         or not _complete_company_identity(company_fit)
         or not isinstance(source_cache, Mapping)
-        or len(source_cache) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+        or len(source_cache) > _max_retained_investigator_contexts()
     ):
         return []
     details = company_fit.details if isinstance(company_fit.details, Mapping) else {}
@@ -11527,7 +11541,7 @@ def _matched_first_party_source_context(
     if (company is None or company_fit.decision != COMPANY_FIT_MATCH
         or not _complete_company_identity(company_fit)
         or not isinstance(source_cache, Mapping)
-        or len(source_cache) > _MAX_RETAINED_INVESTIGATOR_CONTEXTS):
+        or len(source_cache) > _max_retained_investigator_contexts()):
         return None
     from qualification.scoring.intent_details import _source_overlap_score, _source_term_overlap
 
@@ -11607,7 +11621,7 @@ def _matched_company_source_contexts(
         matched_company_source_cache.get(submitted_url)
         if isinstance(matched_company_source_cache, Mapping)
         and len(matched_company_source_cache)
-        <= _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+        <= _max_retained_investigator_contexts()
         else None
     )
     if (

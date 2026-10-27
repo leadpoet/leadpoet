@@ -42,49 +42,51 @@ def example_for(case):
 
 
 # Digests bind the complete (all splits, full manifest) result produced before
-# reuse was added. Counts below also make the relevant policy outcomes readable.
-BASELINES = {'diagnostic_gaps': ('sha256:4fee893a37406c479c7af96f7fe94d56ad990911c3d6f0cedf03b3598421d98c',
-                                    2, {'requested_empty': 1}, 1),'legacy': ('sha256:2bf0e6b7e1940731a55580b55a65f403aac4adef53892dbb4b66432dbac14ec5',
+# the generic host-observation path was added. These values include the earlier
+# reasoning-default annotation and valid Responses-fixture corrections. Counts
+# below also make the relevant policy outcomes readable.
+BASELINES = {'diagnostic_gaps': ('sha256:0163c0c82f00d9928ff843f15a42edae7d45bdbaff446c8acd96ade11b9986d3',
+                                    2, {'requested_empty': 1}, 1),'legacy': ('sha256:490e3ec9b82cb73edfd7dd7ee7464a57becf6783c4bc3554408823aa7675aa02',
             2,
             {'requested_empty': 1},
             1),
- 'new_policy': ('sha256:88b2674cf6b745cccafc60fa6a47c1d40edeb9a6904b28438c09bc9c52b89a02',
+ 'new_policy': ('sha256:2ccae9fa8506087650221b58eab4a7cd240fe229e7b255b514874bca86a579b2',
                 2,
                 {'requested_empty': 1},
                 1),
- 'missing_at_limit': ('sha256:5a4731a0987e3467de73e616d081cd4337f6a8e965bbbd25f94aac7edb55c75a',
+ 'missing_at_limit': ('sha256:91cceea8981cf526e07023c1ee336707cb79141702b04d1308884f9ebb4771a4',
                       2,
                       {'missing_thinking': 1},
                       1),
- 'missing_over_limit': ('sha256:7a48e084e3cc3b662727e8aa75f7286ecb9b986cd17deea46a109e2612d64c51',
+ 'missing_over_limit': ('sha256:ddb38fdf58c70e8e4d1d3457d54bd83f29e32742f5e4f48654f1b4cf6bd5c324',
                         0,
                         {'missing_reasoning_share_exceeded': 3},
                         1),
- 'combined_failure': ('sha256:b06b0a95ee497607990fdee8643f1195bd677a58bd6ae2db9834186e3c5f4498',
+ 'combined_failure': ('sha256:3536d2c51d438cc1811a19446622f5abda1e3e11f7238acdec48d88c263e0b4a',
                       0,
                       {'missing_reasoning_share_exceeded': 2},
                       1),
- 'tampered_route': ('sha256:93007b0baee9bf58a8da04107db28e860f3b7fe6af91ef31e2d5e4ce8e12952f',
+ 'tampered_route': ('sha256:6c4dbfc5a74e3203b67fc3f8d7264720c9b5b706d86d675439382eb0fffda2d9',
                     0,
                     {'trajectory_reasoning_ineligible': 3},
                     1),
- 'missing_usage': ('sha256:c1b5698bb40507217bb493460c8166f4f408c76eca89235f84139821f683e7ef',
+ 'missing_usage': ('sha256:b24ca105f0e6af19f425a85cafd4d0357b4e68ed5bcc8d029076daba4fb52f2b',
                    0,
                    {'trajectory_reasoning_ineligible': 3},
                    1),
- 'privacy': ('sha256:ac5e3dcbbc97df59821f83e8eabf63d2cdc5b09632dae6a33fbf1d19ec8fe773',
+ 'privacy': ('sha256:8aa73bbc308295dab624d2e028921aaea1c767d419987627e1b82816607f2261',
              0,
              {'trajectory_evidence_incomplete': 2},
              0),
- 'invalid_policy': ('sha256:2a942863e1c53f90e2e981328b7a81ca9a893fdc812fcf94bbe88e0aac7a9310',
+ 'invalid_policy': ('sha256:6637f07f755f7a92f14b8dc34d6120f3ca6e4aaa18e4f33c44a43c8f090bcd31',
                     0,
                     {'frozen_reasoning_policy_invalid': 3},
                     1),
- 'failed_retry': ('sha256:57d8f010703a05d9095972bc08b806513fd481d10a02c0a460272eef4847e51d',
+ 'failed_retry': ('sha256:c7e077ffb63c1251821f470c9f4e0f78c56d4f46c87c570d0747fabaeb327d89',
                   3,
                   {},
                   1),
- 'cap_retry': ('sha256:f94d1ec7295cad78c58242626e5caf732db1a3701e1c91fb90ca4c372c5a6229', 2, {}, 1)}
+ 'cap_retry': ('sha256:6639aa9c30140f4a09625398dbf388f1c1718760781f273fae92504f386b7435', 2, {}, 1)}
 
 
 @pytest.mark.parametrize('case', BASELINES)
@@ -136,12 +138,12 @@ def test_distinct_sources_sharing_candidates_each_get_their_own_proof():
 
 def test_delivery_failure_precedes_trajectory_validation():
     example = example_for('new_policy')
-    splits, historical = training_steps.build([example], RULES)
+    splits, historical = training_steps._build([example], RULES)
     for split in ('train', 'eval'):
         for record in splits[split]:
             for ref in record['source_refs']:
                 ref['delivered_response_sha256'] = contracts.hash_bytes(b'unretained')
-    with patch.object(training_steps, 'build', return_value=(splits, historical)):
+    with patch.object(training_steps, '_build', return_value=(splits, historical)):
         with patch.object(training_thinking, '_trajectory_reason', wraps=training_thinking._trajectory_reason) as validate:
             output, manifest = training_thinking.build([example], RULES)
     assert not output['train'] and not output['eval']

@@ -27,6 +27,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from types import MappingProxyType
 from typing import Any, Dict, Mapping, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit
@@ -2509,6 +2510,78 @@ def _wrap_body(operation: Operation, normalized: Mapping[str, Any], document: Di
 # ---------------------------------------------------------------------------
 
 
+def _project_oversized_html_scripts(original: bytes, limit: int) -> bytes:
+    """Keep complete oversized script payloads out of the HTML text allowance.
+
+    The provider reply already has its upstream response bound. Locate
+    spans with the stdlib parser, but preserve the original tags and all other
+    bytes rather than serializing HTML or joining text across removed tags.
+    """
+    if len(original) <= limit:
+        return original
+    try:
+        raw_html = original.decode("utf-8")
+    except UnicodeDecodeError:
+        # Preserve the existing byte-cap behavior for non-UTF-8 source data.
+        return original
+
+    class ScriptSpans(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=False)
+            self.content_start: Optional[int] = None
+            self.spans: list[tuple[int, int]] = []
+            self.line = 1
+            self.line_start = 0
+
+        def position(self) -> int:
+            line, column = self.getpos()
+            # Positions advance monotonically. Avoid a per-line index whose
+            # memory would grow with every newline in the bounded reply.
+            while self.line < line:
+                self.line_start = raw_html.index("\n", self.line_start) + 1
+                self.line += 1
+            return self.line_start + column
+
+        def handle_starttag(self, tag: str, attrs: Any) -> None:
+            if tag == "script":
+                self.content_start = self.position() + len(self.get_starttag_text())
+
+        def handle_startendtag(self, tag: str, attrs: Any) -> None:
+            # A self-closing token does not delimit a script content span.
+            pass
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag != "script" or self.content_start is None:
+                return
+            end = self.position()
+            closing_end = raw_html.find(">", end)
+            if (
+                closing_end >= 0
+                and re.fullmatch(r"</script\s*>", raw_html[end:closing_end + 1], re.I)
+                and len(raw_html[self.content_start:end].encode("utf-8")) > limit
+            ):
+                self.spans.append((self.content_start, end))
+            self.content_start = None
+
+    parser = ScriptSpans()
+    try:
+        parser.feed(raw_html)
+        parser.close()
+    except (AssertionError, ValueError):
+        # HTMLParser rejects malformed marked sections. Do not use partial
+        # spans from a page that could not be parsed; retain the old response.
+        return original
+    if not parser.spans:
+        return original
+    parts = []
+    previous = 0
+    for start, end in parser.spans:
+        parts.append(raw_html[previous:start])
+        previous = end
+    parts.append(raw_html[previous:])
+    return "".join(parts).encode("utf-8")
+
+
 def _truncate_utf8(body: bytes, limit: int) -> bytes:
     cut = body[:limit]
     # Drop a trailing partial multi-byte sequence so the text stays decodable.
@@ -2603,9 +2676,12 @@ def sanitize_response(
                     raw = json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         content_type = "application/json"
     else:
+        content_type = _provider_content_type(headers or {}) or "text/plain"
+        if (operation_id == "scrapingdog.scrape" and 200 <= status < 300
+                and content_type in {"text/html", "application/xhtml+xml"}):
+            raw = _project_oversized_html_scripts(raw, operation.max_response_bytes)
         if len(raw) > operation.max_response_bytes:
             raw = _truncate_utf8(raw, operation.max_response_bytes)
-        content_type = _provider_content_type(headers or {}) or "text/plain"
     return status, {"content-type": content_type, "content-length": str(len(raw))}, raw
 
 

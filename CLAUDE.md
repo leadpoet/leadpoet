@@ -1,3 +1,16 @@
+## Scoped authorization: October 27 SSM access hardening
+
+The user authorized end-to-end SSM access hardening for the production gateway,
+validator, and resources attached to leadpoet-validator-sg,
+leadpoet-gateway-tee-sg, and subnet71-security. Configure and prove normal
+operator, deployment, restart, recovery, and emergency access before removing
+unnecessary public ingress on ports 22 and 3000. The coordinating task may make
+narrow reviewed code/configuration, IAM, and security-group changes and use the
+canonical release controllers. Preserve service availability, current work,
+attestation, scoring, costs, and rewards. Save non-secret before-state and a
+verified rollback path. Do not remove access before replacement and independent
+recovery are proven. This authority ends after live access and Arena verification.
+
 ## Scoped authorization: October 28 mandatory reasoning activation
 
 The user authorized mandatory reasoning capture for October 28 and later rounds.

@@ -167,22 +167,49 @@ def readable_reasoning_item(item: Any) -> bool:
     return isinstance(item, Mapping) and reasoning_kind(item) == "readable"
 
 
-def readable_reasoning_content_path(path: tuple[str, ...]) -> bool:
+def _provider_call_path(path: tuple[str, ...], root: Any = None
+                        ) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Split only the two canonical export call roots from their relative path."""
+    if isinstance(root, Mapping) and (isinstance(root.get("choices"), list)
+            or root.get("object") in ("response", "chat.completion", "chat.completion.chunk")):
+        return None  # Recognizable raw provider replies cannot establish export roots.
+    for collection in (("provider_calls",), ("judgment", "signal_source_provider_calls")):
+        index = len(collection)
+        if len(path) > index and path[:index] == collection and path[index].isdigit():
+            if root is not None:
+                calls = root
+                for key in collection:
+                    calls = calls.get(key) if isinstance(calls, Mapping) else None
+                if not isinstance(calls, list) or int(path[index]) >= len(calls):
+                    return None
+            return path[:index + 1], path[index + 1:]
+    return None
+
+
+def readable_reasoning_content_path(path: tuple[str, ...], root: Any = None) -> bool:
     """Allow the plaintext chat alias only in a provider response message."""
     if (len(path) < 3 or path[-3] != "choices" or not path[-2].isdigit()
             or path[-1] != "message"):
         return False
     if len(path) == 3:
         return True  # A raw provider response, before it enters an example.
-    return (len(path) >= 6 and path[0] == "provider_calls" and path[1].isdigit()
-            and "response" in path[2:-3] and "request" not in path[2:-3])
+    call_path = _provider_call_path(path[:-3], root)
+    if call_path is None:
+        return False
+    relative = call_path[1]
+    return (relative == ("response",)
+            or len(relative) == 3 and relative[0] in {"response_receipts", "upstream_response_receipts"}
+            and relative[1].isdigit() and relative[2] == "response")
 
 
 def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: Any) -> bool:
     """Keep plain assistant replay text only in a known Chat request message."""
     if not isinstance(item, Mapping) or item.get("role") != "assistant" or not isinstance(root, Mapping):
         return False
-    if len(path) >= 4 and path[-2] == "messages" and path[-1].isdigit():
+    if (isinstance(root.get("choices"), list)
+            or root.get("object") in ("response", "chat.completion", "chat.completion.chunk")):
+        return False
+    if len(path) >= 3 and path[-2] == "messages" and path[-1].isdigit():
         prefix = path[:-2]
     else:
         return False
@@ -190,13 +217,18 @@ def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: A
         return parts == ("outbound", "body") or len(parts) == 1 and parts[0] in _PARAMETER_KEYS
 
     if not projection(prefix):
-        if (len(prefix) < 4 or prefix[0] != "provider_calls" or not prefix[1].isdigit()
-                or prefix[2] != "request" or not projection(prefix[3:])):
+        call_path = _provider_call_path(prefix, root)
+        if call_path is None:
             return False
-        calls = root.get("provider_calls")
-        if not isinstance(calls, list) or int(prefix[1]) >= len(calls):
+        location, relative = call_path
+        if not relative or relative[0] != "request" or not projection(relative[1:]):
             return False
-        call = calls[int(prefix[1])]
+        calls = root
+        for key in location[:-1]:
+            calls = calls.get(key) if isinstance(calls, Mapping) else None
+        if not isinstance(calls, list) or int(location[-1]) >= len(calls):
+            return False
+        call = calls[int(location[-1])]
         operation = call.get("operation_id") if isinstance(call, Mapping) else None
         request = call.get("request") if isinstance(call, Mapping) else None
         if not isinstance(request, Mapping) or request.get("operation_id") != operation:
@@ -207,10 +239,10 @@ def approved_history_reasoning_content(root: Any, path: tuple[str, ...], item: A
 
 
 def opaque_reasoning_field(name: str, child: Any, item_kind: str | None, safe_config: bool,
-                           path: tuple[str, ...] = ()) -> bool:
+                           path: tuple[str, ...] = (), root: Any = None) -> bool:
     """Report an opaque reasoning field without dropping returned plain text."""
     if name == "reasoning_content":
-        return not (isinstance(child, str) and readable_reasoning_content_path(path))
+        return not (isinstance(child, str) and readable_reasoning_content_path(path, root))
     if name in _OPAQUE_KEYS:
         return True
     if item_kind is not None and name not in _REASONING_ITEM_FIELDS:
@@ -235,7 +267,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                             aggregate_parts: bool = False) -> tuple[Any, list[str]]:
     """Redact private material without truncation; report every redaction class.
 
-    Final joined examples may budget each top-level call and input snapshot
+    Final joined examples may budget each canonical call and input snapshot
     separately. All other context shares the envelope limit; paths stay intact.
     """
     reasons: set[str] = set()
@@ -318,17 +350,21 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         # path, so provider response objects cannot impersonate request config.
         if len(path) == 1 and path[0] in _PARAMETER_KEYS or path == ("outbound", "body"):
             return True
-        if len(path) not in (4, 5) or path[0] != "provider_calls" or not path[1].isdigit() or path[2] != "request":
+        call_path = _provider_call_path(path, value)
+        if call_path is None:
             return False
-        return (len(path) == 4 and path[3] in _PARAMETER_KEYS
-                or path[3:] == ("outbound", "body"))
+        relative = call_path[1]
+        return (len(relative) == 2 and relative[0] == "request" and relative[1] in _PARAMETER_KEYS
+                or relative == ("request", "outbound", "body"))
 
     def clean(item: Any, path: tuple[str, ...] = (), budget=None) -> Any:
         if budget is None:
             budget = envelope_budget
-        if (aggregate_parts and len(path) == 2 and isinstance(value, Mapping)
-                and (path[0] == "provider_calls" and isinstance(value.get(path[0]), list)
-                     or path[0] == "input_snapshots" and isinstance(value.get(path[0]), Mapping))):
+        call_path = _provider_call_path(path, value) if aggregate_parts else None
+        if (aggregate_parts and isinstance(value, Mapping)
+                and (call_path is not None and not call_path[1]
+                     or len(path) == 2 and path[0] == "input_snapshots"
+                     and isinstance(value.get(path[0]), Mapping))):
             # Joined evidence has independently bounded calls and snapshots.
             # Keep their original paths and scan every leaf. Their roots still
             # count against the envelope, whose other context shares one cap.
@@ -378,7 +414,7 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 elif (normalized == "reasoning_content" and isinstance(child, str)
                       and approved_history_reasoning_content(value, path, item)):
                     result[key] = clean(child, (*path, key), budget)
-                elif opaque_reasoning_field(normalized, child, item_kind, safe_config, path):
+                elif opaque_reasoning_field(normalized, child, item_kind, safe_config, path, value):
                     if empty_value(child):
                         result[key] = child
                     else:

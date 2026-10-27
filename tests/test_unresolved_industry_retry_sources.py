@@ -79,6 +79,25 @@ def test_completed_unavailable_review_keeps_both_support_and_counterevidence(mon
     assert second[2]["industry"]["status"] == "UNPROVEN"
 
 
+@pytest.mark.parametrize("decision", ["match", "mismatch", "unavailable"])
+def test_native_unproven_keeps_new_counterevidence_after_a_model_proposal(monkeypatch, decision):
+    monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "openai/gpt-6.1-sol")
+    positive = {PLATFORM_URL: {"final_url": PLATFORM_URL, "text": PLATFORM_TEXT}}
+    cache = {}
+    run_investigation(monkeypatch, pages=positive, cache=cache)
+    contrary_url = "https://unibuddy.com/product-scope"
+    contrary = {"final_url": contrary_url,
+                "text": "Unibuddy supplies admissions messaging, not campus learning delivery."}
+    result, _ = run_investigation(monkeypatch, pages={**positive, contrary_url: contrary}, cache=cache,
+        review_changes={"decision": decision, "evidence": [{"url": contrary_url, "quote": contrary["text"]}]})
+    assert result[2]["industry"]["status"] == "UNPROVEN"
+    retained = lead_scorer._matched_company_retry_prefetched_pages(cache, IDENTITY)
+    assert retained[contrary_url] == contrary
+    assert result[0]["industry_matches"] is None
+    _, next_call = run_investigation(monkeypatch, cache=cache)
+    assert next_call[0]["prefetched_pages"][contrary_url] == contrary
+
+
 @pytest.mark.parametrize("fault", ["old_policy", "incomplete", "failure", "missing_receipt", "wrong_model"])
 def test_incomplete_or_unbound_review_does_not_change_cache(monkeypatch, fault):
     monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "openai/gpt-6.1-sol")
@@ -189,7 +208,7 @@ def test_unresolved_industry_does_not_evict_a_matched_other_dimension(monkeypatc
               "source_urls": list(pages), "evidence": []}
     lead_scorer._retain_unresolved_industry_retry_sources(cache, result, {
         "_completed_submit": True, "failure_reason": "",
-        "claims": {"industry": {"_industry_review": review}},
+        "claims": {"industry": {"status": "UNPROVEN", "_industry_review": review}},
         investigator.PRIVATE_FETCHED_PAGES_KEY: pages,
     })
     retained = lead_scorer._matched_company_retry_prefetched_pages(cache, IDENTITY)

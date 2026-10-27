@@ -3201,7 +3201,8 @@ def _retain_unresolved_industry_retry_sources(
         not isinstance(review, Mapping)
         or review.get("schema") != "industry_evidence_review_v1"
         or review.get("model") != model
-        or review.get("decision") != COMPANY_FIT_UNAVAILABLE
+        or finding.get("status") != "UNPROVEN"
+        or review.get("decision") not in {"match", "mismatch", "unavailable"}
         or not isinstance(review.get("packet_sha256"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", review["packet_sha256"])
     ):
@@ -3241,6 +3242,9 @@ def _retain_unresolved_industry_retry_sources(
         and item["url"] in admitted and isinstance(item.get("quote"), str)
         and item["quote"] and _quote_occurs(item["quote"], admitted[item["url"]]["text"])
     }
+    # Native source/relationship gates can withhold a model's conclusive
+    # proposal. Retain the checked text in that case too, including contrary
+    # facts, so another retry cannot see only older positive evidence.
     # Preserve matched dimensions, then partial facts and fresh sources.
     # The next invocation independently binds and reclassifies this text.
     retained = {**protected, **cited, **{url: page for url, page in admitted.items() if url not in prior},

@@ -2784,6 +2784,39 @@ _MATCHED_COMPANY_RETRY_IDENTITY_KEY = "verified_identity"
 _MATCHED_COMPANY_RETRY_PAGES_KEY = "pages"
 
 
+def _industry_supporting_pairs(dimensions: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """Keep cited support available for reuse under the new industry policy."""
+
+    if not os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip():
+        return []
+    evidence = dimensions.get("industry")
+    if not isinstance(evidence, Mapping) or evidence.get("decision") != COMPANY_FIT_MATCH:
+        return []
+    web = evidence.get("web_evidence")
+    if (
+        not isinstance(web, Mapping)
+        or not _valid_web_evidence_url(web.get("url"))
+        or not isinstance(web.get("quote"), str)
+        or not web["quote"]
+    ):
+        return []
+    support = web.get("supporting_evidence")
+    if not isinstance(support, list) or not 0 < len(support) <= 8:
+        return []
+    pairs = []
+    for item in support:
+        if not isinstance(item, Mapping):
+            return []
+        url, quote = _valid_web_evidence_url(item.get("url")), item.get("quote")
+        if (
+            not url or url != item.get("url")
+            or not isinstance(quote, str) or not 0 < len(quote) <= 2000
+        ):
+            return []
+        pairs.append((url, quote))
+    return pairs
+
+
 def _complete_company_identity(
     result: CompanyFitDecisionResult,
 ) -> bool:
@@ -3001,6 +3034,13 @@ def _retain_matched_investigator_source_contexts(
             candidates, key=lambda item: (-item[0], -item[1], item[2]),
         )[:min(1, max(0, _MAX_RETAINED_INVESTIGATOR_CONTEXTS - len(evidence_by_url)))]:
             auxiliary_urls.add(url)
+    # Preserve the prior primary/attribute/auxiliary priorities. Supporting
+    # pages use only remaining storage and still pass the source checks below.
+    for url, quote in _industry_supporting_pairs(dimensions):
+        if url not in evidence_by_url and (
+            len(set(evidence_by_url) | auxiliary_urls) < _MAX_RETAINED_INVESTIGATOR_CONTEXTS
+        ):
+            evidence_by_url[url] = quote
     for stale_url in set(source_sink) - set(evidence_by_url) - auxiliary_urls:
         source_sink.pop(stale_url, None)
     for source_url, quote in evidence_by_url.items():
@@ -11403,6 +11443,7 @@ def _matched_investigator_source_contexts(
     # This retained map can contain prefetched pages, which do not consume the
     # investigator's fresh-fetch allowance. The fixed dimension loop and the
     # final two-context cap bound the handoff without conflating those budgets.
+    evidence_pairs = []
     for dimension in ("industry", "employee_size", "geography", "stage"):
         evidence = dimensions.get(dimension)
         if (
@@ -11415,6 +11456,10 @@ def _matched_investigator_source_contexts(
             continue
         source_url = _valid_web_evidence_url(web_evidence.get("url"))
         quote = str(web_evidence.get("quote") or "")
+        evidence_pairs.append((dimension, source_url, quote))
+    evidence_pairs.extend(("industry", url, quote)
+                          for url, quote in _industry_supporting_pairs(dimensions))
+    for dimension, source_url, quote in evidence_pairs:
         entry = source_cache.get(source_url) if source_url else None
         if not isinstance(entry, Mapping) or set(entry) != {"final_url", "text"}:
             continue

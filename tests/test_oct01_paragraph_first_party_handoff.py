@@ -7,7 +7,7 @@ import pytest
 
 from qualification.scoring import lead_scorer, intent_details
 from qualification.scoring.company_evidence_investigator import (
-    MAX_PAGE_CHARACTERS, PRIVATE_FETCHED_PAGES_KEY,
+    MAX_PAGE_CHARACTERS, MAX_RETURNED_FETCHED_PAGES, PRIVATE_FETCHED_PAGES_KEY,
 )
 from qualification.scoring.company_fit_decision import company_fit_match
 from tests.test_arena_intent_details_grounding import inputs
@@ -175,7 +175,9 @@ def test_unbound_submitted_page_never_reaches_paragraph(change):
             ABOUT_PAGE + "x" * MAX_PAGE_CHARACTERS
         )
     elif change == "too_many_fetches":
-        for index in range(2):
+        for index in range(MAX_RETURNED_FETCHED_PAGES - len(
+            investigation[PRIVATE_FETCHED_PAGES_KEY]
+        ) + 1):
             url = f"https://www.chemify.example/other-{index}"
             investigation[PRIVATE_FETCHED_PAGES_KEY][url] = {
                 "final_url": url, "text": "Other page",

@@ -1,3 +1,15 @@
+## Scoped authorization: October 27 Tyche rejected-request capture
+
+The user authorized auditing the actual Tyche submission and October 28
+compatibility, then narrowly fixing, testing, merging and canonically deploying
+confirmed capture defects. This task may preserve validated reasoning controls
+inside rejected model-request observations and verify the saved/exported flow.
+Preserve request admission, credential and opaque-data filtering, historical
+records, scoring, costs, rewards and Tyche strategy. The coordinating task owns
+production actions; implementation agents may commit only. Use the canonical
+gateway and normal-validator release controllers and verify active capture code.
+This authority ends after deployment and affected-flow verification.
+
 ## Scoped authorization: October 27 OCI destination symlink replacement
 
 The user authorized the verified OCI image materialization repair for a later

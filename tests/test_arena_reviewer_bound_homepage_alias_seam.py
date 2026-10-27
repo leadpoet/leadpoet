@@ -11,25 +11,16 @@ from scripts import build_arena_reviewer_runtime as builder
 
 
 def repaired_sources():
-    sources = {name: (builder.ROOT / name).read_bytes() for name in seam.DELTAS}
-    from scripts.arena_reviewer_structured_homepage_alias_seam import SELF_NAME_CHANGES
-    # This fixture represents the prior approved correction, before the new
-    # independently tested exact numeric-profile self-name delta.
-    for name, (_, _, _, changes) in SELF_NAME_CHANGES.items():
-        if name not in sources:
-            continue
-        text = sources[name].decode()
-        for before, after in reversed(changes):
-            assert text.count(after) == 1
-            text = text.replace(after, before, 1)
-        sources[name] = text.encode()
-    # PR742 changed future-grader defaults outside this frozen correction.
-    # Keep this historical whole-module fixture at its reviewed committed
-    # preimage; the new function-only delta has separate current-source tests.
-    for name in (builder.GRADER_FILE, builder.FINALITY_FILE):
+    # This whole-module fixture represents one reviewed historical bundle.
+    # Pin every module so later independent source changes cannot mix revisions.
+    sources = {}
+    for name in seam.DELTAS:
         sources[name] = subprocess.check_output(
             ["git", "show", "1b1da553508b639a8c9f6edf6940e67fb8b77233:" + name],
             cwd=builder.ROOT,
+        )
+        assert hashlib.sha256(sources[name]).hexdigest() in (
+            seam.ORIGINAL_TO_REPAIRED_SHA256[name].values()
         )
     return sources
 

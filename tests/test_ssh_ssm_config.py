@@ -41,8 +41,8 @@ def operator(tmp_path):
     known_hosts.write_text("fixture-existing-host-key-must-stay-unchanged\n")
     existing = (
         "Host unrelated-host\n    HostName unrelated.internal\n"
-        "    User other-operator\n    Port 2222\n    ProxyCommand none\n"
-        "Host *\n    ConnectTimeout 41\n    ForwardAgent yes\n"
+        "    User other-operator\n    ProxyCommand none\n"
+        "Host *\n    Port 2222\n    ConnectTimeout 41\n    ForwardAgent yes\n"
     )
     config = ssh_dir / "config"
     # An absolute include keeps the fixture isolated even on systems where ssh
@@ -97,6 +97,7 @@ def test_install_preserves_unrelated_configuration_and_known_hosts(operator):
     for host in ("gateway-extra", "subnet71-extra", "192.0.2.20"):
         values = resolved(operator, host)
         assert values["hostname"] == host
+        assert values["port"] == "2222"
         assert "hostkeyalias" not in values
         assert "proxycommand" not in values
 

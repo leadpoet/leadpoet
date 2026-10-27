@@ -446,6 +446,12 @@ through final receipt assembly. Its internal proof marker is set only after
 the existing settlement checks pass and is not copied to public or cached
 judgments. A stale homepage failure cannot discard that completed negative
 proof; incomplete investigations and unresolved source failures still retry.
+Version 2 also permits this settlement when headcount was already verified.
+Only the remaining incomplete facts must have completed, typed UNPROVEN
+findings. It applies the same settlement after schema repair, including reviews
+without a semantic dispute. The cached profile failure is retained for audit;
+it is not converted to a successful profile fetch. Real provider failures and
+unproved positive findings remain retryable.
 Unknown or partially corrected source fails closed. Independently verify the
 composed image and its affected paths before registering its runtime mapping.
 Only new lease generations select the registered runtime; existing leases and

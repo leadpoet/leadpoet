@@ -49,6 +49,25 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped authorization: October 27 promotion RPC access
+
+The user authorized the October 27 champion-integrity fix. Restrict only
+`lab_arena_prepare_promotion(text,jsonb)` and
+`lab_arena_complete_promotion(text,jsonb)` to their owner and canonical
+`lab_arena_service` caller. Test the exact migration, preserve function bodies,
+baseline/publication guards, scoring and existing results. The coordinating
+task owns independent review, push, merge and production deployment. Internal
+implementation agents may commit only; they must not write to production.
+
+## Scoped authorization: October 27 completed-review recovery
+
+The user authorized the full October 27 Arena watch, permanent fixes, testing,
+merge and deployment. This task may correct completed-review finality after an
+optional profile failure, compose and register the exact reviewer-runtime repair,
+and use canonical release controllers. Preserve frozen grading, accepted work,
+provider/identity proof, costs, privacy, promotion and reward rules. Verify actual
+new score leases and the full round before completion. Respect concurrent owners.
+
 ## Scoped authorization: October 27 reasoning capture and October 28 routes
 
 The user authorized testing and expanding verified reasoning routes, preserving

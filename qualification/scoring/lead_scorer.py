@@ -9214,7 +9214,6 @@ def _settle_completed_company_investigation(
         and isinstance(current_profile, Mapping)
         and current_profile.get("outcome")
         == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
-        and "employee_size" in incomplete
         and receipt.get("gate") == "company_evidence_investigation"
         and receipt.get("completed_submitted_findings") is True
         and receipt.get("failure_reason") == ""
@@ -10528,6 +10527,14 @@ async def _llm_reverify_company(
                 )
             investigation_targets = post_repair_investigation_targets
             claims = post_repair_claims
+            settled = _settle_completed_company_investigation(
+                repaired_result, repaired_verdict,
+                investigation_targets=investigation_targets,
+                icp=icp, icp_attribute=icp_attribute, icp_stage=icp_stage,
+                current_profile_cache=current_profile_cache,
+            )
+            if settled is not None and settled.details.get("_completed_investigation_settled") is True:
+                return settled
     repaired_incomplete = _incomplete_company_reverify_dimensions(
         repaired_result,
         icp_attribute=icp_attribute,

@@ -1225,7 +1225,15 @@ def _validated_returned_fetched_pages(
 
     return _validated_server_pages(
         value, submitted_source_urls=submitted_source_urls,
-        max_pages=MAX_RETURNED_FETCHED_PAGES,
+        max_pages=max_returned_fetched_pages(),
+    )
+
+
+def max_returned_fetched_pages() -> int:
+    """Only the new frozen industry policy admits search-returned source text."""
+    return MAX_RETURNED_FETCHED_PAGES + (
+        MAX_INDUSTRY_SEARCH_RESULTS
+        if os.environ.get('ARENA_INDUSTRY_EVIDENCE_MODEL', '').strip() else 0
     )
 
 
@@ -2426,12 +2434,17 @@ async def _search_web(
     key: str,
     include_domains: Sequence[str] = (),
     discovery_highlights: bool = False,
+    read_source_text: bool = False,
 ) -> dict[str, Any]:
-    # The frozen provider price includes ten results. Broader discovery does
-    # not expand fetched evidence, model turns, search calls or fetch budgets.
+    # The same priced search includes source contents. Read them only on the
+    # host-issued industry route; snippets and summaries never become proof.
+    if read_source_text and not (discovery_highlights and include_domains):
+        raise ValueError('source text requires scoped industry discovery')
     result_limit = MAX_INDUSTRY_SEARCH_RESULTS if discovery_highlights else MAX_SEARCH_RESULTS
     payload = {"query": query[:500], "type": "auto", "numResults": result_limit}
-    if discovery_highlights:
+    if read_source_text:
+        payload['contents'] = {'text': {'maxCharacters': MAX_PAGE_CHARACTERS}, 'maxAgeHours': 0}
+    elif discovery_highlights:
         payload["contents"] = {"highlights": {"maxCharacters": MAX_SEARCH_LOCATOR_EXCERPT_CHARS}}
     if include_domains:
         # Exa's semantic query does not enforce a textual site: restriction.
@@ -2453,6 +2466,18 @@ async def _search_web(
     if not isinstance(results, list):
         raise ValueError("search_response_malformed")
     locators = []
+    source_pages = {}
+    statuses = body.get('statuses')
+    valid_statuses = statuses is None or (
+        isinstance(statuses, list) and all(
+            isinstance(item, Mapping) and isinstance(item.get('id'), str)
+            for item in statuses
+        )
+    )
+    failed_urls = {
+        item.get('id') for item in (statuses or [])
+        if isinstance(item, Mapping) and (item.get('status') == 'error' or item.get('error'))
+    } if valid_statuses else set()
     for item in results[:result_limit]:
         if not isinstance(item, Mapping):
             continue
@@ -2470,7 +2495,7 @@ async def _search_web(
             "title": str(item.get("title") or "")[:300],
         }
         highlights = item.get("highlights")
-        if discovery_highlights and isinstance(highlights, list):
+        if discovery_highlights and not read_source_text and isinstance(highlights, list):
             first = next((v for v in highlights if isinstance(v, str) and v.strip()), "")
             excerpt = " ".join(re.sub(
                 r"[\x00-\x1f\x7f]", " ", first[:MAX_SEARCH_LOCATOR_EXCERPT_CHARS],
@@ -2478,7 +2503,17 @@ async def _search_web(
             if excerpt:
                 locator["discovery_excerpt"] = excerpt
         locators.append(locator)
-    return {"results": locators, "notice": "discovery_only_not_evidence"}
+        raw = item.get('text')
+        if (read_source_text and valid_statuses and url not in failed_urls
+                and item.get('url') == url and not item.get('error')
+                and item.get('status') != 'error' and isinstance(raw, str)
+                and not _is_known_binary_document(raw)
+                and not visible_html_dialog_only(raw)):
+            text = _plain_text(raw)
+            if text and not _is_known_provider_diagnostic_only(text):
+                source_pages.setdefault(url, text)
+    return {"results": locators, "notice": "discovery_only_not_evidence",
+            **({'_source_pages': source_pages} if read_source_text else {})}
 
 
 async def _fetch_page(
@@ -4776,6 +4811,7 @@ async def investigate_company_evidence(
                 search_calls += 1
                 industry_discovery = await _search_web(
                     session, query, key=exa_key, discovery_highlights=True,
+                    read_source_text=True,
                     include_domains=tuple(sorted(
                         domain for domain in first_party_domains
                         if _independently_bound_first_party_url(
@@ -4783,6 +4819,14 @@ async def investigate_company_evidence(
                         )
                     )),
                 )
+                # These are provider-returned full bodies on independently
+                # bound company domains, with the same freshness request as
+                # the exact-URL reader. Keep them in existing source storage.
+                # Preserve any directly fetched body/redirect already present.
+                for url, text in industry_discovery.pop('_source_pages', {}).items():
+                    if _independently_bound_first_party_url(url, first_party_domains, identity_anchor):
+                        fetched_pages.setdefault(url, text)
+                        fetched_final_urls.setdefault(url, url)
                 input_document['server_industry_discovery'] = industry_discovery
                 input_document['investigation_limits']['remaining_search_calls'] = (
                     MAX_SEARCH_CALLS - search_calls

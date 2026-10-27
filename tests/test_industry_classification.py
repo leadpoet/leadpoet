@@ -114,11 +114,11 @@ def test_full_native_corpus_passes_arena_request_bounds_without_losing_text(body
         page['source_id']: page['body'] for page in pages}
 
 
-def test_native_source_bounds_are_not_silently_expanded_or_truncated():
+def test_native_source_bounds_reject_extra_pages_and_oversized_bodies():
     with pytest.raises(ValueError):
         industry.prepare(CRITERION, COMPANY, [
             {'source_id': f's{i}', 'body': 'Source', 'source_url': 'https://example.com'}
-            for i in range(8)])
+            for i in range(industry.MAX_PAGES + 1)])
     with pytest.raises(ValueError):
         industry.prepare(CRITERION, COMPANY, [
             {'source_id': 's0', 'body': 'x' * 24001, 'source_url': 'https://example.com'}])

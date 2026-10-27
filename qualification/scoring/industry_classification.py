@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 DEFAULT_MODEL = "openai/gpt-6.1-sol"
-MAX_PAGES = 7
+MAX_PAGES = 17
 MAX_PAGE_CHARS = 24_000
+MAX_TOTAL_CHARS = 7 * MAX_PAGE_CHARS
 SPAN_CHARS = 1_600
 ROLES = ("supplier_operator", "customer_user", "partner_other", "unresolved")
 SYSTEM = """Classify the named company's own offering against the complete original industry criterion, using only the supplied sources. Read the criterion as a business description, not as a phrase-matching exercise.
@@ -109,6 +110,19 @@ def prepare(criteria, company_locator, source_pages):
                 raise ValueError("invalid source URL metadata")
         body.encode("utf-8", errors="strict")
         pages.append((source_id, body, source_url))
+    # Search can return several short source pages in one existing call. Keep
+    # the original total context ceiling, and give long pages an equal cap
+    # only when their combined text exceeds it. Existing seven-page packets
+    # stay byte-identical; source IDs still bind the exact supplied bytes.
+    if sum(len(body) for _, body, _ in pages) > MAX_TOTAL_CHARS:
+        low, high = 0, MAX_PAGE_CHARS
+        while low < high:
+            middle = (low + high + 1) // 2
+            if sum(min(len(body), middle) for _, body, _ in pages) <= MAX_TOTAL_CHARS:
+                low = middle
+            else:
+                high = middle - 1
+        pages = [(source_id, body[:low], url) for source_id, body, url in pages]
     return Packet(values, tuple(company_locator.get(k, "") for k in locator_keys), tuple(pages))
 
 
@@ -132,7 +146,7 @@ def request_payload(packet, *, model, research=False):
             page = {"source_id": source_id, "source_url": source_url,
                     "spans": source_spans[start:start + 3]}
             messages.append({"role": "user", "content": _canonical({"untrusted_source_pages": [page]})})
-    # The native corpus has at most 105 spans. Constrain decoding to these
+    # Constrain decoding to these
     # exact references so commentary cannot corrupt an otherwise valid ID.
     # resolve() still checks membership independently of provider compliance.
     schema = deepcopy(SCHEMA)

@@ -78,7 +78,7 @@ from qualification.scoring.company_fit_decision import (
 from qualification.scoring.company_evidence_investigator import (
     ADMISSION_BUDGET_INTERRUPTED_FAILURE_REASON,
     MAX_PREFETCHED_PAGES,
-    MAX_RETURNED_FETCHED_PAGES,
+    max_returned_fetched_pages,
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
@@ -2685,7 +2685,7 @@ def _hydrate_required_attribute_source_cache(
     """Replace one exact-URL negative with a trusted investigator fetch."""
 
     fetched_pages = investigation.get(PRIVATE_FETCHED_PAGES_KEY)
-    if not isinstance(fetched_pages, Mapping) or len(fetched_pages) > MAX_RETURNED_FETCHED_PAGES:
+    if not isinstance(fetched_pages, Mapping) or len(fetched_pages) > max_returned_fetched_pages():
         return
     for raw_url, raw_page in fetched_pages.items():
         if not isinstance(raw_page, Mapping):
@@ -3192,7 +3192,7 @@ def _hydrate_verified_required_attribute_recovery_source(
         or not isinstance(quote, str)
         or not quote
         or not isinstance(fetched_pages, Mapping)
-        or len(fetched_pages) > MAX_RETURNED_FETCHED_PAGES
+        or len(fetched_pages) > max_returned_fetched_pages()
     ):
         return False
     raw_page = fetched_pages.get(raw_url)

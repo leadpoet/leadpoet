@@ -70,6 +70,10 @@ def test_contact_activation_changes_only_rounds_opened_at_or_after_boundary(
         def __init__(self) -> None:
             self.rounds = {}
 
+        def get_round(self, round_id):
+            configuration = self.rounds.get(round_id)
+            return None if configuration is None else {"configuration_doc": configuration}
+
         def create_round(self, round_id, configuration):
             self.rounds[round_id] = configuration
             return {"status": "created"}

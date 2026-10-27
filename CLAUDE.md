@@ -49,6 +49,16 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped authorization: October 28 mandatory reasoning activation
+
+The user authorized mandatory reasoning capture for October 28 and later rounds.
+Reject new rounds with retryable 503 when activated reasoning prerequisites are
+unavailable. Preserve valid frozen rounds, ownership and mode checks, scoring,
+costs, rewards and capture uploads. Do not add a shared read or admission guard
+or alter stored rounds. The coordinating task owns independent review, push,
+merge and canonical deployment with live verification. Internal implementation
+agents may commit only and must not write to production.
+
 ## Scoped authorization: October 27 promotion RPC access
 
 The user authorized the October 27 champion-integrity fix. Restrict only

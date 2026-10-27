@@ -49,6 +49,9 @@ def test_quality_activation_requires_announced_integrity_and_timezone(integrity_
 
 def test_quality_activation_is_frozen_before_intake():
     class Store:
+        def get_round(self, round_id):
+            return None
+
         def create_round(self, round_id, configuration):
             return {"status": "created"}
     runner = fixtures.keypair("quality-runner").ss58_address

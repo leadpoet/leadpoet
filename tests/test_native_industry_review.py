@@ -269,13 +269,23 @@ def test_verified_industry_only_request_enters_final_submission_without_new_rese
     assert reviews[-1]['response_format']['json_schema']['name'] == 'industry_proposal'
 
 
-def test_initial_match_does_not_override_an_unproven_final_review(monkeypatch):
+def test_initial_match_does_not_override_review_of_changed_sources(monkeypatch):
     seen = []
     def final_missing(result):
         seen.append(result)
         if len(seen) > 1:
             result.update(decision='unavailable', missing_requirements=['Account workflows'])
     run, calls, _, _ = install(monkeypatch, mutation=final_missing)
+    original_review = c._review_industry_sources
+
+    async def review_changed_evidence(*args, **kwargs):
+        if not kwargs.get('research'):
+            update = 'https://www.coreworks.ai/product-update'
+            kwargs['fetched_pages'][update] = 'Coreworks no longer supplies account workflows.'
+            kwargs['fetched_final_urls'][update] = update
+        return await original_review(*args, **kwargs)
+
+    monkeypatch.setattr(c, '_review_industry_sources', review_changed_evidence)
     result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
                             prior_observations={'submitted_source_urls': [URL]}))
     assert result['_completed_submit'] is True

@@ -2337,6 +2337,7 @@ async def _review_industry_sources(
     fetched_pages, fetched_final_urls, first_party_domains, identity_anchor,
     identity_names, rebrand_finding=None, research=False,
     admitted_final_judgment=False,
+    completed_review=None,
 ):
     """Use one reserved turn for the full criterion; retain every bound quote.
 
@@ -2376,6 +2377,20 @@ async def _review_industry_sources(
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
     }, pages)
     review['source_urls'] = [page['source_url'] for page in pages]
+    # The initial review already uses the full criterion and the same native
+    # source/relationship validation. Do not sample that completed decision
+    # again when the independently rebound evidence packet is byte-identical.
+    previous = completed_review if isinstance(completed_review, Mapping) else {}
+    receipt = previous.get('_industry_review')
+    if (not research and isinstance(receipt, Mapping)
+            and receipt.get('schema') == 'industry_evidence_review_v1'
+            and receipt.get('model') == model
+            and receipt.get('packet_sha256') == packet.digest
+            and (receipt.get('decision'), previous.get('status'))
+            in {('match', 'VERIFIED'), ('mismatch', 'CONTRADICTED')}):
+        finding = copy.deepcopy(previous)
+        finding['_industry_review']['reused_completed_packet'] = True
+        return finding, '', 0
     status, body = await _post_openrouter_json(
         session, 'https://openrouter.ai/api/v1/chat/completions',
         headers={'Authorization': f'Bearer {openrouter_key}', 'Content-Type': 'application/json'},
@@ -6153,6 +6168,7 @@ async def investigate_company_evidence(
                                     session, **industry_review_arguments,
                                     rebrand_finding=claims.get("rebrand"),
                                     admitted_final_judgment=True,
+                                    completed_review=initial_industry,
                                 )
                             )
                             industry_review_calls += final_review_calls

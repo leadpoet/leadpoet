@@ -116,14 +116,24 @@ def test_changed_native_item_has_no_shared_mutable_provider_fields():
     assert request == original
 
 
-def test_full_context_limit_measures_the_canonical_provider_body(monkeypatch):
+@pytest.mark.parametrize('explicit_limit', [False, True])
+@pytest.mark.parametrize('overflow', [False, True])
+def test_full_context_limit_measures_the_canonical_provider_body(monkeypatch, explicit_limit, overflow):
+    route = _reviewed_registry(api='openrouter.responses')['approved_routes'][0]
+    output_tokens = route['max_output_tokens'] if explicit_limit else operations.OPENROUTER_MAX_OUTPUT_TOKENS
     def tokens(parameters):
         if parameters['input'][0]['type'] == 'openrouter:web_search':
-            return 32768 - 8192 + 1
+            return route['context_tokens'] - output_tokens + int(overflow)
         return 0
     monkeypatch.setattr(broker, 'bounded_input_tokens', tokens)
-    with pytest.raises(broker.BrokerError, match='invalid_request'):
-        normalize({'model': 'openai/gpt-4o-mini', 'input': [native_item()]})
+    request = {'model': 'openai/gpt-4o-mini', 'input': [native_item()]}
+    if explicit_limit:
+        request['max_output_tokens'] = output_tokens
+    if overflow:
+        with pytest.raises(broker.BrokerError, match='invalid_request'):
+            normalize(request)
+    else:
+        assert normalize(request)['max_output_tokens'] == output_tokens
 
 
 def test_strict_training_binds_canonical_hash_while_retaining_native_admitted_history():

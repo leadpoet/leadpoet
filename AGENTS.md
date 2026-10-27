@@ -49,7 +49,10 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+AWS access: use `leadpoet-lab` (SSO `LabOperator`) for routine SN71 SSM/EC2 operations in `us-east-1`, account `493765492819`; it cannot change IAM. For IAM changes, use the existing `leadpoet-recovery-console-20261026` session, or refresh it with `aws login --profile leadpoet-recovery-console-20261026 --region us-east-1` using `hello@leadpoet.com` (Leadpoet-main root); `pranav@leadpoet.com` root is the separate `187445349696` account. Check `sts get-caller-identity` with the selected profile before any write; do not retry unrelated accounts or the unassigned SSO `Admin` role.
+
 ## Scoped authorization: October 27 SSM access hardening
+
 
 The user authorized end-to-end SSM access hardening for the production gateway,
 validator, and resources attached to leadpoet-validator-sg,

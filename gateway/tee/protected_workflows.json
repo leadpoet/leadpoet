@@ -902,7 +902,7 @@
       "symbol": "_verify_company_fit"
     },
     {
-      "ast_sha256": "sha256:b9ea5c7939f54ddd15d0e6314d329fff122f024aaef0f2436fcba671a3b86f89",
+      "ast_sha256": "sha256:7b095f8bb11cc2f11b53aaf708d80722dc8e80a6ee293937d5c293077c870215",
       "path": "scripts/arena_runtime_cache_retirement.py",
       "symbol": "__module__"
     },

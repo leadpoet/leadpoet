@@ -2081,6 +2081,1062 @@
         "verified_at": "2026-10-27T05:38:03.385626Z",
         "probe_manifest_sha256": "af7baf43f2880aef6145ecada457ff59aa66c32bd014afa4f7f30d550b82ca8e"
       }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "minimax/minimax-m3.1-flash",
+      "model_version": "minimax/minimax-m3.1-flash-20261019",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000660000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000165000",
+        "request": "0"
+      },
+      "provider": "nebius/fp4",
+      "provider_name": "Nebius",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "minimax/minimax-m3",
+      "model_version": "minimax/minimax-m3-20260531",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000001056000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000253000",
+        "request": "0"
+      },
+      "provider": "coreweave/fp4",
+      "provider_name": "CoreWeave",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "meta/muse-spark-open",
+      "model_version": "meta/muse-spark-open-20261015",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000004675000",
+        "internal_reasoning": "0",
+        "prompt": "0.000001375000",
+        "request": "0"
+      },
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://dev.meta.ai/docs/muse-spark-open/prompting",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "enabled": true
+      },
+      "model_id": "nvidia/nemotron-3.5-super-vl",
+      "model_version": "nvidia/nemotron-3.5-super-vl-20261015",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000550000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000165000",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp4",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "enabled": true
+      },
+      "model_id": "nvidia/nemotron-3.5-lightning",
+      "model_version": "nvidia/nemotron-3.5-lightning-20260807",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000176000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000066000",
+        "request": "0"
+      },
+      "provider": "deepinfra/bf16",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "enabled": true
+      },
+      "model_id": "qwen/qwen3.8-27b",
+      "model_version": "qwen/qwen3.8-27b-20260814",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000002750000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000220000",
+        "request": "0"
+      },
+      "provider": "deepinfra/bf16",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/README.md",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1000000,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "enabled": true
+      },
+      "model_id": "qwen/qwen3.8-2.4t-a95b",
+      "model_version": "qwen/qwen3.8-2.4t-a95b-20260812",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000006600000",
+        "internal_reasoning": "0",
+        "prompt": "0.000002200000",
+        "request": "0"
+      },
+      "provider": "novita",
+      "provider_name": "Novita",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/README.md",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "enabled": true
+      },
+      "model_id": "inclusionai/ling-3.1-flash",
+      "model_version": "inclusionai/ling-3.1-flash-20261002",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000990000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000330000",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp4",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/inclusionAI/Ling-3.1-flash/blob/main/README.md",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "enabled": true
+      },
+      "model_id": "xiaomi/mimo-v2.6-flash",
+      "model_version": "xiaomi/mimo-v2.6-flash-20260921",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000308000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000154000",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp8",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://mimo.mi.com/docs/en-US/usage-guide/passing-back-reasoning_content",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "stepfun/step-5-preview",
+      "model_version": "stepfun/step-5-preview-20261008",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000002970000",
+        "internal_reasoning": "0",
+        "prompt": "0.000001100000",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp8",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.stepfun.ai/cookbook/step-5-tool-calling",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "mistralai/mistral-medium-3-5",
+      "model_version": "mistralai/mistral-medium-3.5-20260430",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000008250000",
+        "internal_reasoning": "0",
+        "prompt": "0.000001650000",
+        "request": "0"
+      },
+      "provider": "mistral/zdr",
+      "provider_name": "Mistral",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "tencent/hy4-preview",
+      "model_version": "tencent/hy4-preview-20260827",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000002751100",
+        "internal_reasoning": "0",
+        "prompt": "0.000000917400",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp4",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://intl.cloud.tencent.com/ind/document/product/1300/80695",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 524288,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "upstage/solar-pro4",
+      "model_version": "upstage/solar-pro4-20260810",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000001320000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000330000",
+        "request": "0"
+      },
+      "provider": "upstage/zdr",
+      "provider_name": "Upstage",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://console.upstage.ai/docs/capabilities/generate/reasoning",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 524288,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "upstage/solar-mini4",
+      "model_version": "upstage/solar-mini4-20260922",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000440000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000110000",
+        "request": "0"
+      },
+      "provider": "upstage/zdr",
+      "provider_name": "Upstage",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://console.upstage.ai/docs/capabilities/generate/reasoning",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "fireworks/ember-1",
+      "model_version": "fireworks/ember-1-20260923",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000016500000",
+        "internal_reasoning": "0",
+        "prompt": "0.000003300000",
+        "request": "0"
+      },
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://developers.cloudflare.com/ai/models/fireworks/ember-1/",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.chat",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "reasoning",
+        "reasoning_content",
+        "reasoning_details.text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "deepseek/deepseek-v4-pro-0813",
+      "model_version": "deepseek/deepseek-v4-pro-20260813",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000004356000",
+        "internal_reasoning": "0",
+        "prompt": "0.000001441000",
+        "request": "0"
+      },
+      "provider": "coreweave/fp8",
+      "provider_name": "CoreWeave",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://api-docs.deepseek.com/guides/thinking_mode",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "minimax/minimax-m3.1-flash",
+      "model_version": "minimax/minimax-m3.1-flash-20261019",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000660000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000165000",
+        "request": "0"
+      },
+      "provider": "nebius/fp4",
+      "provider_name": "Nebius",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "minimax/minimax-m3",
+      "model_version": "minimax/minimax-m3-20260531",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000001056000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000253000",
+        "request": "0"
+      },
+      "provider": "coreweave/fp4",
+      "provider_name": "CoreWeave",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "meta/muse-spark-open",
+      "model_version": "meta/muse-spark-open-20261015",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000004675000",
+        "internal_reasoning": "0",
+        "prompt": "0.000001375000",
+        "request": "0"
+      },
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://dev.meta.ai/docs/muse-spark-open/prompting",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "nvidia/nemotron-3.5-super-vl",
+      "model_version": "nvidia/nemotron-3.5-super-vl-20261015",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000550000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000165000",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp4",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "nvidia/nemotron-3.5-lightning",
+      "model_version": "nvidia/nemotron-3.5-lightning-20260807",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000176000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000066000",
+        "request": "0"
+      },
+      "provider": "deepinfra/bf16",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "qwen/qwen3.8-27b",
+      "model_version": "qwen/qwen3.8-27b-20260814",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000002750000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000220000",
+        "request": "0"
+      },
+      "provider": "deepinfra/bf16",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/README.md",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1000000,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "qwen/qwen3.8-2.4t-a95b",
+      "model_version": "qwen/qwen3.8-2.4t-a95b-20260812",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000006600000",
+        "internal_reasoning": "0",
+        "prompt": "0.000002200000",
+        "request": "0"
+      },
+      "provider": "novita",
+      "provider_name": "Novita",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/README.md",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "inclusionai/ling-3.1-flash",
+      "model_version": "inclusionai/ling-3.1-flash-20261002",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000990000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000330000",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp4",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://huggingface.co/inclusionAI/Ling-3.1-flash/blob/main/README.md",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "xiaomi/mimo-v2.6-flash",
+      "model_version": "xiaomi/mimo-v2.6-flash-20260921",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000308000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000154000",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp8",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://mimo.mi.com/docs/en-US/usage-guide/passing-back-reasoning_content",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "stepfun/step-5-preview",
+      "model_version": "stepfun/step-5-preview-20261008",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000002970000",
+        "internal_reasoning": "0",
+        "prompt": "0.000001100000",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp8",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://platform.stepfun.ai/cookbook/step-5-tool-calling",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 262144,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "mistralai/mistral-medium-3-5",
+      "model_version": "mistralai/mistral-medium-3.5-20260430",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000008250000",
+        "internal_reasoning": "0",
+        "prompt": "0.000001650000",
+        "request": "0"
+      },
+      "provider": "mistral/zdr",
+      "provider_name": "Mistral",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://docs.mistral.ai/studio/conversations/reasoning",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "tencent/hy4-preview",
+      "model_version": "tencent/hy4-preview-20260827",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000002751100",
+        "internal_reasoning": "0",
+        "prompt": "0.000000917400",
+        "request": "0"
+      },
+      "provider": "deepinfra/fp4",
+      "provider_name": "DeepInfra",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://intl.cloud.tencent.com/ind/document/product/1300/80695",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 524288,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "upstage/solar-pro4",
+      "model_version": "upstage/solar-pro4-20260810",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000001320000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000330000",
+        "request": "0"
+      },
+      "provider": "upstage/zdr",
+      "provider_name": "Upstage",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://console.upstage.ai/docs/capabilities/generate/reasoning",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 524288,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "upstage/solar-mini4",
+      "model_version": "upstage/solar-mini4-20260922",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000000440000",
+        "internal_reasoning": "0",
+        "prompt": "0.000000110000",
+        "request": "0"
+      },
+      "provider": "upstage/zdr",
+      "provider_name": "Upstage",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://console.upstage.ai/docs/capabilities/generate/reasoning",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "fireworks/ember-1",
+      "model_version": "fireworks/ember-1-20260923",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000016500000",
+        "internal_reasoning": "0",
+        "prompt": "0.000003300000",
+        "request": "0"
+      },
+      "provider": "fireworks",
+      "provider_name": "Fireworks",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://developers.cloudflare.com/ai/models/fireworks/ember-1/",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
+    },
+    {
+      "allowed_fallback_routes": [],
+      "answer_headroom_tokens": 1024,
+      "api": "openrouter.responses",
+      "context_tokens": 1048576,
+      "full_text_fields": [
+        "output.content.reasoning_text"
+      ],
+      "max_output_tokens": 32768,
+      "mode": {
+        "effort": "high"
+      },
+      "model_id": "deepseek/deepseek-v4-pro-0813",
+      "model_version": "deepseek/deepseek-v4-pro-20260813",
+      "parser_version": "arena_openrouter_reasoning_v1",
+      "price_ceiling": {
+        "completion": "0.000004356000",
+        "internal_reasoning": "0",
+        "prompt": "0.000001441000",
+        "request": "0"
+      },
+      "provider": "coreweave/fp8",
+      "provider_name": "CoreWeave",
+      "semantic_class": "full_generated_thinking",
+      "status": "approved",
+      "evidence": {
+        "documentation_url": "https://api-docs.deepseek.com/guides/thinking_mode",
+        "probe_id": "reasoning-expansion-20261027-two-scenario",
+        "verified_at": "2026-10-27T08:00:31.518332Z",
+        "probe_manifest_sha256": "0f1a04d4cdb8cd95d4f0d5590181787ace64fbf2d6e0184526bc925ccd6fc282"
+      }
     }
   ],
   "baseline_route": {

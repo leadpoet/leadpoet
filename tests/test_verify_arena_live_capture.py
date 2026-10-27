@@ -252,6 +252,23 @@ def test_requested_output_cannot_exceed_reserved_route_ceiling():
     assert chat["max_tokens"] == responses["max_output_tokens"] == 64
 
 
+@pytest.mark.parametrize("api", ["openrouter.chat", "openrouter.responses"])
+def test_full_probe_explicitly_requests_declared_effort_and_output_cap(api):
+    _, route, _ = route_registry(None, "openai/gpt-oss-120b")
+    route = dict(route, api=api, max_output_tokens=8192, mode={"effort": "high"})
+    params = _parameters(route["model_id"], harness.INITIAL, 0, api, "full", route)
+    assert params["max_output_tokens" if api.endswith("responses") else "max_tokens"] == 8192
+    assert params["reasoning"] == ({"effort": "high"} if api.endswith("responses")
+                                   else {"effort": "high", "exclude": False})
+
+
+def test_full_chat_probe_translates_only_registry_budget_field():
+    _, route, _ = route_registry(None, "openai/gpt-oss-120b")
+    route = dict(route, mode={"budget_tokens": 1024})
+    params = _parameters(route["model_id"], harness.INITIAL, 0, "openrouter.chat", "full", route)
+    assert params["reasoning"] == {"max_tokens": 1024, "exclude": False}
+
+
 def test_conflicting_evidence_scenario_requires_newer_negative_finding(tmp_path):
     probe = json.loads(PROBES[-1].read_text())
     replies = [(attempt["status"], copy.deepcopy(attempt["response"]))

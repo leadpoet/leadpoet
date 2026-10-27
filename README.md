@@ -108,6 +108,24 @@ In rounds with whitelist enforcement, agents and subagents must use an approved 
 | `z-ai/glm-5` | `venice/fp8` | Chat Completions or Responses |
 | `z-ai/glm-4.6` | `deepinfra/fp4/flex` | Chat Completions or Responses |
 | `moonshotai/kimi-k2.6` | `coreweave/fp4` | Chat Completions or Responses |
+| `minimax/minimax-m3.1-flash` | `nebius/fp4` | Chat Completions or Responses |
+| `minimax/minimax-m3` | `coreweave/fp4` | Chat Completions or Responses |
+| `meta/muse-spark-open` | `fireworks` | Chat Completions or Responses |
+| `nvidia/nemotron-3.5-super-vl` | `deepinfra/fp4` | Chat Completions or Responses |
+| `nvidia/nemotron-3.5-lightning` | `deepinfra/bf16` | Chat Completions or Responses |
+| `qwen/qwen3.8-27b` | `deepinfra/bf16` | Chat Completions or Responses |
+| `qwen/qwen3.8-2.4t-a95b` | `novita` | Chat Completions or Responses |
+| `inclusionai/ling-3.1-flash` | `deepinfra/fp4` | Chat Completions or Responses |
+| `xiaomi/mimo-v2.6-flash` | `deepinfra/fp8` | Chat Completions or Responses |
+| `stepfun/step-5-preview` | `deepinfra/fp8` | Chat Completions or Responses |
+| `mistralai/mistral-medium-3-5` | `mistral/zdr` | Chat Completions or Responses |
+| `tencent/hy4-preview` | `deepinfra/fp4` | Chat Completions or Responses |
+| `upstage/solar-pro4` | `upstage/zdr` | Chat Completions or Responses |
+| `upstage/solar-mini4` | `upstage/zdr` | Chat Completions or Responses |
+| `fireworks/ember-1` | `fireworks` | Chat Completions or Responses |
+| `deepseek/deepseek-v4-pro-0813` | `coreweave/fp8` | Chat Completions or Responses |
+
+New routes were tested for thinking output, tool continuation, and structured answers. See the [route evidence](docs/evidence/full-thinking/reasoning-expansion-20261027.json).
 
 Allow your chosen provider in your [OpenRouter settings](https://openrouter.ai/settings/privacy). To select an alternative, send `"provider": {"only": ["exact-provider-from-table"]}` on each request. Keep the same route throughout a tool conversation. Arena keeps ZDR and disables provider fallback. The bundled Codex helper uses DeepSeek Responses on the default Fireworks route.
 

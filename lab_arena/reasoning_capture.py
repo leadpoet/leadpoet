@@ -152,27 +152,55 @@ def _apply_full(operation_id: str, parameters: Mapping[str, Any],
                   and (selected is None or item["provider"] == selected[0])), None)
     if entry is None:
         raise ValueError("reasoning_route_unsupported")
-    field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
-    cap = min(entry["max_output_tokens"], operations.OPENROUTER_RESPONSES_MAX_OUTPUT_TOKENS)
-    budget = entry["mode"].get("budget_tokens", 1024)
-    required = budget + entry["answer_headroom_tokens"]
-    if required > cap:
-        raise ValueError("reasoning_headroom_unavailable")
-    # Use the exact output envelope exercised by the route probe. Shrinking
-    # it for a short agent request can consume the answer in thinking tokens.
-    result[field] = cap
-    result.pop("reasoning_effort", None)
-    result.pop("include_reasoning", None)
     mode = entry["mode"]
-    if "effort" in mode:
-        reasoning = {"effort": mode["effort"]}
-    elif "budget_tokens" in mode:
-        reasoning = {"max_tokens": mode["budget_tokens"]}
-    else:
-        reasoning = {"enabled": True}
-    if operation_id == "openrouter.chat":
-        reasoning["exclude"] = False
-    result["reasoning"] = reasoning
+    changes = []
+    reasoning = result.get("reasoning", {})
+    if not isinstance(reasoning, Mapping):
+        raise ValueError("reasoning_controls_invalid")
+    # Admission may refuse disabled or ambiguous controls, but capture must
+    # not turn them on or replace an explicit effort/budget with the probe's.
+    if (reasoning.get("enabled") is False or reasoning.get("exclude") is True
+            or result.get("include_reasoning") is False):
+        raise ValueError("reasoning_controls_invalid")
+    if "include_reasoning" in result and type(result["include_reasoning"]) is not bool:
+        raise ValueError("reasoning_controls_invalid")
+    for key in ("enabled", "exclude"):
+        if key in reasoning and type(reasoning[key]) is not bool:
+            raise ValueError("reasoning_controls_invalid")
+    efforts = [value for present, value in (
+        ("effort" in reasoning, reasoning.get("effort")),
+        ("reasoning_effort" in result, result.get("reasoning_effort")),
+    ) if present]
+    if any(value not in EFFORTS[1:] for value in efforts) or len(set(efforts)) > 1:
+        raise ValueError("reasoning_controls_invalid")
+    budgets = [reasoning[key] for key in ("max_tokens", "budget_tokens") if key in reasoning]
+    if (any(type(value) is not int or value <= 0 for value in budgets)
+            or len(set(budgets)) > 1 or (efforts and budgets)):
+        raise ValueError("reasoning_controls_invalid")
+    if not (efforts or budgets or reasoning.get("enabled") is True
+            or result.get("include_reasoning") is True):
+        if "reasoning" in result:
+            # A summary/context request is not permission to select an effort.
+            # Refuse insufficient full-thinking controls without rewriting them.
+            raise ValueError("reasoning_controls_invalid")
+        # Retain the established route default only when the caller did not
+        # select a reasoning mode. It is a default, not a newly verified mode.
+        reasoning = dict(reasoning)
+        reasoning.update({"effort": mode["effort"]} if "effort" in mode else
+                         {"max_tokens": mode["budget_tokens"]} if "budget_tokens" in mode else
+                         {"enabled": True})
+        if operation_id == "openrouter.chat":
+            reasoning.setdefault("exclude", False)
+        result["reasoning"] = reasoning
+        changes.append("reasoning_default")
+    field = "max_output_tokens" if operation_id == "openrouter.responses" else "max_tokens"
+    if field not in result:
+        result[field] = operations.OPENROUTER_MAX_OUTPUT_TOKENS
+        changes.append("output_limit_default")
+    actual_budget = (result.get("reasoning") or {}).get("max_tokens",
+                     (result.get("reasoning") or {}).get("budget_tokens"))
+    if actual_budget is not None and (type(result[field]) is not int or actual_budget >= result[field]):
+        raise ValueError("reasoning_headroom_unavailable")
     canonical = json.dumps(frozen, sort_keys=True, separators=(",", ":")).encode()
     evidence = entry["evidence"]
     annotation = {
@@ -180,6 +208,8 @@ def _apply_full(operation_id: str, parameters: Mapping[str, Any],
         "semantic_class": "full_generated_thinking", "model_id": model,
         "model_version": entry["model_version"], "provider_route": entry["provider"],
         "provider_name": entry["provider_name"],
+        # Mode and allowance describe the frozen probe, not the actual call.
+        # The hashed parameters and captured outbound body retain that call.
         "api": operation_id, "mode": copy.deepcopy(mode),
         "full_text_fields": list(entry["full_text_fields"]),
         "context_tokens": entry["context_tokens"],
@@ -189,7 +219,7 @@ def _apply_full(operation_id: str, parameters: Mapping[str, Any],
         "probe_id": evidence["probe_id"],
         "probe_manifest_sha256": evidence["probe_manifest_sha256"],
         "registry_sha256": hashlib.sha256(canonical).hexdigest(),
-        "changes": ["reasoning", "tested_output_allowance"],
+        "changes": changes,
     }
     return result, annotation
 

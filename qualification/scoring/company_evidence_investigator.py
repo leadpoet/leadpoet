@@ -25,9 +25,9 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
-from gateway.qualification.models import canonical_candidate_prompt_url
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from arena_reviewer_runtime.transport import post_json
+from gateway.qualification.models import canonical_candidate_prompt_url
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url

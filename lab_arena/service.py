@@ -5875,6 +5875,9 @@ class ArenaService:
         # Describes the gateway serving this lease, not the frozen scorer image.
         # No admission, accounting or completion decision depends on this value.
         lease["gateway_source_commit"] = runtime_version.SOURCE_METADATA["validator_source_commit"]
+        # Reader support is independent of the frozen scoring/capture policy.
+        # Older gateways omit this field, so new runners use legacy failure tags.
+        lease[training_observations.OPTIONAL_FAILURE_TAG_CAPABILITY] = True
         lease["icp_wall_clock_seconds"] = int(configuration.get(
             "icp_wall_clock_seconds", contracts.ICP_WALL_CLOCK_SECONDS
         ))

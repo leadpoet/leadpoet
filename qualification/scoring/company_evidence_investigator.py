@@ -89,6 +89,7 @@ MAX_PREFETCHED_PAGES = 3
 MAX_RETURNED_FETCHED_PAGES = MAX_PREFETCHED_PAGES + MAX_FETCH_CALLS
 MAX_STAGE_ARCHIVE_CARDS = 3
 MAX_SEARCH_RESULTS = 5
+MAX_INDUSTRY_SEARCH_RESULTS = 10
 MAX_PAGE_CHARACTERS = 24_000
 MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
@@ -2426,7 +2427,10 @@ async def _search_web(
     include_domains: Sequence[str] = (),
     discovery_highlights: bool = False,
 ) -> dict[str, Any]:
-    payload = {"query": query[:500], "type": "auto", "numResults": MAX_SEARCH_RESULTS}
+    # The frozen provider price includes ten results. Broader discovery does
+    # not expand fetched evidence, model turns, search calls or fetch budgets.
+    result_limit = MAX_INDUSTRY_SEARCH_RESULTS if discovery_highlights else MAX_SEARCH_RESULTS
+    payload = {"query": query[:500], "type": "auto", "numResults": result_limit}
     if discovery_highlights:
         payload["contents"] = {"highlights": {"maxCharacters": MAX_SEARCH_LOCATOR_EXCERPT_CHARS}}
     if include_domains:
@@ -2449,7 +2453,7 @@ async def _search_web(
     if not isinstance(results, list):
         raise ValueError("search_response_malformed")
     locators = []
-    for item in results[:MAX_SEARCH_RESULTS]:
+    for item in results[:result_limit]:
         if not isinstance(item, Mapping):
             continue
         url = _safe_https_url(item.get("url") or item.get("id"))

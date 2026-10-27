@@ -424,7 +424,7 @@ async def test_dynamic_fetch_threads_parsed_listing_count(monkeypatch):
         prefer_dynamic_job_index=True,
     )
 
-    assert fetched["results"][0]["meta"] == {
+    assert intent._careers_index_receipt(fetched["results"][0]["meta"]) == {
         "kind": "first_party_careers_index",
         "observed_job_link_count": 3,
     }

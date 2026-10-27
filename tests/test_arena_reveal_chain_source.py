@@ -106,6 +106,11 @@ SPEC484_FIXTURE = (
     / "fixtures"
     / "subtensor_events_spec484_block9348526.json"
 )
+SPEC486_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "fixtures"
+    / "subtensor_events_spec486_block9369766.json"
+)
 
 
 def _compact(value: int) -> bytes:
@@ -438,6 +443,7 @@ def test_historical_reveal_succeeds_after_latest_head_passed_deadline(monkeypatc
         (SPEC482_FIXTURE, 482),
         (SPEC483_FIXTURE, 483),
         (SPEC484_FIXTURE, 484),
+        (SPEC486_FIXTURE, 486),
     ],
 )
 def test_exact_parent_runtime_and_transition_events_prove_reveal(
@@ -481,7 +487,7 @@ def test_exact_parent_runtime_and_transition_events_prove_reveal(
     ) in fixture.calls
 
 
-@pytest.mark.parametrize(("fixture_path", "spec_version"), [(SPEC475_FIXTURE, 475), (SPEC477_FIXTURE, 477), (SPEC478_FIXTURE, 478), (SPEC479_FIXTURE, 479), (SPEC482_FIXTURE, 482), (SPEC484_FIXTURE, 484)])
+@pytest.mark.parametrize(("fixture_path", "spec_version"), [(SPEC475_FIXTURE, 475), (SPEC477_FIXTURE, 477), (SPEC478_FIXTURE, 478), (SPEC479_FIXTURE, 479), (SPEC482_FIXTURE, 482), (SPEC484_FIXTURE, 484), (SPEC486_FIXTURE, 486)])
 @pytest.mark.parametrize("control", ["exact", "wrong_vector", "wrong_owner"])
 def test_measured_chain_source_binds_published_vector_and_recipient(fixture_path, spec_version, control):
     fixture = MeasuredArchiveFixture(fixture_path, spec_version)
@@ -545,6 +551,7 @@ def test_measured_chain_source_binds_published_vector_and_recipient(fixture_path
         479: ([(0, 65535), (15, 3295), (229, 4393)], 9286245, 9286242, 25),
         482: ([(0, 65535), (102, 5617), (247, 22469)], 9334846, 9334845, 39),
         484: ([(0, 65535), (247, 11565)], 9348526, 9348526, 41),
+        486: ([(0, 65535), (153, 11565)], 9369766, 9369763, 44),
     }[spec_version]
     assert result["weights"] == expected[0]
     assert result["reveal_block"] == expected[1]

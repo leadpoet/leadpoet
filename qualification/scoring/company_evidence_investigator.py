@@ -4903,6 +4903,14 @@ async def investigate_company_evidence(
             forced_next_tool = ('fetch_page' if industry_discovery
                                 and industry_discovery.get('results')
                                 and not loaded_industry_sources else '')
+            industry_submit_ready = bool(
+                industry_review_model and requested_targets == ('industry',)
+                and initial_industry.get('status') == 'VERIFIED'
+            )
+            if industry_submit_ready:
+                # The full criterion already has bound evidence. Finish the
+                # existing submission checks instead of reopening research.
+                forced_next_tool = 'submit_findings'
             if industry_gap_search_needed and not loaded_industry_sources:
                 messages.append({'role': 'user', 'content': (
                     'server_industry_discovery contains search results for the '
@@ -5021,6 +5029,7 @@ async def investigate_company_evidence(
                 )
                 turn_forced_submit = bool(
                     correction_turn
+                    or industry_submit_ready
                     or (
                         not required_tool
                         and _turn >= (
@@ -5080,11 +5089,7 @@ async def investigate_company_evidence(
                     and industry_followup_pending
                     and not forced_stage_search_pending
                 )
-                industry_investigation_model = industry_review_model if (
-                    force_submit or required_tool == "submit_findings"
-                    or industry_gap_search_needed or forced_industry_search_call
-                    or (required_tool == "fetch_page" and industry_followup_search_completed)
-                ) else ""
+                industry_investigation_model = industry_review_model
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending
                     and required_tool == "submit_findings"

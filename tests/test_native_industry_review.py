@@ -25,6 +25,12 @@ def install(monkeypatch, *, decision='match', missing=None, mutation=None, **kwa
 
     async def post(session, url, *, headers, payload):
         if 'response_format' not in payload:
+            if payload.get('tool_choice') == {
+                    'type': 'function', 'function': {'name': 'submit_findings'}}:
+                from tests.test_company_evidence_judgment_reserve import _response
+                calls['model'].append(payload)
+                return 200, _response('submit_findings', {
+                    'findings': finding if isinstance(finding, list) else [finding]})
             return await original(session, url, headers=headers, payload=payload)
         review_calls.append(payload)
         pages = [page for message in payload['messages'][2:]
@@ -220,7 +226,7 @@ def test_initial_gap_discovery_is_not_evidence_and_does_not_force_an_empty_fetch
 
 @pytest.mark.parametrize('enabled', [False, True])
 @pytest.mark.parametrize('positive_review', [False, True])
-def test_research_without_industry_gap_keeps_original_research_model(monkeypatch, enabled, positive_review):
+def test_industry_research_keeps_the_frozen_model_even_without_a_gap(monkeypatch, enabled, positive_review):
     run, calls, _, _ = install(monkeypatch, finding=_finding('industry',
         observed_industry='Software', activity_role='supplier_operator',
         evidence_url=URL, evidence_quote='Coreworks connects account workflows to its analysis and reporting product.'))
@@ -236,11 +242,54 @@ def test_research_without_industry_gap_keeps_original_research_model(monkeypatch
     assert calls['model']
     expected = c.POSITIVE_SEMANTIC_REVIEW_MODEL if positive_review else c.INVESTIGATOR_MODEL
     for request in calls['model']:
-        final = request.get('tool_choice') == {'type': 'function', 'function': {'name': 'submit_findings'}}
-        assert request['model'] == (MODEL if enabled and final else expected)
+        assert request['model'] == (MODEL if enabled else expected)
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
     assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
     assert result['usage']['search_calls'] <= c.MAX_SEARCH_CALLS
+
+
+def test_verified_industry_only_request_enters_final_submission_without_new_research(monkeypatch):
+    run, calls, _, reviews = install(monkeypatch, finding=_finding('industry',
+        observed_industry='Software', activity_role='supplier_operator',
+        evidence_url=URL, evidence_quote=FEATURES))
+    result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
+                            prior_observations={'submitted_source_urls': [URL]}))
+    assert result['_completed_submit'] is True
+    assert calls['model'][0]['model'] == MODEL
+    assert calls['model'][0]['tool_choice'] == {'type': 'function', 'function': {'name': 'submit_findings'}}
+    assert not calls['search'] and not calls['primary'] and not calls['contents']
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert reviews[-1]['response_format']['json_schema']['name'] == 'industry_proposal'
+
+
+def test_initial_match_does_not_override_an_unproven_final_review(monkeypatch):
+    seen = []
+    def final_missing(result):
+        seen.append(result)
+        if len(seen) > 1:
+            result.update(decision='unavailable', missing_requirements=['Account workflows'])
+    run, calls, _, _ = install(monkeypatch, mutation=final_missing)
+    result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
+                            prior_observations={'submitted_source_urls': [URL]}))
+    assert result['_completed_submit'] is True
+    assert result['claims']['industry']['status'] == 'UNPROVEN'
+    assert not calls['search'] and not calls['primary']
+
+
+def test_initial_industry_match_does_not_skip_other_requested_checks(monkeypatch):
+    from tests.test_company_evidence_investigator import _attribute_finding
+    run, calls, _, _ = install(monkeypatch, finding=[_finding('industry'), _attribute_finding()])
+    original = c.investigate_company_evidence
+    async def invoke(**kwargs):
+        kwargs['targets'] = ('industry', 'required_attribute')
+        return await original(**kwargs)
+    monkeypatch.setattr(c, 'investigate_company_evidence', invoke)
+    result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
+                            prior_observations={'submitted_source_urls': [URL]}))
+    assert calls['model'][0]['tool_choice'] == 'required'
+    assert result['_completed_submit'] is True
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert result['claims']['required_attribute']['status'] == 'UNPROVEN'
 
 
 def test_unproven_industry_review_cannot_leave_an_old_pass(monkeypatch):

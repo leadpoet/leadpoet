@@ -17,6 +17,7 @@ MAX_PAGES = 30  # Three prefetch + thirteen retained + four fetch + ten search.
 MAX_PAGE_CHARS = 24_000
 MAX_TOTAL_CHARS = 7 * MAX_PAGE_CHARS
 SPAN_CHARS = 1_600
+MAX_SPANS = 128  # Arena's existing list limit also applies to the citation enum.
 ROLES = ("supplier_operator", "customer_user", "partner_other", "unresolved")
 SYSTEM = """Classify the named company's own offering against the complete original industry criterion, using only the supplied sources. Read the criterion as a business description, not as a phrase-matching exercise.
 Preserve every required offering, capability, channel and customer role, including the scope of AND and OR. Examples introduced by 'such as' are illustrative. Do not add narrower requirements. Functional equivalents count. Concrete facts can establish a requirement by a clear inference; explain that inference. Mere industry proximity, possible applicability or an unsupported guess does not count.
@@ -56,10 +57,16 @@ class Packet:
 
     def spans(self):
         spans = {}
+        width = SPAN_CHARS
+        # Retained retry pages can exceed the enum limit through per-page
+        # rounding. Enlarge spans only as needed; preserve every source byte
+        # and stay within the native 2,000-character quote limit.
+        while sum((len(body) + width - 1) // width for _, body, _ in self.pages) > MAX_SPANS:
+            width += 1
         for source_id, body, source_url in self.pages:
             offset = 0
-            for start in range(0, len(body), SPAN_CHARS):
-                text = body[start:start + SPAN_CHARS]
+            for start in range(0, len(body), width):
+                text = body[start:start + width]
                 raw = text.encode("utf-8")
                 end = offset + len(raw)
                 span_id = f"{self.digest[:16]}:{source_id}:{offset}:{end}"

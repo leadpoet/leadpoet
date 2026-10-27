@@ -124,6 +124,24 @@ def test_native_source_bounds_reject_extra_pages_and_oversized_bodies():
             {'source_id': 's0', 'body': 'x' * 24001, 'source_url': 'https://example.com'}])
 
 
+@pytest.mark.parametrize('character', ['X', '"', '\U0001f30d'])
+def test_retry_corpus_fits_citation_schema_without_losing_source_bytes(character):
+    from lab_arena.operations import validate_operation_request
+    # Uneven page lengths can exceed 128 spans even below the text ceiling.
+    pages = [{'source_id': f's{i}', 'source_url': f'https://example.com/{i}',
+              'body': character * (6401 if i < 14 else 4801)} for i in range(30)]
+    value = industry.prepare(CRITERION, COMPANY, pages)
+    request = industry.request_payload(value, model=industry.DEFAULT_MODEL)
+    validate_operation_request('openrouter.chat', request)
+    assert len(value.spans()) <= 128
+    for source_id, body, _ in value.pages:
+        spans = [s for s in value.spans().values() if s['source_id'] == source_id]
+        assert ''.join(s['text'] for s in spans) == body
+        assert all(len(s['text']) <= 2000 for s in spans)
+        assert spans[0]['start_byte'] == 0
+        assert spans[-1]['end_byte'] == len(body.encode('utf-8'))
+
+
 def test_unavailable_needs_a_missing_requirement():
     value = packet()
     with pytest.raises(ValueError):

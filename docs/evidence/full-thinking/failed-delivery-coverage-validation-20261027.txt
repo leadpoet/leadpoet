@@ -54,3 +54,20 @@ Root owns fresh production evidence, PR, merge, deployment and final verificatio
 Old exports without an upstream parsed-response hash fail closed. Reassemble
 from the original retained raw ledger bytes with the new exporter; do not add a
 hash to an old exported object or rewrite the original export.
+
+Owner production readback, 2026-10-27 09:36 UTC:
+An isolated checkout of 7cc2c3f1b rebuilt an accepted October 27 execution from
+the production SQL ledger and 238 retained objects. All three actual Deepline
+502 failed writes passed the exact failed-delivery proof. All three still failed
+the successful-delivery check. All 34 model responses and usage objects matched
+SQL; both returned thinking segments and 2,623 readable source events matched.
+The unchanged historical export remained incomplete for its separately reported
+privacy, old-policy and unfinished judging/cost evidence. It was not converted
+into an eligible October 28 example. No provider calls or production writes.
+
+Owner publication preservation checks:
+PATH=/opt/homebrew/opt/postgresql@17/bin:$PATH /opt/homebrew/bin/python3.11 -m pytest -q tests/lab_arena/training_coverage_publication_postgres_test.py tests/lab_arena/training_storage_publication_postgres_test.py tests/lab_arena/training_publication569_postgres_test.py
+Result: 11 passed in 419.83 seconds. Real local PostgreSQL exercised publication,
+80% coverage, eligible-peer promotion and preserved historical authority. Agent
+and judging inputs in these tests remain synthetic; they are regression proof,
+not a new live sourcing benchmark.

@@ -8422,6 +8422,36 @@ async def _run_targeted_company_evidence_investigation(
             structured_identity=structured_profile_identity_evidence,
         )
     )
+    investigation_observed_linkedin = verdict.get("observed_company_linkedin")
+    if (
+        investigation_observed_linkedin == ""
+        and investigation_web_identity.get("decision") == COMPANY_FIT_MATCH
+        and investigation_web_identity.get("evidence_source")
+        == "company_web_reverification"
+        and _complete_verified_first_party_identity(
+            company.company_website,
+            {verified_transport_domain} if verified_transport_domain else set(),
+            {
+                **{
+                    key: investigation_web_identity.get(key)
+                    for key in (
+                        "submitted_name", "submitted_domain", "submitted_linkedin_slug",
+                        "observed_name", "observed_domain", "observed_linkedin_slug",
+                    )
+                },
+                "verified_name": investigation_verified_identity.get("normalized_name"),
+                "verified_domain": investigation_verified_identity.get("registrable_dns_domain"),
+                "verified_linkedin_slug": investigation_verified_identity.get("linkedin_company_slug"),
+            },
+        )
+    ):
+        # Preserve the already accepted independent identity in this input.
+        # A missing raw observation is not itself proof; nonempty observations,
+        # including conflicting or malformed URLs, are never replaced here.
+        investigation_observed_linkedin = _strict_linkedin_company_profile_url(
+            "https://www.linkedin.com/company/"
+            + str(investigation_web_identity.get("observed_linkedin_slug") or "")
+        ) or investigation_observed_linkedin
     headcount_conflict_context = (
         _headcount_conflict_context(
             structured_employee_size_evidence, investigation_verified_identity, icp,
@@ -8596,6 +8626,7 @@ async def _run_targeted_company_evidence_investigation(
                     "geography_evidence_quote",
                 )
             },
+            "observed_company_linkedin": investigation_observed_linkedin,
             **(
                 {"untrusted_headcount_conflict_context": headcount_conflict_context}
                 if headcount_conflict_context else {}

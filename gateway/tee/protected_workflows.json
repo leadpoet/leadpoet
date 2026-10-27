@@ -902,7 +902,7 @@
       "symbol": "_verify_company_fit"
     },
     {
-      "ast_sha256": "sha256:b9ea5c7939f54ddd15d0e6314d329fff122f024aaef0f2436fcba671a3b86f89",
+      "ast_sha256": "sha256:7b095f8bb11cc2f11b53aaf708d80722dc8e80a6ee293937d5c293077c870215",
       "path": "scripts/arena_runtime_cache_retirement.py",
       "symbol": "__module__"
     },
@@ -927,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:9c0f557756dfe8632517bb06b5454f5f92f49bea7f2de344a8c3106dcf9c3172",
-  "protected_source_commit": "08cd5c97f5dda85b47c42b7d8d34d25cfde1dba4",
+  "manifest_hash": "sha256:3e7c387d1a754c16d61c01fcc671a6f88cfd1ea11bcec5b6fdef93cf7d2bf53a",
+  "protected_source_commit": "a8af0b0677cde6db6b695a0491e4b55759171980",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from lab_arena import code_review, contracts, reasoning_capture, training_coverage, training_export, training_steps, training_thinking
+from lab_arena import code_review, contracts, operations, reasoning_capture, training_coverage, training_export, training_observations, training_steps, training_thinking
 
 
 def _result(reasons, **counts):
@@ -655,6 +655,160 @@ def _transient_artifact_gap_verified(example, submission, artifacts):
         return False
 
 
+def _retained_delivery_evidence_exact(call):
+    """Check every retained result and API route, including unselected receipts."""
+    request = call.get("request") or {}
+    outbound = request.get("outbound") or {}
+    operation = operations.get_operation(call.get("operation_id"))
+    if (operation is None or call.get("provider") != operation.provider
+            or outbound.get("method") != operation.method
+            or outbound.get("host") != (operation.outbound_host or operation.host)
+            or outbound.get("path") != (operation.outbound_path or operations._render_path(
+                operation, request.get("hashed_parameters") or {}))
+            or outbound.get("body_sha256") != (
+                contracts.hash_bytes(b"") if outbound.get("body") is None
+                else contracts.document_hash(outbound["body"]))):
+        return False
+    lifecycle_ids = {row.get("entry_id") for row in call.get("lifecycle") or []}
+    permitted = {"hidden_reasoning"} if call.get("operation_id") in reasoning_capture.OPERATIONS else set()
+    receipts = call.get("response_receipts") or []
+    if (not receipts or len({row.get("entry_id") for row in receipts}) != len(receipts)):
+        return False
+    selected_receipts = [row for row in receipts if row.get("entry_id") == training_export.response_entry_id(call)]
+    if (len(selected_receipts) != 1
+            or (selected_receipts[0].get("metadata") or {}).get("status") != call.get("response_status")):
+        return False
+    for receipt in receipts:
+        if (type(receipt.get("entry_id")) is not int or receipt["entry_id"] not in lifecycle_ids
+                or receipt.get("response_unavailable")
+                or not set(receipt.get("privacy_redactions") or []) <= permitted
+                or not training_steps._exact(training_steps._receipt_response(call, receipt), response=True)
+                or type((receipt.get("metadata") or {}).get("status")) is not int
+                or not 100 <= receipt["metadata"]["status"] <= 599
+                or type(receipt.get("wire_body_bytes")) is not int or receipt["wire_body_bytes"] < 0
+                or not isinstance(receipt.get("wire_body_sha256"), str)
+                or contracts.SHA256_RE.fullmatch(receipt["wire_body_sha256"]) is None):
+            return False
+    upstream = call.get("upstream_response_receipts") or []
+    if len({row.get("entry_id") for row in upstream}) != len(upstream):
+        return False
+    for receipt in upstream:
+        value = receipt.get("response")
+        if (receipt.get("privacy_redactions") or not training_steps._exact(value, response=True)
+                or receipt.get("provenance") != "private_upstream_response_receipt"
+                or receipt.get("delivery_to_worker") != "not_proved"
+                or type(receipt.get("entry_id")) is not int
+                or receipt["entry_id"] not in lifecycle_ids
+                or type(receipt.get("status")) is not int or not 100 <= receipt["status"] <= 599
+                or receipt.get("body_sha256") != receipt.get("wire_body_sha256")
+                or type(receipt.get("body_bytes")) is not int or receipt["body_bytes"] < 0
+                or receipt["body_bytes"] != receipt.get("wire_body_bytes")
+                or not isinstance(receipt.get("body_sha256"), str)
+                or contracts.SHA256_RE.fullmatch(receipt["body_sha256"]) is None
+                or receipt.get("response_sha256") != contracts.document_hash(value)):
+            return False
+    return True
+
+
+def _failed_delivery_call_verified(example, call):
+    """Prove an exact settled result without claiming delivery or a target."""
+    if ((call.get("response_provenance") or {}).get("delivery_to_worker") != "socket_write_failed"
+            or call.get("run_id") != example.get("run_id") or call.get("evidence_gaps")
+            or call.get("accounting_state") != "settlement"
+            or type(call.get("actual_microusd")) is not int or call["actual_microusd"] < 0
+            or not training_thinking._terminal_accounting_matches(call, "settlement", call["actual_microusd"])
+            or not _retained_delivery_evidence_exact(call)):
+        return False
+    evidence = training_steps._failed_host_result(example, call)
+    provenance = call.get("response_provenance") or {}
+    entry_ids = provenance.get("worker_received_receipt_entry_ids") or []
+    if (provenance.get("worker_body_source") != "ledger_terminal"
+            or provenance.get("worker_body_exact_in_artifact") is not True
+            or len(entry_ids) != len(set(entry_ids))
+            or set(entry_ids) != {row["entry_id"] for row in evidence["receipts"]}):
+        return False
+    response = call.get("response")
+    if (not isinstance(response, Mapping) or response != evidence["response"]
+            or contracts.document_hash(response) != call.get("response_sha256")
+            or call.get("response_status") != evidence["write"]["status"]
+            or evidence["write"]["status"] >= 400 and not call.get("upstream_response_receipts")):
+        return False
+    if call.get("operation_id") in reasoning_capture.OPERATIONS:
+        op, body, tools = training_steps._model_request(example, call)
+        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        if (not training_thinking._policy(call, registry)
+                or not (training_thinking._legacy_tested_controls_match(call)
+                        or training_thinking._captured_reasoning_controls_match(call, registry))):
+            return False
+        if evidence["write"]["status"] < 400:
+            state = training_thinking.attempt_coverage(call, example.get("role", "miner"), registry)
+            if not state["route_reviewed"] or not state["provider_route_verified"]:
+                return False
+        if op == "openrouter.chat":
+            training_steps._chat_messages(body.get("messages"), allow_reasoning_history=True,
+                                           allow_tool_error_history=True, tools=tools)
+        else:
+            training_steps._responses_input(body.get("input"), tools=tools,
+                max_tool_calls=body.get("max_tool_calls"), allow_reasoning_history=True,
+                allow_tool_error_history=True)
+    return True
+
+
+def _failed_delivery_gap_verified(example):
+    """An exact failed write consumes coverage; unknown capture loss stays hard."""
+    if not training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
+        return None
+    run_id = example.get("run_id")
+    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+    payload = artifact.get("payload") or {}
+    try:
+        if (set(artifact) != {"schema_version", "run_id", "kind", "lease_generation",
+                              "claim_request_hash", "payload", "payload_sha256"}
+                or artifact.get("schema_version") != training_observations.SCHEMA_VERSION
+                or artifact.get("run_id") != run_id or artifact.get("kind") != "execute"
+                or type(artifact.get("lease_generation")) is not int or artifact["lease_generation"] < 1
+                or not isinstance(artifact.get("claim_request_hash"), str)
+                or contracts.SHA256_RE.fullmatch(artifact["claim_request_hash"]) is None
+                or artifact.get("payload_sha256") != contracts.document_hash(payload)
+                or payload.get("complete") is not False or payload.get("failures") != ["capture_incomplete"]
+                or training_observations._validate_payload(payload) != payload
+                or any(payload[count] != len(payload[rows]) for count, rows in (
+                    ("observation_count", "observations"), ("response_receipt_count", "response_receipts"),
+                    ("agent_observation_count", "agent_observations")))
+                or payload["local_refusal_count"] != sum(row["kind"] == "local_refusal" for row in payload["observations"])
+                or example.get("partial_worker_observation_artifacts")):
+            return None
+        calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
+        receipts = payload["response_receipts"]
+        identities = [call["call_identity"] for call in calls]
+        if (not any(call.get("operation_id") in reasoning_capture.OPERATIONS for call in calls)
+                or len(identities) != len(set(identities))
+                or len(receipts) != len(calls)
+                or {row["call_identity"] for row in receipts} != set(identities)
+                or any(row["write_state"] not in {"socket_written", "socket_write_failed"} for row in receipts)
+                or not any(row["write_state"] == "socket_write_failed" for row in receipts)):
+            return None
+        # A generic capture flag needs a complete provider journal. Unrelated
+        # reported capture failures cannot be explained by one failed write.
+        if any(row["kind"] in {"capture_failure", "http_response_metadata"}
+               or row["kind"] in {"web_fetch", "web_fetch_binary"} and row["data"].get("capture", {}).get("complete") is False
+               or row["kind"] == "state_snapshot" and row["data"]["name"] == "automatic_capture_summary"
+               and isinstance(row["data"]["value"], dict) and row["data"]["value"].get("complete") is False
+               for row in payload["agent_observations"]):
+            return None
+        for call in calls:
+            if (call.get("accounting_state") != "settlement"
+                    or type(call.get("actual_microusd")) is not int or call["actual_microusd"] < 0
+                    or not _retained_delivery_evidence_exact(call)
+                    or not training_thinking._terminal_accounting_matches(call, "settlement", call["actual_microusd"])):
+                return None
+        reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])
+        return training_thinking._attributed_score_only_gaps(
+            example, reasons, failed_delivery_proof=_failed_delivery_call_verified)
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return None
+
+
 def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | None],
                    selected_run_ids: Sequence[str], *, enabled: bool,
                    minimum_coverage_percent: int = 100,
@@ -694,6 +848,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
         reasons.append("source_archive_hash_missing")
     for run_id in selected:
         run_reasons = []
+        failed_delivery_verified = False
         reasoning_counts = {key: 0 for key in reasoning_totals}
         example = examples_by_run.get(run_id)
         if not isinstance(example, Mapping):
@@ -745,6 +900,12 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                 ancillary_gaps = frozenset((example.get("completeness") or {}).get("incomplete_reasons") or [])
                 run_reasons.append("selected_artifact_temporarily_unavailable")
             if ancillary_gaps is None:
+                if new_policy and minimum_coverage_percent < 100:
+                    delivery_gaps = _failed_delivery_gap_verified(example)
+                    if delivery_gaps is not None:
+                        failed_delivery_verified = True
+                        run_reasons.append("worker_delivery_failed")
+                        continue
                 run_reasons.append("trajectory_evidence_incomplete")
                 continue
             if (not isinstance(example.get("output"), Mapping)
@@ -863,6 +1024,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                             else set())
                     if unavailable_ref is not None:
                         soft.add("accepted_output_unavailable")
+                    if failed_delivery_verified:
+                        soft.add("worker_delivery_failed")
                     if transient_verified:
                         soft.add("selected_artifact_temporarily_unavailable")
                         # A composed source/cost proof already checked every

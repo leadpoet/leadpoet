@@ -1411,7 +1411,8 @@ def _selected_input_output_binding(
     return score_ids
 
 
-def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *, target_omission_proof=None) -> frozenset[str] | None:
+def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *, target_omission_proof=None,
+                                failed_delivery_proof=None) -> frozenset[str] | None:
     """Use per-run export attribution only when the selected execution is exact."""
     proof = example.get("completeness") or {}
     dimensions = proof.get("dimensions") or {}
@@ -1443,7 +1444,9 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
             return None
         if source_id == run_id:
             if (row["kind"] != "execute" or row["status"] != "accepted"
-                    or source_research or source_costs):
+                    or source_research != ({"worker_observations_incomplete"}
+                                           if failed_delivery_proof is not None else set())
+                    or source_costs):
                 return None
         elif row["kind"] != "score":
             return None
@@ -1459,7 +1462,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
         return None
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
-    if (not _provider_capture_complete(example, run_id)
+    if (failed_delivery_proof is None and not _provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
@@ -1483,6 +1486,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
         response = call.get("response")
         model = call.get("operation_id") in reasoning_capture.OPERATIONS
         permitted_redactions = {"hidden_reasoning"} if model else set()
+        failed_delivery = (failed_delivery_proof is not None
+                           and failed_delivery_proof(example, call))
         if (call_gaps or call.get("accounting_state") != "settlement"
                 or type(call.get("actual_microusd")) is not int
                 or (call.get("request_capture") or {}).get("redacted") is True
@@ -1499,8 +1504,13 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
                 or (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
                     and (provenance.get("agent_receipt") != "reported_exact_body_received"
                          or provenance.get("selected_response_acknowledged") is not True))
-                or provenance.get("delivery_to_worker") != "socket_written"):
+                or provenance.get("delivery_to_worker") != (
+                    "socket_write_failed" if failed_delivery else "socket_written")):
             return None
+        if failed_delivery:
+            # The eligibility caller proves the undelivered request/result.
+            # It cannot become a candidate, even when the saved result is valid.
+            continue
         if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
             try:
                 evidence = training_steps._host_result(example, call)
@@ -1536,6 +1546,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
                                for read in reads for receipt in receipts)):
                 return None
         if model:
+            if failed_delivery_proof is not None and verified_failed_attempt(example, call):
+                continue
             try:
                 try:
                     training_steps._candidate(example, call)

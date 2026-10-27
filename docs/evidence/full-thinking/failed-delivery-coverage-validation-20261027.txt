@@ -1,0 +1,73 @@
+Arena failed-delivery coverage validation, 2026-10-27
+
+Scope: eligibility only. A fully proved failed host write consumes one incomplete
+ICP under the new frozen policy and a coverage floor below 100%. It never proves
+delivery/read, never creates a target, and never changes the saved export.
+Unknown billing, missing upstream proof, privacy and unrelated integrity defects
+remain hard. Strict dataset admission and the historical/100% policies stay hard.
+
+Before implementation:
+python3 -m pytest tests/lab_arena/training_failed_delivery_coverage_test.py -q
+Result: the initial five regression cases failed with trajectory_evidence_incomplete.
+
+Final focused regression command:
+python3 -m pytest tests/lab_arena/training_failed_delivery_coverage_test.py -q --tb=short
+Result: 82 passed, one existing python_multipart deprecation warning.
+
+The focused cases prove:
+- 9/10 and 8/10 complete ICPs pass an 80% floor; 7/10 fails.
+- Model Chat and Responses 200/502, and non-model 200/502, use the same rule.
+- Multiple exact failed writes in one ICP consume one incomplete ICP.
+- Canonical Buffer failed-write capture, persisted snapshot, production exporter
+  assembly and eligibility work together for non-model 502 and model 200.
+- Strict training excludes the full affected ICP. Default _host_result still
+  rejects its failed write. No read/ack claim or raw export edit is synthesized.
+- Snapshot counts, identity, timestamps, all selected call/receipt coverage,
+  terminal accounting, provider/API routing, request history/settings, generation
+  route evidence, source/input/output and receipt hashes remain checked.
+- Missing/contradictory receipts, duplicate terminal/upstream records, false read
+  claims and selected/other-call privacy, cost, route and target faults reject.
+- Existing separately attributed judge cost/privacy gaps compose without hiding
+  selected-call faults.
+
+Related regression command:
+python3 -m pytest tests/lab_arena/training_export_test.py tests/lab_arena/training_export_receipts_test.py tests/lab_arena/training_retained_terminal_test.py tests/lab_arena/training_hidden_retry_test.py tests/lab_arena/training_unavailable_upstream_coverage_test.py tests/lab_arena/training_host_result_test.py tests/lab_arena/training_steps_test.py tests/lab_arena/training_thinking_test.py tests/lab_arena/training_eligibility_test.py tests/lab_arena/training_provider_output_coverage_test.py tests/lab_arena/training_optional_capture_test.py tests/lab_arena/training_call_semantics_test.py -q --tb=short
+Result: 664 passed, one existing python_multipart deprecation warning.
+
+Handoff checks:
+git diff --check
+python3 -m py_compile lab_arena/training_eligibility.py lab_arena/training_export.py lab_arena/training_steps.py lab_arena/training_thinking.py tests/lab_arena/training_failed_delivery_coverage_test.py
+cmp AGENTS.md CLAUDE.md
+Result: passed. Fetched origin; checkout includes its intended origin/main base.
+
+Independent review:
+The owning task's reviewer independently reproduced the initial bypasses, then
+confirmed all seven reject and the valid 9/10 control passes. It reported 331
+focused tests passing and no remaining blocker. This file records that report;
+the reviewer owns its original evidence.
+
+Limits and substitutions:
+All provider/ledger/cost inputs are synthetic or saved fixtures. The assembled
+baseline integration uses the existing synthetic cost-authority reader. No live
+provider call, production write, deployment or commit was made by this implementer.
+Root owns fresh production evidence, PR, merge, deployment and final verification.
+Old exports without an upstream parsed-response hash fail closed. Reassemble
+from the original retained raw ledger bytes with the new exporter; do not add a
+hash to an old exported object or rewrite the original export.
+
+Owner production readback, 2026-10-27 09:36 UTC:
+An isolated checkout of 7cc2c3f1b rebuilt an accepted October 27 execution from
+the production SQL ledger and 238 retained objects. All three actual Deepline
+502 failed writes passed the exact failed-delivery proof. All three still failed
+the successful-delivery check. All 34 model responses and usage objects matched
+SQL; both returned thinking segments and 2,623 readable source events matched.
+The unchanged historical export remained incomplete for its separately reported
+privacy, old-policy and unfinished judging/cost evidence. It was not converted
+into an eligible October 28 example. No provider calls or production writes.
+
+Owner publication preservation checks:
+PATH=/opt/homebrew/opt/postgresql@17/bin:$PATH /opt/homebrew/bin/python3.11 -m pytest -q tests/lab_arena/training_coverage_publication_postgres_test.py tests/lab_arena/training_storage_publication_postgres_test.py tests/lab_arena/training_publication569_postgres_test.py
+Result: 11 passed in 419.83 seconds. Real local PostgreSQL exercised publication,
+80% coverage, eligible-peer promotion and preserved historical authority. Agent
+and judging inputs in these tests remain synthetic; they are regression proof,
+not a new live sourcing benchmark.

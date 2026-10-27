@@ -720,8 +720,7 @@ def _calls(rows, run_ids, objects, run_order):
                     "wire_body_bytes": captured["wire_body_bytes"],
                     "provenance": "private_upstream_response_receipt",
                     "delivery_to_worker": "not_proved",
-                    **({"response_sha256": contracts.document_hash(response)}
-                       if (call.get("reasoning_capture") or {}).get("policy") == "full_generated_thinking_v1" else {}),
+                    "response_sha256": contracts.document_hash(response),
                 })
                 if redactions:
                     call_reasons.add("upstream_response_privacy_nonexact")

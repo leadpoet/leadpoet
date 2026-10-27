@@ -3134,6 +3134,7 @@ def _retain_matched_company_retry_sources(
         result,
         source_cache,
         matched_dimensions_only=True,
+        include_industry_support=True,
     )
     admitted = {
         context["url"]: {
@@ -11436,6 +11437,7 @@ def _matched_investigator_source_contexts(
     source_cache: Optional[Mapping[str, Any]],
     *,
     matched_dimensions_only: bool = False,
+    include_industry_support: bool = False,
 ) -> list[dict[str, str]]:
     """Bind retained fetched pages back to exact final dimension evidence."""
 
@@ -11471,8 +11473,12 @@ def _matched_investigator_source_contexts(
         source_url = _valid_web_evidence_url(web_evidence.get("url"))
         quote = str(web_evidence.get("quote") or "")
         evidence_pairs.append((dimension, source_url, quote))
-    evidence_pairs.extend(("industry", url, quote)
-                          for url, quote in _industry_supporting_pairs(dimensions))
+    # Retry storage retains every bound industry citation. Downstream company
+    # contexts keep one primary quote per dimension; extra first-party pages
+    # use the existing auxiliary-source binding and the same paragraph cap.
+    if include_industry_support:
+        evidence_pairs.extend(("industry", url, quote)
+                              for url, quote in _industry_supporting_pairs(dimensions))
     for dimension, source_url, quote in evidence_pairs:
         entry = source_cache.get(source_url) if source_url else None
         if not isinstance(entry, Mapping) or set(entry) != {"final_url", "text"}:

@@ -208,3 +208,51 @@ def test_support_does_not_bypass_source_or_identity_checks(monkeypatch, fault):
     assert support_url not in sink and support_url not in restored
     if fault in {"unmatched", "missing_identity"}:
         assert sink == restored == {}
+
+
+def test_supporting_sources_follow_existing_paragraph_context_contract(monkeypatch):
+    """Multi-source industry findings must not make a valid paragraph malformed."""
+    from qualification.scoring import intent_details
+    from qualification.scoring.company_fit_decision import company_fit_match
+    from tests.test_arena_intent_details_grounding import inputs
+
+    monkeypatch.setenv("ARENA_INDUSTRY_EVIDENCE_MODEL", "openai/gpt-6.1-sol")
+    company, icp, signals, receipt = inputs()
+    receipt["dimension_evidence"]["identity"] = {
+        "decision": "match", "web_identity_receipt": {
+            "decision": "match", "evidence_source": "company_web_reverification",
+            "observed_name": "Acme", "observed_domain": "acme.example",
+            "observed_linkedin_slug": "acme",
+        },
+    }
+    primary = receipt["dimension_evidence"]["industry"]["web_evidence"]
+    support = [
+        {"url": f"https://acme.example/product/{i}",
+         "quote": "Acme supplies reporting software, platform workflows, product expansion and geographic reach."}
+        for i in range(2)
+    ]
+    primary["supporting_evidence"] = support
+    pages = {p["url"]: {"final_url": p["url"], "text": p["quote"]}
+             for p in [primary, *support]}
+    fit = company_fit_match(details={"dimension_evidence": receipt["dimension_evidence"]})
+    retained = {}
+    lead_scorer._retain_matched_investigator_source_contexts(
+        retained, fit, {investigator.PRIVATE_FETCHED_PAGES_KEY: pages}, company=company,
+    )
+    assert retained == pages  # Industry evidence and retry storage are unchanged.
+    contexts = lead_scorer._matched_company_source_contexts(
+        fit, None, None, retained, paragraph=company.intent_details, company=company,
+    )
+    document = intent_details.review_evidence(
+        company, icp, signals, fit.receipt("company_fit"), company_source_contexts=contexts,
+    )
+    assert len(contexts) == 2
+    assert [c["dimension"] for c in contexts] == ["industry", "first_party_context"]
+    assert contexts[0]["url"] == primary["url"]
+    assert contexts[1]["url"] in {p["url"] for p in support}
+    admitted = [item for item in document["admitted_evidence"]
+                if item["evidence_kind"] == "verified_company_source_context"]
+    assert {item["source_url"] for item in admitted} == {c["url"] for c in contexts}
+    assert sum(len(text.encode()) for item in document["admitted_evidence"]
+               if item["evidence_kind"] in {"verified_source_context", "verified_company_source_context"}
+               for text in item.get("admitted_text", [])) <= intent_details._MAX_SOURCE_CONTEXT_BYTES

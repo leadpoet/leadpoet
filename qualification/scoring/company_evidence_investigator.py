@@ -2460,7 +2460,11 @@ async def _fetch_page(
             ),
         }
     if _is_known_binary_document(raw):
-        return {"ok": False, "error": "unsupported_binary_content"}
+        return {
+            "ok": False, "error": "unsupported_binary_content",
+            **({"_pdf_document": True}
+               if raw.lstrip("\ufeff\t\r\n ").startswith("%PDF-") else {}),
+        }
     text = _plain_text(raw)
     if not text:
         return {"ok": False, "error": "empty_page"}
@@ -4068,6 +4072,28 @@ async def investigate_company_evidence(
             async def fetch_fresh_page(url: str) -> dict[str, Any]:
                 nonlocal fetch_calls
                 fetch_calls += 1
+                contents_attempted = False
+                if (
+                    "industry" in requested_targets
+                    and urlsplit(url).path.casefold().endswith(".pdf")
+                    and os.environ.get("EXA_API_KEY")
+                ):
+                    # Prefer document text, but a .pdf suffix is not a verified
+                    # content type. Preserve the normal HTML route if this read
+                    # fails and the same admission budget still permits it.
+                    contents_attempted = True
+                    result = await _fetch_exa_exact_page(session, url)
+                    fetch_outcomes.append(_fetch_outcome(url, result))
+                    if (
+                        result.get("ok")
+                        or result.get("error") in {
+                            "source_not_found", "source_gone", "source_access_denied",
+                        }
+                        or fetch_calls >= MAX_FETCH_CALLS
+                        or time.monotonic() - started >= ADMISSION_DEADLINE_SECONDS
+                    ):
+                        return result
+                    fetch_calls += 1
                 archive_targets = (
                     tuple(
                         article_url for article_url in fetched_pages
@@ -4105,14 +4131,20 @@ async def investigate_company_evidence(
                         "broker_http_404" if exc.broker_status == 404
                         else f"http_{exc.broker_status}"
                     )}
+                industry_pdf = bool(
+                    result.pop("_pdf_document", False)
+                    and "industry" in requested_targets
+                    and result.get("error") == "unsupported_binary_content"
+                )
                 fetch_outcomes.append(_fetch_outcome(url, result))
                 if (
-                    result.get("error") in {
+                    (industry_pdf or result.get("error") in {
                         "broker_http_404", "http_502", "http_503", "timeout",
                         "provider_diagnostic_body",
                         "provider_request_refused",
-                    }
+                    })
                     and not result.get("ok")
+                    and not contents_attempted
                     and os.environ.get("EXA_API_KEY")
                     and not archive_targets
                     and not _strict_linkedin_company_profile_url(url)

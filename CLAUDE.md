@@ -1,3 +1,18 @@
+## Scoped authorization: October 27 OCI destination symlink replacement
+
+The user authorized the verified OCI image materialization repair for a later
+layer that replaces an existing destination symlink, including focused security
+tests, exact candidate image materialization, push, merge and canonical gateway
+and normal-validator rollout. Reject absolute hardlink targets to prevent
+host-file import. Create relative hardlinks only to existing contained regular
+files and fail closed on link errors; do not use tarfile archive fallback.
+Preserve hardlink metadata, ancestor containment, whiteout checks, image
+identity, budgets, scoring, costs and rewards. Internal
+implementation agents may commit only; the coordinating task owns independent
+security review and production deployment. Do not change PR 825 scorer behavior
+or unrelated runtime work. This authority ends after deployment and native
+validation complete.
+
 AWS access: use `leadpoet-lab` (SSO `LabOperator`) for routine SN71 SSM/EC2 operations in `us-east-1`, account `493765492819`; it cannot change IAM. For IAM changes, use the existing `leadpoet-recovery-console-20261026` session, or refresh it with `aws login --profile leadpoet-recovery-console-20261026 --region us-east-1` using `hello@leadpoet.com` (Leadpoet-main root); `pranav@leadpoet.com` root is the separate `187445349696` account. Check `sts get-caller-identity` with the selected profile before any write; do not retry unrelated accounts or the unassigned SSO `Admin` role.
 
 ## Scoped authorization: October 27 SSM access hardening

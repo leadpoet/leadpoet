@@ -1,3 +1,13 @@
+## Scoped authorization: October 26 industry evidence verification
+
+The user authorized implementing, testing, safely merging and canonically
+deploying the industry and evidence-verification improvements, followed by
+fresh OnePatch/Sentry and direct production checks. This narrow release fixes
+HTML rendering whitespace in quote matching only. Preserve all source, identity,
+scoring, billing, historical-result and reward rules. Do not activate the broader
+industry candidate until its accuracy is proven. Use reward-disabled validation;
+do not rewrite production judgments or apply unrelated migrations.
+
 ## Scoped production authorization: October 25 publication read performance
 
 On 2026-10-25 the user renewed the request to fix the confirmed duplicate

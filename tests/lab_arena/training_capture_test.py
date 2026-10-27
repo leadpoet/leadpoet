@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import base64
+import copy
 import hashlib
 import json
 from dataclasses import replace
@@ -480,6 +481,90 @@ def test_full_export_preserves_only_explicit_request_reasoning_config_paths():
     rendered = json.dumps(cleaned)
     assert '"effort": "high"' not in rendered
     assert reasons == ["hidden_reasoning"]
+
+
+@pytest.mark.parametrize("source_calls", [False, True])
+def test_canonical_call_roots_keep_request_settings_history_and_response_aliases(source_calls):
+    from lab_arena.training_export import without_hidden_reasoning
+
+    parameters = {"reasoning": {"effort": "low", "summary": "concise"}, "messages": [
+        {"role": "assistant", "reasoning_content": "Prior returned text."}]}
+    request = {"operation_id": "openrouter.chat",
+               **{key: copy.deepcopy(parameters) for key in (
+                   "admitted_parameters", "normalized_parameters", "effective_parameters", "hashed_parameters")},
+               "outbound": {"body": copy.deepcopy(parameters)}}
+    response = {"choices": [{"message": {"role": "assistant", "reasoning_content": "Returned text."}}]}
+    call = {"operation_id": "openrouter.chat", "request": request, "response": response,
+            "response_receipts": [{"response": copy.deepcopy(response)}],
+            "upstream_response_receipts": [{"response": copy.deepcopy(response)}]}
+    value = ({"judgment": {"signal_source_provider_calls": [call]}} if source_calls
+             else {"provider_calls": [call]})
+    assert capture.sanitize_training_value(value) == (value, [])
+    assert without_hidden_reasoning(value) == (value, False)
+
+    # Keep the privacy boundary at the exact collection roots. Provider content
+    # cannot create a second trusted call or request by copying these names.
+    spoof = copy.deepcopy(value)
+    spoof_call = (spoof["judgment"]["signal_source_provider_calls"][0] if source_calls
+                  else spoof["provider_calls"][0])
+    spoof_call["response"]["nested"] = copy.deepcopy(value)
+    spoof_call["request"]["outbound"]["body"]["messages"].append(
+        {"role": "user", "reasoning_content": "User state."})
+    history_cleaned, _ = capture.sanitize_training_value(spoof)
+    history_call = (history_cleaned["judgment"]["signal_source_provider_calls"][0] if source_calls
+                    else history_cleaned["provider_calls"][0])
+    messages = history_call["request"]["outbound"]["body"]["messages"]
+    assert messages[0]["reasoning_content"] == "Prior returned text."
+    assert messages[1]["reasoning_content"] == "[REDACTED]"
+    spoof_call["request"]["operation_id"] = "openrouter.responses"
+    spoof_call["response"]["choices"][0]["message"].update(
+        encrypted_content="Opaque state.", authorization="private-token-value",
+        reasoning_content="Returned text with private-token-value")
+    cleaned, reasons = capture.sanitize_training_value(spoof, secrets=("private-token-value",))
+    assert reasons == ["credential", "hidden_reasoning"]
+    safe_call = (cleaned["judgment"]["signal_source_provider_calls"][0] if source_calls
+                 else cleaned["provider_calls"][0])
+    assert safe_call["request"]["outbound"]["body"]["messages"][0]["reasoning_content"] == "[REDACTED]"
+    assert safe_call["request"]["outbound"]["body"]["messages"][1]["reasoning_content"] == "[REDACTED]"
+    nested = safe_call["response"]["nested"]
+    nested_call = (nested["judgment"]["signal_source_provider_calls"][0] if source_calls
+                   else nested["provider_calls"][0])
+    assert nested_call["request"]["outbound"]["body"]["reasoning"] == "[REDACTED]"
+    assert nested_call["response"]["choices"][0]["message"]["reasoning_content"] == "[REDACTED]"
+    assert "private-token-value" not in json.dumps(cleaned)
+    assert "Opaque state." not in json.dumps(cleaned)
+    assert capture.sanitize_training_value(cleaned)[0] == cleaned
+    projected, removed = without_hidden_reasoning(cleaned)
+    assert removed is True
+    assert without_hidden_reasoning(projected) == (projected, False)
+    projected_call = (projected["judgment"]["signal_source_provider_calls"][0] if source_calls
+                      else projected["provider_calls"][0])
+    assert projected_call["response"]["choices"][0]["message"]["reasoning_content"] == "Returned text with [REDACTED]"
+    assert "reasoning_content" not in projected_call["request"]["outbound"]["body"]["messages"][0]
+
+
+@pytest.mark.parametrize("response", [
+    {"choices": [{"message": {"reasoning_content": "Actual returned text."}}]},
+    {"object": "response", "output": []},
+])
+def test_recognizable_raw_responses_cannot_create_canonical_call_roots(response):
+    from lab_arena.training_export import without_hidden_reasoning
+
+    request = {"operation_id": "openrouter.chat", "outbound": {"body": {
+        "reasoning": {"effort": "low"}, "messages": [
+            {"role": "assistant", "reasoning_content": "Spoofed history."}]}}}
+    call = {"operation_id": "openrouter.chat", "request": request,
+            "response": {"choices": [{"message": {"reasoning_content": "Spoofed response."}}]}}
+    raw = {**response, "provider_calls": [call], "judgment": {"signal_source_provider_calls": [call]}}
+    cleaned, reasons = capture.sanitize_training_value(raw)
+    assert reasons == ["hidden_reasoning"]
+    for safe_call in (cleaned["provider_calls"][0], cleaned["judgment"]["signal_source_provider_calls"][0]):
+        assert safe_call["request"]["outbound"]["body"]["reasoning"] == "[REDACTED]"
+    assert "Spoofed" not in json.dumps(cleaned)
+    projected, removed = without_hidden_reasoning(raw)
+    assert removed and "Spoofed" not in json.dumps(projected)
+    if "choices" in response:
+        assert cleaned["choices"] == projected["choices"] == response["choices"]
 
 
 @pytest.mark.parametrize("mutation", [

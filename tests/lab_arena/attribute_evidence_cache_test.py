@@ -123,6 +123,18 @@ def test_no_hint_inputs_keep_historical_keys_and_malformed_hints_still_fail():
     from tests.lab_arena.judgment_cache_test import _input, _scope
 
     old = _input()
+    # Freeze the policy used when this historical key was recorded. Current
+    # model defaults intentionally produce a different policy and cache key.
+    old["scorer_policy"] = scoring.build_scorer_policy(
+        scoring_adapter_version="qualification_integrity_v2",
+        judge_models={
+            "company_fit_reverification": "perplexity/sonar",
+            "intent_signal_judge": "anthropic/claude-sonnet-4.5",
+            "intent_three_stage_stage3": "perplexity/sonar-pro",
+            "intent_fetched_evidence": "openai/gpt-6-luna",
+            "role_batch_check": "google/gemini-2.5-flash",
+        },
+    )
     expected = _scope(old)
     blank = copy.deepcopy(old)
     blank["companies"][0]["required_attribute"] = None

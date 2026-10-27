@@ -1274,7 +1274,12 @@ def _normalized_span(value: Any) -> str:
 def _quote_match_surface(value: str) -> str:
     # Treat a terminal plural/name possessive as typography only. Keep internal
     # apostrophes, words, numeric tokens and the shared semantic surface intact.
-    return re.sub(r"(?<!\w)([^\W\d_]+s)['\u2019](?=\s|$)", r"\1", value)
+    value = re.sub(r"(?<!\w)([^\W\d_]+s)['\u2019](?=\s|$)", r"\1", value)
+    # Joining visible HTML text nodes can add spaces inside brackets around
+    # a link, e.g. ( Nasdaq: ACME ). Preserve the brackets and their contents;
+    # only that rendering whitespace differs from (Nasdaq: ACME).
+    value = re.sub(r"([(\[])\s+", r"\1", value)
+    return re.sub(r"\s+([)\]])", r"\1", value)
 
 
 def _quote_occurs(quote: Any, fetched_text: str) -> bool:

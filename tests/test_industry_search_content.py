@@ -106,6 +106,11 @@ def test_native_loop_reuses_full_search_body_and_retains_its_exact_quote(monkeyp
     result = asyncio.run(run(prior_observations={'submitted_source_urls':[home]},
         prefetched_pages={home:{'final_url':home,'text':FEATURES}},
         requested_product_service='Supplies analysis, reporting and account workflow software'))
+    # Source selection must see newly loaded bodies, not only the stale gap.
+    assert full_text in json.dumps(calls['model'][0]['messages'])
+    assert calls['model'][0]['tool_choice'] == 'required'
+    for request in calls['model']:
+        validate_operation_request('openrouter.chat', request)
     assert result['_completed_submit'] is True
     claim = result['claims']['industry']
     assert claim['status'] == 'VERIFIED'
@@ -118,3 +123,35 @@ def test_native_loop_reuses_full_search_body_and_retains_its_exact_quote(monkeyp
     projected = lead_scorer._project_investigator_industry({'attribute_satisfied':False},claim)
     assert projected['industry_matches'] is True and projected['attribute_satisfied'] is False
     assert full_text in json.dumps(lead_scorer._dimension_web_evidence(projected,'industry'))
+
+
+def test_full_loaded_search_corpus_fits_native_selection_request(monkeypatch):
+    from tests.test_native_industry_review import install
+    from tests.test_company_evidence_refusal_fallback import FEATURES, URL
+    seen = []
+    def initial_gap(result):
+        seen.append(result)
+        result['evidence_span_ids'] = result['evidence_span_ids'][:8]
+        if len(seen) == 1:
+            result.update(decision='unavailable', missing_requirements=['Account workflows'])
+    run, calls, _, _ = install(monkeypatch, mutation=initial_gap)
+    pages = {f'https://www.coreworks.ai/source/{i}': (FEATURES + ' Detail.' * 4000)[:24000]
+             for i in range(10)}
+    async def search(*args, **kwargs):
+        return {'results': [{'url': url, 'title': 'Company source'} for url in pages],
+                '_source_pages': pages, 'notice': 'discovery_only_not_evidence'}
+    monkeypatch.setattr(c, '_search_web', search)
+    result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
+                            prior_observations={'submitted_source_urls': [URL]}))
+    assert result['_completed_submit'] is True
+    first = calls['model'][0]
+    source_parts = [p for m in first['messages'] if m['role'] == 'user'
+                    and m['content'].startswith('{"untrusted_source_pages"')
+                    for p in json.loads(m['content'])['untrusted_source_pages']]
+    assert {p['source_url'] for p in source_parts} == set(pages)
+    assert sum(len(s['text']) for p in source_parts for s in p['spans']) == industry.MAX_TOTAL_CHARS
+    for request in calls['model']:
+        validate_operation_request('openrouter.chat', request)
+    assert result['usage']['search_calls'] <= c.MAX_SEARCH_CALLS
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
+    assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS

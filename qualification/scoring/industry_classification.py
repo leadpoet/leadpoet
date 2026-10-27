@@ -133,18 +133,13 @@ def prepare(criteria, company_locator, source_pages):
     return Packet(values, tuple(company_locator.get(k, "") for k in locator_keys), tuple(pages))
 
 
-def request_payload(packet, *, model, research=False):
-    """Pure request construction; runner owns all credentials, calls and cost controls."""
+def source_messages(packet):
+    """Share the same bounded source representation with selection and review."""
     spans = packet.spans()
-    metadata = {
-        "criterion": dict(zip(("industry", "subindustry", "product_service"), packet.criteria)),
-        "company_locator": dict(zip(("name", "website", "linkedin"), packet.company)),
-    }
     # Each native page is already bounded. Keep pages in separate messages so
     # the complete corpus survives Arena's unchanged per-message content cap.
     # The same packet digest binds all page references to these criteria.
-    messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": _canonical(metadata)}]
+    messages = []
     for source_id, _, source_url in packet.pages:
         source_spans = [{"span_id": key, "text": value["text"]}
                         for key, value in spans.items() if value["source_id"] == source_id]
@@ -153,6 +148,19 @@ def request_payload(packet, *, model, research=False):
             page = {"source_id": source_id, "source_url": source_url,
                     "spans": source_spans[start:start + 3]}
             messages.append({"role": "user", "content": _canonical({"untrusted_source_pages": [page]})})
+    return messages
+
+
+def request_payload(packet, *, model, research=False):
+    """Pure request construction; runner owns all credentials, calls and cost controls."""
+    spans = packet.spans()
+    metadata = {
+        "criterion": dict(zip(("industry", "subindustry", "product_service"), packet.criteria)),
+        "company_locator": dict(zip(("name", "website", "linkedin"), packet.company)),
+    }
+    messages = [{"role": "system", "content": SYSTEM},
+                {"role": "user", "content": _canonical(metadata)},
+                *source_messages(packet)]
     # Constrain decoding to these
     # exact references so commentary cannot corrupt an otherwise valid ID.
     # resolve() still checks membership independently of provider compliance.

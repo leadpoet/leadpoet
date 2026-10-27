@@ -182,6 +182,10 @@ def test_native_retry_reclassifies_retained_sources_with_existing_guards(monkeyp
                 for p in json.loads(m["content"])["untrusted_source_pages"]}
         assert valid.issubset(seen)
         assert result["claims"]["industry"]["status"] == "VERIFIED"
+        selector = json.dumps(calls['model'][0]['messages'])
+        assert all(pages[url]['text'] in selector for url in valid)
+        assert pages[wrong]['text'] not in selector
+        assert pages[redirect]['text'] not in selector
     assert result["usage"]["prefetched_pages"] <= 3
     assert result["usage"]["fetch_calls"] <= investigator.MAX_FETCH_CALLS
     assert result["usage"]["search_calls"] <= investigator.MAX_SEARCH_CALLS

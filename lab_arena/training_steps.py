@@ -621,7 +621,9 @@ def _candidate(example, call, *, host_observed=False):
             responses.append(value)
         _require(len({contracts.document_hash(value) for value in responses}) == 1, 'delivered_response_ambiguous')
     annotation = call.get('reasoning_capture') or {}
-    full_history = (isinstance(annotation, dict)
+    # Readable retained context is observed input, not a full-thinking claim.
+    # Strict callers keep the annotation-bound parser selection unchanged.
+    full_history = host_observed or (isinstance(annotation, dict)
                     and annotation.get('policy') == 'full_generated_thinking_v1'
                     and annotation.get('requested') is True
                     and annotation.get('reviewed_route') is True)

@@ -99,3 +99,108 @@ def test_generic_host_delivery_keeps_candidate_identity_and_split_groups():
     assert len(result['source_refs']) == 2
     assert {ref['example_hash'] for ref in result['source_refs']} == {
         original['example_hash'], historical['example_hash']}
+
+
+def historical_readable_history(api):
+    example = historical_host_example(api)
+    call = example['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    if api == 'openrouter.chat':
+        body['messages'] += [
+            {'role': 'assistant', 'content': None, 'reasoning': 'Read the retained source.',
+             'reasoning_details': [{'type': 'reasoning.text', 'text': 'Compare the evidence.'}],
+             'tool_calls': [{'id': 'lookup-1', 'type': 'function',
+                             'function': {'name': 'lookup', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 'lookup-1', 'content': 'Retained source evidence.'}]
+        body['tools'] = [{'type': 'function', 'function': {'name': 'lookup', 'parameters': {'type': 'object'}}}]
+    else:
+        body['input'] = [
+            {'type': 'message', 'id': 'user-1', 'role': 'user', 'content': 'Review the company.'},
+            {'type': 'reasoning', 'id': 'reasoning-1', 'encrypted_content': None, 'summary': [],
+             'content': [{'type': 'reasoning_text', 'text': 'Read the retained source.'}]},
+            {'type': 'function_call', 'id': 'function-1', 'call_id': 'lookup-1',
+             'name': 'lookup', 'namespace': None, 'arguments': '{}'},
+            {'type': 'function_call_output', 'id': 'result-1', 'call_id': 'lookup-1',
+             'output': 'Retained source evidence.'}]
+        body['tools'] = [{'type': 'function', 'name': 'lookup', 'parameters': {'type': 'object'}}]
+        # The real TYCHE response includes this empty native transport field.
+        call['response']['output'][-1]['content'][0]['logprobs'] = []
+    return refresh_history(example)
+
+
+def refresh_history(example):
+    call = example['provider_calls'][0]
+    call['request']['outbound']['body_sha256'] = contracts.document_hash(call['request']['outbound']['body'])
+    wire = contracts.canonical_json(call['response']).encode()
+    wire_hash = contracts.hash_bytes(wire)
+    receipt = call['response_receipts'][0]
+    receipt.update(response_sha256=contracts.document_hash(call['response']),
+                   wire_body_sha256=wire_hash, wire_body_bytes=len(wire))
+    artifact = example['worker_observation_artifacts']['run']
+    artifact['payload']['response_receipts'][0].update(body_sha256=wire_hash, body_bytes=len(wire))
+    artifact['payload_sha256'] = contracts.document_hash(artifact['payload'])
+    call['response_provenance']['worker_receipt_ref']['payload_sha256'] = artifact['payload_sha256']
+    return seal(example)
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+def test_generic_historical_readable_history_preserves_exact_native_context(api):
+    example = historical_readable_history(api)
+    before = deepcopy(example)
+    call = example['provider_calls'][0]
+    body = call['request']['outbound']['body']
+    with pytest.raises(ValueError):
+        training_steps._target(body, call['response'], api, allow_reasoning_history=False)
+    candidates, manifest = rows(example)
+    assert len(candidates) == 1, manifest['counts']
+    assert candidates[0]['input'] == body
+    assert candidates[0]['source_refs'][0]['client_consumption'] == 'not_proved'
+    strict, _ = training_thinking.build([example])
+    assert not strict['train'] and not strict['eval']
+    assert example == before
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('damage', ['opaque', 'reasoning_type', 'malformed_arguments',
+                                   'wrong_result_id', 'missing_result', 'unknown_field'])
+def test_generic_readable_history_keeps_closed_schema_privacy_and_tool_links(api, damage):
+    example = historical_readable_history(api)
+    body = example['provider_calls'][0]['request']['outbound']['body']
+    if api == 'openrouter.chat':
+        assistant, result = body['messages'][1:]
+        if damage == 'opaque': assistant['reasoning_details'] = [{'type': 'reasoning.encrypted', 'data': 'opaque-state'}]
+        elif damage == 'reasoning_type': assistant['reasoning'] = {'text': 'wrong type'}
+        elif damage == 'malformed_arguments': assistant['tool_calls'][0]['function']['arguments'] = '{'
+        elif damage == 'wrong_result_id': result['tool_call_id'] = 'different'
+        elif damage == 'missing_result': body['messages'].pop()
+        elif damage == 'unknown_field': assistant['unrecognized'] = 'not admitted'
+    else:
+        reasoning, function, result = body['input'][1:]
+        if damage == 'opaque': reasoning['encrypted_content'] = 'opaque-state'
+        elif damage == 'reasoning_type': reasoning['content'] = [{'type': 'reasoning_text', 'text': 123}]
+        elif damage == 'malformed_arguments': function['arguments'] = '{'
+        elif damage == 'wrong_result_id': result['call_id'] = 'different'
+        elif damage == 'missing_result': body['input'].pop()
+        elif damage == 'unknown_field': reasoning['unrecognized'] = 'not admitted'
+    assert not rows(refresh_history(example))[0]
+
+
+@pytest.mark.parametrize('api', ['openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('damage', ['malformed_target_arguments', 'empty_message_scaffold'])
+def test_generic_readable_history_does_not_relax_generated_targets(api, damage):
+    example = historical_readable_history(api)
+    response = example['provider_calls'][0]['response']
+    if api == 'openrouter.chat':
+        message = response['choices'][0]['message']
+        if damage == 'malformed_target_arguments':
+            message.update(content=None, tool_calls=[{'id': 'new-call', 'type': 'function',
+                'function': {'name': 'lookup', 'arguments': '{'}}])
+            response['choices'][0]['finish_reason'] = 'tool_calls'
+        else:
+            message['content'] = None
+    elif damage == 'malformed_target_arguments':
+        response['output'] = [{'type': 'function_call', 'id': 'new-function', 'call_id': 'new-call',
+            'name': 'lookup', 'arguments': '{', 'status': 'completed'}]
+    else:
+        response['output'][-1]['content'] = []
+    assert not rows(refresh_history(example))[0]

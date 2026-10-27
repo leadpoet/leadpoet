@@ -564,6 +564,9 @@ Each source reference declares `provider_visible_request_result` capture and
 `client_consumption: not_proved`. The frozen strict full-thinking and champion
 checks keep their separate historical read-proof requirements; this export
 does not change round policy, source records, or training permission.
+Generic candidates can retain readable native reasoning history and empty
+provider transport fields under the existing closed replay schema. This does
+not establish full-thinking semantics for an unreviewed route.
 A later billing recovery cannot substitute a response without
 matching host-write evidence. Judge calls and future judgments never
 enter the input. A whole run can be incomplete while one independently verified

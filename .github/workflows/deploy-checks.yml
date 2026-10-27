@@ -65,6 +65,9 @@ jobs:
             requirements.txt
             setup.py
 
+      - name: Verify protected workflow manifest
+        run: python gateway/tee/protected_workflows.py --root .
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip setuptools wheel

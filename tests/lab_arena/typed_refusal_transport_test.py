@@ -73,11 +73,13 @@ class _Session:
         return self.response
 
 
-def test_exact_broker_refusal_crosses_real_reader_only_as_typed_error(monkeypatch):
+@pytest.mark.parametrize("version", [scoring_provider_compat.COMPATIBILITY_VERSION, scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION])
+def test_exact_broker_refusal_crosses_real_reader_only_as_typed_error(monkeypatch, version):
     monkeypatch.setenv("SCRAPINGDOG_API_KEY", "test-placeholder")
     refused = broker._error_result("provider_request_refused", {})
     assert refused.status == 403 and refused.body == REFUSAL
-    response = _response(refused.status, refused.body, attested=True)
+    response = _response(refused.status, refused.body, attested=True,
+                         call_changes={"compatibility_version": version})
     assert response._lab_arena_response_url_validated is False
     assert response.headers[shim.CALL_IDENTITY_HEADER] == IDENTITY
     session = _Session(response)
@@ -178,8 +180,10 @@ def test_provider_cannot_forge_host_marker(monkeypatch):
     (403, b'{"error":{"code":"provider_request_refused","extra":1}}'),
     (401, REFUSAL),
 ])
-def test_valid_call_identity_does_not_turn_other_errors_into_refusals(status, body):
-    response = _response(status, body, attested=True)
+@pytest.mark.parametrize("version", [scoring_provider_compat.COMPATIBILITY_VERSION, scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION])
+def test_valid_call_identity_does_not_turn_other_errors_into_refusals(status, body, version):
+    response = _response(status, body, attested=True,
+                         call_changes={"compatibility_version": version})
     assert response.headers[shim.CALL_IDENTITY_HEADER] == IDENTITY
     with pytest.raises(verification._ArenaProviderFetchError) as caught:
         asyncio.run(verification._fetch_bounded_html(_Session(response), SOURCE))
@@ -201,8 +205,10 @@ def test_valid_call_identity_does_not_turn_other_errors_into_refusals(status, bo
     {"adapter": None},
     {"tool": None},
 ])
-def test_host_does_not_mark_mismatched_call(changes):
-    response = _response(403, REFUSAL, attested=True, call_changes=changes)
+@pytest.mark.parametrize("version", [scoring_provider_compat.COMPATIBILITY_VERSION, scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION])
+def test_host_does_not_mark_mismatched_call(changes, version):
+    response = _response(403, REFUSAL, attested=True,
+                         call_changes={"compatibility_version": version, **changes})
     assert shim.CALL_IDENTITY_HEADER not in response.headers
 
 

@@ -212,3 +212,43 @@ def test_provenance_matched_historical_sources_when_supplied(name, input_sha256,
         repaired = repaired.replace(new.encode(), old.encode(), 1)
     # This includes every pre-existing runtime finality repair, byte for byte.
     assert repaired == source
+
+
+def test_direct_base_current_and_candidate_composition_when_supplied():
+    directory = os.environ.get('ARENA_HOMEPAGE_LINKEDIN_IMAGE_INPUTS')
+    if not directory:
+        pytest.skip('direct base and current-runtime image extracts not supplied')
+    root = Path(directory)
+    manifests = {kind: json.loads((root / kind / 'manifest.json').read_text())
+                 for kind in ('base', 'current')}
+    repository = '493765492819.dkr.ecr.us-east-1.amazonaws.com/leadpoet/sourcing-model@sha256:'
+    assert manifests['base']['reference'] == repository + '8d0f613c781c2126c86effa91ea0bc7f9d28857521216e6346d522f4c0345bb1'
+    assert manifests['current']['reference'] == repository + 'd2d8f1ea02eecb5dc0e8572b86868ccb84f692314f16fcf98ffda01772cdbe4b'
+    for kind, manifest in manifests.items():
+        assert manifest['reference'] in manifest['repo_digests']
+        assert manifest['missing'] == []
+        assert manifest['architecture'] == 'amd64' and manifest['os'] == 'linux'
+        for name, entry in manifest['files'].items():
+            data = (root / kind / name).read_bytes()
+            assert hashlib.sha256(data).hexdigest() == entry['sha256']
+            assert len(data) == entry['bytes']
+    base, current = manifests['base'], manifests['current']
+    assert base['process_configuration_sha256'] == current['process_configuration_sha256']
+    assert current['layers'][:-1] == base['layers']
+    names = (builder.GRADER_FILE, builder.FINALITY_FILE, *builder.ENTRYPOINT_FILES)
+    originals = {name: (root / 'base' / name).read_bytes() for name in names}
+    existing_flags = {'source_blocked_alias': True, 'completed_investigation_finality': True,
+                      'auxiliary_source_name_binding': True}
+    reproduced = builder.expected_overlay(originals, **existing_flags)
+    assert len(reproduced) == 8
+    assert all(data == (root / 'current' / name).read_bytes() for name, data in reproduced.items())
+    candidate = builder.expected_overlay(originals, **existing_flags,
+                                         homepage_linkedin_conflict_repair=True)
+    assert set(candidate) == set(reproduced)
+    assert [name for name in candidate if candidate[name] != reproduced[name]] == [builder.FINALITY_FILE]
+    assert candidate[builder.FINALITY_FILE] == seam.convert_homepage_linkedin_conflict_seam(reproduced[builder.FINALITY_FILE])
+    assert hashlib.sha256(candidate[builder.FINALITY_FILE]).hexdigest() == '1188b584911d91b4edc5d6e24b949173c54943e6540dbef7c70e7c0c2bc439ac'
+    # Remaining captured grader files are unchanged by the existing runtime.
+    for name in set(base['files']) - set(candidate):
+        assert base['files'][name] == current['files'][name]
+    builder.verify_overlay(layer([('model/' + name, data) for name, data in candidate.items()]), candidate)

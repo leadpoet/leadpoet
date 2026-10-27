@@ -108,6 +108,8 @@ def test_joined_calls_and_repeated_snapshots_have_separate_finite_budgets():
     value = {
         'configuration': {'public': [None] * 20},
         'provider_calls': [{'public': [None] * 60}, {'public': [None] * 60}],
+        'judgment': {'signal_source_provider_calls': [
+            {'public': [None] * 60}, {'public': [None] * 60}]},
         'input_snapshots': {'execute': {'public': [None] * 60},
                             'score-1': {'public': [None] * 60},
                             'score-2': {'public': [None] * 60}},
@@ -120,25 +122,32 @@ def test_joined_calls_and_repeated_snapshots_have_separate_finite_budgets():
     assert cleaned == value == original and redactions == []
 
 
-@pytest.mark.parametrize('part', ['call', 'snapshot', 'envelope', 'nested_call', 'nested_snapshot'])
+@pytest.mark.parametrize('part', ['call', 'source_call', 'snapshot', 'envelope', 'nested_call',
+                                  'nested_snapshot', 'nested_source_call', 'source_call_mapping'])
 def test_partitioning_cannot_escape_any_part_or_global_context_budget(part):
     oversized = {'public': [None] * 100}
     value = {
         'call': {'provider_calls': [oversized]},
+        'source_call': {'judgment': {'signal_source_provider_calls': [oversized]}},
         'snapshot': {'input_snapshots': {'run': oversized}},
         'envelope': {'configuration': oversized},
         'nested_call': {'configuration': {'provider_calls': [{'public': [None] * 60}] * 2}},
         'nested_snapshot': {'provider_calls': [{'input_snapshots': {
             'first': {'public': [None] * 60}, 'second': {'public': [None] * 60}}}]},
+        'nested_source_call': {'provider_calls': [{'judgment': {'signal_source_provider_calls': [
+            {'public': [None] * 60}, {'public': [None] * 60}]}}]},
+        'source_call_mapping': {'judgment': {'signal_source_provider_calls': {
+            '0': {'public': [None] * 60}, '1': {'public': [None] * 60}}}},
     }[part]
     with pytest.raises(training_capture.CaptureError, match='request_structure_limit'):
         training_capture.sanitize_training_value(value, max_nodes=100, aggregate_parts=True)
 
 
-@pytest.mark.parametrize('part', ['call', 'snapshot', 'envelope'])
+@pytest.mark.parametrize('part', ['call', 'source_call', 'snapshot', 'envelope'])
 def test_partitioning_still_checks_keys_values_collisions_and_depth(part):
     def wrap(value):
         return {'call': {'provider_calls': [value]},
+                'source_call': {'judgment': {'signal_source_provider_calls': [value]}},
                 'snapshot': {'input_snapshots': {'run': value}},
                 'envelope': {'configuration': value}}[part]
     for invalid, reason in (({1: 'bad key'}, 'request_key_invalid'),

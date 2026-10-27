@@ -900,11 +900,12 @@ def _validated_homepage_navigation_locators(
     verified_homepage_identity: Optional[Mapping[str, Any]],
     headquarters_review: bool = False,
     stage_review: bool = False,
+    industry_review: bool = False,
 ) -> list[dict[str, str]]:
     """Admit only bounded same-verified-domain untrusted navigation locators."""
 
     if (
-        not (positive_semantic_review or headquarters_review or stage_review)
+        not (positive_semantic_review or headquarters_review or stage_review or industry_review)
         or not isinstance(value, Sequence)
         or isinstance(value, (str, bytes))
         or not isinstance(verified_homepage_identity, Mapping)
@@ -4080,6 +4081,7 @@ async def investigate_company_evidence(
             ),
             headquarters_review="geography" in requested_targets,
             stage_review="stage" in requested_targets,
+            industry_review=bool(industry_review_model),
         )
     )
     observed_stage_archive_urls = {

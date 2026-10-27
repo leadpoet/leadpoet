@@ -3180,6 +3180,78 @@ def _retain_matched_company_retry_sources(
     })
 
 
+def _retain_unresolved_industry_retry_sources(
+    retry_cache: Optional[Mapping[str, Any]],
+    result: CompanyFitDecisionResult,
+    investigation: Mapping[str, Any],
+) -> None:
+    """Keep checked text for another review, never an unresolved fit verdict."""
+
+    model = os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+    if (
+        not model or not isinstance(retry_cache, MutableMapping)
+        or investigation.get("_completed_submit") is not True
+        or investigation.get("failure_reason") != ""
+    ):
+        return
+    claims = investigation.get("claims")
+    finding = claims.get("industry") if isinstance(claims, Mapping) else None
+    review = finding.get("_industry_review") if isinstance(finding, Mapping) else None
+    if (
+        not isinstance(review, Mapping)
+        or review.get("schema") != "industry_evidence_review_v1"
+        or review.get("model") != model
+        or review.get("decision") != COMPANY_FIT_UNAVAILABLE
+        or not isinstance(review.get("packet_sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", review["packet_sha256"])
+    ):
+        return
+    identity = _matched_company_result_retry_identity(result)
+    urls = review.get("source_urls")
+    if (
+        not identity or not isinstance(urls, list)
+        or not 0 < len(urls) <= max_returned_fetched_pages()
+        or any(not isinstance(url, str) or not url or _valid_web_evidence_url(url) != url for url in urls)
+    ):
+        return
+    pages, final_urls = _validated_returned_fetched_pages(
+        investigation.get(PRIVATE_FETCHED_PAGES_KEY), submitted_source_urls=tuple(urls),
+    )
+    domain = identity["registrable_dns_domain"]
+    admitted = {
+        url: {"final_url": final_urls[url], "text": pages[url]}
+        for url in urls if url in pages
+        and _registrable_domain(url) == domain
+        and _registrable_domain(final_urls[url]) == domain
+    }
+    if not admitted:
+        return
+    prior = _matched_company_retry_prefetched_pages(retry_cache, identity)
+    protected = {
+        context["url"]: prior[context["url"]]
+        for context in _matched_investigator_source_contexts(
+            result, prior, matched_dimensions_only=True, include_industry_support=True,
+        )
+    }
+    citations = review.get("evidence")
+    cited = {
+        item["url"]: admitted[item["url"]]
+        for item in (citations if isinstance(citations, list) else [])
+        if isinstance(item, Mapping) and isinstance(item.get("url"), str)
+        and item["url"] in admitted and isinstance(item.get("quote"), str)
+        and item["quote"] and _quote_occurs(item["quote"], admitted[item["url"]]["text"])
+    }
+    # Preserve matched dimensions, then partial facts and fresh sources.
+    # The next invocation independently binds and reclassifies this text.
+    retained = {**protected, **cited, **{url: page for url, page in admitted.items() if url not in prior},
+                **admitted, **{url: page for url, page in prior.items() if url not in admitted}}
+    retry_cache.clear()
+    retry_cache.update({
+        _MATCHED_COMPANY_RETRY_IDENTITY_KEY: identity,
+        _MATCHED_COMPANY_RETRY_PAGES_KEY: dict(list(retained.items())[:max_matched_retry_pages()]),
+    })
+
+
 def _hydrate_verified_required_attribute_recovery_source(
     source_cache: dict[str, dict[str, Any]],
     investigation: Mapping[str, Any],
@@ -8721,6 +8793,8 @@ async def _run_targeted_company_evidence_investigation(
                 review_positive_semantics
                 or "geography" in investigation_targets
                 or "stage" in investigation_targets
+                or ("industry" in investigation_targets
+                    and os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip())
             )
             else ()
         ),
@@ -9152,6 +9226,9 @@ async def _run_targeted_company_evidence_investigation(
             retention_projection,
             investigation,
             company=company,
+        )
+        _retain_unresolved_industry_retry_sources(
+            matched_company_retry_source_cache, retention_projection, investigation,
         )
     return (
         projected,

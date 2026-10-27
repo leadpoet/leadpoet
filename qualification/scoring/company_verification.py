@@ -36,6 +36,7 @@ import asyncio
 import codecs
 from html.parser import HTMLParser
 import json
+import os
 import logging
 import re
 from typing import Mapping, Optional
@@ -944,6 +945,7 @@ def _homepage_navigation_locators(
 
     candidates: list[tuple[int, dict[str, str]]] = []
     seen: set[str] = set()
+    industry_review = bool(os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip())
     for href, raw_label in parser.links:
         label = " ".join(str(raw_label or "").split())
         if not label or len(label) > MAX_HOMEPAGE_NAVIGATION_LABEL_LENGTH:
@@ -982,14 +984,26 @@ def _homepage_navigation_locators(
         words = set(re.findall(
             r"[a-z]+", f"{parsed.path} {label}".casefold()
         ))
+        path_parts = [part.casefold() for part in parsed.path.split("/") if part]
+        if industry_review:
+            # A news article under /about/ is not the company overview. Rank
+            # the link itself, so that a large archive cannot hide service
+            # locators inside the same existing navigation allowance.
+            words = set(re.findall(
+                r"[a-z]+", f"{path_parts[-1] if path_parts else ''} {label}".casefold()
+            ))
+        service_locator = industry_review and bool(
+            set(path_parts) & {"service", "services", "product", "products", "platform", "platforms"}
+        ) and not bool(set(path_parts) & {"news", "newsroom", "blog", "blogs", "articles"})
         priority = (
             0 if words & {
                 "pricing", "price", "prices", "plan", "plans",
                 "subscription", "subscriptions",
             } and not _commercial_terms_navigation_locator(canonical, label)
             else 1 if words & {"contact", "about", "headquarters"}
+            or (industry_review and path_parts and path_parts[-1] in {"news", "newsroom", "investors"})
             else 2 if _commercial_terms_navigation_locator(canonical, label)
-            else 3 if words & {"product", "products", "platform", "platforms"}
+            else 3 if service_locator or words & {"product", "products", "platform", "platforms"}
             else 4
         )
         candidates.append((priority, {"url": canonical, "label": label}))

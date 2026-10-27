@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Iterator
+from typing import Iterator, Literal, TypedDict
 
 from scripts.arena_ingress_config import inspect as inspect_ingress
 from scripts.gateway_git_deploy import _candidate_blob_entries, verify_materialized_tree
@@ -25,6 +25,13 @@ CADDY_FILE = Path('/etc/caddy/Caddyfile')
 
 class ArenaRuntimeCacheRetirementError(RuntimeError):
     """An archive or its disposable cache paths could not be proved."""
+
+
+class ArenaRuntimeCacheRetirementResult(TypedDict):
+    archive: str
+    cache_paths: int
+    applied: bool
+    status: Literal['planned', 'cache_cleanup_complete', 'deferred_in_use']
 
 
 def _no_link_ancestors(path: Path) -> Path:
@@ -107,12 +114,13 @@ def retire_runtime_caches(
     *, repo_root: Path, runtime_root: Path, slot: int, sha: str, owner_uid: int,
     ingress_state: Path = INGRESS_STATE, caddy_file: Path = CADDY_FILE,
     proc_root: Path = Path('/proc'), mountinfo: Path = Path('/proc/self/mountinfo'),
-    apply: bool = False,
-) -> dict:
+    apply: bool = False, defer_if_busy: bool = False,
+) -> ArenaRuntimeCacheRetirementResult:
     """Validate everything first; unlink only disposable cache entries as root.
 
     Source removal remains the unprivileged caller's operation after its owned
     process drain. No source file permissions or ownership are changed here.
+    Busy deferral requires a caller that understands and preserves that result.
     """
     if (type(slot) is not int or slot not in (0, 1) or not isinstance(sha, str)
             or not re.fullmatch(r'[0-9a-f]{40}', sha)):
@@ -131,8 +139,6 @@ def retire_runtime_caches(
         raise ArenaRuntimeCacheRetirementError('active Arena archive must be preserved')
     if _contains_nested_mount(archive, _read_mount_points(mountinfo)):
         raise ArenaRuntimeCacheRetirementError('runtime contains a mounted path')
-    if _is_in_use(archive, _read_process_paths(proc_root)):
-        raise ArenaRuntimeCacheRetirementError('runtime is still in use')
     with _exact_git_directory(repo_root):
         expected = _candidate_blob_entries(repo_root, sha)
         verify_materialized_tree(repo_root=repo_root, materialized_root=archive,
@@ -178,18 +184,28 @@ def retire_runtime_caches(
                     raise ArenaRuntimeCacheRetirementError('runtime has unknown paths; preserved')
                 if is_directory:
                     identities[relative] = _identity(metadata)
+        if apply and os.geteuid() != 0:
+            raise ArenaRuntimeCacheRetirementError('cache removal requires root')
+        # Prove the entire inactive archive before allowing a deferred result.
+        # Close our inspection FD before reading /proc, or the helper's own
+        # descriptor would falsely prove that this archive is in use.
+        os.close(root_fd)
+        root_fd = None
+        if (inspect_ingress(ingress_state, caddy_file) != ingress
+                or _contains_nested_mount(archive, _read_mount_points(mountinfo))):
+            raise ArenaRuntimeCacheRetirementError('runtime serving identity changed')
+        _no_link_ancestors(archive)
+        if _identity(archive.lstat()) != _identity(saved):
+            raise ArenaRuntimeCacheRetirementError('runtime root identity changed')
+        if _is_in_use(archive, _read_process_paths(proc_root)):
+            if not defer_if_busy:
+                # Installed older controllers act only on our exit status.
+                raise ArenaRuntimeCacheRetirementError('runtime is still in use')
+            # Diagnostic readers may retain an otherwise valid inactive tree.
+            # Do not mutate it or let optional retirement stop a live release.
+            return {'archive': str(archive), 'cache_paths': len(caches),
+                    'applied': False, 'status': 'deferred_in_use'}
         if apply:
-            if os.geteuid() != 0:
-                raise ArenaRuntimeCacheRetirementError('cache removal requires root')
-            # Close our inspection FD before reading /proc, or the helper's
-            # own descriptor would falsely prove that this archive is in use.
-            os.close(root_fd)
-            root_fd = None
-            if (inspect_ingress(ingress_state, caddy_file) != ingress
-                    or _is_in_use(archive, _read_process_paths(proc_root))
-                    or _contains_nested_mount(archive, _read_mount_points(mountinfo))):
-                raise ArenaRuntimeCacheRetirementError('runtime serving identity changed')
-            _no_link_ancestors(archive)
             root_fd = _open_root_directory(archive)
             if _identity(os.fstat(root_fd)) != _identity(saved):
                 raise ArenaRuntimeCacheRetirementError('runtime root identity changed')
@@ -208,7 +224,8 @@ def retire_runtime_caches(
     finally:
         if root_fd is not None:
             os.close(root_fd)
-    return {'archive': str(archive), 'cache_paths': len(caches), 'applied': apply}
+    return {'archive': str(archive), 'cache_paths': len(caches), 'applied': apply,
+            'status': 'cache_cleanup_complete' if apply else 'planned'}
 
 
 def main() -> int:
@@ -217,9 +234,12 @@ def main() -> int:
     parser.add_argument('--slot', required=True, type=int, choices=(0, 1))
     parser.add_argument('--sha', required=True)
     parser.add_argument('--owner-uid', required=True, type=int)
+    parser.add_argument('--defer-if-busy', action='store_true',
+                        help='return deferred_in_use only for callers that preserve the archive')
     args = parser.parse_args()
     print(json.dumps(retire_runtime_caches(repo_root=args.repo_root, runtime_root=RUNTIME_ROOT,
-        slot=args.slot, sha=args.sha, owner_uid=args.owner_uid, apply=True), sort_keys=True))
+        slot=args.slot, sha=args.sha, owner_uid=args.owner_uid, apply=True,
+        defer_if_busy=args.defer_if_busy), sort_keys=True))
     return 0
 
 

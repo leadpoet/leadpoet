@@ -2246,7 +2246,10 @@ def _quote_supports_headquarters(
             return country_present or postal_present
         return full_state_present or postal_present
     location_tokens = {country, state} - {""}
-    return all(token in normalized for token in location_tokens)
+    return all(
+        re.search(rf"(?<!\w){re.escape(token)}(?!\w)", normalized)
+        for token in location_tokens
+    )
 
 
 async def _post_json(
@@ -2830,7 +2833,10 @@ def _bound_structured_headquarters_finding(
             == canonical_us_state(finding.get("observed_state"))
             if state else not finding.get("observed_state")
         ) and (not state or bool(canonical_us_state(state)))
-    return state.casefold() == str(finding.get("observed_state") or "").casefold()
+    # Only US states control deterministic regional fit. For other countries,
+    # a reviewer can report a city or region from the same exact HQ quote.
+    # The caller still checks the quoted location and requested geography.
+    return True
 
 
 def _semantic_ownership_proof(

@@ -1,3 +1,15 @@
+## Scoped authorization: October 26 verifier accuracy audit
+
+The user authorized the independent October 26 verifier audit, narrow proven
+root-cause fixes, rigorous controls, safe merge and canonical deployment.
+This task may repair placement of already validated headquarters evidence,
+build and select the reviewed scorer for future rounds, and run bounded
+reward-disabled baseline/miner scoring tests. OpenRouter spend must stay
+within $8 for this task. Preserve identity/source proof, frozen rounds,
+accepted judgments, scoring, costs, publication and rewards. The coordinating
+task owns production actions and must verify actual scoring plus fresh
+OnePatch/Sentry. Preserve concurrent industry work and both instruction files.
+
 ## Scoped authorization: October 27 SSM access hardening
 
 The user authorized end-to-end SSM access hardening for the production gateway,

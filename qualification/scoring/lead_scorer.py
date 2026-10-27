@@ -82,6 +82,7 @@ from qualification.scoring.company_evidence_investigator import (
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
+    _IDENTITY_LINK_CONTEXT_MARKER,
     _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
     _bound_linkedin_headquarters_source,
@@ -3408,15 +3409,22 @@ def _investigator_prefetched_pages(
         ):
             existing = candidates.get(submitted_profile_url)
             if existing is not None:
+                source_text, identity_marker, identity_links = existing["text"].partition(
+                    _IDENTITY_LINK_CONTEXT_MARKER
+                )
                 if (
                     source_field != STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD
                     or _strict_linkedin_company_profile_url(
                         existing["final_url"]
                     ) != evidence_url
-                    or text in existing["text"]
+                    or text in source_text
                 ):
                     continue
-                text = existing["text"] + "\n\n" + text
+                # Link destinations are identity-only context. Keep the bound
+                # HQ projection on the quotable side of that existing boundary.
+                text = source_text + "\n\n" + text
+                if identity_marker:
+                    text += "\n\n" + identity_marker + identity_links
                 if len(text) > MAX_PAGE_CHARACTERS:
                     continue
             candidates[submitted_profile_url] = {

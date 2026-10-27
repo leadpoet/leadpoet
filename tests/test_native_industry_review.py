@@ -108,7 +108,11 @@ def test_final_shared_packet_uses_stronger_model_only_under_new_industry_policy(
     assert final['reasoning']['effort'] == 'low'
 
 
-def test_native_source_selection_receives_verified_source_gaps_before_research(monkeypatch):
+@pytest.mark.parametrize('missing', [
+    ['Account workflow integration'],
+    ['General reporting capability', 'Account workflow integration'],
+])
+def test_native_source_selection_receives_verified_source_gaps_before_research(monkeypatch, missing):
     """The source picker must see the actual gap, not only a broad category."""
     seen = []
     search_options = []
@@ -116,7 +120,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     def initial_gap(result):
         seen.append(result)
         if len(seen) == 1:
-            result.update(decision='unavailable', missing_requirements=['Account workflow integration'])
+            result.update(decision='unavailable', missing_requirements=missing)
 
     run, calls, _, reviews = install(monkeypatch, mutation=initial_gap)
     original_post = c._post_json
@@ -146,7 +150,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     first = calls['model'][0]['messages'][1]['content']
     document = json.loads(first[first.index('{'):])
     brief = document['industry_source_research_brief']
-    assert brief['missing_requirements'] == ['Account workflow integration']
+    assert brief['missing_requirements'] == missing
     assert brief['decision'] == 'unavailable'
     assert brief['research_query'] == 'account workflow integration'
     assert search_options[0]['include_domains'] == ('coreworks.ai',)
@@ -154,7 +158,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     assert 'not proof' in brief['notice']
     assert calls['search'][0] == (
         "Find Coreworks's own product documentation or customer projects about: "
-        'Account workflow integration'
+        'account workflow integration'
     )
     assert document['server_industry_discovery']['notice'] == 'discovery_only_not_evidence'
     assert calls['model'][0]['tool_choice']['function']['name'] == 'fetch_page'

@@ -4839,13 +4839,14 @@ async def investigate_company_evidence(
             )
             industry_discovery = None
             if industry_gap_search_needed:
-                # Exa accepts a natural-language fact request. Reuse the first
-                # missing requirement without another query-writing model call;
-                # company-domain authority stays in the provider filter below.
+                # Keep the reviewer's most discriminative missing fact, which
+                # need not be the first item in its requirement list. Reuse
+                # that existing query without another model call; company
+                # authority stays in the provider filter below.
                 query = (
                     'Find ' + str(company_locator.get('name') or '')[:100]
                     + "'s own product documentation or customer projects about: "
-                    + industry_research_brief['missing_requirements'][0].strip()
+                    + industry_research_brief['research_query'].strip()
                 )[:500]
                 search_calls += 1
                 industry_discovery = await _search_web(

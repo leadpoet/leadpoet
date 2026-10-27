@@ -926,12 +926,18 @@ def _rootfs_filter(member: tarfile.TarInfo, dest_path: str) -> Optional[tarfile.
     if not raw_name or "\x00" in raw_name or raw_name.startswith("/") or name in ("", ".", "..") or name.startswith("../"):
         raise ImageError(RULE_LAYER_INVALID, "layer member path escapes the root filesystem")
     root_real = os.path.realpath(dest_path)
-    destination = os.path.realpath(os.path.join(root_real, name))
-    if not _inside(root_real, destination):
+    destination = os.path.join(root_real, name)
+    # A symlink member replaces the existing final symlink itself. Only that
+    # case may ignore the old target; all its ancestors must remain contained.
+    checked_path = (
+        os.path.dirname(destination)
+        if member.issym() and os.path.islink(destination) else destination
+    )
+    if not _inside(root_real, os.path.realpath(checked_path)):
         raise ImageError(RULE_LAYER_INVALID, "layer member path escapes the root filesystem")
     if member.islnk():
         linkname = str(member.linkname).replace("\\", "/")
-        if not linkname or "\x00" in linkname:
+        if not linkname or "\x00" in linkname or linkname.startswith("/"):
             raise ImageError(RULE_LAYER_INVALID, "hardlink target is invalid")
         target = os.path.realpath(os.path.join(root_real, linkname.lstrip("/")))
         if not _inside(root_real, target):
@@ -1022,6 +1028,11 @@ def _apply_layer(
             try:
                 filtered = _rootfs_filter(member, str(rootfs))
                 if filtered is not None:
+                    destination = rootfs / filtered.name
+                    if filtered.issym() and destination.is_symlink():
+                        # Never let extraction write or apply attributes through
+                        # the previous layer's final-component symlink.
+                        destination.unlink()
                     # Calling the local filter immediately before each extract
                     # keeps this safe on Python 3.8, where tarfile has no
                     # extraction_filter argument.

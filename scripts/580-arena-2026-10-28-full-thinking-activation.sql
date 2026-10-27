@@ -117,7 +117,8 @@ BEGIN
   IF encode(extensions.digest(next_configuration::TEXT, 'sha256'), 'hex') IS DISTINCT FROM expected_after THEN
     RAISE EXCEPTION 'Oct28 activation target configuration differs' USING ERRCODE = '55000';
   END IF;
-  SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY round_id), '[]'::JSONB)
+  SELECT coalesce(jsonb_agg(jsonb_build_array(x.round_id,
+      encode(extensions.digest(to_jsonb(x)::TEXT, 'sha256'), 'hex')) ORDER BY x.round_id), '[]'::JSONB)
     INTO other_rounds FROM public.lab_arena_rounds x WHERE round_id <> rid;
   SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY submission_id), '[]'::JSONB)
     INTO submissions FROM public.lab_arena_submissions x WHERE round_id = rid;
@@ -137,7 +138,8 @@ BEGIN
      OR (to_jsonb(after_row) - ARRAY['configuration_doc', 'updated_at'])
         IS DISTINCT FROM (to_jsonb(r) - ARRAY['configuration_doc', 'updated_at'])
      OR current_triggers IS DISTINCT FROM original_triggers
-     OR (SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY round_id), '[]'::JSONB)
+     OR (SELECT coalesce(jsonb_agg(jsonb_build_array(x.round_id,
+      encode(extensions.digest(to_jsonb(x)::TEXT, 'sha256'), 'hex')) ORDER BY x.round_id), '[]'::JSONB)
          FROM public.lab_arena_rounds x WHERE round_id <> rid) IS DISTINCT FROM other_rounds
      OR (SELECT coalesce(jsonb_agg(to_jsonb(x) ORDER BY submission_id), '[]'::JSONB)
          FROM public.lab_arena_submissions x WHERE round_id = rid) IS DISTINCT FROM submissions THEN

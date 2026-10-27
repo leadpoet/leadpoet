@@ -6,7 +6,7 @@ inside the existing verifier; unknown or partially applied source fails closed.
 from __future__ import annotations
 import ast
 
-CORRECTION_ID = "completed_investigation_source_finality_v2"
+CORRECTION_ID = "completed_investigation_source_finality_v3"
 
 class InvestigationFinalitySeamError(ValueError):
     pass
@@ -157,8 +157,56 @@ PREVIOUS_HELPER = LEGACY_HELPER.replace(
     '                "_completed_investigation_settled": True,\n'
     '                **({"investigation_receipt": {', 1,
 )
-HELPER = PREVIOUS_HELPER.replace(
+PREVIOUS_HELPER_V2 = PREVIOUS_HELPER.replace(
     '        and "employee_size" in incomplete\n', '', 1,
+)
+
+
+# Exact reviewed negative-finality delta; no current grader is imported.
+_RESOLVED_PROFILE_OBLIGATIONS = '''    # A source-local optional profile miss no longer blocks a completed
+    # negative review after the existing verifier resolved every obligation
+    # that could depend on that profile. This never clears the cache or changes
+    # identity, source proof, a qualification decision, or a provider fault.
+    resolved_profile_obligations = bool(
+        refresh_outcome == "retryable_failure"
+        and current_profile_cache.get("structured_failure") is True
+        and current_profile_cache.get("structured_failure_reason") == SOURCE_BLOCKED_FAILURE_REASON
+        and current_profile_cache.get(VERIFIER_FAILURE_DETAIL_KEY) == SOURCE_BLOCKED_FAILURE_REASON
+        and isinstance(current_profile, Mapping)
+        and current_profile.get("outcome") == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+        and result.details.get("identity_decision") == COMPANY_FIT_MATCH
+        and result.details.get("dimension_decisions", {}).get("employee_size") == COMPANY_FIT_MATCH
+        and result.details.get("dimension_decisions", {}).get("geography") == COMPANY_FIT_MATCH
+        and receipt.get("gate") == "company_evidence_investigation"
+        and receipt.get("completed_submitted_findings") is True
+        and receipt.get("failure_reason") == ""
+        and all(
+            target in (receipt.get("targets") or ())
+            and isinstance(review_claims.get(target), Mapping)
+            and review_claims[target].get("target") == target
+            and review_claims[target].get("status") == "UNPROVEN"
+            and review_claims[target].get("evidence_url") == ""
+            and review_claims[target].get("evidence_quote") == ""
+            for target in (
+                {"identity": "rebrand", "employee_size": "headcount", "stage": "stage",
+                 "industry": "industry", "required_attribute": "required_attribute", "geography": "geography"}[dimension]
+                for dimension in incomplete
+            )
+        )
+    )
+'''
+HELPER = PREVIOUS_HELPER_V2.replace(
+    '    # A malformed optional structured profile',
+    _RESOLVED_PROFILE_OBLIGATIONS + '    # A malformed optional structured profile', 1,
+).replace(
+    'if malformed_profile_exhausted else refresh_outcome',
+    'if malformed_profile_exhausted or resolved_profile_obligations else refresh_outcome', 1,
+).replace(
+    '                        MALFORMED_RESPONSE_FAILURE_REASON\n',
+    '                        str(current_profile_cache.get(VERIFIER_FAILURE_DETAIL_KEY) or "")\n', 1,
+).replace(
+    '}} if malformed_profile_exhausted else {}),',
+    '}} if malformed_profile_exhausted or resolved_profile_obligations else {}),', 1,
 )
 
 WRAPPER_GUARD_OLD = '''            and web_identity_decision == COMPANY_FIT_UNAVAILABLE
@@ -315,11 +363,12 @@ def convert_investigation_finality_seam(source: bytes) -> bytes:
             changes = []
         else:
             expected_prior_helpers = {
-                (LEGACY_HELPER.rstrip("\n"), (1, 0)),
-                (PREVIOUS_HELPER.rstrip("\n"), (0, 1)),
+                (LEGACY_HELPER.rstrip("\n"), (1, 0), (1, 0)),
+                (PREVIOUS_HELPER.rstrip("\n"), (0, 1), (1, 0)),
+                (PREVIOUS_HELPER_V2.rstrip("\n"), (0, 1), (1, 0)),
+                (PREVIOUS_HELPER_V2.rstrip("\n"), (0, 1), (0, 1)),
             }
-            if ((actual.rstrip("\n"), wrapper_counts) not in expected_prior_helpers
-                    or post_repair_counts != (1, 0)):
+            if (actual.rstrip("\n"), wrapper_counts, post_repair_counts) not in expected_prior_helpers:
                 raise InvestigationFinalitySeamError("unrecognized settlement helper")
             changes = [(helpers[0].lineno - 1, helpers[0].end_lineno,
                         HELPER.rstrip("\n") + "\n")]

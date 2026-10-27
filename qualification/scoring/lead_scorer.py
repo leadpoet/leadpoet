@@ -9128,6 +9128,37 @@ def _settle_completed_company_investigation(
     review_fetches = review_usage.get("fetch_outcomes")
     review_fetches = review_fetches if isinstance(review_fetches, list) else []
     current_profile = current_profile_cache.get("evidence")
+    # A source-local optional profile miss no longer blocks a completed
+    # negative review after the existing verifier resolved every obligation
+    # that could depend on that profile. This never clears the cache or changes
+    # identity, source proof, a qualification decision, or a provider fault.
+    resolved_profile_obligations = bool(
+        refresh_outcome == "retryable_failure"
+        and current_profile_cache.get("structured_failure") is True
+        and current_profile_cache.get("structured_failure_reason") == SOURCE_BLOCKED_FAILURE_REASON
+        and current_profile_cache.get(VERIFIER_FAILURE_DETAIL_KEY) == SOURCE_BLOCKED_FAILURE_REASON
+        and isinstance(current_profile, Mapping)
+        and current_profile.get("outcome") == CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
+        and result.details.get("identity_decision") == COMPANY_FIT_MATCH
+        and result.details.get("dimension_decisions", {}).get("employee_size") == COMPANY_FIT_MATCH
+        and result.details.get("dimension_decisions", {}).get("geography") == COMPANY_FIT_MATCH
+        and receipt.get("gate") == "company_evidence_investigation"
+        and receipt.get("completed_submitted_findings") is True
+        and receipt.get("failure_reason") == ""
+        and all(
+            target in (receipt.get("targets") or ())
+            and isinstance(review_claims.get(target), Mapping)
+            and review_claims[target].get("target") == target
+            and review_claims[target].get("status") == "UNPROVEN"
+            and review_claims[target].get("evidence_url") == ""
+            and review_claims[target].get("evidence_quote") == ""
+            for target in (
+                {"identity": "rebrand", "employee_size": "headcount", "stage": "stage",
+                 "industry": "industry", "required_attribute": "required_attribute", "geography": "geography"}[dimension]
+                for dimension in incomplete
+            )
+        )
+    )
     # A malformed optional structured profile supplies no evidence. A later
     # independently completed search can exhaust every disputed fact without
     # recovering that profile. This cannot clear a transport/provider fault,
@@ -9182,7 +9213,7 @@ def _settle_completed_company_investigation(
             icp=icp,
             linkedin_refresh_outcome=(
                 CURRENT_LINKEDIN_SIZE_INSUFFICIENT_EVIDENCE
-                if malformed_profile_exhausted else refresh_outcome
+                if malformed_profile_exhausted or resolved_profile_obligations else refresh_outcome
             ),
             identity_receipt=(
                 result.details.get("identity_receipt")
@@ -9208,9 +9239,9 @@ def _settle_completed_company_investigation(
                 **({"investigation_receipt": {
                     **receipt,
                     "prior_linkedin_refresh_failure_reason": (
-                        MALFORMED_RESPONSE_FAILURE_REASON
+                        str(current_profile_cache.get(VERIFIER_FAILURE_DETAIL_KEY) or "")
                     ),
-                }} if malformed_profile_exhausted else {}),
+                }} if malformed_profile_exhausted or resolved_profile_obligations else {}),
             },
         )
     if "employee_size" in incomplete and refresh_outcome == "retryable_failure":

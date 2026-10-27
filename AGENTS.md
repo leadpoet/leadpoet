@@ -5,7 +5,9 @@ explicit model settings and valid tool history, and safely merging and deploying
 these fixes. Apply exact committed migration 582 to expand only the open October
 28 registry. Preserve October 27, baseline identity, scoring, privacy, costs,
 80% coverage, and 1% missing-token rules. Use canonical release controllers and
-respect concurrent restart owners. This authority ends after live verification.
+respect concurrent restart owners. Proven failed deliveries may consume the
+incomplete-ICP allowance, but must not become training targets. This authority
+ends after live verification.
 
 ## Scoped authorization: PR808 baseline hotkey read
 

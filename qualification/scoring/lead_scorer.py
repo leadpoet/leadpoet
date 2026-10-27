@@ -4495,14 +4495,11 @@ def _web_identity_receipt(
         )
         return receipt
     if (
-        receipt.get("decision") == COMPANY_FIT_MISMATCH
-        and receipt.get("reason_code") == "identity_mismatch"
-        and verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
-        and receipt.get("submitted_name") == receipt.get("observed_name")
+        verified_anchor_receipt.get("decision") == COMPANY_FIT_MATCH
         and receipt.get("submitted_domain")
         == verified_homepage_identity.get("registrable_dns_domain")
         and receipt.get("submitted_linkedin_slug")
-        == verified_homepage_identity.get("linkedin_company_slug")
+        in {"", verified_homepage_identity.get("linkedin_company_slug")}
         and receipt.get("observed_domain")
         == verified_homepage_identity.get("registrable_dns_domain")
         and receipt.get("observed_linkedin_slug")
@@ -4511,7 +4508,9 @@ def _web_identity_receipt(
     ):
         # A model-owned alternate LinkedIn slug is not stronger than the exact
         # identity triplet independently fetched from the first-party
-        # homepage. It is also not enough to prove that the slugs are aliases.
+        # homepage, even when the web model also changes the company name.
+        # Neither a changed name nor an omitted submitted LinkedIn URL proves
+        # the slugs are aliases. They still require independent identity repair.
         # Keep the model observation in the receipt, classify the conflict as
         # incomplete, and let the existing bounded repair request re-check it.
         receipt.update(
@@ -10051,8 +10050,10 @@ async def _llm_reverify_company(
         identity_conflict_repair = (
             "\nIDENTITY CONFLICT REPAIR: the prior observed_company_linkedin "
             "conflicted with the server-verified first-party homepage anchor "
-            "while the normalized company name and domain matched. Perform a "
-            "fresh lookup. Return the exact LinkedIn company URL only when a "
+            "while the company domain matched. The observed company name may "
+            "also differ. Perform a fresh lookup for the anchored entity and "
+            "independently verify its name, domain, and LinkedIn URL. Return "
+            "the exact LinkedIn company URL only when a "
             "public source proves it; otherwise return an empty string. Do not "
             "assume that two different slugs are aliases and do not repeat an "
             "ungrounded alternate slug."

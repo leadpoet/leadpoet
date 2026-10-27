@@ -4659,6 +4659,16 @@ async def investigate_company_evidence(
                 industry_review_model
                 and industry_source_url
                 and industry_source_url not in fetched_pages
+                # A server-observed exact redirect is already loaded. Keep its
+                # original request binding rather than fetching or aliasing it.
+                # A third-party request cannot supply first-party authority.
+                and not any(
+                    final_url == industry_source_url
+                    and _independently_bound_first_party_url(
+                        request_url, first_party_domains, identity_anchor
+                    )
+                    for request_url, final_url in fetched_final_urls.items()
+                )
                 and _independently_bound_first_party_url(
                     industry_source_url, first_party_domains, identity_anchor
                 )

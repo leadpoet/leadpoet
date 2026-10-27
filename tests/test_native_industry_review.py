@@ -676,3 +676,29 @@ def test_existing_industry_locator_does_not_trust_failure_or_cross_company_redir
     assert calls['primary'].count(industry_url) == 1
     assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
     assert len(result['usage']['fetch_outcomes']) == len(calls['primary'])
+
+
+@pytest.mark.parametrize('source_kind', ['bound_redirect', 'third_party_redirect', 'different_final_url'])
+def test_industry_prefetch_reuses_only_an_already_bound_exact_redirect(monkeypatch, source_kind):
+    run, calls, _, reviews = install(monkeypatch)
+    requested_url = ('https://other.example/article' if source_kind == 'third_party_redirect'
+                     else 'https://coreworks.ai/')
+    industry_url = 'https://www.coreworks.ai/'
+    final_url = (industry_url + '?campaign=other' if source_kind == 'different_final_url'
+                 else industry_url)
+    result = asyncio.run(run(
+        prior_observations={'submitted_source_urls': [requested_url],
+                            'industry_evidence_url': industry_url},
+        prefetched_pages={requested_url: {'final_url': final_url, 'text': FEATURES}}))
+    reused = source_kind == 'bound_redirect'
+    assert calls['primary'].count(industry_url) == (0 if reused else 1)
+    first_sources = {page['source_url'] for message in reviews[0]['messages'][2:]
+                     for page in json.loads(message['content'])['untrusted_source_pages']}
+    if reused:
+        assert requested_url in first_sources
+        assert industry_url not in first_sources  # Keep the real request binding.
+        assert industry_url not in result[c.PRIVATE_FETCHED_PAGES_KEY]
+    else:
+        assert industry_url in first_sources
+    assert result['_completed_submit']
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS

@@ -22,6 +22,12 @@ POLICY_VERSION = "leadpoet.lab_arena.deepline_company_research.v1"
 CATALOG_URL = "https://code.deepline.com/api/v2/tools?compact=false"
 MAX_METADATA_READ_WORKERS = 4
 _ID = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+# Reviewed direct model-product invocation family, across model and output
+# variants. "AI", "prompt", provider descriptions and research labels alone
+# do not distinguish model inference from source-grounded research tools.
+_DATAFORSEO_LIVE_LLM_SCRAPER = re.compile(
+    r"(?:dataforseo_)?ai_optimization_[a-z][a-z0-9_]*_llm_scraper_live_[a-z][a-z0-9_]*"
+)
 _CATEGORY = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _COMPANY_CATEGORIES = frozenset({"company_search", "company_enrich", "research", "smb"})
 _PEOPLE_CATEGORIES = frozenset({"people_search", "people_enrich", "email_finder", "email_verify", "phone_finder", "phone_verify", "reverse_lookup"})
@@ -507,6 +513,20 @@ def tool_entry(snapshot: Mapping[str, Any], tool_id: str) -> dict[str, Any]:
         if row["tool_id"] == tool_id:
             return _copy(row)
     raise CatalogError("tool_not_approved")
+
+
+def is_direct_inference_tool(snapshot: Mapping[str, Any], tool_id: str) -> bool:
+    """Classify reviewed operation semantics without altering frozen catalog data.
+
+    This covers the reviewed named-model scraper family, not arbitrary future
+    inference products. Canonical names and aliases come from the hash-bound
+    entry; caller payload text grants no authority.
+    """
+    entry = tool_entry(snapshot, tool_id)
+    return entry["provider"] == "dataforseo" and any(
+        _DATAFORSEO_LIVE_LLM_SCRAPER.fullmatch(name)
+        for name in (entry["tool_id"], *entry["operation_aliases"])
+    )
 
 
 def allowed_tool_ids(snapshot: Mapping[str, Any]) -> tuple[str, ...]:

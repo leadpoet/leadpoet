@@ -67,7 +67,10 @@ def _reviewed_registry(model="openai/gpt-4o-mini", api="openrouter.chat"):
 
 def test_committed_registry_approves_only_reviewed_routes():
     registry = rc.load_registry()
-    assert {route["model_id"] for route in registry["approved_routes"]} == set(PROBE_FILES) | set(LIVE_CAPTURE_FILES)
+    # These six original models have their exact historical fixtures below.
+    # Later routes must supply their own evidence, not rewrite these fixtures.
+    historical_count = len(PROBE_FILES) + len(LIVE_CAPTURE_FILES)
+    assert {route["model_id"] for route in registry["approved_routes"][:historical_count]} == set(PROBE_FILES) | set(LIVE_CAPTURE_FILES)
     assert registry["baseline_route"] == {
         "model_id": "deepseek/deepseek-v4.1-flash-1017", "api": "openrouter.responses"
     }

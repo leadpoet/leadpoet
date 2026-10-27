@@ -1,7 +1,7 @@
 # Full generated thinking policy
 
-PR #732 is merged and its capture changes are deployed. The policy remains off
-and existing rounds keep their frozen settings. The policy name is
+PR #732 is merged and its capture changes are deployed. Enforcement is selected
+per round; existing rounds keep their frozen settings. The policy name is
 `full_generated_thinking_v1`. See the [verification record](arena-full-thinking-verification.md)
 for follow-ups, test evidence and remaining limits.
 
@@ -18,12 +18,23 @@ behavior does. Catalog capability flags alone do not grant approval.
 
 ## Reviewed route registry
 
-The runtime source is `lab_arena/reasoning_models.json`. It contains 25 exact
-model/API/provider routes: 21 Chat Completions routes and four DeepSeek Responses
-routes. All use ZDR, no provider fallback, and a route price bound. Chat calls
-use `exclude: false`; Responses uses its typed `reasoning_text` output. GPT-OSS
-keeps 8,192 output tokens. The other reviewed routes use 32,768. Gemma uses
-`enabled: true`; the other routes use `effort: high`.
+The runtime source is `lab_arena/reasoning_models.json`. It contains 63 exact
+model/API/provider routes. The October 27 GLM/Kimi extension adds 38 routes across
+17 models, while preserving all original 25 rows, provider defaults and baseline.
+All use ZDR, no provider fallback, and a route price bound. Chat calls use
+`exclude: false`; Responses uses typed `reasoning_text`. Gemma uses
+`enabled: true`; other approved routes use `effort: high`. Route output caps are
+unchanged for existing models; new GLM-4.5V routes use 16,384, GLM-5 Venice uses
+32,000, and other additions use 32,768.
+
+The [GLM/Kimi capture evidence](evidence/full-thinking/glm-kimi-routes-20261027.json)
+records two real-provider synthetic cases per added route, exact raw/SQL/readable
+readback, tool continuations, cost, latency and output-format limits. These are
+compatibility tests, not scored ICP or production lead-quality evidence. Some
+routes support prompted JSON rather than native strict schema; the README marks
+them. Failed controls and excluded routes remain in the evidence. No new miner
+logging or receipt protocol is required. Appended routes enter future enabled
+rounds through the existing registry snapshot; frozen rounds are not rewritten.
 
 The [README](../README.md#upcoming-model-whitelist) lists all approved choices.
 Use `provider.only` to select one exact provider on each request. The first
@@ -43,7 +54,7 @@ retains three synthetic Responses turns, typed full text, two function
 continuations, final strict JSON, and exact wire/readable/receipt proof. No
 private native-agent prompts are included.
 The [expanded route matrix](evidence/full-thinking/expanded-whitelist-final-proof-20261025.json)
-verifies all 25 routes with the complete registry. Exact raw storage retains
+verified the original 25 routes with the then-current registry. Exact raw storage retains
 empty optional fields; the readable export may omit empty summary arrays.
 The requested provider selector is recorded separately: returned metadata does
 not independently expose its quantization suffix.

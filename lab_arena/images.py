@@ -934,7 +934,10 @@ def _rootfs_filter(member: tarfile.TarInfo, dest_path: str) -> Optional[tarfile.
         os.path.dirname(destination)
         if member.issym() and os.path.islink(destination) else destination
     )
-    if not _inside(root_real, os.path.realpath(checked_path)):
+    if (
+        not _inside(root_real, os.path.realpath(os.path.dirname(destination)))
+        or not _inside(root_real, os.path.realpath(checked_path))
+    ):
         raise ImageError(RULE_LAYER_INVALID, "layer member path escapes the root filesystem")
     if member.islnk():
         linkname = str(member.linkname).replace("\\", "/")

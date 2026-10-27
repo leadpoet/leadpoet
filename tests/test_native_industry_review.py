@@ -81,6 +81,27 @@ def test_native_discovery_requests_pass_the_real_arena_request_validator(monkeyp
         validate_operation_request('openrouter.chat', request)
 
 
+@pytest.mark.parametrize('enabled', [False, True])
+def test_final_shared_packet_uses_stronger_model_only_under_new_industry_policy(monkeypatch, enabled):
+    run, calls, clock, _ = install(monkeypatch)
+    monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', MODEL if enabled else '')
+    original_fetch = c._fetch_page
+
+    async def fetch(*args, **kwargs):
+        result = await original_fetch(*args, **kwargs)
+        if len(calls['primary']) == 2:
+            clock.now = c.ADMISSION_DEADLINE_SECONDS - c.JUDGMENT_ADMISSION_RESERVE_SECONDS
+        return result
+
+    monkeypatch.setattr(c, '_fetch_page', fetch)
+    asyncio.run(run())
+    final = calls['model'][-1]
+    assert final['tool_choice'] == {'type': 'function', 'function': {'name': 'submit_findings'}}
+    assert final['model'] == (MODEL if enabled else c.POSITIVE_SEMANTIC_REVIEW_MODEL)
+    assert final['max_tokens'] == c.REASONING_MAX_TOKENS
+    assert final['reasoning']['effort'] == 'low'
+
+
 def test_native_source_selection_receives_verified_source_gaps_before_research(monkeypatch):
     """The source picker must see the actual gap, not only a broad category."""
     seen = []
@@ -134,7 +155,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     # Selecting the next source is still industry research. Do not hand it
     # back to the weaker general reviewer after just one page was fetched.
     assert len(calls['model']) == 3  # Two fetches and final judgment; no query-only model call.
-    assert all(request['model'] == c.POSITIVE_SEMANTIC_REVIEW_MODEL
+    assert all(request['model'] == MODEL
                for request in calls['model']
                if request.get('tool_choice') == {
                    'type': 'function', 'function': {'name': 'submit_findings'}})
@@ -199,7 +220,7 @@ def test_initial_gap_discovery_is_not_evidence_and_does_not_force_an_empty_fetch
 
 @pytest.mark.parametrize('enabled', [False, True])
 @pytest.mark.parametrize('positive_review', [False, True])
-def test_research_without_industry_gap_keeps_original_model(monkeypatch, enabled, positive_review):
+def test_research_without_industry_gap_keeps_original_research_model(monkeypatch, enabled, positive_review):
     run, calls, _, _ = install(monkeypatch, finding=_finding('industry',
         observed_industry='Software', activity_role='supplier_operator',
         evidence_url=URL, evidence_quote='Coreworks connects account workflows to its analysis and reporting product.'))
@@ -214,7 +235,9 @@ def test_research_without_industry_gap_keeps_original_model(monkeypatch, enabled
     assert result['_completed_submit']
     assert calls['model']
     expected = c.POSITIVE_SEMANTIC_REVIEW_MODEL if positive_review else c.INVESTIGATOR_MODEL
-    assert all(request['model'] == expected for request in calls['model'])
+    for request in calls['model']:
+        final = request.get('tool_choice') == {'type': 'function', 'function': {'name': 'submit_findings'}}
+        assert request['model'] == (MODEL if enabled and final else expected)
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
     assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
     assert result['usage']['search_calls'] <= c.MAX_SEARCH_CALLS

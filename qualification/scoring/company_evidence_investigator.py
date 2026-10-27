@@ -4942,12 +4942,10 @@ async def investigate_company_evidence(
                     and industry_followup_pending
                     and not forced_stage_search_pending
                 )
-                industry_selection_model = industry_review_model if (
-                    not force_submit and required_tool != "submit_findings" and (
-                        industry_gap_search_needed
-                        or forced_industry_search_call
-                        or (required_tool == "fetch_page" and industry_followup_search_completed)
-                    )
+                industry_investigation_model = industry_review_model if (
+                    force_submit or required_tool == "submit_findings"
+                    or industry_gap_search_needed or forced_industry_search_call
+                    or (required_tool == "fetch_page" and industry_followup_search_completed)
                 ) else ""
                 serialization_retry_request = bool(
                     incomplete_submit_retry_pending
@@ -4972,9 +4970,11 @@ async def investigate_company_evidence(
                     },
                     payload={
                         # The model assessing capability gaps also selects
-                        # the sources until bounded research ends. Explicit
-                        # final/correction judgments keep their existing model.
-                        "model": industry_selection_model or (
+                        # the sources and completes the final shared findings.
+                        # Repeated citation repairs must not fall back to the
+                        # weaker researcher; all deterministic gates still apply.
+                        # Frozen policies without this role retain their models.
+                        "model": industry_investigation_model or (
                             POSITIVE_SEMANTIC_REVIEW_MODEL
                             if positive_semantic_review
                             else INVESTIGATOR_MODEL
@@ -5019,7 +5019,7 @@ async def investigate_company_evidence(
                         **(
                             {"reasoning": {"effort": "low"}}
                             if (
-                                industry_selection_model
+                                industry_investigation_model
                                 or (positive_semantic_review and (
                                     serialization_retry_request or force_submit
                                     or required_tool == "submit_findings"

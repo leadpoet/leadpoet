@@ -1,11 +1,29 @@
 # Production access through SSM
 
-This is the proposed operator configuration. It does not prove a live cutover.
-The coordinating operator must record live inventory and test access before
-removing ingress. Direct host identity and IMDS checks identify `subnet71` as the dashboard below,
-attached to `subnet71-security` (`sg-0da86fef9576a667e`). Full AWS attachment
-inventory and live SSM cutover checks remain pending. Do not infer other resource
-attachments from this host check.
+The October 27 cutover is verified for the three hosts below. AWS inventory
+confirmed one attached instance and one security group per interface. Public
+TCP 22 is removed from all three groups; public TCP 3000 is removed from
+`subnet71-security`. Ports 80, 443, gateway 8000, and all egress rules are unchanged.
+Fresh SSH over SSM, sudo, exact binary stdin, SCP, session termination/reconnect,
+and restricted emergency SSH were tested. The canonical paired restart and
+exact-owner recovery completed through SSM. Dashboard HTTPS and Arena published
+and open-round state remained intact. Recheck live inventory before later changes.
+
+Use `leadpoet-lab` for routine operations in account `493765492819`, region
+`us-east-1`. Its SSO role is `LabOperator`, which cannot change IAM. The existing
+administrator profile is `leadpoet-recovery-console-20261026`; refresh it with
+`aws login --profile leadpoet-recovery-console-20261026 --region us-east-1`
+using `hello@leadpoet.com` (Leadpoet-main root). The `pranav@leadpoet.com` root
+account is separate (`187445349696`). Check STS identity before each write.
+
+The live `leadpoet-lab-operator` policy's own-session condition was corrected
+from the literal `${!aws:userid}` to `${aws:userid}`. All other permissions stayed
+unchanged. AWS simulation covered both attached principals, including the IAM
+user's permissions boundary: own-session termination/resume are allowed;
+other-owner and other-account cases are denied. Live termination and fresh
+connections passed on all three hosts. The AWS SSH session document has no
+maximum duration, no account session-preferences document exists, and the
+tested SSO role credentials last 12 hours. Recheck expiry before a long release.
 
 | SSH alias and existing IP | SSM target | AWS scope |
 | --- | --- | --- |

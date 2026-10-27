@@ -318,7 +318,7 @@ PY
 
 
 retire_arena_runtime_tree() {
-  local slot="$1" sha="$2" tree="$3" expected helper
+  local slot="$1" sha="$2" tree="$3" expected helper report status
   expected="$(arena_runtime_tree "$slot" "$sha")" || return 1
   if [ "$tree" != "$expected" ] || [ -L "$tree" ] || [ ! -d "$tree" ]; then
     echo "ERROR: retired Arena runtime is not the exact owned archive" >&2
@@ -327,9 +327,26 @@ retire_arena_runtime_tree() {
   helper="$GATEWAY_PREFLIGHT_TREE/scripts/arena_runtime_cache_retirement.py"
   # The privileged operation removes only validated source-derived caches.
   # Source ownership and file modes stay unchanged; the caller removes source.
-  sudo env -i PATH=/usr/bin:/bin PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
+  report="$(sudo env -i PATH=/usr/bin:/bin PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
     "$GATEWAY_PYTHON_BIN" -B "$helper" --repo-root "$LEADPOET_REPO_ROOT" \
-    --slot "$slot" --sha "$sha" --owner-uid "$(id -u)" || return 1
+    --slot "$slot" --sha "$sha" --owner-uid "$(id -u)" --defer-if-busy)" || return 1
+  status="$("$GATEWAY_PYTHON_BIN" - "$tree" "$report" <<'PY'
+import json
+import sys
+report = json.loads(sys.argv[2])
+if (not isinstance(report, dict) or report.get("archive") != sys.argv[1]
+        or type(report.get("cache_paths")) is not int or report["cache_paths"] < 0
+        or report.get("status") not in ("cache_cleanup_complete", "deferred_in_use")
+        or type(report.get("applied")) is not bool
+        or report["applied"] != (report["status"] == "cache_cleanup_complete")):
+    raise SystemExit("invalid Arena runtime retirement result")
+print(report["status"])
+PY
+)" || return 1
+  if [ "$status" = deferred_in_use ]; then
+    echo "Arena runtime retirement deferred: validated inactive archive is still in use: $tree"
+    return 0
+  fi
   find "$tree" -type d -exec chmod u+w {} + || return 1
   rm -rf -- "$tree"
 }

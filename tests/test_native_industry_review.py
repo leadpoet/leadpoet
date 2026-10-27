@@ -121,6 +121,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     brief = document['industry_source_research_brief']
     assert brief['missing_requirements'] == ['Account workflow integration']
     assert brief['decision'] == 'unavailable'
+    assert brief['research_query'] == 'account workflow integration'
     assert search_options[0]['include_domains'] == ('coreworks.ai',)
     assert search_options[0]['discovery_highlights'] is True
     assert 'not proof' in brief['notice']

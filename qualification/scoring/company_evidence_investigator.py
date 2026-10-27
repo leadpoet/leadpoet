@@ -4683,7 +4683,8 @@ async def investigate_company_evidence(
                 initial_review = initial_industry['_industry_review']
                 industry_research_brief = {
                     key: initial_review[key]
-                    for key in ('decision', 'missing_requirements', 'reason', 'packet_sha256', 'source_urls')
+                    for key in ('decision', 'missing_requirements', 'reason', 'packet_sha256',
+                                'source_urls', 'research_query')
                     if key in initial_review
                 }
                 # The shared researcher also sees sources admitted for other

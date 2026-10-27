@@ -316,6 +316,44 @@ def test_no_extra_model_call_after_admission_deadline(monkeypatch):
     assert result['failure_reason'] == 'admission_budget_interrupted'
 
 
+@pytest.mark.parametrize('fault', ['truncated', 'invalid_json', 'missing_role', 'foreign_citation'])
+def test_invalid_advisory_does_not_abort_valid_final_industry_review(monkeypatch, fault):
+    run, calls, _, reviews = install(monkeypatch)
+    original_post = c._post_json
+
+    async def post(session, url, *, headers, payload):
+        status, body = await original_post(session, url, headers=headers, payload=payload)
+        if 'response_format' in payload and len(reviews) == 1:
+            choice = body['choices'][0]
+            if fault == 'truncated':
+                choice['finish_reason'] = 'length'
+            elif fault == 'invalid_json':
+                choice['message']['content'] = '{'
+            else:
+                parsed = json.loads(choice['message']['content'])
+                if fault == 'missing_role':
+                    parsed.pop('role')
+                else:
+                    parsed['evidence_span_ids'] = ['foreign']
+                choice['message']['content'] = json.dumps(parsed)
+        return status, body
+
+    monkeypatch.setattr(c, '_post_json', post)
+    homepage = 'https://www.coreworks.ai/'
+    result = asyncio.run(run(
+        prior_observations={'submitted_source_urls': [homepage]},
+        prefetched_pages={homepage: {'final_url': homepage, 'text': FEATURES}},
+        requested_product_service='Supplies reporting and account workflows'))
+    assert result.get('_completed_submit') is True
+    review = result['claims']['industry']['_industry_review']
+    assert result['claims']['industry']['status'] == 'VERIFIED'
+    assert review['research_brief']['advisory_failure_reason'] == 'malformed_response'
+    assert len(reviews) == result['usage']['industry_review_calls'] == 2
+    assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
+    assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
+    assert result['usage']['search_calls'] <= c.MAX_SEARCH_CALLS
+
+
 def test_an_unbound_source_does_not_reach_strong_judge(monkeypatch):
     run, _, _, reviews = install(monkeypatch, identity={
         'normalized_name': 'Other', 'registrable_dns_domain': 'other.example'})

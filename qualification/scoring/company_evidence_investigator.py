@@ -2358,11 +2358,14 @@ async def _review_industry_sources(
     if (not isinstance(choices, list) or len(choices) != 1
             or not isinstance(choices[0], Mapping)
             or choices[0].get('finish_reason') != 'stop'):
-        raise ValueError('industry_review_response_malformed')
+        return unproven, MALFORMED_RESPONSE_FAILURE_REASON, 1
     message = choices[0].get('message')
     if not isinstance(message, Mapping) or message.get('refusal') or message.get('tool_calls'):
-        raise ValueError('industry_review_response_malformed')
-    result = industry_classification.resolve(packet, message.get('content'), research=research)
+        return unproven, MALFORMED_RESPONSE_FAILURE_REASON, 1
+    try:
+        result = industry_classification.resolve(packet, message.get('content'), research=research)
+    except (TypeError, ValueError):
+        return unproven, MALFORMED_RESPONSE_FAILURE_REASON, 1
     evidence = [{'url': item['source_url'], 'quote': item['text']}
                 for item in result['resolved_evidence']]
     # The legacy projection needs one primary quote. Prefer a cited passage
@@ -4677,7 +4680,7 @@ async def investigate_company_evidence(
                 initial_industry, initial_failure, industry_review_calls = (
                     await _review_industry_sources(session, research=True, **industry_review_arguments)
                 )
-                if initial_failure:
+                if initial_failure and initial_failure != MALFORMED_RESPONSE_FAILURE_REASON:
                     _record_failure(diagnostic, initial_failure)
                     return {'claims': {}, 'failure_reason': initial_failure}
                 initial_review = initial_industry['_industry_review']
@@ -4687,6 +4690,11 @@ async def investigate_company_evidence(
                                 'source_urls', 'research_query')
                     if key in initial_review
                 }
+                if initial_failure:
+                    # This first review only guides discovery. A malformed
+                    # advisory must not abort the existing bounded researcher;
+                    # the independent final industry review is still required.
+                    industry_research_brief['advisory_failure_reason'] = initial_failure
                 # The shared researcher also sees sources admitted for other
                 # dimensions. Those must not silently close an industry gap
                 # when the final industry review cannot use them.

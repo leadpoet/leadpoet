@@ -2,8 +2,8 @@
 
 The user authorized the independent October 26 verifier audit, narrow proven
 root-cause fixes, rigorous controls, safe merge and canonical deployment.
-This task may repair bound headquarters evidence and bounded careers-link
-retrieval, build and select the reviewed scorer for future rounds, and run
+This task may repair bound headquarters evidence, observed company-URL identity,
+and bounded careers-link retrieval, build and select the reviewed scorer for future rounds, and run
 bounded reward-disabled baseline/miner scoring tests. OpenRouter spend must stay
 within $8 for this task. Preserve identity/source proof, frozen rounds,
 accepted judgments, scoring, costs, publication and rewards. The coordinating

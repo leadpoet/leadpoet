@@ -25,6 +25,7 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
+from gateway.qualification.models import canonical_candidate_prompt_url
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from arena_reviewer_runtime.transport import post_json
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
@@ -40,6 +41,7 @@ from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
     MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS,
     _ArenaProviderFetchError,
+    _canonical_linkedin_company_url,
     _commercial_terms_navigation_locator,
     _fetch_bounded_html,
     current_exchange_profile_names_issuer,
@@ -3906,6 +3908,19 @@ async def investigate_company_evidence(
     observed_domain = _registrable_domain(
         (prior_observations or {}).get("observed_company_website")
     )
+    # Company tabs identify the same company. Normalize only this observed
+    # locator; submitted locators and fetched profile evidence stay strict.
+    try:
+        observed_linkedin_url = canonical_candidate_prompt_url(
+            (prior_observations or {}).get("observed_company_linkedin"),
+            "observed_company_linkedin",
+            allow_empty=True,
+        )
+    except (TypeError, ValueError):
+        observed_linkedin_url = ""
+    observed_linkedin_slug = linkedin_company_page_slug(
+        _canonical_linkedin_company_url(observed_linkedin_url)
+    )
     if (
         "rebrand" in requested_targets
         and structured_alias_slug
@@ -3913,9 +3928,7 @@ async def investigate_company_evidence(
         and re.fullmatch(r"[a-z0-9][a-z0-9-]*", structured_alias_slug)
         and submitted_domain
         and submitted_domain == observed_domain
-        and structured_alias_slug == linkedin_company_page_slug(
-            (prior_observations or {}).get("observed_company_linkedin")
-        )
+        and structured_alias_slug == observed_linkedin_slug
         and str(company_locator.get("name") or "").strip()
         and str((prior_observations or {}).get("observed_company_name") or "").strip()
     ):
@@ -4045,9 +4058,7 @@ async def investigate_company_evidence(
             or verified_structured_alias_slug
         ).casefold(),
         "verified_structured_alias_slug": verified_structured_alias_slug,
-        "observed_linkedin_slug": linkedin_company_page_slug(
-            (prior_observations or {}).get("observed_company_linkedin")
-        ),
+        "observed_linkedin_slug": observed_linkedin_slug,
         **(
             {
                 "verified_rebrand_old_domain": verified_rebrand_redirect[

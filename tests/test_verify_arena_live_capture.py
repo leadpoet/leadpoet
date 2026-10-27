@@ -10,12 +10,177 @@ import pytest
 from lab_arena import broker as br, shim
 from scripts import verify_arena_live_capture as harness
 from scripts.verify_arena_live_capture import (SharedBudget, WireTransport, run_probe,
-                                                _parameters, conservative_bound, route_registry)
+                                                _parameters, conservative_bound, request_bound, route_registry,
+                                                preflight_probe_controls)
 from tests.lab_arena.test_lab_arena_broker import FakeTransport
 
 EVIDENCE = Path(__file__).parents[1] / "docs/evidence/full-thinking"
 PROBES = sorted(EVIDENCE.glob("*chat-probe-price-bound.json"))
 KEY = "sk-or-v1-" + "q" * 40
+
+
+@pytest.mark.parametrize("api", ["openrouter.chat", "openrouter.responses"])
+@pytest.mark.parametrize("scenario", ["acme", "conflicting_evidence"])
+@pytest.mark.parametrize("parallel", [None, False])
+def test_text_probe_sends_schema_once_and_keeps_first_input_exact_through_continuations(tmp_path, api, scenario, parallel):
+    _, route, _ = route_registry(None, "openai/gpt-oss-120b")
+    route = copy.deepcopy(route)
+    route["api"] = api
+    if api == "openrouter.responses":
+        route["full_text_fields"] = ["output.content.reasoning_text"]
+    path = tmp_path / "route.json"
+    path.write_text(json.dumps(route))
+    expected = harness.scenario_spec(scenario)["expected"]
+    replies = []
+    for turn in range(3):
+        call = {"id": "call-%d" % turn, "type": "function", "function": {
+            "name": "lookup_evidence", "arguments": json.dumps({"evidence_id": ("profile", "headcount")[turn]})}} if turn < 2 else None
+        if api == "openrouter.chat":
+            output = {"choices": [{"finish_reason": "tool_calls" if call else "stop", "message": {
+                "role": "assistant", "content": None if call else json.dumps(expected),
+                **({"tool_calls": [call]} if call else {})}}]}
+        else:
+            output = {"status": "completed", "output": [{"type": "function_call", "id": call["id"],
+                "call_id": call["id"], "name": call["function"]["name"],
+                "arguments": call["function"]["arguments"], "status": "completed"}] if call else [{
+                    "type": "message", "role": "assistant", "status": "completed", "content": [{
+                        "type": "output_text", "text": json.dumps(expected)}]}]}
+        replies.append((200, {"model": route["model_id"], "provider": route["provider_name"],
+            "openrouter_metadata": {"endpoints": {"available": [{"selected": True,
+                "model": route["model_version"], "provider": route["provider_name"]}]}},
+            "usage": {"cost": "0.00001", "completion_tokens_details": {"reasoning_tokens": 0}}, **output}))
+    transport = FakeTransport(replies)
+    result = run_probe(model=route["model_id"], route_file=path, output=tmp_path / "probe", key=KEY,
+                       transport=transport, ledger_mode="local_diagnostic", final_format="text",
+                       tool_choice="auto", budget_bound_mode="request", scenario=scenario,
+                       parallel_tool_calls=parallel)
+    assert result["tool_continuations_and_final_json"]
+    bodies = [json.loads(item["body"]) for item in transport.sent]
+    history_field = "input" if api == "openrouter.responses" else "messages"
+    first = bodies[0][history_field][0]
+    marker = "Return only JSON conforming to this schema: "
+    assert marker in first["content"]
+    assert first["content"].count(marker) == 1
+    assert json.loads(first["content"].split(marker)[1]) == harness.SCHEMA
+    assert '"qualified": true' not in first["content"]
+    assert '"qualified": false' not in first["content"]
+    assert all(body[history_field][0] == first for body in bodies)
+    assert all(body.get("parallel_tool_calls") is parallel for body in bodies[:2])
+    assert "parallel_tool_calls" not in bodies[2]
+    assert result["native_final_constraint"] == "unconstrained_text"
+    assert marker not in harness.scenario_spec(scenario)["initial"][0]["content"]
+
+
+@pytest.mark.parametrize("choice", ["auto", "required", "named"])
+@pytest.mark.parametrize("final_format", ["json_object", "json_schema", "text"])
+def test_full_probe_controls_use_normal_broker_path(tmp_path, choice, final_format):
+    probe = json.loads(PROBES[-1].read_text())
+    transport = FakeTransport([(a["status"], a["response"]) for a in probe["attempts"]])
+    result = run_probe(model=probe["model"], output=tmp_path / "probe", key=KEY,
+                       transport=transport, ledger_mode="local_diagnostic",
+                       tool_choice=choice, final_format=final_format,
+                       budget_bound_mode="request")
+    assert result["probe_failure"] is None
+    assert result["tool_continuations_and_final_json"]
+    assert result["mode"] == "full"
+    assert not result["diagnostic_tool_choice_auto"]
+    sent = [json.loads(item["body"]) for item in transport.sent]
+    assert sent[0]["tool_choice"] == ({"type": "function", "function": {
+        "name": "lookup_evidence"}} if choice == "named" else choice)
+    if final_format == "text":
+        assert "response_format" not in sent[2]
+        assert result["native_final_constraint"] == "unconstrained_text"
+    else:
+        assert sent[2]["response_format"]["type"] == final_format
+    assert all(row["capture"]["route_reviewed"] for row in result["readback"])
+    _, route, _ = route_registry(None, probe["model"])
+    assert list(result["request_budget_bounds_usd"].values()) == [
+        str(request_bound(route, item["body"])) for item in transport.sent]
+
+
+@pytest.mark.parametrize("api", ["openrouter.chat", "openrouter.responses"])
+@pytest.mark.parametrize("choice", ["auto", "required", "named"])
+@pytest.mark.parametrize("final_format", ["json_object", "json_schema", "text"])
+def test_probe_preflight_uses_actual_production_api_and_format_contract(api, choice, final_format):
+    _, route, _ = route_registry(None, "openai/gpt-oss-120b")
+    route = copy.deepcopy(route)
+    route["api"] = api
+    if api == "openrouter.responses":
+        route["full_text_fields"] = ["output.content.reasoning_text"]
+    arguments = dict(model=route["model_id"], route=route, tool_choice=choice, final_format=final_format)
+    if api == "openrouter.responses" and final_format == "json_object":
+        with pytest.raises(br.BrokerError, match="invalid_request"):
+            preflight_probe_controls(**arguments)
+    else:
+        preflight_probe_controls(**arguments)
+        parameters = _parameters(route["model_id"], harness.INITIAL, 2, api, "full", route,
+                                 tool_choice=choice, final_format=final_format)
+        if api == "openrouter.responses":
+            assert parameters["text"]["format"]["type"] == final_format
+
+
+def test_unsupported_responses_json_object_is_rejected_before_first_paid_turn(tmp_path):
+    _, route, _ = route_registry(None, "openai/gpt-oss-120b")
+    candidate = copy.deepcopy(route)
+    candidate.update(api="openrouter.responses", full_text_fields=["output.content.reasoning_text"])
+    path = tmp_path / "candidate.json"
+    path.write_text(json.dumps(candidate))
+    transport = FakeTransport()
+    with pytest.raises(br.BrokerError, match="invalid_request"):
+        run_probe(model=candidate["model_id"], route_file=path, key=KEY,
+                  output=tmp_path / "evidence", transport=transport,
+                  ledger_mode="local_diagnostic", final_format="json_object")
+    assert not transport.sent
+    assert not (tmp_path / "evidence").exists()
+    assert not (tmp_path / "arena-live-capture-budget.json").exists()
+
+
+@pytest.mark.parametrize("api", ["openrouter.chat", "openrouter.responses"])
+def test_unconstrained_text_still_requires_exact_final_json_values(api):
+    bad = json.dumps({"company": "Acme Test", "qualified": False,
+                      "evidence_ids": ["profile", "headcount"]})
+    response = ({"choices": [{"message": {"role": "assistant", "content": bad}}]}
+                if api == "openrouter.chat" else {"output": [{"type": "message", "content": [
+                    {"type": "output_text", "text": bad}]}]})
+    with pytest.raises(ValueError, match="strict_final_json_mismatch"):
+        harness._next_message(json.dumps(response).encode(), 2, api, harness.scenario_spec("acme"))
+
+
+def test_request_budget_uses_actual_utf8_input_and_full_output_cap():
+    _, route, _ = route_registry(None, "openai/gpt-oss-120b")
+    route = dict(route, context_tokens=1_048_576)
+    document = {"model": route["model_id"], "max_tokens": route["max_output_tokens"],
+                "messages": [{"role": "user", "content": "会社"}]}
+    body = json.dumps(document, ensure_ascii=False).encode()
+    price = route["price_ceiling"]
+    expected = (Decimal(br.bounded_input_tokens(document)) * Decimal(price["prompt"])
+                + Decimal(route["max_output_tokens"]) *
+                (Decimal(price["completion"]) + Decimal(price["internal_reasoning"]))
+                + Decimal(price["request"]))
+    from decimal import ROUND_UP
+    assert request_bound(route, body) == expected.quantize(Decimal("0.000001"), rounding=ROUND_UP)
+    assert request_bound(route, body) < conservative_bound(route)
+    longer = dict(document, messages=[{"role": "user", "content": "x" * 10_000}])
+    assert request_bound(route, json.dumps(longer).encode()) > request_bound(route, body)
+
+
+def test_exact_request_budget_refuses_before_http_and_retains_uncertain_hold(tmp_path):
+    _, route, _ = route_registry(None, "openai/gpt-oss-120b")
+    body = json.dumps({"model": route["model_id"], "max_tokens": route["max_output_tokens"]}).encode()
+    amount = request_bound(route, body)
+    inner = FakeTransport([(503, {"error": "unpriced"})])
+    budget = SharedBudget(tmp_path / "budget.json", amount)
+    wire = WireTransport(tmp_path, inner, request_budget=budget, budget_route=route)
+    arguments = {"url": "https://openrouter.ai/api/v1/chat/completions", "body": body,
+                 "method": "POST", "headers": {}, "timeout_seconds": 1}
+    wire.arm(0)
+    assert wire.send(**arguments).status == 503
+    assert Decimal(json.loads(budget.path.read_text())["reserved_usd"]) == amount
+    wire.arm(1)
+    with pytest.raises(ValueError, match="cumulative_budget_exceeded"):
+        wire.send(**arguments)
+    assert len(inner.sent) == 1
+    assert not wire.sent_in_turn
 
 
 @pytest.mark.parametrize("path", PROBES, ids=lambda path: path.name)
@@ -417,12 +582,14 @@ def test_disposable_sql_ledger_survives_export_readback_failure(tmp_path, monkey
 
 @pytest.mark.skipif(os.environ.get("ARENA_CAPTURE_POSTGRES_TEST") != "1",
                     reason="opt-in disposable PostgreSQL migration fixture")
-def test_real_socket_delivery_ack_and_durable_worker_snapshot(tmp_path):
+@pytest.mark.parametrize("controls", [{}, {"tool_choice": "auto", "final_format": "json_object",
+                                         "budget_bound_mode": "request"}])
+def test_real_socket_delivery_ack_and_durable_worker_snapshot(tmp_path, controls):
     probe = json.loads(PROBES[-1].read_text())
     transport = FakeTransport([(attempt["status"], attempt["response"])
                                for attempt in probe["attempts"]])
     result = run_probe(model=probe["model"], output=tmp_path / "evidence",
-                       key=KEY, transport=transport, worker_socket=True)
+                       key=KEY, transport=transport, worker_socket=True, **controls)
     assert result["probe_failure"] is None
     assert result["worker_snapshot_failure"] is None
     assert result["readback_failure"] is None

@@ -17,7 +17,6 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from html.parser import HTMLParser
 from typing import Any, Mapping, Optional
 from urllib.parse import urlsplit
 
@@ -429,74 +428,6 @@ def _parse_datetime(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
-def _firecrawl_html_bytes(raw_html: str, limit: int) -> bytes:
-    """Keep complete oversized script payloads out of the HTML text allowance.
-
-    The native provider reply already has its upstream response bound. Locate
-    spans with the stdlib parser, but preserve the original tags and all other
-    bytes rather than serializing HTML or joining text across removed tags.
-    """
-    original = raw_html.encode("utf-8")
-    if len(original) <= limit:
-        return original
-
-    class ScriptSpans(HTMLParser):
-        def __init__(self) -> None:
-            super().__init__(convert_charrefs=False)
-            self.content_start: Optional[int] = None
-            self.spans: list[tuple[int, int]] = []
-            self.line = 1
-            self.line_start = 0
-
-        def position(self) -> int:
-            line, column = self.getpos()
-            # Positions advance monotonically. Avoid a per-line index whose
-            # memory would grow with every newline in the bounded reply.
-            while self.line < line:
-                self.line_start = raw_html.index("\n", self.line_start) + 1
-                self.line += 1
-            return self.line_start + column
-
-        def handle_starttag(self, tag: str, attrs: Any) -> None:
-            if tag == "script":
-                self.content_start = self.position() + len(self.get_starttag_text())
-
-        def handle_startendtag(self, tag: str, attrs: Any) -> None:
-            # A self-closing token does not delimit a script content span.
-            pass
-
-        def handle_endtag(self, tag: str) -> None:
-            if tag != "script" or self.content_start is None:
-                return
-            end = self.position()
-            closing_end = raw_html.find(">", end)
-            if (
-                closing_end >= 0
-                and re.fullmatch(r"</script\s*>", raw_html[end:closing_end + 1], re.I)
-                and len(raw_html[self.content_start:end].encode("utf-8")) > limit
-            ):
-                self.spans.append((self.content_start, end))
-            self.content_start = None
-
-    parser = ScriptSpans()
-    try:
-        parser.feed(raw_html)
-        parser.close()
-    except AssertionError:
-        # HTMLParser rejects malformed marked sections. Do not use partial
-        # spans from a page that could not be parsed; retain the old response.
-        return original
-    if not parser.spans:
-        return original
-    parts = []
-    previous = 0
-    for start, end in parser.spans:
-        parts.append(raw_html[previous:start])
-        previous = end
-    parts.append(raw_html[previous:])
-    return "".join(parts).encode("utf-8")
-
-
 def _firecrawl_response(
     route: MinerScoreRoute, data: Mapping[str, Any]
 ) -> tuple[int, dict[str, str], bytes, str]:
@@ -553,9 +484,7 @@ def _firecrawl_response(
     return (
         status,
         {"content-type": "text/html; charset=utf-8"},
-        _firecrawl_html_bytes(
-            raw_html, operations.OPERATIONS[route.requested_operation_id].max_response_bytes,
-        ),
+        raw_html.encode("utf-8"),
         final_url,
     )
 

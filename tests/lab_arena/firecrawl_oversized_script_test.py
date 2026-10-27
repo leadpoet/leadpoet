@@ -45,6 +45,11 @@ def worker_html(document):
     return operations.sanitize_response("scrapingdog.scrape", status, headers, body)[2].decode()
 
 
+def projected_bytes(html):
+    return operations._project_oversized_html_scripts(
+        html.encode(), operations.OPERATIONS["scrapingdog.scrape"].max_response_bytes)
+
+
 def oversized_html(payload=None, *, suffix=None):
     if payload is None:
         payload = '{"jobs":"' + "x" * 4_228_649 + '"}'
@@ -70,11 +75,11 @@ def test_observed_large_jsonld_shape_recovers_body_before_existing_text_cap():
     status, headers, body, final = adapted(document(original))
     assert (status, final) == (200, SOURCE)
     assert headers == {"content-type": "text/html; charset=utf-8"}
-    assert body == expected.encode()
+    assert body == original.encode()  # Source adaptation preserves the raw reply.
     assert worker_html(document(original)) == expected
     assert list(visible_html_link_labels(expected)) == list(visible_html_link_labels(original))
     assert anchors(expected) and SMALL_JSONLD in expected
-    assert adapted(document(expected))[2] == body  # No further source mutation.
+    assert worker_html(document(expected)) == expected  # No further source mutation.
 
 
 @pytest.mark.parametrize("extra_bytes", [-1, 0, 1])
@@ -84,7 +89,7 @@ def test_payload_threshold_uses_operation_limit_in_utf8_bytes(extra_bytes):
     payload = "é" * (size // 2) + "x" * (size % 2)
     original, blanked = oversized_html(payload)
     assert len(payload.encode()) == size and len(payload) < LIMIT
-    assert adapted(document(original))[2] == (blanked if extra_bytes > 0 else original).encode()
+    assert projected_bytes(original) == (blanked if extra_bytes > 0 else original).encode()
 
 
 @pytest.mark.parametrize("html", [
@@ -94,7 +99,7 @@ def test_payload_threshold_uses_operation_limit_in_utf8_bytes(extra_bytes):
     '<script/>not a complete script element',
 ])
 def test_small_html_preserves_every_original_byte(html):
-    assert adapted(document(html))[2] == html.encode()
+    assert worker_html(document(html)).encode() == html.encode()
 
 
 def test_inline_boundaries_styles_hidden_links_and_other_bytes_are_preserved():
@@ -103,7 +108,7 @@ def test_inline_boundaries_styles_hidden_links_and_other_bytes_are_preserved():
         + '</script>ted <a class="hide" href="' + BOARD_LINK + '">Hidden</a>'
         + '<a href="https://job-boards.eu.greenhouse.io/another/jobs/1234567890">Apply</a>')
     expected = original.replace(payload, "")
-    projected = adapted(document(original))[2].decode()
+    projected = worker_html(document(original))
     assert projected == expected
     assert visible_html_text(projected) == visible_html_text(original)
     assert "Uni ted" in visible_html_text(projected)
@@ -115,13 +120,13 @@ def test_inline_boundaries_styles_hidden_links_and_other_bytes_are_preserved():
 def test_each_script_uses_the_requested_operation_cap(monkeypatch):
     operation = operations.OPERATIONS["scrapingdog.scrape"]
     monkeypatch.setattr(operations, "OPERATIONS", {
-        **operations.OPERATIONS, "scrapingdog.scrape": replace(operation, max_response_bytes=64),
+        **operations.OPERATIONS, "scrapingdog.scrape": replace(operation, max_response_bytes=256),
     })
     prefix = '<head>é\r\n<script type="application/ld+json">small</script>\n'
-    original = prefix + '<script id="one">' + "x" * 65 + '</script>\r\n'
-    original += '<SCRIPT id="two">' + "é" * 33 + '</SCRIPT>\n</head><body>Jobs</body>'
+    original = prefix + '<script id="one">' + "x" * 257 + '</script>\r\n'
+    original += '<SCRIPT id="two">' + "é" * 129 + '</SCRIPT>\n</head><body>Jobs</body>'
     expected = prefix + '<script id="one"></script>\r\n<SCRIPT id="two"></SCRIPT>\n</head><body>Jobs</body>'
-    assert adapted(document(original))[2] == expected.encode()
+    assert worker_html(document(original)).encode() == expected.encode()
 
 
 @pytest.mark.parametrize("template", [
@@ -135,22 +140,26 @@ def test_each_script_uses_the_requested_operation_cap(monkeypatch):
 ])
 def test_unclosed_malformed_or_non_script_content_is_not_removed(template):
     original = template.format(payload="x" * (LIMIT + 1))
-    assert adapted(document(original))[2] == original.encode()
+    assert projected_bytes(original) == original.encode()
+    assert worker_html(document(original)).encode() == operations._truncate_utf8(original.encode(), LIMIT)
 
 
-def test_parser_failure_does_not_apply_partial_spans(monkeypatch):
+@pytest.mark.parametrize("error", [AssertionError, ValueError])
+def test_parser_failure_does_not_apply_partial_spans(monkeypatch, error):
     def reject_close(_parser):
-        raise AssertionError("malformed marked section")
+        raise error("malformed marked section")
 
-    monkeypatch.setattr(compat.HTMLParser, "close", reject_close)
+    monkeypatch.setattr(operations.HTMLParser, "close", reject_close)
     original, _ = oversized_html()
-    assert adapted(document(original))[2] == original.encode()
+    assert projected_bytes(original) == original.encode()
+    assert worker_html(document(original)).encode() == operations._truncate_utf8(original.encode(), LIMIT)
 
 
 def test_several_individually_small_scripts_are_not_removed():
     script = '<script>' + "x" * (LIMIT // 2) + '</script>'
     original = '<head>' + script * 3 + '</head><body>Jobs</body>'
-    assert adapted(document(original))[2] == original.encode()
+    assert projected_bytes(original) == original.encode()
+    assert worker_html(document(original)).encode() == operations._truncate_utf8(original.encode(), LIMIT)
 
 
 @pytest.mark.parametrize("metadata,code", [
@@ -178,7 +187,11 @@ def test_target_status_and_final_url_are_not_changed(status):
     final = "https://www.baringa.com/actual-response/"
     result = adapted(document(original, statusCode=status, url=final))
     assert result[0] == status and result[3] == final
-    assert result[2] == expected.encode()
+    assert result[2] == original.encode()
+    sanitized = operations.sanitize_response("scrapingdog.scrape", *result[:3])
+    assert sanitized[0] == status
+    assert sanitized[2] == (expected.encode() if 200 <= status < 300
+                            else operations._truncate_utf8(original.encode(), LIMIT))
 
 
 @pytest.mark.parametrize("status", [403, 429, 503])
@@ -208,3 +221,96 @@ def test_exact_retained_public_provider_reply():
     assert anchors(projected) == anchors(html)  # The existing ownership policy is unchanged.
     assert anchors(projected, posting="https://job-boards.eu.greenhouse.io/another/jobs/1234567890") == []
     assert len(projected.encode()) < LIMIT
+
+
+@pytest.mark.parametrize("content_type", ["text/html; charset=UTF-8", "application/xhtml+xml"])
+def test_direct_native_html_uses_the_same_projection(content_type):
+    original, expected = oversized_html("x" * (LIMIT + 1))
+    status, headers, body = operations.sanitize_response(
+        "scrapingdog.scrape", 200, {"content-type": content_type}, original.encode())
+    assert status == 200 and body == expected.encode()
+    assert headers["content-length"] == str(len(body))
+
+
+@pytest.mark.parametrize("status", [201, 204, 299])
+def test_success_status_is_preserved_by_shared_html_projection(status):
+    original, expected = oversized_html("x" * (LIMIT + 1))
+    result = operations.sanitize_response("scrapingdog.scrape", status,
+        {"content-type": "text/html"}, original.encode())
+    assert result[0] == status and result[2] == expected.encode()
+
+
+@pytest.mark.parametrize("content_type", [None, "text/plain", "application/json", "application/pdf", "text/html invalid"])
+def test_non_html_content_keeps_the_existing_text_cap(content_type):
+    original, _ = oversized_html("x" * (LIMIT + 1))
+    headers = {} if content_type is None else {"content-type": content_type}
+    result = operations.sanitize_response("scrapingdog.scrape", 200, headers, original.encode())
+    assert result[2] == operations._truncate_utf8(original.encode(), LIMIT)
+
+
+@pytest.mark.parametrize("status", [100, 301, 400, 404, 410, 422])
+def test_non_success_html_keeps_the_existing_text_cap(status):
+    original, _ = oversized_html("x" * (LIMIT + 1))
+    result = operations.sanitize_response("scrapingdog.scrape", status,
+        {"content-type": "text/html"}, original.encode())
+    assert result[0] == status
+    assert result[2] == operations._truncate_utf8(original.encode(), LIMIT)
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+def test_infrastructure_html_still_returns_only_the_generic_unavailable_body(status):
+    original, _ = oversized_html("x" * (LIMIT + 1))
+    result = operations.sanitize_response("scrapingdog.scrape", status,
+        {"content-type": "text/html"}, original.encode())
+    assert result[0] == operations.GENERIC_UNAVAILABLE_STATUS
+    assert result[2] == operations.GENERIC_UNAVAILABLE_BODY
+
+
+@pytest.mark.parametrize("invalid", [b"\xff", b"\xc3"])
+def test_invalid_utf8_uses_old_cap_without_replacement_or_partial_projection(invalid):
+    original, _ = oversized_html("x" * (LIMIT + 1))
+    body = invalid + original.encode()
+    assert operations._project_oversized_html_scripts(body, LIMIT) == body
+    result = operations.sanitize_response("scrapingdog.scrape", 200,
+        {"content-type": "text/html"}, body)
+    assert result[2] == operations._truncate_utf8(body, LIMIT)
+
+
+def test_json_operation_does_not_project_script_strings_or_change_its_cap():
+    original, _ = oversized_html("x" * (LIMIT + 1))
+    body = json.dumps({"results": [{"text": original}]}).encode()
+    with pytest.raises(operations.OperationResponseError, match="response_too_large"):
+        operations.sanitize_response("exa.contents", 200,
+            {"content-type": "text/html"}, body)
+
+
+def test_generic_http_source_adapter_reaches_the_shared_projection():
+    from tests.lab_arena import generic_html_source_adapter_test as generic
+
+    original, expected = oversized_html("x" * (LIMIT + 1))
+    reply = generic.envelope()
+    reply["toolResponse"]["rawV2"]["data"] = original
+    status, headers, body, final = generic.adapt(reply)
+    assert body == original.encode() and final == generic.FINAL
+    result = operations.sanitize_response("scrapingdog.scrape", status, headers, body)
+    assert result[2] == expected.encode()
+    # Response sanitation neither supplies nor changes trusted URL authority.
+    assert set(result[1]) == {"content-type", "content-length"}
+
+
+def test_native_transport_ceiling_is_not_increased_for_the_retained_size():
+    import httpx
+    from lab_arena import broker
+    from tests.lab_arena.test_lab_arena_broker import _async_client_factory
+
+    original, _ = oversized_html()
+    assert len(original.encode()) > 4 * 1024 * 1024
+    transport = broker.HttpxProviderTransport(client_factory=_async_client_factory(
+        lambda _request: httpx.Response(200, headers={"content-type": "text/html"}, content=original.encode())))
+    try:
+        result = transport.send(method="GET", url="https://api.scrapingdog.com/scrape",
+            headers={}, body=b"", timeout_seconds=1)
+    finally:
+        transport.close()
+    assert result.status == 502 and result.internal_provenance == "response_too_large"
+    assert result.body == operations.GENERIC_UNAVAILABLE_BODY

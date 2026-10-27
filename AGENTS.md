@@ -1,13 +1,15 @@
 ## Scoped authorization: October 27 oversized source script payloads
 
-The user authorized the confirmed Firecrawl HTML source fix that prevents one
-complete oversized script payload from consuming the existing text allowance.
-Blank only script content larger than the requested operation response cap;
-preserve its exact tags and all other source bytes. Preserve source/final-URL,
-status, PDF, visibility and ownership checks, request routing, response limits,
-billing, scoring and rewards. Internal implementation agents may commit only.
-The coordinating task owns independent review, native validation and any later
-push, merge or canonical deployment. Do not add provider calls or recovery paths.
+The user authorized the confirmed HTML source fix in the existing shared
+response sanitizer. For successful ScrapingDog HTML responses only, blank
+complete script content larger than the existing operation response cap;
+preserve exact tags and all other bytes before the unchanged UTF-8 text cap.
+Strict decoding or parser failure must retain the old cap behavior. Preserve
+source/final-URL, PDF, visibility and ownership checks, request routing, read
+limits, billing, scoring and rewards across native and adapted source paths.
+Internal implementation agents may commit only. The coordinating task owns
+independent review, native validation and any later push, merge or canonical
+deployment. Do not add provider calls, recovery paths or response allowances.
 This authority ends after the fix and affected-flow verification are complete.
 
 ## Scoped authorization: October 27 Tyche rejected-request capture

@@ -2080,7 +2080,13 @@ def _call_provider_matches_operation(call: Mapping[str, Any], operation_id: str)
     return bool(
         call.get("provider") == "deepline"
         and call.get("effective_operation_id") == scoring_provider_compat.EFFECTIVE_OPERATION_ID
-        and call.get("compatibility_version") == scoring_provider_compat.COMPATIBILITY_VERSION
+        and (
+            call.get("compatibility_version") == scoring_provider_compat.COMPATIBILITY_VERSION
+            or (
+                call.get("compatibility_version") == scoring_provider_compat.SOURCE_HTTP_COMPATIBILITY_VERSION
+                and call.get("adapter") == "generic_http_raw_html"
+            )
+        )
         and isinstance(call.get("adapter"), str)
         and isinstance(call.get("tool"), str)
         and (operation_id, call.get("adapter"), call.get("tool")) in {

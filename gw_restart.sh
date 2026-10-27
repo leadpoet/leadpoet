@@ -329,7 +329,7 @@ retire_arena_runtime_tree() {
   # Source ownership and file modes stay unchanged; the caller removes source.
   report="$(sudo env -i PATH=/usr/bin:/bin PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" \
     "$GATEWAY_PYTHON_BIN" -B "$helper" --repo-root "$LEADPOET_REPO_ROOT" \
-    --slot "$slot" --sha "$sha" --owner-uid "$(id -u)")" || return 1
+    --slot "$slot" --sha "$sha" --owner-uid "$(id -u)" --defer-if-busy)" || return 1
   status="$("$GATEWAY_PYTHON_BIN" - "$tree" "$report" <<'PY'
 import json
 import sys

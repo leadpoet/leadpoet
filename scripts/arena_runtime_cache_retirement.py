@@ -114,12 +114,13 @@ def retire_runtime_caches(
     *, repo_root: Path, runtime_root: Path, slot: int, sha: str, owner_uid: int,
     ingress_state: Path = INGRESS_STATE, caddy_file: Path = CADDY_FILE,
     proc_root: Path = Path('/proc'), mountinfo: Path = Path('/proc/self/mountinfo'),
-    apply: bool = False,
+    apply: bool = False, defer_if_busy: bool = False,
 ) -> ArenaRuntimeCacheRetirementResult:
     """Validate everything first; unlink only disposable cache entries as root.
 
     Source removal remains the unprivileged caller's operation after its owned
     process drain. No source file permissions or ownership are changed here.
+    Busy deferral requires a caller that understands and preserves that result.
     """
     if (type(slot) is not int or slot not in (0, 1) or not isinstance(sha, str)
             or not re.fullmatch(r'[0-9a-f]{40}', sha)):
@@ -197,6 +198,9 @@ def retire_runtime_caches(
         if _identity(archive.lstat()) != _identity(saved):
             raise ArenaRuntimeCacheRetirementError('runtime root identity changed')
         if _is_in_use(archive, _read_process_paths(proc_root)):
+            if not defer_if_busy:
+                # Installed older controllers act only on our exit status.
+                raise ArenaRuntimeCacheRetirementError('runtime is still in use')
             # Diagnostic readers may retain an otherwise valid inactive tree.
             # Do not mutate it or let optional retirement stop a live release.
             return {'archive': str(archive), 'cache_paths': len(caches),
@@ -230,9 +234,12 @@ def main() -> int:
     parser.add_argument('--slot', required=True, type=int, choices=(0, 1))
     parser.add_argument('--sha', required=True)
     parser.add_argument('--owner-uid', required=True, type=int)
+    parser.add_argument('--defer-if-busy', action='store_true',
+                        help='return deferred_in_use only for callers that preserve the archive')
     args = parser.parse_args()
     print(json.dumps(retire_runtime_caches(repo_root=args.repo_root, runtime_root=RUNTIME_ROOT,
-        slot=args.slot, sha=args.sha, owner_uid=args.owner_uid, apply=True), sort_keys=True))
+        slot=args.slot, sha=args.sha, owner_uid=args.owner_uid, apply=True,
+        defer_if_busy=args.defer_if_busy), sort_keys=True))
     return 0
 
 

@@ -185,3 +185,30 @@ def test_actual_frozen_source_when_supplied():
     for old, new in ((seam.OLD_DISPATCH, seam.NEW_DISPATCH), (seam.OLD_PROMPT, seam.NEW_PROMPT)):
         repaired = repaired.replace(new.encode(), old.encode(), 1)
     assert repaired == source
+
+
+@pytest.mark.parametrize('name,input_sha256,output_sha256', [
+    ('base', 'b573bd3fb3984cd065e48b37e19c8fdd59545319bef0f1801cdc94f1f502d3b2',
+     '454da6ef97899773c61e6611c7ef08a5175c14674e08029bee6b68b4ba137a30'),
+    ('runtime', 'b09dcafd2f4a83b2fcc31ed44c57a901f9e7f1a5b693d09c914def52bab0128b',
+     'adfd0406323db8d2fa7699a16e60e39ffe6bf1407220d707f16d30958e7369a1'),
+])
+def test_provenance_matched_historical_sources_when_supplied(name, input_sha256, output_sha256):
+    directory = os.environ.get('ARENA_HOMEPAGE_LINKEDIN_HISTORICAL_SOURCES')
+    if not directory:
+        pytest.skip('historical source compatibility inputs not supplied')
+    root = Path(directory)
+    provenance = json.loads((root / 'provenance.json').read_text())
+    assert provenance['base_git_commit'] == 'bbc374a26c8efa23b41840958b63e5d2e230e9ca'
+    assert provenance['base_path'] == builder.FINALITY_FILE
+    source = (root / (name + '.py')).read_bytes()
+    assert hashlib.sha256(source).hexdigest() == provenance[name + '_sha256'] == input_sha256
+    repaired = seam.convert_homepage_linkedin_conflict_seam(source)
+    assert hashlib.sha256(repaired).hexdigest() == output_sha256
+    assert seam.convert_homepage_linkedin_conflict_seam(repaired) == repaired
+    compile(repaired, 'historical_' + name + '_identity_repair.py', 'exec')
+    for old, new in ((seam.OLD_DISPATCH, seam.NEW_DISPATCH), (seam.OLD_PROMPT, seam.NEW_PROMPT)):
+        assert repaired.count(new.encode()) == 1
+        repaired = repaired.replace(new.encode(), old.encode(), 1)
+    # This includes every pre-existing runtime finality repair, byte for byte.
+    assert repaired == source

@@ -4530,6 +4530,23 @@ class Broker:
             )
         except operations.OperationError:
             return _error_result("invalid_request", {"operation_id": operation_id})
+        if (getattr(context, "kind", "execute") == "execute"
+            and getattr(context, "reasoning_capture_policy", None) == reasoning_capture.POLICY
+            and operation_id == "deepline.execute" and context.deepline_catalog is not None):
+            try:
+                direct_inference = deepline_catalog.is_direct_inference_tool(
+                    context.deepline_catalog, normalized["tool"],
+                )
+            except deepline_catalog.CatalogError:
+                return _error_result("broker_unavailable", {"operation_id": operation_id})
+            if direct_inference:
+                # These native model endpoints have no approved reasoning
+                # route/capture adapter. Refuse before funding or ledger work.
+                return _error_result("invalid_request", {
+                    "operation_id": operation_id, "reason": "reasoning_route_unsupported",
+                    "outcome": "not_dispatched",
+                    "supported_reasoning_apis": sorted(reasoning_capture.OPERATIONS),
+                })
         requested_normalized = normalized
         if isinstance(action_sequence, bool) or not isinstance(action_sequence, int) or action_sequence < 0:
             return _error_result("invalid_request", {"operation_id": operation_id})

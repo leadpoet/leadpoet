@@ -1,0 +1,32 @@
+# Localhost only. Existing gateway TLS/release ownership stays outside this pair.
+name: leadpoet-subnet-api
+services:
+  postgrest:
+    image: postgrest/postgrest:v14.5@sha256:b574528fe109c8343c1247155734d03df8c34b462f342dca0ccc20244fc36ef9
+    user: "1000:1000"
+    command: ["postgrest", "/run/subnet-api/postgrest.conf"]
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ${SUBNET_API_CONFIG_DIR:?private configuration directory required}/postgrest.conf:/run/subnet-api/postgrest.conf:ro
+      - ${SUBNET_API_CA_FILE:?reviewed RDS CA file required}:/run/subnet-api/rds-ca.pem:ro
+    logging: {driver: none}
+    restart: unless-stopped
+    stop_grace_period: 620s
+  nginx:
+    image: nginx:1.28.3-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    user: "1000:1000"
+    entrypoint: ["nginx"]
+    command: ["-c", "/run/subnet-api/nginx.conf", "-g", "daemon off;"]
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ${SUBNET_API_CONFIG_DIR:?private configuration directory required}/nginx.conf:/run/subnet-api/nginx.conf:ro
+    tmpfs: ["/tmp:uid=1000,gid=1000,mode=0700"]
+    logging: {driver: none}
+    restart: unless-stopped
+    stop_grace_period: 620s

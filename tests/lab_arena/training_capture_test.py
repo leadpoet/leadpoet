@@ -949,16 +949,33 @@ def test_repeated_text_scans_once_but_still_checks_every_node(monkeypatch):
     assert calls == {public: 1, oversized: 2}
 
 
+def test_long_text_working_set_does_not_evict_itself(monkeypatch):
+    texts = [(f"public catalog entry {index:03d} " * 50) for index in range(408)]
+    original = trajectory.redact_text
+    calls = {text: 0 for text in texts}
+
+    def counted(text, *args, **kwargs):
+        if text in calls:
+            calls[text] += 1
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(trajectory, "redact_text", counted)
+    value = {"catalog": texts * 3}
+    assert capture.sanitize_training_value(value) == (value, [])
+    assert set(calls.values()) == {1}
+
+
 def test_repeated_text_cache_keeps_privacy_and_is_invocation_local():
     private = "known-private-value"
-    text = "private " + private + " https://user:pass@example.test/?token=unknown-token"
+    public = "public evidence " * 80
+    text = "private " + private + " " + public + "https://user:pass@example.test/?token=unknown-token"
     value = {"input_snapshots": {"run": [text] * 20},
              "authorization": "another-private-value",
              "hidden_reasoning": "opaque-private-value"}
     cleaned, reasons = capture.sanitize_training_value(value, secrets=(private,))
     assert reasons == ["credential", "hidden_reasoning"]
     assert cleaned["input_snapshots"]["run"] == [
-        "private [REDACTED] https://example.test/?token=%5BREDACTED%5D"] * 20
+        "private [REDACTED] " + public + "https://example.test/?token=%5BREDACTED%5D"] * 20
     assert private not in json.dumps(cleaned)
     assert "unknown-token" not in json.dumps(cleaned)
     assert cleaned["authorization"] == cleaned["hidden_reasoning"] == "[REDACTED]"

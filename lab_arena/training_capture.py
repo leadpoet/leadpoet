@@ -381,20 +381,20 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
             for variant in (secret, quote(secret, safe=""), quote_plus(secret)):
                 variants.update((variant, re.sub(r"%[0-9A-F]{2}", lambda m: m[0].lower(), variant)))
 
-    # Final examples repeat large request and catalog strings. Keep only small
-    # text results within this walk; every node, path, and key is still checked.
+    # Final examples repeat large request and catalog strings. Keep only bounded
+    # long-text results within this walk; every node, path, and key is still checked.
     text_cache: OrderedDict[str, str] = OrderedDict()
 
     def clean_text(text: str) -> str:
-        if len(text) <= 16_384:
+        if 1_024 <= len(text) <= 16_384:
             cached = text_cache.get(text)
             if cached is not None:
                 text_cache.move_to_end(text)
                 return cached
         cleaned = scan_text(text)
-        if len(text) <= 16_384 and len(cleaned) <= 16_384:
+        if 1_024 <= len(text) <= 16_384 and len(cleaned) <= 16_384:
             text_cache[text] = cleaned
-            if len(text_cache) > 128:
+            if len(text_cache) > 512:
                 text_cache.popitem(last=False)
         return cleaned
 

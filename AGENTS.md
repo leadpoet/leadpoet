@@ -1,3 +1,13 @@
+## Scoped authorization: October 28 Docker mount record ordering
+
+The user authorized the narrow confirmed live-restore snapshot guard fix:
+ignore only the order of complete Docker Mounts records. Preserve all fields,
+value types, duplicate records, nested array order, malformed-value handling
+and every other runtime and restart guard. Internal implementation agents may
+test and commit only; the coordinating task owns independent review and any
+later release. Do not change live Docker state, submitted sources, scoring,
+billing, storage, dependencies or concurrent work under this implementation scope.
+
 ## Scoped production authorization: October 28 guarded idle recovery
 
 The user authorized the narrow guarded idle restart recovery fix and exact

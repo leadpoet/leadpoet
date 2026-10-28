@@ -632,3 +632,120 @@ def test_live_reclaim_integrates_real_stale_inventory_deletion_and_refresh(tmp_p
     assert after['active_image_count'] == after['active_container_count'] == 1
     assert module.reclaim_live_docker_overlay_state_v2(**arguments)['daemon_reconciled'] is False
     assert runtime.restart_count == 1
+
+
+@pytest.fixture
+def mount_records():
+    # Full records deliberately share Source/Destination so every other field
+    # also has to take part in canonical ordering and identity comparison.
+    return [
+        {"Type": "bind", "Source": "/retained", "Destination": "/data",
+         "Mode": "ro", "RW": False, "Propagation": "rprivate",
+         "FutureField": {"values": [1, "1", True, None]}},
+        {"Type": "bind", "Source": "/retained", "Destination": "/data",
+         "Mode": "rw", "RW": True, "Propagation": "rshared",
+         "FutureField": {"values": [1, "1", True, None]}},
+    ]
+
+
+def _snapshot_with_mounts(mounts):
+    from validator_tee.host.docker_live_restore_reconciler_v2 import _runtime_snapshot
+    runtime = _DockerRuntime(live_restore=True)
+    def runner(command):
+        result = runtime(command)
+        if tuple(command[:3]) == ("docker", "container", "inspect"):
+            rows = json.loads(result.stdout)
+            rows[0]["Mounts"] = mounts
+            result.stdout = json.dumps(rows)
+        return result
+    return _runtime_snapshot(runner)
+
+
+def test_runtime_snapshot_mount_permutation_preserves_full_records_and_duplicates(mount_records):
+    first, second = mount_records
+    assert _snapshot_with_mounts([first, second, first]) == _snapshot_with_mounts([first, first, second])
+    assert _snapshot_with_mounts([first, second, first]) != _snapshot_with_mounts([first, second])
+
+
+def test_guarded_reclaim_accepts_only_mount_record_order_changes(guarded_reclaim, monkeypatch, mount_records):
+    module, state, runtime, root, execute = guarded_reclaim
+    original = _DockerRuntime.__call__
+    inspections = 0
+    def permuted(self, command):
+        nonlocal inspections
+        result = original(self, command)
+        if tuple(command[:3]) == ("docker", "container", "inspect"):
+            rows = json.loads(result.stdout)
+            mounts = [mount_records[0], mount_records[1], mount_records[0]]
+            rows[0]["Mounts"] = mounts if inspections % 2 == 0 else [mounts[0], mounts[2], mounts[1]]
+            inspections += 1
+            result.stdout = json.dumps(rows)
+        return result
+    monkeypatch.setattr(_DockerRuntime, "__call__", permuted)
+    assert execute()["daemon_reconciled"] is True
+    assert inspections >= 6  # Initial, pre-mutation, pre-restart and refreshed snapshots.
+    assert state.calls == 1 and runtime.restart_count == 1
+    assert not (root / module._PENDING_RECONCILE).exists()
+
+
+@pytest.mark.parametrize("change", [
+    "Type", "Source", "Destination", "Mode", "RW", "Propagation",
+    "FutureField", "nested-order", "value-type", "bool-int", "string-bool",
+    "field-added", "field-removed",
+    "duplicate", "added", "removed",
+])
+def test_guarded_reclaim_rejects_changed_full_mount_records_before_mutation(
+    guarded_reclaim, monkeypatch, mount_records, change,
+):
+    import copy
+    module, state, runtime, root, execute = guarded_reclaim
+    changed = copy.deepcopy(mount_records)
+    if change in {"Type", "Source", "Destination", "Mode", "Propagation"}:
+        changed[0][change] = "changed"
+    elif change == "RW": changed[0]["RW"] = True
+    elif change == "FutureField": changed[0]["FutureField"]["values"][0] = 2
+    elif change == "nested-order": changed[0]["FutureField"]["values"].reverse()
+    elif change == "value-type": changed[0]["FutureField"]["values"][0] = "1"
+    elif change == "bool-int": changed[0]["RW"] = 0
+    elif change == "string-bool": changed[0]["FutureField"]["values"][1] = True
+    elif change == "field-added": changed[0]["Unknown"] = None
+    elif change == "field-removed": del changed[0]["Mode"]
+    elif change == "duplicate": changed.append(copy.deepcopy(changed[0]))
+    elif change == "added": changed.append({"Source": "/additional"})
+    elif change == "removed": changed.pop()
+    original = _DockerRuntime.__call__
+    inspections = 0
+    def altered(self, command):
+        nonlocal inspections
+        result = original(self, command)
+        if tuple(command[:3]) == ("docker", "container", "inspect"):
+            rows = json.loads(result.stdout)
+            rows[0]["Mounts"] = mount_records if inspections == 0 else changed
+            inspections += 1
+            result.stdout = json.dumps(rows)
+        return result
+    monkeypatch.setattr(_DockerRuntime, "__call__", altered)
+    with pytest.raises(DockerLiveRestoreReconcilerV2Error, match="changed before mutation"):
+        execute()
+    assert state.calls == runtime.restart_count == 0
+    assert not (root / module._PENDING_RECONCILE).exists()
+
+
+@pytest.mark.parametrize("before,after", [
+    (None, []), ({}, []), ("bad", []), (False, []), (0, []),
+    ([None, {"Source": "/retained"}], [{"Source": "/retained"}, None]),
+    (["bad", {"Source": "/retained"}], [{"Source": "/retained"}, "bad"]),
+    ([[1], {"Source": "/retained"}], [{"Source": "/retained"}, [1]]),
+    ([{"RW": False}], [{"RW": 0}]),
+    ([{"Source": None}], [{}]),
+])
+def test_runtime_snapshot_preserves_malformed_mount_values_and_types(before, after):
+    # Mounts previously had no schema validation: retain its exact values and
+    # comparison behavior instead of coercing malformed values into a list.
+    assert _snapshot_with_mounts(before) == _snapshot_with_mounts(before)
+    assert _snapshot_with_mounts(before) != _snapshot_with_mounts(after)
+
+
+def test_runtime_snapshot_keeps_absent_mounts_equivalent_to_null():
+    from validator_tee.host.docker_live_restore_reconciler_v2 import _runtime_snapshot
+    assert _runtime_snapshot(_DockerRuntime(live_restore=True)) == _snapshot_with_mounts(None)

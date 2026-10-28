@@ -33,6 +33,11 @@ publish_built_eif_for_verification() {
   }
 }
 
+MANAGED_DOCKER_HOST=0
+if [ "$(uname -s)" = Linux ] \
+    && [ -d /home/ec2-user/.config/leadpoet/restart-controller ]; then
+  MANAGED_DOCKER_HOST=1
+fi
 . "$REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 leadpoet_acquire_docker_operation_lock_v2
 
@@ -55,6 +60,7 @@ test -d "$EIF_ROOT" && test ! -L "$EIF_ROOT" && test -O "$EIF_ROOT" || {
   exit 1
 }
 COLD_BUILD_ROOT=""
+COLD_DOCKER_BUILD_STARTED=0
 cleanup_cold_build_root() {
   if [ -z "$COLD_BUILD_ROOT" ]; then
     return 0
@@ -71,7 +77,22 @@ cleanup_cold_build_root() {
       ;;
   esac
 }
-trap cleanup_cold_build_root EXIT
+cleanup_build() {
+  local build_status="$?" cleanup_status=0
+  trap - EXIT
+  cleanup_cold_build_root || cleanup_status="$?"
+  if [ "$MANAGED_DOCKER_HOST" = 1 ] && [ "$COLD_DOCKER_BUILD_STARTED" = 1 ]; then
+    VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
+      bash "$REPO_ROOT/validator_tee/scripts/reclaim_docker_storage_v2.sh" \
+      || cleanup_status="$?"
+  fi
+  if [ "$cleanup_status" -ne 0 ]; then
+    echo "ERROR: gateway EIF Docker cleanup failed ($cleanup_status)" >&2
+  fi
+  if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
+  exit "$cleanup_status"
+}
+trap cleanup_build EXIT
 
 # A prior interrupted cold build can leave root-owned final-path files behind.
 # Make only the fixed, regular artifacts readable so the transactional
@@ -118,6 +139,7 @@ if [ "$RESTORED_EXACT_RELEASE" != "1" ]; then
     output="$BUILD_EIF_ROOT/tee-enclave-${role}.eif"
     measurements="$BUILD_EIF_ROOT/enclave-build-${role}.json"
     rm -f "$output" "$measurements"
+    COLD_DOCKER_BUILD_STARTED=1
     sudo env \
       DOCKER_BUILDKIT=1 \
       BUILDX_NO_DEFAULT_ATTESTATIONS=1 \

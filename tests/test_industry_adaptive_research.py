@@ -14,6 +14,48 @@ NEW_URL = 'https://www.coreworks.ai/workflows'
 NEW_BODY = 'Coreworks supplies account workflow management with its analysis and reporting software.'
 
 
+def test_source_picker_can_rely_on_the_advertised_remaining_search_budget(monkeypatch):
+    """A consumed search allowance must not hide the permitted fetch exchange."""
+    supplied = {'new': False}
+    def assessment(result):
+        if not supplied['new']:
+            result.update(decision='unavailable', missing_requirements=['Account workflows'])
+    run, _, _, _ = install(monkeypatch, mutation=assessment)
+    monkeypatch.setattr(c, 'MAX_SEARCH_CALLS', 1)
+    original_post = c._post_json
+    searches, limits = [], []
+
+    async def search(session, query, **kwargs):
+        searches.append(kwargs)
+        supplied['new'] = len(searches) > 1
+        return {'results': [], '_source_pages': {NEW_URL: NEW_BODY} if supplied['new'] else {}}
+
+    async def post(session, url, *, headers, payload):
+        if 'response_format' in payload:
+            return await original_post(session, url, headers=headers, payload=payload)
+        request = next(m['content'] for m in payload['messages']
+                       if m['role'] == 'user' and m['content'].startswith('Investigate this bounded request.'))
+        budget = json.loads(request.split('\n', 1)[1])['investigation_limits']
+        for message in payload['messages']:
+            if message['role'] == 'tool':
+                budget = json.loads(message['content']).get('remaining_research_budget', budget)
+        limits.append(budget)
+        if budget['remaining_search_calls'] > 0:
+            return 200, _response('search_web', {'query': 'Coreworks account workflows'})
+        return 200, _response('submit_findings', {'findings': [_finding('industry')]})
+
+    monkeypatch.setattr(c, '_search_web', search)
+    monkeypatch.setattr(c, '_post_json', post)
+    result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
+                            prior_observations={'submitted_source_urls': [URL]}))
+    assert limits[0]['remaining_search_calls'] == 1
+    assert limits[0]['industry_search_exchange_available'] is True
+    assert limits[-1]['remaining_search_calls'] == 0
+    assert limits[-1]['industry_search_exchange_available'] is False
+    assert limits[-1]['remaining_fetch_calls'] == limits[0]['remaining_fetch_calls'] - 1
+    assert len(searches) == 2 and result['claims']['industry']['status'] == 'VERIFIED'
+
+
 @pytest.mark.parametrize('late, capacity', [(False, None), (True, None), (False, 0), (False, 20)])
 def test_native_remaining_gap_can_use_one_unused_fetch_without_extending_deadline(monkeypatch, late, capacity):
     observed = []
@@ -57,6 +99,16 @@ def test_native_remaining_gap_can_use_one_unused_fetch_without_extending_deadlin
     assert result['usage']['search_calls'] == len(observed)
     assert result['usage']['search_calls'] + result['usage']['fetch_calls'] <= 6
     assert result['usage']['reasoning_turns'] <= 8
+    input_message = next(m['content'] for m in turns[0]['messages']
+                         if m['role'] == 'user' and m['content'].startswith('Investigate this bounded request.'))
+    initial_budget = json.loads(input_message.split('\n', 1)[1])['investigation_limits']
+    assert initial_budget['industry_search_exchange_available'] is (capacity != 0)
+    for message in turns[-1]['messages']:
+        if message['role'] == 'tool':
+            tool_budget = json.loads(message['content'])['remaining_research_budget']
+    assert tool_budget['industry_search_exchange_available'] is False
+    if late:
+        assert tool_budget['remaining_search_calls'] == tool_budget['remaining_fetch_calls'] == 0
     if not exchanged:
         assert result['claims']['industry']['status'] == 'UNPROVEN'
     else:

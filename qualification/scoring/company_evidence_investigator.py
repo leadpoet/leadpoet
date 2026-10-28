@@ -4996,6 +4996,42 @@ async def investigate_company_evidence(
                 input_document['investigation_limits']['remaining_search_calls'] = (
                     MAX_SEARCH_CALLS - search_calls
                 )
+
+            def industry_search_exchange():
+                """Use the same remaining allowance for disclosure and admission."""
+                if not (industry_review_model and industry_research_brief
+                        and industry_research_brief['decision'] == 'unavailable'
+                        and search_calls <= MAX_SEARCH_CALLS
+                        and fetch_calls < fetch_call_limit
+                        and len(fetched_pages) < industry_classification.MAX_PAGES
+                        and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
+                        - JUDGMENT_ADMISSION_RESERVE_SECONDS):
+                    return (), 0
+                domains = tuple(sorted(domain for domain in first_party_domains
+                    if _independently_bound_first_party_url(
+                        f'https://{domain}/', first_party_domains, identity_anchor)))
+                capacity = max(0, industry_classification.MAX_TOTAL_CHARS - sum(
+                    len(_visible_quote_surface(body).strip())
+                    for source_url, body in fetched_pages.items()
+                    if _independently_bound_first_party_url(source_url, first_party_domains, identity_anchor)
+                    and _independently_bound_first_party_url(
+                        fetched_final_urls.get(source_url, ''), first_party_domains, identity_anchor)))
+                return domains, capacity
+
+            def remaining_industry_research_budget():
+                domains, capacity = industry_search_exchange()
+                available = bool(domains and capacity)
+                research_open = time.monotonic() - started < (
+                    ADMISSION_DEADLINE_SECONDS - JUDGMENT_ADMISSION_RESERVE_SECONDS)
+                return {
+                    'remaining_search_calls': (max(0, MAX_SEARCH_CALLS - search_calls)
+                                               + int(available)) if research_open else 0,
+                    'remaining_fetch_calls': max(0, fetch_call_limit - fetch_calls) if research_open else 0,
+                    'industry_search_exchange_available': available,
+                }
+
+            if industry_review_model:
+                input_document['investigation_limits'].update(remaining_industry_research_budget())
             messages: list[dict[str, Any]] = [{
                 "role": "user",
                 "content": _bounded_message_json(
@@ -6365,27 +6401,11 @@ async def investigate_company_evidence(
                     # A full-text company search can replace one unused exact
                     # fetch. Keep one exchange, six total research calls, and
                     # the existing judgment reserve; older policies are unchanged.
-                    exchange_domains = tuple(sorted(
-                        domain for domain in first_party_domains
-                        if _independently_bound_first_party_url(
-                            f"https://{domain}/", first_party_domains, identity_anchor,
-                        )
-                    )) if industry_review_model else ()
                     # Do not make room by truncating any already loaded proof.
-                    exchange_text_capacity = max(0, industry_classification.MAX_TOTAL_CHARS - sum(
-                        len(_visible_quote_surface(body).strip())
-                        for source_url, body in fetched_pages.items()
-                        if _independently_bound_first_party_url(
-                            source_url, first_party_domains, identity_anchor)
-                        and _independently_bound_first_party_url(
-                            fetched_final_urls.get(source_url, ''), first_party_domains, identity_anchor)
-                    )) if exchange_domains else 0
+                    exchange_domains, exchange_text_capacity = industry_search_exchange()
                     exchange_fetch_for_search = bool(
-                        exchange_domains and exchange_text_capacity and industry_research_brief
-                        and industry_research_brief['decision'] == 'unavailable'
+                        exchange_domains and exchange_text_capacity
                         and search_calls == MAX_SEARCH_CALLS
-                        and fetch_calls < fetch_call_limit
-                        and len(fetched_pages) < industry_classification.MAX_PAGES
                     )
                     if (
                         elapsed >= ADMISSION_DEADLINE_SECONDS
@@ -6515,6 +6535,8 @@ async def investigate_company_evidence(
                             }
                 else:
                     raise ValueError("reasoning_tool_unknown")
+                if industry_review_model:
+                    tool_result['remaining_research_budget'] = remaining_industry_research_budget()
                 admission.tool_settled(
                     name=name, has_loaded_evidence=bool(fetched_pages),
                 )

@@ -249,6 +249,9 @@ def test_owned_and_stateless_assessments_have_identical_results_and_flags(monkey
         def payload_hash(self, value):
             return contracts.document_hash(value)
 
+        def exact_privacy(self, value, *, response, check):
+            return check(value, response=response)
+
     monkeypatch.setattr(training_worker_proof, 'WorkerProofs', Stateless)
     assert assess(example) == result
     assert example == before

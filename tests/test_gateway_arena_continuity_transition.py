@@ -171,6 +171,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
     harness = tmp_path / "cutover.sh"
     functions = "\n".join(_function(name) for name in (
         "arena_slot_ports", "arena_runtime_tree", "prepare_arena_runtime_tree",
+        "retire_arena_runtime_tree",
         "arena_ingress_transition", "arena_component_command",
         "rollback_arena_candidate_before_destructive",
         "recover_arena_restart_owner", "restore_arena_recovery_guard_before_destructive",
@@ -261,6 +262,21 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
           esac
         }
         timeout() { shift; "$@"; }
+        # The privileged cache helper is covered separately. Return its report
+        # here while the real shell function validates it and removes source.
+        sudo() {
+          local slot= sha=
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              --slot) slot="$2"; shift;;
+              --sha) sha="$2"; shift;;
+            esac
+            shift
+          done
+          record "retire:$slot:$sha"
+          printf '{"archive":"%s","cache_paths":0,"status":"cache_cleanup_complete","applied":true}\\n' \
+            "$ARENA_RUNTIME_ROOT/slot$slot-$sha"
+        }
         curl() {
           local url="${!#}"
           record "curl:$url"

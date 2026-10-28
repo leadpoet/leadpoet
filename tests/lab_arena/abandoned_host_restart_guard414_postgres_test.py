@@ -175,10 +175,23 @@ def test_capture_and_early_recovery_share_claim_control_lock(database,migrated,w
     finally: owner.close()
 
 
-def test_http_host_recovery_publishes_and_promotes_with414_active(database,migrated,tmp_path,monkeypatch):
+@pytest.fixture
+def current_http_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
+def test_http_host_recovery_publishes_and_promotes_with414_active(current_http_database,tmp_path,monkeypatch):
     from tests.lab_arena import abandoned_host_recovery412_e2e_test as full_http
+    from tests.lab_arena import proxy_model_capacity401_e2e_test as current
+    # Exact 414 upgrade/security cases above retain their historical schema.
+    # The current HTTP path needs its complete schema and still-active guard.
+    with current_http_database[0].connect(**current_http_database[1]) as conn,conn.cursor() as cur:
+        cur.execute("SELECT pg_get_functiondef('public.lab_arena_expire_leases(text)'::regprocedure)")
+        assert 'v_early_recovery_allowed' in cur.fetchone()[0]
+    ready=current.migrated.__wrapped__(current_http_database)
     full_http.test_host_fault_recovers_via_signed_http_run_then_publishes_and_promotes(
-        database,migrated,tmp_path,monkeypatch,
+        current_http_database,ready,tmp_path,monkeypatch,
     )
 
 

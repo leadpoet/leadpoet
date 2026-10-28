@@ -521,7 +521,7 @@ def _restart_inputs(
     """Refuse a restart that could activate pending config, unit or binary edits."""
     service = _service_identity(runner, "docker.service")
     raw = _checked_output(runner, [
-        "systemctl", "show", "docker.service", "--property=FragmentPath",
+        "systemctl", "show", "docker.service", "--all", "--property=FragmentPath",
         "--property=DropInPaths", "--property=NeedDaemonReload",
         "--property=ExecMainStartTimestampMonotonic", "--no-pager",
         "--property=EnvironmentFiles", "--property=ExecStart", "--property=ExecStartPre",
@@ -542,6 +542,10 @@ def _restart_inputs(
         if not separator or key in fields:
             raise DockerLiveRestoreReconcilerV2Error("Docker restart inputs are malformed")
         fields[key] = value
+    # systemd 252 omits empty execution-command arrays even with --all.
+    # Nonempty hooks are always printed and remain unsupported below.
+    for key in ("ExecStartPost", "ExecStop", "ExecStopPost", "ExecCondition"):
+        fields.setdefault(key, "")
     if set(fields) != {"FragmentPath", "DropInPaths", "NeedDaemonReload",
                        "ExecMainStartTimestampMonotonic", "ExecStart", "ExecStartPost",
                        "ExecStop", "ExecStopPost", "ExecCondition", "PassEnvironment", "KillMode"} or fields["NeedDaemonReload"] != "no":

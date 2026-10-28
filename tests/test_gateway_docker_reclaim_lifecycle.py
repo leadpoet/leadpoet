@@ -19,7 +19,7 @@ def bash(script, **environment):
                           env={**os.environ, **environment}, text=True, capture_output=True)
 
 
-@pytest.mark.parametrize('source', [GATEWAY, RECLAIM])
+@pytest.mark.parametrize('source', [GATEWAY, RECLAIM], ids=['gateway', 'reclaim'])
 @pytest.mark.parametrize('state,status', [('0', 0), ('1', 0), ('', 1), ('unexpected', 0)])
 def test_pending_reader_distinguishes_absence_from_failure(source, state, status):
     script = function(source, 'pending_docker_reconcile') + '''

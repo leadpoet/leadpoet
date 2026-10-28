@@ -476,7 +476,10 @@ def restart_inputs(tmp_path, monkeypatch):
         ('KillMode', 'process'),
     ]
     def runner(args):
-        if args[0] == 'systemctl': output = '\n'.join(key + '=' + value for key, value in fields)
+        if args[0] == 'systemctl':
+            # systemd 252 omits empty command arrays even with --all.
+            output = '\n'.join(key + '=' + value for key, value in fields
+                               if value or key not in ('ExecStartPost', 'ExecStop', 'ExecStopPost', 'ExecCondition'))
         else:
             assert args[:2] == ['docker', 'info']
             output = 'true'
@@ -596,6 +599,7 @@ def test_live_reclaim_integrates_real_stale_inventory_deletion_and_refresh(tmp_p
     from test_docker_stale_mount_reclaimer_v2 import _DockerFixture
     import validator_tee.host.docker_live_restore_reconciler_v2 as module
     fixture = _DockerFixture(tmp_path.resolve() / 'docker')
+    fixture.root.chmod(0o700)
     runtime = _DockerRuntime(live_restore=True)
     runtime.container_id = fixture.container_id
     runtime.image_id = fixture.image_id

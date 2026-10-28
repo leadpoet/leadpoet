@@ -75,7 +75,12 @@ Prepare local review files with `plan --export-directory EXPORT
 nonempty review reason. Only the unavailable `http` extension entry, its
 comment, and the exact `SCHEMA - public postgres` or
 `SCHEMA - public pg_database_owner` creation/ownership entry may be proposed
-for exclusion. The public entry's owner must match the single `public` record
+for exclusion. The exact `SCHEMA - extensions postgres` entry may also be
+excluded after the bootstrap creates that schema with the captured owner.
+This permits a narrow temporary CREATE grant needed to restore the six
+`supabase_admin`-owned helper functions. Its owner must match one and only one
+`extensions` schema record in the sealed manifest. Retain its native ACL entry.
+The public entry's owner must match the single `public` record
 in sealed `manifest.schema_metadata.schemas`. Other owners and missing,
 duplicate or mismatched source records are rejected. The public-schema ACL
 entry must remain. The tool cannot omit a table, sequence,
@@ -167,6 +172,11 @@ the database ACL against its saved target baseline. When `public` remains owned
 by `pg_database_owner`, native ownership restoration can also require temporary
 CREATE on that schema for inert object-owner roles such as `postgres` and
 `lab_arena_owner`. Schema ownership alone does not give those roles CREATE.
+The bootstrap also creates `extensions` with its captured owner `postgres` and
+grants only temporary CREATE to `supabase_admin`. Native `ALTER FUNCTION OWNER`
+requires that privilege for the six retained helpers. Exclude only the exact
+manifest-bound schema creation entry; keep all extension, function and ACL entries.
+Remove this CREATE grant after restore if it is absent from the source ACL.
 Review the exact prerequisite grants against the source manifest and saved
 target baseline. After restore, remove only added privileges absent from the
 intended source ACL; preserve every native source grant. Do not use a blanket
@@ -222,6 +232,26 @@ getter, succeeds with its exact definition, and leaves `auth.users` absent.
 Future client authentication and claim binding remain separate compatibility
 work. The helper prepares evidence only; it does not create the schema, roles
 or function.
+
+## Dedicated bootstrap and verification tools
+
+`scripts/aws_subnet_target_bootstrap.py` prepares private SQL against the empty,
+fixed RDS target. It requires the sealed export hash and its three-module code
+hash (`--print-code-sha256`). The separate `--execute --sql-sha256 HASH` operation
+requires the reviewed exact SQL. It rechecks the empty target inside the same
+transaction as the 11 inert roles, owner authority, precreated `extensions`
+schema and exact auth helper. It does not restore data or install extensions.
+The source-aware `cleanup.sql` is a separate reviewed action after native restore.
+
+`scripts/aws_subnet_verify_metadata.py` reads the target after cleanup. Its
+inputs are sealed source metadata, actual archived sequence states and the
+initial target database ACL, each bound to its reviewed file hash. It compares
+all 12 catalog categories, exact auth support, owner and grantor identities,
+inert role attributes and memberships, and absence of unexpected objects. It
+allows only removal of the temporary exporter grants and ACL entry ordering.
+It does not allow changed grant rights, grantors, options or NULL semantics.
+The existing `aws_subnet_snapshot.py verify-data` operation remains required
+to prove every table's rows and the full stored generated-column values.
 
 ## Native restore phases
 

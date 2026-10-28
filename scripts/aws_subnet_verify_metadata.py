@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Read-only post-restore metadata proof for the dedicated rehearsal target.
+
+Run under the reviewed root systemd deadline and private log controls used by
+aws_subnet_snapshot.py. This never restores, changes ACLs or cleans up roles.
+The separate verify-data operation must still prove captured row checksums.
+"""
+import argparse
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import sys
+
+if __package__:
+    from . import aws_subnet_restore as restore
+    from . import aws_subnet_snapshot as snapshot
+    from . import aws_subnet_target_bootstrap as bootstrap
+else:
+    import aws_subnet_restore as restore
+    import aws_subnet_snapshot as snapshot
+    import aws_subnet_target_bootstrap as bootstrap
+
+
+HASH = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+
+
+def sealed_json(path, digest):
+    path = Path(path)
+    snapshot.require(isinstance(digest, str) and HASH.fullmatch(digest)
+                     and snapshot.sha256_file(path) == digest, "reference-seal")
+    return json.loads(path.read_text())
+
+
+def acl_items(value):
+    """Order only: preserve each entry's grantor, rights and grant options."""
+    snapshot.require(isinstance(value, str) and value.startswith("{") and value.endswith("}")
+                     and not any(c in value for c in ('"', '\\', '\n', '\r')), "acl-text")
+    items = value[1:-1].split(",") if value != "{}" else []
+    snapshot.require(all(re.fullmatch(r"[a-z_0-9]*=[a-zA-Z*]*/[a-z_][a-z_0-9]*", item, re.ASCII)
+                         for item in items) and len(set(items)) == len(items), "acl-text")
+    return sorted(items)
+
+
+def canonical_acl(value):
+    snapshot.require(isinstance(value, dict) and set(value) == {"is_null", "items"}
+                     and type(value["is_null"]) is bool and isinstance(value["items"], list)
+                     and all(isinstance(item, str) for item in value["items"]), "acl-shape")
+    snapshot.require(not value["is_null"] or not value["items"], "acl-shape")
+    return dict(is_null=value["is_null"], items=sorted(value["items"]))
+
+
+def clean_source_metadata(manifest):
+    """Approve only removal of the exact temporary export identity's grants."""
+    metadata = copy.deepcopy(manifest["schema_metadata"])
+    snapshot.require(set(metadata) == set(snapshot.OBJECT_KINDS)
+                     and all(isinstance(items, list) for items in metadata.values()), "source-metadata")
+    tables = {(t["schema"], t["name"]) for t in manifest["tables"]}
+    sequences = {(s["schema"], s["name"]) for s in manifest["sequences"]}
+    for category, records in metadata.items():
+        for item in records:
+            snapshot.require(isinstance(item, dict), "source-metadata")
+            if "acl" not in item:
+                continue
+            acl = canonical_acl(item["acl"])
+            kept = []
+            for entry in acl["items"]:
+                grantee, sep, rest = entry.partition("=")
+                rights, slash, grantor = rest.partition("/")
+                snapshot.require(sep and slash and grantor != snapshot.SOURCE_ROLE, "export-acl-scope")
+                if grantee != snapshot.SOURCE_ROLE:
+                    kept.append(entry)
+                    continue
+                key = item.get("schema"), item.get("name")
+                allowed = (category == "schemas" and key[0] == key[1] and key[0] in snapshot.SCHEMAS and rights == "U")
+                allowed |= (category == "relations" and item.get("kind") == "r" and key in tables and rights == "r")
+                allowed |= (category == "relations" and item.get("kind") == "S" and key in sequences and rights == "r")
+                snapshot.require(allowed, "export-acl-scope")
+            item["acl"] = dict(is_null=acl["is_null"], items=kept)
+    return metadata
+
+
+def canonical_metadata(metadata):
+    value = copy.deepcopy(metadata)
+    snapshot.require(set(value) == set(snapshot.OBJECT_KINDS), "metadata-categories")
+    for records in value.values():
+        snapshot.require(isinstance(records, list), "metadata-shape")
+        for item in records:
+            if "acl" in item:
+                item["acl"] = canonical_acl(item["acl"])
+    return value
+
+
+def canonical_support(value):
+    result = copy.deepcopy(restore.validate_supporting_auth_role(value))
+    result["schema"]["acl"] = acl_items(result["schema"]["acl"])
+    result["function"]["acl"] = acl_items(result["function"]["acl"])
+    return result
+
+
+def validate_sequences(states, manifest):
+    snapshot.require(isinstance(states, list) and len(states) == 3, "archive-sequences")
+    normalized = []
+    for item in states:
+        snapshot.require(isinstance(item, dict) and set(item) == {"schema", "name", "last_value", "is_called"}, "archive-sequences")
+        snapshot.qualified(item)
+        snapshot.require(isinstance(item["last_value"], str) and re.fullmatch(r"-?[0-9]+", item["last_value"])
+                         and type(item["is_called"]) is bool, "archive-sequences")
+        normalized.append(dict(item))
+    keys = {(item["schema"], item["name"]) for item in normalized}
+    snapshot.require(len(keys) == 3 and keys == {(item["schema"], item["name"]) for item in manifest["sequences"]}, "archive-sequences")
+    return sorted(normalized, key=lambda item: (item["schema"], item["name"]))
+
+
+def capture_target(keeper):
+    """The caller supplies the existing read-only Keeper and target service."""
+    snapshot.check_identity(keeper, "target")
+    metadata = snapshot.capture_metadata(keeper)
+    state = keeper.one_json(bootstrap.STATE_SQL)
+    # Unlike source capture, target capture must retain ACL-order differences
+    # as evidence rather than reject before semantic entry-order comparison.
+    support_sql = snapshot.SUPPORTING_AUTH_ROLE_SQL.strip().rstrip(";")
+    supports = keeper.one_json("SELECT coalesce(json_agg(v),'[]'::json) FROM (" + support_sql + ") q(v);")
+    for support in supports:
+        definition = support.get("function", {}).get("definition")
+        if isinstance(definition, str):
+            support["function"]["sha256"] = hashlib.sha256(definition.encode()).hexdigest()
+    sequences = []
+    for item in metadata["sequence_definitions"]:
+        value = keeper.one_json("SELECT json_build_object('last_value',last_value::text,'is_called',is_called) FROM " + snapshot.qualified(item) + ";")
+        sequences.append(dict(schema=item["schema"], name=item["name"], **value))
+    return dict(metadata=metadata, state=state, supporting_auth_roles=supports, sequences=sequences)
+
+
+def target_roles_match(state):
+    expected = [r for r in bootstrap.role_expectations() if r["name"] != snapshot.SOURCE_ROLE]
+    if state["roles"] != expected:
+        return False
+    names = {r["name"] for r in expected}
+    rows = {name: [] for name in names}
+    for membership in state["memberships"]:
+        name = membership["name"]
+        if name not in names or membership["member"] != "arena_admin":
+            return False
+        creator = (membership.get("admin") is True and membership.get("inherit") is False
+                   and membership.get("set") is False)
+        owner = (name in bootstrap.OWNERS and type(membership.get("admin")) is bool
+                 and membership.get("inherit") is True and membership.get("set") is True)
+        if not (creator or owner):
+            return False
+        rows[name].append((creator, owner))
+    for name, grants in rows.items():
+        if name in bootstrap.OWNERS:
+            # PG17 may keep its automatic admin-only grant separately from the
+            # explicit owner SET/INHERIT grant, or update that same grant row.
+            if not 1 <= len(grants) <= 2 or sum(owner for _, owner in grants) != 1:
+                return False
+        elif len(grants) != 1 or grants[0] != (True, False):
+            return False
+    return True
+
+
+def compare(manifest, archive_sequences, initial_target, actual):
+    expected = clean_source_metadata(manifest)
+    metadata = canonical_metadata(actual["metadata"])
+    differences = restore.compare_metadata(expected, metadata)
+    state = actual["state"]
+    if not (state["role"] == state["session"] == state["owner"] == "arena_admin"
+            and state["database"] == "postgres" and 170000 <= state["version"] < 180000
+            and state["read_only"] == "on" and state["recovery"] is False):
+        differences.append("target-identity")
+    if not target_roles_match(state):
+        differences.append("target-role-security")
+    if canonical_acl(state["database_acl"]) != canonical_acl(initial_target["database_acl"]):
+        differences.append("database-acl")
+    if any(r["name"] == snapshot.SOURCE_ROLE for r in state["roles"]) or any(
+            snapshot.SOURCE_ROLE in (m["name"], m["member"]) for m in state["memberships"]):
+        differences.append("temporary-export-role")
+    try:
+        snapshot.require(len(actual["supporting_auth_roles"]) == 1, "supporting-auth-role")
+        if canonical_support(actual["supporting_auth_roles"][0]) != canonical_support(manifest["supporting_auth_role"]):
+            differences.append("supporting-auth-role")
+    except (snapshot.Failure, KeyError, TypeError, ValueError):
+        differences.append("supporting-auth-role")
+    expected_sequences = validate_sequences(archive_sequences, manifest)
+    try:
+        if validate_sequences(actual["sequences"], manifest) != expected_sequences:
+            differences.append("archive-sequences")
+    except snapshot.Failure:
+        differences.append("archive-sequences")
+    # These totals include the three selected schemas plus only the one auth
+    # schema/getter. They detect stray objects outside the captured categories.
+    expected_counts = dict(relations=len(expected["relations"]) + len(expected["indexes"]),
+                           routines=len(expected["routines"]) + 1, types=len(expected["types"]),
+                           schemas=sum(s["name"] != "public" for s in expected["schemas"]) + 1,
+                           default_acls=len(expected["default_acls"]), event_triggers=0,
+                           large_objects=initial_target["counts"]["large_objects"],
+                           databases=initial_target["counts"]["databases"])
+    if state["counts"] != expected_counts:
+        differences.append("unexpected-objects")
+    return differences
+
+
+def verify(args):
+    manifest = sealed_json(args.manifest, args.manifest_sha256)
+    snapshot.require((Path(args.manifest).parent / "manifest.sha256").read_text().strip() == args.manifest_sha256,
+                     "manifest-seal")
+    snapshot.require(manifest["format"] == 1 and manifest["source_host"] == snapshot.SOURCE_HOST
+                     and manifest["source_role"] == snapshot.SOURCE_ROLE and manifest["database"] == "postgres", "manifest-identity")
+    snapshot.validate_tables(manifest["tables"])
+    snapshot.require(any(t["schema"] == "source_add_history" for t in manifest["tables"]), "protected-history-missing")
+    clean_source_metadata(manifest)
+    canonical_support(manifest["supporting_auth_role"])
+    sequences = validate_sequences(sealed_json(args.archive_sequences, args.archive_sequences_sha256), manifest)
+    initial = sealed_json(args.initial_target, args.initial_target_sha256)
+    bootstrap.guard_empty(initial)
+    directory = Path(args.directory).absolute()
+    directory.mkdir(mode=0o700)
+    logs = directory / "private-logs"
+    logs.mkdir(mode=0o700)
+    config = snapshot.connection_config("target", snapshot.secret(bootstrap.TARGET_SECRET_ARN), snapshot.TARGET_HOST)
+    with snapshot.service(config) as env, snapshot.Keeper(env, logs) as keeper:
+        actual = capture_target(keeper)
+    snapshot.private_json(directory / "actual.json", actual)
+    snapshot.private_json(directory / "expected-metadata.json", clean_source_metadata(manifest))
+    differences = compare(manifest, sequences, initial, actual)
+    counts = {category: len(actual["metadata"][category]) for category in snapshot.OBJECT_KINDS}
+    report = dict(format=1, status="mismatch" if differences else "match", differences=differences, counts=counts,
+                  manifest_sha256=args.manifest_sha256, archive_sequences_sha256=args.archive_sequences_sha256,
+                  initial_target_sha256=args.initial_target_sha256,
+                  data_verification="separate verify-data proof remains required")
+    snapshot.private_json(directory / "report.json", report)
+    print(json.dumps(dict(status=report["status"], categories=differences, counts=counts), sort_keys=True))
+    snapshot.require(not differences, "metadata-mismatch")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ("manifest", "archive-sequences", "initial-target"):
+        parser.add_argument("--" + name, required=True)
+        parser.add_argument("--" + name + "-sha256", required=True)
+    parser.add_argument("--directory", required=True)
+    args = parser.parse_args(argv)
+    os.umask(0o077)
+    previous = signal.signal(signal.SIGTERM, snapshot.interrupted)
+    try:
+        verify(args)
+        return 0
+    except snapshot.Failure as error:
+        print("ERROR phase=" + str(error), file=sys.stderr)
+    except (Exception, KeyboardInterrupt):
+        print("ERROR phase=metadata-verification", file=sys.stderr)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

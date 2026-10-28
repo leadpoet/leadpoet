@@ -192,8 +192,20 @@ def source_public_schema(schema_metadata):
     return public[0]
 
 
+def source_extensions_schema(schema_metadata):
+    """Bind the precreated schema needed for native helper-owner restoration."""
+    snapshot.require(isinstance(schema_metadata, dict)
+                     and isinstance(schema_metadata.get("schemas"), list), "source-extensions-schema")
+    records = [item for item in schema_metadata["schemas"] if isinstance(item, dict)
+               and (item.get("schema") == "extensions" or item.get("name") == "extensions")]
+    snapshot.require(len(records) == 1 and records[0].get("schema") == "extensions"
+                     and records[0].get("name") == "extensions"
+                     and records[0].get("owner") == "postgres", "source-extensions-schema")
+    return records[0]
+
+
 def select_toc(toc, exclusions, schema_metadata=None):
-    """Only exact http entries or the manifest-bound public creation may go."""
+    """Omit only http or exact manifest-bound precreated schema entries."""
     entries = toc_entries(toc)
     excluded = {}
     for item in exclusions:
@@ -206,6 +218,8 @@ def select_toc(toc, exclusions, schema_metadata=None):
         public = re.fullmatch(r"SCHEMA - public (postgres|pg_database_owner)\s*", tail)
         if public:
             snapshot.require(public[1] == source_public_schema(schema_metadata)["owner"], "public-schema-owner-binding")
+        elif re.fullmatch(r"SCHEMA - extensions postgres\s*", tail):
+            source_extensions_schema(schema_metadata)
         else:
             snapshot.require(re.fullmatch(r"(?:EXTENSION - http|COMMENT - EXTENSION http)\s*", tail), "protected-toc-exclusion")
         excluded[key] = item
@@ -316,7 +330,7 @@ def plan(args):
                      "approved-platform-metadata-deltas-required",
                      "exact-auth-role-schema-owner-acl-prerequisites-require-review",
                      "public-schema-owner-and-initial-acl-preservation-require-review",
-                     "write-enabled-target-service-and-final-preflight-not-implemented"])
+                     "separately-reviewed-write-enabled-target-service-and-final-preflight-required"])
     if any(re.match(r"^[0-9]+; [0-9]+ [0-9]+ SCHEMA - public(?: |$)", line) for line in entries.values()):
         blockers.append("existing-public-schema-requires-reviewed-empty-target-handling")
     snapshot.private_write(output / "restore.list", listing)

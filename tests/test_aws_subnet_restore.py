@@ -154,6 +154,28 @@ class RestorePlanTests(unittest.TestCase):
                 restore.select_toc((line + "\n").encode(), [exclusion],
                                    dict(schemas=[dict(schema="public", name="public", owner=owner)]))
 
+    def test_extensions_schema_exclusion_preserves_acl_and_requires_exact_owner(self):
+        line = "7; 2615 19000 SCHEMA - extensions postgres"
+        acl = "8; 0 0 ACL - SCHEMA extensions postgres"
+        helper = "9; 1255 19001 FUNCTION extensions pgrst_ddl_watch() supabase_admin"
+        toc = (line + "\n" + acl + "\n" + helper + "\n").encode()
+        exclusion = dict(id="7", sha256=hashlib.sha256(line.encode()).hexdigest(),
+                         reason="precreated exact schema for helper owner CREATE prerequisite")
+        record = dict(schema="extensions", name="extensions", owner="postgres")
+        selected, _ = restore.select_toc(toc, [exclusion], dict(schemas=[record]))
+        self.assertIn(("; excluded " + line).encode(), selected)
+        self.assertIn(("\n" + acl + "\n").encode(), selected)
+        self.assertIn(("\n" + helper + "\n").encode(), selected)
+        for bad in (None, dict(schemas=[]), dict(schemas=[record, record]),
+                    dict(schemas=[{**record, "owner": "supabase_admin"}]),
+                    dict(schemas=[{**record, "name": "public"}])):
+            with self.assertRaises(snapshot.Failure):
+                restore.select_toc(toc, [exclusion], bad)
+        for key, text in (("8", acl), ("9", helper)):
+            with self.assertRaises(snapshot.Failure):
+                restore.select_toc(toc, [dict(id=key, sha256=hashlib.sha256(text.encode()).hexdigest(),
+                                             reason="must retain")], dict(schemas=[record]))
+
     def test_toc_inventory_matches_all_manifest_routines_and_views(self):
         routines = [dict(schema="public", name=f"f_{i}", arguments="", kind="f") for i in range(377)]
         routines += [dict(schema="extensions", name=name, arguments="", kind="f") for name in (

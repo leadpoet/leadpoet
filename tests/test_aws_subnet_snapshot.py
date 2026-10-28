@@ -24,9 +24,13 @@ class SnapshotTests(unittest.TestCase):
     def test_manifest_metadata_is_captured_by_the_exact_snapshot_keeper(self):
         tables = [dict(schema="public", name=f"t_{i}", kind="r", filtered_rls=False, inherited=False,
                        columns=[dict(name="id", type="integer", generated="")]) for i in range(48)]
+        tables[0]["name"] = "lab_arena_rounds"
+        tables[0]["columns"] += [dict(name="arena_netuid", type="bigint", generated="s", generation_expression="id+71"),
+                                  dict(name="arena_network_name", type="text", generated="s", generation_expression="id::text")]
         sequences = [dict(schema="public", name=f"seq_{i}") for i in range(3)]
         class FakeKeeper:
             initial_settings = dict(timezone="UTC", bytea_output="hex")
+            env, logs = {}, Path("private-logs")
             def query(self, sql):
                 self.lock = sql
             def one_json(self, sql):
@@ -43,9 +47,14 @@ class SnapshotTests(unittest.TestCase):
                 raise AssertionError("unexpected catalog query")
         keeper = FakeKeeper()
         metadata = {key: [] for key in snapshot.OBJECT_KINDS}
-        with patch.object(snapshot, "capture_metadata", return_value=metadata) as capture:
+        full = dict(count=2, sum256="1" * 64, xor256="2" * 64)
+        with patch.object(snapshot, "capture_metadata", return_value=metadata) as capture, \
+             patch.object(snapshot, "copy_digest", return_value=full) as generated_copy:
             manifest = snapshot.capture_manifest(keeper, "00000003-0000001B-1")
         capture.assert_called_once_with(keeper)
+        generated_copy.assert_called_once_with(tables[0], "00000003-0000001B-1", keeper.env, keeper.logs, include_generated=True)
+        self.assertEqual(manifest["tables"][0]["generated_full_digest"], full)
+        self.assertEqual(len(manifest["tables"][0]["columns"]), 3)
         self.assertIs(manifest["schema_metadata"], metadata)
         self.assertEqual(manifest["snapshot"], "00000003-0000001B-1")
         self.assertEqual(len(manifest["tables"]), 48)
@@ -218,7 +227,7 @@ class SnapshotTests(unittest.TestCase):
             with self.assertRaises(snapshot.Failure):
                 snapshot.table_data_entries(bad)
 
-    def test_table_validation_rejects_filtered_rls_and_generated_columns(self):
+    def test_table_validation_accepts_stored_and_rejects_virtual_or_unknown_generated_columns(self):
         tables = [dict(schema="public", name=f"t_{i}", kind="r", filtered_rls=False, inherited=False,
                        columns=[dict(name="id", type="integer", generated="")]) for i in range(48)]
         snapshot.validate_tables(tables)
@@ -227,9 +236,12 @@ class SnapshotTests(unittest.TestCase):
             changed[0][key] = bad
             with self.assertRaises(snapshot.Failure):
                 snapshot.validate_tables(changed)
-        tables[0]["columns"][0]["generated"] = "s"
-        with self.assertRaises(snapshot.Failure):
-            snapshot.validate_tables(tables)
+        tables[0]["columns"].append(dict(name="generated_id", type="integer", generated="s", generation_expression="id+1"))
+        snapshot.validate_tables(tables)
+        for kind in ("v", "unknown"):
+            tables[0]["columns"][-1]["generated"] = kind
+            with self.assertRaises(snapshot.Failure):
+                snapshot.validate_tables(tables)
 
 
 PG17 = Path("/opt/homebrew/opt/postgresql@17/bin")
@@ -263,8 +275,13 @@ class NativePostgresTests(unittest.TestCase):
                 run(admin + ["-d", "postgres"], data=b"CREATE DATABASE source; CREATE DATABASE target;")
                 seed = "CREATE SCHEMA source_add_history; CREATE SCHEMA extensions;\n"
                 for i in range(48):
-                    seed += f"CREATE TABLE public.t_{i}(id integer, txt text, f double precision, b bytea, d timestamptz, j jsonb, n text);\n"
-                    seed += f"INSERT INTO public.t_{i} VALUES (1,$$line\nsecond\t\\tail$$,0.1,'\\x00ff','2026-10-28T00:00:00Z','{{\"a\":1}}',NULL),(2,$$\\.$$,'Infinity','\\x','2026-10-28T01:02:03Z','null',''),(1,$$line\nsecond\t\\tail$$,0.1,'\\x00ff','2026-10-28T00:00:00Z','{{\"a\":1}}',NULL);\n"
+                    name = "lab_arena_rounds" if i == 0 else f"t_{i}"
+                    generated = (", configuration_doc jsonb, arena_netuid bigint GENERATED ALWAYS AS (COALESCE((configuration_doc->>'netuid')::bigint,71)) STORED, arena_network_name text GENERATED ALWAYS AS (COALESCE(configuration_doc->>'network_name','finney')) STORED" if i == 0 else "")
+                    seed += f"CREATE TABLE public.{name}(id integer, txt text, f double precision, b bytea, d timestamptz, j jsonb, n text{generated});\n"
+                    columns = "id,txt,f,b,d,j,n" + (",configuration_doc" if i == 0 else "")
+                    blank = ",NULL" if i == 0 else ""
+                    configured = ',\'{"netuid":99,"network_name":"testnet"}\'' if i == 0 else ""
+                    seed += f"INSERT INTO public.{name}({columns}) VALUES (1,$$line\nsecond\t\\tail$$,0.1,'\\x00ff','2026-10-28T00:00:00Z','{{\"a\":1}}',NULL{blank}),(2,$$\\.$$,'Infinity','\\x','2026-10-28T01:02:03Z','null',''{configured}),(1,$$line\nsecond\t\\tail$$,0.1,'\\x00ff','2026-10-28T00:00:00Z','{{\"a\":1}}',NULL{blank});\n"
                 seed += "CREATE SEQUENCE public.seq_a; CREATE SEQUENCE public.seq_b; CREATE SEQUENCE source_add_history.seq_c;"
                 run(admin + ["-d", "source"], data=seed.encode())
                 # Simulate a session pooler that ignores libpq startup options.
@@ -295,8 +312,10 @@ class NativePostgresTests(unittest.TestCase):
                     schema_metadata = snapshot.capture_metadata(keeper)
                     for table in tables:
                         table["count"] = keeper.one_json("SELECT count(*) FROM ONLY " + snapshot.qualified(table) + ";")
+                        if any(c["generated"] for c in table["columns"]):
+                            table["generated_full_digest"] = snapshot.copy_digest(table, exported, source_env, logs, include_generated=True)
                     # A committed later source row must not enter the exported snapshot.
-                    run(admin + ["-d", "source"], data=b"INSERT INTO public.t_0(id,txt) VALUES(999,'later');")
+                    run(admin + ["-d", "source"], data=b"INSERT INTO public.lab_arena_rounds(id,txt) VALUES(999,'later');")
                     args = [a for a in snapshot.dump_command(exported, root / "dump") if not a.startswith("--extension=")]
                     snapshot.command(args, source_env, logs, "local-dump")
                     manifest = dict(tables=tables, schema_metadata=schema_metadata, sequences=[dict(schema="public", name="seq_a"),
@@ -310,17 +329,28 @@ class NativePostgresTests(unittest.TestCase):
                 run(admin + ["-d", "target"], data=b"DROP SCHEMA public;")
                 snapshot.command(["pg_restore", "--exit-on-error", "--no-owner", "--no-privileges", "--dbname=service=migration", str(root / "dump")], restore_env, logs, "local-restore")
                 # Change physical order while preserving duplicate rows and contents.
-                run(admin + ["-d", "target"], data=b"CREATE TEMP TABLE reordered AS SELECT * FROM public.t_0 ORDER BY id DESC; TRUNCATE public.t_0; INSERT INTO public.t_0 SELECT * FROM reordered;")
+                run(admin + ["-d", "target"], data=b"CREATE TEMP TABLE reordered AS SELECT id,txt,f,b,d,j,n,configuration_doc FROM public.lab_arena_rounds ORDER BY id DESC; TRUNCATE public.lab_arena_rounds; INSERT INTO public.lab_arena_rounds(id,txt,f,b,d,j,n,configuration_doc) SELECT * FROM reordered;")
                 with snapshot.Keeper(target_env, logs) as keeper:
                     target_snapshot = keeper.snapshot()
                     for table in tables:
                         self.assertEqual(snapshot.copy_digest(table, target_snapshot, target_env, logs), table["digest"])
-                run(admin + ["-d", "target"], data=b"UPDATE public.t_0 SET txt='changed' WHERE id=2;")
+                        if any(c["generated"] for c in table["columns"]):
+                            self.assertEqual(snapshot.copy_digest(table, target_snapshot, target_env, logs, include_generated=True), table["generated_full_digest"])
+                # Generated-expression drift leaves the native data checksum
+                # unchanged, but changes both metadata and full stored values.
+                run(admin + ["-d", "target"], data=b"ALTER TABLE public.lab_arena_rounds ALTER COLUMN arena_netuid SET EXPRESSION AS (COALESCE((configuration_doc->>'netuid')::bigint,72));")
+                with snapshot.Keeper(target_env, logs) as keeper:
+                    target_snapshot = keeper.snapshot()
+                    mutated = keeper.one_json(snapshot.CATALOG)[0]
+                    self.assertNotEqual(mutated["columns"], tables[0]["columns"])
+                    self.assertEqual(snapshot.copy_digest(mutated, target_snapshot, target_env, logs), tables[0]["digest"])
+                    self.assertNotEqual(snapshot.copy_digest(mutated, target_snapshot, target_env, logs, include_generated=True), tables[0]["generated_full_digest"])
+                run(admin + ["-d", "target"], data=b"ALTER TABLE public.lab_arena_rounds ALTER COLUMN arena_netuid SET EXPRESSION AS (COALESCE((configuration_doc->>'netuid')::bigint,71)); UPDATE public.lab_arena_rounds SET txt='changed' WHERE id=2;")
                 with snapshot.Keeper(target_env, logs) as keeper:
                     self.assertNotEqual(snapshot.copy_digest(tables[0], keeper.snapshot(), target_env, logs), tables[0]["digest"])
                 with snapshot.Keeper(source_env, logs) as keeper:
                     with self.assertRaises(snapshot.Failure):
-                        keeper.query("INSERT INTO public.t_0(id) VALUES(1000);")
+                        keeper.query("INSERT INTO public.lab_arena_rounds(id) VALUES(1000);")
                 run(admin + ["-d", "source"], data=b"CREATE ROLE fixture_reader LOGIN; GRANT USAGE ON SCHEMA public,source_add_history,extensions TO fixture_reader; GRANT SELECT ON ALL TABLES IN SCHEMA public TO fixture_reader; ALTER TABLE public.t_1 ENABLE ROW LEVEL SECURITY;")
                 reader_service = root / "reader.service"
                 snapshot.private_write(reader_service, Path(source_env["PGSERVICEFILE"]).read_bytes().replace(b"user=local_operator", b"user=fixture_reader"))

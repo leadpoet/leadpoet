@@ -279,7 +279,10 @@ CATALOG = """SELECT coalesce(json_agg(t ORDER BY t.schema, t.name), '[]'::json) 
    pg_catalog.row_security_active(c.oid) AS filtered_rls,
    EXISTS(SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhrelid=c.oid OR i.inhparent=c.oid) AS inherited,
    (SELECT json_agg(json_build_object('name', a.attname, 'type',
-     pg_catalog.format_type(a.atttypid,a.atttypmod), 'generated', a.attgenerated)
+     pg_catalog.format_type(a.atttypid,a.atttypmod), 'generated', a.attgenerated,
+     'generation_expression', CASE WHEN a.attgenerated<>'' THEN
+       pg_catalog.pg_get_expr((SELECT d.adbin FROM pg_catalog.pg_attrdef d
+         WHERE d.adrelid=a.attrelid AND d.adnum=a.attnum),a.attrelid) END)
      ORDER BY a.attnum) FROM pg_catalog.pg_attribute a
      WHERE a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped) AS columns
  FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
@@ -298,7 +301,11 @@ def validate_tables(tables):
         columns = []
         for col in table["columns"]:
             columns.append(ident(col["name"]))
-            require(not col["generated"], "generated-column")
+            require(col["generated"] in ("", "s"), "generated-column")
+            if col["generated"]:
+                require(isinstance(col.get("generation_expression"), str)
+                        and col["generation_expression"].strip(), "generated-expression")
+        require(any(not c["generated"] for c in table["columns"]), "data-column-inventory")
         require(len(set(columns)) == len(columns), "duplicate-column")
     require(len(set(keys)) == len(keys), "duplicate-table")
 
@@ -352,6 +359,11 @@ def capture_manifest(keeper, snapshot):
     keeper.query("LOCK TABLE " + ",".join(qualified(t) for t in tables) + " IN ACCESS SHARE MODE;")
     for table in tables:
         table["count"] = keeper.one_json("SELECT count(*) FROM ONLY " + qualified(table) + ";")
+        if any(c["generated"] for c in table["columns"]):
+            # pg_dump excludes generated columns from COPY. Capture their actual
+            # stored values separately while this same exported snapshot lives.
+            table["generated_full_digest"] = copy_digest(table, snapshot, keeper.env, keeper.logs, include_generated=True)
+            require(table["generated_full_digest"]["count"] == table["count"], "source-generated-count")
     sequences = keeper.one_json("""SELECT coalesce(json_agg(json_build_object('schema',n.nspname,'name',c.relname)
       ORDER BY n.nspname,c.relname),'[]'::json) FROM pg_catalog.pg_class c
       JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
@@ -465,6 +477,8 @@ def validate_archive(directory, manifest, env, logs):
         with gzip.open(directory / name, "rb") as stream:
             digest = stream_digest(stream, archive=True)
         require(digest["count"] == table["count"], "snapshot-count")
+        if any(c["generated"] for c in table["columns"]):
+            require(table.get("generated_full_digest", {}).get("count") == table["count"], "source-generated-digest")
         if "digest" in table:
             require(table["digest"] == digest and table["data_file"] == name, "archive-digest")
         else:
@@ -499,20 +513,25 @@ def export(args):
     print("export complete: 48 tables; 3 sequence observations; private manifest sealed")
 
 
-def copy_digest(table, snapshot, env, logs):
+def copy_digest(table, snapshot, env, logs, *, include_generated=False):
     require(SNAPSHOT.fullmatch(snapshot), "snapshot-id")
-    columns = ",".join(ident(c["name"]) for c in table["columns"])
+    columns = ",".join(ident(c["name"]) for c in table["columns"] if include_generated or not c["generated"])
+    require(bool(columns), "data-column-inventory")
+    # PostgreSQL 17 rejects generated attributes in COPY table(column_list).
+    # COPY(query) reads their actual stored values without excluding them.
+    source = ("(SELECT " + columns + " FROM ONLY " + qualified(table) + ")"
+              if include_generated else qualified(table) + " (" + columns + ")")
     # Import the keeper snapshot before any query can acquire another snapshot.
     sql = (BEGIN + "\nSET TRANSACTION SNAPSHOT '" + snapshot + "';\n"
-           + TRANSACTION_SETTINGS + "\nCOPY "
-           + qualified(table) + " (" + columns + ") TO STDOUT WITH (FORMAT text);\nROLLBACK;\n")
-    with stderr_file(logs, "target-copy") as err:
+           + TRANSACTION_SETTINGS + "\nCOPY " + source
+           + " TO STDOUT WITH (FORMAT text);\nROLLBACK;\n")
+    with stderr_file(logs, "table-copy") as err:
         proc = subprocess.Popen(psql_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=env)
         try:
             proc.stdin.write(sql.encode())
             proc.stdin.close()
             digest = stream_digest(proc.stdout)
-            require(proc.wait() == 0, "target-copy")
+            require(proc.wait() == 0, "table-copy")
             return digest
         finally:
             stop_child(proc)
@@ -549,6 +568,10 @@ def verify_data(args):
                 digest = copy_digest(table, snapshot, env, logs)
                 require(digest == table["digest"], "target-data-mismatch")
                 result = dict(schema=table["schema"], name=table["name"], **digest)
+                if any(c["generated"] for c in table["columns"]):
+                    full = copy_digest(table, snapshot, env, logs, include_generated=True)
+                    require(full == table["generated_full_digest"], "target-generated-data-mismatch")
+                    result["generated_full_digest"] = full
                 receipt["tables"].append(result)
                 print(json.dumps(result, sort_keys=True))
         private_json(root / ("verified-data-" + secrets.token_hex(8) + ".json"), receipt)

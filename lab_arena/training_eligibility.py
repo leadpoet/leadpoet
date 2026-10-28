@@ -948,9 +948,9 @@ def _failed_delivery_gap_verified(example):
                 or not isinstance(artifact.get("claim_request_hash"), str)
                 or contracts.SHA256_RE.fullmatch(artifact["claim_request_hash"]) is None
                 or artifact.get("payload_sha256") != contracts.document_hash(payload)
-                or payload.get("complete") is not False
-                or payload.get("failures") not in (["capture_incomplete"],
-                    ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE])
+                or not (payload.get("complete") is True and payload.get("failures") == []
+                    or payload.get("complete") is False and payload.get("failures") in (["capture_incomplete"],
+                        ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE]))
                 or training_observations._validate_payload(payload) != payload
                 or any(payload[count] != len(payload[rows]) for count, rows in (
                     ("observation_count", "observations"), ("response_receipt_count", "response_receipts"),
@@ -960,6 +960,10 @@ def _failed_delivery_gap_verified(example):
             return None
         calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
         undispatched = [call for call in calls if training_thinking.verified_undispatched_transport(example, call)]
+        # Complete capture can truthfully record a request that never reached
+        # a provider. Its exact proof still consumes an incomplete ICP slot.
+        if payload["complete"] and not undispatched:
+            return None
         delivered = [call for call in calls if call not in undispatched]
         # Reuse the exporter's exact local-event proof. The export retains
         # every provider lifecycle; no synthetic call, charge or receipt is made.

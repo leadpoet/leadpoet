@@ -191,6 +191,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pytest-shard-${{ matrix.shard }}
+          overwrite: true
           path: ci-results/
           include-hidden-files: true
           if-no-files-found: error
@@ -251,6 +252,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report-py${{ matrix.python-version }}
+          overwrite: true
           path: coverage.xml
           if-no-files-found: ignore
 

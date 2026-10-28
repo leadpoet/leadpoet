@@ -49,6 +49,18 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped production authorization: October 28 publication during restart drain
+
+The user authorized the narrow general fix for the October 28 scored-round
+publication blocked by the automatic restart guard. Permit an already-scored
+round to commit publication while the automatic guard is active and the
+operator has not paused it. Preserve explicit operator pauses, all other
+round and score holds, publication validation, costs, scoring, baseline,
+rewards, and concurrent work. Apply only exact committed migration 586 through
+the migration helper. The coordinating task owns independent review, safe
+push and merge, production migration, canonical deployment, and live
+verification. Internal implementation agents may test and commit only.
+
 ## Scoped authorization: October 28 exact privacy proof reuse
 
 The user authorized bounded reuse of exact privacy booleans within one example's

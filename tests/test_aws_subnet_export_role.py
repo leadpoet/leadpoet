@@ -148,6 +148,18 @@ class ExportRoleTests(unittest.TestCase):
             with self.assertRaisesRegex(tool.Failure, "^source-request$"):
                 tool.query("private-SQL", read_only=False)
 
+    def test_metadata_uses_admin_route_inside_explicit_readonly_transaction(self):
+        response = io.BytesIO(json.dumps([{"state": source_state(role())}]).encode())
+        with patch.object(tool, "access_token", return_value="local-mocked-token"), \
+             patch.object(tool, "urlopen", return_value=response) as opened:
+            observed = tool.state()
+        payload = json.loads(opened.call_args.args[0].data)
+        self.assertIs(payload["read_only"], False)
+        self.assertEqual(payload["query"], "BEGIN READ ONLY;\n" + tool.STATE_SQL + "\nROLLBACK;")
+        self.assertNotIn("COMMIT;", payload["query"])
+        self.assertEqual(observed["current_user"], "postgres")
+        self.assertEqual(observed["role"]["memberships"], tool.CREATOR_MEMBERSHIP)
+
     def test_preflight_rejects_wrong_identity_existing_role_and_secret(self):
         with patch.object(tool, "aws_json", return_value={"Account": "wrong"}):
             with self.assertRaisesRegex(tool.Failure, "aws-account"):

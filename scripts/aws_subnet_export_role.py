@@ -205,7 +205,9 @@ def inventory(objects):
 
 
 def state():
-    rows = query(STATE_SQL)
+    # The API's read_only route changes current_user to its restricted reader.
+    # Use the admin route for role metadata, with SQL enforcing read-only work.
+    rows = query("BEGIN READ ONLY;\n" + STATE_SQL + "\nROLLBACK;", read_only=False)
     require(len(rows) == 1 and isinstance(rows[0].get("state"), dict), "source-state")
     value = rows[0]["state"]
     require(value.get("current_user") == "postgres" and value.get("database") == "postgres", "source-identity")

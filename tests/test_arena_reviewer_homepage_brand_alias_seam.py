@@ -18,6 +18,19 @@ from tests.lab_arena.reviewer_runtime_composition_test import layer
 def sources():
     corrected = {name: (builder.ROOT / name).read_bytes()
                  for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}
+    # This overlay owns exact historical functions. Industry integration can
+    # change today's investigator without changing the reviewed frozen image.
+    # Exact corrected function from upstream197048255 (PR832).
+    frozen = (builder.ROOT / 'tests/fixtures/arena_reviewer/frozen_brand_investigator.py.txt').read_bytes()
+    assert hashlib.sha256(frozen).hexdigest() == (
+        '4ee4e5c966a6f1815c860a3b43e7cb151712eadf7ac7912e90e271cf06c19005')
+    text = corrected[seam.INVESTIGATOR].decode()
+    node = next(n for n in ast.parse(text).body
+                if isinstance(n, ast.AsyncFunctionDef) and n.name == 'investigate_company_evidence')
+    lines = text.splitlines(keepends=True)
+    corrected[seam.INVESTIGATOR] = (
+        ''.join(lines[:node.lineno - 1]).encode() + frozen
+        + ''.join(lines[node.end_lineno:]).encode())
     return reverse(corrected), corrected
 
 
@@ -40,6 +53,7 @@ def originals(include_brand=True):
     files = {name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
                                    if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in names}
+    files[builder.GRADER_FILE] = sources()[1][seam.INVESTIGATOR]
     if include_brand:
         files.update(sources()[0])
     return files
@@ -55,6 +69,13 @@ def test_exact_five_owned_spans_only_and_idempotence():
         name: b"# frozen prefix\n" + data + b"\n# frozen suffix\n"
         for name, data in corrected.items()
     }
+
+
+def test_new_industry_investigator_is_not_mistaken_for_frozen_overlay_source():
+    current = {name: (builder.ROOT / name).read_bytes()
+               for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}
+    with pytest.raises(seam.HomepageBrandAliasSeamError, match='unrecognized bytes'):
+        seam.convert_homepage_brand_alias_files(current)
 
 
 @pytest.mark.parametrize("function,path", [

@@ -26,7 +26,7 @@ def record_frozen_failed_execution_zeros(service, round_id, stage):
         for run in latest.values()
         if run["status"] == "failed" and run["per_icp_score"] is None
         and run["assignment_id"] not in accepted
-        and run["terminal_cause"] in (contracts.INFRASTRUCTURE_TERMINAL_CAUSES | {"stage_closed"})
+        and run["terminal_cause"] == "provider_error"
     ]
     if zeros:
         recorded = service.store.record_run_scores(round_id, stage, zeros)
@@ -34,9 +34,7 @@ def record_frozen_failed_execution_zeros(service, round_id, stage):
         for item in zeros:
             saved = service.store.get_run(item["run_id"])
             assert saved["status"] == "failed" and saved["per_icp_score"] == 0
-            assert saved["terminal_cause"] in (
-                contracts.INFRASTRUCTURE_TERMINAL_CAUSES | {"stage_closed"}
-            )
+            assert saved["terminal_cause"] == "provider_error"
 
 
 def frozen_publication_document(service, round_id):

@@ -94,10 +94,41 @@ def _all_model_routes_verified(example, run_id):
         return False
 
 
+def _empty_stopped_chat_output(response):
+    """Recognize only the observed null Chat result, with explicit zero usage."""
+    if (not isinstance(response, Mapping)
+            or not set(response) <= {"id", "object", "created", "model", "provider", "choices", "usage",
+                                     "system_fingerprint", "service_tier", "openrouter_metadata"}):
+        return False
+    choices = response.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], Mapping):
+        return False
+    choice = choices[0]
+    target = choice.get("message")
+    if (not set(choice) <= {"index", "finish_reason", "native_finish_reason", "message", "logprobs"}
+            or choice.get("finish_reason") != "stop"
+            or choice.get("native_finish_reason") not in (None, "stop")
+            or choice.get("logprobs") is not None
+            or not isinstance(target, Mapping) or target.get("role") != "assistant"
+            or "content" not in target or target["content"] is not None
+            or not set(target) <= {"role", "content", "reasoning", "reasoning_content", "refusal", "tool_calls"}
+            or any(target.get(field) is not None for field in ("reasoning", "reasoning_content", "refusal"))
+            or target.get("tool_calls") not in (None, [])):
+        return False
+    usage = response.get("usage")
+    if not isinstance(usage, Mapping):
+        return False
+    sources = (usage, usage.get("completion_tokens_details", {}), usage.get("output_tokens_details", {}))
+    if not all(isinstance(source, Mapping) for source in sources):
+        return False
+    tokens = [source["reasoning_tokens"] for source in sources if "reasoning_tokens" in source]
+    return bool(tokens) and all(type(value) is int and value == 0 for value in tokens)
+
+
 def _verified_provider_output_fault(example, call):
     """Prove an unusable generated action without admitting a training target.
 
-    Only the two observed output faults qualify. Reaching these target errors
+    Only the observed output faults qualify. Reaching these target errors
     must still prove the exact request, input history and host-written response.
     Actual provider routing and settled cost are independent requirements.
     """
@@ -119,7 +150,10 @@ def _verified_provider_output_fault(example, call):
         reasoning_only = (op == "openrouter.responses" and isinstance(target, list) and bool(target)
                           and all(isinstance(item, Mapping) and item.get("type") == "reasoning"
                                   for item in target))
-        if not reasoning_only:
+        empty_chat = (op == "openrouter.chat" and _empty_stopped_chat_output(response)
+                      and not call.get("response_privacy_redactions")
+                      and not any(receipt.get("privacy_redactions") for receipt in call.get("response_receipts") or []))
+        if not reasoning_only and not empty_chat:
             try:
                 training_steps._validate_target_tools(
                     call["request"]["outbound"]["body"], target, op)
@@ -142,6 +176,10 @@ def _verified_provider_output_fault(example, call):
         try:
             training_steps._candidate(example, call)
         except ValueError as exc:
+            if str(exc) == "assistant_shape_unsupported" and empty_chat:
+                # The closed null shape and explicit zero counters above must
+                # still agree with the independent route/accounting projection.
+                return state["tokens_reported"] == 0
             if str(exc) == "undeclared_tool_call":
                 return True
             if str(exc) == "response_choice_ambiguous" and call.get("operation_id") == "openrouter.responses":

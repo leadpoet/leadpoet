@@ -18,6 +18,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     DEFAULT_MIGRATIONS,
     database_with_lab_arena_migration,
+    current_service_database,
 )
 
 MIGRATIONS = DEFAULT_MIGRATIONS + (
@@ -29,6 +30,10 @@ MIGRATIONS = DEFAULT_MIGRATIONS + (
 def database():
     yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
 
+
+@pytest.fixture()
+def current_integrity_database():
+    yield from current_service_database()
 
 @pytest.fixture()
 def database_before_251():
@@ -121,7 +126,7 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
     database, tmp_path, monkeypatch
 ):
     psycopg2, dsn = database
-    harness = IntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
+    harness = _HistoricalIntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
         challengers=["Outage", "Healthy"], runners=["alpha"])
     def judge(companies, icp, reference):
         indexes, _ = verify.bucket_skip(icp, companies)
@@ -133,7 +138,7 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
     monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
     round_id = "arena-2026-11-01-outage"
     harness.clock.now = datetime.now(timezone.utc)
-    harness.service.create_round(harness.clock.now + timedelta(hours=12), round_id=round_id)
+    harness.service.create_round(harness.clock.now + timedelta(minutes=30), round_id=round_id)
     harness.round_id = round_id
     submission = harness.submit("Outage", round_id)
     healthy_submission = harness.submit("Healthy", round_id)
@@ -213,11 +218,11 @@ def test_closed_judge_failures_keep_billing_evidence_without_harming_healthy_wor
 
 
 def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
-    database, tmp_path, monkeypatch,
+    current_integrity_database, tmp_path, monkeypatch,
 ):
-    psycopg2, dsn = database
+    psycopg2, dsn = current_integrity_database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=["Challenger"], runners=["alpha"]
     )
 
@@ -245,7 +250,7 @@ def test_complete_twenty_icp_winner_cannot_be_vetoed_by_retired_stage(
     )
     round_id = "arena-2026-11-01-twentyicp"
     config = harness.service.create_round(
-        datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id
+        datetime.now(timezone.utc) + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
     assert config["integrity_policy"] == integrity.POLICY
@@ -370,7 +375,7 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
 ):
     psycopg2, dsn = database_before_251
     connect = lambda: psycopg2.connect(**dsn)
-    harness = IntegrityHarness(
+    harness = _Pre251IntegrityHarness(
         connect, tmp_path, challengers=["CutoverWinner"], runners=["alpha"]
     )
     def judge(companies, icp, reference):
@@ -393,10 +398,10 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
     harness.service._require_integrity_schema = lambda: None
     round_id = "arena-2026-11-02-cutover"
     config = harness.service.create_round(
-        harness.clock.now + timedelta(hours=12), round_id=round_id
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
     )
     harness.round_id = round_id
-    winner = harness.submit("CutoverWinner", round_id)
+    winner = _seed_pre251_challenger(harness, "CutoverWinner")
     confirmation_ref = f"arena/{round_id}/confirmation/{'c' * 64}.json"
     confirmation_hash = "sha256:" + "c" * 64
     with connect() as connection, connection.cursor() as cursor:
@@ -496,3 +501,93 @@ def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
             "'public.lab_arena_twenty_icp_promotion_schema_v1()', 'EXECUTE')"
         )
         assert cursor.fetchone() == (True, False)
+
+
+class _FrozenIntegrityHarness(IntegrityHarness):
+    def build_service(self):
+        from tests.lab_arena.historical_service_harness import freeze_historical_intake_dates
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-02")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service
+
+
+class _Pre251IntegrityHarness(_FrozenIntegrityHarness):
+    def advance_until(self, target, *, runners=1, max_steps=80):
+        # Exercise the original SQL stage protocol. The later coordinator's
+        # operator-hold/recovery RPCs do not exist before251.
+        for _ in range(max_steps):
+            status = self.status()
+            if status == target:
+                return self.service.store.get_round(self.round_id)
+            if status == "open":
+                result = self.service.commit_benchmark(self.round_id)
+            elif status == "committed":
+                result = self.service.open_stage(self.round_id, 1)
+            elif status in ("stage1", "stage2"):
+                self.run_stage_with_runners(runners)
+                result = self.service.close_stage(self.round_id, int(status[-1]))
+            elif status in ("stage1_closed", "stage2_closed"):
+                stage = int(status[5])
+                result = self.service.commit_scoring_plan(self.round_id, stage)
+                assert result["status"] in ("ok", "existing"), result
+                result = self.service.open_scoring(self.round_id, stage)
+            elif status in ("stage1_scoring", "stage2_scoring"):
+                self.run_stage_with_runners(runners)
+                result = self.service.close_scoring(self.round_id, int(status[5]))
+            elif status in ("stage1_judged", "stage2_judged"):
+                result = self.service.score_stage(self.round_id, int(status[5]))
+            elif status == "stage1_scored":
+                self.clock.advance_to(self.schedule()["stage_2_start"])
+                result = self.service.open_stage(self.round_id, 2)
+            elif status == "scored":
+                result = self.service.publish(self.round_id)
+            else:
+                raise AssertionError(status)
+            assert result["status"] in ("ok", "closed"), result
+        raise AssertionError((target, self.status()))
+
+    def make_store(self):
+        from tests.lab_arena.historical_service_harness import HistoricalArenaStore
+        from lab_arena.store import PsycopgTransport
+        return HistoricalArenaStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
+
+
+def _seed_pre251_challenger(harness, flavor):
+    """Set up the exact old SQL boundary, before source-fingerprint admission."""
+    from tests.lab_arena.test_lab_arena_migration_postgres import pass_code_review
+    miner = fixtures.keypair("svc-miner-" + flavor)
+    payload = fixtures.flavor_source_archive(flavor)
+    facts = fixtures.source_bundle.validate_source_archive(payload)
+    envelope = contracts.build_signed_request(
+        scope=contracts.SCOPE_SUBMISSION_PRESIGN, round_id=harness.round_id,
+        hotkey=miner.ss58_address,
+        body={"source_size_bytes": facts["source_size_bytes"], "consent": {"public_rerun": True}},
+        timestamp=int(harness.clock().timestamp()),
+        sign_message=lambda message: miner.sign(message.encode()).hex(),
+    )
+    target = harness.service.handle_submission_presign(envelope)
+    harness.objects.put(target["source_ref"], payload)
+    submission_id = target["submission_id"]
+    credentials = harness.service.config.credential_manager.validate_and_encrypt(
+        {"openrouter_api_key": fixtures.CANARY_OPENROUTER_KEY,
+         "openrouter_management_key": fixtures.CANARY_OPENROUTER_MANAGEMENT_KEY,
+         "deepline_api_key": fixtures.CANARY_DEEPLINE_KEY},
+        submission_id=submission_id, miner_hotkey=miner.ss58_address,
+    )
+    assert harness.service.store.accept_submission_with_credentials(
+        harness.round_id, submission_id, miner.ss58_address, credentials,
+    )["status"] == "ok"
+    pass_code_review(harness.service.store, submission_id, miner.ss58_address)
+    harness.flavors[submission_id] = flavor
+    return submission_id
+
+
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
+
+class _HistoricalIntegrityHarness(HistoricalStoreHarnessMixin, _FrozenIntegrityHarness):
+    """The original pre472 two-attempt integrity/billing contract."""

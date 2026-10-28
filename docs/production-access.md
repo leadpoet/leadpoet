@@ -31,6 +31,12 @@ approved recovery profile through `aws configure export-credentials` in memory;
 it does not print or save the export. This supports AWS CLI `login_session` with
 the deployed boto3 version. An already-correct policy causes no IAM write.
 
+Recovery requires an AWS CLI that supports `aws login` and its `login_session`
+credentials. Use the existing current CLI installation. Before the guard, run
+`aws --version` and `aws --profile leadpoet-recovery-console-20261026 --region us-east-1 sts get-caller-identity`
+with the same `PATH` that will run the guard. An older CLI earlier in `PATH` can
+report missing credentials even when the current CLI has a valid login session.
+
 For a host with an appropriately permitted EC2 instance role, select
 `--aws-instance-role`. It accepts only the instance metadata credential provider.
 Both options apply only to this guard. The helper rejects inherited AWS authority

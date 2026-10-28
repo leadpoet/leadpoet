@@ -82,7 +82,8 @@ def test_reuse_keeps_exact_pointer_match_and_rejects_invalid_proof(tmp_path, dam
 
 
 @pytest.mark.parametrize("wrong_identity", [False, True])
-def test_first_proof_read_failure_and_early_identity_rejection_are_unchanged(tmp_path, wrong_identity):
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_first_proof_failure_preserves_ambiguous_request_without_dispatch(tmp_path, wrong_identity, ambiguous):
     terminal = ArenaStoreUnavailable("first proof unavailable")
     class FailedProofStore(OneReadStore):
         def reserve_call(self, **kwargs):
@@ -91,8 +92,9 @@ def test_first_proof_read_failure_and_early_identity_rejection_are_unchanged(tmp
         def list_ledger(self, **kwargs):
             self.ledger_reads += 1
             raise terminal
+    objects = LocalObjectStore(tmp_path)
     provider, store, transport = make_broker(
-        store=FailedProofStore(), capture_request=capture.RequestCapture(LocalObjectStore(tmp_path)).prepare,
+        store=FailedProofStore(ambiguous=ambiguous), capture_request=capture.RequestCapture(objects).prepare,
     )
     if wrong_identity:
         assert _execute(provider).status == 503
@@ -101,7 +103,13 @@ def test_first_proof_read_failure_and_early_identity_rejection_are_unchanged(tmp
             _execute(provider)
         assert raised.value is terminal
     assert store.ledger_reads == (0 if wrong_identity else 1)
-    assert transport.sent == [] and not list(tmp_path.rglob("*.gz"))
+    assert transport.sent == []
+    if ambiguous and not wrong_identity:
+        receipt = next(iter(store.calls.values()))
+        saved = capture.read_request(objects, receipt["call_doc"]["request_capture"])
+        assert saved["operation_id"] == "openrouter.chat"
+    else:
+        assert not list(tmp_path.rglob("*.gz"))
 
 
 @pytest.mark.parametrize("kind,expected_status", [

@@ -5288,8 +5288,18 @@ class Broker:
         ):
             if reserved.get("call_identity") != call_identity:
                 return _error_result("broker_unavailable", summary)
-            rows = (reservation_readback_rows if reservation_readback_rows is not None
-                    else self._store.list_ledger(call_identity=call_identity, limit=64))
+            try:
+                rows = (reservation_readback_rows if reservation_readback_rows is not None
+                        else self._store.list_ledger(call_identity=call_identity, limit=64))
+            except ArenaStoreUnavailable:
+                if reserve_readback_used and prepared_capture is not None:
+                    # Admission remains unverified, but the first reserve may
+                    # already reference this prepared, sanitized request.
+                    try:
+                        prepared_capture.persist()
+                    except Exception:
+                        pass
+                raise
             if rows is None or not _reservation_readback_matches(
                 self._store, reservation_arguments, reserved,
                 confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},

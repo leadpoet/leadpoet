@@ -706,10 +706,13 @@ class PostgrestTransport(StoreTransport):
                     and code == "55P03"
                     and function in {
                         "lab_arena_reserve_call", "lab_arena_reserve_judgment_call",
+                        "lab_arena_mark_dispatched",
                     }
                 ):
-                    # An explicit reservation lock timeout rolls back the RPC.
-                    # Repeat its exact identity before any provider dispatch.
+                    # A proved lock timeout rolls back these pre-dispatch RPCs.
+                    # Repeat the exact identity; an existing dispatch marker
+                    # returns idempotent into the broker's uncertain branch.
+                    # Settlement and ambiguous failures stay outside this bound.
                     self.deadlock_retries += 1
                     deadlock_attempts += 1
                     time.sleep(0.01 * deadlock_attempts)
@@ -1389,8 +1392,9 @@ class ArenaStore:
             raise ArenaStoreError("code review schema mismatch")
         retry_policy = result.get("retry_policy")
         if (
-            retry_policy != "bounded_transient_v1"
-            or result.get("max_transient_attempts") != 6
+            retry_policy != "deadline_transient_v2"
+            or "max_transient_attempts" not in result
+            or result["max_transient_attempts"] is not None
             or result.get("transient_retry_backoff_seconds")
                 != [60, 120, 240, 480, 900]
             or result.get("legacy_max_attempts") != 3

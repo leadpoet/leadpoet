@@ -10,6 +10,23 @@ Standalone callers remain stateless. Do not add a global cache, replay paid work
 or rewrite history. Internal agents may commit only. The coordinating task owns
 independent review, push, merge and release after the current canonical pair.
 
+## Scoped authorization: October 28 admission review recovery
+
+The user authorized the narrow recovery of unfinished reviewer and provider
+failures until the existing admission deadline, focused tests, independent
+review, safe push and merge, exact committed
+`585-lab-arena-review-deadline-recovery.sql` and
+`585-lab-arena-review-deadline-recovery-rollback.sql`, canonical gateway and
+normal-validator deployment, and live
+verification. Preserve completed pass/reject decisions, source and credential
+checks, miner funding, backoff, leases, accounting limits, scoring and rewards.
+Preserve the October 28 frozen entrant set and its excluded submission; do not
+admit it late, replace participants, reset scores, replay paid calls or rewrite
+historical records. Internal implementation agents may test and commit only.
+The coordinating task owns production SQL, migration and rollback application,
+canonical deployment and live verification. This authority ends after the
+scoped fix and affected future-flow verification are complete.
+
 ## Scoped authorization: October 28 capture policy composition
 
 The user authorized the proven capture-policy composition repair. Bind

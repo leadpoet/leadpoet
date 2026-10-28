@@ -295,9 +295,14 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                     'entry_kind':"CASE WHEN s%%3=1 THEN 'reservation' WHEN s%%3=2 THEN 'dispatch' "
                                  "WHEN ((s-1)/3)%%2=0 THEN 'uncertain' ELSE 'settlement' END",
                     'provider':"CASE WHEN ((s-1)/3)%%3=0 THEN 'openrouter' ELSE 'deepline' END"}
-            cur.execute('INSERT INTO lab_arena_ledger SELECT '+','.join(repl.get(k,'l.'+k) for k in cols)+
-                        " FROM lab_arena_ledger l CROSS JOIN generate_series(1,500000) s "
-                        "WHERE call_identity=%s AND entry_kind='uncertain'", (maximum, cid))
+            # Seed the identical history in bounded statements. The 20s
+            # timeout and all measured queries stay unchanged.
+            for first in range(1, 500001, 100000):
+                cur.execute('INSERT INTO lab_arena_ledger SELECT '+','.join(repl.get(k,'l.'+k) for k in cols)+
+                            " FROM lab_arena_ledger l CROSS JOIN generate_series(%s,%s) s "
+                            "WHERE call_identity=%s AND entry_kind='uncertain'",
+                            (maximum, first, first + 99999, cid))
+                assert cur.rowcount == 100000
             for table in ('lab_arena_ledger','lab_arena_runs','lab_arena_rounds'):
                 cur.execute('ANALYZE '+table)
             cur.execute('SET LOCAL plan_cache_mode=force_generic_plan')

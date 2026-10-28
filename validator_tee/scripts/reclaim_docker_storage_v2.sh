@@ -208,6 +208,7 @@ protect_exact_host_gateway_runtime() {
     echo "Docker storage requirement: runtime_mode=host-gateway-live phase=$phase required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
     if [ "$AVAILABLE" -ge "$LIVE_RUNTIME_MIN_FREE_BYTES" ] \
         && [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" != "1" ] \
+        && [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" != "1" ] \
         && ! pending_docker_reconcile; then
       echo "Docker storage maintenance deferred while the exact host gateway is live: phase=$phase free_bytes=$AVAILABLE required_free_bytes=$LIVE_RUNTIME_MIN_FREE_BYTES"
       exit 0
@@ -970,7 +971,8 @@ if [ "$HOST_GATEWAY_LIVE" -eq 1 ] || [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" = "1" ];
   AVAILABLE="$(available_bytes)"
   ONLINE_RAW_RECLAIM_PERFORMED=0
   if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ] \
-      || [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]; then
+      || [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ] \
+      || [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" = "1" ]; then
     inventory_empty_online_runtime "pre-stale-reclaim"
     require_same_online_gateway "pre-stale-reclaim"
     require_same_online_docker_root "pre-stale-reclaim"

@@ -44,8 +44,9 @@ class HistoricalArenaStore(ArenaStore):
         row = self.get_round(round_id)
         baseline = next(p["submission_id"] for p in row["participants"] if p["is_king"])
         runs = self.list_runs(round_id, stage=1, kind="execute", submission_id=baseline)
-        assert len(runs) == contracts.benchmark_icp_count(row["configuration_doc"])
-        assert all(r["status"] == "accepted" and r["per_icp_score"] is not None for r in runs)
+        accepted = {int(run["icp_position"]) for run in runs
+                    if run["status"] == "accepted" and run["per_icp_score"] is not None}
+        assert accepted == set(range(contracts.benchmark_icp_count(row["configuration_doc"])))
         return {"status": "not_applicable"}
 
     def scoring_policy_history(self, round_id):

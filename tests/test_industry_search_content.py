@@ -10,28 +10,6 @@ from qualification.scoring import industry_classification as industry
 from tests.test_industry_classification import CRITERION, COMPANY
 
 
-def install_exchange(monkeypatch, **kwargs):
-    """Exercise full-text search on the remaining-fetch exchange route."""
-    from tests.test_native_industry_review import install
-    from tests.test_company_evidence_judgment_reserve import _response
-    run, calls, clock, reviews = install(monkeypatch, **kwargs)
-    monkeypatch.setattr(c, 'MAX_SEARCH_CALLS', 1)
-    async def initial_locators(*args, **kwargs):
-        return {'results': [], 'notice': 'discovery_only_not_evidence'}
-    monkeypatch.setattr(c, '_search_industry_locators', initial_locators)
-    original = c._post_json
-    searched = False
-    async def post(session, url, *, headers, payload):
-        nonlocal searched
-        if url.endswith('/chat/completions') and 'response_format' not in payload and not searched:
-            searched = True
-            calls['model'].append(payload)
-            return 200, _response('search_web', {'query': 'Coreworks account workflows'})
-        return await original(session, url, headers=headers, payload=payload)
-    monkeypatch.setattr(c, '_post_json', post)
-    return run, calls, clock, reviews
-
-
 def test_exact_domain_source_text_is_retained_without_trusting_highlights(monkeypatch):
     requests = []
     async def post(session, url, *, headers, payload):
@@ -113,7 +91,7 @@ def test_native_http_locator_is_fetched_before_its_https_text_becomes_evidence(m
         if not reads:
             result.update(decision='unavailable', missing_requirements=['Account workflows'])
 
-    run, calls, _, _ = install_exchange(monkeypatch, mutation=finding)
+    run, calls, _, _ = install(monkeypatch, mutation=finding)
     original_post, original_fetch = c._post_json, c._fetch_page
 
     async def post(session, url, **kwargs):
@@ -135,11 +113,12 @@ def test_native_http_locator_is_fetched_before_its_https_text_becomes_evidence(m
         prefetched_pages={home: {'final_url': home, 'text': FEATURES}},
         requested_product_service='Supplies analysis, reporting and account workflows'))
     assert reads == [service]
+    assert calls['model'][0]['tool_choice'] == 'required'
     assert result[c.PRIVATE_FETCHED_PAGES_KEY][service] == {'final_url': service, 'text': fresh}
     evidence = result['claims']['industry']['_industry_review']['evidence']
     assert any(item == {'url': service, 'quote': fresh} for item in evidence)
     assert 'Unsupported HTTP-only claim' not in json.dumps(result)
-    assert result['usage']['search_calls'] == 2
+    assert result['usage']['search_calls'] == 1
     assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
 
 
@@ -182,13 +161,17 @@ def test_native_loop_reuses_full_search_body_and_retains_its_exact_quote(monkeyp
             result.update(decision='unavailable', missing_requirements=['Account workflow offering'])
     finding = _finding('industry',status='VERIFIED',evidence_url=service,evidence_quote=full_text,
                        activity_role='supplier_operator',observed_industry='Software')
-    run, calls, clock, reviews = install_exchange(monkeypatch, mutation=initial_gap, finding=finding)
+    run, calls, clock, reviews = install(monkeypatch, mutation=initial_gap, finding=finding)
     original_post = c._post_json
     paid_searches = []
     async def post(session,url,**kwargs):
         if url == 'https://api.exa.ai/search':
             paid_searches.append(kwargs['payload'])
             return 200, {'results':[{'url':service, 'text':full_text}, {'url':URL,'text':FEATURES}]}
+        if 'response_format' not in kwargs['payload']:
+            from tests.test_company_evidence_judgment_reserve import _response
+            calls['model'].append(kwargs['payload'])
+            return 200, _response('submit_findings', {'findings': [finding]})
         return await original_post(session,url,**kwargs)
     monkeypatch.setattr(c,'_post_json',post)
     monkeypatch.setattr(c,'_search_web',search)
@@ -196,18 +179,19 @@ def test_native_loop_reuses_full_search_body_and_retains_its_exact_quote(monkeyp
         prefetched_pages={home:{'final_url':home,'text':FEATURES}},
         requested_product_service='Supplies analysis, reporting and account workflow software'))
     # Source selection must see newly loaded bodies, not only the stale gap.
-    assert full_text in json.dumps(calls['model'][1]['messages'])
+    assert full_text in json.dumps(calls['model'][0]['messages'])
+    assert calls['model'][0]['tool_choice'] == 'required'
     for request in calls['model']:
         validate_operation_request('openrouter.chat', request)
     assert result['_completed_submit'] is True
     claim = result['claims']['industry']
     assert claim['status'] == 'VERIFIED'
-    assert len(reviews) == 2  # Initial gap and final fetched-proof review.
+    assert not claim['_industry_review'].get('reused_completed_packet')
+    assert len(reviews) == 2  # Initial assessment and final review; no intermediate review.
     assert any(item['url'] == service and item['quote'] == full_text for item in claim['_industry_review']['evidence'])
     assert result[c.PRIVATE_FETCHED_PAGES_KEY][service] == {'final_url':service,'text':full_text}
     assert calls['primary'] == [] and calls['contents'] == []
-    assert len(paid_searches) == 1
-    assert result['usage']['search_calls'] == 2
+    assert len(paid_searches) == result['usage']['search_calls'] == 1
     assert result['usage']['fetch_calls'] == 0
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
     projected = lead_scorer._project_investigator_industry({'attribute_satisfied':False},claim)
@@ -224,7 +208,7 @@ def test_full_loaded_search_corpus_fits_native_selection_request(monkeypatch):
         result['evidence_span_ids'] = result['evidence_span_ids'][:8]
         if len(seen) == 1:
             result.update(decision='unavailable', missing_requirements=['Account workflows'])
-    run, calls, _, _ = install_exchange(monkeypatch, mutation=initial_gap)
+    run, calls, _, _ = install(monkeypatch, mutation=initial_gap)
     pages = {f'https://www.coreworks.ai/source/{i}': (FEATURES + ' Detail.' * 4000)[:24000]
              for i in range(10)}
     async def search(*args, **kwargs):
@@ -234,15 +218,14 @@ def test_full_loaded_search_corpus_fits_native_selection_request(monkeypatch):
     result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
                             prior_observations={'submitted_source_urls': [URL]}))
     assert result['_completed_submit'] is True
-    first = calls['model'][1]
+    first = calls['model'][0]
     source_parts = [p for m in first['messages'] if m['role'] == 'user'
                     and m['content'].startswith('{"untrusted_source_pages"')
                     for p in json.loads(m['content'])['untrusted_source_pages']]
-    assert {p['source_url'] for p in source_parts} <= set(pages)
-    assert len({p['source_url'] for p in source_parts}) == 7
-    assert sum(len(s['text']) for p in source_parts for s in p['spans']) == industry.MAX_TOTAL_CHARS - len(FEATURES)
+    assert {p['source_url'] for p in source_parts} == set(pages)
+    assert sum(len(s['text']) for p in source_parts for s in p['spans']) == industry.MAX_TOTAL_CHARS
     for request in calls['model']:
         validate_operation_request('openrouter.chat', request)
-    assert result['usage']['search_calls'] == c.MAX_SEARCH_CALLS + 1
+    assert result['usage']['search_calls'] <= c.MAX_SEARCH_CALLS
     assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS

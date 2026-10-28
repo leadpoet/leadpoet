@@ -6,9 +6,13 @@ import pytest
 
 from lab_arena.operations import validate_operation_request
 from qualification.scoring import company_evidence_investigator as c
-from tests.test_company_evidence_refusal_fallback import URL
+from tests.test_native_industry_review import install
+from tests.test_company_evidence_refusal_fallback import FEATURES, URL
+from tests.test_company_evidence_judgment_reserve import _response
+from tests.test_company_evidence_investigator import _finding
 
 SOURCE = 'https://www.coreworks.ai/workflows'
+BODY = 'Coreworks supplies account workflow management with its reporting software.'
 
 
 def test_alternative_search_keeps_only_bound_provider_citation_locators(monkeypatch):
@@ -51,3 +55,58 @@ def test_alternative_search_errors_are_not_negative_company_evidence(monkeypatch
             None, 'account workflows', key='test',
             company_locator={'name': 'Coreworks', 'website': URL},
             include_domains=('coreworks.ai',)))
+
+
+@pytest.mark.parametrize('fetch_ok', [False, True])
+def test_native_exchange_requires_a_fresh_page_before_alternative_locator_can_help(monkeypatch, fetch_ok):
+    supplied = {'new': False}
+    def assessment(result):
+        if not supplied['new']:
+            result.update(decision='unavailable', missing_requirements=['Account workflows'])
+    run, _, _, reviews = install(monkeypatch, mutation=assessment, locator_transport=True)
+    original = c._post_json
+    turns, searches, alternatives, fetches = [], [], [], []
+
+    async def search(*args, **kwargs):
+        searches.append(kwargs)
+        return {'results': [], '_source_pages': {}, 'notice': 'discovery_only_not_evidence'}
+
+    async def fetch(session, url, **kwargs):
+        fetches.append(url)
+        supplied['new'] = fetch_ok
+        if not fetch_ok:
+            return {'ok': False, 'error': 'http_403'}
+        return {'ok': True, 'url': url, 'final_url': url, 'text': BODY}
+
+    async def post(session, url, *, headers, payload):
+        if 'response_format' in payload:
+            return await original(session, url, headers=headers, payload=payload)
+        if payload['model'] == 'perplexity/sonar':
+            alternatives.append(payload)
+            return 200, {'choices': [{'message': {
+                'content': BODY,
+                'annotations': [{'type': 'url_citation', 'url_citation': {'url': SOURCE}}],
+            }}]}
+        turns.append(payload)
+        if len(turns) <= 2:
+            return 200, _response('search_web', {'query': 'Coreworks account workflows'})
+        if len(turns) == 3:
+            return 200, _response('fetch_page', {'url': SOURCE})
+        return 200, _response('submit_findings', {'findings': [_finding('industry')]})
+
+    monkeypatch.setattr(c, '_search_web', search)
+    monkeypatch.setattr(c, '_fetch_page', fetch)
+    monkeypatch.setattr(c, '_post_json', post)
+    result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
+                            prior_observations={'submitted_source_urls': [URL]}))
+    assert len(searches) == 2 and len(alternatives) == 1 and fetches == [SOURCE]
+    assert BODY not in json.dumps(turns[2])  # Provider prose did not become source text.
+    assert (BODY in json.dumps(reviews[-1])) is fetch_ok
+    assert result['claims']['industry']['status'] == ('VERIFIED' if fetch_ok else 'UNPROVEN')
+    assert result['usage']['search_calls'] == 3
+    assert result['usage']['fetch_calls'] == 1
+    assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
+    budgets = [json.loads(m['content']) for m in turns[-1]['messages'] if m['role'] == 'tool']
+    alternative = next(t for t in budgets if t.get('industry_locator_fallback_used'))
+    assert alternative['remaining_fetch_calls'] == c.MAX_FETCH_CALLS - 1
+    assert alternative['remaining_research_budget']['remaining_search_calls'] == 0

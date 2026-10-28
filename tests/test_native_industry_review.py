@@ -171,7 +171,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
         'account workflow integration'
     )
     assert document['server_industry_discovery']['notice'] == 'discovery_only_not_evidence'
-    assert calls['model'][0]['tool_choice']['function']['name'] == 'fetch_page'
+    assert calls['model'][0]['tool_choice'] == 'required'
     assert calls['model'][0]['model'] == MODEL
     assert calls['model'][1]['model'] == MODEL
     assert all(request['reasoning']['effort'] == 'low' for request in calls['model'][:2])

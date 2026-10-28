@@ -4969,7 +4969,8 @@ async def investigate_company_evidence(
                     'If industry facts remain unsupported after reading the loaded sources, '
                     'one unused fetch call may instead fund one additional search_web call. '
                     'Ask for the remaining supplied capability or customer role. This extra '
-                    'search reads company-bound full text from a second index. '
+                    'search uses another index for company-bound source locators when a '
+                    'subsequent fetch remains; otherwise it reads company-bound full text. '
                     'A locator or search answer is never evidence. It replaces a fetch; '
                     'the total search plus fetch limit and research deadline do not increase.'
                 )
@@ -4997,11 +4998,9 @@ async def investigate_company_evidence(
                     + industry_research_brief['research_query'].strip()
                 )[:500]
                 search_calls += 1
-                # Discover locators before spending the short research window
-                # expanding many search-result bodies. The existing researcher
-                # selects and fetches proof; only the final review decides fit.
-                industry_discovery = await _search_industry_locators(
-                    session, query, key=openrouter_key, company_locator=company_locator,
+                industry_discovery = await _search_web(
+                    session, query, key=exa_key, discovery_highlights=True,
+                    read_source_text=True,
                     include_domains=tuple(sorted(
                         domain for domain in first_party_domains
                         if _independently_bound_first_party_url(
@@ -5009,6 +5008,14 @@ async def investigate_company_evidence(
                         )
                     )),
                 )
+                # These are provider-returned full bodies on independently
+                # bound company domains, with the same freshness request as
+                # the exact-URL reader. Keep them in existing source storage.
+                # Preserve any directly fetched body/redirect already present.
+                for url, text in industry_discovery.pop('_source_pages', {}).items():
+                    if _independently_bound_first_party_url(url, first_party_domains, identity_anchor):
+                        fetched_pages.setdefault(url, text)
+                        fetched_final_urls.setdefault(url, url)
                 input_document['server_industry_discovery'] = industry_discovery
                 input_document['investigation_limits']['remaining_search_calls'] = (
                     MAX_SEARCH_CALLS - search_calls
@@ -5090,9 +5097,10 @@ async def investigate_company_evidence(
                     )})
                     messages.extend(industry_classification.source_messages(packet))
             final_correction_pending = False
-            forced_next_tool = ('fetch_page' if industry_discovery
-                                and industry_discovery.get('results')
-                                and not loaded_industry_sources else '')
+            # Discovery does not require a read: results can repeat loaded pages
+            # or miss the remaining fact. Let the researcher choose the next
+            # bounded action; the final source-bound review still owns fit.
+            forced_next_tool = ''
             industry_submit_ready = bool(
                 industry_review_model and requested_targets == ('industry',)
                 and initial_industry.get('status') == 'VERIFIED'
@@ -6447,6 +6455,9 @@ async def investigate_company_evidence(
                         else:
                             search_calls += 1
                             search_options = {}
+                            alternative_locators = bool(
+                                exchange_fetch_for_search and fetch_call_limit - fetch_calls >= 2
+                            )
                             if exchange_fetch_for_search:
                                 fetch_call_limit -= 1
                                 search_options.update(discovery_highlights=True,
@@ -6460,9 +6471,16 @@ async def investigate_company_evidence(
                                         identity_anchor,
                                     )
                                 ))
-                            tool_result = await _search_web(
-                                session, query.strip(), key=exa_key, **search_options
-                            )
+                            if alternative_locators:
+                                tool_result = await _search_industry_locators(
+                                    session, query.strip(), key=openrouter_key,
+                                    company_locator=company_locator, include_domains=exchange_domains,
+                                )
+                                tool_result['industry_locator_fallback_used'] = True
+                            else:
+                                tool_result = await _search_web(
+                                    session, query.strip(), key=exa_key, **search_options
+                                )
                             if exchange_fetch_for_search:
                                 for source_url, body in tool_result.pop('_source_pages', {}).items():
                                     if (len(fetched_pages) >= industry_classification.MAX_PAGES

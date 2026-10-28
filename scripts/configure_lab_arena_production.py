@@ -3,8 +3,8 @@
 
 Secret documents are read and changed on their owning hosts. The complete
 documents and the scoped service key travel only on SSH stdin and stay in memory.
-The fixed validator credential KMS guard mode runs from a gateway checkout and
-uses the gateway's pinned IAM operator session; it does not use SSH.
+The fixed validator credential KMS guard mode uses an explicitly selected
+temporary operator or IAM role session; it does not use SSH.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ DEFAULT_SSH_KEY = Path.home() / ".ssh" / "leadpoet-2026-07-28.pem"
 AUTH_ENV = "LEADPOET_LAB_ARENA_PRODUCTION_APPLY"
 KNOWN_ACCOUNTS = frozenset({"187445349696", "493765492819"})
 IAM_ACCOUNT = "493765492819"
-IAM_CALLER_ARN = "arn:aws:iam::493765492819:user/pranav-main"
 VALIDATOR_IAM_ROLE = "leadpoet-validator-s3-cloudwatch-role"
 VALIDATOR_IAM_POLICY = "leadpoet-research-lab-kms-sign-and-trace"
 VALIDATOR_IAM_ROLE_ARN = f"arn:aws:iam::{IAM_ACCOUNT}:role/{VALIDATOR_IAM_ROLE}"
@@ -50,12 +49,12 @@ class ConfigurationError(RuntimeError):
     pass
 
 
-def _gateway_iam_session():
+def _gateway_iam_session(*, profile="leadpoet-lab"):
     try:
         from scripts.gateway_iam_session import gateway_iam_session
-        return gateway_iam_session()
-    except Exception as exc:
-        raise ConfigurationError("gateway IAM authority is unavailable") from exc
+        return gateway_iam_session(profile=profile)
+    except Exception:
+        raise ConfigurationError("gateway IAM authority is unavailable") from None
 
 
 def _policy_hash(document: Mapping[str, object]) -> str:
@@ -138,16 +137,17 @@ def _validator_policy_document(iam) -> dict[str, object]:
     return copy.deepcopy(dict(document))
 
 
-def _configure_validator_credential_kms_guard(*, apply: bool) -> dict[str, object]:
-    session = _gateway_iam_session()
-    sts = session.client("sts")
-    iam = session.client("iam")
+def _configure_validator_credential_kms_guard(*, apply: bool, profile="leadpoet-lab") -> dict[str, object]:
+    from scripts.gateway_iam_session import AWS_CLIENT_CONFIG, RECOVERY_PROFILE, validate_gateway_iam_identity
+
+    session = _gateway_iam_session(profile=profile)
+    sts = session.client("sts", region_name="us-east-1", config=AWS_CLIENT_CONFIG)
     identity = sts.get_caller_identity()
-    if (
-        str(identity.get("Account") or "") != IAM_ACCOUNT
-        or str(identity.get("Arn") or "") != IAM_CALLER_ARN
-    ):
-        raise ConfigurationError("gateway IAM caller identity differs")
+    try:
+        validate_gateway_iam_identity(identity, allow_recovery=profile == RECOVERY_PROFILE)
+    except Exception:
+        raise ConfigurationError("gateway IAM caller identity differs") from None
+    iam = session.client("iam", region_name="us-east-1", config=AWS_CLIENT_CONFIG)
     before = _validator_policy_document(iam)
     desired, changed = _policy_with_credential_deny(before)
     result: dict[str, object] = {
@@ -179,13 +179,13 @@ def _configure_validator_credential_kms_guard(*, apply: bool) -> dict[str, objec
     return result
 
 
-def configure_validator_credential_kms_guard(*, apply: bool) -> dict[str, object]:
+def configure_validator_credential_kms_guard(*, apply: bool, profile="leadpoet-lab") -> dict[str, object]:
     try:
-        return _configure_validator_credential_kms_guard(apply=apply)
+        return _configure_validator_credential_kms_guard(apply=apply, profile=profile)
     except ConfigurationError:
         raise
-    except Exception as exc:
-        raise ConfigurationError("validator IAM guard operation failed") from exc
+    except Exception:
+        raise ConfigurationError("validator IAM guard operation failed") from None
 
 
 def _dotenv_key(line: str) -> str:
@@ -729,7 +729,7 @@ def build_parser() -> argparse.ArgumentParser:
     scope.add_argument("--testnet-proxy", choices=("enabled", "disabled"), default=None, help="configure only the fixed testnet gateway route; does not start a service or change mainnet")
     scope.add_argument("--scorer-image-only", action="store_true", help="configure only the gateway scorer image")
     scope.add_argument("--openrouter-max-concurrency", type=int, choices=range(1, 201), default=None, help="configure only the gateway OpenRouter shared concurrency; activate with the canonical gateway restart")
-    scope.add_argument("--validator-credential-kms-guard", action="store_true", help="from a gateway checkout, check or add the exact validator deny for Arena miner credential decrypts")
+    scope.add_argument("--validator-credential-kms-guard", action="store_true", help="check or add the exact validator deny using temporary AWS operator authority")
     scope.add_argument("--benchmark-disclosure-from", default=None, metavar="TIMESTAMP", help="set or clear the future benchmark disclosure timestamp")
     scope.add_argument("--contacts-from", default=None, metavar="TIMESTAMP", help="set or clear the future contact activation timestamp")
     scope.add_argument("--company-quality-from", default=None, metavar="TIMESTAMP", help="set or clear company quality activation for future submission periods")
@@ -740,6 +740,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reasoning-baseline-source-sha256", default=None, metavar="SHA256", help="tested baseline archive digest required for reasoning activation")
     parser.add_argument("--reasoning-baseline-source-url", default=None, metavar="URL", help="immutable baseline commit archive URL required for reasoning activation")
     scope.add_argument("--contacts-generation", choices=("enabled", "disabled"), default=None, help="enable or disable contact ICP generation")
+    authority = parser.add_mutually_exclusive_group()
+    authority.add_argument("--aws-profile", default=None, help="temporary AWS profile for the validator IAM guard only (default: leadpoet-lab)")
+    authority.add_argument("--aws-instance-role", action="store_true", help="use the host IAM role credential chain for the validator IAM guard only")
     parser.add_argument("--miner-credential-kms-key-id", default=None, help="override the miner KMS key; an empty value disables admission during staged deployment")
     parser.add_argument("--service-key-fd", type=int, help="inherited descriptor containing only the scoped service key")
     parser.add_argument("--ssh-key", type=Path, default=Path(os.getenv("LEADPOET_LAB_ARENA_SSH_KEY") or DEFAULT_SSH_KEY))
@@ -760,6 +763,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if (args.aws_profile is not None or args.aws_instance_role) and not args.validator_credential_kms_guard:
+        raise ConfigurationError("AWS authority options require --validator-credential-kms-guard")
     accounts = set(args.allowed_account)
     if not accounts or not accounts <= KNOWN_ACCOUNTS:
         raise ConfigurationError("allowed account must be in the repository allowlist")
@@ -843,7 +848,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _validate_args(args)
         if args.validator_credential_kms_guard:
-            result = configure_validator_credential_kms_guard(apply=args.apply)
+            result = configure_validator_credential_kms_guard(apply=args.apply, profile=None if args.aws_instance_role else (args.aws_profile or "leadpoet-lab"))
             print(json.dumps(result, separators=(",", ":")))
             return 0
         if args.testnet_proxy is not None:

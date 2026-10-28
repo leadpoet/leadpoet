@@ -2155,8 +2155,19 @@ docker_storage_counts() {
 reset_orphaned_docker_storage_if_needed() {
   local free_kb_after_prune="$1"
   local reason="${2:-orphaned Docker storage}"
-  local reclaim_script
+  local reclaim_script required_kb cleanup_source_root
+  cleanup_source_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
+  required_kb="$(docker_build_required_kb)" || return 1
   docker_storage_counts
+
+  if [ "$free_kb_after_prune" -lt "$required_kb" ] || pending_docker_reconcile; then
+    VALIDATOR_DOCKER_MIN_FREE_BYTES=$((required_kb * 1024)) \
+      VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
+      VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
+      VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
+      bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh" || return 1
+    return 0
+  fi
 
   if [ "${IMAGE_COUNT:-0}" -eq 0 ] \
      && [ "${CONTAINER_COUNT:-0}" -eq 0 ] \
@@ -2164,7 +2175,7 @@ reset_orphaned_docker_storage_if_needed() {
      && { [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] || [ "${DOCKER_ROOT_KB:-0}" -gt 1024 ] || [ "${OVERLAY_DIRS:-0}" -gt 0 ]; }; then
     echo "Detected ${reason} with no tracked Docker objects; resetting full Docker data root"
     echo "docker root usage: ${DOCKER_ROOT_KB:-0} KiB; overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
-    reclaim_script="$LEADPOET_REPO_ROOT/validator_tee/scripts/reclaim_docker_storage_v2.sh"
+    reclaim_script="$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"
     if [ ! -r "$reclaim_script" ]; then
       echo "ERROR: guarded Docker storage reclaim helper is unavailable" >&2
       return 1
@@ -2313,10 +2324,45 @@ preflight_gateway_restart_disk() {
   fi
 }
 
+pending_docker_reconcile() {
+  local pending
+  if ! pending="$(sudo python3 -I -c '
+from pathlib import Path
+try:
+    Path("/var/lib/docker/.leadpoet-pending-overlay-reconcile").lstat()
+except FileNotFoundError:
+    print("0")
+else:
+    print("1")
+')" || { [ "$pending" != "0" ] && [ "$pending" != "1" ]; }; then
+    echo "ERROR: pending Docker reconciliation state is unreadable" >&2
+    exit 1
+  fi
+  [ "$pending" = "1" ]
+}
+
+docker_build_required_kb() {
+  python3 - "${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" <<'PY'
+import re
+import sys
+
+value = sys.argv[1]
+if not re.fullmatch(r"[1-9][0-9]*", value) or int(value) > 9223372036854775807:
+    raise SystemExit("invalid Docker build free-space requirement")
+print((int(value) + 1023) // 1024)
+PY
+}
+
 emergency_disk_preflight() {
-  local free_kb emergency_lock_helper
+  local free_kb emergency_lock_helper required_kb cleanup_source_root
+  cleanup_source_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
+  required_kb="$(docker_build_required_kb)" || return 1
   free_kb="$(root_free_kb)"
-  if [ "${free_kb:-0}" -ge "$MIN_FREE_KB" ]; then
+  if ! [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: gateway disk capacity is unreadable" >&2
+    return 1
+  fi
+  if [ "$free_kb" -ge "$required_kb" ] && ! pending_docker_reconcile; then
     return 0
   fi
 
@@ -2328,7 +2374,7 @@ emergency_disk_preflight() {
     \( -name "gateway.env.before-gw-restart.*.bak" -o -name "gateway.env.before-secret-hydrate.*" \) \
     -delete 2>/dev/null || true
   sudo journalctl --vacuum-size=200M 2>/dev/null || true
-  emergency_lock_helper="$LEADPOET_REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
+  emergency_lock_helper="$cleanup_source_root/validator_tee/scripts/docker_operation_lock_v2.sh"
   if [ ! -r "$emergency_lock_helper" ]; then
     echo "ERROR: emergency Docker lock helper is unavailable" >&2
     return 1
@@ -2341,8 +2387,9 @@ emergency_disk_preflight() {
   run_bounded_restart_artifact_cleanup
   if ! VALIDATOR_DOCKER_MIN_FREE_BYTES=$((MIN_FREE_KB * 1024)) \
       VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
+      VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
       VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
-      bash "$LEADPOET_REPO_ROOT/validator_tee/scripts/reclaim_docker_storage_v2.sh"; then
+      bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"; then
     leadpoet_release_docker_operation_lock_v2 || true
     echo "ERROR: guarded emergency Docker cleanup failed closed" >&2
     return 1
@@ -3560,9 +3607,7 @@ df -h / /var/lib/docker 2>/dev/null || df -h /
 sudo journalctl --vacuum-size=200M 2>/dev/null || true
 run_bounded_restart_artifact_cleanup
 
-sudo docker container prune -f 2>/dev/null || true
 sudo docker builder prune -af 2>/dev/null || true
-sudo docker system prune -af --volumes 2>/dev/null || true
 
 FREE_KB_AFTER_PRUNE="$(root_free_kb)"
 reset_orphaned_docker_storage_if_needed "$FREE_KB_AFTER_PRUNE" "stale Docker storage after cleanup"
@@ -3572,9 +3617,10 @@ df -h / /var/lib/docker 2>/dev/null || df -h /
 sudo docker system df 2>/dev/null || true
 
 FREE_KB="$(root_free_kb)"
-if ! [[ "$FREE_KB" =~ ^[0-9]+$ ]] || [ "$FREE_KB" -lt "$MIN_FREE_KB" ]; then
+DOCKER_BUILD_REQUIRED_KB="$(docker_build_required_kb)"
+if ! [[ "$FREE_KB" =~ ^[0-9]+$ ]] || [ "$FREE_KB" -lt "$DOCKER_BUILD_REQUIRED_KB" ]; then
   echo "ERROR: insufficient free disk after activation: $(df -h / | tail -1)" >&2
-  echo "Need at least 10GiB free before starting gateway Arena Docker workloads." >&2
+  echo "Need at least $DOCKER_BUILD_REQUIRED_KB KiB free before starting gateway Arena Docker workloads." >&2
   exit 1
 fi
 

@@ -179,6 +179,7 @@ def test_cli_verifies_image_with_named_correction_and_exact_overlay(monkeypatch,
         builder.verify_overlay(layer([("model/" + k, v) for k, v in files.items()]), files)
     monkeypatch.setattr(builder, "extract_frozen_sources", extract)
     monkeypatch.setattr(builder, "verify_saved_overlay", verify)
+    monkeypatch.setattr(builder, "_managed_docker_host", lambda: False)
     assert builder.main() == 0
     receipt = json.loads(capsys.readouterr().out)
     assert seen["auxiliary_source_name_binding"] is True

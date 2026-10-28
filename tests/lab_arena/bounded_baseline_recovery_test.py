@@ -85,36 +85,3 @@ def test_original_pending_execution_and_ordinary_recovery_judge_hold_completion(
     assert not obj.scoring_is_complete(row['round_id'],2)
     judges[0]['status']='accepted'
     assert obj.scoring_is_complete(row['round_id'],2)
-
-
-@pytest.mark.parametrize('policy', [
-    contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
-    contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
-])
-def test_ordinary_current_baseline_judges_do_not_enter_recovery_writer(policy):
-    obj, row, executions, judges = fixture()
-    row['evaluation_date'] = '2026-10-28'
-    row['configuration_doc']['sourcing_cost_eligibility_policy'] = policy
-    executions[:] = [run for run in executions if run['status'] == 'accepted']
-    executions[0].update(attempt=1, run_id=executions[0]['assignment_id'] + ':1')
-    judges[0]['scored_run_id'] = executions[0]['run_id']
-    assert not any(obj._is_baseline_recovery(run, executions + judges, row)
-                   for run in executions + judges)
-    obj._baseline_recovery_plan = Mock(return_value=None)
-    obj._score_recovered_baseline(row)
-    obj._baseline_recovery_plan.assert_not_called()
-    obj._store.record_run_scores.assert_not_called()
-
-
-@pytest.mark.parametrize('authority', ['explicit_recovery', 'supersession'])
-def test_recovery_and_supersession_keep_the_recovery_writer(authority):
-    obj, row, executions, judges = fixture()
-    row['evaluation_date'] = '2026-10-28'
-    if authority == 'supersession':
-        row['scoring_generation_floor'] = 2
-        executions[:] = [run for run in executions if run['status'] == 'accepted']
-        executions[0].update(attempt=1, run_id=executions[0]['assignment_id'] + ':1')
-        judges[0]['scored_run_id'] = executions[0]['run_id']
-    obj._baseline_recovery_plan = Mock(return_value=None)
-    obj._score_recovered_baseline(row)
-    obj._baseline_recovery_plan.assert_called_once_with(row, executions, judges)

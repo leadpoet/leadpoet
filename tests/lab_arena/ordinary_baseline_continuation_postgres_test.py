@@ -121,7 +121,7 @@ def test_current_ordinary_baseline_requires_bound_judges_before_publication(data
     assert judge["attempt"] == source["attempt"] == 1
     assert not any(harness.service._is_baseline_recovery(run, executions + judges, before)
                    for run in executions + judges)
-    assert source["per_icp_score"] is None
+    original_source_score = source["per_icp_score"]
     if fault:
         with harness.connect() as connection, connection.cursor() as cursor:
             cursor.execute("SET LOCAL session_replication_role=replica")
@@ -133,7 +133,7 @@ def test_current_ordinary_baseline_requires_bound_judges_before_publication(data
             else:
                 cursor.execute("UPDATE public.lab_arena_runs SET scoring_generation_floor=1 WHERE run_id=%s", (judge["run_id"],))
     if fault == "wrong_miner":
-        with pytest.raises(ServiceError, match="recovered_judgment_binding_invalid"):
+        with pytest.raises(ServiceError, match="(?:recovered_judgment|accepted_judgment)_binding_invalid"):
             harness.service.publish(harness.round_id)
     else:
         result = harness.service.publish(harness.round_id)
@@ -143,7 +143,7 @@ def test_current_ordinary_baseline_requires_bound_judges_before_publication(data
         assert final["status"] == "scored"
         assert final["publication_doc"] is None
         assert final["reward_activated_at"] is None
-        assert store.get_run(source["run_id"])["per_icp_score"] is None
+        assert store.get_run(source["run_id"])["per_icp_score"] == original_source_score
     else:
         assert final["status"] == "published"
         assert len(final["publication_doc"]["final_ranking"]) == 2

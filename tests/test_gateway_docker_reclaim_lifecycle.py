@@ -108,7 +108,8 @@ def test_canonical_cleanup_has_no_broad_prune_and_preserving_paths_are_terminal(
     assert 'docker container prune' not in GATEWAY
     assert 'docker system prune' not in GATEWAY
     hook = function(GATEWAY, 'reset_orphaned_docker_storage_if_needed')
-    assert 'docker_build_required_kb' in hook and 'pending_docker_reconcile' in hook
+    assert 'docker_build_required_kb' in hook
+    assert 'if [' not in hook
     assert 'VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1' in hook
     assert 'GATEWAY_RESTART_AUTHORITY_ROOT' in hook
     preserving = RECLAIM[RECLAIM.index('LIVE_CONTAINER_IDS='):RECLAIM.index('run_prune_with_retry image docker image prune')]
@@ -116,3 +117,130 @@ def test_canonical_cleanup_has_no_broad_prune_and_preserving_paths_are_terminal(
     assert preserving.count('exit 0') == 2
     assert 'ONLINE_VOLUME_MANIFEST=' in preserving
     assert 'zero-runtime reconciliation refuses live containers' in preserving
+
+
+@pytest.mark.parametrize('allow,enters', [('0', False), ('1', True)])
+def test_explicit_preserving_optin_audits_even_at_high_free_space(allow, enters):
+    script = function(RECLAIM, 'protect_exact_host_gateway_runtime') + '''
+inspect_exact_host_gateway_runtime() { HOST_GATEWAY_LIVE=1; }
+available_bytes() { echo 50000000000; }
+pending_docker_reconcile() { return 1; }
+protect_exact_host_gateway_runtime entry
+echo admitted
+'''
+    result = bash(script, ALLOW_LIVE_HOST_GATEWAY_PRUNE=allow,
+                  LIVE_RUNTIME_MIN_FREE_BYTES='18000000000', REQUIRE_ZERO_RUNTIME_RECONCILE='0')
+    assert result.returncode == 0
+    assert ('admitted' in result.stdout) is enters
+
+
+def test_explicit_optin_also_triggers_empty_runtime_audit_at_high_free_space():
+    start = RECLAIM.index('  if [ "$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES" ]', RECLAIM.index('ONLINE_RAW_RECLAIM_PERFORMED=0'))
+    condition = RECLAIM[start:RECLAIM.index('; then', start)] + '; then echo audit; fi\n'
+    assert 'ALLOW_LIVE_HOST_GATEWAY_PRUNE' in condition
+    result = bash(condition, AVAILABLE='50000000000', LIVE_RUNTIME_MIN_FREE_BYTES='18000000000',
+                  REQUIRE_ZERO_RUNTIME_RECONCILE='0', ALLOW_LIVE_HOST_GATEWAY_PRUNE='1')
+    assert result.returncode == 0 and result.stdout.strip() == 'audit'
+
+
+def test_normal_maintenance_always_calls_preserving_helper_with_retained_state(tmp_path):
+    helper_dir = tmp_path / 'validator_tee/scripts'
+    helper_dir.mkdir(parents=True)
+    retained = tmp_path / 'retained-object'
+    retained.write_bytes(b'rollback-image-and-volume')
+    (helper_dir / 'reclaim_docker_storage_v2.sh').write_text('''
+set -eu
+[ "$VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE" = 1 ]
+[ "$(cat "$TEST_RETAINED")" = rollback-image-and-volume ]
+echo audited
+''')
+    script = '\n'.join(function(GATEWAY, name) for name in (
+        'docker_build_required_kb', 'reset_orphaned_docker_storage_if_needed'))
+    result = bash(script + '\nreset_orphaned_docker_storage_if_needed\n',
+        LEADPOET_REPO_ROOT=str(tmp_path), TEST_RETAINED=str(retained))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'audited'
+    assert retained.read_bytes() == b'rollback-image-and-volume'
+
+
+@pytest.mark.parametrize('entry,cold', [('local', False), ('role', False), ('role', True)])
+@pytest.mark.parametrize('managed,system', [(True, 'Linux'), (False, 'Linux'), (False, 'Darwin')])
+@pytest.mark.parametrize('build_status,cleanup_status', [(0, 0), (17, 0), (0, 19), (17, 19)])
+def test_build_batch_teardown_preserves_status_scope_and_retained_objects(tmp_path, entry, cold, managed, system, build_status, cleanup_status):
+    source = Path('gateway/tee/build_' + ('local_release_v2' if entry == 'local' else 'role_enclaves') + '.sh').read_text()
+    helper_dir = tmp_path / 'validator_tee/scripts'
+    helper_dir.mkdir(parents=True)
+    log = tmp_path / 'cleanup.log'
+    retained = tmp_path / 'retained-image-volume-pg'
+    retained.write_bytes(b'preserved')
+    cold_root = tmp_path / '.gateway-eif-cold-build.test'
+    if cold:
+        cold_root.mkdir()
+        (cold_root / 'owned-temporary').write_text('owned')
+    (helper_dir / 'docker_operation_lock_v2.sh').write_text('''
+leadpoet_acquire_docker_operation_lock_v2() {
+  export LEADPOET_DOCKER_OPERATION_LOCK_HELD=1 LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_HELD=1
+}
+leadpoet_release_docker_operation_lock_v2() { echo unlock >> "$TEST_LOG"; }
+''')
+    (helper_dir / 'reclaim_docker_storage_v2.sh').write_text('''
+set -eu
+[ "$LEADPOET_DOCKER_OPERATION_LOCK_HELD" = 1 ]
+[ "$LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_HELD" = 1 ]
+[ "$VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE" = 1 ]
+[ "$(cat "$TEST_RETAINED")" = preserved ]
+echo reclaim >> "$TEST_LOG"
+exit "$TEST_CLEANUP_STATUS"
+''')
+    start = source.index('MANAGED_DOCKER_HOST=0')
+    boundary = source[start:source.index('leadpoet_acquire_docker_operation_lock_v2', start) + len('leadpoet_acquire_docker_operation_lock_v2')]
+    # The filesystem fixture replaces only the canonical managed-host directory.
+    boundary = boundary.replace('/home/ec2-user/.config/leadpoet', str(tmp_path / 'absent-canonical-directory'))
+    setup = 'uname() { echo "$TEST_SYSTEM"; }\n' + boundary + '\n'
+    if entry == 'local':
+        setup += function(source, 'cleanup') + '\ntrap cleanup EXIT\n'
+    else:
+        setup += function(source, 'cleanup_cold_build_root') + '\n' + function(source, 'cleanup_build') + '\ntrap cleanup_build EXIT\n'
+    environment = dict(TEST_SYSTEM=system, CANDIDATE_ROOT=str(tmp_path), REPO_ROOT=str(tmp_path),
+        TEMPORARY_ROOT=str(tmp_path / 'owned-temporary'), COLD_BUILD_ROOT=str(cold_root) if cold else '',
+        COLD_DOCKER_BUILD_STARTED='1' if cold else '0', EIF_ROOT=str(tmp_path),
+        TEST_LOG=str(log), TEST_RETAINED=str(retained), TEST_CLEANUP_STATUS=str(cleanup_status))
+    if managed: environment['LEADPOET_DOCKER_OPERATION_LOCK_FILE'] = str(tmp_path / 'docker.lock')
+    else:
+        # Remove any caller's real managed lock marker from this host simulation.
+        environment['LEADPOET_DOCKER_OPERATION_LOCK_FILE'] = ''
+    if cold and build_status == 0:
+        setup += '\ncleanup_cold_build_root\nCOLD_BUILD_ROOT=""\n'
+    result = bash(setup + f'\nexit {build_status}\n', **environment)
+    cleans_docker = managed and (entry == 'local' or cold)
+    expected = build_status or (cleanup_status if cleans_docker else 0)
+    assert result.returncode == expected, result.stderr
+    lines = log.read_text().splitlines() if log.exists() else []
+    assert lines.count('reclaim') == int(cleans_docker)
+    if entry == 'local':
+        assert lines[-1] == 'unlock'
+    assert ('cleanup failed' in result.stderr) == (cleans_docker and cleanup_status != 0)
+    assert retained.read_bytes() == b'preserved'
+    assert not cold_root.exists()
+
+
+def test_role_temporary_cleanup_keeps_its_original_success_timing():
+    source = Path('gateway/tee/build_role_enclaves.sh').read_text()
+    archive = source.index('--archive')
+    restore = source.index('--restore', archive)
+    cleanup = source.index('    cleanup_cold_build_root', restore)
+    assert archive < restore < cleanup < source.index('echo "Built role EIFs:"')
+    assert source.count('reclaim_docker_storage_v2.sh') == 1
+    start = source.index('    COLD_DOCKER_BUILD_STARTED=1')
+    first_build = source.index('    sudo env', start)
+    assert start < first_build
+    assert source[start:first_build].strip() == 'COLD_DOCKER_BUILD_STARTED=1'
+
+
+def test_both_workflow_final_cleanup_paths_always_use_preserving_optin():
+    import yaml
+    workflow = yaml.safe_load(Path('.github/workflows/attested-v2-release.yml').read_text())
+    for name in ('gateway-parent', 'gateway-parent-b'):
+        step = next(step for step in workflow['jobs'][name]['steps'] if step.get('id') == 'final_cleanup')
+        assert step['if'] == 'always()'
+        assert 'VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1' in step['run']

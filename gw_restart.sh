@@ -2141,50 +2141,16 @@ root_free_kb() {
   df --output=avail / | tail -1 | tr -d ' '
 }
 
-docker_storage_counts() {
-  OVERLAY_DIRS="$(sudo find /var/lib/docker/overlay2 -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')"
-  OVERLAY_KB="$(sudo du -sxk /var/lib/docker/overlay2 2>/dev/null | awk '{print $1}' || true)"
-  OVERLAY_KB="${OVERLAY_KB:-0}"
-  DOCKER_ROOT_KB="$(sudo du -sxk /var/lib/docker 2>/dev/null | awk '{print $1}' || true)"
-  DOCKER_ROOT_KB="${DOCKER_ROOT_KB:-0}"
-  IMAGE_COUNT="$(sudo docker images -q 2>/dev/null | wc -l | tr -d ' ')"
-  CONTAINER_COUNT="$(sudo docker ps -aq 2>/dev/null | wc -l | tr -d ' ')"
-  VOLUME_COUNT="$(sudo docker volume ls -q 2>/dev/null | wc -l | tr -d ' ')"
-}
-
 reset_orphaned_docker_storage_if_needed() {
-  local free_kb_after_prune="$1"
-  local reason="${2:-orphaned Docker storage}"
-  local reclaim_script required_kb cleanup_source_root
+  local required_kb cleanup_source_root
   cleanup_source_root="${GATEWAY_RESTART_AUTHORITY_ROOT:-$LEADPOET_REPO_ROOT}"
   required_kb="$(docker_build_required_kb)" || return 1
-  docker_storage_counts
-
-  if [ "$free_kb_after_prune" -lt "$required_kb" ] || pending_docker_reconcile; then
-    VALIDATOR_DOCKER_MIN_FREE_BYTES=$((required_kb * 1024)) \
-      VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
-      VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
-      VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
-      bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh" || return 1
-    return 0
-  fi
-
-  if [ "${IMAGE_COUNT:-0}" -eq 0 ] \
-     && [ "${CONTAINER_COUNT:-0}" -eq 0 ] \
-     && [ "${VOLUME_COUNT:-0}" -eq 0 ] \
-     && { [ "${free_kb_after_prune:-0}" -lt "$MIN_FREE_KB" ] || [ "${DOCKER_ROOT_KB:-0}" -gt 1024 ] || [ "${OVERLAY_DIRS:-0}" -gt 0 ]; }; then
-    echo "Detected ${reason} with no tracked Docker objects; resetting full Docker data root"
-    echo "docker root usage: ${DOCKER_ROOT_KB:-0} KiB; overlay usage: ${OVERLAY_KB:-0} KiB across ${OVERLAY_DIRS:-0} dirs"
-    reclaim_script="$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"
-    if [ ! -r "$reclaim_script" ]; then
-      echo "ERROR: guarded Docker storage reclaim helper is unavailable" >&2
-      return 1
-    fi
-    VALIDATOR_DOCKER_MIN_FREE_BYTES=$((MIN_FREE_KB * 1024)) \
-      VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
-      VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1 \
-      bash "$reclaim_script"
-  fi
+  # Export leaks can exist with ample free space. Reuse the preserving path
+  # at this existing maintenance boundary instead of waiting for capacity loss.
+  VALIDATOR_DOCKER_MIN_FREE_BYTES=$((required_kb * 1024)) \
+    VALIDATOR_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES="${GATEWAY_DOCKER_LIVE_RUNTIME_MIN_FREE_BYTES:-18000000000}" \
+    VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
+    bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"
 }
 
 ensure_docker_ready() {
@@ -3609,8 +3575,7 @@ run_bounded_restart_artifact_cleanup
 
 sudo docker builder prune -af 2>/dev/null || true
 
-FREE_KB_AFTER_PRUNE="$(root_free_kb)"
-reset_orphaned_docker_storage_if_needed "$FREE_KB_AFTER_PRUNE" "stale Docker storage after cleanup"
+reset_orphaned_docker_storage_if_needed
 
 echo "Disk after cleanup"
 df -h / /var/lib/docker 2>/dev/null || df -h /

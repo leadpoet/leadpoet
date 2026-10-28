@@ -277,3 +277,56 @@ def test_review_direct_trigger_publish_and_guard_do_not_form_a_lock_cycle(recove
             c.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_publication_baseline_guard")
             c.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_integrity_publication_guard")
             c.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_rounds_write_once")
+
+
+def test_migration_waits_for_read_only_api_transaction_then_succeeds(recovery_connect, recovery_superuser):
+    reader, migrator = recovery_connect(), recovery_connect()
+    migrator.autocommit = True
+    def apply():
+        with migrator.cursor() as c:
+            c.execute(MIGRATION.read_text())
+    try:
+        with reader.cursor() as c:
+            c.execute('SET TRANSACTION READ ONLY')
+            c.execute('SELECT count(*) FROM public.lab_arena_rounds')
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            migration = pool.submit(apply)
+            try:
+                blocked(recovery_superuser, migrator.get_backend_pid(), reader.get_backend_pid())
+                assert not migration.done()
+            finally:
+                reader.rollback()
+            migration.result(timeout=3)
+    finally:
+        reader.rollback()
+        with migrator.cursor() as c:
+            c.execute('ROLLBACK')
+        reader.close(); migrator.close()
+
+
+def test_migration_read_contention_still_has_bounded_lock_timeout(recovery_connect, recovery_superuser):
+    reader, migrator = recovery_connect(), recovery_connect()
+    migrator.autocommit = True
+    def metadata():
+        with recovery_superuser.cursor() as c:
+            c.execute("SELECT oid,pg_get_functiondef(oid),to_jsonb(pg_proc)-'prosrc' FROM pg_proc WHERE oid IN ('public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)'::regprocedure,'public.lab_arena_code_review_schema_v1()'::regprocedure) ORDER BY oid")
+            return c.fetchall()
+    try:
+        before = metadata()
+        with reader.cursor() as c:
+            c.execute('SET TRANSACTION READ ONLY')
+            c.execute('SELECT count(*) FROM public.lab_arena_rounds')
+        started = time.monotonic()
+        with pytest.raises(Exception) as failure:
+            with migrator.cursor() as c:
+                c.execute(MIGRATION.read_text())
+        assert failure.value.pgcode == '55P03'
+        assert 4 <= time.monotonic() - started < 8
+        with migrator.cursor() as c:
+            c.execute('ROLLBACK')
+        assert metadata() == before
+    finally:
+        reader.rollback()
+        with migrator.cursor() as c:
+            c.execute('ROLLBACK')
+        reader.close(); migrator.close()

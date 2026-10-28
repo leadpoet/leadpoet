@@ -47,6 +47,21 @@ OPTIONS = ("-c default_transaction_read_only=on -c statement_timeout=0 "
            "-c DateStyle=ISO -c IntervalStyle=postgres -c extra_float_digits=3 "
            "-c bytea_output=hex -c TimeZone=UTC -c search_path=pg_catalog")
 BEGIN = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;"
+TRANSACTION_SETTINGS = """
+SET LOCAL default_transaction_read_only = on;
+SET LOCAL statement_timeout = 0;
+SET LOCAL idle_in_transaction_session_timeout = 0;
+SET LOCAL transaction_timeout = 0;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL row_security = off;
+SET LOCAL client_encoding = 'UTF8';
+SET LOCAL DateStyle = 'ISO';
+SET LOCAL IntervalStyle = 'postgres';
+SET LOCAL extra_float_digits = 3;
+SET LOCAL bytea_output = 'hex';
+SET LOCAL TimeZone = 'UTC';
+SET LOCAL search_path = pg_catalog;
+"""
 
 
 class Failure(Exception):
@@ -176,6 +191,13 @@ class Keeper:
             self.proc = subprocess.Popen(psql_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=out, env=self.env, text=True, encoding="utf-8")
             self.query(BEGIN)
+            # Session poolers may discard startup options. Record untouched
+            # serialization defaults before applying transaction-local settings.
+            self.initial_settings = self.one_json("""SELECT json_build_object(
+              'timezone',current_setting('TimeZone'),
+              'bytea_output',current_setting('bytea_output'));
+            """)
+            self.query(TRANSACTION_SETTINGS)
             return self
         except BaseException:
             self.__exit__(None, None, None)
@@ -242,6 +264,14 @@ def check_identity(keeper, mode):
              AND rolvaliduntil < 'infinity'::timestamptz)
           FROM pg_catalog.pg_roles WHERE rolname=current_user;""")
         require(attrs["safe"] is True and attrs["expires"] is True, "source-role-scope")
+
+
+def check_dump_defaults(keeper):
+    # pg_dump 17 explicitly sets dates, intervals, floats and row_security, but
+    # inherits TimeZone/bytea_output. Require canonical new-connection defaults
+    # instead of assuming the pooler honored libpq startup options.
+    require(keeper.initial_settings["timezone"] in ("UTC", "Etc/UTC")
+            and keeper.initial_settings["bytea_output"] == "hex", "dump-session-defaults")
 
 
 CATALOG = """SELECT coalesce(json_agg(t ORDER BY t.schema, t.name), '[]'::json) FROM (
@@ -336,12 +366,14 @@ def capture_manifest(keeper, snapshot):
     return dict(format=1, source_host=SOURCE_HOST, source_role=SOURCE_ROLE, database="postgres",
                 snapshot=snapshot, serialization=OPTIONS, tables=tables, sequences=sequences,
                 sequence_caveat="Sequence state is non-MVCC and may advance independently of the table snapshot.",
-                extensions=extensions, schema_metadata=capture_metadata(keeper))
+                extensions=extensions, schema_metadata=capture_metadata(keeper),
+                dump_session_defaults=keeper.initial_settings)
 
 
 def dump_command(snapshot, directory):
     require(SNAPSHOT.fullmatch(snapshot), "snapshot-id")
     return ["pg_dump", "--dbname=service=migration", "--no-password", "-Fd", "-j2",
+            "--encoding=UTF8", "--extra-float-digits=3",
             "--snapshot=" + snapshot, "--lock-wait-timeout=5s", "--strict-names",
             "--no-publications", "--no-subscriptions", "--compress=gzip:1",
             *["--schema=" + s for s in SCHEMAS],
@@ -452,6 +484,8 @@ def export(args):
         check_tools(env, logs)
         with Keeper(env, logs) as keeper:
             check_identity(keeper, "source")
+            private_json(partial / "dump-session-defaults.json", keeper.initial_settings)
+            check_dump_defaults(keeper)
             snapshot = keeper.snapshot()
             manifest = capture_manifest(keeper, snapshot)
             command(dump_command(snapshot, partial / "dump"), env, logs, "pg-dump")
@@ -468,7 +502,9 @@ def export(args):
 def copy_digest(table, snapshot, env, logs):
     require(SNAPSHOT.fullmatch(snapshot), "snapshot-id")
     columns = ",".join(ident(c["name"]) for c in table["columns"])
-    sql = (BEGIN + "\nSET TRANSACTION SNAPSHOT '" + snapshot + "';\nCOPY "
+    # Import the keeper snapshot before any query can acquire another snapshot.
+    sql = (BEGIN + "\nSET TRANSACTION SNAPSHOT '" + snapshot + "';\n"
+           + TRANSACTION_SETTINGS + "\nCOPY "
            + qualified(table) + " (" + columns + ") TO STDOUT WITH (FORMAT text);\nROLLBACK;\n")
     with stderr_file(logs, "target-copy") as err:
         proc = subprocess.Popen(psql_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, env=env)

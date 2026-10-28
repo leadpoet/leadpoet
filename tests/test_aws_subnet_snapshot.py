@@ -26,6 +26,7 @@ class SnapshotTests(unittest.TestCase):
                        columns=[dict(name="id", type="integer", generated="")]) for i in range(48)]
         sequences = [dict(schema="public", name=f"seq_{i}") for i in range(3)]
         class FakeKeeper:
+            initial_settings = dict(timezone="UTC", bytea_output="hex")
             def query(self, sql):
                 self.lock = sql
             def one_json(self, sql):
@@ -49,6 +50,13 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(manifest["snapshot"], "00000003-0000001B-1")
         self.assertEqual(len(manifest["tables"]), 48)
         self.assertTrue(keeper.lock.startswith("LOCK TABLE"))
+
+    def test_dump_defaults_fail_closed_without_changing_source_role(self):
+        snapshot.check_dump_defaults(SimpleNamespace(initial_settings=dict(timezone="UTC", bytea_output="hex")))
+        for settings in (dict(timezone="America/New_York", bytea_output="hex"),
+                         dict(timezone="UTC", bytea_output="escape")):
+            with self.assertRaisesRegex(snapshot.Failure, "dump-session-defaults"):
+                snapshot.check_dump_defaults(SimpleNamespace(initial_settings=settings))
 
     def test_multiset_is_order_independent_and_preserves_duplicates(self):
         digest = snapshot.stream_digest
@@ -123,7 +131,7 @@ class SnapshotTests(unittest.TestCase):
         def keeper(*_):
             events.append("enter")
             try:
-                yield SimpleNamespace(snapshot=lambda: "00000003-0000001B-1")
+                yield SimpleNamespace(snapshot=lambda: "00000003-0000001B-1", initial_settings=dict(timezone="UTC", bytea_output="hex"))
             finally:
                 events.append("exit")
         def run(*_, **__):
@@ -190,7 +198,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_commands_keep_source_readonly_and_dump_complete(self):
         args = snapshot.dump_command("00000003-0000001B-1", Path("private/dump"))
-        for option in ("-Fd", "-j2", "--strict-names", "--no-publications", "--no-subscriptions",
+        for option in ("-Fd", "-j2", "--strict-names", "--no-publications", "--no-subscriptions", "--encoding=UTF8", "--extra-float-digits=3",
                        "--compress=gzip:1", "--lock-wait-timeout=5s"):
             self.assertIn(option, args)
         self.assertEqual({a.split("=", 1)[1] for a in args if a.startswith("--schema=")}, set(snapshot.SCHEMAS))
@@ -259,14 +267,28 @@ class NativePostgresTests(unittest.TestCase):
                     seed += f"INSERT INTO public.t_{i} VALUES (1,$$line\nsecond\t\\tail$$,0.1,'\\x00ff','2026-10-28T00:00:00Z','{{\"a\":1}}',NULL),(2,$$\\.$$,'Infinity','\\x','2026-10-28T01:02:03Z','null',''),(1,$$line\nsecond\t\\tail$$,0.1,'\\x00ff','2026-10-28T00:00:00Z','{{\"a\":1}}',NULL);\n"
                 seed += "CREATE SEQUENCE public.seq_a; CREATE SEQUENCE public.seq_b; CREATE SEQUENCE source_add_history.seq_c;"
                 run(admin + ["-d", "source"], data=seed.encode())
+                # Simulate a session pooler that ignores libpq startup options.
+                # Local disposable source defaults satisfy pg_dump's inherited
+                # timezone/bytea requirement; all other defaults conflict.
+                run(admin + ["-d", "postgres"], data=b"ALTER DATABASE source SET TimeZone='UTC'; ALTER DATABASE source SET bytea_output='hex'; ALTER DATABASE source SET DateStyle='German, DMY'; ALTER DATABASE source SET IntervalStyle='sql_standard'; ALTER DATABASE source SET extra_float_digits=-1; ALTER DATABASE source SET row_security=on; ALTER DATABASE source SET statement_timeout='10s'; ALTER DATABASE source SET lock_timeout='100ms'; ALTER DATABASE source SET transaction_timeout='10s'; ALTER DATABASE target SET TimeZone='Asia/Kolkata'; ALTER DATABASE target SET bytea_output='escape'; ALTER DATABASE target SET extra_float_digits=-1; ALTER DATABASE target SET row_security=on; ALTER DATABASE target SET DateStyle='German, DMY'; ALTER DATABASE target SET IntervalStyle='sql_standard';")
 
                 def env_for(db, readonly=True):
                     path = root / (db + ("-read" if readonly else "-write") + ".service")
-                    snapshot.private_write(path, (f"[migration]\nhost=127.0.0.1\nport={port}\nuser=local_operator\ndbname={db}\nsslmode=disable\n"
-                                                  + ("options=" + snapshot.OPTIONS + "\n" if readonly else "")).encode())
+                    snapshot.private_write(path, (f"[migration]\nhost=127.0.0.1\nport={port}\nuser=local_operator\ndbname={db}\nsslmode=disable\n").encode())
                     return {**base, "PGSERVICEFILE": str(path)}
                 source_env, target_env, restore_env = env_for("source"), env_for("target"), env_for("target", False)
                 with snapshot.Keeper(source_env, logs) as keeper:
+                    snapshot.check_dump_defaults(keeper)
+                    settings = keeper.one_json("""SELECT json_build_object(
+                      'readonly',current_setting('transaction_read_only'),'rls',current_setting('row_security'),
+                      'timezone',current_setting('TimeZone'),'bytea',current_setting('bytea_output'),
+                      'dates',current_setting('DateStyle'),'intervals',current_setting('IntervalStyle'),
+                      'floats',current_setting('extra_float_digits'),'lock',current_setting('lock_timeout'),
+                      'statement',current_setting('statement_timeout'),'transaction',current_setting('transaction_timeout'),
+                      'encoding',current_setting('client_encoding'),'path',current_setting('search_path'));
+                    """)
+                    self.assertEqual({k:v for k,v in settings.items() if k != 'dates'}, dict(readonly="on",rls="off",timezone="UTC",bytea="hex",intervals="postgres",floats="3",lock="5s",statement="0",transaction="0",encoding="UTF8",path="pg_catalog"))
+                    self.assertTrue(settings["dates"].startswith("ISO"))
                     exported = keeper.snapshot()
                     tables = keeper.one_json(snapshot.CATALOG)
                     snapshot.validate_tables(tables)

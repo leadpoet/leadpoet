@@ -7,8 +7,13 @@ from typing import Any, Dict, Mapping, Optional
 
 
 LEGACY_MAX_ATTEMPTS = 3
-MAX_TRANSIENT_ATTEMPTS = 6
 TRANSIENT_BACKOFF_SECONDS = (60, 120, 240, 480, 900)
+TRANSIENT_ERROR_CODES = frozenset({
+    "code_review_preparation_unavailable", "code_review_provider_rate_limited",
+    "code_review_provider_timeout", "code_review_provider_unavailable",
+    "code_review_transport_error", "review_response_invalid",
+    "code_review_research_unverified",
+})
 OPENROUTER_LIMIT_SOURCES = frozenset({
     "openrouter_credits", "openrouter_key_limit", "openrouter_in_flight_budget",
 })
@@ -189,14 +194,25 @@ def provider_http_diagnostic(status: int) -> Dict[str, Any]:
     )
 
 
-def review_attempt_limit(row: Mapping[str, Any]) -> int:
-    """Return the row's effective cap, including a consumed permanent failure."""
+def transient_failure(document: Any) -> bool:
+    """Use classified failure codes, never provider prose or stale retry flags."""
+
+    code = document.get("error_code") if isinstance(document, Mapping) else None
+    return isinstance(code, str) and code in TRANSIENT_ERROR_CODES
+
+
+def review_attempt_limit(row: Mapping[str, Any]) -> Optional[int]:
+    """Known reviewer failures use the admission deadline, never an attempt cap.
+
+    Reclassify old diagnostics at read time: a cached retry flag is not a code
+    verdict. Unknown legacy errors retain their historical fail-closed limit.
+    """
 
     attempts = max(0, int(row.get("code_review_attempts") or 0))
     document = row.get("code_review_doc")
+    if transient_failure(document):
+        return None
     retryable = document.get("retryable") if isinstance(document, Mapping) else None
-    if retryable is True:
-        return MAX_TRANSIENT_ATTEMPTS
     if retryable is False:
         return attempts
     return LEGACY_MAX_ATTEMPTS
@@ -206,7 +222,8 @@ def review_retry_available(row: Mapping[str, Any]) -> bool:
     """Return whether an error row can consume another attempt."""
 
     attempts = max(0, int(row.get("code_review_attempts") or 0))
-    return row.get("code_review_status") == "error" and attempts < review_attempt_limit(row)
+    limit = review_attempt_limit(row)
+    return row.get("code_review_status") == "error" and (limit is None or attempts < limit)
 
 
 def retry_ready_at(row: Mapping[str, Any]) -> Optional[datetime]:
@@ -225,9 +242,7 @@ def retry_ready_at(row: Mapping[str, Any]) -> Optional[datetime]:
     if started.tzinfo is None:
         started = started.replace(tzinfo=timezone.utc)
     attempt = max(1, int(row.get("code_review_attempts") or 0))
-    retryable = isinstance(row.get("code_review_doc"), Mapping) and (
-        row["code_review_doc"].get("retryable") is True
-    )
+    retryable = review_attempt_limit(row) is None
     delay = (
         TRANSIENT_BACKOFF_SECONDS[min(attempt - 1, len(TRANSIENT_BACKOFF_SECONDS) - 1)]
         if retryable else TRANSIENT_BACKOFF_SECONDS[0]

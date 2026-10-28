@@ -3283,6 +3283,13 @@ def _complete_verified_attribute_recovery_identity(
             "observed_domain": receipt.get("observed_domain"),
             "observed_linkedin_slug": receipt.get("observed_linkedin_slug"),
             "verified_name": recovery_identity.get("normalized_name"),
+            **{
+                key: recovery_identity.get(key)
+                for key in (
+                    "verified_homepage_brand_alias", "verified_brand_name",
+                    "verified_legal_name_aliases",
+                )
+            },
             "verified_domain": verified_domain,
             "verified_linkedin_slug": recovery_identity.get(
                 "linkedin_company_slug"
@@ -8539,6 +8546,13 @@ async def _run_targeted_company_evidence_investigation(
                     )
                 },
                 "verified_name": investigation_verified_identity.get("normalized_name"),
+                **{
+                    key: investigation_verified_identity.get(key)
+                    for key in (
+                        "verified_homepage_brand_alias", "verified_brand_name",
+                        "verified_legal_name_aliases",
+                    )
+                },
                 "verified_domain": investigation_verified_identity.get("registrable_dns_domain"),
                 "verified_linkedin_slug": investigation_verified_identity.get("linkedin_company_slug"),
             },

@@ -78,14 +78,49 @@ logs are disabled. Use status, exit codes and bounded authenticated capability
 checks for diagnosis. Inspect a failed private configuration only through the
 same redacted operator workflow.
 
-The owner can review compose interpolation without secrets because it contains
-only a private directory name:
+Where a Compose plugin is already available, the owner can review interpolation
+without secrets because it contains only private file paths:
 
 ```sh
 SUBNET_API_CONFIG_DIR=/etc/leadpoet-subnet-api/source \
   SUBNET_API_CA_FILE=/etc/leadpoet-subnet-api/source/db-ca.pem \
   docker compose -f deploy/aws/subnet-api/compose.yaml config --quiet
 ```
+
+The gateway has Docker CLI without a Compose plugin. Do not install a plugin
+for this migration. `compose.yaml` remains the reviewed container contract;
+local checks compare the native Docker argument lists with every service field.
+The owner can start its equivalent pair with the reviewed commands below after
+host preparation and RDS identity checks. These commands select source REST;
+select the prepared `target` directory to use RDS REST instead. All credential
+values remain in the private files.
+
+```sh
+SUBNET_API_CONFIG_DIR=/etc/leadpoet-subnet-api/source
+SUBNET_API_CA_FILE="$SUBNET_API_CONFIG_DIR/db-ca.pem"
+docker run --detach --name leadpoet-subnet-api-postgrest-1 \
+  --user 1000:1000 --network host --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true --log-driver none \
+  --restart unless-stopped --stop-timeout 620 \
+  --volume "$SUBNET_API_CONFIG_DIR/postgrest.conf:/run/subnet-api/postgrest.conf:ro" \
+  --volume "$SUBNET_API_CA_FILE:/run/subnet-api/rds-ca.pem:ro" \
+  postgrest/postgrest:v14.5@sha256:b574528fe109c8343c1247155734d03df8c34b462f342dca0ccc20244fc36ef9 \
+  postgrest /run/subnet-api/postgrest.conf
+docker run --detach --name leadpoet-subnet-api-nginx-1 \
+  --user 1000:1000 --network host --read-only --cap-drop ALL \
+  --security-opt no-new-privileges:true --log-driver none \
+  --restart unless-stopped --stop-timeout 620 \
+  --volume "$SUBNET_API_CONFIG_DIR/nginx.conf:/run/subnet-api/nginx.conf:ro" \
+  --tmpfs /tmp:uid=1000,gid=1000,mode=0700 --entrypoint nginx \
+  nginx:1.28.3-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236 \
+  -c /run/subnet-api/nginx.conf -g 'daemon off;'
+```
+
+Keep the fixed container names. The owner must drain and stop the existing pair
+before selecting another mode. Prove the running image digests, host network,
+UID/GID, read-only mounts and selected private configuration hashes. Complete
+cold private HTTP identity/ACL checks before public routing or client changes.
+Rendering or a local syntax check does not start either service.
 
 Starting the pair, routing TLS and changing endpoint/key documents remain
 separate owner actions. An explicit API key/signing-secret rotation requires

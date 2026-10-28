@@ -14,6 +14,7 @@ import pytest
 
 from lab_arena import broker as br, contracts, operations, trajectory, training_capture as capture
 from lab_arena.service import LocalObjectStore
+from lab_arena.store import ArenaStoreUnavailable
 from tests.lab_arena.test_lab_arena_broker import (
     CONTEXT, FakeLedgerStore, FakeTransport, HOST_KEYS, make_broker,
 )
@@ -714,6 +715,204 @@ def test_no_object_write_without_authorized_admission(tmp_path, denial):
     assert not transport.sent
     assert not list(tmp_path.rglob("*.gz"))
 
+
+
+@pytest.mark.parametrize("cached_judgment", [False, True])
+def test_exhausted_ambiguous_reservation_preserves_prepared_request(
+    tmp_path, monkeypatch, cached_judgment,
+):
+    objects = LocalObjectStore(tmp_path)
+    writes = []
+    original_put = objects.put
+    def put(ref, body):
+        writes.append((ref, body))
+        original_put(ref, body)
+    monkeypatch.setattr(objects, "put", put)
+
+    class CommitThenLoseBothResponses(FakeLedgerStore):
+        def __init__(self):
+            super().__init__()
+            self.arguments = []
+            self.failures = [ArenaStoreUnavailable("first lost response"),
+                             ArenaStoreUnavailable("second lost response")]
+            self.judgment_calls = 0
+
+        def reserve_call(self, **kwargs):
+            assert writes == []  # Capture must not move before admission.
+            self.arguments.append(copy.deepcopy(kwargs))
+            super().reserve_call(**kwargs)
+            raise self.failures[len(self.arguments) - 1]
+
+        def reserve_judgment_call(self, **kwargs):
+            self.judgment_calls += 1
+            return self.reserve_call(**kwargs)
+
+    store = CommitThenLoseBothResponses()
+    if cached_judgment:
+        monkeypatch.setattr(br, "_judgment_cache_material", lambda *_a, **_kw: (
+            "sha256:" + "c" * 64, "{}"))
+    provider, _, transport = make_broker(
+        store=store, capture_request=capture.RequestCapture(objects).prepare,
+        judge_models=("openai/gpt-4o-mini",),
+    )
+    with pytest.raises(ArenaStoreUnavailable) as raised:
+        _execute(provider, context=replace(CONTEXT, kind="score" if cached_judgment else "execute"))
+    assert raised.value is store.failures[1]
+    assert store.arguments[0] == store.arguments[1]
+    assert store.judgment_calls == (2 if cached_judgment else 0)
+    assert store.log == ["reserve", "reserve"] and transport.sent == []
+    assert len(store.calls) == 1 and len(writes) == 1
+    receipt = next(iter(store.calls.values()))
+    assert receipt["kind"] == "reservation"
+    pointer = receipt["call_doc"]["request_capture"]
+    assert writes[0][0] == pointer["ref"]
+    restored = capture.read_request(objects, pointer)
+    assert restored["request_hash"] == receipt["call_doc"]["request_hash"]
+    assert contracts.document_hash(restored["hashed_parameters"]) == restored["request_hash"]
+    assert restored["outbound"]["body"]["messages"] == [{"role": "user", "content": "hello"}]
+    assert not any(secret in json.dumps(restored) for secret in HOST_KEYS.values())
+    assert "headers" not in restored["outbound"]
+
+
+@pytest.mark.parametrize("prior_ambiguous", [False, True])
+def test_rolled_back_reserve_only_persists_after_prior_ambiguous_response(
+    tmp_path, monkeypatch, prior_ambiguous,
+):
+    objects = LocalObjectStore(tmp_path)
+    writes = []
+    original_put = objects.put
+    monkeypatch.setattr(objects, "put", lambda ref, body: (writes.append(ref), original_put(ref, body))[1])
+    terminal = ArenaStoreUnavailable("rolled back", transaction_rolled_back=True)
+
+    class RollbackStore(FakeLedgerStore):
+        def reserve_call(self, **kwargs):
+            self.log.append("attempt")
+            if prior_ambiguous and self.log == ["attempt"]:
+                super().reserve_call(**kwargs)
+                raise ArenaStoreUnavailable("ambiguous response")
+            raise terminal
+
+    provider, store, transport = make_broker(
+        store=RollbackStore(), capture_request=capture.RequestCapture(objects).prepare,
+    )
+    with pytest.raises(ArenaStoreUnavailable) as raised:
+        _execute(provider)
+    assert raised.value is terminal and transport.sent == []
+    assert len(writes) == int(prior_ambiguous)
+    assert len(store.calls) == int(prior_ambiguous)
+    assert store.log.count("attempt") == (2 if prior_ambiguous else 1)
+
+
+@pytest.mark.parametrize("persistence_failure", ["false", "raises"])
+def test_exhausted_reservation_capture_failure_keeps_original_exception(
+    tmp_path, monkeypatch, persistence_failure,
+):
+    terminal = ArenaStoreUnavailable("admission failure")
+    attempts = []
+    persist_attempts = []
+    class UnavailableStore(FakeLedgerStore):
+        def reserve_call(self, **kwargs):
+            attempts.append(kwargs["call_identity"])
+            super().reserve_call(**kwargs)
+            raise terminal
+    def persist(prepared):
+        persist_attempts.append(prepared.pointer)
+        if persistence_failure == "raises":
+            raise RuntimeError("object failure")
+        return False
+    monkeypatch.setattr(capture.PreparedRequest, "persist", persist)
+    provider, store, transport = make_broker(
+        store=UnavailableStore(), capture_request=capture.RequestCapture(LocalObjectStore(tmp_path)).prepare,
+    )
+    with pytest.raises(ArenaStoreUnavailable) as raised:
+        _execute(provider)
+    assert raised.value is terminal
+    assert len(persist_attempts) == 1 and len(attempts) == 2 and attempts[0] == attempts[1]
+    assert store.log == ["reserve", "reserve"] and transport.sent == []
+    assert not list(tmp_path.rglob("*.gz"))
+
+
+@pytest.mark.parametrize("first_response_lost", [False, True])
+def test_successful_admission_persists_once_after_same_identity_readback(
+    tmp_path, monkeypatch, first_response_lost,
+):
+    objects, writes, arguments = LocalObjectStore(tmp_path), [], []
+    original_put = objects.put
+    def put(ref, body):
+        writes.append(ref)
+        original_put(ref, body)
+    monkeypatch.setattr(objects, "put", put)
+    class SuccessStore(FakeLedgerStore):
+        def reserve_call(self, **kwargs):
+            assert writes == []
+            arguments.append(copy.deepcopy(kwargs))
+            result = super().reserve_call(**kwargs)
+            if first_response_lost and len(arguments) == 1:
+                raise ArenaStoreUnavailable("lost first response")
+            return result
+    provider, store, transport = make_broker(
+        store=SuccessStore(), capture_request=capture.RequestCapture(objects).prepare,
+        transport=FakeTransport([(200, {"usage": {"cost": "0.000001"}})]),
+    )
+    result = _execute(provider)
+    assert result.status == 200 and len(writes) == 1 and len(transport.sent) == 1
+    assert len(arguments) == (2 if first_response_lost else 1)
+    assert all(argument == arguments[0] for argument in arguments)
+    assert len(store.calls) == 1 and store.log.count("dispatch") == store.log.count("settle") == 1
+    pointer = next(iter(store.calls.values()))["call_doc"]["request_capture"]
+    assert capture.read_request(objects, pointer)["outbound"]["body"] == json.loads(transport.sent[0]["body"])
+
+
+def test_idempotent_request_pointer_mismatch_does_not_write_or_rewrite_receipt(tmp_path, monkeypatch):
+    objects, writes = LocalObjectStore(tmp_path), []
+    original_put = objects.put
+    monkeypatch.setattr(objects, "put", lambda ref, body: (writes.append(ref), original_put(ref, body))[1])
+    provider, store, transport = make_broker(
+        capture_request=capture.RequestCapture(objects).prepare,
+        transport=FakeTransport([(200, {"usage": {"cost": "0.000001"}})] * 2),
+    )
+    first = _execute(provider)
+    receipt = store.calls[first.call["call_identity"]]
+    receipt["kind"] = "reservation"
+    receipt["call_doc"]["request_capture"]["ref"] = "arena/existing-different-request.json.gz"
+    saved = copy.deepcopy(receipt["call_doc"])
+    replay = _execute(provider)
+    assert replay.status == 200
+    assert len(writes) == 1 and len(transport.sent) == 2
+    assert receipt["call_doc"] == saved
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_adapted_source_request_survives_exhausted_reserve_responses(tmp_path, fallback):
+    terminal = ArenaStoreUnavailable("second lost response")
+    arguments = []
+    class LostSourceReservation(FakeLedgerStore):
+        def reserve_call(self, **kwargs):
+            arguments.append(copy.deepcopy(kwargs))
+            super().reserve_call(**kwargs)
+            raise terminal
+    objects = LocalObjectStore(tmp_path)
+    provider, store, transport = make_broker(
+        store=LostSourceReservation(), capture_request=capture.RequestCapture(objects).prepare,
+        credential_for=lambda _context, name: HOST_KEYS[name],
+        funding_source_for=lambda _context: "miner_key",
+    )
+    with pytest.raises(ArenaStoreUnavailable) as raised:
+        provider._execute_once(
+            replace(CONTEXT, kind="score", round_id="arena-2026-10-13"),
+            operation_id="scrapingdog.scrape", parameters={"url": "https://example.com/about"},
+            action_sequence=1, timeout_ms=30_000, provider_attempt=2 if fallback else 1,
+            champion_credential_retry=False, source_content_fallback=fallback,
+        )
+    assert raised.value is terminal
+    assert len(arguments) == 2 and arguments[0] == arguments[1]
+    assert len(store.calls) == 1 and transport.sent == []
+    receipt = next(iter(store.calls.values()))
+    restored = capture.read_request(objects, receipt["call_doc"]["request_capture"])
+    assert restored["effective_operation_id"] == "deepline.execute"
+    assert restored["effective_parameters"]["tool"] == ("generic_http_request" if fallback else "firecrawl_scrape")
+    assert restored["outbound"]["body"]["payload"]["url"] == "https://example.com/about"
+    assert not any(secret in json.dumps(restored) for secret in HOST_KEYS.values())
 
 def test_prepare_has_no_io_and_missing_referenced_object_fails_closed(tmp_path):
     objects = LocalObjectStore(tmp_path)

@@ -551,6 +551,9 @@ def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False
                         or set(row["cost_gaps"]) != expected & {"provider_cost_unresolved"}):
                     return False
         for call in selected:
+            if failed_delivery and training_thinking.verified_undispatched_transport(
+                    example, call, worker_proofs=worker_proofs):
+                continue
             gaps = set(call.get("evidence_gaps") or [])
             if training_thinking.verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
                 continue

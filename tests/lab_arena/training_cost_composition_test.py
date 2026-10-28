@@ -8,6 +8,8 @@ from tests.lab_arena.training_eligibility_test import (
     _unsettled_selected_call, assess_ten, ten_selected_examples,
 )
 from tests.lab_arena.training_steps_test import seal
+from tests.lab_arena.training_optional_undispatched_composition_test import optional_undispatched, relink, assert_no_targets
+from tests.lab_arena.training_export_test import per_icp_cost_reader
 from tests.lab_arena.training_undispatched_coverage_test import assess_bank, undispatched_values
 
 
@@ -110,4 +112,42 @@ def test_nondispatch_unknown_bill_and_bound_judge_privacy_share_one_icp():
     assert result['counts']['complete_runs'] == 9
     assert result['counts']['incomplete_runs'] == 1
     assert not assess_bank(values, example, percent=100)['eligible']
+    assert example == before
+
+
+@pytest.mark.parametrize('category', ['web_fetch', 'response_received'])
+@pytest.mark.parametrize('damage', [None, 'unproved_nondispatch', 'dispatch', 'unknown_nondispatch_bill',
+                                  'call_privacy', 'receipt_privacy', 'unknown_privacy', 'missing_receipt'])
+def test_optional_nondispatch_and_separate_unknown_bill_keep_full_proof(category, damage):
+    values, _ = optional_undispatched(category)
+    # A separate dispatched call has a retained response but an unknown bill.
+    terminal = next(row for row in values['ledger_rows'] if row['entry_kind'] == 'settlement')
+    terminal.update(entry_kind='uncertain', amount_microusd=0)
+    values['cost_eligibility_reader'] = per_icp_cost_reader(spend=43, reason='provider_cost_uncertain')
+    example = training_export.assemble_example(**values)
+    selected, nondispatched = example['provider_calls'][0], example['provider_calls'][-1]
+    if damage == 'unproved_nondispatch':
+        nondispatched['lifecycle'][-1]['accounting']['reason'] = 'unknown'
+    elif damage == 'dispatch':
+        nondispatched['lifecycle'].insert(1, {**deepcopy(nondispatched['lifecycle'][0]), 'entry_kind': 'dispatch'})
+    elif damage == 'unknown_nondispatch_bill':
+        nondispatched['actual_microusd'] = None
+    elif damage == 'call_privacy':
+        selected['response_privacy_redactions'] = ['credential']
+    elif damage in {'receipt_privacy', 'unknown_privacy'}:
+        selected['response_receipts'][0]['privacy_redactions'] = [
+            'unknown' if damage == 'unknown_privacy' else 'credential']
+    elif damage == 'missing_receipt':
+        payload = example['worker_observation_artifacts'][example['run_id']]['payload']
+        payload['response_receipts'].pop(0)
+        payload['response_receipt_count'] -= 1
+    relink(example)
+    before = deepcopy(example)
+    result = assess_bank(values, example)
+    assert result['eligible'] is (damage is None), result
+    assert result['counts']['complete_runs'] == 9
+    assert result['counts']['incomplete_runs'] == 1
+    assert not assess_bank(values, example, percent=100)['eligible']
+    assert selected['actual_microusd'] is None
+    assert_no_targets(example)
     assert example == before

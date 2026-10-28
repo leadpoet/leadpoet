@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -22,6 +23,18 @@ database = hold.database
 
 def _prepare(cursor):
     hold._seed_active(cursor)
+    # Keep October1 intake/evaluation authority while making the release's
+    # execution deadline runnable on the disposable database's real clock.
+    cursor.execute("SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s", (hold.recovery.ROUND,))
+    config = cursor.fetchone()[0]
+    shift = datetime.now(timezone.utc) + timedelta(minutes=30) - datetime.fromisoformat(
+        config["schedule"]["benchmark_deadline"].replace("Z", "+00:00"))
+    for key, value in config["schedule"].items():
+        if key not in ("submission_open", "submission_cutoff"):
+            config["schedule"][key] = (datetime.fromisoformat(value.replace("Z", "+00:00")) + shift).isoformat().replace("+00:00", "Z")
+    cursor.execute("SET session_replication_role=replica")
+    cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s", (json.dumps(config), hold.recovery.ROUND))
+    cursor.execute("SET session_replication_role=origin")
     cursor.execute(hold._render_hold(cursor))
     cursor.execute("UPDATE public.lab_arena_runs SET status='accepted',"
                    "terminal_cause='accepted',output_ref='arena/test/score2.json' "

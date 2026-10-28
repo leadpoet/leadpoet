@@ -47,12 +47,15 @@ def service_key():
     return "sb_secret_scoped-test-value"
 
 
-def test_gateway_configuration_uses_existing_aliases_and_disables_rewards():
-    updates = MODULE.gateway_updates(existing(), args(), service_key())
+@pytest.mark.parametrize("origin", ["https://db.example", "https://gateway.subnet71.com"])
+def test_gateway_configuration_uses_existing_aliases_and_disables_rewards(origin):
+    values = existing()
+    values["SUPABASE_URL"] = origin
+    updates = MODULE.gateway_updates(values, args(), service_key())
     assert updates["LAB_ARENA_MODE"] == "live"
     assert updates["LAB_ARENA_REWARDS_ENABLED"] == "false"
     assert updates["LAB_ARENA_OPENROUTER_API_KEY"] == "openrouter-secret"
-    assert updates["LAB_ARENA_SUPABASE_URL"] == "https://db.example"
+    assert updates["LAB_ARENA_SUPABASE_URL"] == origin
 
 
 def test_gateway_nonsecret_configuration_derives_registry_repository():

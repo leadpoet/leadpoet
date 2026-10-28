@@ -802,7 +802,7 @@
       "symbol": "PRODUCTION_PARITY_ENV_NAMES"
     },
     {
-      "ast_sha256": "sha256:aad816c507423f832315daf5a03a724dbd6a92ff243d156626b13661d1590402",
+      "ast_sha256": "sha256:9452d584975c542547cd0b64e4efd7e37ed71383afbe89d7c2e58aa37509f1bc",
       "path": "leadpoet_canonical/production_parity_boundary_v2.py",
       "symbol": "PRODUCTION_SUPABASE_ORIGIN"
     },
@@ -927,7 +927,7 @@
       "symbol": "inspect_exact_host_gateway_runtime"
     }
   ],
-  "manifest_hash": "sha256:b1635ccc925b1c1966a3b4c1d3c1413589db1efe1da6c053a8a238ca65c7699a",
+  "manifest_hash": "sha256:c9c887a29fbed9795083d03eab54e3958c9b9d41a6569b50cfe2cf76c83d81c8",
   "protected_source_commit": "1009cde4793a496c48f8412cff91af16f9bed8f7",
   "schema_version": "leadpoet.protected_workflows.v2"
 }

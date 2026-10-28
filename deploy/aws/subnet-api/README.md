@@ -28,6 +28,15 @@ The renderer takes a mode 0600 JSON regular file with exactly these names:
   requires these TLS settings. Set `SUBNET_API_CA_FILE` to the reviewed AWS
   CA file for compose's read-only mount; neither tool retrieves it.
 
+The container filename `rds-ca.pem` is the fixed interface path, not a claim
+about the upstream. For an owner-approved rollback, keep the public gateway
+origin and request identities unchanged. After writer drain and verified
+reverse synchronization, switch the private URI to the exact source database
+hostname and mount its verified source CA at this same path. Use the source
+hostname rather than its IP so verify-full checks the certificate name. Switch
+the URI and CA together, and prove the dedicated source authenticator's exact
+SET memberships before relying on this path. Do not disable TLS verification.
+
 Hydrate this input through the existing protected secret workflow. Keep the
 input and output outside Git. No secret belongs in argv, compose environment
 variables, terminal output or Docker logs. Render as root into a private parent:

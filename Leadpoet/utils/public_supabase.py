@@ -1,4 +1,4 @@
-"""Dependency-free access to Leadpoet's fixed public Supabase authority."""
+"""Dependency-free access to Leadpoet's fixed public database HTTP authority."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any, Mapping
 from urllib.request import Request, urlopen
 
 
-SUPABASE_URL = "https://qplwoislplkcegvdmbim.supabase.co"
+SUPABASE_URL = "https://gateway.subnet71.com"
 SUPABASE_ANON_KEY = "sb_publishable_YU7GBMSX-fwEsSH7MnhSBQ_l5ACuFVf"
 
 

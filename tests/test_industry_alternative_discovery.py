@@ -15,7 +15,7 @@ SOURCE = 'https://www.coreworks.ai/workflows'
 BODY = 'Coreworks supplies account workflow management with its reporting software.'
 
 
-def test_alternative_search_keeps_only_bound_provider_citation_locators(monkeypatch):
+def test_alternative_search_keeps_bound_locators_without_promoting_claims(monkeypatch):
     seen = []
     async def post(session, url, *, headers, payload):
         validate_operation_request('openrouter.chat', payload)
@@ -33,10 +33,11 @@ def test_alternative_search_keeps_only_bound_provider_citation_locators(monkeypa
         None, 'account workflows', key='test',
         company_locator={'name': 'Coreworks', 'website': URL},
         include_domains=('coreworks.ai',)))
-    assert result == {'results': [{'url': SOURCE, 'title': 'Workflow documentation'}],
-                      'notice': 'discovery_only_not_evidence'}
+    assert [r['url'] for r in result['results']] == [
+        'https://coreworks.ai/not-cited', SOURCE]
+    assert result['notice'] == 'discovery_only_not_evidence'
+    assert '_source_pages' not in result
     assert seen[0]['model'] == 'perplexity/sonar'
-    assert 'VERIFIED' not in json.dumps(result)
 
 
 @pytest.mark.parametrize('status, body, expected', [
@@ -84,8 +85,8 @@ def test_native_exchange_requires_a_fresh_page_before_alternative_locator_can_he
         if payload['model'] == 'perplexity/sonar':
             alternatives.append(payload)
             return 200, {'choices': [{'message': {
-                'content': BODY,
-                'annotations': [{'type': 'url_citation', 'url_citation': {'url': SOURCE}}],
+                'content': f'{SOURCE} — {BODY}',
+                'annotations': [],
             }}]}
         turns.append(payload)
         if len(turns) <= 2:
@@ -100,7 +101,8 @@ def test_native_exchange_requires_a_fresh_page_before_alternative_locator_can_he
     result = asyncio.run(run(prefetched_pages={URL: {'final_url': URL, 'text': FEATURES}},
                             prior_observations={'submitted_source_urls': [URL]}))
     assert len(searches) == 2 and len(alternatives) == 1 and fetches == [SOURCE]
-    assert BODY not in json.dumps(turns[2])  # Provider prose did not become source text.
+    assert BODY in json.dumps(turns[2])  # A search hint can guide source selection.
+    # Only the independent fetched body can enter the final evidence packet.
     assert (BODY in json.dumps(reviews[-1])) is fetch_ok
     assert result['claims']['industry']['status'] == ('VERIFIED' if fetch_ok else 'UNPROVEN')
     assert result['usage']['search_calls'] == 3

@@ -2590,8 +2590,8 @@ async def _search_industry_locators(
 ):
     """Use the existing company search model when another index leaves gaps.
 
-    Only provider citation URLs survive. The answer, quotes and model claims
-    are not source evidence; a remaining exact-page fetch must establish it.
+    Search answers and annotations propose locators only. Their descriptions
+    help select a page; a remaining exact-page fetch must establish its facts.
     """
     payload = {
         'model': 'perplexity/sonar', 'max_tokens': 700, 'temperature': 0,
@@ -2625,23 +2625,53 @@ async def _search_industry_locators(
             raise ValueError('invalid search annotations')
     except (KeyError, IndexError, TypeError, AttributeError, ValueError):
         raise ValueError('search_response_malformed') from None
-    locators = {}
+    def safe_locator(value):
+        url = _safe_https_url(value)
+        if not url or _registrable_domain(url) not in include_domains:
+            return ''
+        try:
+            public_http_url(url)
+        except ValueError:
+            return ''
+        return url
+
+    citations = {}
     for annotation in annotations:
         if not isinstance(annotation, Mapping) or annotation.get('type') != 'url_citation':
             continue
         citation = annotation.get('url_citation')
         if not isinstance(citation, Mapping):
             continue
-        url = _safe_https_url(citation.get('url'))
-        if not url or _registrable_domain(url) not in include_domains:
-            continue
-        try:
-            public_http_url(url)
-        except ValueError:
-            continue
-        locators.setdefault(url, {'url': url, 'title': str(citation.get('title') or '')[:300]})
+        url = safe_locator(citation.get('url'))
+        if url:
+            citations.setdefault(url, str(citation.get('title') or '')[:300])
+        if len(citations) >= MAX_INDUSTRY_SEARCH_RESULTS:
+            break
+    locators = {}
+    content = message.get('content')
+    if isinstance(content, str):
+        # The provider's cited search results can differ from its recommended
+        # URLs. Neither is proof. Preserve bounded recommendation context so
+        # the researcher can select an exact source rather than guess from a
+        # title alone; never copy this prose into fetched_pages.
+        for block in re.split(r'\n\s*\n', content[:12_000]):
+            for match in re.finditer(r'https?://[^\s<>"`]+', block):
+                url = safe_locator(match.group().rstrip("'.,;:!?)]}"))
+                if url and url not in locators:
+                    excerpt = " ".join(re.sub(
+                        r"[\x00-\x1f\x7f]", " ",
+                        block[:MAX_SEARCH_LOCATOR_EXCERPT_CHARS],
+                    ).split())
+                    locators[url] = {'url': url, 'title': citations.get(url, ''),
+                                     'discovery_excerpt': excerpt}
+                if len(locators) >= MAX_INDUSTRY_SEARCH_RESULTS:
+                    break
+            if len(locators) >= MAX_INDUSTRY_SEARCH_RESULTS:
+                break
+    for url, title in citations.items():
         if len(locators) >= MAX_INDUSTRY_SEARCH_RESULTS:
             break
+        locators.setdefault(url, {'url': url, 'title': title})
     return {'results': list(locators.values()), 'notice': 'discovery_only_not_evidence'}
 
 

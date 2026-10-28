@@ -170,6 +170,7 @@ def test_verify_cli_applies_same_flag_and_reports_correction(monkeypatch, capsys
 
     monkeypatch.setattr(builder, "verify_saved_overlay", verify)
     monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: pytest.fail("unexpected build or publication"))
+    monkeypatch.setattr(builder, "_managed_docker_host", lambda: False)
     assert builder.main() == 0
     receipt = json.loads(capsys.readouterr().out)
     assert verified == [True]

@@ -264,16 +264,11 @@ def test_runtime_uses_one_paid_request_and_stores_only_bounded_result(classifica
     if classification == "unverified":
         assert document["error_code"] == "code_review_research_unverified"
         assert document["retryable"] is True
-        for attempts in (1, code_review_policy.MAX_TRANSIENT_ATTEMPTS - 1):
+        for attempts in (1, 6, 10):
             assert code_review_policy.review_retry_available({
                 "code_review_status": "error", "code_review_attempts": attempts,
                 "code_review_doc": document,
             })
-        assert not code_review_policy.review_retry_available({
-            "code_review_status": "error",
-            "code_review_attempts": code_review_policy.MAX_TRANSIENT_ATTEMPTS,
-            "code_review_doc": document,
-        })
 
 
 def test_frozen_round_policy_is_authoritative_over_submission_fields():

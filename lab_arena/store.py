@@ -1389,8 +1389,9 @@ class ArenaStore:
             raise ArenaStoreError("code review schema mismatch")
         retry_policy = result.get("retry_policy")
         if (
-            retry_policy != "bounded_transient_v1"
-            or result.get("max_transient_attempts") != 6
+            retry_policy != "deadline_transient_v2"
+            or "max_transient_attempts" not in result
+            or result["max_transient_attempts"] is not None
             or result.get("transient_retry_backoff_seconds")
                 != [60, 120, 240, 480, 900]
             or result.get("legacy_max_attempts") != 3

@@ -343,7 +343,7 @@ def test_review_telemetry_reports_no_provider_route_when_credential_absent():
         telemetry.install_recorder(None)
 
 
-def test_review_telemetry_reports_legacy_and_transient_attempt_caps():
+def test_review_telemetry_keeps_transient_failures_retryable_after_six_attempts():
     exporter = InMemorySpanExporter()
     telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
     transport = ReviewTransport(lambda _parameters: pytest.fail("no provider dispatch"))
@@ -370,7 +370,7 @@ def test_review_telemetry_reports_legacy_and_transient_attempt_caps():
             {"error_code": "code_review_provider_rate_limited", "retryable": True}, 0,
             attempt=6,
         )
-        assert exporter.get_finished_spans()[-1].attributes["arena.retryable"] is False
+        assert exporter.get_finished_spans()[-1].attributes["arena.retryable"] is True
     finally:
         telemetry.install_recorder(None)
 
@@ -490,7 +490,9 @@ def test_incomplete_or_unaccounted_reviews_never_pass(damage, reason):
             "model",
             "file_count",
             "source_bytes",
+            "retryable",
         }
+        assert store.finish_calls[0][4]["retryable"] is True
 
 
 def test_preparation_failure_makes_no_api_or_credential_call():

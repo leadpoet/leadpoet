@@ -843,10 +843,9 @@ def code_review_summary(
     }
     if "code_review_attempts" in row:
         result["attempts"] = row["code_review_attempts"]
-    if type(document.get("retryable")) is bool:
+    if type(document.get("retryable")) is bool or code_review_policy.transient_failure(document):
         result["retryable"] = (
-            document["retryable"]
-            and row.get("status") != "rejected"
+            row.get("status") != "rejected"
             and code_review_policy.review_retry_available(row)
         )
         if round_row is not None:

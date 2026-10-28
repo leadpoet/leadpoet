@@ -1116,11 +1116,11 @@ def test_public_review_ignores_stale_credit_evidence_after_status_change(status)
 
 
 @pytest.mark.parametrize('attempts,round_status,offset,expected', [
-    (3, 'open', -1, True), (6, 'open', -1, False),
+    (3, 'open', -1, True), (6, 'open', -1, True),
     (3, 'open', 0, False), (3, 'open', 1, False),
     (3, 'published', -1, False),
 ])
-def test_public_review_retry_flag_stops_at_cap_and_deadline(attempts, round_status, offset, expected):
+def test_public_review_retry_flag_stops_at_deadline_and_round_close(attempts, round_status, offset, expected):
     from datetime import timedelta
     deadline = _now()
     view = public_dashboard.code_review_summary({

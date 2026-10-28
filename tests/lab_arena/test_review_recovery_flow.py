@@ -12,6 +12,10 @@ import pytest
 from lab_arena import broker, code_review, contracts, source_bundle
 from lab_arena.service import ServiceError
 from lab_arena.store import new_lease_token
+from tests.lab_arena.lab_arena_pg_harness import (
+    CURRENT_PROVIDER_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+)
+from tests.postgres_migration_harness import SCRIPTS
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_KEYS,
     CANARY_OPENROUTER_KEY,
@@ -19,10 +23,62 @@ from tests.lab_arena.test_lab_arena_service_round import (
     FakeProviderTransport,
     Harness,
     connect,
-    database,
     flavor_source_archive,
     keypair,
 )
+
+
+@pytest.fixture(scope="module")
+def database():
+    generator = database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS + (
+        "365-lab-arena-trajectories.sql",
+        "492-lab-arena-review-provider-observations.sql",
+        "562-lab-arena-review-context-integrity-reason.sql",
+        "563-lab-arena-review-source-digest-reason.sql",
+        "566-lab-arena-research-review-result.sql",
+        "585-lab-arena-review-deadline-recovery.sql",
+    ))
+    db = next(generator)
+    try:
+        # Current scoring reads this computed column. Reuse its exact existing
+        # production definition without installing unrelated host retry RPCs.
+        sql = (SCRIPTS / "474-lab-arena-host-interruption-execution-retries.sql").read_text()
+        helper = "CREATE OR REPLACE FUNCTION public.lab_arena_execution_attempt_count"
+        definition = helper + sql.split(helper, 1)[1].split(
+            "CREATE OR REPLACE FUNCTION public.lab_arena__execute_assignment_calls_v1", 1,
+        )[0]
+        with db[0].connect(**db[1]) as connection, connection.cursor() as cursor:
+            cursor.execute("GRANT CREATE ON SCHEMA public TO lab_arena_owner")
+            cursor.execute(definition)
+            # This historical harness has no model supersessions. Install only
+            # migration 517's additive zero-floor columns and public projection
+            # used by current result reads. Keep zero defaults for old inserts.
+            supersession = (SCRIPTS / "517-lab-arena-model-policy-supersession.sql").read_text()
+            for table in ("rounds", "runs"):
+                anchor = f"ALTER TABLE public.lab_arena_{table} ADD COLUMN IF NOT EXISTS scoring_generation_floor"
+                cursor.execute(anchor + supersession.split(anchor, 1)[1].split(";", 1)[0] + ";")
+            anchor = "DO $view517$"
+            cursor.execute(anchor + supersession.split(anchor, 1)[1].split("$view517$;", 1)[0] + "$view517$;")
+            anchor = "CREATE TABLE IF NOT EXISTS public.lab_arena_scoring_supersessions"
+            cursor.execute(anchor + supersession.split(anchor, 1)[1].split(";", 1)[0] + ";")
+            cursor.execute("ALTER TABLE public.lab_arena_scoring_supersessions OWNER TO lab_arena_owner")
+            cursor.execute("ALTER TABLE public.lab_arena_scoring_supersessions ENABLE ROW LEVEL SECURITY")
+            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena_scoring_policy_history_v1"
+            cursor.execute(anchor + supersession.split(anchor, 1)[1].split(
+                "-- Trigger and exact existing-function amendments follow below.", 1,
+            )[0])
+            privacy = (SCRIPTS / "540-lab-arena-incomplete-participant-publication.sql").read_text()
+            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena__execution_privacy_route_unavailable_v1"
+            cursor.execute(anchor + privacy.split(anchor, 1)[1].split(
+                "DO $preflight_lab_arena__participant_incomplete_reason_v1$", 1,
+            )[0])
+            public_failure = (SCRIPTS / "541-lab-arena-public-execution-failure-reason.sql").read_text()
+            anchor = "CREATE OR REPLACE FUNCTION public.lab_arena_public_execution_failure_reason_v1"
+            cursor.execute(anchor + public_failure.split(anchor, 1)[1].split("DO $restore541$", 1)[0])
+            cursor.execute("REVOKE CREATE ON SCHEMA public FROM lab_arena_owner")
+        yield db
+    finally:
+        generator.close()
 
 
 def _iso(moment: datetime) -> str:
@@ -161,6 +217,16 @@ class RecoveryReviewTransport(FakeProviderTransport):
                 )
             if attempt in (2, 4):
                 raise broker.ProviderTransportError("controlled transport failure")
+            if attempt in (5, 6, 7):
+                response = super().send(**request)
+                document = json.loads(response.body.decode("utf-8"))
+                if attempt == 6:
+                    document["choices"][0]["message"]["content"] = "incomplete JSON"
+                else:
+                    document["choices"][0]["finish_reason"] = "length"
+                return broker.ProviderResponse(
+                    response.status, response.headers, json.dumps(document).encode("utf-8"),
+                )
         if flavor == "PermanentAuthFailure":
             return broker.ProviderResponse(
                 401,
@@ -187,7 +253,7 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     reviewer = harness.service.config.code_reviewer
     reviewer._transport = transport
     harness.review_transport = transport
-    assert harness.service.store.code_review_schema()["max_transient_attempts"] == 6
+    assert harness.service.store.code_review_schema()["max_transient_attempts"] is None
 
     # A UTC-midnight round fixes the source replacement boundary at 23:00.
     now = datetime.now(timezone.utc)
@@ -319,28 +385,28 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
         connect, round_id, "benchmark_deadline", original_deadline
     )
 
-    # Attempts 2-4 are retryable transport/503 failures. Attempt 5 passes,
-    # proving recovery beyond the former three-attempt limit and below cap 6.
+    # Recover transport/503 failures and unusable JSON/unfinished responses.
+    # Attempt 8 passes, beyond both former caps, then reaches publication below.
     outcomes = []
-    for _attempt in range(2, 6):
+    for _attempt in range(2, 9):
         _make_review_retry_ready(connect, replacement_id)
         outcome = reviewer.review(
             harness.service.store.get_submission(replacement_id)
         )
         outcomes.append(outcome["status"])
-    assert outcomes == ["error", "error", "error", "passed"]
+    assert outcomes == ["error"] * 6 + ["passed"]
     recovered = harness.service.store.get_submission(replacement_id)
     assert recovered["code_review_status"] == "passed"
-    assert recovered["code_review_attempts"] == 5
+    assert recovered["code_review_attempts"] == 8
     assert recovered["code_review_doc"]["cost_status"] == "settled"
     assert recovered["code_review_doc"]["cost_microusd"] == 0
     assert recovered["code_review_doc"]["review_cost_microusd"] > 0
-    assert transport.attempts["RecoveredReplacement"] == 5
+    assert transport.attempts["RecoveredReplacement"] == 8
     recovered_kinds = _ledger_kinds(harness, replacement_id)
-    assert recovered_kinds.count("reservation") == 5
-    assert recovered_kinds.count("dispatch") == 5
+    assert recovered_kinds.count("reservation") == 8
+    assert recovered_kinds.count("dispatch") == 8
     assert reviewer.review(recovered)["status"] == "existing"
-    assert transport.attempts["RecoveredReplacement"] == 5
+    assert transport.attempts["RecoveredReplacement"] == 8
     assert _ledger_kinds(harness, replacement_id) == recovered_kinds
 
     permanent = reviewer.review(

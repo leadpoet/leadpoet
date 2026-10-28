@@ -224,20 +224,24 @@ class _VisibleHTMLLinkParser(_VisibleHTMLTextParser):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.link_labels: list[tuple[str, str]] = []
-        self._active_link: Optional[tuple[str, int]] = None
+        self._active_link: Optional[tuple[str, int, str]] = None
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
         super().handle_starttag(tag, attrs)
         if tag.casefold() == "a" and not self._hidden_depth:
             href = self._attribute_map(attrs).get("href", "").strip()
             if href:
-                self._active_link = (href, len(self.parts))
+                self._active_link = (
+                    href, len(self.parts),
+                    self._attribute_map(attrs).get("aria-label", "").strip(),
+                )
 
     def handle_endtag(self, tag: str) -> None:
         if tag.casefold() == "a" and self._active_link is not None:
-            href, start = self._active_link
+            href, start, accessible_label = self._active_link
             if len(self.link_labels) < 500:
-                self.link_labels.append((href, " ".join(self.parts[start:])))
+                label = " ".join(self.parts[start:])
+                self.link_labels.append((href, label if label.strip() else accessible_label))
             self._active_link = None
         super().handle_endtag(tag)
 

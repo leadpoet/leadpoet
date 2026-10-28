@@ -82,6 +82,7 @@ from qualification.scoring.company_evidence_investigator import (
     MAX_PAGE_CHARACTERS,
     MAX_SUBMITTED_SOURCE_URLS,
     PRIVATE_FETCHED_PAGES_KEY,
+    _IDENTITY_LINK_CONTEXT_MARKER,
     _PRE_SERIES_STAGE_TOKEN_RE,
     _VENTURE_SERIES_STAGE_LABELS,
     _bound_linkedin_headquarters_source,
@@ -1958,11 +1959,17 @@ def _decision_from_observed_geography(
     ))
     if not observed or not requested_values:
         return COMPANY_FIT_UNAVAILABLE
-    if company_quality and not _quote_identifies_headquarters(
-        _dimension_web_evidence(verdict, "geography")["quote"],
+    if company_quality and not (
+        _quote_identifies_headquarters(
+            _dimension_web_evidence(verdict, "geography")["quote"],
+        )
+        or _validated_investigator_geography_matches_verdict(
+            verdict, validated_geography_finding,
+        )
     ):
-        # A profile location or regional office is not an HQ fact. Leave both
-        # positive and negative locations open for the bounded HQ investigator.
+        # Ordinary profile locations and regional offices are not HQ facts.
+        # A literal provider record needs an internally validated finding bound
+        # to these exact source facts; raw verifier JSON supplies no authority.
         return COMPANY_FIT_UNAVAILABLE
     if company_quality and company is not None:
         submitted_country = str(company.country or "").strip()
@@ -3408,15 +3415,22 @@ def _investigator_prefetched_pages(
         ):
             existing = candidates.get(submitted_profile_url)
             if existing is not None:
+                source_text, identity_marker, identity_links = existing["text"].partition(
+                    _IDENTITY_LINK_CONTEXT_MARKER
+                )
                 if (
                     source_field != STRUCTURED_PROFILE_HEADQUARTERS_SOURCE_FIELD
                     or _strict_linkedin_company_profile_url(
                         existing["final_url"]
                     ) != evidence_url
-                    or text in existing["text"]
+                    or text in source_text
                 ):
                     continue
-                text = existing["text"] + "\n\n" + text
+                # Link destinations are identity-only context. Keep the bound
+                # HQ projection on the quotable side of that existing boundary.
+                text = source_text + "\n\n" + text
+                if identity_marker:
+                    text += "\n\n" + identity_marker + identity_links
                 if len(text) > MAX_PAGE_CHARACTERS:
                     continue
             candidates[submitted_profile_url] = {
@@ -6498,6 +6512,7 @@ def _reverify_decision(
     structured_employee_size_evidence: Optional[Mapping[str, Any]] = None,
     structured_public_company_evidence: Optional[Mapping[str, Any]] = None,
     structured_profile_identity_evidence: Optional[Mapping[str, Any]] = None,
+    structured_profile_headquarters_evidence: Optional[Mapping[str, Any]] = None,
     employee_size_conflict: bool = False,
     company_quality: bool = False,
 ) -> CompanyFitDecisionResult:
@@ -6660,6 +6675,28 @@ def _reverify_decision(
             or _is_archived_sec_filing_snapshot(stage_evidence.get("url"))
         )
     )
+    geography_finding = validated_geography_finding
+    if not _geography_needs_semantic_resolution(icp):
+        # Preserve the pre-existing deterministic country/US-region path. A
+        # custom locality still needs the existing investigator's judgment.
+        # An UNPROVEN review cannot erase this separately bound known fact;
+        # the review claim itself stays unchanged.
+        source_evidence = _dimension_web_evidence(verdict, "geography")
+        candidate = {
+            "target": "geography", "status": "VERIFIED",
+            "evidence_url": source_evidence["url"],
+            "evidence_quote": source_evidence["quote"],
+            "observed_country": verdict.get("observed_hq_country"),
+            "observed_state": verdict.get("observed_hq_state"),
+        }
+        if _bound_structured_headquarters_finding(
+            candidate, structured_profile_headquarters_evidence, {
+                "verified_name": profile_identity.get("normalized_name"),
+                "verified_domain": profile_identity.get("registrable_dns_domain"),
+                "verified_linkedin_slug": profile_identity.get("linkedin_company_slug"),
+            },
+        ):
+            geography_finding = candidate
     dimensions = {
         "employee_size": (
             COMPANY_FIT_UNAVAILABLE
@@ -6689,7 +6726,7 @@ def _reverify_decision(
             icp,
             company=company,
             company_quality=company_quality,
-            validated_geography_finding=validated_geography_finding,
+            validated_geography_finding=geography_finding,
         ),
         "stage": (
             COMPANY_FIT_UNAVAILABLE
@@ -8439,6 +8476,36 @@ async def _run_targeted_company_evidence_investigation(
             structured_identity=structured_profile_identity_evidence,
         )
     )
+    investigation_observed_linkedin = verdict.get("observed_company_linkedin")
+    if (
+        investigation_observed_linkedin == ""
+        and investigation_web_identity.get("decision") == COMPANY_FIT_MATCH
+        and investigation_web_identity.get("evidence_source")
+        == "company_web_reverification"
+        and _complete_verified_first_party_identity(
+            company.company_website,
+            {verified_transport_domain} if verified_transport_domain else set(),
+            {
+                **{
+                    key: investigation_web_identity.get(key)
+                    for key in (
+                        "submitted_name", "submitted_domain", "submitted_linkedin_slug",
+                        "observed_name", "observed_domain", "observed_linkedin_slug",
+                    )
+                },
+                "verified_name": investigation_verified_identity.get("normalized_name"),
+                "verified_domain": investigation_verified_identity.get("registrable_dns_domain"),
+                "verified_linkedin_slug": investigation_verified_identity.get("linkedin_company_slug"),
+            },
+        )
+    ):
+        # Preserve the already accepted independent identity in this input.
+        # A missing raw observation is not itself proof; nonempty observations,
+        # including conflicting or malformed URLs, are never replaced here.
+        investigation_observed_linkedin = _strict_linkedin_company_profile_url(
+            "https://www.linkedin.com/company/"
+            + str(investigation_web_identity.get("observed_linkedin_slug") or "")
+        ) or investigation_observed_linkedin
     headcount_conflict_context = (
         _headcount_conflict_context(
             structured_employee_size_evidence, investigation_verified_identity, icp,
@@ -8613,6 +8680,7 @@ async def _run_targeted_company_evidence_investigation(
                     "geography_evidence_quote",
                 )
             },
+            "observed_company_linkedin": investigation_observed_linkedin,
             **(
                 {"untrusted_headcount_conflict_context": headcount_conflict_context}
                 if headcount_conflict_context else {}
@@ -9061,6 +9129,7 @@ async def _run_targeted_company_evidence_investigation(
             if isinstance(claims.get("geography"), Mapping)
             else None
         ),
+        structured_profile_headquarters_evidence=structured_profile_headquarters_evidence,
         structured_employee_size_evidence=structured_employee_size_evidence,
         structured_public_company_evidence=(
             structured_public_company_evidence
@@ -9735,6 +9804,9 @@ async def _llm_reverify_company(
         verified_homepage_identity=verified_identity,
         verified_homepage_transport_domain=verified_transport_domain,
         verified_homepage_navigation_locators=verified_homepage_navigation_locators,
+        structured_profile_headquarters_evidence=current_profile_cache.get(
+            "structured_profile_headquarters_evidence"
+        ),
         structured_employee_size_evidence=structured_employee_size_evidence,
         structured_public_company_evidence=(
             structured_public_company_evidence
@@ -9801,6 +9873,9 @@ async def _llm_reverify_company(
                 verified_homepage_identity=verified_identity,
                 verified_homepage_transport_domain=verified_transport_domain,
                 verified_homepage_navigation_locators=verified_homepage_navigation_locators,
+                structured_profile_headquarters_evidence=current_profile_cache.get(
+                    "structured_profile_headquarters_evidence"
+                ),
                 structured_employee_size_evidence=(
                     structured_employee_size_evidence
                 ),
@@ -10354,6 +10429,9 @@ async def _llm_reverify_company(
             claims.get("geography")
             if isinstance(claims.get("geography"), Mapping)
             else None
+        ),
+        structured_profile_headquarters_evidence=current_profile_cache.get(
+            "structured_profile_headquarters_evidence"
         ),
         structured_employee_size_evidence=structured_employee_size_evidence,
         structured_public_company_evidence=structured_public_company_evidence,

@@ -1,10 +1,92 @@
 import json
+import os
 from pathlib import Path
+import re
+import shlex
 import subprocess
 import sys
 
+import pytest
+
 
 SCRIPT = Path("validator_tee/scripts/reclaim_docker_storage_v2.sh").read_text()
+
+
+def _privileged_python_options():
+    for match in re.finditer(
+        r"sudo (?:env PYTHONSAFEPATH=1 )?python3\b([^\n]*)", SCRIPT
+    ):
+        # The only inline program is the isolated pending-marker read.
+        options = match[1].split("-c", 1)[0].replace("\\", "").strip()
+        yield shlex.split(options)
+
+
+@pytest.mark.parametrize("options", list(_privileged_python_options()))
+def test_privileged_python_cannot_write_bytecode_after_sudo_env_reset(options):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+    result = subprocess.run(
+        [sys.executable, *options, "-c", "import sys; assert sys.dont_write_bytecode"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_privileged_live_helper_imports_leave_frozen_source_clean(tmp_path):
+    source = Path("validator_tee/host")
+    modules = (
+        "docker_live_restore_reconciler_v2.py",
+        "docker_operation_guard_v2.py",
+        "docker_stale_mount_reclaimer_v2.py",
+        "docker_zero_runtime_reconciler_v2.py",
+    )
+    for name in modules:
+        (tmp_path / name).write_bytes((source / name).read_bytes())
+    helper = tmp_path / modules[0]
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+    env["PYTHONSAFEPATH"] = "1"
+
+    def run(options, argument="--help"):
+        return subprocess.run(
+            [
+                sys.executable, *options, "-c",
+                # Apple Python redirects caches by default. Match the Linux
+                # builder's adjacent-cache layout without changing -B policy.
+                "import runpy, sys; sys.pycache_prefix = None; "
+                "sys.argv = sys.argv[1:]; "
+                "runpy.run_path(sys.argv[0], run_name='__main__')",
+                str(helper), argument,
+            ],
+            cwd="/",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+    # Positive control: these real sibling imports created the root-owned files
+    # in the failed release. No root authority or Docker operations are needed.
+    assert run([]).returncode == 0
+    cache = tmp_path / "__pycache__"
+    assert {path.name.split(".")[0] for path in cache.iterdir()} == {
+        Path(name).stem for name in modules[1:]
+    }
+    for path in cache.iterdir():
+        path.unlink()
+    cache.rmdir()
+
+    options = list(_privileged_python_options())
+    assert options  # Keep the subprocess coverage non-vacuous.
+    for prefix in options:
+        result = run(prefix)
+        assert result.returncode == 0, result.stderr
+        assert not cache.exists()
+        failed = run(prefix, "--not-a-valid-reclaim-option")
+        assert failed.returncode != 0
+        assert not cache.exists()
+    assert {path.name for path in tmp_path.iterdir()} == set(modules)
 
 
 def test_builder_daemons_recover_before_any_docker_inventory():

@@ -515,11 +515,80 @@ def _verified_invocation(args: argparse.Namespace, state: dict[str, Any]) -> str
     return owner_invocation
 
 
+def _inspect_retained_slot(args: argparse.Namespace) -> dict[str, Any]:
+    """Bind only regular canonical receipts; never discover or adopt a process."""
+    root = args.runtime_root.resolve()
+    if args.runtime_root.is_symlink() or not _RESTART_INVOCATION.fullmatch(args.owner):
+        raise OwnershipError("retained slot authority is invalid")
+    tree, owner, components = None, None, {}
+    for component in ("driver", "edge", "api"):
+        path = root / f"{component}-slot{args.slot}-process.json"
+        if not path.exists() and not path.is_symlink():
+            continue
+        # Read only enough schema to select the exact expected cwd. The
+        # existing no-follow reader checks ownership, mode and stable bytes.
+        metadata = os.lstat(path)
+        _require_verify_file(metadata, path)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+        try:
+            raw = os.read(descriptor, MAX_VERIFY_STATE_BYTES + 1)
+        finally:
+            os.close(descriptor)
+        if len(raw) > MAX_VERIFY_STATE_BYTES:
+            raise OwnershipError("retained receipt exceeds limit")
+        selected = json.loads(raw)
+        cwd = selected.get("cwd") if isinstance(selected, dict) else None
+        if (not isinstance(cwd, str) or not re.fullmatch(
+                re.escape(str(root / f"slot{args.slot}-")) + r"[0-9a-f]{40}", cwd)
+                or Path(cwd).is_symlink() or not Path(cwd).is_dir()):
+            raise OwnershipError("retained slot source differs")
+        if tree is not None and cwd != tree:
+            raise OwnershipError("retained slot receipts name mixed source")
+        tree = cwd
+        command = [args.python_bin, "-B", "-u", "scripts/run_lab_arena_service.py",
+                   "--environment-file", args.environment_file]
+        if component == "driver":
+            command += ["--driver-only"]
+        elif component == "api":
+            command += ["--host", "127.0.0.1", "--port", str(8792 if args.slot == 0 else 8794), "--no-driver"]
+        else:
+            command[3] = "scripts/run_arena_proxy_edge.py"
+            command += ["--port", str(8890 if args.slot == 0 else 8891),
+                        "--sidecar-port", str(8792 if args.slot == 0 else 8794)]
+        expected = _expected_identity(argv=command, cwd=cwd, uid=args.uid)
+        verified_raw, state = _read_verify_state(path, expected)
+        if raw != verified_raw:
+            raise OwnershipError("retained slot receipt changed during inspection")
+        process = _read_process(state["pid"])
+        if process is not None and process["state"] != "Z":
+            if not _same_process(process, state):
+                raise OwnershipError("retained process identity changed")
+            invocation = _verified_invocation(argparse.Namespace(
+                process_argv=command, cwd=cwd, uid=args.uid, release_sha=cwd[-40:]), state)
+            if owner is not None and invocation != owner:
+                raise OwnershipError("retained slot release owners differ")
+            owner = invocation
+        elif (_active_group_members(state["pgid"])
+              or _matching_processes(argv=command, cwd=cwd, uid=args.uid)):
+            raise OwnershipError("retained leader exited with unowned members")
+        components[component] = hashlib.sha256(raw).hexdigest()
+    return {"tree": tree, "sha": tree[-40:] if tree else None,
+            "owner": owner or args.owner, "components": components}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Record, verify, or stop one exact detached process group"
     )
     actions = parser.add_subparsers(dest="action", required=True)
+    retained = actions.add_parser("inspect-retained-slot", help="read-only exact old-slot receipt proof")
+    retained.add_argument("--runtime-root", type=Path, required=True)
+    retained.add_argument("--slot", type=int, choices=(0, 1), required=True)
+    retained.add_argument("--uid", type=int, required=True)
+    retained.add_argument("--python-bin", required=True)
+    retained.add_argument("--environment-file", required=True)
+    retained.add_argument("--owner", required=True)
     for action in ("record", "stop", "verify", "verify-invocation"):
         command = actions.add_parser(
             action,
@@ -547,6 +616,13 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = _parser().parse_args()
+    if args.action == "inspect-retained-slot":
+        try:
+            print(json.dumps(_inspect_retained_slot(args), sort_keys=True))
+            return 0
+        except (OwnershipError, OSError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
     if args.process_argv[:1] == ["--"]:
         args.process_argv = args.process_argv[1:]
     if not args.process_argv:

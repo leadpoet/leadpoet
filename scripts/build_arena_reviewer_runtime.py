@@ -11,6 +11,9 @@ repairs to frozen source. A separate exact-source option repairs explicit
 first-party legal/brand identity and same-origin Organization URL resolution.
 Another normalizes the existing typed LinkedIn source-blocked diagnostic.
 An optional auxiliary-source correction enforces the existing reviewer's name binding.
+Another explicit option permits one existing identity repair when an unproved
+web LinkedIn conflict also changes the observed name.
+An observed-locator option adds only single-decoded ampersand company slugs.
 No option imports today's complete grading implementation.
 """
 from __future__ import annotations
@@ -156,6 +159,8 @@ def extract_frozen_sources(
     bound_homepage_legal_alias: bool = False,
     archive_snapshot_https: bool = False,
     auxiliary_source_name_binding: bool = False,
+    homepage_linkedin_conflict_repair: bool = False,
+    observed_linkedin_ampersand: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -164,11 +169,12 @@ def extract_frozen_sources(
         if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
-                or bound_homepage_legal_alias or auxiliary_source_name_binding):
+                or bound_homepage_legal_alias or auxiliary_source_name_binding
+                or homepage_linkedin_conflict_repair):
             names += (FINALITY_FILE,)
         if authenticated_page_refusal:
             names += (VERIFICATION_FILE,)
-        if bound_homepage_legal_alias:
+        if bound_homepage_legal_alias or observed_linkedin_ampersand:
             names += BOUND_IDENTITY_FILES
         if archive_snapshot_https:
             names += (ARCHIVE_FILE,)
@@ -199,6 +205,8 @@ def expected_overlay(
     rejected_final_packet: bool = False,
     source_blocked_alias: bool = False,
     auxiliary_source_name_binding: bool = False,
+    homepage_linkedin_conflict_repair: bool = False,
+    observed_linkedin_ampersand: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
@@ -209,11 +217,12 @@ def expected_overlay(
     if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
-                or bound_homepage_legal_alias or auxiliary_source_name_binding):
+                or bound_homepage_legal_alias or auxiliary_source_name_binding
+                or homepage_linkedin_conflict_repair):
         expected.add(FINALITY_FILE)
     if authenticated_page_refusal:
         expected.add(VERIFICATION_FILE)
-    if bound_homepage_legal_alias:
+    if bound_homepage_legal_alias or observed_linkedin_ampersand:
         expected.update(BOUND_IDENTITY_FILES)
     if archive_snapshot_https:
         expected.add(ARCHIVE_FILE)
@@ -224,9 +233,10 @@ def expected_overlay(
     if (complete_negative_finality or source_access_denied
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
-                or bound_homepage_legal_alias or auxiliary_source_name_binding):
+                or bound_homepage_legal_alias or auxiliary_source_name_binding
+                or homepage_linkedin_conflict_repair):
         files[FINALITY_FILE] = original[FINALITY_FILE]
-    if bound_homepage_legal_alias:
+    if bound_homepage_legal_alias or observed_linkedin_ampersand:
         files.update({name: original[name] for name in BOUND_IDENTITY_FILES})
     if complete_negative_finality:
         from scripts.arena_reviewer_finality_seam import convert_finality_seam
@@ -294,6 +304,18 @@ def expected_overlay(
             convert_auxiliary_source_name_seam,
         )
         files[FINALITY_FILE] = convert_auxiliary_source_name_seam(files[FINALITY_FILE])
+    if homepage_linkedin_conflict_repair:
+        from scripts.arena_reviewer_homepage_linkedin_conflict_seam import (
+            convert_homepage_linkedin_conflict_seam,
+        )
+        files[FINALITY_FILE] = convert_homepage_linkedin_conflict_seam(files[FINALITY_FILE])
+    if observed_linkedin_ampersand:
+        from scripts.arena_reviewer_observed_linkedin_ampersand_seam import (
+            convert_observed_linkedin_ampersand_files,
+        )
+        files.update(convert_observed_linkedin_ampersand_files(
+            {name: files[name] for name in BOUND_IDENTITY_FILES},
+        ))
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
             raise CompositionError("runtime source must not be a symlink")
@@ -368,6 +390,14 @@ def main() -> int:
         "--auxiliary-source-name-binding", action="store_true",
         help="omit optional auxiliary context rejected by the existing exact-name rule; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--homepage-linkedin-conflict-repair", action="store_true",
+        help="reach existing identity repair for an unproved same-domain LinkedIn conflict; use the same option for --verify-image",
+    )
+    parser.add_argument(
+        "--observed-linkedin-ampersand", action="store_true",
+        help="route only reviewed observed ampersand company locators; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     if args.numeric_profile_legal_self_name and not args.bound_homepage_legal_alias:
         raise CompositionError("numeric self-name requires the reviewed legal alias repair")
@@ -403,6 +433,10 @@ def main() -> int:
                if args.authenticated_page_refusal else {}),
             **({"auxiliary_source_name_binding": True}
                if args.auxiliary_source_name_binding else {}),
+            **({"homepage_linkedin_conflict_repair": True}
+               if args.homepage_linkedin_conflict_repair else {}),
+            **({"observed_linkedin_ampersand": True}
+               if args.observed_linkedin_ampersand else {}),
         )
         files = expected_overlay(
             original, complete_negative_finality=args.complete_negative_finality,
@@ -420,6 +454,8 @@ def main() -> int:
             archive_snapshot_https=args.archive_snapshot_https,
             **({"source_blocked_alias": True} if args.source_blocked_alias else {}),
             auxiliary_source_name_binding=args.auxiliary_source_name_binding,
+            homepage_linkedin_conflict_repair=args.homepage_linkedin_conflict_repair,
+            observed_linkedin_ampersand=args.observed_linkedin_ampersand,
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
@@ -438,6 +474,8 @@ def main() -> int:
             + ("-single-tool-repair" if args.single_tool_protocol_repair else "")
             + ("-rejected-final-packet" if args.rejected_final_packet else "")
             + ("-auxiliary-name-binding" if args.auxiliary_source_name_binding else "")
+            + ("-homepage-linkedin-conflict" if args.homepage_linkedin_conflict_repair else "")
+            + ("-observed-linkedin-ampersand" if args.observed_linkedin_ampersand else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -506,6 +544,12 @@ def main() -> int:
         if args.auxiliary_source_name_binding:
             from scripts.arena_reviewer_auxiliary_source_name_seam import CORRECTION_ID as AUXILIARY_NAME_CORRECTION_ID
             corrections.append(AUXILIARY_NAME_CORRECTION_ID)
+        if args.homepage_linkedin_conflict_repair:
+            from scripts.arena_reviewer_homepage_linkedin_conflict_seam import CORRECTION_ID as HOMEPAGE_LINKEDIN_CONFLICT_CORRECTION_ID
+            corrections.append(HOMEPAGE_LINKEDIN_CONFLICT_CORRECTION_ID)
+        if args.observed_linkedin_ampersand:
+            from scripts.arena_reviewer_observed_linkedin_ampersand_seam import CORRECTION_ID as OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID
+            corrections.append(OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID)
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,

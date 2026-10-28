@@ -13,7 +13,9 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
-from gateway.qualification.models import candidate_linkedin_prompt_slug
+from gateway.qualification.models import (
+    candidate_linkedin_prompt_slug, canonical_candidate_prompt_url,
+)
 from lab_arena.scoring_provider_compat import (
     CompatibilityResponseError,
     _firecrawl_response,
@@ -27,7 +29,7 @@ from qualification.employee_buckets import LINKEDIN_EMPLOYEE_BUCKETS
 from qualification.company_quality import canonical_us_state
 from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.company_fit_decision import (
-    _company_name, verified_homepage_brand_name,
+    _company_name, observed_linkedin_ampersand_slug, verified_homepage_brand_name,
 )
 
 
@@ -205,7 +207,24 @@ def linkedin_company_page_slug(value: Any) -> str:
         )
         parsed = urlsplit(str(value))
     except (TypeError, ValueError):
-        return ""
+        # An independently observed company locator may contain an ampersand.
+        # Keep the miner prompt grammar unchanged; validate the full URL before
+        # admitting this one separately bounded, single-decoded component.
+        try:
+            canonical_candidate_prompt_url(value, "employee_size_evidence_url")
+            parsed = urlsplit(value)
+            host = str(parsed.hostname or "").casefold()
+            parts = [part for part in parsed.path.split("/") if part]
+            if (
+                not (host == "linkedin.com" or host.endswith(".linkedin.com"))
+                or len(parts) != 2 or parts[0].casefold() != "company"
+            ):
+                return ""
+            slug = observed_linkedin_ampersand_slug(parts[1])
+            if not slug:
+                return ""
+        except (TypeError, ValueError):
+            return ""
     parts = [part for part in parsed.path.split("/") if part]
     if len(parts) != 2 or parts[0].casefold() != "company":
         return ""

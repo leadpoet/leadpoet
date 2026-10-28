@@ -51,6 +51,7 @@ from qualification.scoring.company_fit_decision import (
     company_fit_mismatch,
     company_fit_unavailable,
     evaluate_company_identity,
+    observed_linkedin_ampersand_slug,
     _company_name,
 )
 
@@ -571,6 +572,9 @@ def _canonical_linkedin_company_url(value: str) -> str:
     ):
         return ""
     slug = parts[1].casefold()
+    ampersand_slug = observed_linkedin_ampersand_slug(slug)
+    if ampersand_slug:
+        return f"https://www.linkedin.com/company/{ampersand_slug}"
     if not re.fullmatch(r"[a-z0-9][a-z0-9._%+-]{0,99}", slug):
         return ""
     return f"https://www.linkedin.com/company/{slug}"

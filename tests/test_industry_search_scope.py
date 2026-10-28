@@ -73,7 +73,7 @@ def test_domain_filter_survives_native_broker_and_preserves_billing(monkeypatch,
     wire = json.loads(transport.sent[0]['body'])
     assert wire['payload']['includeDomains'] == ['coreworks.ai']
     assert wire['payload']['numResults'] == (10 if source_text else investigator.MAX_SEARCH_RESULTS)
-    assert wire['payload']['type'] == ('deep' if source_text else 'auto')
+    assert wire['payload']['type'] == 'auto'
     if source_text:
         assert wire['payload']['contents'] == {'text':{'maxCharacters':24000},'maxAgeHours':0}
         assert result['_source_pages'] == {'https://coreworks.ai/project':'Coreworks supplies this service.'}

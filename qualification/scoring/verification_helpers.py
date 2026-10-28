@@ -393,6 +393,19 @@ def visible_html_text(
     )[0]
 
 
+def visible_html_body_empty(content: str) -> bool:
+    """Detect HTML metadata without visible body content, without a length rule."""
+    class BodyParser(_VisibleHTMLTextParser):
+        _HIDDEN_ELEMENTS = _VisibleHTMLTextParser._HIDDEN_ELEMENTS | {'head', 'title'}
+
+    hidden_classes, hidden_ids = _css_hidden_selectors(content)
+    parser = BodyParser(hidden_classes=hidden_classes, hidden_ids=hidden_ids,
+                        include_scroll_reveal=True)
+    parser.feed(content)
+    parser.close()
+    return not any(part.strip() for part in parser.parts)
+
+
 def visible_html_dialog_only(content: str) -> bool:
     """Detect a rendered dialog with no visible body text outside it.
 

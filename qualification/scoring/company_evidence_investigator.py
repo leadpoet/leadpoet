@@ -71,6 +71,7 @@ from qualification.scoring.linkedin_company_size import (
 )
 from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.verification_helpers import (
+    visible_html_body_empty,
     visible_html_dialog_only,
     visible_html_link_labels,
     visible_html_links,
@@ -1035,6 +1036,12 @@ def _is_known_provider_diagnostic_only(value: str) -> bool:
 
 def _plain_text(value: str) -> str:
     if _is_known_binary_document(value):
+        return ""
+    if (os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
+            and visible_html_body_empty(value)):
+        # A 200 response can contain a title but an empty body. Do not retain
+        # metadata as a successful source; the existing exact-URL recovery
+        # handles this as empty_page within the same read and time limits.
         return ""
     linked_urls = " ".join(
         match.rstrip("'\"<>.,)")
@@ -2493,8 +2500,10 @@ async def _search_web(
     if read_source_text and not (discovery_highlights and include_domains):
         raise ValueError('source text requires scoped industry discovery')
     result_limit = MAX_INDUSTRY_SEARCH_RESULTS if discovery_highlights else MAX_SEARCH_RESULTS
-    payload = {"query": query[:500], "type": "deep" if read_source_text else "auto",
-               "numResults": result_limit}
+    # The shared investigator already performs the reasoning. Use ordinary
+    # retrieval for its source query so provider-side deep research does not
+    # consume the page-read window; retain the same fresh full-text contents.
+    payload = {"query": query[:500], "type": "auto", "numResults": result_limit}
     if read_source_text:
         payload['contents'] = {'text': {'maxCharacters': MAX_PAGE_CHARACTERS}, 'maxAgeHours': 0}
     elif discovery_highlights:

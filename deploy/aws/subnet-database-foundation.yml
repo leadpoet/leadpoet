@@ -27,6 +27,10 @@ Parameters:
       - db.m7g.large
       - db.m7g.xlarge
       - db.r7g.large
+  GatewaySecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Default: sg-054d94a992866f520
+    Description: Existing Arena gateway; the only application database client.
   MultiAZ:
     Type: String
     Default: 'false'
@@ -86,7 +90,7 @@ Resources:
     Properties:
       GroupDescription: Arena migration DB - no ingress until restore access is reviewed
       VpcId: !Ref VpcId
-      # No ingress. An explicit loopback-only egress replaces the default allow-all.
+      # Gateway ingress is managed separately below. Outbound stays closed.
       SecurityGroupEgress:
         - IpProtocol: '-1'
           CidrIp: 127.0.0.1/32
@@ -101,6 +105,16 @@ Resources:
       Family: postgres17
       Parameters:
         rds.force_ssl: '1'
+        rds.logical_replication: '1'
+  DatabaseGatewayIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref GatewaySecurityGroupId
+      Description: Arena gateway PostgREST and controlled migration access
   Database:
     Type: AWS::RDS::DBInstance
     DeletionPolicy: Retain

@@ -5007,8 +5007,7 @@ async def investigate_company_evidence(
                     'If industry facts remain unsupported after reading the loaded sources, '
                     'one unused fetch call may instead fund one additional search_web call. '
                     'Ask for the remaining supplied capability or customer role. This extra '
-                    'search uses another index for company-bound source locators when a '
-                    'subsequent fetch remains; otherwise it reads company-bound full text. '
+                    'search reads company-bound full text from a second index. '
                     'A locator or search answer is never evidence. It replaces a fetch; '
                     'the total search plus fetch limit and research deadline do not increase.'
                 )
@@ -5036,9 +5035,11 @@ async def investigate_company_evidence(
                     + industry_research_brief['research_query'].strip()
                 )[:500]
                 search_calls += 1
-                industry_discovery = await _search_web(
-                    session, query, key=exa_key, discovery_highlights=True,
-                    read_source_text=True,
+                # Discover locators before spending the short research window
+                # expanding many search-result bodies. The existing researcher
+                # selects and fetches proof; only the final review decides fit.
+                industry_discovery = await _search_industry_locators(
+                    session, query, key=openrouter_key, company_locator=company_locator,
                     include_domains=tuple(sorted(
                         domain for domain in first_party_domains
                         if _independently_bound_first_party_url(
@@ -5046,45 +5047,10 @@ async def investigate_company_evidence(
                         )
                     )),
                 )
-                # These are provider-returned full bodies on independently
-                # bound company domains, with the same freshness request as
-                # the exact-URL reader. Keep them in existing source storage.
-                # Preserve any directly fetched body/redirect already present.
-                industry_discovery_added_source = False
-                for url, text in industry_discovery.pop('_source_pages', {}).items():
-                    if _independently_bound_first_party_url(url, first_party_domains, identity_anchor):
-                        industry_discovery_added_source |= url not in fetched_pages
-                        fetched_pages.setdefault(url, text)
-                        fetched_final_urls.setdefault(url, url)
                 input_document['server_industry_discovery'] = industry_discovery
                 input_document['investigation_limits']['remaining_search_calls'] = (
                     MAX_SEARCH_CALLS - search_calls
                 )
-                if (industry_discovery_added_source and reasoning_turn_limit > 2
-                        and time.monotonic() - started < ADMISSION_DEADLINE_SECONDS
-                        - JUDGMENT_ADMISSION_RESERVE_SECONDS):
-                    # Discovery changed the proof, so the original gap list is
-                    # stale. Reassess it before the shared researcher chooses
-                    # another source. Charge this to the existing turn limit;
-                    # do not add searches, fetches or time to the investigation.
-                    refreshed, refresh_failure, refresh_calls = await _review_industry_sources(
-                        session, research=True, **industry_review_arguments)
-                    industry_review_calls += refresh_calls
-                    reasoning_turn_limit -= refresh_calls
-                    input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
-                    if not refresh_failure:
-                        initial_industry = refreshed
-                        refreshed_review = refreshed['_industry_review']
-                        industry_research_brief.update({key: refreshed_review[key]
-                            for key in ('decision', 'missing_requirements', 'reason',
-                                        'packet_sha256', 'source_urls', 'research_query')
-                            if key in refreshed_review})
-                        industry_research_brief['refreshed_after_discovery'] = True
-                    else:
-                        # This assessment is advisory. Keep the prior gaps on
-                        # malformed output; the final grounded review remains
-                        # mandatory. Transport/billing errors still propagate.
-                        industry_research_brief['advisory_failure_reason'] = refresh_failure
 
             def industry_search_exchange():
                 """Use the same remaining allowance for disclosure and admission."""
@@ -6519,9 +6485,6 @@ async def investigate_company_evidence(
                         else:
                             search_calls += 1
                             search_options = {}
-                            alternative_locators = bool(
-                                exchange_fetch_for_search and fetch_call_limit - fetch_calls >= 2
-                            )
                             if exchange_fetch_for_search:
                                 fetch_call_limit -= 1
                                 search_options.update(discovery_highlights=True,
@@ -6535,16 +6498,9 @@ async def investigate_company_evidence(
                                         identity_anchor,
                                     )
                                 ))
-                            if alternative_locators:
-                                tool_result = await _search_industry_locators(
-                                    session, query.strip(), key=openrouter_key,
-                                    company_locator=company_locator, include_domains=exchange_domains,
-                                )
-                                tool_result['industry_locator_fallback_used'] = True
-                            else:
-                                tool_result = await _search_web(
-                                    session, query.strip(), key=exa_key, **search_options
-                                )
+                            tool_result = await _search_web(
+                                session, query.strip(), key=exa_key, **search_options
+                            )
                             if exchange_fetch_for_search:
                                 for source_url, body in tool_result.pop('_source_pages', {}).items():
                                     if (len(fetched_pages) >= industry_classification.MAX_PAGES

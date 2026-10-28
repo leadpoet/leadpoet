@@ -12,7 +12,8 @@ from tests.test_company_evidence_refusal_fallback import _install_loop, FEATURES
 MODEL = 'openai/gpt-6.1-sol'
 
 
-def install(monkeypatch, *, decision='match', missing=None, mutation=None, **kwargs):
+def install(monkeypatch, *, decision='match', missing=None, mutation=None,
+            locator_transport=False, **kwargs):
     finding = kwargs.pop('finding', _finding('industry'))
     run, calls, clock = _install_loop(
         monkeypatch, target='industry', status=200,
@@ -22,6 +23,15 @@ def install(monkeypatch, *, decision='match', missing=None, mutation=None, **kwa
     monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', MODEL)
     original = c._post_json
     review_calls = []
+
+    if not locator_transport:
+        # These loop fixtures share an offline search stub. Real Sonar request
+        # parsing and source admission are exercised by the discovery tests.
+        async def locators(session, query, *, key, company_locator, include_domains):
+            result = await c._search_web(session, query, key=key,
+                discovery_highlights=True, include_domains=include_domains)
+            return {k: v for k, v in result.items() if k != '_source_pages'}
+        monkeypatch.setattr(c, '_search_industry_locators', locators)
 
     async def post(session, url, *, headers, payload):
         if 'response_format' not in payload:

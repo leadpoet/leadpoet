@@ -87,7 +87,7 @@ class IntegrityHarness(fixtures.Harness):
         # Separate DB fixtures must never reuse a sealed object namespace.
         with closing(self.connect()) as connection, connection.cursor() as cursor:
             cursor.execute("SELECT pg_postmaster_start_time()::text")
-            identity = str(connection.info.port) + cursor.fetchone()[0]
+            identity = ":".join((str(connection.info.port), connection.info.dbname, cursor.fetchone()[0]))
         return "integrity-round-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
     def build_service(self):

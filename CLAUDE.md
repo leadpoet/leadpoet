@@ -1,3 +1,14 @@
+## Scoped authorization: October 27 Docker storage lifecycle
+
+The user authorized tracing and fixing accumulated Docker data on the gateway,
+reclaiming only proven-unused data, and testing, merging and deploying the
+smallest durable change through the existing lifecycle and canonical release
+path. Preserve active containers and builds, all retained images needed for
+current execution, recovery and rollback, accepted scoring and concurrent work.
+Do not expand storage or EC2 size, lower the 18 GB guard, or add a new cleanup
+system. The coordinator owns production actions; implementation agents may
+commit only. Require independent safety review and live before/after evidence.
+
 ## Scoped authorization: October 26 verifier accuracy audit
 
 The user authorized the independent October 26 verifier audit, narrow proven

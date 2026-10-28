@@ -462,6 +462,7 @@ def test_numeric_homepage_alias_rejects_unreviewed_identity_bypass(fault):
 
 
 def test_numeric_homepage_alias_builder_flag_and_receipt(monkeypatch, capsys):
+    monkeypatch.setattr(composer, '_managed_docker_host', lambda: False)
     import json
     from scripts import arena_reviewer_structured_homepage_alias_seam as seam
     sources = _numeric_alias_sources()

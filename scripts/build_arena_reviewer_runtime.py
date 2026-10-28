@@ -20,10 +20,12 @@ No option imports today's complete grading implementation.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import gzip
 import hashlib
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -48,6 +50,88 @@ BRAND_IDENTITY_FILES = (FINALITY_FILE, "qualification/scoring/company_fit_decisi
 ENTRYPOINT_FILES = ("lab_arena/scorer_entrypoint.py", "scorer_entrypoint.py")
 RUNTIME_DIRECTORY = "arena_reviewer_runtime"
 MAX_OVERLAY_BYTES = 4 * 1024 * 1024
+
+
+def _managed_docker_host() -> bool:
+    return sys.platform.startswith("linux") and bool(
+        os.environ.get("LEADPOET_DOCKER_OPERATION_LOCK_FILE")
+        or Path("/home/ec2-user/.config/leadpoet").is_dir()
+    )
+
+
+def _require_managed_docker_locks() -> None:
+    if os.environ.get("LEADPOET_DOCKER_OPERATION_LOCK_HELD") != "1":
+        # Let the existing shell contract acquire both locks. Preserve open
+        # inherited lock descriptors through this one managed-host re-exec.
+        descriptors = []
+        for descriptor in (7, 8):
+            try:
+                os.fstat(descriptor)
+            except OSError:
+                continue
+            descriptors.append(descriptor)
+        result = subprocess.run([
+            "bash", "-c",
+            'set -euo pipefail; . "$1"; shift; '
+            'leadpoet_acquire_docker_operation_lock_v2 >&2; exec "$@"',
+            "arena-reviewer-build",
+            str(ROOT / "validator_tee/scripts/docker_operation_lock_v2.sh"),
+            sys.executable, str(Path(__file__).resolve()), *sys.argv[1:],
+        ], cwd=ROOT, pass_fds=tuple(descriptors))
+        raise SystemExit(result.returncode)
+
+    from validator_tee.host.docker_zero_runtime_reconciler_v2 import (
+        DockerZeroRuntimeReconcilerV2Error,
+        verify_docker_operation_locks_v2,
+    )
+    try:
+        if os.environ.get("LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_HELD") != "1":
+            raise CompositionError("managed build requires both Docker locks")
+        verify_docker_operation_locks_v2(
+            lock_file=Path(os.environ["LEADPOET_DOCKER_OPERATION_LOCK_FILE"]),
+            admission_lock_file=Path(os.environ["LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_FILE"]),
+            owner_pid=os.getpid(),
+        )
+    except (KeyError, DockerZeroRuntimeReconcilerV2Error) as exc:
+        raise CompositionError("managed build Docker locks are not held") from exc
+
+
+@contextmanager
+def _managed_build_images(*, publish: bool, verify_only: bool):
+    if not _managed_docker_host():
+        yield
+        return
+    _require_managed_docker_locks()
+    subprocess.run([
+        sys.executable, str(ROOT / "validator_tee/host/docker_operation_guard_v2.py"),
+        "--wait", "--timeout-seconds", "1800", "--interval-seconds", "3",
+    ], check=True, stdout=sys.stderr, pass_fds=(7, 8))
+    if verify_only:
+        yield
+        return
+    with tempfile.TemporaryDirectory(prefix="arena-reviewer-images-") as directory:
+        inventory = str(Path(directory) / "images.txt")
+        helper = str(ROOT / "validator_tee/scripts/reclaim_release_build_images_v2.sh")
+        subprocess.run(["bash", helper, "snapshot", inventory], check=True,
+                       stdout=sys.stderr, pass_fds=(7, 8))
+        failed = False
+        try:
+            yield
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            try:
+                # A successful non-push build intentionally retains its image.
+                if publish or failed:
+                    subprocess.run(["bash", helper, "cleanup", inventory], check=True,
+                                   stdout=sys.stderr, pass_fds=(7, 8))
+                subprocess.run(["docker", "builder", "prune", "--all", "--force"],
+                               check=True, stdout=sys.stderr, pass_fds=(7, 8))
+            except (OSError, subprocess.SubprocessError) as exc:
+                print("ERROR: reviewer build cleanup failed", file=sys.stderr)
+                if not failed:
+                    raise CompositionError("reviewer build cleanup failed") from exc
 
 
 class CompositionError(ValueError):
@@ -428,6 +512,11 @@ def main() -> int:
     revision = checked_output(["git", "rev-parse", "HEAD"], cwd=ROOT)
     if args.push and checked_output(["git", "status", "--porcelain"], cwd=ROOT):
         raise CompositionError("publishing requires a clean committed checkout")
+    with _managed_build_images(publish=args.push, verify_only=bool(args.verify_image)):
+        return _build_runtime(args, match, revision)
+
+
+def _build_runtime(args: argparse.Namespace, match: re.Match[str], revision: str) -> int:
     base = image_inspect(args.grading_image)
     if base.get("Architecture") != "amd64" or base.get("Os") != "linux":
         raise CompositionError("grading image must be linux/amd64")
@@ -599,3 +688,5 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except (CompositionError, ValueError) as exc:
         raise SystemExit(str(exc)) from None
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(exc.returncode) from None

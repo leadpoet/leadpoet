@@ -1,3 +1,23 @@
+## Scoped authorization: October 28 AWS production database migration
+
+The user explicitly authorized completing the subnet Supabase-to-AWS migration,
+including narrow CI fixes, API/client compatibility tests, final synchronization,
+tested rollback, safe merges, deployment and controlled production cutover.
+Use account 493765492819, us-east-1, and the dedicated subnet destination.
+This replaces the completed foundation/rehearsal stage limits for this task.
+Preserve all source data and SOURCE_ADD history, accepted work, provider billing,
+scoring, promotion, rewards, weight recovery and concurrent work. Use the smallest
+existing-code changes; do not add an accounting system or compatibility framework.
+The coordinator owns source/AWS writes, writer drain/fencing, exact migrations,
+canonical gateway/normal-validator restarts and live verification. Internal
+agents may implement in isolated worktrees or review read-only; they must not
+write to production. Independently review data transfer, authorization and
+rollback before activation. Do not bypass tests or canonical release gates.
+Keep current production authoritative until data integrity, client compatibility
+and rollback pass. A failed critical check leaves the current system serving.
+Do not delete Supabase source data, the verified backup or rollback evidence.
+This scope ends after the AWS production flow and durable outcomes are verified.
+
 ## Scoped authorization: October 28 AWS restore rehearsal
 
 The user asked the coordinating agent to take ownership and continue the staged

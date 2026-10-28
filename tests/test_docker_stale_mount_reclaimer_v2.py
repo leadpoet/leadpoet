@@ -1110,3 +1110,22 @@ def test_refuses_non_overlay_mount_below_stale_directory(tmp_path: Path) -> None
             runner=fixture,
             expected_root=fixture.root,
         )
+
+
+@pytest.mark.parametrize('phase', ['before-unmount', 'before-delete'])
+def test_reclaim_rechecks_complete_inventory_before_mutation(tmp_path, monkeypatch, phase):
+    from dataclasses import replace
+    import validator_tee.host.docker_stale_mount_reclaimer_v2 as module
+    fixture = _DockerFixture(tmp_path / 'docker')
+    original = module._inventory
+    reads = []
+    def inventory(**kwargs):
+        value = original(**kwargs)
+        reads.append(value)
+        target = 2 if phase == 'before-unmount' else 3
+        return replace(value, active_manifest_hash='changed') if len(reads) == target else value
+    monkeypatch.setattr(module, '_inventory', inventory)
+    with pytest.raises(module.DockerStaleMountReclaimerV2Error, match='inventory changed before stale'):
+        module.reclaim_stale_docker_overlay_mounts_v2(runner=fixture, expected_root=fixture.root)
+    assert len(fixture.unmounted) == (0 if phase == 'before-unmount' else 1)
+    assert (fixture.root / 'image/overlay2/layerdb/sha256' / fixture.stale_chain.removeprefix('sha256:')).is_dir()

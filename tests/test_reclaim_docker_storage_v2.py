@@ -74,7 +74,7 @@ def test_exact_host_gateway_guard_is_rechecked_at_the_stop_boundary():
 
 def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     inventory = SCRIPT.index("inventory_empty_online_runtime()")
-    lane = SCRIPT.index('if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then', inventory)
+    lane = SCRIPT.index('LIVE_CONTAINER_IDS=', inventory)
     offline_image_prune = SCRIPT.index(
         "run_prune_with_retry image docker image prune --all --force",
         lane,
@@ -98,7 +98,14 @@ def test_live_host_gateway_online_lane_is_terminal_and_preserves_images():
     assert 'inventory_empty_online_runtime "post-reclaim"' in source
     assert "docker image prune" not in source
     assert "docker system prune" not in source
-    assert "docker_live_restore_reconciler_v2.py" not in source
+    active_lane, empty_lane = source.split('  inventory_empty_online_runtime "pre-prune"', 1)
+    assert "--reclaim-stale" in active_lane
+    assert 'if [ "$REQUIRE_ZERO_RUNTIME_RECONCILE" = "1" ]' in active_lane
+    assert "docker_live_restore_reconciler_v2.py" not in empty_lane
+    assert "--docker-lock-file" in active_lane
+    assert "--docker-admission-lock-file" in active_lane
+    assert '--docker-lock-owner-pid "$LEADPOET_DOCKER_OPERATION_LOCK_OWNER_PID"' in active_lane
+    assert '"$AVAILABLE" -lt "$LIVE_RUNTIME_MIN_FREE_BYTES"' in active_lane
     assert source.count("--audit-only") == 4
     assert "--docker-lock-file" in reconcile_function
     assert "--docker-admission-lock-file" in reconcile_function
@@ -115,7 +122,7 @@ def test_required_zero_runtime_reconcile_is_strict_and_builder_first():
     )
     acquire = SCRIPT.index("leadpoet_acquire_docker_operation_lock_v2")
     lane = SCRIPT.index(
-        'if [ "$HOST_GATEWAY_LIVE" -eq 1 ]; then',
+        'if [ "$HOST_GATEWAY_LIVE" -eq 1 ] || [ "$ALLOW_LIVE_HOST_GATEWAY_PRUNE" = "1" ]; then',
         SCRIPT.index("inventory_empty_online_runtime()"),
     )
     builder_prune = SCRIPT.index(

@@ -16,6 +16,37 @@ administrator profile is `leadpoet-recovery-console-20261026`; refresh it with
 using `hello@leadpoet.com` (Leadpoet-main root). The `pranav@leadpoet.com` root
 account is separate (`187445349696`). Check STS identity before each write.
 
+The validator credential KMS guard no longer reads AWS credentials from
+`gateway.env`. Run it from the checkout with temporary SSO authority:
+
+```bash
+python3 -m scripts.configure_lab_arena_production --validator-credential-kms-guard --check --allowed-account 493765492819
+```
+
+The default profile is explicitly `leadpoet-lab`. It can inspect this guard but
+cannot change IAM. For an authorized policy change, select the existing temporary
+recovery session with `--aws-profile leadpoet-recovery-console-20261026`,
+`--apply`, and `LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1`. The helper reads the
+approved recovery profile through `aws configure export-credentials` in memory;
+it does not print or save the export. This supports AWS CLI `login_session` with
+the deployed boto3 version. An already-correct policy causes no IAM write.
+
+Recovery requires an AWS CLI that supports `aws login` and its `login_session`
+credentials. Use the existing current CLI installation. Before the guard, run
+`aws --version` and `aws --profile leadpoet-recovery-console-20261026 --region us-east-1 sts get-caller-identity`
+with the same `PATH` that will run the guard. An older CLI earlier in `PATH` can
+report missing credentials even when the current CLI has a valid login session.
+
+For a host with an appropriately permitted EC2 instance role, select
+`--aws-instance-role`. It accepts only the instance metadata credential provider.
+Both options apply only to this guard. The helper rejects inherited AWS authority
+overrides, long-lived credentials, IAM user callers and other accounts. STS and
+IAM clients ignore configured endpoint URLs. The recovery root caller is allowed
+only through the explicit existing recovery profile. No role permissions change.
+Gateway, Arena and canonical restart authentication continue to use their
+existing instance roles. Keep obsolete static keys out of both the cache and its
+authoritative Secrets Manager document.
+
 The live `leadpoet-lab-operator` policy's own-session condition was corrected
 from the literal `${!aws:userid}` to `${aws:userid}`. All other permissions stayed
 unchanged. AWS simulation covered both attached principals, including the IAM

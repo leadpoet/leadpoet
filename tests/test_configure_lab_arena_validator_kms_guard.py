@@ -41,7 +41,7 @@ BEFORE = {
 
 
 class FakeSts:
-    def __init__(self, *, account=MODULE.IAM_ACCOUNT, arn=MODULE.IAM_CALLER_ARN):
+    def __init__(self, *, account=MODULE.IAM_ACCOUNT, arn="arn:aws:sts::493765492819:assumed-role/LabOperator/test"):
         self.account = account
         self.arn = arn
 
@@ -87,12 +87,14 @@ class FakeSession:
         self.iam = iam
         self.sts = sts or FakeSts()
 
-    def client(self, name):
+    def client(self, name, **kwargs):
+        assert kwargs["config"].ignore_configured_endpoint_urls is True
+        assert kwargs["region_name"] == "us-east-1"
         return {"sts": self.sts, "iam": self.iam}[name]
 
 
 def _install(monkeypatch, iam, sts=None):
-    monkeypatch.setattr(MODULE, "_gateway_iam_session", lambda: FakeSession(iam, sts))
+    monkeypatch.setattr(MODULE, "_gateway_iam_session", lambda **_kwargs: FakeSession(iam, sts))
 
 
 def test_read_only_plan_adds_only_exact_deny_and_preserves_existing_statements(
@@ -167,7 +169,7 @@ def test_exact_existing_deny_is_idempotent(monkeypatch):
 
 @pytest.mark.parametrize(
     ("account", "arn"),
-    (("111111111111", MODULE.IAM_CALLER_ARN), (MODULE.IAM_ACCOUNT, "arn:aws:iam::493765492819:user/other")),
+    (("111111111111", "arn:aws:sts::493765492819:assumed-role/LabOperator/test"), (MODULE.IAM_ACCOUNT, "arn:aws:iam::493765492819:user/other")),
 )
 def test_exact_operator_identity_is_required(monkeypatch, account, arn):
     iam = FakeIam()
@@ -234,7 +236,7 @@ def test_cli_defaults_to_plan_and_apply_uses_existing_arena_authorization(
     monkeypatch.setattr(
         MODULE,
         "configure_validator_credential_kms_guard",
-        lambda *, apply: calls.append(apply) or {"ok": True, "applied": apply},
+        lambda *, apply, profile: calls.append(apply) or {"ok": True, "applied": apply},
     )
     assert MODULE.main(
         ["--validator-credential-kms-guard", "--allowed-account", MODULE.IAM_ACCOUNT]
@@ -264,3 +266,38 @@ def test_cli_defaults_to_plan_and_apply_uses_existing_arena_authorization(
         ]
     ) == 2
     assert calls == [False, True]
+
+
+@pytest.mark.parametrize("options,expected", [
+    ([], "leadpoet-lab"),
+    (["--aws-profile", "leadpoet-recovery-console-20261026"], "leadpoet-recovery-console-20261026"),
+    (["--aws-instance-role"], None),
+])
+def test_cli_selects_guard_authority_explicitly(monkeypatch, capsys, options, expected):
+    calls = []
+    monkeypatch.setattr(MODULE, "configure_validator_credential_kms_guard",
+                        lambda **kwargs: calls.append(kwargs) or {"ok": True})
+    assert MODULE.main(["--validator-credential-kms-guard", "--allowed-account", MODULE.IAM_ACCOUNT, *options]) == 0
+    assert calls == [{"apply": False, "profile": expected}]
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("options", [["--aws-profile", "leadpoet-lab"], ["--aws-instance-role"]])
+def test_other_configuration_scopes_reject_aws_authority_options(capsys, options):
+    assert MODULE.main(["--openrouter-max-concurrency", "4", "--allowed-account", MODULE.IAM_ACCOUNT, *options]) == 2
+    assert "require --validator-credential-kms-guard" in capsys.readouterr().err
+
+
+def test_approved_temporary_recovery_root_passes_guard(monkeypatch):
+    iam = FakeIam(MODULE._policy_with_credential_deny(BEFORE)[0])
+    _install(monkeypatch, iam, FakeSts(arn="arn:aws:iam::493765492819:root"))
+    result = MODULE.configure_validator_credential_kms_guard(apply=True, profile="leadpoet-recovery-console-20261026")
+    assert result["changed"] is False and iam.puts == []
+
+
+def test_old_iam_user_cannot_run_guard(monkeypatch):
+    iam = FakeIam()
+    _install(monkeypatch, iam, FakeSts(arn="arn:aws:iam::493765492819:user/pranav-main"))
+    with pytest.raises(MODULE.ConfigurationError, match="identity"):
+        MODULE.configure_validator_credential_kms_guard(apply=True, profile="leadpoet-recovery-console-20261026")
+    assert iam.reads == 0 and iam.puts == []

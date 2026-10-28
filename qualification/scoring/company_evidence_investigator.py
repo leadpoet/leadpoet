@@ -3785,16 +3785,6 @@ async def investigate_company_evidence(
         requested_attribute or ""
     ).strip():
         return {"claims": {}, "failure_reason": "invalid_targets"}
-    # The HQ contract belongs to this invocation's original targets, even
-    # when a later correction submits only another unresolved dimension.
-    system_prompt = (
-        _SYSTEM_PROMPT.replace(
-            'Use verified exact-company LinkedIn headquarters first: quote the identity-bound About\nHeadquarters field or server-fetched "harvestapi_get_company\nlocations.headquarter=true" projection, never generic profile locations.',
-            _LITERAL_HEADQUARTERS_INSTRUCTION,
-            1,
-        )
-        if "geography" in requested_targets else _SYSTEM_PROMPT
-    )
     openrouter_key = str(
         os.environ.get("OPENROUTER_API_KEY")
         or os.environ.get("QUALIFICATION_OPENROUTER_API_KEY")
@@ -4134,6 +4124,36 @@ async def investigate_company_evidence(
             else {}
         ),
     }
+
+    # Describe this private format only when its complete bound record is
+    # already available to quote. Keep one prompt for the original invocation,
+    # including later corrections that shrink the active submit targets.
+    system_prompt = _SYSTEM_PROMPT
+    if "geography" in requested_targets and isinstance(
+        structured_headquarters_evidence, Mapping,
+    ):
+        headquarters = structured_headquarters_evidence
+        headquarters_url = _strict_linkedin_company_profile_url(headquarters.get("url"))
+        if (
+            headquarters_url
+            and _strict_linkedin_company_profile_url(
+                fetched_final_urls.get(headquarters_url)
+            ) == headquarters_url
+            and _quote_occurs(
+                headquarters.get("text"), fetched_pages.get(headquarters_url, ""),
+            )
+            and _bound_structured_headquarters_finding({
+                "evidence_url": headquarters_url,
+                "evidence_quote": headquarters.get("text"),
+                "observed_country": headquarters.get("country"),
+                "observed_state": headquarters.get("state"),
+            }, headquarters, identity_anchor)
+        ):
+            system_prompt = _SYSTEM_PROMPT.replace(
+                'Use verified exact-company LinkedIn headquarters first: quote the identity-bound About\nHeadquarters field or server-fetched "harvestapi_get_company\nlocations.headquarter=true" projection, never generic profile locations.',
+                _LITERAL_HEADQUARTERS_INSTRUCTION,
+                1,
+            )
 
     started = time.monotonic()
     def retained_fetched_pages() -> dict[str, dict[str, str]]:

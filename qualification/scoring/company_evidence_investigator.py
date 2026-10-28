@@ -1759,7 +1759,7 @@ def _complete_verified_first_party_identity(
     domains: set[str],
     identity: Mapping[str, Any],
 ) -> bool:
-    """Bind an unnamed industry quote to one fully verified company identity."""
+    """Bind an unnamed first-party quote to one fully verified company identity."""
 
     domain = _registrable_domain(url)
     identity_domains = (
@@ -1770,6 +1770,34 @@ def _complete_verified_first_party_identity(
     identity_names = tuple(
         _company_name(identity.get(key))
         for key in ("submitted_name", "observed_name", "verified_name")
+    )
+    # Only the host can supply this bounded homepage alias proof. Keep the
+    # observed legal/brand spelling from invalidating an otherwise exact
+    # first-party binding; an ordinary common-name prefix is not alias proof.
+    legal_aliases = identity.get("verified_legal_name_aliases")
+    verified_name = _company_name(identity.get("verified_name"))
+    verified_brand = verified_homepage_brand_name(
+        {
+            "normalized_name": identity.get("verified_name"),
+            "verified_brand_name": identity.get("verified_brand_name"),
+            "verified_legal_name_aliases": legal_aliases,
+        }
+    )
+    verified_alias_names = bool(
+        identity.get("verified_homepage_brand_alias") is True
+        and verified_brand
+        and verified_name
+        and isinstance(legal_aliases, list)
+        and 0 < len(legal_aliases) <= 3
+        and all(
+            isinstance(alias, str) and alias == alias.strip()
+            and 0 < len(alias) <= 200 and _company_name(alias) == verified_name
+            for alias in legal_aliases
+        )
+        and all(
+            name in {verified_name, _company_name(verified_brand)}
+            for name in identity_names
+        )
     )
     submitted_slug = str(
         identity.get("submitted_linkedin_slug") or ""
@@ -1787,7 +1815,7 @@ def _complete_verified_first_party_identity(
         and len(set(identity_domains)) == 1
         and identity_domains[0] == domain
         and all(identity_names)
-        and len(set(identity_names)) == 1
+        and (len(set(identity_names)) == 1 or verified_alias_names)
         and observed_slug
         and observed_slug == verified_slug
         and (not submitted_slug or submitted_slug == verified_slug)
@@ -4105,6 +4133,13 @@ async def investigate_company_evidence(
             (verified_homepage_identity or {}).get("registrable_dns_domain")
         ),
         "verified_name": (verified_homepage_identity or {}).get("normalized_name"),
+        **{
+            key: (verified_homepage_identity or {}).get(key)
+            for key in (
+                "verified_homepage_brand_alias", "verified_brand_name",
+                "verified_legal_name_aliases",
+            )
+        },
         "verified_linkedin_slug": (
             str((verified_homepage_identity or {}).get("linkedin_company_slug") or "")
             or verified_structured_alias_slug

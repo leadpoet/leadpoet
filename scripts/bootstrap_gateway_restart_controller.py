@@ -164,7 +164,8 @@ def _archive(repo: Path, commit: str, root: Path) -> None:
 
 
 def _resume_owner(*, repo: Path, source_commit: str, authority: Path,
-                  invocation: str, timing_dir: Path, environment_file: Path) -> str:
+                  invocation: str, timing_dir: Path, environment_file: Path,
+                  scope: str = "gateway") -> str:
     if not INVOCATION.fullmatch(invocation):
         raise BootstrapError("resume invocation is invalid")
     _owned(timing_dir, 0o700, directory=True)
@@ -223,7 +224,7 @@ def _resume_owner(*, repo: Path, source_commit: str, authority: Path,
         valid = (result.returncode == 0 and state["schema_version"] == "leadpoet.lab_arena.restart_guard_state.v1"
                  and state["guard_present"] is True and state["guard_active"] is True
                  and state["candidate_commit"] == candidate
-                 and state["restart_scope"] == "gateway"
+                 and state["restart_scope"] == scope
                  and state["restart_phase"] == "gateway_destructive"
                  and type(generation) is int and generation > 0
                  and drain["schema_version"] == "leadpoet.lab_arena.restart_drain_state.v1"
@@ -240,7 +241,10 @@ def bootstrap(*, repo: Path, source_commit: str, expected_controller_commit: str
               recovery_lock_file: Path, helper_path: Path,
               bootstrap_parent: Path = Path("/tmp"), resume_invocation: str = "",
               timing_dir: Path = Path("/home/ec2-user/.config/leadpoet/restart-timings"),
-              environment_file: Path = Path("/home/ec2-user/.config/leadpoet/gateway.env")) -> int:
+              environment_file: Path = Path("/home/ec2-user/.config/leadpoet/gateway.env"),
+              paired_restart: bool = False) -> int:
+    if type(paired_restart) is not bool:
+        raise BootstrapError("paired restart must be an explicit boolean")
     if not SHA.fullmatch(source_commit) or not SHA.fullmatch(expected_controller_commit):
         raise BootstrapError("full source and installed controller commits are required")
     for path in (repo, controller_root, host_script, lock_file, recovery_lock_file, helper_path):
@@ -294,7 +298,7 @@ def bootstrap(*, repo: Path, source_commit: str, expected_controller_commit: str
             if resume_invocation:
                 _resume_owner(repo=repo, source_commit=source_commit, authority=authority,
                               invocation=resume_invocation, timing_dir=timing_dir,
-                              environment_file=environment_file)
+                              environment_file=environment_file, scope="all" if paired_restart else "gateway")
             _git(repo, "fetch", "--no-tags", "origin")
             if _git(repo, "rev-parse", "origin/main").decode().strip() != source_commit:
                 raise BootstrapError("origin/main advanced during controller preparation")
@@ -313,6 +317,8 @@ def bootstrap(*, repo: Path, source_commit: str, expected_controller_commit: str
         }
         if resume_invocation:
             environment["GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID"] = resume_invocation
+        if paired_restart:
+            environment["GATEWAY_PAIRED_RESTART"] = "1"
         canonical = subprocess.Popen(["/bin/bash", str(authority / "gw_restart.sh"),
                                       "--commit", source_commit], env=environment, cwd=repo)
         canonical_exit = canonical.wait()
@@ -355,6 +361,7 @@ def main() -> int:
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--expected-controller-commit", required=True)
     parser.add_argument("--resume-invocation", default="")
+    parser.add_argument("--paired-restart", action="store_true", help="retain the all-component guard for the paired coordinator")
     parser.add_argument("--repo-root", type=Path, default=Path("/home/ec2-user/leadpoet_repo"))
     parser.add_argument("--controller-root", type=Path, default=Path("/home/ec2-user/.config/leadpoet/restart-controller/gateway"))
     parser.add_argument("--host-script", type=Path, default=Path("/home/ec2-user/gw_restart.sh"))
@@ -364,6 +371,7 @@ def main() -> int:
     try:
         return bootstrap(repo=args.repo_root, source_commit=args.source_commit,
                          expected_controller_commit=args.expected_controller_commit,
+                         paired_restart=args.paired_restart,
                          controller_root=args.controller_root, host_script=args.host_script,
                          lock_file=args.lock_file, recovery_lock_file=args.recovery_lock_file,
                          resume_invocation=args.resume_invocation,

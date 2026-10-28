@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import os
+import subprocess
 
 import pytest
 
@@ -116,7 +117,10 @@ def originals(with_prior):
                                    if name == 'scorer_entrypoint.py' else name)).read_bytes()
              for name in (builder.GRADER_FILE, *builder.ENTRYPOINT_FILES)}
     if with_prior:
-        files[builder.FINALITY_FILE] = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+        # Prior repair flags apply to the exact historical body they reviewed.
+        files[builder.FINALITY_FILE] = subprocess.check_output([
+            "git", "show", "dbe8a014d2488a25f53649c4f61a48248147c54e:" + builder.FINALITY_FILE,
+        ], cwd=builder.ROOT)
     return files
 
 

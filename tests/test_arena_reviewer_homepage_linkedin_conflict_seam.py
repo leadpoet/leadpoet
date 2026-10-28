@@ -26,8 +26,9 @@ def previous_broad_dispatch():
     return ast.literal_eval(bindings[0])
 
 
-def source_pair():
-    corrected = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+def source_pair(corrected=None):
+    if corrected is None:
+        corrected = (builder.ROOT / builder.FINALITY_FILE).read_bytes()
     original = corrected
     for old, new in ((seam.OLD_DISPATCH, seam.NEW_DISPATCH), (seam.OLD_PROMPT, seam.NEW_PROMPT)):
         assert original.count(new.encode()) == 1
@@ -35,13 +36,13 @@ def source_pair():
     return original, corrected
 
 
-def originals(include_finality=True):
+def originals(include_finality=True, finality_source=None):
     names = [builder.GRADER_FILE, *builder.ENTRYPOINT_FILES]
     files = {name: (builder.ROOT / ('lab_arena/scorer_entrypoint.py'
                                    if name == 'scorer_entrypoint.py' else name)).read_bytes()
              for name in names}
     if include_finality:
-        files[builder.FINALITY_FILE] = source_pair()[0]
+        files[builder.FINALITY_FILE] = source_pair(finality_source)[0]
     return files
 
 
@@ -121,9 +122,15 @@ def test_malformed_ambiguous_or_mixed_source_fails_closed(fault):
                                     {'auxiliary_source_name_binding': True}])
 def test_explicit_option_preserves_other_frozen_bytes_and_options(options):
     prior_needs_finality = bool(options.get('identity_schema_repair') or options.get('auxiliary_source_name_binding'))
-    before = builder.expected_overlay(originals(prior_needs_finality), **options)
-    after = builder.expected_overlay(originals(), **options, homepage_linkedin_conflict_repair=True)
-    assert after[builder.FINALITY_FILE] == source_pair()[1]
+    # The legacy auxiliary correction accepts only its reviewed historical body.
+    # New industry source handling must not be retrofitted into that old image.
+    frozen = (subprocess.check_output([
+        "git", "show", "dbe8a014d2488a25f53649c4f61a48248147c54e:" + builder.FINALITY_FILE,
+    ], cwd=builder.ROOT) if options.get('auxiliary_source_name_binding') else None)
+    before = builder.expected_overlay(originals(prior_needs_finality, frozen), **options)
+    after = builder.expected_overlay(originals(finality_source=frozen), **options,
+                                     homepage_linkedin_conflict_repair=True)
+    assert after[builder.FINALITY_FILE] == source_pair(frozen)[1]
     assert all(after[name] == data for name, data in before.items() if name != builder.FINALITY_FILE)
     assert set(after) == set(before) | {builder.FINALITY_FILE}
     builder.verify_overlay(layer([('model/' + name, data) for name, data in after.items()]), after)

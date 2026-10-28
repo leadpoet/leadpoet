@@ -411,9 +411,11 @@ def _ignored_provider_failure(response, request_body, annotation) -> bool:
                and row.get("step") == "Filter by Allowed Providers"]
     target = [row for row in endpoints if row.get("model") == annotation.get("model_version")
               and row.get("provider") == annotation.get("provider_name")]
+    # The available catalog can include endpoints removed by earlier filters.
+    # All listed endpoints must still explicitly report no selection above.
     return (len(allowed) == 1 and funnel[-1] == allowed[0]
             and type(allowed[0].get("endpoint_count")) is int
-            and allowed[0]["endpoint_count"] == len(target) > 0
+            and 0 < allowed[0]["endpoint_count"] <= len(target)
             and metadata["failed_routing_step"] not in {row.get("step") for row in funnel
                                                        if isinstance(row, Mapping)})
 

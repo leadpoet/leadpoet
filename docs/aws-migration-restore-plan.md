@@ -308,6 +308,15 @@ The verifier accepts only that exact default ACL, with unchanged grantors,
 rights and grant options; it rejects any additional access. A non-NULL initial
 database ACL still requires exact equality. This does not normalize schema,
 table, function or default-privilege ACLs.
+
+Compare column positions as visible ordinals within each relation. PostgreSQL
+keeps physical `attnum` slots for dropped columns; a native dump/restore removes
+those gaps. The verifier must reject invalid, duplicate or decreasing positions
+and duplicate column names. It must preserve the captured column order and all
+other fields. Do not sort columns by name or remove missing/changed columns from
+the comparison. Keep the original manifest and raw target evidence unchanged.
+Record this physical-to-logical position normalization in the verification report.
+
 The existing `aws_subnet_snapshot.py verify-data` operation remains required
 to prove every table's rows and the full stored generated-column values.
 

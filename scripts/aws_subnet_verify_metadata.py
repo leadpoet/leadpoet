@@ -40,6 +40,7 @@ HTTP_DOMAIN_DEPENDENCY = dict(dependent_class="pg_constraint", dependent_type="d
     dependent_schema="public", dependent_name=None,
     dependent_identity="content_type_check on public.content_type", dependency_type="a",
     referenced_kind="type", referenced_identity="public.content_type")
+COLUMN_CANONICALIZATION = "column-position-logical-ordinal-per-relation"
 
 
 def sealed_json(path, digest):
@@ -108,7 +109,7 @@ def canonical_acl(value):
 
 
 def clean_source_metadata(manifest, http_domain_exclusion=None):
-    """Remove export grants and, only with reviewed proof, one HTTP CHECK."""
+    """Canonical source metadata after the exact approved cleanup exceptions."""
     metadata = copy.deepcopy(manifest["schema_metadata"])
     snapshot.require(set(metadata) == set(snapshot.OBJECT_KINDS)
                      and all(isinstance(items, list) for items in metadata.values()), "source-metadata")
@@ -138,10 +139,35 @@ def clean_source_metadata(manifest, http_domain_exclusion=None):
                 allowed |= (category == "relations" and item.get("kind") == "S" and key in sequences and rights == "r")
                 snapshot.require(allowed, "export-acl-scope")
             item["acl"] = dict(is_null=acl["is_null"], items=kept)
-    return metadata
+    return canonical_metadata(metadata)
+
+
+def canonical_columns(records):
+    """Rank visible physical positions without sorting or changing columns."""
+    result = copy.deepcopy(records)
+    snapshot.require(isinstance(result, list), "column-order")
+    seen_relations = set()
+    relation = None
+    for item in result:
+        snapshot.require(isinstance(item, dict) and all(isinstance(item.get(key), str) and item[key]
+                         for key in ("schema", "name", "column")), "column-order")
+        key = item["schema"], item["name"]
+        if key != relation:
+            snapshot.require(key not in seen_relations, "column-order")
+            seen_relations.add(key)
+            relation, previous, ordinal, columns = key, 0, 0, set()
+        position = item.get("position")
+        snapshot.require(type(position) is int and position > previous
+                         and item["column"] not in columns, "column-order")
+        previous = position
+        columns.add(item["column"])
+        ordinal += 1
+        item["position"] = ordinal
+    return result
 
 
 def canonical_metadata(metadata):
+    """Normalize ACL entry order and logical column ordinals on a copy."""
     value = copy.deepcopy(metadata)
     snapshot.require(set(value) == set(snapshot.OBJECT_KINDS), "metadata-categories")
     for records in value.values():
@@ -149,6 +175,7 @@ def canonical_metadata(metadata):
         for item in records:
             if "acl" in item:
                 item["acl"] = canonical_acl(item["acl"])
+    value["columns"] = canonical_columns(value["columns"])
     return value
 
 
@@ -315,6 +342,7 @@ def verify(args):
     counts = {category: len(actual["metadata"][category]) for category in snapshot.OBJECT_KINDS}
     equivalence = database_acl_match(initial, actual)[1]
     report = dict(format=1, status="mismatch" if differences else "match", differences=differences, counts=counts,
+                  canonicalizations=[COLUMN_CANONICALIZATION],
                   applied_equivalences=[equivalence] if equivalence else [],
                   applied_exclusions=[http_domain_exclusion] if http_domain_exclusion else [],
                   manifest_sha256=args.manifest_sha256, archive_sequences_sha256=args.archive_sequences_sha256,

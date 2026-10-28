@@ -83,6 +83,60 @@ def http_proof_fixture(root, manifest, manifest_digest):
 
 
 class MetadataTests(unittest.TestCase):
+    def test_column_ordinals_preserve_visible_order_all_other_fields_and_inputs(self):
+        manifest=manifest_fixture()
+        def column(table,name,position):
+            return dict(schema="public",name=table,column=name,position=position,type="integer",
+                not_null=False,identity="",generated="",default="7",collation=None,
+                acl=dict(is_null=True,items=[]))
+        columns=[column("alpha","a",1),column("alpha","b",6),column("alpha","c",10),
+                 column("beta","a",2),column("beta","b",7)]
+        manifest["schema_metadata"]["columns"]=copy.deepcopy(columns)
+        original=copy.deepcopy(manifest)
+        expected=verify.clean_source_metadata(manifest)
+        self.assertEqual([c["position"] for c in expected["columns"]],[1,2,3,1,2])
+        self.assertEqual(verify.canonical_columns(expected["columns"]),expected["columns"])
+        self.assertEqual(manifest,original)
+        for raw,canonical in zip(columns,expected["columns"]):
+            self.assertEqual({k:v for k,v in raw.items() if k!="position"},
+                             {k:v for k,v in canonical.items() if k!="position"})
+        actual=copy.deepcopy(expected)
+        actual["columns"]=copy.deepcopy(columns)
+        self.assertEqual(verify.canonical_metadata(actual),expected)
+        self.assertEqual(actual["columns"],columns)
+        for key,value in (("column","renamed"),("type","bigint"),("not_null",True),
+                          ("identity","a"),("generated","s"),("default","8"),
+                          ("collation","C"),("acl",dict(is_null=False,items=["anon=r/postgres"]))):
+            changed=copy.deepcopy(expected);changed["columns"][0][key]=value
+            self.assertEqual(restore.compare_metadata(expected,verify.canonical_metadata(changed)),["columns"])
+        # A logical reorder with valid monotonic positions must remain visible.
+        changed=copy.deepcopy(expected)
+        changed["columns"][0],changed["columns"][1]=changed["columns"][1],changed["columns"][0]
+        for i,item in enumerate(changed["columns"][:3],1):item["position"]=i
+        self.assertEqual(restore.compare_metadata(expected,verify.canonical_metadata(changed)),["columns"])
+        changed=copy.deepcopy(expected);changed["columns"].pop(1)
+        self.assertEqual(restore.compare_metadata(expected,verify.canonical_metadata(changed)),["columns"])
+        changed=copy.deepcopy(expected);changed["columns"]=changed["columns"][3:]+changed["columns"][:3]
+        self.assertEqual(restore.compare_metadata(expected,verify.canonical_metadata(changed)),["columns"])
+
+    def test_column_ordinals_reject_malformed_or_hidden_reordering(self):
+        records=[dict(schema="public",name="t",column="a",position=1),
+                 dict(schema="public",name="t",column="b",position=6)]
+        for position in (0,-1,True,1.0,"1",None):
+            changed=copy.deepcopy(records);changed[0]["position"]=position
+            with self.assertRaisesRegex(snapshot.Failure,"column-order"):
+                verify.canonical_columns(changed)
+        cases=[]
+        changed=copy.deepcopy(records);changed[1]["position"]=1;cases.append(changed)
+        cases.append(list(reversed(records)))
+        changed=copy.deepcopy(records);changed[1]["column"]="a";cases.append(changed)
+        changed=copy.deepcopy(records);changed[1]["column"]="";cases.append(changed)
+        changed=copy.deepcopy(records);del changed[1]["position"];cases.append(changed)
+        changed=copy.deepcopy(records);changed.insert(1,dict(schema="public",name="other",column="a",position=1));cases.append(changed)
+        for changed in cases:
+            with self.assertRaisesRegex(snapshot.Failure,"column-order"):
+                verify.canonical_columns(changed)
+
     def test_http_domain_exception_is_optional_exact_and_preserves_application_constraints(self):
         # This literal is transcribed independently from the sealed catalog,
         # rather than deriving every positive fixture from the implementation.
@@ -258,7 +312,11 @@ class MetadataTests(unittest.TestCase):
         for category in snapshot.OBJECT_KINDS:
             changed=copy.deepcopy(actual)
             changed["metadata"][category].append(dict(schema="public",name="unreviewed"))
-            self.assertIn(category,verify.compare(manifest,archive,before,changed))
+            if category=="columns":
+                with self.assertRaisesRegex(snapshot.Failure,"column-order"):
+                    verify.compare(manifest,archive,before,changed)
+            else:
+                self.assertIn(category,verify.compare(manifest,archive,before,changed))
         changed=copy.deepcopy(actual);changed["state"]["roles"]=[dict(name=snapshot.SOURCE_ROLE)]
         self.assertIn("temporary-export-role",verify.compare(manifest,archive,before,changed))
         changed=copy.deepcopy(actual);changed["supporting_auth_roles"][0]["function"]["security_definer"]=True
@@ -347,6 +405,7 @@ class MetadataTests(unittest.TestCase):
             self.assertEqual(json.loads((root/"proof"/"actual.json").read_text()),actual)
             report=json.loads((root/"proof"/"report.json").read_text())
             self.assertEqual(report["applied_equivalences"][0]["rule"],"initial-null-database-acl-equals-server-default")
+            self.assertEqual(report["canonicalizations"],["column-position-logical-ordinal-per-relation"])
             self.assertNotIn("applied_equivalences",json.loads(output.getvalue()))
         output=io.StringIO()
         with patch.object(verify,"verify",side_effect=RuntimeError("private function definition password")),contextlib.redirect_stderr(output):
@@ -360,6 +419,54 @@ PG17=Path("/opt/homebrew/opt/postgresql@17/bin")
 
 @unittest.skipUnless(os.environ.get("RUN_AWS_METADATA_LOCAL_PG17")=="1" and PG17.is_dir(),"opt-in disposable local PG17 proof")
 class NativeMetadataTests(unittest.TestCase):
+    def test_native_dump_restore_compacts_dropped_column_holes_only(self):
+        with tempfile.TemporaryDirectory(prefix="lp-column-order-",dir="/tmp") as directory:
+            root=Path(directory)
+            env={k:v for k,v in os.environ.items() if not k.startswith("PG")}
+            def run(args,data=None):
+                return subprocess.run(args,input=data,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                    env=env,check=True,timeout=30).stdout
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1",0));port=sock.getsockname()[1]
+            run([str(PG17/"initdb"),"-D",str(root/"db"),"-U","local_bootstrap","--auth=trust","--no-locale","--encoding=UTF8"])
+            run([str(PG17/"pg_ctl"),"-D",str(root/"db"),"-l",str(root/"server.log"),"-o",f"-F -h 127.0.0.1 -p {port} -k {root}","-w","start"])
+            connection=["-h","127.0.0.1","-p",str(port),"-U","local_bootstrap"]
+            def sql(database,statement):
+                return run([str(PG17/"psql"),"-XqAt","-v","ON_ERROR_STOP=1",*connection,"-d",database],statement.encode())
+            try:
+                sql("postgres","CREATE DATABASE column_source; CREATE DATABASE column_target; CREATE ROLE column_reader NOLOGIN;")
+                sql("column_source","""CREATE TABLE public.ordinal_four(id integer PRIMARY KEY,
+                    kept_first text DEFAULT 'source',d1 text,d2 text,d3 text,d4 text,
+                    kept_last integer NOT NULL DEFAULT 7,generated_id integer GENERATED ALWAYS AS (id+1) STORED);
+                    ALTER TABLE public.ordinal_four DROP COLUMN d1,DROP COLUMN d2,DROP COLUMN d3,DROP COLUMN d4;
+                    GRANT SELECT (kept_last) ON public.ordinal_four TO column_reader;
+                    CREATE TABLE public.ordinal_multiple(a integer,d1 text,b text,d2 text,d3 text,c integer,d4 text);
+                    ALTER TABLE public.ordinal_multiple DROP COLUMN d1,DROP COLUMN d2,DROP COLUMN d3,DROP COLUMN d4;""")
+                archive=root/"schema.dump"
+                run([str(PG17/"pg_dump"),*connection,"--no-password","--schema-only","--format=custom","--file="+str(archive),"column_source"])
+                run([str(PG17/"pg_restore"),*connection,"--no-password","--exit-on-error","--dbname=column_target",str(archive)])
+                def capture(database):
+                    return json.loads(sql(database,snapshot.METADATA_QUERIES["columns"]))
+                source=capture("column_source");target=capture("column_target")
+                self.assertEqual([c["position"] for c in source],[1,2,7,8,1,3,6])
+                self.assertEqual([c["position"] for c in target],[1,2,3,4,1,2,3])
+                original=copy.deepcopy(source)
+                self.assertEqual(verify.canonical_columns(source),verify.canonical_columns(target))
+                self.assertEqual(source,original)
+                for change,undo in (
+                    ("ALTER TABLE public.ordinal_four ALTER COLUMN kept_first SET DEFAULT 'changed';",
+                     "ALTER TABLE public.ordinal_four ALTER COLUMN kept_first SET DEFAULT 'source';"),
+                    ("ALTER TABLE public.ordinal_four ALTER COLUMN kept_first TYPE varchar(40);",
+                     "ALTER TABLE public.ordinal_four ALTER COLUMN kept_first TYPE text;"),
+                    ("REVOKE SELECT (kept_last) ON public.ordinal_four FROM column_reader;",
+                     "GRANT SELECT (kept_last) ON public.ordinal_four TO column_reader;")):
+                    sql("column_target",change)
+                    self.assertNotEqual(verify.canonical_columns(source),verify.canonical_columns(capture("column_target")))
+                    sql("column_target",undo)
+                    self.assertEqual(verify.canonical_columns(source),verify.canonical_columns(capture("column_target")))
+            finally:
+                run([str(PG17/"pg_ctl"),"-D",str(root/"db"),"-m","fast","-w","stop"])
+
     def test_real_catalog_parity_cleanup_and_detected_drift(self):
         with tempfile.TemporaryDirectory(prefix="lp-meta-",dir="/tmp") as directory:
             root=Path(directory);logs=root/"logs";logs.mkdir(mode=0o700)

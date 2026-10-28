@@ -128,16 +128,20 @@ def _guard(monkeypatch, **changes):
 
 
 @pytest.mark.parametrize("round_status", ["open", "stage2"])
-def test_owned_guard_blocks_new_review_even_at_cutoff(monkeypatch, round_status):
+@pytest.mark.parametrize("seconds", [-1, 0, 7200, 7201])
+@pytest.mark.parametrize("scope", ["gateway", "all"])
+def test_owned_guard_blocks_new_review_even_at_cutoff(monkeypatch, round_status, seconds, scope):
     now = datetime(2026, 10, 28, tzinfo=timezone.utc)
     row = {"status": "accepted", "code_review_claim": None,
            "code_review_expires_at": None, "code_review_status": "pending"}
-    service = _service(now, row, round_status=round_status, cutoff_seconds=0)
-    require_idle(service, now=now, restart_guard=_guard(monkeypatch))
+    service = _service(now, row, round_status=round_status, cutoff_seconds=seconds)
+    args = _guard(monkeypatch, restart_scope=scope)
+    args.scope = scope
+    require_idle(service, now=now, restart_guard=args)
 
 
 @pytest.mark.parametrize("changes", [
-    {"guard_present": False}, {"guard_active": False},
+    {"schema_version": "unknown"}, {"guard_present": False}, {"guard_active": False},
     {"owner_commitment": "foreign"}, {"guard_commitment": "foreign"},
     {"candidate_commit": "b" * 40}, {"restart_scope": "validator"},
     {"restart_phase": "gateway_ready"}, {"guard_generation": 8},
@@ -159,3 +163,15 @@ def test_owned_guard_does_not_abandon_paid_review(monkeypatch, review):
     with pytest.raises(ValueError, match="claimed|lease"):
         require_idle(_service(now, {"status": "accepted", **review}, round_status="open", cutoff_seconds=0),
                      now=now, restart_guard=_guard(monkeypatch))
+
+
+def test_guard_state_read_failure_blocks_idle_recovery(monkeypatch):
+    from scripts import lab_arena_restart_claim_guard as guard
+    args = _guard(monkeypatch)
+    def unavailable(*_):
+        raise guard.GuardError("guard state unavailable")
+    monkeypatch.setattr(guard, "_request", unavailable)
+    now = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    with pytest.raises(guard.GuardError, match="unavailable"):
+        require_idle(_service(now, {"status": "accepted"}, round_status="open", cutoff_seconds=0),
+                     now=now, restart_guard=args)

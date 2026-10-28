@@ -28,7 +28,7 @@ def test_micruity_industry_review_controls_schema_repair(
     initial_attribute,
     expected_decision,
 ):
-    """Reproduce the frozen Sep. 27 Micruity industry-only receipt."""
+    """Unresolved industry must block repair under the current full review."""
 
     company = CompanyOutput(
         company_name="Micruity",
@@ -96,34 +96,17 @@ def test_micruity_industry_review_controls_schema_repair(
         ),
         stage_evidence_quote="Micruity has raised a $20 million Series A",
     )
-    repaired = {
-        **initial,
-        "observed_industry": "Lending and Investments",
-        "observed_subindustry": "Alternative lending and private credit platforms",
-        "industry_matches": True,
-        "industry_evidence_url": "https://micruity.com/platform",
-        "industry_evidence_quote": (
-            "Micruity originates and services private credit products for customers."
-        ),
-        "attribute_satisfied": True,
-        "required_attribute_evidence_url": "https://micruity.com/platform",
-        "required_attribute_evidence_quote": (
-            "Micruity originates and services private credit products for customers."
-        ),
-    }
     calls = {"provider": 0, "investigator": 0}
 
     async def provider(**_kwargs):
         calls["provider"] += 1
         if calls["provider"] == 1:
             return initial, ""
-        if investigator_status == "VERIFIED" and calls["provider"] == 2:
-            return repaired, ""
-        raise AssertionError("schema repair followed an unresolved industry result")
+        raise AssertionError("completed source review must not trigger schema repair")
 
     async def bounded_investigation(**kwargs):
         calls["investigator"] += 1
-        assert kwargs["targets"] == ("industry",)
+        assert kwargs["targets"] == ("stage", "industry", "required_attribute")
         assert kwargs["positive_semantic_review"] is True
         if investigator_status == "UNPROVEN":
             finding = _finding(
@@ -157,8 +140,29 @@ def test_micruity_industry_review_controls_schema_repair(
                 ),
                 reason="Exact requested industry and activity are supported.",
             )
+        stage = _finding(
+            "stage", observed_value="Series A",
+            evidence_url=initial["stage_evidence_url"],
+            evidence_quote=initial["stage_evidence_quote"],
+        )
+        attribute = _finding(
+            "required_attribute", status=investigator_status,
+            observed_value=("Credit platform" if investigator_status == "VERIFIED" else ""),
+            activity_role=finding["activity_role"],
+            evidence_url=finding["evidence_url"],
+            evidence_quote=finding["evidence_quote"],
+        )
         return {
-            "claims": {"industry": finding},
+            "_completed_submit": True,
+            "_validated_stage_finding": stage,
+            lead_scorer.PRIVATE_FETCHED_PAGES_KEY: {
+                finding["evidence_url"]: {
+                    "final_url": finding["evidence_url"],
+                    "text": finding["evidence_quote"],
+                },
+            } if investigator_status == "VERIFIED" else {},
+            "claims": {"stage": stage, "industry": finding,
+                       "required_attribute": attribute},
             "failure_reason": "",
             "usage": {"reasoning_turns": 1, "search_calls": 0, "fetch_calls": 1},
         }
@@ -207,17 +211,21 @@ def test_micruity_industry_review_controls_schema_repair(
             require_company_fit_dimensions=True,
             verified_homepage_identity=homepage_identity,
             company_quality=True,
-                evidence_investigator=True,
+            evidence_investigator=True,
         )
     )
 
     assert calls == {
-        "provider": 2 if investigator_status == "VERIFIED" else 1,
+        "provider": 1,
         "investigator": 1,
     }
     assert result.decision == expected_decision
     assert result.details["dimension_decisions"]["industry"] == expected_decision
     receipt = result.details["investigation_receipt"]
+    assert receipt["targets"] == ["stage", "industry", "required_attribute"]
+    assert receipt["completed_submitted_findings"] is True
+    assert receipt["claims"]["industry"]["status"] == investigator_status
+    assert receipt["claims"]["required_attribute"]["status"] == investigator_status
     assert receipt["positive_semantic_review"] is True
     assert receipt["positive_semantic_review_resolved"] is (
         investigator_status == "VERIFIED"

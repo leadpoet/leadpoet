@@ -408,6 +408,15 @@ def optional_capture_failure(row: Mapping[str, Any]) -> bool:
             and (failures > 0 or counts.get("responses_partial", 0) > 0))
 
 
+def _capture_failure_rows(document: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Return all reported runtime failures for independent attribution."""
+    return [row for row in document["agent_observations"]
+            if row["kind"] in {"capture_failure", "http_response_metadata"}
+            or row["kind"] in {"web_fetch", "web_fetch_binary"} and row["data"].get("capture", {}).get("complete") is False
+            or row["kind"] == "state_snapshot" and row["data"]["name"] == "automatic_capture_summary"
+            and isinstance(row["data"]["value"], dict) and row["data"]["value"].get("complete") is False]
+
+
 def optional_capture_only(document: Mapping[str, Any]) -> bool:
     """A new explicit failure tag cannot excuse missing required host evidence."""
     try:
@@ -423,11 +432,7 @@ def optional_capture_only(document: Mapping[str, Any]) -> bool:
                 or any(row["privacy"]["redacted"] for row in document["agent_observations"]
                        if row["kind"] == "response_received")):
             return False
-        rows = [row for row in document["agent_observations"]
-                if row["kind"] in {"capture_failure", "http_response_metadata"}
-                or row["kind"] in {"web_fetch", "web_fetch_binary"} and row["data"].get("capture", {}).get("complete") is False
-                or row["kind"] == "state_snapshot" and row["data"]["name"] == "automatic_capture_summary"
-                and isinstance(row["data"]["value"], dict) and row["data"]["value"].get("complete") is False]
+        rows = _capture_failure_rows(document)
         return bool(rows) and all(optional_capture_failure(row) for row in rows)
     except (KeyError, TypeError, ValueError, AttributeError):
         return False

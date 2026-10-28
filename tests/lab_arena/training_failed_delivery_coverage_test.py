@@ -102,6 +102,58 @@ def test_exact_failed_delivery_is_one_incomplete_icp(model, status, api):
     assert example == before
 
 
+@pytest.mark.parametrize('optional', [False, True])
+@pytest.mark.parametrize('local_diagnostics', [False, True])
+def test_failed_delivery_with_proven_optional_capture_is_one_incomplete_icp(optional, local_diagnostics):
+    from tests.lab_arena.training_optional_capture_test import summary
+    example = failed_delivery()
+    payload = example['worker_observation_artifacts']['run']['payload']
+    if optional:
+        payload['agent_observations'].append(summary())
+        payload['agent_observation_count'] += 1
+        payload['failures'].append(training_observations.OPTIONAL_CAPTURE_INCOMPLETE)
+    if local_diagnostics:
+        proof = example['completeness']
+        proof['incomplete_reasons'].append('direct_web_content_not_captured')
+        proof['reasons_by_dimension']['research_process'].append('direct_web_content_not_captured')
+        example['related_run_gap_attribution']['run']['research_process_gaps'].append('direct_web_content_not_captured')
+    refresh(example)
+    before = deepcopy(example)
+    result = assess_ten(bank(example))
+    assert result['eligible'], result
+    assert result['counts']['complete_runs'] == 9
+    assert result['counts']['incomplete_runs'] == 1
+    assert not assess_ten(bank(example), percent=100)['eligible']
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    assert not strict['train'] and not strict['eval']
+    assert example == before
+
+
+@pytest.mark.parametrize('damage', ['missing_tag', 'unproven_tag', 'unknown_summary', 'unknown_failure',
+    'host_hash', 'request_privacy', 'response_privacy', 'output_binding', 'source', 'legacy'])
+def test_failed_delivery_optional_capture_still_needs_exact_independent_proof(damage):
+    from tests.lab_arena.training_optional_capture_test import summary
+    example = failed_delivery()
+    payload = example['worker_observation_artifacts']['run']['payload']
+    payload['agent_observations'].append(summary())
+    payload['agent_observation_count'] += 1
+    payload['failures'].append(training_observations.OPTIONAL_CAPTURE_INCOMPLETE)
+    if damage == 'missing_tag': payload['failures'].pop()
+    elif damage == 'unproven_tag':
+        payload['agent_observations'].pop()
+        payload['agent_observation_count'] -= 1
+    elif damage == 'unknown_summary': payload['agent_observations'][-1]['data']['value']['counts']['queue_overflow'] = 1
+    elif damage == 'unknown_failure': payload['failures'].append('unknown_failure')
+    elif damage == 'host_hash': payload['response_receipts'][-1]['body_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'request_privacy': example['provider_calls'][-1]['request_capture']['redacted'] = True
+    elif damage == 'response_privacy': example['provider_calls'][0]['response_privacy_redactions'] = ['credential']
+    elif damage == 'output_binding': example['output_identity']['document_hash'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'source': example['source']['sha256'] = contracts.hash_bytes(b'wrong')
+    else: example['configuration'].pop('training_maximum_missing_reasoning_percent')
+    refresh(example)
+    assert not assess_ten(bank(example))['eligible']
+
+
 def test_failed_delivery_shares_the_existing_coverage_floor():
     examples = bank(failed_delivery())
     examples['run-8'] = None
@@ -285,7 +337,8 @@ def test_exact_failed_delivery_does_not_hide_a_missing_execution_model_call():
 
 
 @pytest.mark.parametrize('model,status', [(False, 502), (True, 200)])
-def test_worker_failed_write_through_actual_export_assembly_and_eligibility(model, status):
+@pytest.mark.parametrize('optional', [False, True])
+def test_worker_failed_write_through_actual_export_assembly_and_eligibility(model, status, optional):
     from lab_arena import broker, training_capture
     from tests.lab_arena.training_export_test import per_icp_cost_fixture, per_icp_cost_reader
     from tests.lab_arena.training_observations_test import save
@@ -325,7 +378,16 @@ def test_worker_failed_write_through_actual_export_assembly_and_eligibility(mode
                  entry_doc={}, terminal_response=terminal)])
     values['ledger_rows'] = ledger
     run['result_doc']['resource_summary']['provider_call_count'] = len(source['provider_calls'])
-    save(values, deepcopy(source['worker_observation_artifacts']['run']['payload']))
+    payload = deepcopy(source['worker_observation_artifacts']['run']['payload'])
+    if optional:
+        from tests.lab_arena.training_optional_capture_test import summary
+        buffer = training_observations.Buffer()
+        for receipt in payload['response_receipts']:
+            assert buffer.append_response_receipt(receipt)
+        buffer.failures.add('capture_incomplete')
+        assert buffer.append_agent_observation(summary()) == 0
+        payload = buffer.document()
+    save(values, payload)
     example = training_export.assemble_example(**values,
         cost_eligibility_reader=per_icp_cost_reader(spend=3, reason='eligible'))
     before = deepcopy(example)

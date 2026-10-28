@@ -193,16 +193,53 @@ class ExportRoleTests(unittest.TestCase):
             with self.assertRaisesRegex(tool.Failure, "repo-tool-bytes"):
                 tool.verified_head(Path.cwd(), HEAD)
 
-    def test_aws_cli_stdin_never_contains_secret_in_arguments(self):
-        with patch.object(tool, "run", return_value=subprocess.CompletedProcess([], 0, b"{}", b"")) as run:
-            tool.aws("secretsmanager", "create-secret", payload={"SecretString": "private-password"})
-            args, data = run.call_args.args
+    def test_aws_cli_payload_file_is_private_removed_and_not_in_arguments(self):
+        paths = []
+        def inspect(args, data=None):
+            self.assertIsNone(data)
             self.assertEqual(args[0], tool.AWS)
             self.assertIn(tool.PROFILE, args)
-            self.assertIn("file:///dev/stdin", args)
-            self.assertIn("private-password", data.decode())
+            value = args[args.index("--cli-input-json") + 1]
+            self.assertTrue(value.startswith("file://"))
+            path = Path(value[len("file://"):])
+            paths.append(path)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(json.loads(path.read_text()), {"SecretString": "private-password"})
             self.assertNotIn("private-password", " ".join(args))
             self.assertNotIn("--secret-string", args)
+            return subprocess.CompletedProcess([], 0, b"{}", b"")
+        with patch.object(tool, "run", side_effect=inspect):
+            tool.aws("secretsmanager", "create-secret", payload={"SecretString": "private-password"})
+        self.assertFalse(paths[0].exists())
+        self.assertFalse(paths[0].parent.exists())
+
+    def test_aws_cli_payload_cleanup_and_sanitized_failure(self):
+        paths = []
+        def failed(args, data=None):
+            path = Path(args[args.index("--cli-input-json") + 1][len("file://"):])
+            self.assertTrue(path.is_file())
+            paths.append(path)
+            return subprocess.CompletedProcess([], 252, b"private-password", b"private-password invalid JSON")
+        with patch.object(tool, "run", side_effect=failed):
+            with self.assertRaisesRegex(tool.Failure, "^aws-request$"):
+                tool.aws_json("secretsmanager", "create-secret", payload={"SecretString": "private-password"})
+        self.assertFalse(paths[0].parent.exists())
+        def raised(args, data=None):
+            paths.append(Path(args[args.index("--cli-input-json") + 1][len("file://"):]))
+            raise tool.Failure("command")
+        with patch.object(tool, "run", side_effect=raised):
+            with self.assertRaisesRegex(tool.Failure, "^command$"):
+                tool.aws("secretsmanager", "create-secret", payload={"SecretString": "private-password"})
+        self.assertFalse(paths[-1].parent.exists())
+        output = io.StringIO()
+        with patch.object(tool, "verified_head", return_value=HEAD), \
+             patch.object(tool, "preflight", side_effect=lambda unused: tool.aws_json(
+                 "secretsmanager", "create-secret", payload={"SecretString": "private-password"})), \
+             patch.object(tool, "run", side_effect=failed), contextlib.redirect_stderr(output):
+            self.assertEqual(tool.main(["preflight", "--expected-head", HEAD]), 1)
+        self.assertEqual(output.getvalue(), "ERROR phase=aws-request\n")
+        self.assertFalse(paths[-1].parent.exists())
 
     def test_create_persists_secret_receipt_before_ddl_and_verifies_grants(self):
         events = []
@@ -304,6 +341,57 @@ class ExportRoleTests(unittest.TestCase):
              contextlib.redirect_stderr(output):
             self.assertEqual(tool.main(["preflight", "--expected-head", HEAD]), 1)
         self.assertEqual(output.getvalue(), "ERROR phase=operator-utility\n")
+
+
+@unittest.skipUnless(os.environ.get("RUN_AWS_EXPORT_ROLE_LOCAL_SKELETON") == "1" and Path(tool.AWS).is_file(),
+                     "opt-in non-secret local AWS CLI skeleton validation")
+class LocalAWSCLITests(unittest.TestCase):
+    def test_nonsecret_file_payload_validates_without_credentials_or_aws_request(self):
+        with tempfile.TemporaryDirectory(prefix="lp-aws-skeleton-") as directory:
+            root = Path(directory)
+            config, credentials = root / "config", root / "credentials"
+            for path, contents in ((config, "[profile " + tool.PROFILE + "]\nregion = us-east-1\n"),
+                                   (credentials, "")):
+                with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as out:
+                    out.write(contents)
+            env = {"PATH": os.defpath, "AWS_CONFIG_FILE": str(config),
+                   "AWS_SHARED_CREDENTIALS_FILE": str(credentials), "AWS_EC2_METADATA_DISABLED": "true",
+                   "AWS_PAGER": "", "AWS_CLI_AUTO_PROMPT": "off"}
+            paths = []
+            def local_run(args, data=None):
+                self.assertIn("--generate-cli-skeleton", args)
+                self.assertIn("--no-sign-request", args)
+                paths.append(Path(args[args.index("--cli-input-json") + 1][len("file://"):]))
+                return subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, timeout=30, check=False, env=env)
+            with patch.object(tool, "run", side_effect=local_run):
+                result = tool.aws("secretsmanager", "create-secret", "--generate-cli-skeleton", "output",
+                                  "--no-sign-request", "--endpoint-url", "http://127.0.0.1:9",
+                                  payload={"Name": "local-skeleton-validation-only",
+                                           "SecretString": "local-validation-only",
+                                           "ClientRequestToken": OP})
+            if result.returncode == 0:
+                self.assertIn("ARN", json.loads(result.stdout))
+            else:
+                # CLI 2.38.6 accepts input, then rejects its own short output
+                # placeholders. Distinguish that defect from input parsing.
+                self.assertEqual(result.returncode, 252)
+                self.assertIn(b"Invalid length for parameter ARN", result.stderr)
+                self.assertIn(b"Invalid length for parameter VersionId", result.stderr)
+                self.assertNotIn(b"Invalid JSON", result.stderr)
+                self.assertNotIn(b"parameter in input", result.stderr)
+            def invalid_json_run(args, data=None):
+                path = Path(args[args.index("--cli-input-json") + 1][len("file://"):])
+                path.write_text("{invalid-json")
+                return local_run(args, data)
+            with patch.object(tool, "run", side_effect=invalid_json_run):
+                invalid = tool.aws("secretsmanager", "create-secret", "--generate-cli-skeleton", "output",
+                                   "--no-sign-request", "--endpoint-url", "http://127.0.0.1:9",
+                                   payload={"Name": "local-skeleton-validation-only", "SecretString": "local-validation-only"})
+            self.assertEqual(invalid.returncode, 252)
+            self.assertIn(b"Invalid JSON received", invalid.stderr)
+            for path in paths:
+                self.assertFalse(path.parent.exists())
 
 
 PG17 = Path("/opt/homebrew/opt/postgresql@17/bin")

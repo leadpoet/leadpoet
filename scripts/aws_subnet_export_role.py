@@ -25,6 +25,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 from urllib.request import Request, urlopen
 import uuid
 
@@ -122,10 +123,20 @@ def query(sql, *, read_only=True):
 def aws(*args, payload=None):
     command = [AWS, *args, "--profile", PROFILE, "--region", REGION,
                "--output", "json", "--no-cli-pager"]
-    if payload is not None:
-        command += ["--cli-input-json", "file:///dev/stdin"]
-    result = run(command, None if payload is None else json.dumps(payload).encode())
-    return result
+    if payload is None:
+        return run(command)
+    # AWS CLI v2 does not reliably read JSON from /dev/stdin. Only the private
+    # pathname enters argv; the context removes the payload on success or error.
+    try:
+        with tempfile.TemporaryDirectory(prefix="leadpoet-aws-payload-") as directory:
+            root = Path(directory)
+            os.chmod(root, 0o700)
+            path = root / "input.json"
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as out:
+                json.dump(payload, out)
+            return run(command + ["--cli-input-json", path.as_uri()])
+    except OSError:
+        raise Failure("aws-payload-file") from None
 
 
 def aws_json(*args, payload=None):

@@ -5,6 +5,85 @@ This stage copies a consistent, read-only source snapshot into the dedicated
 Do not change production endpoints or restart gateway/validator services.
 The coordinator owns all AWS and source permission writes.
 
+## October 28 rehearsal results
+
+The isolated RDS restore committed successfully. Verification compared the
+restored database with the frozen source snapshot, including all 48 tables and
+11,627,285 rows. Every table's row count and full-row content digests matched.
+Stored generated values, protected history, all three archived sequence states,
+application owners, recorded grants and all 12 catalog comparison categories
+passed. Temporary target CREATE grants and the target export identity were
+removed before the final verification.
+
+The final proof is `restore-verification4-20261028/verification-completed.json`;
+its SHA-256 is
+`919b24a7fc0c7f626c206f9e689419b1345c106a487f7a7870e935f2346434f9`.
+The captured source manifest SHA-256 is
+`d93ddef1740ecfa1bb74a186f36c918ca731e4973cfd756fa69f9a62d8138f56`.
+Private receipts and the native dump stay outside Git. The comparison includes
+the exact reviewed RDS platform differences documented in the restore plan;
+it does not silently omit application objects to obtain a match.
+
+All 12 read-only database capability checks also passed. They cover the restored
+auth claim getter, installed extension capabilities and catalog permissions.
+They do not test an Auth server, an external dblink connection, application
+requests, provider calls, scoring, publication or chain writes.
+
+The temporary source exporter is disabled, has no active sessions and has lost
+its recorded data access. The existing parity reader's recorded role metadata
+and 51 direct relation grants match the before-state. The runner's temporary
+secret-read policy is removed, and both credential reads are denied. Only the
+source-export secret is scheduled for seven-day deletion; the RDS-managed
+target secret remains active.
+
+The encrypted backup snapshot `snap-0ab1ae007cff3f842` was independently restored
+to a separate encrypted volume. A no-modify filesystem check passed, followed
+by read-only checks of all 49 archive files and 36 final proof/code/access files.
+Every checksum matched. Normal unmount and a separate all-process mount check
+passed. The external backup receipt SHA-256 is
+`4b70cf70c07a26ce52444f239a710cc23449b4ec46aa56cbfc1bceea7cf9f681`.
+The snapshot is private and remains retained. The disposable verification
+volume is deleted. The temporary runner is terminated and its stack is
+`DELETE_COMPLETE`; the original runner disk, network interface, public IP,
+security group, role, instance profile and exact temporary database ingress
+are gone. Other target security-group rules are unchanged.
+
+Final AWS reads confirm the database remains available, private, encrypted and
+deletion-protected, with 14-day automated backup retention. The foundation,
+target managed secret, verified snapshot and encryption key remain present.
+These retained resources continue to incur their normal AWS charges. No source
+application rows or production endpoint settings were changed, and no gateway
+or validator restart was run as part of this rehearsal.
+
+## Work required before production cutover
+
+This is a verified point-in-time copy, not a live replica. The source has
+continued to accept writes and schema changes, including migration 584 after
+the snapshot. A final synchronization must include all subsequent changes.
+
+The current Arena store uses PostgREST table and RPC HTTP endpoints, and the
+gateway uses a Supabase HTTP client. An RDS SQL endpoint cannot replace those
+HTTP URLs directly. The next stage must provide and verify the compatible API
+and authentication path, then test the current gateway, validator and dashboard
+clients against it. Preserve existing schemas, accounting, scoring and recovery
+semantics; avoid a client rewrite unless compatibility testing requires it.
+
+The source and target also use different libc collation versions. Exact copied
+bytes and catalog parity do not prove identical text ordering, equality or
+index behavior. Include these semantics in the pre-cutover compatibility tests;
+this rehearsal does not change or rebuild source indexes.
+
+After those tests, prepare the final data synchronization and controlled
+endpoint switch with a rollback path. Verify real submissions, rebenchmarks,
+provider accounting, scoring, persistence, publication, promotion and weights
+through the canonical release process. Those checks and production restarts
+are not part of this isolated restore stage.
+
+The foundation PR's repository-wide check currently times out and its dependent
+Docker check is skipped. The stacked restore PR remains unmerged. Focused
+migration tests and live database proofs do not replace that merge gate; no
+branch-protection checks have been bypassed.
+
 ## Temporary runner
 
 Deploy `deploy/aws/subnet-restore-runner.yml` as

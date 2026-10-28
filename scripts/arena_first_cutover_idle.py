@@ -29,6 +29,10 @@ def require_idle(service, *, now: datetime, restart_guard=None) -> None:
                 or type(state.get("guard_generation")) is not int
                 or state["guard_generation"] != restart_guard.generation):
             raise ValueError("Arena idle recovery requires an active owned gateway guard")
+        schema = service._store.code_review_schema()
+        if (schema.get("schema_version") != "leadpoet.lab_arena.code_review.v1"
+                or schema.get("atomic_restart_guard") is not True):
+            raise ValueError("Arena guarded idle recovery requires atomic review admission")
         guarded = True
     # The old combined process has a five-second daemon-thread join. It can
     # only be retired when review cannot start during the handoff window.

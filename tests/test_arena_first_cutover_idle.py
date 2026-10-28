@@ -16,8 +16,10 @@ def _service(now, row, *, round_status="stage2", cutoff_seconds=10800):
         _round=lambda _id: {"round_id": "r", "status": round_status},
         _submission_replacement_cutoff=lambda _round: now + timedelta(seconds=cutoff_seconds),
         _is_daily_baseline=lambda _row, _round: False,
-        _store=SimpleNamespace(list_submissions=lambda _id, *, status:
-                               [row] if row["status"] == status else []),
+        _store=SimpleNamespace(
+            code_review_schema=lambda: {"schema_version": "leadpoet.lab_arena.code_review.v1",
+                                        "atomic_restart_guard": True},
+            list_submissions=lambda _id, *, status: [row] if row["status"] == status else []),
     )
 
 
@@ -175,3 +177,14 @@ def test_guard_state_read_failure_blocks_idle_recovery(monkeypatch):
     with pytest.raises(guard.GuardError, match="unavailable"):
         require_idle(_service(now, {"status": "accepted"}, round_status="open", cutoff_seconds=0),
                      now=now, restart_guard=args)
+
+
+@pytest.mark.parametrize("schema", [{}, {"schema_version": "unknown", "atomic_restart_guard": True},
+    {"schema_version": "leadpoet.lab_arena.code_review.v1", "atomic_restart_guard": False},
+    {"schema_version": "leadpoet.lab_arena.code_review.v1", "atomic_restart_guard": 1}])
+def test_guarded_idle_requires_installed_atomic_reservation_gate(monkeypatch, schema):
+    now = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    service = _service(now, {"status": "accepted"}, round_status="open", cutoff_seconds=0)
+    service._store.code_review_schema = lambda: schema
+    with pytest.raises(ValueError, match="atomic review admission"):
+        require_idle(service, now=now, restart_guard=_guard(monkeypatch))

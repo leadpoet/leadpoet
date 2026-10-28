@@ -14,6 +14,7 @@ An optional auxiliary-source correction enforces the existing reviewer's name bi
 Another explicit option permits one existing identity repair when an unproved
 web LinkedIn conflict also changes the observed name.
 An observed-locator option adds only single-decoded ampersand company slugs.
+A separate brand option requires its matching host receipt validator deployment.
 No option imports today's complete grading implementation.
 """
 from __future__ import annotations
@@ -43,6 +44,7 @@ BOUND_IDENTITY_FILES = (
     "qualification/scoring/company_fit_decision.py",
     "qualification/scoring/linkedin_company_size.py",
 )
+BRAND_IDENTITY_FILES = (FINALITY_FILE, "qualification/scoring/company_fit_decision.py")
 ENTRYPOINT_FILES = ("lab_arena/scorer_entrypoint.py", "scorer_entrypoint.py")
 RUNTIME_DIRECTORY = "arena_reviewer_runtime"
 MAX_OVERLAY_BYTES = 4 * 1024 * 1024
@@ -161,6 +163,7 @@ def extract_frozen_sources(
     auxiliary_source_name_binding: bool = False,
     homepage_linkedin_conflict_repair: bool = False,
     observed_linkedin_ampersand: bool = False,
+    verified_homepage_brand_alias: bool = False,
 ) -> dict[str, bytes]:
     container = checked_output(["docker", "create", reference])
     try:
@@ -170,12 +173,14 @@ def extract_frozen_sources(
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
                 or bound_homepage_legal_alias or auxiliary_source_name_binding
-                or homepage_linkedin_conflict_repair):
+                or homepage_linkedin_conflict_repair or verified_homepage_brand_alias):
             names += (FINALITY_FILE,)
         if authenticated_page_refusal:
             names += (VERIFICATION_FILE,)
         if bound_homepage_legal_alias or observed_linkedin_ampersand:
             names += BOUND_IDENTITY_FILES
+        if verified_homepage_brand_alias:
+            names += BRAND_IDENTITY_FILES
         if archive_snapshot_https:
             names += (ARCHIVE_FILE,)
         for name in dict.fromkeys(names):
@@ -207,6 +212,7 @@ def expected_overlay(
     auxiliary_source_name_binding: bool = False,
     homepage_linkedin_conflict_repair: bool = False,
     observed_linkedin_ampersand: bool = False,
+    verified_homepage_brand_alias: bool = False,
 ) -> dict[str, bytes]:
     from scripts.arena_reviewer_admission_seam import convert_admission_seam
     from scripts.arena_reviewer_checkpoint_seam import convert_checkpoint_seam
@@ -218,12 +224,14 @@ def expected_overlay(
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
                 or bound_homepage_legal_alias or auxiliary_source_name_binding
-                or homepage_linkedin_conflict_repair):
+                or homepage_linkedin_conflict_repair or verified_homepage_brand_alias):
         expected.add(FINALITY_FILE)
     if authenticated_page_refusal:
         expected.add(VERIFICATION_FILE)
     if bound_homepage_legal_alias or observed_linkedin_ampersand:
         expected.update(BOUND_IDENTITY_FILES)
+    if verified_homepage_brand_alias:
+        expected.update(BRAND_IDENTITY_FILES)
     if archive_snapshot_https:
         expected.add(ARCHIVE_FILE)
     if set(original) != expected:
@@ -234,10 +242,12 @@ def expected_overlay(
                 or failed_attribute_source_recovery or completed_investigation_finality
                 or identity_schema_repair or structured_homepage_numeric_alias
                 or bound_homepage_legal_alias or auxiliary_source_name_binding
-                or homepage_linkedin_conflict_repair):
+                or homepage_linkedin_conflict_repair or verified_homepage_brand_alias):
         files[FINALITY_FILE] = original[FINALITY_FILE]
     if bound_homepage_legal_alias or observed_linkedin_ampersand:
         files.update({name: original[name] for name in BOUND_IDENTITY_FILES})
+    if verified_homepage_brand_alias:
+        files.update({name: original[name] for name in BRAND_IDENTITY_FILES})
     if complete_negative_finality:
         from scripts.arena_reviewer_finality_seam import convert_finality_seam
         files[FINALITY_FILE] = convert_finality_seam(files[FINALITY_FILE])
@@ -315,6 +325,11 @@ def expected_overlay(
         )
         files.update(convert_observed_linkedin_ampersand_files(
             {name: files[name] for name in BOUND_IDENTITY_FILES},
+        ))
+    if verified_homepage_brand_alias:
+        from scripts.arena_reviewer_homepage_brand_alias_seam import convert_homepage_brand_alias_files
+        files.update(convert_homepage_brand_alias_files(
+            {name: files[name] for name in BRAND_IDENTITY_FILES},
         ))
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():
@@ -398,6 +413,10 @@ def main() -> int:
         "--observed-linkedin-ampersand", action="store_true",
         help="route only reviewed observed ampersand company locators; use the same option for --verify-image",
     )
+    parser.add_argument(
+        "--verified-homepage-brand-alias", action="store_true",
+        help="compose verified brand identity and its matching host-validator contract; deploy that host validator too; use the same option for --verify-image",
+    )
     args = parser.parse_args()
     if args.numeric_profile_legal_self_name and not args.bound_homepage_legal_alias:
         raise CompositionError("numeric self-name requires the reviewed legal alias repair")
@@ -437,6 +456,8 @@ def main() -> int:
                if args.homepage_linkedin_conflict_repair else {}),
             **({"observed_linkedin_ampersand": True}
                if args.observed_linkedin_ampersand else {}),
+            **({"verified_homepage_brand_alias": True}
+               if args.verified_homepage_brand_alias else {}),
         )
         files = expected_overlay(
             original, complete_negative_finality=args.complete_negative_finality,
@@ -456,6 +477,7 @@ def main() -> int:
             auxiliary_source_name_binding=args.auxiliary_source_name_binding,
             homepage_linkedin_conflict_repair=args.homepage_linkedin_conflict_repair,
             observed_linkedin_ampersand=args.observed_linkedin_ampersand,
+            verified_homepage_brand_alias=args.verified_homepage_brand_alias,
         )
         tag = args.verify_image or (
             match[1] + ":reviewer-" + match[2][7:19] + "-" + revision[:12]
@@ -476,6 +498,7 @@ def main() -> int:
             + ("-auxiliary-name-binding" if args.auxiliary_source_name_binding else "")
             + ("-homepage-linkedin-conflict" if args.homepage_linkedin_conflict_repair else "")
             + ("-observed-linkedin-ampersand" if args.observed_linkedin_ampersand else "")
+            + ("-verified-homepage-brand" if args.verified_homepage_brand_alias else "")
         )
         if not args.verify_image:
             tag = bounded_build_tag(tag)
@@ -550,6 +573,13 @@ def main() -> int:
         if args.observed_linkedin_ampersand:
             from scripts.arena_reviewer_observed_linkedin_ampersand_seam import CORRECTION_ID as OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID
             corrections.append(OBSERVED_LINKEDIN_AMPERSAND_CORRECTION_ID)
+        host_requirements = {}
+        if args.verified_homepage_brand_alias:
+            from scripts.arena_reviewer_homepage_brand_alias_seam import (
+                CORRECTION_ID as BRAND_CORRECTION_ID, HOST_VALIDATOR_REQUIREMENT,
+            )
+            corrections.append(BRAND_CORRECTION_ID)
+            host_requirements["host_validator_requirement"] = HOST_VALIDATOR_REQUIREMENT
         print(json.dumps({
             "grading_image": args.grading_image,
             "runtime_image": reference,
@@ -557,6 +587,7 @@ def main() -> int:
             "base_layers_unchanged": True,
             "process_configuration_unchanged": True,
             "grading_corrections": corrections,
+            **host_requirements,
             "original_files": {name: hashlib.sha256(value).hexdigest() for name, value in original.items()},
             "overlay_files": {name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
         }, sort_keys=True))

@@ -1,5 +1,6 @@
 """Keep exact funding proof semantics with bounded historical receipt lookups."""
 from pathlib import Path
+from functools import partial
 from datetime import timedelta
 import hashlib
 import json
@@ -8,6 +9,8 @@ import time
 
 import pytest
 
+from tests import postgres_migration_harness as pg_harness
+from tests.lab_arena import lab_arena_pg_harness as arena_pg
 from tests.lab_arena import funding_proof_scalars526_postgres_test as scalar
 from tests.lab_arena import proven_funding_recovery524_postgres_test as prior
 from tests.lab_arena.quiescence_recovery_gate522_postgres_test import reset
@@ -19,6 +22,7 @@ SQL = ROOT / 'scripts/554-lab-arena-funding-proof-throughput.sql'
 PRE = '46acfd38b92eb7a03613a4d55c72cc9af57339cf6602ed4611955af22b511cf6'
 POST = 'a962ddae017d3e1efbbe05d296bd1b9c895523d4a5081b0a3fd2c78b9c7f3d73'
 NAME = 'public.lab_arena_ledger_paid_native_request_idx'
+POSTGRES_IMAGE = 'postgres:17.9@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545'
 
 
 def definition(q):
@@ -39,28 +43,33 @@ def old_source(post):
 
 @pytest.fixture(scope='module')
 def database():
-    gen = scalar.database.__wrapped__()
-    db = next(gen)
-    try:
-        c = db[0].connect(**db[1])
-        c.autocommit = True
-        with c.cursor() as q:
-            # Exercise the committed concurrent migration as one autocommit SQL
-            # statement, never inside the ordinary transaction migration helper.
-            q.execute(INDEX.read_text())
-            q.execute(INDEX.read_text())
-            for number in (527, 551, 552):
-                paths = list((ROOT/'scripts').glob(str(number)+'-*.sql'))
-                assert len(paths) == 1
-                q.execute(paths[0].read_text())
-            assert hashlib.sha256(definition(q).encode()).hexdigest() == PRE
-            q.execute(SQL.read_text())
-            q.execute(SQL.read_text())
-            assert hashlib.sha256(definition(q).encode()).hexdigest() == POST
-        c.close()
-        yield db
-    finally:
-        gen.close()
+    # Throughput must use the production PG17 planner, with its normal JIT
+    # defaults, rather than the shared historical harness's PG15 default.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(arena_pg, '_database_with_migrations',
+                      partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
+        gen = scalar.database.__wrapped__()
+        db = next(gen)
+        try:
+            c = db[0].connect(**db[1])
+            c.autocommit = True
+            with c.cursor() as q:
+                # Exercise the committed concurrent migration as one autocommit SQL
+                # statement, never inside the ordinary transaction migration helper.
+                q.execute(INDEX.read_text())
+                q.execute(INDEX.read_text())
+                for number in (527, 551, 552):
+                    paths = list((ROOT/'scripts').glob(str(number)+'-*.sql'))
+                    assert len(paths) == 1
+                    q.execute(paths[0].read_text())
+                assert hashlib.sha256(definition(q).encode()).hexdigest() == PRE
+                q.execute(SQL.read_text())
+                q.execute(SQL.read_text())
+                assert hashlib.sha256(definition(q).encode()).hexdigest() == POST
+            c.close()
+            yield db
+        finally:
+            gen.close()
 
 
 # Existing successful, adversarial, inherited-root and malformed JSON proofs

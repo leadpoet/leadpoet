@@ -6,6 +6,8 @@ and accepted weight-state paths are the production implementations.
 """
 from __future__ import annotations
 
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
 import io
 import json
 import os
@@ -16,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from lab_arena import broker as br, runtime, scoring, shim, submission_runtime, verify
+from lab_arena import broker as br, rewards, runtime, scoring, shim, submission_runtime, verify
 from lab_arena.promotion import GitPromoter
 from leadpoet_canonical import arena_weights
 from qualification.scoring.arena_integrity import canonical_company_identity
@@ -268,7 +270,7 @@ def test_cost_ineligible_baseline_scores_zero_and_eligible_challenger_carries_do
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = BaselineCostHarness(
+    harness = _HistoricalBaselineCostHarness(
         connect, tmp_path, challengers=["EfficientWinner"], runners=["alpha"]
     )
     harness.expensive_baseline = True
@@ -351,7 +353,7 @@ def test_cost_ineligible_baseline_scores_zero_and_eligible_challenger_carries_do
         ).decode()
         == "EfficientWinner"
     )
-    assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
+    assert _activate_single_champion_reward(harness)["status"] == "activated"
     activated = harness.service.store.get_round(harness.round_id)
     assert activated["reward_basis_doc"]["king_hotkey"] == winner["miner_hotkey"]
 
@@ -373,7 +375,7 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = BaselineCostHarness(
+    harness = _HistoricalBaselineCostHarness(
         connect, tmp_path, challengers=["PriorWinner"], runners=["alpha"]
     )
 
@@ -413,7 +415,7 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
         "status": "ok",
         "promoted": 1,
     }
-    assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
+    assert _activate_single_champion_reward(harness)["status"] == "activated"
     first_activated = harness.service.store.get_round(harness.round_id)
     first_basis = first_activated["reward_basis_doc"]
 
@@ -462,7 +464,7 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
         "status": "ok",
         "promoted": 0,
     }
-    assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
+    assert _activate_single_champion_reward(harness, previous=first_basis)["status"] == "activated"
     second_activated = harness.service.store.get_round(harness.round_id)
     second_basis = second_activated["reward_basis_doc"]
     assert second_basis["king_hotkey"] == prior_winner["miner_hotkey"]
@@ -506,3 +508,32 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
     ) as archive:
         assert archive.extractfile("flavor.txt").read().decode() == "PriorWinner"
     fixtures.assert_canary_absent(harness, connect)
+
+
+def _activate_single_champion_reward(harness, *, previous=None):
+    """Exercise the fixture's pre-428 v1 reward contract through its real RPC.
+
+    Current slot-policy activation is covered on current SQL. These rounds pin
+    the original one-point margin and single-champion weight authority.
+    """
+    row = harness.service.store.get_round(harness.round_id)
+    decision = row["publication_doc"]["king_decision"]
+    crowned = decision["outcome"] == "crowned"
+    hotkey = decision["king_hotkey"] if crowned else previous["king_hotkey"]
+    basis = harness.service._sign(rewards.reward_basis_document(
+        round_id=harness.round_id,
+        published_at=row["publication_doc"]["published_at"],
+        finalized_epoch=harness.chain.current_settlement_epoch(),
+        king_hotkey=hotkey,
+        king_outcome="crowned" if crowned else "defended",
+        previous_king_start_epoch=None if crowned else previous["king_start_epoch"],
+        reward_constants=row["configuration_doc"]["reward_constants"],
+    ), "reward_basis_hash")
+    return harness.service.store.activate_reward(
+        harness.round_id, basis, harness.service.signing_key_document(),
+    )
+
+
+# These local tests pin pre-474 SQL. Shared harness classes keep current clients.
+class _HistoricalBaselineCostHarness(HistoricalStoreHarnessMixin, BaselineCostHarness):
+    pass

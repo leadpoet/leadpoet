@@ -983,12 +983,12 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
     return errors
 
 
-def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=None):
+def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=None, ledger_rows=None):
     from lab_arena import training_observations
     from lab_arena import training_coverage
     require_client_ack = not training_coverage.uses_host_result_evidence(configuration or {})
     artifacts, partial_artifacts, errors, counts = {}, {}, set(), {}
-    per_run_errors = {}
+    per_run_errors, verified_counts = {}, {}
 
     def record_error(code, run_id):
         errors.add(code)
@@ -1091,7 +1091,33 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                 counts[run_id].add(sequence)
                 if observation["kind"] != "local_catalog":
                     record_error("worker_call_accounting_unverified", run_id)
-    return artifacts, partial_artifacts, errors, counts, per_run_errors
+        # A lease can expire after the immutable capture upload but before the
+        # completion summary. Only a failed, nonselected execution may use that
+        # exact complete capture for absent counters. Present counters remain
+        # independent checks, including invalid values and contradictions.
+        run_errors = per_run_errors.get(run_id, set())
+        missing_local = "provider_local_refusal_count" not in summary
+        expected_calls = summary.get("provider_call_count", len(counts[run_id]))
+        if (run_id != selected_run_id and run["kind"] == "execute" and run.get("status") == "failed"
+                and payload["complete"] and "response_receipts" in payload
+                and not run_errors - ({"worker_local_refusals_unverified"} if missing_local else set())
+                and type(expected_calls) is int and expected_calls == len(counts[run_id])
+                and ledger_rows is not None
+                and {row["entry_id"] for row in ledger_rows if row.get("run_id") == run_id}
+                    == {entry["entry_id"] for call in paid for entry in call["lifecycle"]}
+                and all(type(call.get("action_sequence")) is int and call["action_sequence"] >= 0
+                        and type(call.get("actual_microusd")) is int and call["actual_microusd"] >= 0
+                        and not call["evidence_gaps"]
+                        and not call.get("response_hidden_reasoning_removed")
+                        and not call.get("response_privacy_redactions")
+                        and call["response_provenance"].get("worker_receipt_ref")
+                        and call["response_provenance"].get("delivery_to_worker") == "socket_written"
+                        for call in paid)):
+            verified_counts[run_id] = len(counts[run_id])
+            if missing_local:
+                run_errors.discard("worker_local_refusals_unverified")
+    errors = set().union(*per_run_errors.values()) if per_run_errors else set()
+    return artifacts, partial_artifacts, errors, counts, per_run_errors, verified_counts
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
@@ -1383,8 +1409,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             raise ExportError("ledger_context_mismatch")
     calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
                          {row["run_id"]: index for index, row in enumerate(related)})
-    observations, partial_observations, observation_gaps, observed_actions, worker_gaps_by_run = _worker_evidence(
-        related, calls, objects, selected_run_id=run_id, configuration=config)
+    observations, partial_observations, observation_gaps, observed_actions, worker_gaps_by_run, verified_worker_counts = _worker_evidence(
+        related, calls, objects, selected_run_id=run_id, configuration=config, ledger_rows=ledger_rows)
     # Recompute payload gaps after exact worker-side fallback joins. Structural
     # ledger failures and every accounting gap retain their original authority.
     gaps -= {"full_request_unavailable", "full_response_unavailable", "request_privacy_nonexact", "response_privacy_nonexact", "provider_call_inflight", "provider_cost_unresolved"}
@@ -1596,7 +1622,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                 logical_calls.add(("unproved", call["call_identity"]))
         logical_calls.update(("action", sequence) for sequence in observed_actions.get(row["run_id"], set()))
         captured = len(logical_calls)
-        if type(summary.get("provider_call_count")) is not int or summary.get("provider_call_count") != captured:
+        expected_count = summary.get("provider_call_count", verified_worker_counts.get(row["run_id"]))
+        if type(expected_count) is not int or expected_count != captured:
             reasons["research_process"].add("provider_capture_count_unverified")
             reasons["costs"].add("provider_capture_count_unverified")
             related_gaps[row["run_id"]]["research_process"].add("provider_capture_count_unverified")

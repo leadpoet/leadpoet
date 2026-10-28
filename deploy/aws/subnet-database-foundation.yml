@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Isolated Leadpoet Arena PostgreSQL migration destination. Creates only new
+  resources in the existing lab VPC. No production clients or source data move.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing lab VPC; verify account and subnet ranges before deploy.
+    Default: vpc-0c975a643bc1e0e79
+  AvailabilityZoneA:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1d
+  AvailabilityZoneB:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Default: us-east-1c
+  DatabaseSubnetCidrA:
+    Type: String
+    Default: 172.31.96.0/24
+  DatabaseSubnetCidrB:
+    Type: String
+    Default: 172.31.97.0/24
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.m7g.large
+    AllowedValues:
+      - db.m7g.large
+      - db.m7g.xlarge
+      - db.r7g.large
+  MultiAZ:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['false', 'true']
+    Description: Single-AZ restore rehearsal; reassess availability before cutover.
+
+Conditions:
+  UseMultiAZ: !Equals [!Ref MultiAZ, 'true']
+
+Resources:
+  DatabaseSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Ref AvailabilityZoneA
+      CidrBlock: !Ref DatabaseSubnetCidrA
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: leadpoet-subnet-db-a
+  DatabaseSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VpcId
+      AvailabilityZone: !Ref AvailabilityZoneB
+      CidrBlock: !Ref DatabaseSubnetCidrB
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: leadpoet-subnet-db-b
+  DatabaseRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: leadpoet-subnet-db-private
+  DatabaseSubnetRouteA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnetA
+      RouteTableId: !Ref DatabaseRouteTable
+  DatabaseSubnetRouteB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DatabaseSubnetB
+      RouteTableId: !Ref DatabaseRouteTable
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for the isolated Arena destination
+      SubnetIds:
+        - !Ref DatabaseSubnetA
+        - !Ref DatabaseSubnetB
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Arena migration DB - no ingress until restore access is reviewed
+      VpcId: !Ref VpcId
+      # No ingress. An explicit loopback-only egress replaces the default allow-all.
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 127.0.0.1/32
+          Description: Suppress default outbound access
+      Tags:
+        - Key: Name
+          Value: leadpoet-subnet-db
+  DatabaseParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: Arena PostgreSQL 17 migration - require encrypted connections
+      Family: postgres17
+      Parameters:
+        rds.force_ssl: '1'
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    DependsOn:
+      - DatabaseSubnetRouteA
+      - DatabaseSubnetRouteB
+    Properties:
+      DBInstanceIdentifier: leadpoet-subnet-arena
+      DBName: postgres
+      Engine: postgres
+      EngineVersion: '17.9'
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      AvailabilityZone: !If [UseMultiAZ, !Ref 'AWS::NoValue', !Ref AvailabilityZoneA]
+      MultiAZ: !If [UseMultiAZ, true, false]
+      AllocatedStorage: '150'
+      MaxAllocatedStorage: 500
+      StorageType: gp3
+      StorageEncrypted: true
+      NetworkType: IPV4
+      PubliclyAccessible: false
+      Port: '5432'
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      DBParameterGroupName: !Ref DatabaseParameterGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      MasterUsername: arena_admin
+      ManageMasterUserPassword: true
+      BackupRetentionPeriod: 14
+      CopyTagsToSnapshot: true
+      DeleteAutomatedBackups: false
+      DeletionProtection: true
+      AllowMajorVersionUpgrade: false
+      AutoMinorVersionUpgrade: false
+      PreferredBackupWindow: '09:00-09:30'
+      PreferredMaintenanceWindow: 'sun:10:00-sun:10:30'
+      Tags:
+        - Key: Name
+          Value: leadpoet-subnet-arena
+        - Key: Purpose
+          Value: migration-rehearsal
+
+Outputs:
+  DatabaseIdentifier:
+    Value: !Ref Database
+  DatabaseEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+  DatabasePort:
+    Value: !GetAtt Database.Endpoint.Port
+  DatabaseMasterSecretArn:
+    Description: Metadata only; RDS manages the password in Secrets Manager.
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+  DatabaseSecurityGroupId:
+    Value: !GetAtt DatabaseSecurityGroup.GroupId
+  DatabaseRouteTableId:
+    Value: !Ref DatabaseRouteTable
+  DatabaseSubnetAId:
+    Value: !Ref DatabaseSubnetA
+  DatabaseSubnetBId:
+    Value: !Ref DatabaseSubnetB

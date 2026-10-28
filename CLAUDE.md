@@ -1,3 +1,16 @@
+## Scoped authorization: October 28 AWS migration foundation
+
+The user authorized starting the subnet Supabase-to-AWS migration step by step.
+The current step creates and verifies only an isolated AWS PostgreSQL destination
+and its dedicated private network resources in account 493765492819, us-east-1.
+Use the saved reviewed CloudFormation template and existing authorized access.
+Preserve production databases, clients, source records, gateway/validator releases,
+provider work, scoring, rewards, weights, and concurrent tasks. Do not change
+source roles or copy data, expose the destination, change production endpoints,
+or restart production in this step. The coordinating task owns AWS writes and
+verification; independent reviewers are read-only. This authority ends after the
+foundation is provisioned and verified, with the next step reported to the user.
+
 ## Scoped authorization: October 28 capture finalization
 
 The user authorized tracing October 28 miner training capture and fixing confirmed

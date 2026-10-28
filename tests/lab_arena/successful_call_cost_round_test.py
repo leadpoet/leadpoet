@@ -1,6 +1,8 @@
 """Production round transitions with a controlled, charged provider failure."""
 from __future__ import annotations
 
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
 import json
 import os
 import subprocess
@@ -12,7 +14,7 @@ import pytest
 from lab_arena import broker as br, contracts, runtime, scoring, shim, submission_runtime
 from lab_arena.promotion import GitPromoter
 from tests.lab_arena import test_lab_arena_service_round as fixtures
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import CURRENT_REWARD_SERVICE_MIGRATIONS, database_with_lab_arena_migration
 
 
 class ChargedTransport(fixtures.FakeProviderTransport):
@@ -62,13 +64,13 @@ class CostHarness(fixtures.Harness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
 
 
 def test_successful_call_cost_survives_publication_restart_and_promotion(database, tmp_path):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = CostHarness(connect, tmp_path, challengers=["Bravo"], runners=["alpha"])
+    harness = _HistoricalCostHarness(connect, tmp_path, challengers=["Bravo"], runners=["alpha"])
     original = harness.sandbox.run_icp
     crashed_once = set()
 
@@ -140,3 +142,8 @@ def test_successful_call_cost_survives_publication_restart_and_promotion(databas
 def test_new_cost_policy_preserves_quality_and_contact_publication(database, tmp_path, with_contacts):
     from tests.lab_arena.company_quality_round_test import test_quality_round_publishes_coverage_winner_after_restart
     test_quality_round_publishes_coverage_winner_after_restart(database, tmp_path, with_contacts)
+
+
+# These local tests pin pre-474 SQL. Shared harness classes keep current clients.
+class _HistoricalCostHarness(HistoricalStoreHarnessMixin, CostHarness):
+    pass

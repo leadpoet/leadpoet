@@ -1,5 +1,7 @@
 """Saved-result verification of integrity rounds on disposable PostgreSQL."""
 from copy import deepcopy
+from contextlib import closing
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -81,7 +83,12 @@ def test_legacy_rounds_still_publish_and_promote_after_integrity_migrations(data
 
 class IntegrityHarness(fixtures.Harness):
     def objects_key(self):
-        return "integrity-round"
+        # All harnesses on one disposable DB share promoted source objects.
+        # Separate DB fixtures must never reuse a sealed object namespace.
+        with closing(self.connect()) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_postmaster_start_time()::text")
+            identity = str(connection.info.port) + cursor.fetchone()[0]
+        return "integrity-round-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
     def build_service(self):
         service = super().build_service()

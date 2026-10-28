@@ -16,9 +16,9 @@ Docker Desktop deployment recipe.
 
 The renderer takes a mode 0600 JSON regular file with exactly these names:
 
-- `arena_key`: existing `sb_secret_` key for `lab_arena_service`.
-- `gateway_key`: separate `sb_secret_` key for `service_role` SDK calls.
-- `public_key`: existing `sb_publishable_` key for `anon` public RPCs.
+- `arena_key`: existing Arena `sb_secret_` key; maps to `lab_arena_service` on RDS.
+- `gateway_key`: separate existing gateway `sb_secret_` key; maps to `service_role` on RDS.
+- `public_key`: existing `sb_publishable_` key for public RPCs; maps to `anon` on RDS.
 - `jwt_secret`: dedicated high-entropy signing secret, at least 32 URL-safe
   ASCII characters. Retain the same dedicated AWS secret on ordinary app
   deploys. Do not regenerate it as part of app startup.
@@ -28,25 +28,46 @@ The renderer takes a mode 0600 JSON regular file with exactly these names:
   requires these TLS settings. Set `SUBNET_API_CA_FILE` to the reviewed AWS
   CA file for compose's read-only mount; neither tool retrieves it.
 
-The container filename `rds-ca.pem` is the fixed interface path, not a claim
-about the upstream. For an owner-approved rollback, keep the public gateway
-origin and request identities unchanged. After writer drain and verified
-reverse synchronization, switch the private URI to the exact source database
-hostname and mount its verified source CA at this same path. Use the source
-hostname rather than its IP so verify-full checks the certificate name. Switch
-the URI and CA together, and prove the dedicated source authenticator's exact
-SET memberships before relying on this path. Do not disable TLS verification.
+Prepare both modes from **one pinned target secret version**, with the exact
+same five-field document and reviewed RDS CA. The default `--rest-backend target`
+uses nginx and the dedicated RDS PostgREST connection. `--rest-backend source`
+forwards nginx requests to the existing managed REST endpoint at
+`https://qplwoislplkcegvdmbim.supabase.co/rest/v1/`. Source mode leaves the
+PostgREST configuration bound to the same RDS URI and CA; that connection is
+unused by nginx in source mode. It does not use a source database login, source
+CA or separate source secret version. Managed Supabase reserves the required
+role memberships, so do not attempt to provision a source authenticator.
 
-Hydrate this input through the existing protected secret workflow. Keep the
-input and output outside Git. No secret belongs in argv, compose environment
-variables, terminal output or Docker logs. Render as root into a private parent:
+Keep the original source public API and existing client keys available. Before
+source-first activation or rollback, the owner must prove the three original
+apikey-only source identities, public epoch RPC, required private reads and
+negative ACL cases. The original source public RPC and anon read permissions
+must remain available to retained validators/auditors that still call it.
+A rollback still requires writer drain, verified reverse synchronization and
+proof that the source is authoritative before selecting its REST mode.
+
+Hydrate the retained target input through the existing protected secret
+workflow. Keep input and output outside Git. No secret belongs in argv, compose
+environment variables, terminal output or Docker logs. The reviewed host
+preparation can fetch the pinned target version into memory. For a protected
+file-based render, use the same private target input for both directories:
 
 ```sh
 python3 scripts/aws_subnet_api.py \
-  --secrets-file /run/leadpoet-subnet-api-input.json \
-  --output-dir /etc/leadpoet-subnet-api \
-  --owner-uid 1000 --owner-gid 1000
+  --secrets-file /run/leadpoet-subnet-api-target-input.json \
+  --output-dir /etc/leadpoet-subnet-api/target \
+  --owner-uid 1000 --owner-gid 1000 --rest-backend target
+python3 scripts/aws_subnet_api.py \
+  --secrets-file /run/leadpoet-subnet-api-target-input.json \
+  --output-dir /etc/leadpoet-subnet-api/source \
+  --owner-uid 1000 --owner-gid 1000 --rest-backend source
 ```
+
+Create the private parent first. Prepare both directories, but run only one
+compose pair at a time. Select the reviewed directory through
+`SUBNET_API_CONFIG_DIR`; both selections use the same reviewed RDS CA through
+`SUBNET_API_CA_FILE`. Place the same reviewed RDS CA in each directory as
+`db-ca.pem`, owned by UID/GID 1000 with mode 0600. Keep `db_uri` bound to RDS.
 
 The output directory is mode 0700; both configuration files are mode 0600 and
 owned by the runtime UID/GID. The renderer emits only a fixed success/error
@@ -61,8 +82,8 @@ The owner can review compose interpolation without secrets because it contains
 only a private directory name:
 
 ```sh
-SUBNET_API_CONFIG_DIR=/etc/leadpoet-subnet-api \
-  SUBNET_API_CA_FILE=/etc/leadpoet/rds-ca.pem \
+SUBNET_API_CONFIG_DIR=/etc/leadpoet-subnet-api/source \
+  SUBNET_API_CA_FILE=/etc/leadpoet-subnet-api/source/db-ca.pem \
   docker compose -f deploy/aws/subnet-api/compose.yaml config --quiet
 ```
 
@@ -80,17 +101,24 @@ An absent bearer is allowed only with a valid apikey. Any nonblank bearer must
 carry that same apikey. Unknown, changed-case, duplicate and mismatched
 credentials fail closed. Incoming role/JWT headers cannot select a role.
 
-nginx replaces Authorization with an internally signed role JWT and removes
-apikey before proxying. These internal tokens have no expiry, are scoped to
-the dedicated signing key/audience/issuer and never leave the private
+In target mode, nginx replaces Authorization with an internally signed role
+JWT and removes apikey before proxying. These internal tokens have no expiry,
+are scoped to the dedicated signing key/audience/issuer and never leave the private
 nginx-to-PostgREST hop. PostgREST verifies signature/audience and switches only
 through the authenticator's reviewed SET memberships. PostgREST does not
 independently validate the issuer string; the dedicated signer and private
 hop provide that issuer boundary. It has no anonymous fallback. It exposes
 only public schema REST/RPC; Auth, Storage and Realtime servers are not added.
 
-`/rest/v1/` is removed exactly once at nginx. Other paths return 404. Requests
-keep HTTP1, JSON, query filters, Prefer and SQLSTATE/status behavior. nginx
+In source mode, nginx forwards the exact original apikey after the same key gate.
+It strips Authorization, Cookie and spoofable JWT headers. No private target JWT
+reaches the source. The HTTPS upstream has the fixed source Host and SNI name,
+with certificate-chain and hostname verification against the container's system
+CA bundle. The RDS CA is used only by PostgREST; it is not the HTTPS trust store.
+
+Target mode removes `/rest/v1/` exactly once. Source mode preserves the original
+`/rest/v1/` path and query. `/rest/v1` without its trailing slash has nginx's
+local 301 redirect to `/rest/v1/`; other routes return 404. Requests keep HTTP1, JSON, query filters, Prefer and SQLSTATE/status behavior. nginx
 does not retry upstream requests, follow redirects or intercept SQL errors.
 The 610s upstream wait preserves existing 605s publication and 65s bulk client
 deadlines. There is no new nginx body cap: existing application/SQL contracts
@@ -98,13 +126,13 @@ own payload limits. Request and response buffering are disabled.
 
 ## Read-only database review before service start
 
-The owner must create/review the authenticator separately. It must be LOGIN,
+The owner must create/review the authenticator on RDS separately. It must be LOGIN,
 NOINHERIT, NOSUPERUSER, NOCREATEDB, NOCREATEROLE, NOREPLICATION and NOBYPASSRLS.
 On PostgreSQL 17 its only SET memberships must be `anon`, `service_role` and
 `lab_arena_service`, with INHERIT and ADMIN false. It must never SET
 `lab_arena_owner`, `postgres`, `arena_admin` or a platform owner role.
 
-These review queries contain no passwords and perform no writes:
+Run these password-free, read-only review queries on the RDS target:
 
 ```sql
 SELECT rolname,rolcanlogin,rolinherit,rolsuper,rolcreatedb,rolcreaterole,
@@ -129,7 +157,8 @@ WHERE r.rolname IN ('anon','service_role','lab_arena_service',
 ```
 
 Replace the example authenticator *name* above with the exact reviewed role
-name. Preserve source ACLs/RLS and the exact `auth.role()` policy helper.
+name on RDS. Preserve the restored ACLs/RLS and exact `auth.role()` policy helper.
+Source REST keeps its existing platform-managed authentication and ACLs.
 Review active role/database settings separately from schema restore metadata.
 In particular, keep the Arena statement, lock and idle-transaction limits;
 `SET ROLE` alone does not apply PostgreSQL login defaults, so prove the actual
@@ -147,9 +176,15 @@ opaque keys and `/rest/v1`; no Python JWT/path substitution is used.
 
 ```sh
 python3 -m pytest -q tests/test_aws_subnet_api.py \
+  tests/test_aws_subnet_api_source.py \
   tests/lab_arena/test_lab_arena_postgrest_route.py \
   tests/lab_arena/test_lab_arena_postgrest_round.py
 ```
+
+The source-fallback tests use pinned nginx and a private HTTPS wire stub. They
+prove key gating, header removal, request/response bytes, SNI and certificate
+verification. The stub does not establish actual managed-source key roles or ACLs;
+the owner must verify those with cold source reads before activation.
 
 Local tests do not prove RDS TLS, restored-source data/ACL parity, final
 synchronization, public TLS routing, deployed releases or real production

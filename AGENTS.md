@@ -2,8 +2,10 @@
 
 The user authorized the narrow recovery of unfinished reviewer and provider
 failures until the existing admission deadline, focused tests, independent
-review, safe push and merge, exact committed migration 585 and its numbered
-rollback, canonical gateway and normal-validator deployment, and live
+review, safe push and merge, exact committed
+`585-lab-arena-review-deadline-recovery.sql` and
+`585-lab-arena-review-deadline-recovery-rollback.sql`, canonical gateway and
+normal-validator deployment, and live
 verification. Preserve completed pass/reject decisions, source and credential
 checks, miner funding, backoff, leases, accounting limits, scoring and rewards.
 Preserve the October 28 frozen entrant set and its excluded submission; do not

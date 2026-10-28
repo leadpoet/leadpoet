@@ -128,6 +128,11 @@ migration 585 restores recovery for that row while its admission window is open.
 Neither direction admits a closed-round or previously excluded submission.
 The rollback is a separately selected operator artifact. It is not part of the
 forward migration fixture or a bulk migration sequence.
+When combined with `585-lab-arena-champion-baseline-reasoning.sql`, the review
+rollback leaves that baseline contract installed. The fallback release must
+retain champion baseline continuity from PR 872. After a baseline capture
+snapshot freezes, do not use the older `a88f94b2` or `4b51d975` releases, which
+do not understand that snapshot.
 
 No Dockerfile, public registry, image tag, commit identity, receipt, source
 digest, or release manifest is part of miner admission. The service validates
@@ -781,7 +786,8 @@ champion. Historical frozen rounds are not repinned. Baseline cost limits,
 scoring, and reward rules remain those of the current round; the capture
 snapshot does not make legacy reasoning eligible for strict training exports.
 
-Apply migration 585, verify its function hashes, then deploy the matching
+Apply `585-lab-arena-champion-baseline-reasoning.sql`, verify its function
+hashes, then deploy the matching
 gateway code before the next baseline freeze. The new code must not freeze a
 round against the older database function, which cannot save the capture
 snapshot. Verify that both the serving API and daily driver use that release;

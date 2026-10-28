@@ -1,4 +1,4 @@
-"""The two distinct migration 585 files preserve each other's contracts."""
+"""Champion migration 585 and review migration 586 preserve each other's contracts."""
 
 import pytest
 
@@ -8,8 +8,8 @@ from tests.postgres_migration_harness import SCRIPTS
 
 
 BASELINE = SCRIPTS / "585-lab-arena-champion-baseline-reasoning.sql"
-REVIEW = SCRIPTS / "585-lab-arena-review-deadline-recovery.sql"
-REVIEW_ROLLBACK = SCRIPTS / "585-lab-arena-review-deadline-recovery-rollback.sql"
+REVIEW = SCRIPTS / "586-lab-arena-review-deadline-recovery.sql"
+REVIEW_ROLLBACK = SCRIPTS / "586-lab-arena-review-deadline-recovery-rollback.sql.template"
 BASELINE_FUNCTIONS = (
     "public.lab_arena_rounds_write_once_v1()",
     "public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)",
@@ -19,7 +19,7 @@ BASELINE_FUNCTIONS = (
 @pytest.fixture()
 def database():
     # The predecessor fixture installs baseline 567 and review 492. Add only
-    # the existing review prerequisites, then test both exact 585 files below.
+    # the existing review prerequisites, then test both exact migration files below.
     generator = baseline.prior.database.__wrapped__()
     db = next(generator)
     try:

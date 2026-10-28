@@ -152,6 +152,24 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
 
 
+def test_review_recovery_uses_586_and_keeps_rollback_out_of_forward_discovery():
+    # Champion585 is already applied. Review586 was still unapplied when its
+    # path changed; retain both exact SQL bodies and forbid an implicit rollback.
+    numbered = _assert_migration_numbering(SCRIPTS)
+    assert numbered[585] == ["585-lab-arena-champion-baseline-reasoning.sql"]
+    assert numbered[586] == ["586-lab-arena-review-deadline-recovery.sql"]
+    identities = {
+        "586-lab-arena-review-deadline-recovery.sql":
+            "e54b999380190722216c0f78a84e3ca175f9eadcf51fa68d2387a53669c3bc5a",
+        "586-lab-arena-review-deadline-recovery-rollback.sql.template":
+            "9c78bc154eb93482cf29f6be10609260efa8d395c6db2969edaaced52ff57e3d",
+    }
+    for name, expected in identities.items():
+        assert hashlib.sha256((SCRIPTS / name).read_bytes()).hexdigest() == expected
+    rollback = SCRIPTS / "586-lab-arena-review-deadline-recovery-rollback.sql.template"
+    assert rollback not in set(SCRIPTS.glob("*.sql"))
+
+
 @pytest.mark.parametrize("mutation", ["changed_bytes", "third_member", "new_collision", "missing_member"])
 def test_migration_numbering_rejects_changes_to_frozen_exceptions(tmp_path, mutation):
     for frozen in FROZEN_MIGRATION_COLLISIONS.values():

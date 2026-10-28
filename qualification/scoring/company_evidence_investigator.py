@@ -6535,11 +6535,11 @@ async def investigate_company_evidence(
                             }
                 else:
                     raise ValueError("reasoning_tool_unknown")
-                if industry_review_model:
-                    tool_result['remaining_research_budget'] = remaining_industry_research_budget()
                 admission.tool_settled(
                     name=name, has_loaded_evidence=bool(fetched_pages),
                 )
+                if industry_review_model:
+                    tool_result['remaining_research_budget'] = remaining_industry_research_budget()
                 assistant_message: dict[str, Any] = {
                     "role": "assistant",
                     # Provider replies can include response-only metadata such

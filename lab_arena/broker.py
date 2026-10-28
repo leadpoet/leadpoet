@@ -6187,16 +6187,6 @@ class Broker:
                         deepline_async_poll_accepted = _deepline_async_response_accepted(
                             response, raw_document,
                         )
-                    deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
-                        effective_normalized, response.status, raw_document,
-                        catalog_entry=deepline_catalog_entry,
-                    )
-                    if deepline_known_free_cost is None:
-                        deepline_known_free_cost = (
-                            provider_costs.deepline_payment_refusal_cost(
-                                response.status, raw_document
-                            )
-                        )
                     response_request_id = _deepline_job_request_id(raw_document)
                     body_identity_present = isinstance(raw_document, Mapping) and any(
                         name in raw_document for name in ("job_id", "request_id", "requestId")
@@ -6218,6 +6208,23 @@ class Broker:
                     # The pre-dispatch ID remains on the immutable reservation
                     # and is used if the transport loses that receipt.
                     deepline_response_request_id = response_request_id
+
+                    deepline_known_free_cost = provider_costs.deepline_free_completed_cost(
+                        effective_normalized, response.status, raw_document,
+                        catalog_entry=deepline_catalog_entry,
+                        request_refused=bool(
+                            response.internal_provenance is None
+                            and response_request_id is not None
+                            and _deepline_generic_http_request_refusal(effective_normalized, response)
+                            and raw_document.get("credential_owner") == "none"
+                            and raw_document.get("credential_source") == "none"
+                            and raw_document["tool_error"].get("requestId") == response_request_id
+                        ),
+                    )
+                    if deepline_known_free_cost is None:
+                        deepline_known_free_cost = provider_costs.deepline_payment_refusal_cost(
+                            response.status, raw_document
+                        )
 
                     if response_request_id is not None and isinstance(raw_document, Mapping) and (
                         (

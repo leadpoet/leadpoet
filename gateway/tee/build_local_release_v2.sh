@@ -51,9 +51,8 @@ cd "$CANDIDATE_ROOT"
 WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}"
 TEMPORARY_ROOT="$(mktemp -d /tmp/leadpoet-local-release.XXXXXX)"
 MANAGED_DOCKER_HOST=0
-if [ "$(uname -s)" = Linux ] && {
-  [ -n "${LEADPOET_DOCKER_OPERATION_LOCK_FILE:-}" ] || [ -d /home/ec2-user/.config/leadpoet ];
-}; then
+if [ "$(uname -s)" = Linux ] \
+    && [ -d /home/ec2-user/.config/leadpoet/restart-controller ]; then
   MANAGED_DOCKER_HOST=1
 fi
 . "$CANDIDATE_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"

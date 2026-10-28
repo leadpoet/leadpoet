@@ -34,9 +34,8 @@ publish_built_eif_for_verification() {
 }
 
 MANAGED_DOCKER_HOST=0
-if [ "$(uname -s)" = Linux ] && {
-  [ -n "${LEADPOET_DOCKER_OPERATION_LOCK_FILE:-}" ] || [ -d /home/ec2-user/.config/leadpoet ];
-}; then
+if [ "$(uname -s)" = Linux ] \
+    && [ -d /home/ec2-user/.config/leadpoet/restart-controller ]; then
   MANAGED_DOCKER_HOST=1
 fi
 . "$REPO_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"

@@ -164,7 +164,7 @@ echo audited
 
 
 @pytest.mark.parametrize('entry,cold', [('local', False), ('role', False), ('role', True)])
-@pytest.mark.parametrize('managed,system', [(True, 'Linux'), (False, 'Linux'), (False, 'Darwin')])
+@pytest.mark.parametrize('managed,system', [(True, 'Linux'), (False, 'Linux'), (True, 'Darwin')])
 @pytest.mark.parametrize('build_status,cleanup_status', [(0, 0), (17, 0), (0, 19), (17, 19)])
 def test_build_batch_teardown_preserves_status_scope_and_retained_objects(tmp_path, entry, cold, managed, system, build_status, cleanup_status):
     source = Path('gateway/tee/build_' + ('local_release_v2' if entry == 'local' else 'role_enclaves') + '.sh').read_text()
@@ -177,6 +177,9 @@ def test_build_batch_teardown_preserves_status_scope_and_retained_objects(tmp_pa
     if cold:
         cold_root.mkdir()
         (cold_root / 'owned-temporary').write_text('owned')
+    managed_marker = tmp_path / 'restart-controller'
+    if managed:
+        managed_marker.mkdir()
     (helper_dir / 'docker_operation_lock_v2.sh').write_text('''
 leadpoet_acquire_docker_operation_lock_v2() {
   export LEADPOET_DOCKER_OPERATION_LOCK_HELD=1 LEADPOET_DOCKER_OPERATION_ADMISSION_LOCK_HELD=1
@@ -195,7 +198,7 @@ exit "$TEST_CLEANUP_STATUS"
     start = source.index('MANAGED_DOCKER_HOST=0')
     boundary = source[start:source.index('leadpoet_acquire_docker_operation_lock_v2', start) + len('leadpoet_acquire_docker_operation_lock_v2')]
     # The filesystem fixture replaces only the canonical managed-host directory.
-    boundary = boundary.replace('/home/ec2-user/.config/leadpoet', str(tmp_path / 'absent-canonical-directory'))
+    boundary = boundary.replace('/home/ec2-user/.config/leadpoet/restart-controller', str(managed_marker))
     setup = 'uname() { echo "$TEST_SYSTEM"; }\n' + boundary + '\n'
     if entry == 'local':
         setup += function(source, 'cleanup') + '\ntrap cleanup EXIT\n'
@@ -205,14 +208,12 @@ exit "$TEST_CLEANUP_STATUS"
         TEMPORARY_ROOT=str(tmp_path / 'owned-temporary'), COLD_BUILD_ROOT=str(cold_root) if cold else '',
         COLD_DOCKER_BUILD_STARTED='1' if cold else '0', EIF_ROOT=str(tmp_path),
         TEST_LOG=str(log), TEST_RETAINED=str(retained), TEST_CLEANUP_STATUS=str(cleanup_status))
-    if managed: environment['LEADPOET_DOCKER_OPERATION_LOCK_FILE'] = str(tmp_path / 'docker.lock')
-    else:
-        # Remove any caller's real managed lock marker from this host simulation.
-        environment['LEADPOET_DOCKER_OPERATION_LOCK_FILE'] = ''
+    # A custom or inherited lock by itself must never admit host maintenance.
+    environment['LEADPOET_DOCKER_OPERATION_LOCK_FILE'] = str(tmp_path / 'custom-docker.lock')
     if cold and build_status == 0:
         setup += '\ncleanup_cold_build_root\nCOLD_BUILD_ROOT=""\n'
     result = bash(setup + f'\nexit {build_status}\n', **environment)
-    cleans_docker = managed and (entry == 'local' or cold)
+    cleans_docker = managed and system == 'Linux' and (entry == 'local' or cold)
     expected = build_status or (cleanup_status if cleans_docker else 0)
     assert result.returncode == expected, result.stderr
     lines = log.read_text().splitlines() if log.exists() else []

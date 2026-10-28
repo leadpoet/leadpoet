@@ -108,6 +108,13 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
     preflight = tmp_path / "preflight"
     preflight.mkdir(exist_ok=True)
     (preflight / "marker").write_text("candidate\n", encoding="utf-8")
+    (preflight / "scripts").mkdir(exist_ok=True)
+    (preflight / "scripts/manage_owned_process_group.py").write_bytes(
+        (ROOT / "scripts/manage_owned_process_group.py").read_bytes()
+    )
+    (tmp_path / "helper").write_bytes(
+        (ROOT / "scripts/manage_owned_process_group.py").read_bytes()
+    )
     clone = tmp_path / "env-clone"
     clone.write_text(runtime_clone, encoding="utf-8")
     ingress = tmp_path / "ingress"
@@ -188,6 +195,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         "wait_for_gateway_v2_authority", "wait_for_arena_driver_startup",
         "wait_for_arena_current_readiness",
         "abort_lab_arena_restart_guard_before_destructive",
+        "verify_controller_process_helper",
     ))
     functions += _function("stop_arena_component").replace(
         "stop_arena_component() {", "actual_stop_arena_component() {", 1,
@@ -221,7 +229,6 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
           if [ "${FAIL:-}" = dual_gap ] && [ "$new_mode" = dual ] && [ "$new_backend" = closed ]; then return 1; fi
         }
         preflight_gateway_restart_disk() { record disk; }
-        verify_controller_process_helper() { record helper; }
         start_arena_component() {
           record "start:$1:$2"
           if [ "${FAIL:-}" != driver_died ] || [ "$1" != driver ]; then

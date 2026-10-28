@@ -1,6 +1,6 @@
-"""Publication inputs for the sealed Sep20 release SQL, not a service override."""
+"""Frozen scoring and publication producers for Sep20 and Oct10 release SQL."""
 
-from lab_arena import contracts, verify
+from lab_arena import contracts, scoring, verify
 
 
 def record_frozen_failed_execution_zeros(service, round_id, stage):
@@ -44,14 +44,18 @@ def frozen_publication_document(service, round_id):
     service publication must refuse them. Their release migrations still need
     the original document assembled from those unchanged, persisted facts.
     """
-    assert service.publish(round_id) == {
+    row = service.store.get_round(round_id)
+    assert row["evaluation_date"] in ("2026-09-20", "2026-10-10")
+    actual = service.publish(round_id)
+    assert actual == {
         "status": "retry", "round_status": "scored", "reason": "baseline_incomplete",
-    }
+    }, actual
     row = service.store.get_round(round_id)
     assert row["status"] == "scored" and row["publication_doc"] is None
     configuration = row["configuration_doc"]
-    assert row["evaluation_date"] == "2026-09-20"
-    assert configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
+    assert row["evaluation_date"] in ("2026-09-20", "2026-10-10")
+    if row["evaluation_date"] == "2026-09-20":
+        assert configuration.get("execution_sequence_policy") != contracts.BASELINE_SCORED_FIRST_POLICY
     positions = range(contracts.benchmark_icp_count(configuration))
     runs = service.store.list_runs(round_id, kind="execute")
     entries = service._score_entries_from_runs(row, positions, "final_score")
@@ -67,9 +71,15 @@ def frozen_publication_document(service, round_id):
     # with a null final score; that later shape is not this release contract.
     complete_entries = [entry for entry in entries if entry["final_score"] is not None]
     assert baseline in complete_entries
-    final_ranking = verify.final_ranking(complete_entries)
+    # Post423 SQL also preserves null-final participant entries.
+    final_ranking = verify.final_ranking(
+        complete_entries if row["evaluation_date"] == "2026-09-20" else entries)
     for entry in final_ranking:
-        entry.update(eligibility[entry["submission_id"]])
+        if entry["final_score"] is None:
+            entry.update(cost_summary=None, eligible=False,
+                         eligibility_reason="execution_incomplete")
+        else:
+            entry.update(eligibility[entry["submission_id"]])
     document = {
         "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
         "round_id": round_id,
@@ -99,3 +109,40 @@ def publish_frozen_document(service, round_id, document):
     return service.store.transition_round(round_id, "scored", "published", {
         "publication_doc": document, "published_at": document["published_at"],
     })
+
+
+def commit_oct10_frozen_scoring_plan(service, round_id, stage):
+    """Produce the sealed Oct10 provider-zero plan through its real SQL API.
+
+    First prove today's producer leaves saved provider failures incomplete.
+    The archived release requires its original zero classification; execution
+    receipts, failed status, ledger rows and SQL guards stay unchanged.
+    """
+    row = service.store.get_round(round_id)
+    assert row["evaluation_date"] == "2026-10-10"
+    assert row["status"] == "stage%d_closed" % stage
+    service.benchmark_icps(round_id)
+    admitted = {p["submission_id"] for p in row["participants"]}
+    runs = [r for r in service.store.list_runs(round_id, stage=stage, kind="execute")
+            if r["submission_id"] in admitted]
+    current = scoring.build_scoring_plan(
+        round_id=round_id, stage=stage, runs=runs,
+        execution_sequence_policy=row["configuration_doc"].get("execution_sequence_policy"),
+        configuration=row["configuration_doc"],
+    )
+    assert not any(item["cause"] == "provider_error" for item in current["zero_rows"])
+    frozen_zeros = [item for item in current.get("incomplete_rows", [])
+                    if item["cause"] == "provider_error"]
+    for item in frozen_zeros:
+        sources = [r for r in runs if r["submission_id"] == item["submission_id"]
+                   and r["icp_position"] == item["icp_position"]]
+        assert sources and not any(r["status"] == "accepted" for r in sources)
+        latest = max(sources, key=lambda r: r["attempt"])
+        assert latest["status"] == "failed" and latest["terminal_cause"] == "provider_error"
+        assert latest["output_ref"] is None
+    frozen = {**current, "zero_rows": current["zero_rows"] + frozen_zeros,
+              "incomplete_rows": [item for item in current.get("incomplete_rows", [])
+                                  if item["cause"] != "provider_error"]}
+    result = service.store.transition_round(round_id, row["status"], row["status"],
+                                            {"stage%d_scoring_plan_doc" % stage: frozen})
+    return {"status": result["status"], "work_items": len(frozen["work_items"])}

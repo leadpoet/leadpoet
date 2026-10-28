@@ -2364,7 +2364,7 @@ def test_worker_socket_disconnect_cancels_temporary_hold_retry(monkeypatch, tmp_
         shutil.rmtree(socket_dir)
 
 
-def test_worker_socket_refuses_connections_above_its_fixed_thread_bound(tmp_path):
+def test_worker_socket_refuses_extra_provider_frames_at_its_fixed_provider_bound(tmp_path):
     socket_dir = Path(tempfile.mkdtemp(prefix="la", dir="/tmp"))
     server = rn.WorkerSocketServer(
         socket_dir / "worker.sock",
@@ -2382,6 +2382,7 @@ def test_worker_socket_refuses_connections_above_its_fixed_thread_bound(tmp_path
         time.sleep(0.05)
         second.settimeout(1)
         second.connect(str(socket_dir / "worker.sock"))
+        second.sendall(b"\x00\x00\x00\x02")  # overflow cannot read an ordinary provider body
         assert second.recv(1) == b""
     finally:
         first.close()

@@ -1,7 +1,7 @@
 """Future baseline-first rounds through the real service and PostgreSQL."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,7 @@ from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
+    CURRENT_REWARD_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
     migrations_before,
 )
@@ -20,11 +20,12 @@ from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
     _verified_test_pool,
 )
 from tests.lab_arena.test_integrity_round import IntegrityHarness
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
 
 
 @pytest.fixture()
@@ -91,7 +92,7 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
     flavors = ["Miner%d" % index for index in range(5)]
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=flavors, runners=["alpha", "beta"]
     )
     harness.service.config.defaults = replace(
@@ -103,7 +104,7 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
     _enable_verified_proxy_runtime(harness)
 
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
-    participants = fixtures._start_round(harness, day=31, epoch=62_031)
+    participants = _start_frozen_round(harness, day=31, epoch=62_031)
     assert participants == 6
     committed = harness.service.store.get_round(harness.round_id)
     configuration = committed["configuration_doc"]
@@ -111,7 +112,8 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
         contracts.BASELINE_SCORED_FIRST_POLICY
     )
     assert "parallel_twenty_icp_execution" not in configuration
-    assert capacity.daily_challenger_capacity(configuration) >= len(flavors)
+    # Capacity was checked against the actual intake schedule before this
+    # historical replay moved its execution windows forward.
     bank_ref = committed["benchmark_ref"]
     bank_bytes = harness.objects.get(bank_ref)
     baseline_id = next(
@@ -210,7 +212,7 @@ def test_baseline_only_future_round_scores_and_publishes_without_stage_two_runs(
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=[], runners=["alpha", "beta"]
     )
     harness.service.config.defaults = replace(
@@ -220,7 +222,7 @@ def test_baseline_only_future_round_scores_and_publishes_without_stage_two_runs(
     )
     _enable_verified_proxy_runtime(harness)
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
-    assert fixtures._start_round(harness, day=30, epoch=62_030) == 1
+    assert _start_frozen_round(harness, day=30, epoch=62_030) == 1
 
     harness.advance_until("published", runners=2, max_steps=120)
     row = harness.service.store.get_round(harness.round_id)
@@ -250,7 +252,7 @@ def test_sep22_open_round_opt_in_changes_only_the_execution_policy(
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=[], runners=["alpha", "beta"]
     )
     harness.round_id = "arena-2026-09-22"
@@ -288,3 +290,27 @@ def test_sep22_open_round_opt_in_changes_only_the_execution_policy(
         key: value for key, value in before.items()
         if key not in {"configuration_doc", "updated_at"}
     }
+
+
+class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+    pass
+
+
+def _start_frozen_round(harness, *, day, epoch):
+    harness.chain.epoch = epoch
+    harness.clock.now = datetime.now(timezone.utc)
+    configuration = harness.service.create_round(
+        harness.clock.now + timedelta(minutes=30), round_id="arena-2026-10-%02d" % day,
+    )
+    assert capacity.daily_challenger_capacity(configuration) >= len(harness.challengers)
+    harness.round_id = configuration["round_id"]
+    for flavor in harness.challengers:
+        harness.submit(flavor, harness.round_id)
+    original_cutoff = freeze_historical_intake_dates(harness, "2026-09-23")
+    harness.clock.advance_to(original_cutoff)
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["evaluation_date"] == "2026-09-23"
+    for participant in row["participants"]:
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
+    return len(row["participants"])

@@ -5087,7 +5087,7 @@ async def investigate_company_evidence(
                 input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
             industry_gap_search_needed = bool(
                 industry_research_brief
-                and industry_research_brief['decision'] == 'unavailable'
+                and industry_research_brief['decision'] != 'match'
                 and industry_research_brief['missing_requirements']
                 and industry_research_brief.get('research_query')
                 and any(_independently_bound_first_party_url(
@@ -5136,7 +5136,8 @@ async def investigate_company_evidence(
             def industry_search_exchange():
                 """Use the same remaining allowance for disclosure and admission."""
                 if not (industry_review_model and industry_research_brief
-                        and industry_research_brief['decision'] == 'unavailable'
+                        and industry_research_brief['decision'] != 'match'
+                        and industry_research_brief['missing_requirements']
                         and search_calls <= MAX_SEARCH_CALLS
                         and fetch_calls < fetch_call_limit
                         and len(fetched_pages) < industry_classification.MAX_PAGES

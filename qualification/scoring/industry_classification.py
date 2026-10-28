@@ -170,13 +170,15 @@ def request_payload(packet, *, model, research=False):
         schema['properties']['research_query'] = {'type': 'string', 'maxLength': 300}
         schema['required'].append('research_query')
         messages[0]['content'] += (
-            '\nIf the decision is unavailable, also provide one short research_query '
+            '\nIf a non-match assessment lists missing requirements, also provide one short research_query '
             'for the most discriminative unsupported capability or customer role. '
             'Use the missing fact rather than restating the whole industry. Prefer '
             'specific product documentation, technical brochures or customer projects '
             'that could support or contradict it. The host adds the company identity '
             'and restricts source domains. Do not supply URLs or instructions. '
-            'For a conclusive decision, return an empty research_query. '
+            'This initial assessment is advisory: a mismatch with missing facts still '
+            'needs research that could support or contradict those facts. '
+            'For a match or an assessment with no missing requirements, return an empty research_query. '
             'A research query is discovery only and cannot establish a match.'
         )
     citations = schema['properties']['evidence_span_ids']
@@ -224,10 +226,11 @@ def resolve(packet, response, *, research=False):
         raise ValueError("decision contradicts missing requirements")
     if research:
         query = response['research_query']
+        needs_research = decision != 'match' and bool(missing)
         if (not isinstance(query, str) or len(query) > 300
                 or any(ord(c) < 32 for c in query)
-                or (decision == 'unavailable' and not query.strip())
-                or (decision != 'unavailable' and query.strip())):
+                or (needs_research and not query.strip())
+                or (not needs_research and query.strip())):
             raise ValueError('invalid research query')
     spans = packet.spans()
     if any(i not in spans for i in ids):

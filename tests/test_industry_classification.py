@@ -148,16 +148,17 @@ def test_unavailable_needs_a_missing_requirement():
         industry.resolve(value, proposal(value, decision='unavailable'))
 
 
-def test_initial_research_query_does_not_change_final_evidence_contract():
+@pytest.mark.parametrize('decision', ['unavailable', 'mismatch'])
+def test_initial_research_query_does_not_change_final_evidence_contract(decision):
     from lab_arena.operations import validate_operation_request
     value = packet()
     request = industry.request_payload(value, model=industry.DEFAULT_MODEL, research=True)
     validate_operation_request('openrouter.chat', request)
     assert 'research_query' in request['response_format']['json_schema']['schema']['required']
-    response = proposal(value, decision='unavailable', missing_requirements=['Account workflows'],
+    response = proposal(value, decision=decision, missing_requirements=['Account workflows'],
                         research_query='account workflow integration')
     result = industry.resolve(value, response, research=True)
-    assert result['decision'] == 'unavailable'
+    assert result['decision'] == decision
     assert result['packet_sha256'] == value.digest
     assert len(result['resolved_evidence']) == 2
     with pytest.raises(ValueError, match='invalid result shape'):
@@ -167,11 +168,12 @@ def test_initial_research_query_does_not_change_final_evidence_contract():
     assert 'research_query' not in industry.SCHEMA['properties']
 
 
+@pytest.mark.parametrize('decision', ['unavailable', 'mismatch'])
 @pytest.mark.parametrize('query', ['', ' ', None, 42, 'x' * 301, 'account\nworkflow'])
-def test_initial_discovery_query_is_bounded_and_required_for_a_gap(query):
+def test_initial_discovery_query_is_bounded_and_required_for_a_gap(query, decision):
     value = packet()
     with pytest.raises(ValueError, match='invalid research query'):
-        industry.resolve(value, proposal(value, decision='unavailable',
+        industry.resolve(value, proposal(value, decision=decision,
             missing_requirements=['Account workflows'], research_query=query), research=True)
 
 

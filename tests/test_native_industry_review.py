@@ -65,7 +65,8 @@ def install(monkeypatch, *, decision='match', missing=None, mutation=None,
         if mutation:
             mutation(result)
         if 'research_query' in payload['response_format']['json_schema']['schema']['properties']:
-            result['research_query'] = 'account workflow integration' if result['decision'] == 'unavailable' else ''
+            result['research_query'] = ('account workflow integration'
+                if result['decision'] != 'match' and result['missing_requirements'] else '')
         return 200, {'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(result)}}]}
 
     monkeypatch.setattr(c, '_post_json', post)
@@ -153,11 +154,12 @@ def test_final_shared_packet_uses_stronger_model_only_under_new_industry_policy(
     assert final['reasoning']['effort'] == 'low'
 
 
+@pytest.mark.parametrize('initial_decision', ['unavailable', 'mismatch'])
 @pytest.mark.parametrize('missing', [
     ['Account workflow integration'],
     ['General reporting capability', 'Account workflow integration'],
 ])
-def test_native_source_selection_receives_verified_source_gaps_before_research(monkeypatch, missing):
+def test_native_source_selection_receives_verified_source_gaps_before_research(monkeypatch, missing, initial_decision):
     """The source picker must see the actual gap, not only a broad category."""
     seen = []
     search_options = []
@@ -165,7 +167,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     def initial_gap(result):
         seen.append(result)
         if len(seen) == 1:
-            result.update(decision='unavailable', missing_requirements=missing)
+            result.update(decision=initial_decision, missing_requirements=missing)
 
     run, calls, _, reviews = install(monkeypatch, mutation=initial_gap)
     original_post = c._post_json
@@ -196,7 +198,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
     document = json.loads(first[first.index('{'):])
     brief = document['industry_source_research_brief']
     assert brief['missing_requirements'] == missing
-    assert brief['decision'] == 'unavailable'
+    assert brief['decision'] == initial_decision
     assert brief['research_query'] == 'account workflow integration'
     assert search_options[0]['include_domains'] == ('coreworks.ai',)
     assert search_options[0]['discovery_highlights'] is True
@@ -228,10 +230,11 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
         validate_operation_request('openrouter.chat', request)
 
 
+@pytest.mark.parametrize('decision', ['unavailable', 'mismatch'])
 @pytest.mark.parametrize('limit', ['deadline', 'search_cap', 'fetch_cap'])
-def test_initial_gap_query_obeys_existing_discovery_admission(monkeypatch, limit):
+def test_initial_gap_query_obeys_existing_discovery_admission(monkeypatch, limit, decision):
     run, calls, clock, reviews = install(
-        monkeypatch, decision='unavailable', missing=['Account workflow integration'])
+        monkeypatch, decision=decision, missing=['Account workflow integration'])
     original = c._post_json
 
     async def review(session, url, **kwargs):

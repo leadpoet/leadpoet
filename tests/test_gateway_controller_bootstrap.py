@@ -81,7 +81,9 @@ def host(tmp_path, monkeypatch):
           [ -z "${GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID+x}" ]
         fi
         [[ "$GATEWAY_RESTART_AUTHORITY_ROOT" == */gateway-restart-controller-bootstrap.*/authority ]]
-        [ "$(stat -f '%Lp' "$GATEWAY_RESTART_AUTHORITY_ROOT" 2>/dev/null || stat -c '%a' "$GATEWAY_RESTART_AUTHORITY_ROOT")" = 700 ]
+        # GNU stat -f can emit filesystem output before failing the BSD form.
+        # Use the existing Python runtime for one portable exact mode check.
+        python3 -B -c 'import os,stat; assert stat.S_IMODE(os.stat(os.environ["GATEWAY_RESTART_AUTHORITY_ROOT"]).st_mode) == 0o700'
         python3 -B - <<'PY'
         import fcntl, os
         # Bootstrap must release its locks before the full controller enters.

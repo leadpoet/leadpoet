@@ -74,3 +74,33 @@ def test_discovery_context_uses_existing_excerpt_and_message_bounds(monkeypatch)
     assert len(result['results']) == c.MAX_INDUSTRY_SEARCH_RESULTS
     assert all('\x01' not in r['discovery_excerpt'] for r in result['results'])
     assert len(c._bounded_message_json(result)) < c.OPENROUTER_MAX_CONTENT_CHARS
+
+
+def test_compact_list_binds_each_description_to_its_own_url(monkeypatch):
+    first = 'https://coreworks.ai/migration'
+    second = 'https://coreworks.ai/operations'
+    content = (f'- {first} — Application migration and conversion.\n'
+               f'- {second} — Managed infrastructure operations and monitoring.')
+    result = search(monkeypatch, content)
+    a, b = result['results']
+    assert first in a['discovery_excerpt']
+    assert 'Application migration' in a['discovery_excerpt']
+    assert second not in a['discovery_excerpt']
+    assert second in b['discovery_excerpt']
+    assert 'Managed infrastructure operations' in b['discovery_excerpt']
+    assert first not in b['discovery_excerpt']
+    assert 'Application migration' not in b['discovery_excerpt']
+    assert '_source_pages' not in result
+
+
+def test_long_intro_cannot_hide_a_later_locator_description(monkeypatch):
+    url = 'https://coreworks.ai/operations'
+    result = search(monkeypatch, 'Background. ' * 100 + f'\n{url} — Managed operations.')
+    assert url in result['results'][0]['discovery_excerpt']
+    assert 'Managed operations' in result['results'][0]['discovery_excerpt']
+
+
+def test_locator_keeps_its_own_short_leading_description(monkeypatch):
+    url = 'https://coreworks.ai/operations'
+    result = search(monkeypatch, f'Managed infrastructure operations: {url}')
+    assert 'Managed infrastructure operations' in result['results'][0]['discovery_excerpt']

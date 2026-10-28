@@ -2701,12 +2701,26 @@ async def _search_industry_locators(
         # the researcher can select an exact source rather than guess from a
         # title alone; never copy this prose into fetched_pages.
         for block in re.split(r'\n\s*\n', content[:12_000]):
-            for match in re.finditer(r'https?://[^\s<>"`]+', block):
+            matches = list(re.finditer(r'https?://[^\s<>"`]+', block))
+            for index, match in enumerate(matches):
                 url = safe_locator(match.group().rstrip("'.,;:!?)]}"))
                 if url and url not in locators:
+                    # Compact lists often have no blank lines. Use this URL's
+                    # local entry and stop before the next one, so locators do
+                    # not inherit the first page's description or lose its own.
+                    end = matches[index + 1].start() if index + 1 < len(matches) else len(block)
+                    if index + 1 < len(matches):
+                        next_line = block.rfind('\n', match.end(), end) + 1
+                        if next_line > match.end():
+                            end = next_line
+                    start = block.rfind('\n', 0, match.start()) + 1
+                    if ((index and start < matches[index - 1].end())
+                            or match.end() - start > MAX_SEARCH_LOCATOR_EXCERPT_CHARS):
+                        start = match.start()
+                    context = block[start:end]
                     excerpt = " ".join(re.sub(
                         r"[\x00-\x1f\x7f]", " ",
-                        block[:MAX_SEARCH_LOCATOR_EXCERPT_CHARS],
+                        context[:MAX_SEARCH_LOCATOR_EXCERPT_CHARS],
                     ).split())
                     locators[url] = {'url': url, 'title': citations.get(url, ''),
                                      'discovery_excerpt': excerpt}

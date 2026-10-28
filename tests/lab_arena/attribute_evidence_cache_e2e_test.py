@@ -29,7 +29,7 @@ from leadpoet_canonical import arena_weights
 from qualification.scoring import competition
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
-from tests.lab_arena.attribute_evidence_cache_postgres_test import database, migrated
+from tests.lab_arena.proxy_model_capacity401_e2e_test import database, migrated
 
 
 def _install_hints(harness):
@@ -48,7 +48,7 @@ def _install_hints(harness):
                     status, _, _ = shim.dispatch(
                         "openrouter.chat",
                         {
-                            "model": "google/gemini-2.5-flash",
+                            "model": document["scorer_policy"]["judge_models"]["role_batch_check"],
                             "messages": [
                                 {
                                     "role": "user",
@@ -206,27 +206,31 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
                     break
                 if status in ("stage1", "stage1_scoring", "stage2", "stage2_scoring"):
                     _drain_both(harness, (small, large))
-                if status == "stage1_scored":
-                    assert harness.service._baseline_fully_succeeded(
-                        harness.service.store.get_round(harness.round_id)
+                if not old_baseline:
+                    baseline_scores = harness.service.store.list_runs(
+                        harness.round_id, stage=1, kind="score"
                     )
-                    old_baseline = {
+                    accepted_baseline = {
                         r["run_id"]: (
                             r["judgment_cache_key"],
                             r["judgment_scope_doc"],
                             r["result_doc"],
                             r["output_ref"],
                         )
-                        for r in harness.service.store.list_runs(
-                            harness.round_id, stage=1, kind="score"
-                        )
+                        for r in baseline_scores
                         if r["status"] == "accepted"
                     }
-                    assert len(old_baseline) == 10
-                    monkeypatch.setattr(
-                        competition, "effective_competition_input", current_projection
-                    )
-                    harness.clock.advance_to(harness.schedule()["stage_2_start"])
+                    if len(accepted_baseline) == 10:
+                        # Current concurrency can skip the old stage1_scored
+                        # state. Upgrade after all baseline judgments exist,
+                        # while no miner judgment has been planned or accepted.
+                        assert not harness.service.store.list_runs(
+                            harness.round_id, stage=2, kind="score"
+                        )
+                        old_baseline = accepted_baseline
+                        monkeypatch.setattr(
+                            competition, "effective_competition_input", current_projection
+                        )
                 transition = harness.service.advance_round(harness.round_id)
                 assert transition.get("status") not in (
                     "cancelled",
@@ -242,6 +246,7 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
 
     published = harness.service.store.get_round(harness.round_id)
     assert published["status"] == "published"
+    assert harness.service._baseline_fully_succeeded(published)
     assert observed == {"execute": 30, "score": 26}
     score_runs = harness.service.store.list_runs(harness.round_id, kind="score")
     cached = [r for r in score_runs if r["judgment_cache_source_run_id"] != r["run_id"]]
@@ -292,6 +297,8 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
     burn = fixtures.keypair("attribute-evidence-cache-burn").ss58_address
     state = _accepted_state(harness, int(activated["effective_reward_epoch"]), burn)
     weights = arena_weights.derive_arena_weights(state, [burn, winner_hotkey])
-    assert weights["champion_share_ppb"] == 300_000_000
-    assert weights["burned_residual_ppb"] == 700_000_000
+    # Current-schema activation uses the signed cumulative slot policy.
+    assert activated["reward_basis_doc"]["slot_policy"]["pool_percent"] == 50
+    assert weights["champion_share_ppb"] == 500_000_000
+    assert weights["burned_residual_ppb"] == 500_000_000
     fixtures.assert_canary_absent(harness, lambda: database[0].connect(**database[1]))

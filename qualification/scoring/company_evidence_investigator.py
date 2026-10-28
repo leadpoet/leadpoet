@@ -3940,7 +3940,10 @@ async def investigate_company_evidence(
         "requested_geography": str(requested_geography or "")[:300],
         "positive_semantic_review": bool(positive_semantic_review),
         "prior_observations": bounded_prior_observations,
-        "verified_homepage_identity": dict(verified_homepage_identity or {}),
+        "verified_homepage_identity": {
+            key: value for key, value in (verified_homepage_identity or {}).items()
+            if key != "verified_homepage_brand_alias"
+        },
         "investigation_limits": {
             "reasoning_turns": MAX_REASONING_TURNS,
             "search_calls": MAX_SEARCH_CALLS,

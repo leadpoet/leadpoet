@@ -12,10 +12,40 @@ from datetime import date, timedelta
 
 from lab_arena import contracts
 
-from lab_arena.store import ArenaStore, PsycopgTransport, PUBLIC_RESULTS_CONFIGURATION_FIELDS
+from lab_arena.store import (ArenaStore, ArenaStoreError, PsycopgTransport,
+                             PUBLIC_RESULTS_CONFIGURATION_FIELDS,
+                             CODE_REVIEW_SCHEMA_VERSION, _require_mapping)
 
 
 class HistoricalArenaStore(ArenaStore):
+    def code_review_schema(self):
+        """Require the exact bounded-review capability from pre-586 fixtures."""
+
+        result = _require_mapping(
+            self._transport.rpc("lab_arena_code_review_schema_v1", {}),
+            "code_review_schema",
+        )
+        if (
+            result.get("schema_version") != CODE_REVIEW_SCHEMA_VERSION
+            or result.get("version") != 207
+            or result.get("claim_ttl_seconds") != 600
+            or result.get("retry_backoff_seconds") != 60
+            or result.get("max_attempts") != 3
+        ):
+            raise ArenaStoreError("code review schema mismatch")
+        retry_policy = result.get("retry_policy")
+        if (
+            retry_policy != "bounded_transient_v1"
+            or result.get("max_transient_attempts") != 6
+            or result.get("transient_retry_backoff_seconds")
+                != [60, 120, 240, 480, 900]
+            or result.get("legacy_max_attempts") != 3
+            or result.get("retry_window")
+                != "replacement_freeze_to_benchmark_deadline"
+        ):
+            raise ArenaStoreError("code review schema mismatch")
+        return result
+
     def list_runs(self, round_id, *, columns="*", **kwargs):
         if columns == "*,execution_attempt:lab_arena_execution_attempt_count":
             # Pre-474 SQL counts every stored attempt. Host-retry exclusions

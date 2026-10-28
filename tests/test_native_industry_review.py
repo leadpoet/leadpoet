@@ -464,6 +464,13 @@ def test_invalid_advisory_does_not_abort_valid_final_industry_review(monkeypatch
     review = result['claims']['industry']['_industry_review']
     assert result['claims']['industry']['status'] == 'VERIFIED'
     assert review['research_brief']['advisory_failure_reason'] == 'malformed_response'
+    # An invalid advisory cannot erase source discovery for the original
+    # criterion. It supplies neither a verdict nor partial model-generated gaps.
+    assert review['research_brief']['decision'] == 'unavailable'
+    assert review['research_brief']['research_query'].startswith(
+        'Supplies reporting and account workflows')
+    assert any('Supplies reporting and account workflows' in query
+               for query in calls['search'])
     assert len(reviews) == result['usage']['industry_review_calls'] == 2
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
     assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS

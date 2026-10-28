@@ -2414,6 +2414,13 @@ async def _review_industry_sources(
     review = {'schema': 'industry_evidence_review_v1', 'model': model,
               'decision': 'unavailable', 'missing_requirements': [], 'evidence': [],
               'source_urls': []}
+    if research:
+        # A malformed advisory must not erase bounded source discovery. Use
+        # only the original criterion, never fragments of an invalid response.
+        review['missing_requirements'] = ['A valid assessment of the complete industry criterion']
+        review['research_query'] = ' '.join(
+            criteria.get(key, '') for key in ('product_service', 'subindustry', 'industry')
+        ).strip()[:300]
     unproven['_industry_review'] = review
     # The shared loop can settle an already admitted submission after research
     # closes. Its reserved industry judgment is part of that submission, not
@@ -2438,10 +2445,6 @@ async def _review_industry_sources(
             pages.append({'source_id': f's{index}', 'source_url': url, 'body': text})
     if not pages:
         review['missing_requirements'] = ['Company-bound source text for the requested activity']
-        if research:
-            review['research_query'] = ' '.join(
-                criteria.get(key, '') for key in ('product_service', 'subindustry', 'industry')
-            ).strip()[:300]
         return unproven, '', 0
     packet = industry_classification.prepare(criteria, {
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')

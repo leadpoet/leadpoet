@@ -554,10 +554,6 @@ PY
 
 require_arena_lock_recovery_idle() {
   local state generation
-  # API code review is separate from the driver and durable execute/score leases.
-  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B \
-    "$GATEWAY_PREFLIGHT_TREE/scripts/arena_first_cutover_idle.py" \
-    --environment-file "$GATEWAY_ENV_FILE" >/dev/null || return 1
   state="$(run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" owned)" || return 1
   generation="$("$GATEWAY_PYTHON_BIN" -B - "$PREPARED_GATEWAY_SHA" "$state" "$GATEWAY_RESTART_GUARD_SCOPE" "${1:-}" <<'PY'
 import json
@@ -578,6 +574,14 @@ if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
 print(state["guard_generation"])
 PY
   )" || return 1
+  # The exact active guard blocks new API reviews. Still reject every live or
+  # ambiguous paid-review claim/lease before recovering process locks.
+  PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B \
+    "$GATEWAY_PREFLIGHT_TREE/scripts/arena_first_cutover_idle.py" \
+    --environment-file "$GATEWAY_ENV_FILE" \
+    --candidate "$PREPARED_GATEWAY_SHA" \
+    --invocation "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" \
+    --scope "$GATEWAY_RESTART_GUARD_SCOPE" --generation "$generation" >/dev/null || return 1
   # The normal canonical RPC checks the same owner, generation, active lease and
   # current drain atomically. Repeating its current destructive phase is legal.
   run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \

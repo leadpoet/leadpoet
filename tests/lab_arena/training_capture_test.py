@@ -928,3 +928,42 @@ def test_rejected_frame_keeps_credential_and_opaque_guards_and_redaction_fixed_p
     assert not any(word in json.dumps(cleaned) for word in (
         "known-private-value", "another-private-value", "opaque-private-value", "sealed-private-value"))
     assert capture.sanitize_training_value(cleaned) == (cleaned, redactions)
+
+
+def test_repeated_text_scans_once_but_still_checks_every_node(monkeypatch):
+    public = "public catalog description " * 100
+    oversized = "public response text " * 1000
+    value = {"input_snapshots": {"run": [public] * 40},
+             "provider_calls": [{"response": [public] * 40}],
+             "large": [oversized, oversized]}
+    original = trajectory.redact_text
+    calls = {public: 0, oversized: 0}
+
+    def counted(text, *args, **kwargs):
+        if text in calls:
+            calls[text] += 1
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(trajectory, "redact_text", counted)
+    assert capture.sanitize_training_value(value, aggregate_parts=True) == (value, [])
+    assert calls == {public: 1, oversized: 2}
+
+
+def test_repeated_text_cache_keeps_privacy_and_is_invocation_local():
+    private = "known-private-value"
+    text = "private " + private + " https://user:pass@example.test/?token=unknown-token"
+    value = {"input_snapshots": {"run": [text] * 20},
+             "authorization": "another-private-value",
+             "hidden_reasoning": "opaque-private-value"}
+    cleaned, reasons = capture.sanitize_training_value(value, secrets=(private,))
+    assert reasons == ["credential", "hidden_reasoning"]
+    assert cleaned["input_snapshots"]["run"] == [
+        "private [REDACTED] https://example.test/?token=%5BREDACTED%5D"] * 20
+    assert private not in json.dumps(cleaned)
+    assert "unknown-token" not in json.dumps(cleaned)
+    assert cleaned["authorization"] == cleaned["hidden_reasoning"] == "[REDACTED]"
+    without_secret, reasons = capture.sanitize_training_value(value)
+    assert private in without_secret["input_snapshots"]["run"][0]
+    assert reasons == ["credential", "hidden_reasoning"]
+    with pytest.raises(capture.CaptureError, match="request_redaction_key_collision"):
+        capture.sanitize_training_value({private: "safe", "[REDACTED]": "safe"}, secrets=(private,))

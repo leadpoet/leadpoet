@@ -17,6 +17,12 @@ import tempfile
 
 ARENA_EDGE_PORTS = (8890, 8891)
 BACKENDS = {"legacy": 8000, "ready": 8001, "closed": None}
+DATABASE_HANDLER = (
+    "    @database path /rest/v1/*\n"
+    "    handle @database {\n"
+    "        reverse_proxy 127.0.0.1:8081\n"
+    "    }\n"
+)
 BASELINE_CADDY_SHA256 = "feb10ab28f61a2bbcbfd0a75f6e16d53ecf7951bec5e94373f5958edc3d901dc"
 BASELINE_CADDY = b"gateway.subnet71.com {\n\treverse_proxy localhost:8000\n}\n"
 _SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -37,6 +43,7 @@ def render(*, arena_edge_port: int, backend: str, direct: bool) -> str:
         )
         return (
             f"{name} {{\n"
+            f"{DATABASE_HANDLER if name == 'gateway.subnet71.com' else ''}"
             "    @arena path /arena /arena/* /testnet/arena /testnet/arena/*\n"
             "    handle @arena {\n"
             f"        reverse_proxy 127.0.0.1:{arena_edge_port}\n"
@@ -79,7 +86,8 @@ def inspect(state_file: Path, caddy_file: Path) -> dict[str, object]:
         raise ValueError("Arena ingress state is not an owned private file")
     state = json.loads(state_file.read_text(encoding="utf-8"))
     if (not isinstance(state, dict) or set(state) != {"version", "mode", "slot", "sha", "backend"}
-            or state["version"] != 1 or state["mode"] not in ("domain", "dual")
+            or type(state["version"]) is not int or state["version"] not in (1, 2)
+            or state["mode"] not in ("domain", "dual")
             or type(state["slot"]) is not int or state["slot"] not in (0, 1)
             or not isinstance(state["sha"], str) or not _SHA.fullmatch(state["sha"])
             or state["backend"] not in BACKENDS
@@ -89,7 +97,12 @@ def inspect(state_file: Path, caddy_file: Path) -> dict[str, object]:
     expected = render(
         arena_edge_port=slot_ports(state["slot"])[1],
         backend=state["backend"], direct=state["mode"] == "dual",
-    ).encode("utf-8")
+    )
+    if state["version"] == 1:
+        # Version 1 predates the fixed HTTPS database route. Accept only its
+        # exact former renderer, never an arbitrary pre-migration Caddy edit.
+        expected = expected.replace(DATABASE_HANDLER, "", 1)
+    expected = expected.encode("utf-8")
     if current != expected:
         raise ValueError("Caddy config differs from the recorded Arena ingress")
     return state
@@ -110,7 +123,7 @@ def commit_state(
     ).encode("utf-8")
     if caddy_file.read_bytes() != config:
         raise ValueError("Caddy config does not match the proposed Arena ingress")
-    state = {"version": 1, "mode": mode, "slot": slot, "sha": sha, "backend": backend}
+    state = {"version": 2, "mode": mode, "slot": slot, "sha": sha, "backend": backend}
     state_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=".arena-ingress.", dir=state_file.parent)
     try:
@@ -146,7 +159,7 @@ def activate(
             "mode": expected_mode, "slot": expected_slot,
             "sha": "" if expected_sha == "-" else expected_sha,
             "backend": expected_backend,
-            **({"version": 1} if expected_mode != "legacy" else {}),
+            **({"version": previous.get("version")} if expected_mode != "legacy" else {}),
         }:
             raise ValueError("Arena ingress changed before routing transition")
         if mode == "legacy":
@@ -161,7 +174,7 @@ def activate(
         previous_config = caddy_file.read_bytes()
         previous_state = state_file.read_bytes() if state_file.exists() else None
         next_state = None if mode == "legacy" else (
-            json.dumps({"version": 1, "mode": mode, "slot": slot, "sha": sha,
+            json.dumps({"version": 2, "mode": mode, "slot": slot, "sha": sha,
                         "backend": backend}, sort_keys=True) + "\n"
         ).encode("utf-8")
         with tempfile.NamedTemporaryFile(

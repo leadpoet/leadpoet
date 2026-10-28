@@ -168,6 +168,16 @@ class RecoveryReviewTransport(FakeProviderTransport):
                 )
             if attempt in (2, 4):
                 raise broker.ProviderTransportError("controlled transport failure")
+            if attempt in (5, 6, 7):
+                response = super().send(**request)
+                document = json.loads(response.body.decode("utf-8"))
+                if attempt == 6:
+                    document["choices"][0]["message"]["content"] = "incomplete JSON"
+                else:
+                    document["choices"][0]["finish_reason"] = "length"
+                return broker.ProviderResponse(
+                    response.status, response.headers, json.dumps(document).encode("utf-8"),
+                )
         if flavor == "PermanentAuthFailure":
             return broker.ProviderResponse(
                 401,
@@ -194,7 +204,7 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     reviewer = harness.service.config.code_reviewer
     reviewer._transport = transport
     harness.review_transport = transport
-    assert harness.service.store.code_review_schema()["max_transient_attempts"] == 6
+    assert harness.service.store.code_review_schema()["max_transient_attempts"] is None
 
     # A UTC-midnight round fixes the source replacement boundary at 23:00.
     now = datetime.now(timezone.utc)
@@ -326,28 +336,28 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
         connect, round_id, "benchmark_deadline", original_deadline
     )
 
-    # Attempts 2-4 are retryable transport/503 failures. Attempt 5 passes,
-    # proving recovery beyond the former three-attempt limit and below cap 6.
+    # Recover transport/503 failures and unusable JSON/unfinished responses.
+    # Attempt 8 passes, beyond both former caps, then reaches publication below.
     outcomes = []
-    for _attempt in range(2, 6):
+    for _attempt in range(2, 9):
         _make_review_retry_ready(connect, replacement_id)
         outcome = reviewer.review(
             harness.service.store.get_submission(replacement_id)
         )
         outcomes.append(outcome["status"])
-    assert outcomes == ["error", "error", "error", "passed"]
+    assert outcomes == ["error"] * 6 + ["passed"]
     recovered = harness.service.store.get_submission(replacement_id)
     assert recovered["code_review_status"] == "passed"
-    assert recovered["code_review_attempts"] == 5
+    assert recovered["code_review_attempts"] == 8
     assert recovered["code_review_doc"]["cost_status"] == "settled"
     assert recovered["code_review_doc"]["cost_microusd"] == 0
     assert recovered["code_review_doc"]["review_cost_microusd"] > 0
-    assert transport.attempts["RecoveredReplacement"] == 5
+    assert transport.attempts["RecoveredReplacement"] == 8
     recovered_kinds = _ledger_kinds(harness, replacement_id)
-    assert recovered_kinds.count("reservation") == 5
-    assert recovered_kinds.count("dispatch") == 5
+    assert recovered_kinds.count("reservation") == 8
+    assert recovered_kinds.count("dispatch") == 8
     assert reviewer.review(recovered)["status"] == "existing"
-    assert transport.attempts["RecoveredReplacement"] == 5
+    assert transport.attempts["RecoveredReplacement"] == 8
     assert _ledger_kinds(harness, replacement_id) == recovered_kinds
 
     permanent = reviewer.review(

@@ -2837,7 +2837,8 @@ class ArenaService:
             and row.get("code_review_status") not in ("passed", "rejected")
             and (
                 row.get("code_review_status") == "reviewing"
-                or int(row.get("code_review_attempts") or 0) < code_review_policy.review_attempt_limit(row)
+                or row.get("code_review_status") == "pending"
+                or code_review_policy.review_retry_available(row)
             )
         ]
         if unresolved:

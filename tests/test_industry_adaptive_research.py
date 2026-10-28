@@ -22,6 +22,7 @@ def test_source_picker_can_rely_on_the_advertised_remaining_search_budget(monkey
             result.update(decision='unavailable', missing_requirements=['Account workflows'])
     run, _, _, _ = install(monkeypatch, mutation=assessment)
     monkeypatch.setattr(c, 'MAX_SEARCH_CALLS', 1)
+    monkeypatch.setattr(c, 'MAX_FETCH_CALLS', 1)  # Last read uses full text, not locators.
     original_post = c._post_json
     searches, limits = [], []
 
@@ -66,6 +67,7 @@ def test_native_remaining_gap_can_use_one_unused_fetch_without_extending_deadlin
             result.update(decision='unavailable', missing_requirements=['Account workflows'])
 
     run, calls, clock, reviews = install(monkeypatch, mutation=assessment)
+    monkeypatch.setattr(c, 'MAX_FETCH_CALLS', 1)  # Preserve the final-read Exa path.
     if capacity is not None:
         monkeypatch.setattr(c.industry_classification, 'MAX_TOTAL_CHARS', len(FEATURES) + capacity)
     original_post = c._post_json

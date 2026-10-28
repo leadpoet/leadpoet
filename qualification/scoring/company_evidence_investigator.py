@@ -2576,6 +2576,66 @@ async def _search_web(
             **({'_source_pages': source_pages} if read_source_text else {})}
 
 
+async def _search_industry_locators(
+    session, query, *, key, company_locator, include_domains,
+):
+    """Use the existing company search model when another index leaves gaps.
+
+    Only provider citation URLs survive. The answer, quotes and model claims
+    are not source evidence; a remaining exact-page fetch must establish it.
+    """
+    payload = {
+        'model': 'perplexity/sonar', 'max_tokens': 700, 'temperature': 0,
+        'messages': [
+            {'role': 'system', 'content': (
+                'Find company-owned source pages for the requested fact. Return a short '
+                'list of relevant source URLs with a brief description of what each page '
+                'covers. Search only the named company domain and its subdomains. Prefer '
+                'product or service documentation and customer projects. Do not decide '
+                'whether the company fits an ICP, and do not invent URLs. Search output '
+                'will be used only as discovery; each page must be fetched and checked '
+                'independently.'
+            )},
+            {'role': 'user', 'content': json.dumps({
+                'company': str(company_locator.get('name') or '')[:100],
+                'domains': list(include_domains), 'missing_fact': query[:500],
+            })},
+        ],
+    }
+    status, body = await _post_json(
+        session, 'https://openrouter.ai/api/v1/chat/completions',
+        headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
+        payload=payload,
+    )
+    if status != 200 or (isinstance(body, Mapping) and (body.get('error') or body.get('errors'))):
+        raise RuntimeError('search_provider_unavailable')
+    try:
+        message = body['choices'][0]['message']
+        annotations = message.get('annotations', [])
+        if message.get('refusal') or not isinstance(annotations, list):
+            raise ValueError('invalid search annotations')
+    except (KeyError, IndexError, TypeError, AttributeError, ValueError):
+        raise ValueError('search_response_malformed') from None
+    locators = {}
+    for annotation in annotations:
+        if not isinstance(annotation, Mapping) or annotation.get('type') != 'url_citation':
+            continue
+        citation = annotation.get('url_citation')
+        if not isinstance(citation, Mapping):
+            continue
+        url = _safe_https_url(citation.get('url'))
+        if not url or _registrable_domain(url) not in include_domains:
+            continue
+        try:
+            public_http_url(url)
+        except ValueError:
+            continue
+        locators.setdefault(url, {'url': url, 'title': str(citation.get('title') or '')[:300]})
+        if len(locators) >= MAX_INDUSTRY_SEARCH_RESULTS:
+            break
+    return {'results': list(locators.values()), 'notice': 'discovery_only_not_evidence'}
+
+
 async def _fetch_page(
     session: aiohttp.ClientSession,
     url: str,
@@ -4947,7 +5007,9 @@ async def investigate_company_evidence(
                     'If industry facts remain unsupported after reading the loaded sources, '
                     'one unused fetch call may instead fund one additional search_web call. '
                     'Ask for the remaining supplied capability or customer role. This extra '
-                    'search reads only company-bound full source text. It replaces a fetch; '
+                    'search uses another index for company-bound source locators when a '
+                    'subsequent fetch remains; otherwise it reads company-bound full text. '
+                    'A locator or search answer is never evidence. It replaces a fetch; '
                     'the total search plus fetch limit and research deadline do not increase.'
                 )
                 reasoning_turn_limit -= industry_review_calls
@@ -6457,6 +6519,9 @@ async def investigate_company_evidence(
                         else:
                             search_calls += 1
                             search_options = {}
+                            alternative_locators = bool(
+                                exchange_fetch_for_search and fetch_call_limit - fetch_calls >= 2
+                            )
                             if exchange_fetch_for_search:
                                 fetch_call_limit -= 1
                                 search_options.update(discovery_highlights=True,
@@ -6470,9 +6535,16 @@ async def investigate_company_evidence(
                                         identity_anchor,
                                     )
                                 ))
-                            tool_result = await _search_web(
-                                session, query.strip(), key=exa_key, **search_options
-                            )
+                            if alternative_locators:
+                                tool_result = await _search_industry_locators(
+                                    session, query.strip(), key=openrouter_key,
+                                    company_locator=company_locator, include_domains=exchange_domains,
+                                )
+                                tool_result['industry_locator_fallback_used'] = True
+                            else:
+                                tool_result = await _search_web(
+                                    session, query.strip(), key=exa_key, **search_options
+                                )
                             if exchange_fetch_for_search:
                                 for source_url, body in tool_result.pop('_source_pages', {}).items():
                                     if (len(fetched_pages) >= industry_classification.MAX_PAGES

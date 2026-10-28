@@ -1,16 +1,19 @@
 """Optional read-report failures cannot invalidate exact host-delivered results."""
 from copy import deepcopy
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import time
 
 import pytest
 
-from lab_arena import contracts, training_eligibility, training_observations as observations, training_steps, training_thinking
+from lab_arena import automatic_capture, contracts, lab_arena_checkpoint as checkpoint, training_eligibility, training_observations as observations, training_steps, training_thinking
 from tests.lab_arena.training_eligibility_test import submission
 from tests.lab_arena.training_optional_capture_test import captured_timeout, refresh
 from tests.lab_arena.training_worker_proof_reuse_test import large_example
 
 
 def captured_failure(*, category="response_received", reason="transport_error", damage=None,
-                     failed_writes=0):
+                     failed_writes=0, runtime_summary=None):
     template = captured_timeout()
     example = large_example(20) if failed_writes else deepcopy(template)
     if failed_writes:
@@ -25,9 +28,12 @@ def captured_failure(*, category="response_received", reason="transport_error", 
             example["provider_calls"][index]["response_provenance"]["delivery_to_worker"] = "socket_write_failed"
         assert buffer.append_response_receipt(receipt)
     row = deepcopy(template["worker_observation_artifacts"]["run"]["payload"]["agent_observations"][0])
+    if runtime_summary is not None:
+        row["data"]["value"] = deepcopy(runtime_summary)
     value = row["data"]["value"]
-    value["counts"] = {"responses_started": 1, "responses_complete": 1, "client_httpx": 1,
-                       "checkpoint_failure": 1, "checkpoint_failure_" + category + "_" + reason: 1}
+    if runtime_summary is None:
+        value["counts"] = {"responses_started": 1, "responses_complete": 1, "client_httpx": 1,
+                           "checkpoint_failure": 1, "checkpoint_failure_" + category + "_" + reason: 1}
     if damage in {"pending_queue", "inflight"}:
         value[damage] = 1
     elif damage == "unbalanced":
@@ -75,6 +81,65 @@ def assess(example):
 def target_count(example):
     splits, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
     return len(splits["train"]) + len(splits["eval"])
+
+
+def test_actual_recorder_ack_transport_failure_keeps_exact_provider_capture(monkeypatch):
+    fixture = captured_timeout()
+    provider_call = fixture["provider_calls"][0]
+    identity = provider_call["call_identity"]
+    response_bytes = contracts.canonical_json(provider_call["response"]).encode("utf-8")
+    receipt = fixture["worker_observation_artifacts"]["run"]["payload"]["response_receipts"][0]
+    assert receipt["body_sha256"] == contracts.hash_bytes(response_bytes)
+    assert receipt["body_bytes"] == len(response_bytes)
+    with TemporaryDirectory(prefix="ack-", dir="/tmp") as directory:
+        monkeypatch.setenv(checkpoint.WORKER_SOCKET_ENV, str(Path(directory) / "missing.sock"))
+        recorder = automatic_capture.Recorder(checkpoint, memory_limit=1024, queue_limit=1, close_timeout=0.25)
+        try:
+            body = recorder._new("httpx", "https://openrouter.ai/api/v1/chat/completions", 200, {
+                "content-type": "application/json", "x-leadpoet-call-identity": identity})
+            assert body is not None and body.identity == identity
+            body.add(response_bytes)
+            body.finish(True)
+            started = time.monotonic()
+            summary = recorder.close()
+            assert time.monotonic() - started < 0.5
+        finally:
+            recorder.close()
+    assert not recorder.worker.is_alive()
+    assert summary["complete"] is False
+    assert summary["pending_queue"] == summary["inflight"] == 0
+    assert summary["counts"] == {
+        "responses_started": 1, "responses_complete": 1, "client_httpx": 1,
+        "checkpoint_failure": 1, "checkpoint_failure_response_received_transport_error": 1}
+
+    current_classifier = observations.optional_capture_failure
+
+    def pre_fix_classifier(row):
+        # Before this fix every response_received checkpoint failure was outside
+        # the summary whitelist. Keep all other classification paths unchanged.
+        value = row.get("data", {}).get("value", {})
+        if any(key.startswith("checkpoint_failure_response_received_") for key in value.get("counts", {})):
+            return False
+        return current_classifier(row)
+
+    with monkeypatch.context() as scope:
+        scope.setattr(observations, "optional_capture_failure", pre_fix_classifier)
+        previous = captured_failure(runtime_summary=summary)
+        assert previous["worker_observation_artifacts"]["run"]["payload"]["failures"] == ["capture_incomplete"]
+        assert all(training_steps._host_result(previous, call) for call in previous["provider_calls"])
+        assert not assess(previous)["eligible"]
+        assert target_count(previous) == 0
+
+    example = captured_failure(runtime_summary=summary)
+    before = deepcopy(example)
+    payload = example["worker_observation_artifacts"]["run"]["payload"]
+    assert payload["complete"] is False
+    assert payload["failures"] == [observations.OPTIONAL_CAPTURE_INCOMPLETE]
+    assert payload["agent_observations"][0]["data"]["value"] == summary
+    assert all(training_steps._host_result(example, call) for call in example["provider_calls"])
+    assert assess(example)["eligible"]
+    assert target_count(example) == 2
+    assert example == before
 
 
 @pytest.mark.parametrize("category", ["web_fetch", "response_received"])

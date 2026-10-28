@@ -238,6 +238,13 @@ def _runtime_snapshot(runner: CommandRunner) -> DockerRuntimeSnapshot:
             )
         if image_id not in image_ids:
             raise DockerLiveRestoreReconcilerV2Error("Container references an unlisted image")
+        mounts = row.get("Mounts")
+        if isinstance(mounts, list) and all(isinstance(mount, dict) for mount in mounts):
+            # Docker may reorder Mounts. Compare complete records as a multiset,
+            # retaining duplicate records, value types and nested array order.
+            mounts = sorted(mounts, key=lambda mount: json.dumps(
+                mount, sort_keys=True, separators=(",", ":"),
+            ))
         normalized_rows.append(
             {
                 "graph_data": graph_data,
@@ -246,7 +253,7 @@ def _runtime_snapshot(runner: CommandRunner) -> DockerRuntimeSnapshot:
                 "image": image_id,
                 "pid": pid,
                 "started_at": state.get("StartedAt"),
-                "mounts": row.get("Mounts"),
+                "mounts": mounts,
             }
         )
     task_ids = _validated_ids(

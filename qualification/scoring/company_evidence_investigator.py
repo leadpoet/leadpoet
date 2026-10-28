@@ -4267,6 +4267,7 @@ async def investigate_company_evidence(
         }
     search_calls = 0
     fetch_calls = 0
+    fetch_call_limit = MAX_FETCH_CALLS
     fetch_outcomes: list[dict[str, Any]] = []
     requested_venture_stage = (
         normalized_requested_stage
@@ -4942,6 +4943,13 @@ async def investigate_company_evidence(
                     'Keep all other requested targets and existing research limits.'
                 )
                 input_document['industry_source_research_brief'] = industry_research_brief
+                input_document['investigation_limits']['industry_search_exchange'] = (
+                    'If industry facts remain unsupported after reading the loaded sources, '
+                    'one unused fetch call may instead fund one additional search_web call. '
+                    'Ask for the remaining supplied capability or customer role. This extra '
+                    'search reads only company-bound full source text. It replaces a fetch; '
+                    'the total search plus fetch limit and research deadline do not increase.'
+                )
                 reasoning_turn_limit -= industry_review_calls
                 input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
             industry_gap_search_needed = bool(
@@ -5528,6 +5536,7 @@ async def investigate_company_evidence(
                 if required_tool:
                     forced_next_tool = ""
                     forced_stage_search_pending = False
+                added_industry_sources = []
                 if name == "submit_findings":
                     if industry_review_model and isinstance(arguments, Mapping):
                         arguments = copy.deepcopy(arguments)
@@ -6353,6 +6362,31 @@ async def investigate_company_evidence(
                         }
                 elif name == "search_web":
                     elapsed = time.monotonic() - started
+                    # A full-text company search can replace one unused exact
+                    # fetch. Keep one exchange, six total research calls, and
+                    # the existing judgment reserve; older policies are unchanged.
+                    exchange_domains = tuple(sorted(
+                        domain for domain in first_party_domains
+                        if _independently_bound_first_party_url(
+                            f"https://{domain}/", first_party_domains, identity_anchor,
+                        )
+                    )) if industry_review_model else ()
+                    # Do not make room by truncating any already loaded proof.
+                    exchange_text_capacity = max(0, industry_classification.MAX_TOTAL_CHARS - sum(
+                        len(_visible_quote_surface(body).strip())
+                        for source_url, body in fetched_pages.items()
+                        if _independently_bound_first_party_url(
+                            source_url, first_party_domains, identity_anchor)
+                        and _independently_bound_first_party_url(
+                            fetched_final_urls.get(source_url, ''), first_party_domains, identity_anchor)
+                    )) if exchange_domains else 0
+                    exchange_fetch_for_search = bool(
+                        exchange_domains and exchange_text_capacity and industry_research_brief
+                        and industry_research_brief['decision'] == 'unavailable'
+                        and search_calls == MAX_SEARCH_CALLS
+                        and fetch_calls < fetch_call_limit
+                        and len(fetched_pages) < industry_classification.MAX_PAGES
+                    )
                     if (
                         elapsed >= ADMISSION_DEADLINE_SECONDS
                         - JUDGMENT_ADMISSION_RESERVE_SECONDS
@@ -6367,7 +6401,7 @@ async def investigate_company_evidence(
                                 "for any claim whose required proof is still missing."
                             ),
                         }
-                    elif search_calls >= MAX_SEARCH_CALLS:
+                    elif search_calls >= MAX_SEARCH_CALLS and not exchange_fetch_for_search:
                         tool_result = {"ok": False, "error": "search_budget_exhausted"}
                     else:
                         query = arguments.get("query") if isinstance(arguments, Mapping) else None
@@ -6376,7 +6410,11 @@ async def investigate_company_evidence(
                         else:
                             search_calls += 1
                             search_options = {}
-                            if forced_industry_search_call and industry_review_model:
+                            if exchange_fetch_for_search:
+                                fetch_call_limit -= 1
+                                search_options.update(discovery_highlights=True,
+                                    read_source_text=True, include_domains=exchange_domains)
+                            elif forced_industry_search_call and industry_review_model:
                                 search_options["discovery_highlights"] = True
                                 search_options["include_domains"] = tuple(sorted(
                                     domain for domain in first_party_domains
@@ -6388,6 +6426,26 @@ async def investigate_company_evidence(
                             tool_result = await _search_web(
                                 session, query.strip(), key=exa_key, **search_options
                             )
+                            if exchange_fetch_for_search:
+                                for source_url, body in tool_result.pop('_source_pages', {}).items():
+                                    if (len(fetched_pages) >= industry_classification.MAX_PAGES
+                                            or exchange_text_capacity <= 0):
+                                        break
+                                    if (source_url not in fetched_pages
+                                            and _independently_bound_first_party_url(
+                                                source_url, first_party_domains, identity_anchor)):
+                                        body = _visible_quote_surface(body).strip()[:exchange_text_capacity]
+                                        if not body:
+                                            continue
+                                        exchange_text_capacity -= len(body)
+                                        fetched_pages[source_url] = body
+                                        fetched_final_urls[source_url] = source_url
+                                        added_industry_sources.append({
+                                            'source_id': f's{len(fetched_pages) - 1}',
+                                            'source_url': source_url, 'body': body,
+                                        })
+                                tool_result['remaining_fetch_calls'] = max(0, fetch_call_limit - fetch_calls)
+                                tool_result['industry_search_exchange_used'] = True
                             if forced_stage_search_call:
                                 current_stage_search_succeeded = True
                                 required_stage_discovery_failure_reason = ""
@@ -6434,7 +6492,7 @@ async def investigate_company_evidence(
                                 "for any claim whose required proof is still missing."
                             ),
                         }
-                    elif fetch_calls >= MAX_FETCH_CALLS:
+                    elif fetch_calls >= fetch_call_limit:
                         tool_result = {"ok": False, "error": "fetch_budget_exhausted"}
                     else:
                         tool_result = await fetch_fresh_page(str(safe_url or ""))
@@ -6477,6 +6535,14 @@ async def investigate_company_evidence(
                         "content": _bounded_message_json(tool_result),
                     },
                 ])
+                if added_industry_sources:
+                    packet = industry_classification.prepare(
+                        industry_review_arguments['criteria'],
+                        {key: str(company_locator.get(key) or '')
+                         for key in ('name', 'website', 'linkedin')},
+                        added_industry_sources,
+                    )
+                    messages.extend(industry_classification.source_messages(packet))
     except (aiohttp.ClientError, RuntimeError, TimeoutError, asyncio.TimeoutError):
         _record_failure(diagnostic, PROVIDER_ERROR_FAILURE_REASON)
         return {"claims": {}, "failure_reason": PROVIDER_ERROR_FAILURE_REASON}

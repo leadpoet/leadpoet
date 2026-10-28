@@ -2102,6 +2102,13 @@ def _call_provider_matches_operation(call: Mapping[str, Any], operation_id: str)
     )
 
 
+@dataclass(frozen=True)
+class _WorkerSocketAdmission:
+    permit: threading.BoundedSemaphore
+    capture_only: bool
+    read_deadline: Optional[float] = None
+
+
 class WorkerSocketServer:
     """Unix-socket bridge: operation frames in, provider responses out.
 
@@ -3435,6 +3442,9 @@ class WorkerSocketServer:
         self._stopping.clear()
         server_self = self
         slots = threading.BoundedSemaphore(self._max_connections)
+        capture_slot = threading.BoundedSemaphore(1)
+        admissions: Dict[socket.socket, _WorkerSocketAdmission] = {}
+        admission_lock = threading.Lock()
 
         def connection_closed(connection: socket.socket) -> bool:
             if server_self._stopping.is_set():
@@ -3451,26 +3461,54 @@ class WorkerSocketServer:
             daemon_threads = True
 
             def verify_request(self, request: Any, client_address: Any) -> bool:
-                return slots.acquire(blocking=False)
+                if slots.acquire(blocking=False):
+                    permit, capture_only = slots, False
+                elif capture_slot.acquire(blocking=False):
+                    # One capture writer must make progress while all eight
+                    # provider handlers are busy. This permit grants no dispatch.
+                    permit, capture_only = capture_slot, True
+                else:
+                    return False
+                try:
+                    admission = _WorkerSocketAdmission(
+                        permit, capture_only=capture_only,
+                        read_deadline=(time.monotonic() + min(
+                            server_self._read_timeout_seconds,
+                            lab_arena_checkpoint.TRAINING_SOCKET_TIMEOUT_SECONDS,
+                        )) if capture_only else None,
+                    )
+                    with admission_lock:
+                        admissions[request] = admission
+                except BaseException:
+                    permit.release()
+                    raise
+                return True
+
+            def admission_for(self, request: socket.socket) -> _WorkerSocketAdmission:
+                with admission_lock:
+                    return admissions[request]
+
+            def release_request(self, request: socket.socket) -> None:
+                with admission_lock:
+                    admission = admissions.pop(request)
+                with server_self._state.lock:
+                    server_self._state.worker_handlers_inflight -= 1
+                    admission.permit.release()
 
             def process_request(self, request: Any, client_address: Any) -> None:
                 with server_self._state.lock:
                     server_self._state.worker_handlers_inflight += 1
                 try:
                     super().process_request(request, client_address)
-                except Exception:
-                    with server_self._state.lock:
-                        server_self._state.worker_handlers_inflight -= 1
-                    slots.release()
+                except BaseException:
+                    self.release_request(request)
                     raise
 
             def process_request_thread(self, request: Any, client_address: Any) -> None:
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
-                    with server_self._state.lock:
-                        server_self._state.worker_handlers_inflight -= 1
-                    slots.release()
+                    self.release_request(request)
 
         class HttpBridge(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -3548,21 +3586,25 @@ class WorkerSocketServer:
         class Handler(socketserver.BaseRequestHandler):
             def handle(self) -> None:
                 connection = self.request
+                admission = self.server.admission_for(connection)
                 connection.settimeout(server_self._read_timeout_seconds)
-                try:
-                    first = connection.recv(1, socket.MSG_PEEK)
-                except OSError:
-                    return
-                if first and first[0] in HTTP_FIRST_BYTES:
+                if not admission.capture_only:
                     try:
-                        HttpBridge(connection, self.client_address, self.server)
-                    except (OSError, ValueError):
+                        first = connection.recv(1, socket.MSG_PEEK)
+                    except OSError:
                         return
-                    return
+                    if first and first[0] in HTTP_FIRST_BYTES:
+                        try:
+                            HttpBridge(connection, self.client_address, self.server)
+                        except (OSError, ValueError):
+                            return
+                        return
                 try:
-                    header = _recv_exact(connection, 4)
+                    header = _recv_exact(connection, 4, deadline=admission.read_deadline)
                     declared = int.from_bytes(header, "big")
                     training_frame = bool(declared & 0x80000000)
+                    if admission.capture_only and not training_frame:
+                        return
                     size = declared & 0x7fffffff if training_frame else declared
                     delivery_report: Dict[str, Any] = {}
                     frame_limit = lab_arena_checkpoint.MAX_TRAINING_FRAME_BYTES if training_frame else shim.MAX_FRAME_BYTES
@@ -3575,7 +3617,9 @@ class WorkerSocketServer:
                     elif training_frame:
                         # The extended prefix is reserved for optional capture;
                         # it cannot dispatch provider or other control work.
-                        payload = server_self._handle_training_control(_recv_exact(connection, size))
+                        payload = server_self._handle_training_control(
+                            _recv_exact(connection, size, deadline=admission.read_deadline)
+                        )
                         if payload is None:
                             server_self._mark_observations_incomplete()
                             payload = contracts.canonical_json({"recorded": False}).encode("utf-8")
@@ -3631,9 +3675,14 @@ def _http_error_body(code: str) -> bytes:
     return json.dumps({"error": {"code": str(code)}}, sort_keys=True).encode("utf-8")
 
 
-def _recv_exact(connection: socket.socket, size: int) -> bytes:
+def _recv_exact(connection: socket.socket, size: int, *, deadline: Optional[float] = None) -> bytes:
     output = bytearray()
     while len(output) < size:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("worker capture read deadline")
+            connection.settimeout(remaining)
         chunk = connection.recv(min(65536, size - len(output)))
         if not chunk:
             raise OSError("connection closed")

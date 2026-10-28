@@ -1711,7 +1711,77 @@ def test_serving_retries_temporary_store_outage_and_resamples_publication(monkey
     assert all(line['phase'] == outage_phase and line['error_class'] == 'ArenaStoreUnavailable' and line['observed_at'] for line in retry_lines)
 
 
+def test_serving_keeps_api_available_for_exact_operator_transition_hold_race(monkeypatch, tmp_path, capsys):
+    import httpx
+    from lab_arena.store import PostgrestTransport
+
+    service = Service()
+    service.store.row['status'] = 'stage2_closed'
+    servers, _ = _serve_test_runtime(monkeypatch)
+    args = SimpleNamespace(round_id=ROUND_ID, port=18792, status_file=tmp_path/'status.json', tick_seconds=5)
+    advance = service.advance_round
+    attempts = []
+    artifacts = []
+    write = verification._write_artifact
+
+    def race(round_id):
+        attempts.append(round_id)
+        assert servers[0].started and not servers[0].should_exit
+        if len(attempts) <= 2:
+            with httpx.Client(transport=httpx.MockTransport(lambda request:
+                httpx.Response(500, json={'code': '55000', 'message': 'lab_arena_round_progression_paused'}))) as client:
+                PostgrestTransport('https://db.example', service_key='sb_secret_test', http_client=client).rpc(
+                    'lab_arena_open_scoring_v3', {})
+        service.store.row['status'] = 'published'
+        return advance(round_id)
+
+    def record(path, document):
+        artifacts.append(json.loads(json.dumps(document)))
+        return write(path, document)
+
+    monkeypatch.setattr(service, 'advance_round', race)
+    monkeypatch.setattr(verification, '_write_artifact', record)
+    assert verification._serve(args, service, object()) == 0
+    paused = [doc for doc in artifacts if doc.get('last_transition', {}).get('status') == 'paused']
+    assert len(paused) == 2
+    assert all(doc['last_transition'] == {'status': 'paused', 'round_status': 'stage2_closed'}
+               and doc['proof']['complete'] is False for doc in paused)
+    assert len(attempts) == 3
+    assert artifacts[-1]['proof']['complete'] is True
+    assert servers[0].heartbeats > 0
+    assert 'parallel_round_driver_failed' not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize('field,value', [
+    ('operation', None), ('operation', 'select'),
+    ('resource', None), ('resource', 'unknown_rpc'),
+    ('resource', 'lab_arena_transition_round'),
+    ('http_status', None), ('http_status', 503),
+    ('code', None), ('code', '42501'),
+])
+def test_tick_rejects_operator_hold_message_without_matching_typed_diagnostics(monkeypatch, field, value):
+    service = Service()
+    diagnostics = dict(operation='rpc', resource='lab_arena_open_scoring_v3', http_status=500, code='55000')
+    diagnostics[field] = value
+    error = ArenaStoreError(
+        'rpc lab_arena_open_scoring_v3 failed: HTTP 500 code=55000 message=lab_arena_round_progression_paused',
+        **diagnostics,
+    )
+    def fail(_round_id):
+        raise error
+    monkeypatch.setattr(service, 'advance_round', fail)
+    with pytest.raises(ArenaStoreError) as raised:
+        verification._tick(service, ROUND_ID)
+    assert raised.value is error
+    assert service.calls == []
+
+
 @pytest.mark.parametrize('error', [verification.VerificationError('invalid frozen configuration'), ValueError('private unexpected validation error'),
+    ArenaStoreError('rpc lab_arena_open_scoring_v3 failed: HTTP 500 code=55000 message=lab_arena_final_baseline_incomplete',
+                    operation='rpc', resource='lab_arena_open_scoring_v3', http_status=500, code='55000'),
+    ArenaStoreError('rpc lab_arena_open_scoring_v3 failed: HTTP 500 code=55000 message=lab_arena_round_progression_paused unrelated',
+                    operation='rpc', resource='lab_arena_open_scoring_v3', http_status=500, code='55000'),
+    ArenaStoreError('rpc lab_arena_open_scoring_v3 failed: HTTP 500 code=55000 message=lab_arena_round_progression_paused'),
     ArenaStoreError('rpc lab_arena_transition_round failed: HTTP 500 code=42501 message=private authorization detail'),
     ArenaStoreError('private unknown store detail')])
 def test_serving_still_fails_closed_for_permanent_or_unknown_errors(monkeypatch, tmp_path, capsys, error):
@@ -1723,7 +1793,7 @@ def test_serving_still_fails_closed_for_permanent_or_unknown_errors(monkeypatch,
     def fail(*_):
         attempts.append(1)
         raise error
-    monkeypatch.setattr(verification, '_tick', fail)
+    monkeypatch.setattr(service, 'advance_round', fail)
     assert verification._serve(args, service, object()) == 1
     assert attempts == [1] and servers[0].should_exit
     logged = capsys.readouterr().err
@@ -1735,5 +1805,8 @@ def test_serving_still_fails_closed_for_permanent_or_unknown_errors(monkeypatch,
         assert diagnostic['rpc'] == 'lab_arena_transition_round'
         assert diagnostic['http_status'] == 500 and diagnostic['sqlstate'] == '42501'
         assert 'private authorization detail' not in logged
+    elif str(error).startswith('rpc lab_arena_open_scoring_v3'):
+        assert diagnostic['rpc'] == 'lab_arena_open_scoring_v3'
+        assert diagnostic['http_status'] == 500 and diagnostic['sqlstate'] == '55000'
     else:
         assert 'rpc' not in diagnostic and 'sqlstate' not in diagnostic

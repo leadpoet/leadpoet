@@ -81,11 +81,16 @@ Only `code_review_status=passed` can freeze a miner into evaluation. The source
 must be complete UTF-8 text and fit in the 1M-token judge context, including
 output headroom. Requests disable context compression. Missing file coverage,
 truncated output, malformed verdicts, and unknown charges are incomplete reviews.
-Explicit HTTP 408/429/5xx, transport, and temporary preparation failures allow
-at most six attempts, with backoffs of 60, 120, 240, 480, and 900 seconds.
+Explicit HTTP 408/429/5xx, transport, temporary preparation failures, unusable
+reviewer responses, and inconclusive research assessments retry within the
+existing admission window. Attempts are an audit count, not a rejection rule.
+Backoffs are 60, 120, 240, 480, then 900 seconds after each failure. Each worker
+invocation can dispatch one request. A ninety-minute window permits at most
+nine starts per submission, even with zero provider latency.
 Credential, credit, request, and invalid-source errors do not retry. Unknown
-errors, malformed successful responses, and missing charges retain the legacy
-three-attempt limit and 60-second backoff. A live review claim expires after ten
+legacy errors and missing charges retain the legacy three-attempt limit and
+60-second backoff. Accounting uncertainty is not unfinished review recovery.
+A live review claim expires after ten
 minutes so a restart can recover. Claims start only after source replacement
 closes and before the existing benchmark deadline. A late result can settle
 its charge but cannot pass the review or admit a submission.
@@ -104,9 +109,30 @@ per-attempt ledger metadata retain only safe category codes, HTTP status, and
 retry flags, never provider prose, credentials, or submitted source.
 Unknown provider charges retain their reservation
 as uncertain; neither a worker crash nor a malformed response makes a free pass.
-Apply migration `263-lab-arena-code-review-recovery.sql` after migration 262
-before restarting the gateway. The gateway preflight checks the bounded retry
-capability as well as the existing review schema.
+Migration `585-lab-arena-review-deadline-recovery.sql` updates the existing
+review RPCs and widens the audit counter. It does not rewrite prior reviews,
+ledger charges, participants, or scores. Known reviewer failure codes are
+reclassified on read, including old diagnostics with a stale retry flag.
+The preflight requires the deadline retry capability.
+
+Deploy this change as a controlled pair of database and service changes. Drain
+and stop the review worker through the canonical deployment workflow. Apply
+migration 585 immediately before starting the candidate. The old service cannot
+pass its review preflight while the truthful v2 RPC schema is active.
+For rollback, stop and drain the candidate first, then run
+`585-lab-arena-review-deadline-recovery-rollback.sql` before restarting the old
+release. This restores all three exact prior RPC definitions and their existing
+identities and grants. It keeps the widened audit storage and all review rows.
+The old RPCs fail closed for an unfinished review above six attempts. Reapplying
+migration 585 restores recovery for that row while its admission window is open.
+Neither direction admits a closed-round or previously excluded submission.
+The rollback is a separately selected operator artifact. It is not part of the
+forward migration fixture or a bulk migration sequence.
+When combined with `585-lab-arena-champion-baseline-reasoning.sql`, the review
+rollback leaves that baseline contract installed. The fallback release must
+retain champion baseline continuity from PR 872. After a baseline capture
+snapshot freezes, do not use the older `a88f94b2` or `4b51d975` releases, which
+do not understand that snapshot.
 
 No Dockerfile, public registry, image tag, commit identity, receipt, source
 digest, or release manifest is part of miner admission. The service validates
@@ -751,6 +777,24 @@ Concurrent branch changes fail closed; they are not overwritten or force-pushed.
 There is no sequential fallback when the remote does not support atomic pushes.
 The next baseline download and the winner's reward activation wait for promotion
 to complete. Existing frozen round bundles do not change during recovery.
+
+For full-thinking rounds, the baseline freeze selects the completed promotion's
+exact commit and freezes its original capture settings separately from the new
+challengers' settings. A capture-policy change cannot substitute the bootstrap
+for an existing champion. The bootstrap is used only before the first promoted
+champion. Historical frozen rounds are not repinned. Baseline cost limits,
+scoring, and reward rules remain those of the current round; the capture
+snapshot does not make legacy reasoning eligible for strict training exports.
+
+Apply `585-lab-arena-champion-baseline-reasoning.sql`, verify its function
+hashes, then deploy the matching
+gateway code before the next baseline freeze. The new code must not freeze a
+round against the older database function, which cannot save the capture
+snapshot. Verify that both the serving API and daily driver use that release;
+an older API ignores the separate capture snapshot. The new database function
+rejects an older driver's attempt to substitute the bootstrap before freeze.
+After the first round freezes the new snapshot, do not roll back to code that
+does not understand it. Use a corrected release that preserves the contract.
 
 Configure one repository-scoped host credential: `LAB_ARENA_GIT_SSH_KEY_PATH`
 for a write-enabled deploy key, or `LAB_ARENA_GITHUB_TOKEN`. Do not set both.

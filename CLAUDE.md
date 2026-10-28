@@ -1,3 +1,20 @@
+## Scoped authorization: October 28 admission review recovery
+
+The user authorized the narrow recovery of unfinished reviewer and provider
+failures until the existing admission deadline, focused tests, independent
+review, safe push and merge, exact committed
+`585-lab-arena-review-deadline-recovery.sql` and
+`585-lab-arena-review-deadline-recovery-rollback.sql`, canonical gateway and
+normal-validator deployment, and live
+verification. Preserve completed pass/reject decisions, source and credential
+checks, miner funding, backoff, leases, accounting limits, scoring and rewards.
+Preserve the October 28 frozen entrant set and its excluded submission; do not
+admit it late, replace participants, reset scores, replay paid calls or rewrite
+historical records. Internal implementation agents may test and commit only.
+The coordinating task owns production SQL, migration and rollback application,
+canonical deployment and live verification. This authority ends after the
+scoped fix and affected future-flow verification are complete.
+
 ## Scoped authorization: October 28 capture policy composition
 
 The user authorized the proven capture-policy composition repair. Bind
@@ -333,3 +350,14 @@ merge, deployment, data, and spending limits take precedence.
 19. Use OnePatch only when explicitly requested. Verify fresh, scoped telemetry and direct production evidence; do not start monitors or schedules without authorization.
 
 20. Make the smallest durable fix at the cause; keep unrelated changes separate. Before editing, trace every affected path in the actual code, including callers, shared defaults, validators, stored state, and failure handling; do not rely on summaries or assumed file boundaries. Reproduce the defect, then test the production execution path end to end, including relevant combined failures and preserved behavior. Use independent review for high-risk changes. State test substitutions and unverified paths; passing test counts alone do not prove completion.
+
+## Scoped production authorization: champion baseline continuity
+
+On 2026-10-28 the user authorized investigation, implementation, migration,
+merge, deployment, and end-to-end verification of champion baseline continuity.
+The next eligible round must use the exact promoted champion source and its
+frozen capture contract. Apply only the committed migration for this fix and
+use the canonical gateway and normal-validator release controllers. Preserve
+historical rounds, scoring, rewards, credentials, and concurrent work. This
+scope does not authorize one-off promotions, replaying historical competition,
+or unrelated production changes. It ends when verification is complete.

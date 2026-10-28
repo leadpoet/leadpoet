@@ -78,7 +78,7 @@ def _readable_full_segments(example, report, call_index, delivered, segments):
     return True
 
 
-def _all_model_routes_verified(example, run_id):
+def _all_model_routes_verified(example, run_id, *, failed_delivery=False):
     calls = [call for call in example.get("provider_calls") or []
              if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
     if not calls:
@@ -86,7 +86,9 @@ def _all_model_routes_verified(example, run_id):
     registry = (example.get("configuration") or {}).get("reasoning_route_registry")
     try:
         new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
-        return all(new_policy and training_thinking.verified_failed_attempt(example, call) or (
+        return all(new_policy and (
+            training_thinking.verified_failed_attempt(example, call)
+            or failed_delivery and _failed_delivery_call_verified(example, call)) or (
             (state := training_thinking.attempt_coverage(
                 call, example.get("role", "miner"), registry))["route_reviewed"]
             and state["provider_route_verified"]) for call in calls)
@@ -433,7 +435,7 @@ def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False
                ("credential" in ((example.get("privacy") or {}).get("context_redactions") or []))
             or training_thinking._selected_input_output_binding(
                 example, allow_selected_cost_unavailable=cost_gap) is None
-            or not _all_model_routes_verified(example, run_id)):
+            or not _all_model_routes_verified(example, run_id, failed_delivery=failed_delivery)):
         return False
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
@@ -796,7 +798,7 @@ def _privacy_aware_outbound_request_verified(call):
             and contracts.SHA256_RE.fullmatch(outbound["body_sha256"]) is not None)
 
 
-def _retained_delivery_evidence_exact(call, *, allow_privacy=False):
+def _retained_delivery_evidence_exact(call, *, allow_privacy=False, worker_error=False):
     """Check every retained result and API route, including unselected receipts."""
     if not (_privacy_aware_outbound_request_verified(call) if allow_privacy
             else training_steps._outbound_request_exact(call)):
@@ -808,23 +810,36 @@ def _retained_delivery_evidence_exact(call, *, allow_privacy=False):
     receipts = call.get("response_receipts") or []
     if (not receipts or len({row.get("entry_id") for row in receipts}) != len(receipts)):
         return False
-    selected_receipts = [row for row in receipts if row.get("entry_id") == training_export.response_entry_id(call)]
-    if (len(selected_receipts) != 1
-            or (selected_receipts[0].get("metadata") or {}).get("status") != call.get("response_status")):
-        return False
-    for receipt in receipts:
-        retained_response = training_steps._receipt_response(call, receipt)
-        if (type(receipt.get("entry_id")) is not int or receipt["entry_id"] not in lifecycle_ids
-                or receipt.get("response_unavailable")
-                or not set(receipt.get("privacy_redactions") or []) <= permitted
-                or not (training_steps._exact(retained_response, response=True)
-                        or allow_privacy and "credential" in (receipt.get("privacy_redactions") or []))
-                or type((receipt.get("metadata") or {}).get("status")) is not int
-                or not 100 <= receipt["metadata"]["status"] <= 599
-                or type(receipt.get("wire_body_bytes")) is not int or receipt["wire_body_bytes"] < 0
-                or not isinstance(receipt.get("wire_body_sha256"), str)
-                or contracts.SHA256_RE.fullmatch(receipt["wire_body_sha256"]) is None):
+    if worker_error:
+        # No retained bridge bytes is a specific uncertain-ledger shape. The
+        # caller must independently bind the host's exact worker error body.
+        receipt = receipts[0] if len(receipts) == 1 else {}
+        if (len(receipts) != 1
+                or not set(receipt) <= {"created_at", "entry_id", "entry_kind", "metadata", "response_unavailable"}
+                or type(receipt.get("entry_id")) is not int or receipt["entry_id"] != call.get("terminal_entry_id")
+                or receipt.get("entry_kind") != "uncertain" or receipt.get("metadata") != {}
+                or receipt.get("response_unavailable") is not True
+                or training_export.response_entry_id(call) != call.get("terminal_entry_id")
+                or any(key in call for key in ("response", "response_sha256", "response_status"))):
             return False
+    else:
+        selected_receipts = [row for row in receipts if row.get("entry_id") == training_export.response_entry_id(call)]
+        if (len(selected_receipts) != 1
+                or (selected_receipts[0].get("metadata") or {}).get("status") != call.get("response_status")):
+            return False
+        for receipt in receipts:
+            retained_response = training_steps._receipt_response(call, receipt)
+            if (type(receipt.get("entry_id")) is not int or receipt["entry_id"] not in lifecycle_ids
+                    or receipt.get("response_unavailable")
+                    or not set(receipt.get("privacy_redactions") or []) <= permitted
+                    or not (training_steps._exact(retained_response, response=True)
+                            or allow_privacy and "credential" in (receipt.get("privacy_redactions") or []))
+                    or type((receipt.get("metadata") or {}).get("status")) is not int
+                    or not 100 <= receipt["metadata"]["status"] <= 599
+                    or type(receipt.get("wire_body_bytes")) is not int or receipt["wire_body_bytes"] < 0
+                    or not isinstance(receipt.get("wire_body_sha256"), str)
+                    or contracts.SHA256_RE.fullmatch(receipt["wire_body_sha256"]) is None):
+                return False
     upstream = call.get("upstream_response_receipts") or []
     if len({row.get("entry_id") for row in upstream}) != len(upstream):
         return False
@@ -847,27 +862,48 @@ def _retained_delivery_evidence_exact(call, *, allow_privacy=False):
 
 
 def _failed_delivery_call_verified(example, call):
-    """Prove an exact settled result without claiming delivery or a target."""
+    """Prove one failed host write, with its settled or explicitly unknown bill."""
+    configuration = example.get("configuration") or {}
+    uncertain = call.get("accounting_state") == "uncertain"
+    worker_error = uncertain and (call.get("response_provenance") or {}).get(
+        "worker_body_source") == "worker_error_observation"
+    accounting_ok = (
+        training_coverage.MISSING_REASONING_SETTING in configuration
+        and training_coverage.uses_host_result_evidence(configuration)
+        and call.get("evidence_gaps") == ["provider_cost_unresolved"]
+        and "actual_microusd" in call and call["actual_microusd"] is None
+        and training_thinking._terminal_accounting_matches(call, "uncertain", 0)
+    ) if uncertain else (
+        not call.get("evidence_gaps") and call.get("accounting_state") == "settlement"
+        and type(call.get("actual_microusd")) is int and call["actual_microusd"] >= 0
+        and training_thinking._terminal_accounting_matches(call, "settlement", call["actual_microusd"]))
     if ((call.get("response_provenance") or {}).get("delivery_to_worker") != "socket_write_failed"
-            or call.get("run_id") != example.get("run_id") or call.get("evidence_gaps")
-            or call.get("accounting_state") != "settlement"
-            or type(call.get("actual_microusd")) is not int or call["actual_microusd"] < 0
-            or not training_thinking._terminal_accounting_matches(call, "settlement", call["actual_microusd"])
-            or not _retained_delivery_evidence_exact(call)):
+            or call.get("run_id") != example.get("run_id") or not accounting_ok
+            or not _retained_delivery_evidence_exact(call, worker_error=worker_error)):
         return False
-    evidence = training_steps._failed_host_result(example, call)
+    evidence = training_steps._host_response(
+        example, call, write_state="socket_write_failed", allow_worker_error=worker_error)
     provenance = call.get("response_provenance") or {}
     entry_ids = provenance.get("worker_received_receipt_entry_ids") or []
-    if (provenance.get("worker_body_source") != "ledger_terminal"
+    if (provenance.get("worker_body_source") != (
+            "worker_error_observation" if worker_error else "ledger_terminal")
             or provenance.get("worker_body_exact_in_artifact") is not True
             or len(entry_ids) != len(set(entry_ids))
             or set(entry_ids) != {row["entry_id"] for row in evidence["receipts"]}):
         return False
-    response = call.get("response")
-    if (not isinstance(response, Mapping) or response != evidence["response"]
-            or contracts.document_hash(response) != call.get("response_sha256")
-            or call.get("response_status") != evidence["write"]["status"]
-            or evidence["write"]["status"] >= 400 and not call.get("upstream_response_receipts")):
+    if worker_error:
+        # Reuse the existing closed bridge failure, never an invented response
+        # or a model target. Its bytes/hash/request are proven by _host_response.
+        if (evidence["write"]["status"] != 502
+                or evidence["response"] != {"error": {"code": "provider_unavailable"}}):
+            return False
+    else:
+        response = call.get("response")
+        if (not isinstance(response, Mapping) or response != evidence["response"]
+                or contracts.document_hash(response) != call.get("response_sha256")
+                or call.get("response_status") != evidence["write"]["status"]):
+            return False
+    if evidence["write"]["status"] >= 400 and not call.get("upstream_response_receipts"):
         return False
     if call.get("operation_id") in reasoning_capture.OPERATIONS:
         op, body, tools = training_steps._model_request(example, call)

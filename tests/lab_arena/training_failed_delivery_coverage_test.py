@@ -338,14 +338,16 @@ def test_exact_failed_delivery_does_not_hide_a_missing_execution_model_call():
 
 @pytest.mark.parametrize('model,status', [(False, 502), (True, 200)])
 @pytest.mark.parametrize('optional', [False, True])
-@pytest.mark.parametrize('uncertain_cost', [False, True])
+@pytest.mark.parametrize('uncertain_cost', [False, True, 'failed', 'bodyless'])
 def test_worker_failed_write_through_actual_export_assembly_and_eligibility(model, status, optional, uncertain_cost):
     from lab_arena import broker, training_capture
     from tests.lab_arena.training_export_test import per_icp_cost_fixture, per_icp_cost_reader
     from tests.lab_arena.training_observations_test import save
-    source = failed_delivery(model=model, status=status)
+    bodyless = uncertain_cost == 'bodyless'
+    same_call = uncertain_cost in ('failed', 'bodyless')
+    source = failed_delivery(model=model, status=502 if bodyless else status)
     uncertain_call = next(call for call in source['provider_calls']
-                          if call['response_provenance']['delivery_to_worker'] == 'socket_written')
+        if call['response_provenance']['delivery_to_worker'] == ('socket_write_failed' if same_call else 'socket_written'))
     values = per_icp_cost_fixture()
     config = values['round_row']['configuration_doc']
     config.update(source['configuration'])
@@ -381,6 +383,10 @@ def test_worker_failed_write_through_actual_export_assembly_and_eligibility(mode
                  entry_kind='uncertain' if uncertain_cost and call is uncertain_call else 'settlement',
                  amount_microusd=0 if uncertain_cost and call is uncertain_call else call['actual_microusd'],
                  entry_doc={}, terminal_response=terminal)])
+        if bodyless and call is uncertain_call:
+            ledger[-1].pop('terminal_response')
+            ledger[-1]['entry_doc'] = {'call': {
+                'upstream_response_receipt': terminal['upstream_response_receipt']}}
     values['ledger_rows'] = ledger
     run['result_doc']['resource_summary']['provider_call_count'] = len(source['provider_calls'])
     payload = deepcopy(source['worker_observation_artifacts']['run']['payload'])
@@ -392,6 +398,18 @@ def test_worker_failed_write_through_actual_export_assembly_and_eligibility(mode
         buffer.failures.add('capture_incomplete')
         assert buffer.append_agent_observation(summary()) == 0
         payload = buffer.document()
+    if bodyless:
+        from tests.lab_arena.training_observations_test import observation
+        write = next(row for row in payload['response_receipts'] if row['call_identity'] == uncertain_call['call_identity'])
+        row = observation(kind='nonstandard_response', ordinal=write['ordinal'],
+            action=uncertain_call['action_sequence'], identity=uncertain_call['call_identity'], operation=uncertain_call['operation_id'])
+        row['request'] = {'admitted_parameters': deepcopy(uncertain_call['request']['admitted_parameters']), 'timeout_ms': 1000}
+        bridge = broker._terminal_response_document(502, {},
+            contracts.canonical_json(uncertain_call['response']).encode(), call_succeeded=False)
+        row['outcome'] = {'protocol': write['protocol'], 'response': {
+            key: bridge[key] for key in ('status', 'headers', 'body_b64')}}
+        payload['observations'] = [row]
+        payload['observation_count'] = 1
     save(values, payload)
     example = training_export.assemble_example(**values,
         cost_eligibility_reader=per_icp_cost_reader(
@@ -403,6 +421,11 @@ def test_worker_failed_write_through_actual_export_assembly_and_eligibility(mode
         assert example['competition_cost_eligibility']['reason'] == 'provider_cost_uncertain'
         assert next(call for call in example['provider_calls']
                     if call['accounting_state'] == 'uncertain')['actual_microusd'] is None
+    if bodyless:
+        failed_call = next(call for call in example['provider_calls'] if call['accounting_state'] == 'uncertain')
+        assert 'created_at' in failed_call['response_receipts'][0]
+        assert failed_call['response_provenance']['worker_body_source'] == 'worker_error_observation'
+        assert all(key not in failed_call for key in ('response', 'response_sha256', 'response_status'))
     assert set(example['completeness']['incomplete_reasons']) == expected
     assert training_eligibility._failed_delivery_gap_verified(example) == expected
     examples = bank(source)

@@ -2703,7 +2703,16 @@ async def _search_industry_locators(
         for block in re.split(r'\n\s*\n', content[:12_000]):
             matches = list(re.finditer(r'https?://[^\s<>"`]+', block))
             for index, match in enumerate(matches):
-                url = safe_locator(match.group().rstrip("'.,;:!?)]}"))
+                raw_url = match.group().rstrip("'.,;:!?)}")
+                # Answer formatting is not part of a URL. Remove numeric
+                # citation suffixes and only a matching emphasis delimiter;
+                # unwrapped literal '*' or '_' characters remain unchanged.
+                raw_url = re.sub(r'(?:\[\d+\])+$', '', raw_url)
+                raw_url = raw_url.rstrip("'.,;:!?)]}")
+                emphasis = re.search(r'(?<!\w)(\*{1,3}|_{1,3})$', block[:match.start()])
+                if emphasis and raw_url.endswith(emphasis[1]):
+                    raw_url = raw_url[:-len(emphasis[1])]
+                url = safe_locator(raw_url)
                 if url and url not in locators:
                     # Compact lists often have no blank lines. Use this URL's
                     # local entry and stop before the next one, so locators do

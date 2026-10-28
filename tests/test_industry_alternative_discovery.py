@@ -15,6 +15,42 @@ SOURCE = 'https://www.coreworks.ai/workflows'
 BODY = 'Coreworks supplies account workflow management with its reporting software.'
 
 
+@pytest.mark.parametrize('formatted, expected', [
+    (f'**{SOURCE}**', SOURCE),
+    (f'*{SOURCE}*', SOURCE),
+    (f'***{SOURCE}***.', SOURCE),
+    (f'__{SOURCE}__', SOURCE),
+    (f'_{SOURCE}_', SOURCE),
+    (f'**{SOURCE}**[1][2]', SOURCE),
+    (f'{SOURCE}[1][2].', SOURCE),
+    (f'`{SOURCE}`[1]', SOURCE),
+    (f'[Workflow docs]({SOURCE})', SOURCE),
+    (SOURCE + '/literal*', SOURCE + '/literal*'),
+    (SOURCE + '/literal_', SOURCE + '/literal_'),
+    (SOURCE + '?path=%2A&version=1', SOURCE + '?path=%2A&version=1'),
+    ('**https://coreworks.ai.evil.example/workflows**', None),
+    ('**https://user@coreworks.ai/workflows**', None),
+])
+def test_search_url_formatting_does_not_change_locator_or_authority(monkeypatch, formatted, expected):
+    async def post(*args, **kwargs):
+        return 200, {'choices': [{'message': {
+            'content': f'- {formatted} — Account workflow documentation.',
+            'annotations': ([{'type': 'url_citation', 'url_citation': {
+                'url': expected, 'title': 'Workflow docs'}}] if expected else []),
+        }}]}
+    monkeypatch.setattr(c, '_post_json', post)
+    result = asyncio.run(c._search_industry_locators(
+        None, 'account workflows', key='test',
+        company_locator={'name': 'Coreworks', 'website': URL},
+        include_domains=('coreworks.ai',)))
+    assert [r['url'] for r in result['results']] == ([expected] if expected else [])
+    if expected:
+        assert result['results'][0]['title'] == 'Workflow docs'
+        assert 'Account workflow documentation.' in result['results'][0]['discovery_excerpt']
+    assert result['notice'] == 'discovery_only_not_evidence'
+    assert '_source_pages' not in result
+
+
 def test_alternative_search_keeps_bound_locators_without_promoting_claims(monkeypatch):
     seen = []
     async def post(session, url, *, headers, payload):

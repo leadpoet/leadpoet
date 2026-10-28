@@ -519,14 +519,14 @@ def _activate_single_champion_reward(harness, *, previous=None):
     row = harness.service.store.get_round(harness.round_id)
     decision = row["publication_doc"]["king_decision"]
     crowned = decision["outcome"] == "crowned"
-    hotkey = decision["king_hotkey"] if crowned else previous["king_hotkey"]
+    hotkey = decision["king_hotkey"] if crowned else previous["king_hotkey"] if previous else ""
     basis = harness.service._sign(rewards.reward_basis_document(
         round_id=harness.round_id,
         published_at=row["publication_doc"]["published_at"],
         finalized_epoch=harness.chain.current_settlement_epoch(),
         king_hotkey=hotkey,
-        king_outcome="crowned" if crowned else "defended",
-        previous_king_start_epoch=None if crowned else previous["king_start_epoch"],
+        king_outcome="crowned" if crowned else "defended" if previous else "no_king",
+        previous_king_start_epoch=previous["king_start_epoch"] if previous and not crowned else None,
         reward_constants=row["configuration_doc"]["reward_constants"],
     ), "reward_basis_hash")
     return harness.service.store.activate_reward(

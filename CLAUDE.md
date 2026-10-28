@@ -49,6 +49,20 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped authorization: October 28 capture policy composition
+
+The user authorized the proven capture-policy composition repair. Bind
+ancillary judge privacy to the accepted input/output evidence, and reuse the
+existing complete proof for zero-charge, non-dispatched transport attempts in
+route and cost-gap qualification. Preserve selected privacy checks, unknown
+bills as incomplete ICPs, the frozen 80% coverage and 1% missing-token limits,
+source and judgment identities, costs, scoring, rewards and all raw historical
+rows and artifacts. Do not infer a zero bill or a provider generation route.
+Do not restore S3 objects, rewrite historical records or replay paid calls.
+Internal agents may commit only. The coordinating task owns independent review,
+safe push and merge, canonical gateway and normal-validator deployment, and
+verification of the affected live flows. Preserve concurrent capture work.
+
 ## Scoped authorization: October 28 tool-free Codex compaction
 
 The user authorized the narrow October 28 Tyche compatibility fix for native

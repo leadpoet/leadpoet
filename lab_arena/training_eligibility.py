@@ -87,7 +87,8 @@ def _all_model_routes_verified(example, run_id, *, failed_delivery=False, worker
     try:
         new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
         return all(new_policy and (
-            training_thinking.verified_failed_attempt(example, call, worker_proofs=worker_proofs)
+            training_thinking.verified_undispatched_transport(example, call, worker_proofs=worker_proofs)
+            or training_thinking.verified_failed_attempt(example, call, worker_proofs=worker_proofs)
             or failed_delivery and _failed_delivery_call_verified(example, call, worker_proofs=worker_proofs)) or (
             (state := training_thinking.attempt_coverage(
                 call, example.get("role", "miner"), registry))["route_reviewed"]
@@ -232,6 +233,37 @@ def _documented_selected_privacy_gap(example, run_id):
         for call in example.get("provider_calls") or [])
 
 
+def _documented_cost_privacy_scope(example, run_id, *, cost_snapshot_unavailable):
+    """Bind every privacy flag before allowing one selected cost-gap ICP."""
+    score_ids = training_thinking._selected_input_output_binding(
+        example, allow_selected_cost_unavailable=cost_snapshot_unavailable)
+    if score_ids is None:
+        return False
+    affected = False
+    for call in example.get("provider_calls") or []:
+        redactions = set(call.get("response_privacy_redactions") or [])
+        receipt_redactions = [set(receipt.get("privacy_redactions") or [])
+                              for receipt in call.get("response_receipts") or []]
+        all_redactions = redactions.union(*receipt_redactions)
+        permitted = {"hidden_reasoning"} if call.get("operation_id") in reasoning_capture.OPERATIONS else set()
+        flagged = "response_privacy_nonexact" in (call.get("evidence_gaps") or [])
+        if not flagged and all_redactions <= permitted:
+            continue
+        affected = True
+        if call.get("run_id") == run_id:
+            # An ancillary flag cannot authorize contradictory selected-call
+            # metadata, a missing selected receipt, or unknown redactions.
+            if (not flagged or all_redactions - permitted != {"credential"}
+                    or "credential" not in redactions
+                    or not any("credential" in value for value in receipt_redactions)):
+                return False
+        elif (not flagged or call.get("run_id") not in score_ids
+              or "credential" not in all_redactions
+              or not all_redactions <= {"credential", "hidden_reasoning"}):
+            return False
+    return affected
+
+
 def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False, worker_proofs=None):
     """Recognize an uncertain charge only after selected receipt proof survives.
 
@@ -279,7 +311,8 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False, wo
             or (cost_snapshot_unavailable !=
                 ("competition_cost_eligibility_unavailable" in reasons))
             or ("response_privacy_nonexact" in reasons
-                and not _documented_selected_privacy_gap(example, run_id))
+                and not _documented_cost_privacy_scope(
+                    example, run_id, cost_snapshot_unavailable=cost_snapshot_unavailable))
             or training_thinking._selected_input_output_binding(
                 example, allow_selected_cost_unavailable=cost_snapshot_unavailable) is None
             or not _all_model_routes_verified(example, run_id, worker_proofs=worker_proofs)):
@@ -297,6 +330,11 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False, wo
         return False
     try:
         for call in selected:
+            if new_policy and training_thinking.verified_undispatched_transport(
+                    example, call, worker_proofs=worker_proofs):
+                # This existing proof establishes zero charge and no provider
+                # reply. It must not acquire a generation route or a target.
+                continue
             gaps = set(call.get("evidence_gaps") or [])
             permitted = call_allowed | ({"full_response_unavailable"} if (
                 new_policy and training_thinking._verified_unavailable_upstream_failure(example, call, worker_proofs=worker_proofs)
@@ -513,6 +551,9 @@ def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False
                         or set(row["cost_gaps"]) != expected & {"provider_cost_unresolved"}):
                     return False
         for call in selected:
+            if failed_delivery and training_thinking.verified_undispatched_transport(
+                    example, call, worker_proofs=worker_proofs):
+                continue
             gaps = set(call.get("evidence_gaps") or [])
             if training_thinking.verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
                 continue
@@ -950,7 +991,8 @@ def _failed_delivery_gap_verified(example, *, worker_proofs=None):
                 or artifact.get("payload_sha256") != training_worker_proof.payload_hash(payload, worker_proofs)
                 or not (payload.get("complete") is True and payload.get("failures") == []
                     or payload.get("complete") is False and payload.get("failures") in (["capture_incomplete"],
-                        ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE]))
+                        ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE],
+                        [training_observations.OPTIONAL_CAPTURE_INCOMPLETE]))
                 or training_observations._validate_payload(payload) != payload
                 or any(payload[count] != len(payload[rows]) for count, rows in (
                     ("observation_count", "observations"), ("response_receipt_count", "response_receipts"),
@@ -960,6 +1002,8 @@ def _failed_delivery_gap_verified(example, *, worker_proofs=None):
             return None
         calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
         undispatched = [call for call in calls if training_thinking.verified_undispatched_transport(example, call, worker_proofs=worker_proofs)]
+        if payload["failures"] == [training_observations.OPTIONAL_CAPTURE_INCOMPLETE] and not undispatched:
+            return None
         # Complete capture can truthfully record a request that never reached
         # a provider. Its exact proof still consumes an incomplete ICP slot.
         if payload["complete"] and not undispatched:

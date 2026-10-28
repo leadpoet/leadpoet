@@ -8,7 +8,7 @@ BEGIN;
 SET LOCAL lock_timeout='5s';
 SET LOCAL statement_timeout='30s';
 LOCK TABLE public.lab_arena_rounds, public.lab_arena_submissions
-  IN ACCESS EXCLUSIVE MODE NOWAIT;
+  IN ACCESS EXCLUSIVE MODE;
 
 DO $review587_0$
 DECLARE

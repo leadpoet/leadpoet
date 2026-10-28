@@ -338,11 +338,14 @@ def test_exact_failed_delivery_does_not_hide_a_missing_execution_model_call():
 
 @pytest.mark.parametrize('model,status', [(False, 502), (True, 200)])
 @pytest.mark.parametrize('optional', [False, True])
-def test_worker_failed_write_through_actual_export_assembly_and_eligibility(model, status, optional):
+@pytest.mark.parametrize('uncertain_cost', [False, True])
+def test_worker_failed_write_through_actual_export_assembly_and_eligibility(model, status, optional, uncertain_cost):
     from lab_arena import broker, training_capture
     from tests.lab_arena.training_export_test import per_icp_cost_fixture, per_icp_cost_reader
     from tests.lab_arena.training_observations_test import save
     source = failed_delivery(model=model, status=status)
+    uncertain_call = next(call for call in source['provider_calls']
+                          if call['response_provenance']['delivery_to_worker'] == 'socket_written')
     values = per_icp_cost_fixture()
     config = values['round_row']['configuration_doc']
     config.update(source['configuration'])
@@ -374,7 +377,9 @@ def test_worker_failed_write_through_actual_export_assembly_and_eligibility(mode
                     'base_call_identity': call['call_identity'], 'provider_attempt': 1,
                     'request_capture': pointer, **({'reasoning_capture': call['reasoning_capture']} if call.get('reasoning_capture') else {})}),
             dict(context, entry_id=entry_id-1, entry_kind='dispatch', amount_microusd=0, entry_doc={}),
-            dict(context, entry_id=entry_id, entry_kind='settlement', amount_microusd=call['actual_microusd'],
+            dict(context, entry_id=entry_id,
+                 entry_kind='uncertain' if uncertain_cost and call is uncertain_call else 'settlement',
+                 amount_microusd=0 if uncertain_cost and call is uncertain_call else call['actual_microusd'],
                  entry_doc={}, terminal_response=terminal)])
     values['ledger_rows'] = ledger
     run['result_doc']['resource_summary']['provider_call_count'] = len(source['provider_calls'])
@@ -389,10 +394,17 @@ def test_worker_failed_write_through_actual_export_assembly_and_eligibility(mode
         payload = buffer.document()
     save(values, payload)
     example = training_export.assemble_example(**values,
-        cost_eligibility_reader=per_icp_cost_reader(spend=3, reason='eligible'))
+        cost_eligibility_reader=per_icp_cost_reader(
+            spend=100, reason='provider_cost_uncertain' if uncertain_cost else 'eligible'))
     before = deepcopy(example)
-    assert example['completeness']['incomplete_reasons'] == ['worker_observations_incomplete']
-    assert training_eligibility._failed_delivery_gap_verified(example) == {'worker_observations_incomplete'}
+    expected = {'worker_observations_incomplete'}
+    if uncertain_cost:
+        expected |= {'provider_cost_unresolved', 'competition_cost_eligibility_unavailable'}
+        assert example['competition_cost_eligibility']['reason'] == 'provider_cost_uncertain'
+        assert next(call for call in example['provider_calls']
+                    if call['accounting_state'] == 'uncertain')['actual_microusd'] is None
+    assert set(example['completeness']['incomplete_reasons']) == expected
+    assert training_eligibility._failed_delivery_gap_verified(example) == expected
     examples = bank(source)
     examples.pop('run')
     examples[run_id] = example

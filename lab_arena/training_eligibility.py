@@ -395,52 +395,81 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
     return True
 
 
-def _selected_privacy_cascade_verified(example, run_id):
-    """Count a documented redaction as an incomplete ICP, never exact training."""
+def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False):
+    """Compose documented privacy/cost gaps without changing retained evidence.
+
+    Only the failed-delivery verifier can enable its mode, after proving the
+    complete host artifact shape. Each failed call still needs its own proof.
+    """
     example, _ = training_thinking.provider_visible_view(example)
     proof = example.get("completeness") or {}
     reasons = set(proof.get("incomplete_reasons") or [])
-    allowed = {"context_privacy_nonexact", "request_privacy_nonexact", "response_privacy_nonexact"}
+    call_allowed = {"request_privacy_nonexact", "response_privacy_nonexact", "provider_cost_unresolved"}
+    cost_gap = "provider_cost_unresolved" in reasons
+    snapshot_gap = "competition_cost_eligibility_unavailable" in reasons
+    delivery_reasons = {"worker_observations_incomplete"} if failed_delivery else set()
+    snapshot_reasons = {"competition_cost_eligibility_unavailable"} if snapshot_gap else set()
+    cost_reasons = ({"provider_cost_unresolved"} if cost_gap else set()) | snapshot_reasons
+    allowed = call_allowed | {"context_privacy_nonexact"} | snapshot_reasons | delivery_reasons
     by_dimension = proof.get("reasons_by_dimension") or {}
     dimensions = proof.get("dimensions") or {}
-    if (not reasons or not reasons <= allowed
-            or not {"request_privacy_nonexact", "response_privacy_nonexact"} & reasons
+    if (proof.get("complete") is not False
+            or not reasons or not reasons <= allowed
+            or not call_allowed & reasons
+            or (cost_gap or failed_delivery) and training_coverage.MISSING_REASONING_SETTING not in (
+                example.get("configuration") or {})
+            or not delivery_reasons <= reasons
+            or snapshot_gap and (not cost_gap or (example.get("configuration") or {}).get(
+                "sourcing_cost_eligibility_policy") not in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES)
+            or snapshot_gap != ((example.get("competition_cost_eligibility") or {}).get("status") == "unavailable")
             or any(dimensions.get(name) is not True or by_dimension.get(name) != []
-                   for name in ("context", "source_identity", "exact_inputs", "input_output_label", "costs"))
+                   for name in ("context", "source_identity", "exact_inputs", "input_output_label"))
+            or dimensions.get("costs") is not (not cost_reasons)
+            or set(by_dimension.get("costs") or []) != cost_reasons
             or dimensions.get("research_process") is not False
-            or set(by_dimension.get("research_process") or []) != reasons
+            or set(by_dimension.get("research_process") or []) != reasons - snapshot_reasons
+            or not set((example.get("privacy") or {}).get("context_redactions") or []) <= {"credential"}
             or ("context_privacy_nonexact" in reasons) !=
                ("credential" in ((example.get("privacy") or {}).get("context_redactions") or []))
-            or training_thinking._selected_input_output_binding(example) is None
+            or training_thinking._selected_input_output_binding(
+                example, allow_selected_cost_unavailable=cost_gap) is None
             or not _all_model_routes_verified(example, run_id)):
         return False
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
-    if (not training_thinking._provider_capture_complete(example, run_id)
+    if (not failed_delivery and not training_thinking._provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(training_thinking._required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
                    for row in payload.get(field) or [])):
         return False
     selected = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
-    selected_privacy = set()
+    selected_gaps = set()
     attributed = set()
     try:
         for call in example.get("provider_calls") or []:
             gaps = set(call.get("evidence_gaps") or [])
             if call.get("run_id") == run_id:
-                if not gaps <= allowed - {"context_privacy_nonexact"}:
+                if not gaps <= call_allowed:
                     return False
-                selected_privacy.update(gaps)
+                selected_gaps.update(gaps)
             elif gaps:
                 if (not any(row.get("run_id") == call.get("run_id") and row.get("kind") == "score"
                             for row in example.get("attempts") or [])
-                        or not gaps <= allowed - {"context_privacy_nonexact"}):
+                        or not gaps <= {"request_privacy_nonexact", "response_privacy_nonexact"}):
                     return False
+            permitted = {"hidden_reasoning"} if call.get("operation_id") in reasoning_capture.OPERATIONS else set()
+            if "response_privacy_nonexact" in gaps:
+                permitted.add("credential")
+            if (not set(call.get("response_privacy_redactions") or []) <= permitted
+                    or any(not set(row.get("privacy_redactions") or []) <= permitted
+                           for row in call.get("response_receipts") or [])):
+                return False
             if "request_privacy_nonexact" in gaps:
                 capture = call.get("request_capture") or {}
                 if (capture.get("redacted") is not True
-                        or "credential" not in (capture.get("redactions") or [])):
+                        or set(capture.get("redactions") or []) != {"credential"}
+                        or set((call.get("request") or {}).get("privacy", {}).get("redactions") or []) != {"credential"}):
                     return False
             if "response_privacy_nonexact" in gaps and not (
                     "credential" in (call.get("response_privacy_redactions") or [])
@@ -449,22 +478,72 @@ def _selected_privacy_cascade_verified(example, run_id):
                         for row in call.get("response_receipts") or []))):
                 return False
             attributed.update(gaps)
-        if not selected_privacy or attributed | (
-                {"context_privacy_nonexact"} if "context_privacy_nonexact" in reasons else set()) != reasons:
+        if (not selected_gaps or attributed | delivery_reasons | snapshot_reasons | (
+                {"context_privacy_nonexact"} if "context_privacy_nonexact" in reasons else set()) != reasons):
             return False
+        if failed_delivery:
+            rows = example.get("related_run_gap_attribution")
+            attempts = {row.get("run_id"): row for row in example.get("attempts") or []}
+            if (not isinstance(rows, Mapping) or set(rows) != set(attempts) or run_id not in rows
+                    or len(attempts) != len(example.get("attempts") or [])
+                    or any(call.get("run_id") not in rows for call in example.get("provider_calls") or [])):
+                return False
+            for source_id, row in rows.items():
+                attempt = attempts[source_id]
+                calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == source_id]
+                expected = set().union(*(set(call.get("evidence_gaps") or []) for call in calls))
+                if source_id == run_id:
+                    if attempt.get("kind") != "execute" or attempt.get("status") != "accepted":
+                        return False
+                    expected |= delivery_reasons
+                elif attempt.get("kind") != "score":
+                    return False
+                if (not isinstance(row, Mapping) or row.get("kind") != attempt.get("kind")
+                        or row.get("status") != attempt.get("status")
+                        or not isinstance(row.get("research_process_gaps"), list)
+                        or not isinstance(row.get("cost_gaps"), list)
+                        or set(row["research_process_gaps"]) != expected
+                        or set(row["cost_gaps"]) != expected & {"provider_cost_unresolved"}):
+                    return False
         for call in selected:
             gaps = set(call.get("evidence_gaps") or [])
             if training_thinking.verified_recovered_responses_retry(example, call):
                 continue
             if call.get("accounting_state") == "refusal" and training_thinking.verified_failed_attempt(example, call):
                 continue
-            if call.get("accounting_state") != "settlement" or type(call.get("actual_microusd")) is not int:
+            if failed_delivery and (call.get("response_provenance") or {}).get("delivery_to_worker") == "socket_write_failed":
+                if not _failed_delivery_call_verified(example, call):
+                    return False
+                continue
+            if "provider_cost_unresolved" in gaps:
+                # The ledger's uncertain placeholder is not an actual charge.
+                # Keep actual_microusd unknown and require its terminal proof.
+                if (call.get("accounting_state") != "uncertain"
+                        or call.get("actual_microusd") is not None
+                        or not training_thinking._terminal_accounting_matches(call, "uncertain", 0)):
+                    return False
+            elif (call.get("accounting_state") != "settlement"
+                    or type(call.get("actual_microusd")) is not int or call["actual_microusd"] < 0
+                    or (cost_gap or failed_delivery) and not training_thinking._terminal_accounting_matches(
+                        call, "settlement", call["actual_microusd"])):
+                return False
+            if (not _privacy_aware_outbound_request_verified(call)
+                    or (cost_gap or failed_delivery) and not _retained_delivery_evidence_exact(
+                        call, allow_privacy=bool(gaps & {"request_privacy_nonexact", "response_privacy_nonexact"}))):
                 return False
             if call.get("operation_id") in reasoning_capture.OPERATIONS:
                 try:
                     training_steps._candidate(example, call)
                 except ValueError as exc:
-                    if str(exc) not in gaps and not _verified_provider_output_fault(example, call):
+                    truncated = False
+                    if (str(exc) == "response_not_complete"
+                            and training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})):
+                        state = training_thinking.attempt_coverage(
+                            call, example.get("role", "miner"),
+                            (example.get("configuration") or {}).get("reasoning_route_registry"))
+                        truncated = (state["returned"] == "truncated"
+                                     and state["route_reviewed"] and state["provider_route_verified"])
+                    if str(exc) not in gaps and not truncated and not _verified_provider_output_fault(example, call):
                         return False
             request = call.get("request") or {}
             response = call.get("response")
@@ -693,12 +772,39 @@ def _transient_artifact_gap_verified(example, submission, artifacts):
         return False
 
 
-def _retained_delivery_evidence_exact(call):
+def _privacy_aware_outbound_request_verified(call):
+    """Keep original digest semantics for a proven sanitized request body."""
+    if "request_privacy_nonexact" not in (call.get("evidence_gaps") or []):
+        return training_steps._outbound_request_exact(call)
+    request = call.get("request") or {}
+    outbound = request.get("outbound") or {}
+    capture = call.get("request_capture") or {}
+    operation = operations.get_operation(call.get("operation_id"))
+    # RequestCapture hashes the outbound body before privacy filtering. Its
+    # stored blob is separately checked by read_request; the redacted body
+    # cannot reproduce that original hash. Route identity must still agree.
+    return (capture.get("redacted") is True
+            and set(capture.get("redactions") or []) == {"credential"}
+            and (request.get("privacy") or {}).get("redacted") is True
+            and set((request.get("privacy") or {}).get("redactions") or []) == {"credential"}
+            and operation is not None and call.get("provider") == operation.provider
+            and outbound.get("method") == operation.method
+            and outbound.get("host") == (operation.outbound_host or operation.host)
+            and outbound.get("path") == (operation.outbound_path or operations._render_path(
+                operation, request.get("hashed_parameters") or {}))
+            and isinstance(outbound.get("body_sha256"), str)
+            and contracts.SHA256_RE.fullmatch(outbound["body_sha256"]) is not None)
+
+
+def _retained_delivery_evidence_exact(call, *, allow_privacy=False):
     """Check every retained result and API route, including unselected receipts."""
-    if not training_steps._outbound_request_exact(call):
+    if not (_privacy_aware_outbound_request_verified(call) if allow_privacy
+            else training_steps._outbound_request_exact(call)):
         return False
     lifecycle_ids = {row.get("entry_id") for row in call.get("lifecycle") or []}
     permitted = {"hidden_reasoning"} if call.get("operation_id") in reasoning_capture.OPERATIONS else set()
+    if allow_privacy:
+        permitted.add("credential")
     receipts = call.get("response_receipts") or []
     if (not receipts or len({row.get("entry_id") for row in receipts}) != len(receipts)):
         return False
@@ -707,10 +813,12 @@ def _retained_delivery_evidence_exact(call):
             or (selected_receipts[0].get("metadata") or {}).get("status") != call.get("response_status")):
         return False
     for receipt in receipts:
+        retained_response = training_steps._receipt_response(call, receipt)
         if (type(receipt.get("entry_id")) is not int or receipt["entry_id"] not in lifecycle_ids
                 or receipt.get("response_unavailable")
                 or not set(receipt.get("privacy_redactions") or []) <= permitted
-                or not training_steps._exact(training_steps._receipt_response(call, receipt), response=True)
+                or not (training_steps._exact(retained_response, response=True)
+                        or allow_privacy and "credential" in (receipt.get("privacy_redactions") or []))
                 or type((receipt.get("metadata") or {}).get("status")) is not int
                 or not 100 <= receipt["metadata"]["status"] <= 599
                 or type(receipt.get("wire_body_bytes")) is not int or receipt["wire_body_bytes"] < 0
@@ -829,6 +937,11 @@ def _failed_delivery_gap_verified(example):
         if (bool(failures) is not optional
                 or not all(training_observations.optional_capture_failure(row) for row in failures)):
             return None
+        reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])
+        if any(set(call.get("evidence_gaps") or []) & {
+                "provider_cost_unresolved", "request_privacy_nonexact", "response_privacy_nonexact"} for call in calls):
+            return (frozenset(reasons) if _selected_privacy_cascade_verified(
+                example, run_id, failed_delivery=True) else None)
         for call in delivered:
             if (call.get("accounting_state") != "settlement"
                     or type(call.get("actual_microusd")) is not int or call["actual_microusd"] < 0
@@ -1076,6 +1189,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                         if _selected_cost_gap_verified(example, run_id):
                             soft.add("trajectory_evidence_incomplete")
                         if _selected_privacy_cascade_verified(example, run_id):
+                            soft.add("trajectory_evidence_incomplete")
+                        if new_policy and _failed_delivery_gap_verified(example) is not None:
                             soft.add("trajectory_evidence_incomplete")
                     reasons.extend(reason for reason in run_reasons if reason not in soft)
             else:

@@ -573,6 +573,29 @@ def _standalone_search_request(document: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _tool_free_serial_request(document: Mapping[str, Any]) -> bool:
+    """Keep native compaction's empty tool contract, without prompt heuristics.
+
+    Additional tool declarations are active even when root tools are empty.
+    Historical calls/results and message text do not declare callable tools.
+    The broker still validates every input item before provider admission.
+    """
+    value = document.get("input")
+    return (
+        document.get("tools") == []
+        and document.get("parallel_tool_calls") is False
+        and document.get("tool_choice", "auto") in ("auto", "none")
+        and (isinstance(value, str) or isinstance(value, list) and all(
+            isinstance(item, Mapping) and item.get("type", "message") in (
+                "message", "function_call", "function_call_output",
+                "custom_tool_call", "custom_tool_call_output", "reasoning",
+                "web_search_call", "openrouter:web_search",
+            )
+            for item in value
+        ))
+    )
+
+
 def _standalone_search_output(document: Any) -> bytes:
     if not isinstance(document, dict):
         return b'{"output":"The web lookup returned an invalid result. No source evidence was retrieved."}'
@@ -883,7 +906,7 @@ class ResponsesBridge:
                     if web_tools and (
                             owner._web_search != "live" or len(web_tools) != 1):
                         raise _BridgeRequestError("web_search_unavailable")
-                    if owner._web_search == "live":
+                    if owner._web_search == "live" and not _tool_free_serial_request(body):
                         if len(web_tools) > 1:
                             raise _BridgeRequestError("web_search_unavailable")
                         if web_tools:

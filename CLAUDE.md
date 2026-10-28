@@ -1,3 +1,17 @@
+## Scoped authorization: October 28 tool-free Codex compaction
+
+The user authorized the narrow October 28 Tyche compatibility fix for native
+Codex requests with explicit empty tools, explicit serial tool calls, automatic
+or disabled tool choice, and no additional tool declarations. Preserve their
+tool-free intent at the bridge and omit only the irrelevant outbound serial
+control after validation. Preserve original admission, hash and capture values;
+keep all real-tool serial controls, research behavior, strict provider/ZDR
+routing, billing, scoring, frozen results, privacy and rewards unchanged.
+Internal implementation agents may commit only. The coordinating task owns
+independent review, push, merge, canonical deployment and live verification.
+Do not replay paid calls or rewrite historical records. This authority ends
+after the scoped fix and affected-flow verification are complete.
+
 ## Scoped authorization: October 28 retained Arena slot recovery
 
 The user authorized the narrow canonical recovery fix after a graceful driver

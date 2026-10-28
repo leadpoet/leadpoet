@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena import sep18_published_rerun295_postgres_test as previous
+from tests.lab_arena import parallel_twenty_icp_execution_postgres_test as ordinary
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
     test_parallel_execution_preserves_standard_twenty_icp_scoring_and_costs as ordinary_lifecycle,
 )
@@ -196,6 +197,8 @@ def test_canonical_retained_scores_survive_both_stages_and_publication(database,
         with connection.cursor() as cursor:
             cursor.execute("SELECT status,public.lab_arena_sep18_published_rerun295_nonbaseline_valid_v1() FROM public.lab_arena_rounds WHERE round_id=%s", (previous.ROUND,))
             assert cursor.fetchone() == ("published", True)
-    ordinary = tmp_path / "ordinary"
-    ordinary.mkdir()
-    ordinary_lifecycle(lambda: psycopg2.connect(**dsn), ordinary)
+    ordinary_path = tmp_path / "ordinary"
+    ordinary_path.mkdir()
+    # The ordinary admission control owns a later schema than the sealed296 DB.
+    for current_pg, current_dsn in ordinary.database.__wrapped__():
+        ordinary_lifecycle(lambda: current_pg.connect(**current_dsn), ordinary_path)

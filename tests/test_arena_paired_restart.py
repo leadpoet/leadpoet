@@ -129,6 +129,86 @@ def test_failure_never_releases_guard_or_starts_unapproved_next_step(tmp_path, f
         assert not (tmp_path/"gateway.log").exists()
 
 
+@pytest.mark.parametrize("failure", [None, "bootstrap", "installed"])
+def test_paired_bootstrap_uses_exact_helper_then_existing_validator_handoff(tmp_path, monkeypatch, failure):
+    p = FakePair(tmp_path)
+    p.args.bootstrap_controller_commit = "b" * 40
+    helper = b"# exact candidate bootstrap fixture\n"
+    check_output = subprocess.check_output
+
+    def blob(argv, **kwargs):
+        if argv == ["git", "show", SHA + ":scripts/bootstrap_gateway_restart_controller.py"]:
+            return helper
+        return check_output(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "check_output", blob)
+    remote = p.remote
+
+    def bootstrap_remote(host, command, **kwargs):
+        if "--paired-restart" in command:
+            p.events.append("bootstrap")
+            assert kwargs["input"] == helper
+            assert "--expected-controller-commit " + "b" * 40 in command
+            assert "--source-commit " + SHA in command
+            assert "umask 077" in command and "cat >" in command
+            assert "cp " not in command and "--resume-invocation" not in command
+            if failure == "bootstrap":
+                raise PairErrorForTest()
+            kwargs["stdout"].write(pair.PREFIX + json.dumps(dict(invocation=INV, state=p.receipt_state)) + "\n")
+            return subprocess.CompletedProcess([], 0)
+        if "sha256sum" in command and failure == "installed":
+            p.events.append("installed-preflight")
+            raise PairErrorForTest()
+        return remote(host, command, **kwargs)
+
+    p.remote = bootstrap_remote
+    if failure:
+        with pytest.raises(PairErrorForTest):
+            p.run()
+        assert "validator" not in p.events and "release" not in p.events
+    else:
+        result = p.run()
+        assert result["candidate_commit"] == SHA
+        assert p.events == ["bootstrap", "installed-preflight", "drain", "authorize", "validator",
+                            "validator-command", "operational-ready", "drain", "ready", "release"]
+
+
+def test_retained_slot_recovery_reaches_same_guard_validator_handoff(tmp_path):
+    from tests.test_gateway_arena_continuity_transition import _run, _retained_slot_fixture
+    assert _run(tmp_path, sha=SHA).returncode == 0
+    _retained_slot_fixture(tmp_path)
+    p = FakePair(tmp_path)
+    p.generation_value = 1
+    remote, guard = p.remote, p.guard
+
+    def gateway(host, command, **kwargs):
+        if "gw_restart.sh --commit" in command:
+            result = _run(tmp_path, sha=SHA, guard_scope="all", paired=True)
+            assert result.returncode == 0, result.stderr
+            assert (tmp_path / "guard").read_text().strip() == "gateway_ready"
+            kwargs["stdout"].write(result.stdout)
+            return result
+        return remote(host, command, **kwargs)
+
+    def exact_guard(action, *extra):
+        result = guard(action, *extra)
+        if "schema_version" in result:
+            result["guard_generation"] = 1
+            result["guard_commitment"], result["owner_commitment"] = _commitments(*_identity(SHA, p.invocation))
+        return result
+
+    def validator(permit, nonce):
+        p.events.append("validator")
+        assert permit["guard_generation"] == 1
+        assert p.phase == "validator_destructive"
+        pair.Pair.restart_validator(p, permit, nonce)
+
+    p.remote, p.guard, p.restart_validator = gateway, exact_guard, validator
+    result = p.run()
+    assert result["guard_generation"] == 1
+    assert p.events[-6:] == ["validator", "validator-command", "operational-ready", "drain", "ready", "release"]
+
+
 def test_renewal_failure_after_primary_ready_keeps_guard(tmp_path):
     p = FakePair(tmp_path)
     original = p.restart_validator

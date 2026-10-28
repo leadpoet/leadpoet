@@ -14,7 +14,7 @@ DO $review587_0$
 DECLARE
   v_signature CONSTANT TEXT := 'public.lab_arena_begin_submission_review(text,text,text,bigint,text,integer,bigint)';
   v_preimage CONSTANT TEXT := '136f980e76b1ece72fb72986cfdfdcf8cb2384e96d5b44892aec2a5af9f43644';
-  v_postimage CONSTANT TEXT := 'd1d16e3259d9c8955ccf14521be930b33e63281bd0c0ddca6ca06e249aa90da9';
+  v_postimage CONSTANT TEXT := '38ed2f3616f92a0c17a3ef1c8f7617f229fed949f560f1bb3bb1f91c03c6534a';
   v_oid OID;
   v_definition TEXT;
   v_updated TEXT;
@@ -42,12 +42,14 @@ BEGIN
   v_updated:=v_definition;
   v_updated:=pg_catalog.replace(v_updated,$old587_0_0$  v_round_id TEXT;$old587_0_0$,$new587_0_0$  v_review_guard_present BOOLEAN;
   v_round_id TEXT;$new587_0_0$);
-  v_updated:=pg_catalog.replace(v_updated,$old587_0_1$  SELECT submission.round_id INTO v_round_id$old587_0_1$,$new587_0_1$  -- Hold the singleton through reservation commit. A canonical guard update
-  -- must wait for every earlier reservation transaction to finish.
+  v_updated:=pg_catalog.replace(v_updated,$old587_0_1$  v_now := pg_catalog.clock_timestamp();
+  v_freeze_at :=$old587_0_1$,$new587_0_1$  -- Follow the existing round/submission lock order before control SHARE.
+  -- Hold the singleton through reservation commit so guard updates must wait.
   SELECT guard_commitment <> '' INTO STRICT v_review_guard_present
   FROM public.lab_arena_restart_claim_control WHERE singleton FOR SHARE;
 
-  SELECT submission.round_id INTO v_round_id$new587_0_1$);
+  v_now := pg_catalog.clock_timestamp();
+  v_freeze_at :=$new587_0_1$);
   v_updated:=pg_catalog.replace(v_updated,$old587_0_2$  IF v_submission.code_review_status = 'reviewing' THEN$old587_0_2$,$new587_0_2$  -- Completed decisions and exact replay above/below remain read-only.
   IF v_review_guard_present AND NOT (
       v_submission.code_review_status = 'reviewing'

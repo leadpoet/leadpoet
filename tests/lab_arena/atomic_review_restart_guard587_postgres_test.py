@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from lab_arena.store import hash_lease_token, new_lease_token
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
 from tests.lab_arena.test_lab_arena_code_review_postgres import (
     accepted_recovery_submission, recovery_connect, recovery_store, recovery_superuser,
 )
@@ -19,17 +18,19 @@ MIGRATION = SCRIPTS / '587-lab-arena-atomic-review-restart-guard.sql'
 
 @pytest.fixture(scope='module')
 def recovery_database():
-    databases = database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS + (
-        '492-lab-arena-review-provider-observations.sql',
-        '562-lab-arena-review-context-integrity-reason.sql',
-        '563-lab-arena-review-source-digest-reason.sql',
-        '566-lab-arena-research-review-result.sql',
-        '585-lab-arena-review-deadline-recovery.sql',
-    ))
+    from tests.lab_arena import restore_recorded_results538_postgres_test as prior
+    databases = prior.database.__wrapped__()
     for psycopg2, dsn in databases:
         with psycopg2.connect(**dsn) as connection:
             connection.autocommit = True
             with connection.cursor() as c:
+                for name in ('492-lab-arena-review-provider-observations.sql',
+                             '562-lab-arena-review-context-integrity-reason.sql',
+                             '563-lab-arena-review-source-digest-reason.sql',
+                             '566-lab-arena-research-review-result.sql',
+                             '585-lab-arena-review-deadline-recovery.sql',
+                             '586-lab-arena-publication-restart-drain.sql'):
+                    c.execute((SCRIPTS / name).read_text())
                 c.execute("CREATE ROLE review587_migrator NOLOGIN NOSUPERUSER INHERIT")
                 c.execute("GRANT lab_arena_owner TO review587_migrator")
                 c.execute("ALTER SCHEMA public OWNER TO review587_migrator")
@@ -208,3 +209,71 @@ def test_guard_does_not_hide_malformed_rpc_inputs(recovery_store, recovery_super
         with recovery_superuser.cursor() as c:
             c.execute("SELECT public.lab_arena_begin_submission_review(%s,%s,'malformed',50000,'model',2,1000)", (submission, miner))
     assert recovery_store.get_submission(submission)['code_review_claim'] is None
+
+
+def test_review_direct_trigger_publish_and_guard_do_not_form_a_lock_cycle(recovery_store, recovery_superuser, recovery_connect):
+    round_id, submission, miner = accepted_recovery_submission(recovery_store, 'f10')
+    with recovery_superuser.cursor() as c:
+        c.execute("SET session_replication_role='replica'")
+        try:
+            c.execute("UPDATE public.lab_arena_rounds SET status='scored' WHERE round_id=%s", (round_id,))
+        finally:
+            c.execute("SET session_replication_role='origin'")
+    # Isolate the production hold trigger's lock order from unrelated final
+    # baseline/result validators; migration586 separately tests full publication.
+    with recovery_superuser.cursor() as c:
+        c.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_complete_baseline_final_guard")
+        c.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_publication_baseline_guard")
+        c.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_integrity_publication_guard")
+        c.execute("ALTER TABLE public.lab_arena_rounds DISABLE TRIGGER lab_arena_rounds_write_once")
+        c.execute("SELECT encode(extensions.digest(pg_get_functiondef('public.lab_arena_operator_hold_transition_guard_v1()'::regprocedure),'sha256'),'hex')")
+        assert c.fetchone()[0] == '754b81efbc162250f062f03b920a732d4439ce0ecc6aae590edae5c30218dffc'
+    review, publisher, controller = recovery_connect(), recovery_connect(), recovery_connect()
+    def publish():
+        with publisher.cursor() as c:
+            c.execute("UPDATE public.lab_arena_rounds SET status='published' WHERE round_id=%s", (round_id,))
+        publisher.commit()
+    try:
+        for connection in (review, publisher, controller):
+            with connection.cursor() as c:
+                c.execute("SET deadlock_timeout='200ms'; SET statement_timeout='5s'")
+        with publisher.cursor() as c:
+            c.execute('SELECT round_id FROM public.lab_arena_rounds WHERE round_id=%s FOR UPDATE', (round_id,))
+        with controller.cursor() as c:
+            c.execute("SELECT pg_advisory_xact_lock(hashtextextended('lab-arena-claim-control',0))")
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            reviewing = pool.submit(raw_begin, review, submission, miner)
+            try:
+                blocked(recovery_superuser, review.get_backend_pid(), publisher.get_backend_pid())
+                publishing = pool.submit(publish)
+                try:
+                    blocked(recovery_superuser, publisher.get_backend_pid(), controller.get_backend_pid())
+                except BaseException:
+                    if publishing.done():
+                        publishing.result()
+                    raise
+                renewing = pool.submit(acquire, controller)
+                try:
+                    assert renewing.result(timeout=3)['guard_present'] is True
+                    controller.commit()
+                    publishing.result(timeout=3)
+                    assert reviewing.result(timeout=3)['status'] == 'paused'
+                    review.commit()
+                finally:
+                    controller.rollback()
+                    publisher.rollback()
+                    review.rollback()
+            finally:
+                controller.rollback()
+                publisher.rollback()
+                review.rollback()
+        assert recovery_store.get_submission(submission)['code_review_claim'] is None
+        assert recovery_store.list_ledger(submission_id=submission) == []
+        assert recovery_store.get_round(round_id)['status'] == 'published'
+    finally:
+        review.close(); publisher.close(); controller.close()
+        with recovery_superuser.cursor() as c:
+            c.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_complete_baseline_final_guard")
+            c.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_publication_baseline_guard")
+            c.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_integrity_publication_guard")
+            c.execute("ALTER TABLE public.lab_arena_rounds ENABLE TRIGGER lab_arena_rounds_write_once")

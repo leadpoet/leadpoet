@@ -117,6 +117,36 @@ def test_owned_worker_payload_cannot_be_mutated_or_reinitialized(mutate):
     assert deepcopy(payload) is payload
 
 
+class MutableDict(dict):
+    pass
+
+
+class MutableList(list):
+    pass
+
+
+@pytest.mark.parametrize('path', [(), ('response_receipts',), ('response_receipts', 0),
+                                 ('agent_observations', 0, 'depends_on')])
+@pytest.mark.parametrize('operation', ['class_assignment', 'attribute_assignment', 'attribute_deletion'])
+def test_owned_containers_cannot_replace_their_class_or_attributes(path, operation):
+    owner = training_worker_proof.WorkerProofs()
+    view = owner.prepare(large_example(2))
+    payload = view['worker_observation_artifacts']['run']['payload']
+    node = payload
+    for key in path:
+        node = node[key]
+    before = contracts.canonical_json(payload)
+    with pytest.raises(TypeError, match='read-only'):
+        if operation == 'class_assignment':
+            node.__class__ = MutableDict if isinstance(node, dict) else MutableList
+        elif operation == 'attribute_assignment':
+            node.extra_attribute = 'must not be retained'
+        else:
+            del node.__dict__
+    assert contracts.canonical_json(payload) == before
+    assert owner.payload_hash(payload) == contracts.document_hash(payload)
+
+
 def test_context_holds_exact_objects_and_releases_them_with_its_lifetime():
     owner = training_worker_proof.WorkerProofs()
     view = owner.prepare(large_example(2))

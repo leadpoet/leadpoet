@@ -15,6 +15,7 @@ def _immutable(*args, **kwargs):
 
 
 class _ReadOnlyDict(dict):
+    __setattr__ = __delattr__ = _immutable
     __init__ = __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = __ior__ = _immutable
 
     def __deepcopy__(self, memo):
@@ -23,6 +24,7 @@ class _ReadOnlyDict(dict):
 
 
 class _ReadOnlyList(list):
+    __setattr__ = __delattr__ = _immutable
     __init__ = __setitem__ = __delitem__ = append = clear = extend = insert = pop = remove = reverse = sort = __iadd__ = __imul__ = _immutable
 
     def __deepcopy__(self, memo):

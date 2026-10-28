@@ -1,3 +1,12 @@
+## Scoped authorization: October 28 stage-quota query performance
+
+The user authorized the measured October 28 Arena reservation query fix,
+focused PostgreSQL regression tests, safe merge, and deployment of exact
+committed migration 584 by the coordinating task. Read each distinct eligible
+run once while preserving stage call counts, latest ledger heads, locks,
+limits, costs, accepted results and rewards. Internal agents may commit only;
+the coordinating task owns production writes and live verification.
+
 ## Scoped authorization: October 28 capture finalization
 
 The user authorized tracing October 28 miner training capture and fixing confirmed

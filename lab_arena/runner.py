@@ -3611,6 +3611,21 @@ class WorkerSocketServer:
         if self._path.exists():
             self._path.unlink()
 
+    def wait_for_handlers(self) -> bool:
+        """Let accepted requests finish before final capture, within the socket bound."""
+
+        deadline = time.monotonic() + min(
+            self._read_timeout_seconds, WORKER_SOCKET_READ_TIMEOUT_SECONDS,
+        )
+        while True:
+            with self._state.lock:
+                if self._state.worker_handlers_inflight == 0:
+                    return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+
 
 def _http_error_body(code: str) -> bytes:
     return json.dumps({"error": {"code": str(code)}}, sort_keys=True).encode("utf-8")
@@ -4650,6 +4665,16 @@ class AssignmentExecutor:
                 server.stop()
             except Exception as exc:
                 stop_exception = exc
+            else:
+                # stop() closes ingress but daemon handlers may still finish a
+                # settled call. Keep the journal and final buffer open briefly.
+                # This extra evidence wait cannot turn a valid result into an
+                # abandoned run; stop() failure keeps its existing fatal path.
+                try:
+                    server.wait_for_handlers()
+                except Exception:
+                    with state.lock:
+                        state.worker_observations.failures.add("capture_incomplete")
             if journal is not None:
                 try:
                     journal.stop()

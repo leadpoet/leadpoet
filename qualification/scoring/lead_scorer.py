@@ -2246,6 +2246,24 @@ def _verified_homepage_identity_anchor(
             })
             if brand:
                 anchor["verified_brand_name"] = brand
+                # The new brand acceptance path must see the original proof,
+                # before legacy alias truncation/filtering can hide a defect.
+                if (
+                    0 < len(raw_aliases) <= 3
+                    and all(
+                        isinstance(alias, str) and alias == alias.strip()
+                        and bool(alias) and len(alias) <= 200
+                        and _company_name(alias) == anchor["normalized_name"]
+                        for alias in raw_aliases
+                    )
+                    and receipt.get("submitted_name")
+                    == receipt.get("observed_name") == anchor["normalized_name"]
+                    and receipt.get("submitted_domain")
+                    == receipt.get("observed_domain") == anchor["registrable_dns_domain"]
+                    and receipt.get("submitted_linkedin_slug")
+                    == receipt.get("observed_linkedin_slug") == anchor["linkedin_company_slug"]
+                ):
+                    anchor["verified_homepage_brand_alias"] = True
     return anchor
 
 
@@ -4236,6 +4254,33 @@ def _web_identity_receipt(
         receipt.update(
             decision=COMPANY_FIT_MATCH,
             reason_code="verified_legal_name_initialism",
+        )
+        return receipt
+    homepage_brand = verified_homepage_brand_name(verified_alias_anchor)
+    homepage_legal_aliases = verified_alias_anchor.get("verified_legal_name_aliases")
+    if (
+        receipt.get("decision") != COMPANY_FIT_MATCH
+        and verified_brand_receipt.get("decision") == COMPANY_FIT_MATCH
+        and verified_alias_anchor.get("verified_homepage_brand_alias") is True
+        and receipt.get("submitted_name") == verified_alias_name
+        and receipt_submitted_domain == receipt_observed_domain == verified_alias_domain
+        and receipt_submitted_slug == receipt_observed_slug == verified_alias_slug
+        and homepage_brand
+        and receipt.get("observed_name") == _company_name(homepage_brand)
+        and isinstance(homepage_legal_aliases, list)
+        and 0 < len(homepage_legal_aliases) <= 3
+        and all(
+            isinstance(alias, str) and alias.strip() and len(alias.strip()) <= 200
+            and _company_name(alias) == verified_alias_name
+            for alias in homepage_legal_aliases
+        )
+    ):
+        receipt.update(
+            decision=COMPANY_FIT_MATCH,
+            reason_code="verified_homepage_brand_alias",
+            verified_brand_name=homepage_brand,
+            verified_legal_name_aliases=list(homepage_legal_aliases),
+            verified_homepage_brand_alias=True,
         )
         return receipt
     if (
@@ -9745,7 +9790,10 @@ async def _llm_reverify_company(
             "not proof of any fit dimension):\n"
             "<verified_homepage_identity>"
             + json.dumps(
-                verified_identity,
+                {
+                    key: value for key, value in verified_identity.items()
+                    if key != "verified_homepage_brand_alias"
+                },
                 sort_keys=True,
                 separators=(",", ":"),
             )

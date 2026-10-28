@@ -568,8 +568,47 @@ def _publish_rerun328(
     assert subprocess.check_output(
         ["git", "--git-dir", str(remote), "rev-parse", "lab"]
     ).strip()
-    assert harness.service.activate_reward(ROUND)["status"] == "activated"
+    # This exact pre-428 schema has the single-champion reward contract. Seed
+    # its historical v1 basis through the real activation RPC; the current
+    # service's slot-snapshot activation is covered by current-schema tests.
+    published = harness.service.store.get_round(ROUND)
+    decision = published["publication_doc"]["king_decision"]
+    basis = harness.service._sign(rewards.reward_basis_document(
+        round_id=ROUND,
+        published_at=published["publication_doc"]["published_at"],
+        finalized_epoch=harness.chain.current_settlement_epoch(),
+        king_hotkey=decision["king_hotkey"],
+        king_outcome=decision["outcome"],
+        reward_constants=published["configuration_doc"]["reward_constants"],
+    ), "reward_basis_hash")
+    assert harness.service.store.activate_reward(
+        ROUND, basis, harness.service.signing_key_document(),
+    )["status"] == "activated"
     assert harness.service.activate_reward(ROUND)["status"] == "existing"
+
+
+def _assert_incomplete_baseline_and_sealed_sql_stop(harness):
+    # Current service preflight must hold this deliberately incomplete historical
+    # baseline. The pinned SQL stop must independently reject final authority.
+    result = harness.service.publish(ROUND)
+    assert result == {
+        "status": "retry", "round_status": "scored", "reason": "baseline_incomplete",
+    }
+    connection = harness.connect()
+    connection.autocommit = True
+    try:
+        import psycopg2
+        with connection.cursor() as cursor:
+            with pytest.raises(
+                psycopg2.Error,
+                match="Sep20 rejudge332 publication requires sealed review release",
+            ):
+                cursor.execute(
+                    "UPDATE public.lab_arena_rounds SET status='published' WHERE round_id=%s",
+                    (ROUND,),
+                )
+    finally:
+        connection.close()
 
 
 def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
@@ -984,11 +1023,7 @@ def test_sep20_rerun332_preserves_history_and_isolates_new_scorer_cache(
         _drive_rejudge_cycle(
             harness.service, harness.objects, harness.runner_keys[0]
         )
-        with pytest.raises(
-            ArenaStoreError,
-            match="Sep20 rejudge332 publication requires sealed review release",
-        ):
-            harness.service.publish(ROUND)
+        _assert_incomplete_baseline_and_sealed_sql_stop(harness)
         with connection.cursor() as cursor:
             assert _scalar(
                 cursor,

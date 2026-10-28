@@ -170,19 +170,28 @@ user has accepted this tradeoff.
 
 ## Limits and release gates
 
-- The current baseline and Tyche's hosted OpenAI route do not qualify for this
-  full-text-only registry. No baseline or miner is silently switched. The initial
-  registry deliberately has no baseline selection. Before activation, publish and
-  test a compatible baseline archive, including every subagent route. The
+- Routes without full thinking text do not qualify for this full-text-only
+  registry. No baseline or miner is silently switched. Before activation,
+  publish and test a compatible bootstrap archive, including every subagent
+  route, for rounds that do not yet have a promoted champion. The
   activation command requires `--reasoning-baseline-source-url` with a same-repo
   40-character commit archive URL and `--reasoning-baseline-source-sha256`.
   Reused accepted/frozen baselines must also match the stored digest.
-  At baseline freeze, a future full-thinking round adopts a completed
-  full-thinking champion's source commit, digest, and funding owner together.
-  If the current champion is from a legacy round, the first full-thinking round
-  keeps its tested bootstrap source while retaining that champion as payer.
+  At baseline freeze, a future round adopts the latest completed champion's
+  source commit, digest, and funding owner together. The bootstrap is used only
+  when there is no promoted champion. A change in capture policy must not
+  substitute a different baseline model.
+  The baseline also freezes the champion's original capture policy and route
+  registry in `baseline_reasoning_configuration`. An empty object preserves a
+  champion that won before full-thinking activation. Only the trusted baseline
+  execution uses this snapshot; new challengers use the current round's policy.
+  Current round scoring, cost limits, and reward rules still apply to everyone.
+  A baseline without full-thinking evidence does not qualify for strict
+  thinking exports. A prior full-thinking baseline uses its original registry
+  when its capture evidence is checked.
   This also covers a round opened before the previous round's promotion.
-  Frozen rounds do not change their baseline snapshot.
+  Frozen rounds retain their source and capture behavior. Existing rounds
+  without this field keep their original round-wide capture contract.
 - Only the four listed DeepSeek Responses routes are approved. The bundled
   Codex helper retains its Fireworks default. The existing
   broker uses completed upstream responses; this PR does not add arbitrary

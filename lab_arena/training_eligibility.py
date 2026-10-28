@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from lab_arena import code_review, contracts, operations, reasoning_capture, training_coverage, training_export, training_observations, training_steps, training_thinking, training_worker_proof
+from lab_arena import baseline_reasoning, code_review, contracts, operations, reasoning_capture, training_coverage, training_export, training_observations, training_steps, training_thinking, training_worker_proof
 
 
 def _result(reasons, **counts):
@@ -83,7 +83,7 @@ def _all_model_routes_verified(example, run_id, *, failed_delivery=False, worker
              if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
     if not calls:
         return False
-    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
     try:
         new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
         return all(new_policy and (
@@ -173,7 +173,7 @@ def _verified_provider_output_fault(example, call, *, worker_proofs=None):
                 or not set(call.get("response_privacy_redactions") or []) <= {"hidden_reasoning"}):
             return False
         state = training_thinking.attempt_coverage(
-            call, example.get("role", "miner"), configuration.get("reasoning_route_registry"))
+            call, example.get("role", "miner"), baseline_reasoning.for_example(example).get("reasoning_route_registry"))
         if not state["route_reviewed"] or not state["provider_route_verified"]:
             return False
         try:
@@ -199,7 +199,7 @@ def _only_benign_thinking_gaps(example, run_id, *, new_policy=False, worker_proo
     """Verified omissions and length stops share one incomplete ICP budget."""
     calls = [call for call in example.get("provider_calls") or []
              if call.get("run_id") == run_id and call.get("operation_id") in reasoning_capture.OPERATIONS]
-    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
     try:
         output_fault = new_policy and any(_verified_provider_output_fault(example, call, worker_proofs=worker_proofs) for call in calls)
         checked = [training_thinking.full_text_segments(call, example.get("role", "miner"), registry)
@@ -378,7 +378,7 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False, wo
                     if str(exc) == "response_not_complete":
                         state = training_thinking.attempt_coverage(
                             call, example.get("role", "miner"),
-                            (example.get("configuration") or {}).get("reasoning_route_registry"))
+                            baseline_reasoning.for_example(example).get("reasoning_route_registry"))
                         truncated = (state["returned"] == "truncated"
                                      and state["route_reviewed"] and state["provider_route_verified"])
                     if not privacy_gap and not truncated and not _verified_provider_output_fault(example, call, worker_proofs=worker_proofs):
@@ -588,7 +588,7 @@ def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False
                             and training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})):
                         state = training_thinking.attempt_coverage(
                             call, example.get("role", "miner"),
-                            (example.get("configuration") or {}).get("reasoning_route_registry"))
+                            baseline_reasoning.for_example(example).get("reasoning_route_registry"))
                         truncated = (state["returned"] == "truncated"
                                      and state["route_reviewed"] and state["provider_route_verified"])
                     if str(exc) not in gaps and not truncated and not _verified_provider_output_fault(example, call, worker_proofs=worker_proofs):
@@ -736,7 +736,7 @@ def _transient_artifact_gap_verified(example, submission, artifacts, *, worker_p
                     or (snapshot.get("privacy") or {}).get("redacted") is not False):
                 return False
         # Every retained provider call still has to prove its own exact data.
-        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
         for call in example.get("provider_calls") or []:
             if call.get("evidence_gaps"):
                 return False
@@ -953,7 +953,7 @@ def _failed_delivery_call_verified(example, call, *, worker_proofs=None):
         return False
     if call.get("operation_id") in reasoning_capture.OPERATIONS:
         op, body, tools = training_steps._model_request(example, call)
-        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
         if (not training_thinking._policy(call, registry)
                 or not (training_thinking._legacy_tested_controls_match(call)
                         or training_thinking._captured_reasoning_controls_match(call, registry))):
@@ -1137,7 +1137,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
                              and contracts.SHA256_RE.fullmatch(source["sha256"]) is not None
                              and (source["sha256"] == source_digest or baseline_source_ok))
                             or transient_verified and "source" in (unavailable_artifacts or {}).get(run_id, {}))
-                    or (example.get("configuration") or {}).get("reasoning_capture_policy") != reasoning_capture.POLICY
+                    or baseline_reasoning.for_example(example).get("reasoning_capture_policy") != reasoning_capture.POLICY
                     or training_coverage.missing_reasoning_percent_from_configuration(
                         example.get("configuration") or {}) != maximum_missing_reasoning_percent):
                 run_reasons.append("selected_run_identity_unverified")
@@ -1184,7 +1184,7 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
             if not calls:
                 run_reasons.append("execution_model_call_missing")
                 continue
-            registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+            registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
             has_full = False
             for index, call in calls:
                 counts["model_calls"] += 1

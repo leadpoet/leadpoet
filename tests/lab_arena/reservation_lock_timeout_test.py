@@ -18,10 +18,11 @@ from tests.lab_arena.test_lab_arena_broker import (
 )
 
 RESERVATIONS = ("lab_arena_reserve_call", "lab_arena_reserve_judgment_call")
+PRE_DISPATCH = RESERVATIONS + ("lab_arena_mark_dispatched",)
 LOCK_TIMEOUT = {"code": "55P03", "message": "canceling statement due to lock timeout"}
 
 
-@pytest.mark.parametrize("function", RESERVATIONS)
+@pytest.mark.parametrize("function", PRE_DISPATCH)
 @pytest.mark.parametrize("code", ["55P03", "40P01"])
 @pytest.mark.parametrize("failures", [1, DEADLOCK_RETRIES])
 def test_definite_rollback_repeats_identical_rpc_with_existing_bound(function, code, failures):
@@ -43,7 +44,7 @@ def test_definite_rollback_repeats_identical_rpc_with_existing_bound(function, c
     assert {request.url.path for request in requests} == {"/rest/v1/rpc/" + function}
 
 
-@pytest.mark.parametrize("function", RESERVATIONS)
+@pytest.mark.parametrize("function", PRE_DISPATCH)
 def test_persistent_lock_timeout_stops_at_existing_retry_bound(function):
     requests = []
     with httpx.Client(transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(500, json=LOCK_TIMEOUT))) as client:
@@ -59,7 +60,7 @@ def test_persistent_lock_timeout_stops_at_existing_retry_bound(function):
     *[(function, 500, LOCK_TIMEOUT) for function in (
         "lab_arena_whoami", "lab_arena_settle_call", "lab_arena_open_scoring",
     )],
-    *[(function, status, body) for function in RESERVATIONS for status, body in (
+    *[(function, status, body) for function in PRE_DISPATCH for status, body in (
         (401, LOCK_TIMEOUT), (403, LOCK_TIMEOUT), (503, LOCK_TIMEOUT),
         (500, {"code": "42501", "message": "permission denied"}),
         (500, {"code": "P0001", "message": "unknown failure"}),
@@ -76,7 +77,7 @@ def test_other_rpc_auth_unknown_or_untyped_failure_never_retries(function, statu
     assert len(requests) == 1
 
 
-@pytest.mark.parametrize("function", RESERVATIONS)
+@pytest.mark.parametrize("function", PRE_DISPATCH)
 def test_ambiguous_transport_failure_remains_for_existing_caller_readback(function):
     requests = []
 
@@ -94,9 +95,10 @@ def test_ambiguous_transport_failure_remains_for_existing_caller_readback(functi
 
 @pytest.mark.parametrize("judgment", [False, True])
 @pytest.mark.parametrize("persistent", [False, True])
-def test_transport_to_broker_reserves_dispatches_and_charges_once(monkeypatch, judgment, persistent):
+@pytest.mark.parametrize("dispatch_marker", [False, True])
+def test_transport_to_broker_reserves_dispatches_and_charges_once(monkeypatch, judgment, persistent, dispatch_marker):
     rpc_requests = []
-    function = RESERVATIONS[int(judgment)]
+    function = "lab_arena_mark_dispatched" if dispatch_marker else RESERVATIONS[int(judgment)]
     ledger = FakeLedgerStore()
     clock = SimpleNamespace(now=0.0)
     clock.monotonic = lambda: clock.now
@@ -108,11 +110,12 @@ def test_transport_to_broker_reserves_dispatches_and_charges_once(monkeypatch, j
         rpc_requests.append(request)
         assert request.url.path == "/rest/v1/rpc/" + function
         if len(rpc_requests) <= DEADLOCK_RETRIES or persistent:
-            assert ledger.calls == {}
+            assert (ledger.calls == {}) is (not dispatch_marker)
             clock.now += 5.0  # Production lab_arena_service lock_timeout.
             return httpx.Response(500, json=LOCK_TIMEOUT)
         params = json.loads(request.content)
-        result = FakeLedgerStore.reserve_call(ledger, **{
+        write = FakeLedgerStore.mark_dispatched if dispatch_marker else FakeLedgerStore.reserve_call
+        result = write(ledger, **{
             key.removeprefix("p_"): value for key, value in params.items()
         })
         return httpx.Response(200, json=result)
@@ -123,11 +126,14 @@ def test_transport_to_broker_reserves_dispatches_and_charges_once(monkeypatch, j
 
         def reserve_call(self, **kwargs):
             assert not judgment
-            return self.inner.reserve_call(**kwargs)
+            return ledger.reserve_call(**kwargs) if dispatch_marker else self.inner.reserve_call(**kwargs)
 
         def reserve_judgment_call(self, **kwargs):
             assert judgment
-            return self.inner.reserve_judgment_call(**kwargs)
+            return ledger.reserve_call(**kwargs) if dispatch_marker else self.inner.reserve_judgment_call(**kwargs)
+
+        def mark_dispatched(self, **kwargs):
+            return self.inner.mark_dispatched(**kwargs) if dispatch_marker else ledger.mark_dispatched(**kwargs)
 
         def __getattr__(self, name):
             return getattr(ledger, name)
@@ -160,7 +166,13 @@ def test_transport_to_broker_reserves_dispatches_and_charges_once(monkeypatch, j
             with pytest.raises(ArenaStoreUnavailable, match="55P03") as failed:
                 broker.execute(context, operation_id="openrouter.chat", parameters={**CHAT, "model": model}, action_sequence=36, timeout_ms=30_000)
             assert failed.value.transaction_rolled_back is True
-            assert ledger.calls == {} and provider.sent == []
+            assert provider.sent == [] and ledger.log.count("settle") == 0
+            if dispatch_marker:
+                assert len(ledger.calls) == 1
+                assert next(iter(ledger.calls.values()))["kind"] == "reservation"
+                assert ledger.log == ["reserve"]
+            else:
+                assert ledger.calls == {}
             assert clock.now == pytest.approx(20.06)
         else:
             result = broker.execute(context, operation_id="openrouter.chat", parameters={**CHAT, "model": model}, action_sequence=36, timeout_ms=30_000)
@@ -185,3 +197,53 @@ def test_transport_to_broker_reserves_dispatches_and_charges_once(monkeypatch, j
         assert database.deadlock_retries == DEADLOCK_RETRIES
     assert len(rpc_requests) == DEADLOCK_RETRIES + 1
     assert len({request.content for request in rpc_requests}) == 1
+
+
+@pytest.mark.parametrize("failure", ["transport_before", "transport_after", "non_json_after", "http503_after", "idempotent"])
+def test_broker_never_replays_ambiguous_or_committed_dispatch_marker(failure):
+    requests = []
+    ledger = FakeLedgerStore()
+    provider = FakeTransport()
+
+    def handle(request):
+        requests.append(request)
+        assert request.url.path == "/rest/v1/rpc/lab_arena_mark_dispatched"
+        if failure == "transport_before":
+            raise httpx.ReadTimeout("unproved marker outcome")
+        params = {key.removeprefix("p_"): value for key, value in json.loads(request.content).items()}
+        ledger.mark_dispatched(**params)
+        if failure == "transport_after":
+            raise httpx.ReadTimeout("committed marker response lost")
+        if failure == "non_json_after":
+            return httpx.Response(200, content=b"not-json")
+        if failure == "http503_after":
+            return httpx.Response(503, json=LOCK_TIMEOUT)
+        return httpx.Response(200, json=ledger.mark_dispatched(**params))
+
+    class Store:
+        def __init__(self, database):
+            self.database = database
+
+        def mark_dispatched(self, **kwargs):
+            return self.database.mark_dispatched(**kwargs)
+
+        def __getattr__(self, name):
+            return getattr(ledger, name)
+
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        database = PostgrestTransport("https://db.example", service_key="sb_secret_test", http_client=client)
+        broker = br.Broker(store=Store(ArenaStore(database)),
+            key_for=lambda provider: HOST_KEYS[provider], price_table=price_table(), transport=provider)
+        arguments = dict(operation_id="openrouter.chat", parameters=CHAT, action_sequence=36, timeout_ms=30_000)
+        if failure == "idempotent":
+            result = broker.execute(CONTEXT, **arguments)
+            assert result.status == 409 and result.call["outcome"] == "uncertain"
+        else:
+            with pytest.raises(ArenaStoreError):
+                broker.execute(CONTEXT, **arguments)
+        assert database.deadlock_retries == 0
+    assert len(requests) == 1
+    assert provider.sent == [] and ledger.log.count("settle") == 0
+    assert len(ledger.calls) == 1
+    assert next(iter(ledger.calls.values()))["kind"] == (
+        "reservation" if failure == "transport_before" else "dispatch")

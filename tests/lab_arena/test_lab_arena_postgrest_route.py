@@ -94,6 +94,12 @@ def stack(tmp_path_factory):
                       NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
                     GRANT anon, service_role, lab_arena_service TO authenticator
                       WITH INHERIT FALSE, SET TRUE;
+                    -- Match source request defaults. PostgREST applies each
+                    -- request role's overrides above the login's fallback.
+                    ALTER ROLE authenticator IN DATABASE postgres SET statement_timeout='8s';
+                    ALTER ROLE authenticator IN DATABASE postgres SET lock_timeout='8s';
+                    ALTER ROLE authenticator IN DATABASE postgres SET idle_in_transaction_session_timeout='0';
+                    ALTER ROLE anon SET statement_timeout='10s';
                     CREATE TABLE public.lab_arena_test_other_table (id INT);
                     CREATE FUNCTION public.api_test_identity() RETURNS jsonb
                     LANGUAGE sql STABLE SECURITY INVOKER AS $$
@@ -357,6 +363,21 @@ def test_exact_three_roles_and_untrusted_claim_headers(stack):
             assert result["claims"]["aud"] == "leadpoet-subnet-api"
             if role == "lab_arena_service":
                 assert (result["statement_timeout"], result["lock_timeout"], result["idle_timeout"]) == ("30s", "5s", "1min")
+
+
+@pytest.mark.parametrize("key_name,role,timeouts", [
+    ("arena_key", "lab_arena_service", ("30s", "5s", "1min")),
+    ("gateway_key", "service_role", ("8s", "8s", "0")),
+    ("public_key", "anon", ("10s", "8s", "0")),
+])
+def test_request_role_timeouts_preserve_source_defaults(stack, key_name, role, timeouts):
+    response = httpx.post(stack["base_url"] + "/rest/v1/rpc/api_test_identity",
+                          headers={"apikey": stack["values"][key_name]}, json={})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["role"] == result["claims"]["role"] == role
+    assert tuple(result[name] for name in
+                 ("statement_timeout", "lock_timeout", "idle_timeout")) == timeouts
 
 
 def test_arena_direct_writes_and_private_icps_are_denied(stack):

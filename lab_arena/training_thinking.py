@@ -13,7 +13,7 @@ import re
 from collections import Counter, defaultdict
 from typing import Any, Mapping
 
-from lab_arena import contracts, operations, reasoning_capture, training_capture, training_coverage, training_dataset, training_export, training_steps, training_worker_proof
+from lab_arena import baseline_reasoning, contracts, operations, reasoning_capture, training_capture, training_coverage, training_dataset, training_export, training_steps, training_worker_proof
 
 SCHEMA_VERSION = "leadpoet.lab_arena.full_thinking_dataset.v1"
 RECORD_SCHEMA_VERSION = "leadpoet.lab_arena.full_thinking_step.v1"
@@ -517,7 +517,7 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
     proof of recovery from a later successful request on the frozen route.
     """
     try:
-        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
         request = call.get("request") or {}
         outbound = request.get("outbound") or {}
         body = outbound.get("body")
@@ -832,7 +832,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any],
             if admitted.get("model") != (((call.get("request") or {}).get("outbound") or {}).get("body") or {}).get("model"):
                 return False
         operation = call.get("operation_id")
-        registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
         request = call.get("request") or {}
         outbound = request.get("outbound") or {}
         body = outbound.get("body")
@@ -1018,12 +1018,12 @@ def verified_cap_truncated_target(example, call, *, worker_proofs=None) -> bool:
         usage = response.get("usage") or {}
         checked = dict(call, response=response, response_sha256=contracts.document_hash(response))
         state = attempt_coverage(checked, _role(example, call),
-                                 (example.get("configuration") or {}).get("reasoning_route_registry"))
+                                 baseline_reasoning.for_example(example).get("reasoning_route_registry"))
         if (operation not in reasoning_capture.OPERATIONS or evidence["write"]["status"] != 200
                 or type(cap) is not int or cap < 1
                 or not (_legacy_tested_controls_match(call)
                         or _captured_reasoning_controls_match(call,
-                            (example.get("configuration") or {}).get("reasoning_route_registry")))
+                            baseline_reasoning.for_example(example).get("reasoning_route_registry")))
                 or type(usage.get(usage_key)) is not int or usage[usage_key] != cap
                 or not state["requested"] or not state["route_reviewed"]
                 or not state["provider_route_verified"] or state["redactions"]):
@@ -1101,7 +1101,7 @@ def coverage(examples) -> dict:
         bad = False
         has_text = False
         configuration = example.get("configuration") or {}
-        registry = configuration.get("reasoning_route_registry")
+        registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
         new_policy = training_coverage.MISSING_REASONING_SETTING in configuration
         try:
             maximum_missing = training_coverage.missing_reasoning_percent_from_configuration(configuration)
@@ -1120,7 +1120,7 @@ def coverage(examples) -> dict:
             grouped[key]["saved"] += row["storage"] == "saved"
             execution_model = _execution_model_call(example, call)
             full_text_calls += execution_model and bool(full)  # Raw exposed text inventory.
-            full_round = (example.get("configuration") or {}).get("reasoning_capture_policy") == POLICY
+            full_round = baseline_reasoning.for_example(example).get("reasoning_capture_policy") == POLICY
             failed = new_policy and verified_failed_attempt(example, call)
             omitted_truncation = False
             target_usable = not new_policy
@@ -1178,7 +1178,7 @@ def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
             or example.get("example_hash") != contracts.document_hash(
                 {key: value for key, value in example.items() if key != "example_hash"})):
         raise ValueError("example_hash_mismatch")
-    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
     calls = []
     for ci, call in enumerate(example.get("provider_calls") or []):
         prefix = ["provider_calls", ci]
@@ -1622,7 +1622,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
     selected = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
     if not selected:
         return None
-    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
     for call in example.get("provider_calls") or []:
         call_gaps = set(call.get("evidence_gaps") or [])
         if call.get("run_id") not in rows or not call_gaps <= set(rows[call["run_id"]]["research_process_gaps"]):
@@ -1994,7 +1994,7 @@ def build(examples, rules: training_steps.Rules | None = None):
                     continue
                 delivered_call = dict(call, response=delivered,
                                       response_sha256=ref["delivered_response_sha256"])
-                registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+                registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
                 source = ref["example_hash"]
                 if source not in trajectory_reasons:
                     trajectory_reasons[source] = _trajectory_reason(example)
@@ -2053,7 +2053,7 @@ def build(examples, rules: training_steps.Rules | None = None):
 
 def _trajectory_reason(example: Mapping[str, Any]) -> str | None:
     """Validate the unchanged execution trajectory without candidate state."""
-    registry = (example.get("configuration") or {}).get("reasoning_route_registry")
+    registry = baseline_reasoning.for_example(example).get("reasoning_route_registry")
     trajectory_valid = True
     new_policy = training_coverage.MISSING_REASONING_SETTING in (example.get("configuration") or {})
     try:

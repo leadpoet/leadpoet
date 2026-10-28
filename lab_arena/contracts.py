@@ -941,6 +941,7 @@ ROUND_CONFIGURATION_FIELDS = (
     F("training_maximum_missing_reasoning_percent", "int", required=False,
       minimum=0, maximum=100),
     F("reasoning_route_registry", "object", required=False),
+    F("baseline_reasoning_configuration", "object", required=False),
     F("reasoning_baseline_source_sha256", "sha256", required=False),
     F("reasoning_activation_status", "str", required=False, choices=("not_ready",)),
     F("reasoning_activation_reason", "str", required=False,
@@ -1032,6 +1033,14 @@ def validate_round_configuration(document: Any) -> Dict[str, Any]:
         and config.get("sourcing_cost_eligibility_policy") not in PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES):
         raise ArenaContractError("infrastructure retry cost policy requires per-ICP costs")
     capture_policy = config.get("reasoning_capture_policy")
+    if "baseline_reasoning_configuration" in config:
+        from lab_arena import baseline_reasoning
+        try:
+            baseline_reasoning.validate(config[baseline_reasoning.FIELD])
+        except ValueError as exc:
+            raise ArenaContractError("invalid baseline reasoning configuration") from exc
+        if capture_policy != "full_generated_thinking_v1":
+            raise ArenaContractError("separate baseline reasoning requires full thinking round")
     if "training_maximum_missing_reasoning_percent" in config:
         from lab_arena import training_coverage
         try:

@@ -773,6 +773,23 @@ There is no sequential fallback when the remote does not support atomic pushes.
 The next baseline download and the winner's reward activation wait for promotion
 to complete. Existing frozen round bundles do not change during recovery.
 
+For full-thinking rounds, the baseline freeze selects the completed promotion's
+exact commit and freezes its original capture settings separately from the new
+challengers' settings. A capture-policy change cannot substitute the bootstrap
+for an existing champion. The bootstrap is used only before the first promoted
+champion. Historical frozen rounds are not repinned. Baseline cost limits,
+scoring, and reward rules remain those of the current round; the capture
+snapshot does not make legacy reasoning eligible for strict training exports.
+
+Apply migration 585, verify its function hashes, then deploy the matching
+gateway code before the next baseline freeze. The new code must not freeze a
+round against the older database function, which cannot save the capture
+snapshot. Verify that both the serving API and daily driver use that release;
+an older API ignores the separate capture snapshot. The new database function
+rejects an older driver's attempt to substitute the bootstrap before freeze.
+After the first round freezes the new snapshot, do not roll back to code that
+does not understand it. Use a corrected release that preserves the contract.
+
 Configure one repository-scoped host credential: `LAB_ARENA_GIT_SSH_KEY_PATH`
 for a write-enabled deploy key, or `LAB_ARENA_GITHUB_TOKEN`. Do not set both.
 SSH requires a verified GitHub host key and a private key readable only by its

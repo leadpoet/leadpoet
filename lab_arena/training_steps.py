@@ -526,6 +526,21 @@ def _validate_target_tools(body, target, op):
                      for item in target if item['type'] in {'function_call', 'custom_tool_call'}), 'undeclared_tool_call')
 
 
+def _outbound_request_exact(call):
+    """Check the retained provider route and the existing outbound body hash."""
+    request = call.get('request') or {}
+    outbound = request.get('outbound') or {}
+    operation = operations.get_operation(call.get('operation_id'))
+    return (operation is not None and call.get('provider') == operation.provider
+            and outbound.get('method') == operation.method
+            and outbound.get('host') == (operation.outbound_host or operation.host)
+            and outbound.get('path') == (operation.outbound_path or operations._render_path(
+                operation, request.get('hashed_parameters') or {}))
+            and outbound.get('body_sha256') == (
+                contracts.hash_bytes(b'') if outbound.get('body') is None
+                else contracts.document_hash(outbound['body'])))
+
+
 def _model_request(example, call):
     """Shared exact model request checks, independent of delivery or target."""
     _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')

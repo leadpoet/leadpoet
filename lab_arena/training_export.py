@@ -742,6 +742,9 @@ def _calls(rows, run_ids, objects, run_order):
                         ("entry_id", "entry_kind", "created_at", "funding_source", "amount_microusd") if key in row}
             metadata["accounting"] = {key: copy.deepcopy(value) for key, value in (row.get("entry_doc") or {}).items()
                                       if key in accounting_fields}
+            if (row.get("entry_kind") == "recovery"
+                    and (row.get("entry_doc") or {}).get("reason") == "attempt_completed_before_dispatch"):
+                metadata["accounting"]["reason"] = "attempt_completed_before_dispatch"
             metadata["accounting"].update({key: copy.deepcopy(value) for key, value in
                 observations(row.get("entry_doc") or {}).items() if key in accounting_fields})
             recorded_call = (row.get("entry_doc") or {}).get("call")
@@ -969,7 +972,9 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
         proof = {"run_id": run["run_id"], "configuration": configuration or {},
                  "provider_calls": paid, "worker_observation_artifacts": {run["run_id"]: snapshot}}
         if any(call["call_identity"] not in linked
-               and not training_thinking.verified_recovered_responses_retry(proof, call) for call in paid):
+               and not training_thinking.verified_recovered_responses_retry(proof, call)
+               and not training_thinking.verified_undispatched_transport(
+                   proof, call, require_observation_ref=False) for call in paid):
             errors.add("worker_response_receipt_link_invalid")
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid

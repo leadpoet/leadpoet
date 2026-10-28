@@ -1,8 +1,9 @@
 """Render private configuration for the subnet's PostgREST compatibility pair.
 
 This does not connect to a database, provision resources or change a service.
-Opaque client keys terminate at nginx. Only private, signed role tokens reach
-PostgREST. Configuration and input errors never print their values.
+Opaque client keys are checked at nginx. The target receives private role
+tokens; managed-source REST receives the original API key alone.
+Configuration and input errors never print their values.
 """
 
 from __future__ import annotations
@@ -151,6 +152,37 @@ http {{
 '''
 
 
+SOURCE_REST_HOST = "qplwoislplkcegvdmbim.supabase.co"
+
+
+def render_source_nginx(values: Mapping[str, str], *, listen: str = "127.0.0.1:8081") -> str:
+    """Retain the exact client-key gate while forwarding to managed REST.
+
+    The source API resolves the original opaque key. Private target JWTs and
+    database credentials never reach it. The URI has no replacement component,
+    so nginx forwards the original /rest/v1/ path and query unchanged.
+    """
+    body = render_nginx(values, listen=listen)
+    token_map_start = body.index("    map $request_role $backend_jwt {")
+    token_map_end = body.index("    server {", token_map_start)
+    body = body[:token_map_start] + body[token_map_end:]
+    if any(body.count(directive) != 1 for directive in (
+            "proxy_pass http://127.0.0.1:3000/;",
+            'proxy_set_header Authorization "Bearer $backend_jwt";',
+            'proxy_set_header apikey "";')):
+        raise ConfigurationError("source renderer contract changed")
+    body = body.replace("proxy_pass http://127.0.0.1:3000/;", f"""proxy_pass https://{SOURCE_REST_HOST};
+            proxy_set_header Host {SOURCE_REST_HOST};
+            proxy_ssl_server_name on;
+            proxy_ssl_name {SOURCE_REST_HOST};
+            proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+            proxy_ssl_verify on;
+            proxy_ssl_verify_depth 3;""")
+    return body.replace('proxy_set_header Authorization "Bearer $backend_jwt";',
+                        'proxy_set_header Authorization "";').replace(
+        'proxy_set_header apikey "";', 'proxy_set_header apikey $http_apikey;')
+
+
 def render_postgrest(values: Mapping[str, str], *, host: str = "127.0.0.1") -> str:
     values = validate_secrets(values)
     if not re.fullmatch(r"[a-zA-Z0-9.:-]+", host):
@@ -182,14 +214,18 @@ def _read_private(path: Path) -> dict[str, str]:
 
 
 def write_configuration(values: Mapping[str, str], directory: Path, *, owner_uid: int | None = None,
-                        owner_gid: int | None = None) -> None:
+                        owner_gid: int | None = None, rest_backend: str = "target") -> None:
+    if rest_backend not in {"target", "source"}:
+        raise ConfigurationError("invalid REST backend")
     directory.mkdir(mode=0o700, parents=False, exist_ok=True)
     info = directory.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
         raise ConfigurationError("output must be a private directory")
     # Render both before replacing either; the operator owns pair stop/start
     # during explicit key rotation. Ordinary app deploys retain this pair.
-    bodies = {"nginx.conf": render_nginx(values), "postgrest.conf": render_postgrest(values)}
+    bodies = {"nginx.conf": (render_source_nginx(values) if rest_backend == "source"
+                              else render_nginx(values)),
+              "postgrest.conf": render_postgrest(values)}
     for name, body in bodies.items():
         fd, temporary = tempfile.mkstemp(prefix=".config-", dir=directory)
         try:
@@ -211,6 +247,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--secrets-file", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--rest-backend", choices=("target", "source"), default="target")
     parser.add_argument("--owner-uid", type=int)
     parser.add_argument("--owner-gid", type=int)
     args = parser.parse_args()
@@ -223,7 +260,8 @@ def main() -> int:
                 or tls.get("sslrootcert") != ["/run/subnet-api/rds-ca.pem"]):
             raise ConfigurationError("production database TLS is required")
         write_configuration(values, args.output_dir,
-                            owner_uid=args.owner_uid, owner_gid=args.owner_gid)
+                            owner_uid=args.owner_uid, owner_gid=args.owner_gid,
+                            rest_backend=args.rest_backend)
     except (ConfigurationError, ValueError, TypeError, OSError, OverflowError):
         parser.exit(1, "subnet_api_configuration_invalid\n")
     print("subnet_api_configuration_ready")

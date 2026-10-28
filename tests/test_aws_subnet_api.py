@@ -106,3 +106,51 @@ def test_existing_rpc_timeouts_and_body_limits_are_not_reduced():
     assert "proxy_next_upstream off;" in body
     assert "proxy_http_version 1.1;" in body
     assert "access_log off;" in body and "error_log /dev/null crit;" in body
+
+
+def test_source_fallback_retains_target_bytes_and_uses_only_original_client_keys():
+    values = secrets()
+    assert hashlib.sha256(api.render_nginx(values).encode()).hexdigest() == (
+        "759a1b25eca6b75bf8b2b47be1c616c144b7af1903dde168bc6d8b951ccece35"
+    )
+    source = api.render_source_nginx(values)
+    assert "proxy_pass https://qplwoislplkcegvdmbim.supabase.co;" in source
+    assert 'proxy_set_header Authorization "";' in source
+    assert 'proxy_set_header apikey $http_apikey;' in source
+    assert "proxy_ssl_server_name on;" in source and "proxy_ssl_verify on;" in source
+    assert values["db_uri"] not in source and values["jwt_secret"] not in source
+    assert "$backend_jwt" not in source
+    for role in api.KEY_ROLES.values():
+        assert api.role_jwt(role, values["jwt_secret"]) not in source
+    for directive in ("client_max_body_size 0;", "proxy_connect_timeout 8s;",
+                      "proxy_read_timeout 610s;", "proxy_send_timeout 610s;",
+                      "proxy_next_upstream off;", "proxy_buffering off;",
+                      "proxy_request_buffering off;", "proxy_max_temp_file_size 0;"):
+        assert directive in source
+
+
+def test_source_cli_keeps_private_pair_and_retained_target_database(tmp_path):
+    values = secrets()
+    values["db_uri"] += "?sslmode=verify-full&sslrootcert=/run/subnet-api/rds-ca.pem"
+    source = tmp_path / "input.json"
+    source.write_text(json.dumps(values))
+    source.chmod(0o600)
+    output = tmp_path / "configuration"
+    result = subprocess.run([sys.executable, str(Path(api.__file__)), "--secrets-file", str(source),
+                             "--output-dir", str(output), "--rest-backend", "source"],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and result.stdout == "subnet_api_configuration_ready\n"
+    assert not result.stderr
+    assert (output / "nginx.conf").read_text() == api.render_source_nginx(values)
+    assert (output / "postgrest.conf").read_text() == api.render_postgrest(values)
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    for path in output.iterdir():
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_source_selection_fails_closed_if_target_render_contract_changes(monkeypatch):
+    changed = api.render_nginx(secrets()).replace("proxy_pass http://127.0.0.1:3000/;",
+                                                "proxy_pass http://different-target/;")
+    monkeypatch.setattr(api, "render_nginx", lambda *_args, **_kwargs: changed)
+    with pytest.raises(api.ConfigurationError, match="source renderer contract changed"):
+        api.render_source_nginx(secrets())

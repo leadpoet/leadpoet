@@ -8,6 +8,22 @@ test and commit only; the coordinating task owns independent review and any
 later release. Do not change live Docker state, submitted sources, scoring,
 billing, storage, dependencies or concurrent work under this implementation scope.
 
+## Scoped production authorization: October 28 guarded idle recovery
+
+The user authorized the narrow guarded idle restart recovery fix and exact
+committed `587-lab-arena-atomic-review-restart-guard.sql`. Before application,
+stop and drain all review workers and prove no old begin-review invocation
+remains in flight. The migration takes exclusive round/submission table locks;
+these locks alone do not fence an old function body. Serialize paid-review
+reservation with the retained restart guard. Permit guarded idle recovery only
+when the database reports this atomic admission capability and exact active
+restart ownership is proved. Preserve paid claims, leases, completed decisions,
+idempotent replay, operator pause semantics, costs, participants, scoring,
+weights, and concurrent work. The coordinating task owns independent review,
+push, merge, exact migration application, canonical gateway and normal-validator
+deployment, and live verification. Internal implementation agents may test and
+commit only. This authority ends after scoped recovery and verification.
+
 ## Scoped production authorization: October 28 publication during restart drain
 
 The user authorized the narrow general fix for the October 28 scored-round

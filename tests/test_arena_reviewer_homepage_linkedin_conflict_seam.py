@@ -1,15 +1,29 @@
 """The frozen-image option changes exactly two reviewed identity blocks."""
 from copy import deepcopy
+import ast
 import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
 from scripts import build_arena_reviewer_runtime as builder
 from scripts import arena_reviewer_homepage_linkedin_conflict_seam as seam
 from tests.lab_arena.reviewer_runtime_composition_test import layer
+
+
+def previous_broad_dispatch():
+    source = subprocess.check_output([
+        "git", "show", "b1255dcc9aa7b66411ef0d76c0a8473051e67442:scripts/arena_reviewer_homepage_linkedin_conflict_seam.py",
+    ], cwd=builder.ROOT)
+    bindings = [node.value for node in ast.parse(source).body
+                if isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id == "NEW_DISPATCH"
+                        for target in node.targets)]
+    assert len(bindings) == 1
+    return ast.literal_eval(bindings[0])
 
 
 def source_pair():
@@ -45,7 +59,7 @@ def test_two_exact_blocks_are_the_only_change_and_are_idempotent():
     'utf8', 'syntax', 'crlf', 'missing_web', 'missing_verifier',
     'duplicate_web', 'duplicate_verifier', 'shadow_web', 'shadow_verifier',
     'decorated_web', 'decorated_verifier', 'mixed_dispatch', 'mixed_prompt',
-    'weakened_match_preservation', 'changed_domain_binding', 'prompt_binding',
+    'weakened_match_preservation', 'previous_broad_dispatch', 'changed_domain_binding', 'prompt_binding',
     'duplicate_prompt', 'changed_prompt_guard', 'quoted_functions',
 ])
 def test_malformed_ambiguous_or_mixed_source_fails_closed(fault):
@@ -74,9 +88,16 @@ def test_malformed_ambiguous_or_mixed_source_fails_closed(fault):
     elif fault == 'mixed_prompt':
         bad = original.replace(seam.OLD_PROMPT.encode(), seam.NEW_PROMPT.encode(), 1)
     elif fault == 'weakened_match_preservation':
-        bad = corrected.replace(
-            b'        receipt.get("decision") in {COMPANY_FIT_MISMATCH, COMPANY_FIT_UNAVAILABLE}\n',
-            b'        receipt.get("decision") in {COMPANY_FIT_MATCH, COMPANY_FIT_UNAVAILABLE}\n', 1)
+        bad = corrected.replace(seam.NEW_DISPATCH.encode(),
+            seam.NEW_DISPATCH.replace(
+                'receipt.get("decision") == COMPANY_FIT_MISMATCH',
+                'receipt.get("decision") in {COMPANY_FIT_MATCH, COMPANY_FIT_UNAVAILABLE}',
+            ).encode(), 1)
+        assert bad != corrected
+    elif fault == 'previous_broad_dispatch':
+        bad = corrected.replace(seam.NEW_DISPATCH.encode(),
+                                previous_broad_dispatch().encode(), 1)
+        assert bad != corrected
     elif fault == 'changed_domain_binding':
         bad = original.replace(seam.OLD_DISPATCH.encode(),
                                seam.OLD_DISPATCH.replace('and receipt.get("observed_domain")',
@@ -189,9 +210,9 @@ def test_actual_frozen_source_when_supplied():
 
 @pytest.mark.parametrize('name,input_sha256,output_sha256', [
     ('base', 'b573bd3fb3984cd065e48b37e19c8fdd59545319bef0f1801cdc94f1f502d3b2',
-     '454da6ef97899773c61e6611c7ef08a5175c14674e08029bee6b68b4ba137a30'),
+     '10638a78bbe457ec4f2ad880727dd1325a3773c543db0d4d4e8324251b8358d6'),
     ('runtime', 'b09dcafd2f4a83b2fcc31ed44c57a901f9e7f1a5b693d09c914def52bab0128b',
-     'adfd0406323db8d2fa7699a16e60e39ffe6bf1407220d707f16d30958e7369a1'),
+     'ee9fff67c5f8aa31680da8de05e9222e7e8b27dc45a5d3ad9d3790685a0781ca'),
 ])
 def test_provenance_matched_historical_sources_when_supplied(name, input_sha256, output_sha256):
     directory = os.environ.get('ARENA_HOMEPAGE_LINKEDIN_HISTORICAL_SOURCES')
@@ -247,7 +268,7 @@ def test_direct_base_current_and_candidate_composition_when_supplied():
     assert set(candidate) == set(reproduced)
     assert [name for name in candidate if candidate[name] != reproduced[name]] == [builder.FINALITY_FILE]
     assert candidate[builder.FINALITY_FILE] == seam.convert_homepage_linkedin_conflict_seam(reproduced[builder.FINALITY_FILE])
-    assert hashlib.sha256(candidate[builder.FINALITY_FILE]).hexdigest() == '1188b584911d91b4edc5d6e24b949173c54943e6540dbef7c70e7c0c2bc439ac'
+    assert hashlib.sha256(candidate[builder.FINALITY_FILE]).hexdigest() == '60ceb054effcf4b22ccb3e3da0a4368c586310b384db7451b1e87fd19f25b166'
     # Remaining captured grader files are unchanged by the existing runtime.
     for name in set(base['files']) - set(candidate):
         assert base['files'][name] == current['files'][name]

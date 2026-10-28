@@ -187,7 +187,19 @@ def test_actual_base_sources_and_monzo_overlay_when_supplied():
     prior = builder.expected_overlay({name: data for name, data in files.items()
                                       if name not in builder.BOUND_IDENTITY_FILES}, **flags)
     receipt = json.loads(Path(receipt_path).read_text())
-    assert {name: hashlib.sha256(data).hexdigest() for name, data in prior.items()} == receipt['overlay_files']
+    # The recorded Monzo image predates restoration of the original mismatch
+    # guard. Reconstruct only that old block to verify its immutable receipt;
+    # the candidate below must preserve the corrected prior overlay exactly.
+    from scripts import arena_reviewer_homepage_linkedin_conflict_seam as identity_seam
+    from tests.test_arena_reviewer_homepage_linkedin_conflict_seam import previous_broad_dispatch
+    recorded = dict(prior)
+    previous_dispatch = previous_broad_dispatch()
+    assert previous_dispatch != identity_seam.NEW_DISPATCH
+    assert recorded[builder.FINALITY_FILE].count(identity_seam.NEW_DISPATCH.encode()) == 1
+    recorded[builder.FINALITY_FILE] = recorded[builder.FINALITY_FILE].replace(
+        identity_seam.NEW_DISPATCH.encode(), previous_dispatch.encode(), 1,
+    )
+    assert {name: hashlib.sha256(data).hexdigest() for name, data in recorded.items()} == receipt['overlay_files']
     candidate = builder.expected_overlay(files, **flags, observed_linkedin_ampersand=True)
     assert all(candidate[name] == data for name, data in prior.items())
     corrected = {name: candidate[name] for name in seam.FUNCTIONS}

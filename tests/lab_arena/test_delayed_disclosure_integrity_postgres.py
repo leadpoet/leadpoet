@@ -9,16 +9,29 @@ from lab_arena import contracts, icp_disclosure, integrity, service as svc, veri
 from lab_arena.promotion import GitPromoter
 from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
-from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
-)
+from tests.lab_arena.historical_service_harness import freeze_historical_intake_dates
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.test_integrity_round import IntegrityHarness
+
+
+class FrozenIntegrityHarness(IntegrityHarness):
+    """Use current SQL with the original integrity judge's intake policy."""
+
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-02")
+            return commit(round_id)
+
+        service.commit_benchmark = commit_frozen
+        return service
 
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def test_integrity_round_reveals_committed_details_at_cutoff(
@@ -26,7 +39,7 @@ def test_integrity_round_reveals_committed_details_at_cutoff(
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
-    harness = IntegrityHarness(
+    harness = FrozenIntegrityHarness(
         connect, tmp_path, challengers=["DelayedWinner"], runners=["alpha"]
     )
     harness.chain.epoch = 27_000

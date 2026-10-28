@@ -48,6 +48,31 @@ Do not merge the unsuccessful draft PR 764 as a prerequisite or claim that a
 recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
+## Scoped authorization: October 28 Docker mount record ordering
+
+The user authorized the narrow confirmed live-restore snapshot guard fix:
+ignore only the order of complete Docker Mounts records. Preserve all fields,
+value types, duplicate records, nested array order, malformed-value handling
+and every other runtime and restart guard. Internal implementation agents may
+test and commit only; the coordinating task owns independent review and any
+later release. Do not change live Docker state, submitted sources, scoring,
+billing, storage, dependencies or concurrent work under this implementation scope.
+
+## Scoped production authorization: October 28 guarded idle recovery
+
+The user authorized the narrow guarded idle restart recovery fix and exact
+committed `587-lab-arena-atomic-review-restart-guard.sql`. Before application,
+stop and drain all review workers and prove no old begin-review invocation
+remains in flight. The migration takes exclusive round/submission table locks;
+these locks alone do not fence an old function body. Serialize paid-review
+reservation with the retained restart guard. Permit guarded idle recovery only
+when the database reports this atomic admission capability and exact active
+restart ownership is proved. Preserve paid claims, leases, completed decisions,
+idempotent replay, operator pause semantics, costs, participants, scoring,
+weights, and concurrent work. The coordinating task owns independent review,
+push, merge, exact migration application, canonical gateway and normal-validator
+deployment, and live verification. Internal implementation agents may test and
+commit only. This authority ends after scoped recovery and verification.
 
 ## Scoped production authorization: October 28 publication during restart drain
 

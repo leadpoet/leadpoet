@@ -12,9 +12,15 @@ from pathlib import Path
 
 from lab_arena import broker, runner as rn, runtime, scoring, shim
 from tests.lab_arena.baseline_scored_first_postgres_test import _baseline_first_judge
-from tests.lab_arena.deepline_budget_only_exact_recovery_postgres_test import database
+import pytest
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import _verified_test_pool
 from tests.lab_arena import test_lab_arena_service_round as fixtures
+
+
+@pytest.fixture()
+def database():
+    yield from current_service_database()
 
 
 REFUSAL_QUERY = "fixture-credit-refusal"
@@ -105,12 +111,6 @@ def test_credit_refusal_preserves_partial_work_but_not_empty_success(
     database, tmp_path, monkeypatch,
 ):
     connect = lambda: database[0].connect(**database[1])
-    with connect() as connection, connection.cursor() as cursor:
-        for name in (
-            "365-lab-arena-trajectories.sql",
-            "366-lab-arena-trajectory-capacity.sql",
-        ):
-            cursor.execute((Path(__file__).resolve().parents[2] / "scripts" / name).read_text())
     h = fixtures.Harness(
         connect, tmp_path, challengers=["CreditMiner"], runners=["alpha"]
     )

@@ -49,6 +49,18 @@ or restart production in this step. The coordinating task owns AWS writes and
 verification; independent reviewers are read-only. This authority ends after the
 foundation is provisioned and verified, with the next step reported to the user.
 
+## Scoped authorization: October 28 exact privacy proof reuse
+
+The user authorized bounded reuse of exact privacy booleans within one example's
+existing WorkerProofs lifetime. Hash the current plain JSON content and response
+mode on every lookup; retain only a bounded digest/mode/boolean map. Unsupported
+values and failures keep the original stateless checks. Do not cache eligibility,
+bills, identities, routes or receipt decisions. Preserve every privacy flag,
+qualification threshold, historical output, raw artifact and concurrent change.
+Standalone callers remain stateless. Do not add a global cache, replay paid work
+or rewrite history. Internal agents may commit only. The coordinating task owns
+independent review, push, merge and release after the current canonical pair.
+
 ## Scoped authorization: October 28 admission review recovery
 
 The user authorized the narrow recovery of unfinished reviewer and provider

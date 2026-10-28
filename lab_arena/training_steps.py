@@ -39,7 +39,13 @@ def _require(condition, reason):
         raise ValueError(reason)
 
 
-def _exact(value, *, response=False):
+def _exact(value, *, response=False, worker_proofs=None):
+    if type(worker_proofs) is training_worker_proof.WorkerProofs:
+        return worker_proofs.exact_privacy(value, response=response, check=_exact_stateless)
+    return _exact_stateless(value, response=response)
+
+
+def _exact_stateless(value, *, response=False):
     def comparable(item):
         if isinstance(item, dict):
             return {key: comparable(child) for key, child in item.items()
@@ -418,7 +424,7 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
     capture = call.get('request_capture') or {}
     permitted_redactions = {'hidden_reasoning'} if call.get('operation_id') in {'openrouter.chat', 'openrouter.responses'} else set()
     if not allow_privacy:
-        _require(not capture.get('redacted') and _exact(request), 'request_privacy_nonexact')
+        _require(not capture.get('redacted') and _exact(request, worker_proofs=worker_proofs), 'request_privacy_nonexact')
     _require(isinstance(request, dict) and request.get('operation_id') == call.get('operation_id')
              and request.get('request_hash') == call.get('request_hash'), 'request_identity_mismatch')
     if not (allow_privacy and capture.get('redacted') is True):
@@ -456,7 +462,7 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
             _require(set(receipt.get('privacy_redactions') or []) <= permitted_redactions, 'response_privacy_nonexact')
         value = _receipt_response(call, receipt)
         if not allow_privacy:
-            _require(_exact(value, response=True), 'response_privacy_nonexact')
+            _require(_exact(value, response=True, worker_proofs=worker_proofs), 'response_privacy_nonexact')
         values.append(value)
     if not values and allow_worker_error:
         error_ref = provenance.get('worker_error_observation_ref') or {}
@@ -541,7 +547,7 @@ def _outbound_request_exact(call):
                 else contracts.document_hash(outbound['body'])))
 
 
-def _model_request(example, call):
+def _model_request(example, call, *, worker_proofs=None):
     """Shared exact model request checks, independent of delivery or target."""
     _require(call.get('run_id') == example.get('run_id'), 'not_main_execution_call')
     op = call.get('operation_id')
@@ -551,7 +557,7 @@ def _model_request(example, call):
     if isinstance(annotation, Mapping) and annotation.get('policy') == reasoning_capture.POLICY:
         _require(reasoning_capture.explicit_provider_matches(request, annotation.get('provider_route')),
                  'request_provider_route_mismatch')
-    _require(not (call.get('request_capture') or {}).get('redacted') and _exact(request), 'request_privacy_nonexact')
+    _require(not (call.get('request_capture') or {}).get('redacted') and _exact(request, worker_proofs=worker_proofs), 'request_privacy_nonexact')
     _require(request.get('operation_id') == op and request.get('request_hash') == call.get('request_hash')
              and isinstance(request.get('hashed_parameters'), dict)
              and contracts.document_hash(request['hashed_parameters']) == call.get('request_hash'), 'request_identity_mismatch')
@@ -577,7 +583,7 @@ def _model_request(example, call):
 
 
 def _candidate(example, call, *, host_observed=False, worker_proofs=None):
-    op, body, tools = _model_request(example, call)
+    op, body, tools = _model_request(example, call, worker_proofs=worker_proofs)
     request = call.get('request') or {}
     provider_visible = host_observed or training_coverage.uses_host_result_evidence(
         example.get('configuration') or {})
@@ -632,7 +638,7 @@ def _candidate(example, call, *, host_observed=False, worker_proofs=None):
                     _require(len(linked) == 1, 'response_reference_unresolved')
                     value = linked[0]['response']
             _require(contracts.document_hash(value) == receipt.get('response_sha256'), 'response_hash_mismatch')
-            _require(_exact(value, response=True), 'response_privacy_nonexact')
+            _require(_exact(value, response=True, worker_proofs=worker_proofs), 'response_privacy_nonexact')
             responses.append(value)
         _require(len({contracts.document_hash(value) for value in responses}) == 1, 'delivered_response_ambiguous')
     annotation = call.get('reasoning_capture') or {}

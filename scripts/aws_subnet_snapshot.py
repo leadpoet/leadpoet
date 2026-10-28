@@ -36,7 +36,7 @@ SOURCE_ROLE = "leadpoet_aws_export_20261028"
 SOURCE_USER = SOURCE_ROLE + ".qplwoislplkcegvdmbim"
 SCHEMAS = ("public", "source_add_history", "extensions")
 EXTENSIONS = ("pgcrypto", "uuid-ossp", "pg_trgm", "dblink", "http", "pg_stat_statements")
-SOURCE_CA = "/etc/pki/tls/certs/ca-bundle.crt"
+SOURCE_CA = "/etc/leadpoet-migration/supabase-prod-ca-2021.crt"
 TARGET_CA = "/etc/leadpoet-migration/rds-us-east-1-bundle.pem"
 IDENT = re.compile(r"[a-z_][a-z0-9_]*\Z", re.ASCII)
 SNAPSHOT = re.compile(r"[0-9A-Fa-f]{8}-[0-9A-Fa-f]{8}-[0-9]+\Z", re.ASCII)
@@ -273,6 +273,49 @@ def validate_tables(tables):
     require(len(set(keys)) == len(keys), "duplicate-table")
 
 
+OBJECT_KINDS = ("schemas", "relations", "columns", "constraints", "indexes", "views",
+                "routines", "policies", "triggers", "sequence_definitions", "types", "default_acls")
+SCHEMA_SQL = "('public','source_add_history','extensions')"
+
+
+def acl(expression):
+    return (f"json_build_object('is_null', {expression} IS NULL, 'items', "
+            f"ARRAY(SELECT x::text FROM unnest({expression}) x ORDER BY x::text))")
+
+
+def aggregate(select, order="t.schema,t.name"):
+    return f"SELECT coalesce(json_agg(t ORDER BY {order}),'[]'::json) FROM ({select}) t;"
+
+
+def nonextension(alias, catalog):
+    return ("NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d "
+            f"WHERE d.classid='pg_catalog.{catalog}'::regclass AND d.objid={alias}.oid "
+            "AND d.deptype='e')")
+
+
+REL = f"FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN {SCHEMA_SQL}"
+PROC = f"FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname IN {SCHEMA_SQL} AND {nonextension('p','pg_proc')}"
+METADATA_QUERIES = {
+    "schemas": aggregate(f"SELECT n.nspname AS schema,n.nspname AS name,pg_get_userbyid(n.nspowner) AS owner,{acl('n.nspacl')} AS acl FROM pg_catalog.pg_namespace n WHERE n.nspname IN {SCHEMA_SQL}"),
+    "relations": aggregate(f"SELECT n.nspname AS schema,c.relname AS name,c.relkind AS kind,pg_get_userbyid(c.relowner) AS owner,{acl('c.relacl')} AS acl,c.relrowsecurity AS rls,c.relforcerowsecurity AS force_rls,c.relreplident AS replica_identity,ARRAY(SELECT unnest(c.reloptions) ORDER BY 1) AS options {REL} AND c.relkind IN ('r','p','v','m','S','f') AND {nonextension('c','pg_class')}"),
+    "columns": aggregate(f"SELECT n.nspname AS schema,c.relname AS name,a.attnum AS position,a.attname AS column,pg_catalog.format_type(a.atttypid,a.atttypmod) AS type,a.attnotnull AS not_null,a.attidentity AS identity,a.attgenerated AS generated,pg_catalog.pg_get_expr(ad.adbin,ad.adrelid) AS default,co.collname AS collation,{acl('a.attacl')} AS acl FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid LEFT JOIN pg_catalog.pg_attrdef ad ON ad.adrelid=c.oid AND ad.adnum=a.attnum LEFT JOIN pg_catalog.pg_collation co ON co.oid=a.attcollation WHERE n.nspname IN {SCHEMA_SQL} AND c.relkind IN ('r','p','v','m','f') AND a.attnum>0 AND NOT a.attisdropped AND {nonextension('c','pg_class')}", "t.schema,t.name,t.position"),
+    "constraints": aggregate(f"SELECT n.nspname AS schema,co.conname AS name,c.relname AS relation,co.contype AS kind,co.convalidated AS validated,co.condeferrable AS deferrable,co.condeferred AS initially_deferred,pg_catalog.pg_get_constraintdef(co.oid,false) AS definition FROM pg_catalog.pg_constraint co JOIN pg_catalog.pg_namespace n ON n.oid=co.connamespace LEFT JOIN pg_catalog.pg_class c ON c.oid=co.conrelid WHERE n.nspname IN {SCHEMA_SQL} AND {nonextension('co','pg_constraint')}", "t.schema,t.name,t.relation"),
+    "indexes": aggregate(f"SELECT n.nspname AS schema,ci.relname AS name,c.relname AS relation,pg_catalog.pg_get_indexdef(i.indexrelid) AS definition,i.indisvalid AS valid,i.indisready AS ready,i.indisprimary AS primary_key,i.indisunique AS unique_key FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid=i.indrelid JOIN pg_catalog.pg_class ci ON ci.oid=i.indexrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN {SCHEMA_SQL} AND {nonextension('c','pg_class')}"),
+    "views": aggregate(f"SELECT n.nspname AS schema,c.relname AS name,pg_catalog.pg_get_viewdef(c.oid,false) AS definition {REL} AND c.relkind IN ('v','m') AND {nonextension('c','pg_class')}"),
+    "routines": aggregate(f"SELECT n.nspname AS schema,p.proname AS name,pg_catalog.pg_get_function_identity_arguments(p.oid) AS arguments,p.prokind AS kind,pg_get_userbyid(p.proowner) AS owner,{acl('p.proacl')} AS acl,p.prosecdef AS security_definer,p.proleakproof AS leakproof,p.provolatile AS volatility,p.proparallel AS parallel,p.proconfig AS config,CASE WHEN p.prokind<>'a' THEN pg_catalog.pg_get_functiondef(p.oid) END AS definition {PROC}", "t.schema,t.name,t.arguments"),
+    "policies": aggregate(f"SELECT n.nspname AS schema,p.polname AS name,c.relname AS relation,p.polpermissive AS permissive,p.polcmd AS command,ARRAY(SELECT CASE WHEN x=0 THEN 'PUBLIC' ELSE pg_get_userbyid(x) END FROM unnest(p.polroles) x ORDER BY 1) AS roles,pg_catalog.pg_get_expr(p.polqual,p.polrelid) AS using,pg_catalog.pg_get_expr(p.polwithcheck,p.polrelid) AS check FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid=p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN {SCHEMA_SQL}", "t.schema,t.relation,t.name"),
+    "triggers": aggregate(f"SELECT n.nspname AS schema,t.tgname AS name,c.relname AS relation,t.tgenabled AS enabled,pg_catalog.pg_get_triggerdef(t.oid,false) AS definition FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN {SCHEMA_SQL} AND NOT t.tgisinternal", "t.schema,t.relation,t.name"),
+    "sequence_definitions": aggregate(f"SELECT q.schemaname AS schema,q.sequencename AS name,q.sequenceowner AS owner,q.data_type::text AS type,q.start_value,q.min_value,q.max_value,q.increment_by,q.cycle,q.cache_size,(SELECT json_build_object('schema',tn.nspname,'table',tc.relname,'column',a.attname,'kind',d.deptype) FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_class tc ON tc.oid=d.refobjid JOIN pg_catalog.pg_namespace tn ON tn.oid=tc.relnamespace JOIN pg_catalog.pg_attribute a ON a.attrelid=tc.oid AND a.attnum=d.refobjsubid WHERE d.classid='pg_catalog.pg_class'::regclass AND d.objid=s.oid AND d.refclassid='pg_catalog.pg_class'::regclass AND d.deptype IN ('a','i')) AS owned_by FROM pg_catalog.pg_sequences q JOIN pg_catalog.pg_namespace n ON n.nspname=q.schemaname JOIN pg_catalog.pg_class s ON s.relnamespace=n.oid AND s.relname=q.sequencename WHERE q.schemaname IN {SCHEMA_SQL}"),
+    "types": aggregate(f"SELECT n.nspname AS schema,t.typname AS name,t.typtype AS kind,pg_get_userbyid(t.typowner) AS owner,{acl('t.typacl')} AS acl,pg_catalog.format_type(t.typbasetype,t.typtypmod) AS base,t.typnotnull AS not_null,t.typdefault AS default,ARRAY(SELECT e.enumlabel FROM pg_catalog.pg_enum e WHERE e.enumtypid=t.oid ORDER BY e.enumsortorder) AS labels FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname IN {SCHEMA_SQL} AND t.typtype IN ('e','d') AND {nonextension('t','pg_type')}"),
+    "default_acls": aggregate(f"SELECT coalesce(n.nspname,'') AS schema,pg_get_userbyid(d.defaclrole) AS name,d.defaclobjtype AS kind,{acl('d.defaclacl')} AS acl FROM pg_catalog.pg_default_acl d LEFT JOIN pg_catalog.pg_namespace n ON n.oid=d.defaclnamespace WHERE d.defaclnamespace=0 OR n.nspname IN {SCHEMA_SQL}", "t.schema,t.name,t.kind"),
+}
+
+
+def capture_metadata(keeper):
+    """Canonical catalog evidence, without rows, passwords, or physical OIDs."""
+    return {key: keeper.one_json(query) for key, query in METADATA_QUERIES.items()}
+
+
 def capture_manifest(keeper, snapshot):
     tables = keeper.one_json(CATALOG)
     validate_tables(tables)
@@ -293,7 +336,7 @@ def capture_manifest(keeper, snapshot):
     return dict(format=1, source_host=SOURCE_HOST, source_role=SOURCE_ROLE, database="postgres",
                 snapshot=snapshot, serialization=OPTIONS, tables=tables, sequences=sequences,
                 sequence_caveat="Sequence state is non-MVCC and may advance independently of the table snapshot.",
-                extensions=extensions)
+                extensions=extensions, schema_metadata=capture_metadata(keeper))
 
 
 def dump_command(snapshot, directory):

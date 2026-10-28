@@ -21,6 +21,35 @@ from scripts import aws_subnet_snapshot as snapshot
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_manifest_metadata_is_captured_by_the_exact_snapshot_keeper(self):
+        tables = [dict(schema="public", name=f"t_{i}", kind="r", filtered_rls=False, inherited=False,
+                       columns=[dict(name="id", type="integer", generated="")]) for i in range(48)]
+        sequences = [dict(schema="public", name=f"seq_{i}") for i in range(3)]
+        class FakeKeeper:
+            def query(self, sql):
+                self.lock = sql
+            def one_json(self, sql):
+                if sql == snapshot.CATALOG:
+                    return tables
+                if sql.startswith("SELECT count(*)"):
+                    return 2
+                if "c.relkind='S'" in sql:
+                    return sequences
+                if "'last_value'" in sql:
+                    return dict(last_value="1", is_called=False)
+                if "FROM pg_catalog.pg_extension" in sql:
+                    return [dict(name=e) for e in snapshot.EXTENSIONS]
+                raise AssertionError("unexpected catalog query")
+        keeper = FakeKeeper()
+        metadata = {key: [] for key in snapshot.OBJECT_KINDS}
+        with patch.object(snapshot, "capture_metadata", return_value=metadata) as capture:
+            manifest = snapshot.capture_manifest(keeper, "00000003-0000001B-1")
+        capture.assert_called_once_with(keeper)
+        self.assertIs(manifest["schema_metadata"], metadata)
+        self.assertEqual(manifest["snapshot"], "00000003-0000001B-1")
+        self.assertEqual(len(manifest["tables"]), 48)
+        self.assertTrue(keeper.lock.startswith("LOCK TABLE"))
+
     def test_multiset_is_order_independent_and_preserves_duplicates(self):
         digest = snapshot.stream_digest
         self.assertEqual(digest(io.BytesIO(b"a\nb\na\n")), digest(io.BytesIO(b"b\na\na\n")))
@@ -77,6 +106,7 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(service.stat().st_mode & 0o777, 0o600)
                 self.assertEqual(password.stat().st_mode & 0o777, 0o600)
                 self.assertIn("sslmode=verify-full", service.read_text())
+                self.assertIn("sslrootcert=/etc/leadpoet-migration/supabase-prod-ca-2021.crt", service.read_text())
                 self.assertIn("default_transaction_read_only=on", service.read_text())
                 for option in ("keepalives_idle=30", "keepalives_interval=10", "keepalives_count=3"):
                     self.assertIn(option, service.read_text())
@@ -240,16 +270,19 @@ class NativePostgresTests(unittest.TestCase):
                     exported = keeper.snapshot()
                     tables = keeper.one_json(snapshot.CATALOG)
                     snapshot.validate_tables(tables)
+                    schema_metadata = snapshot.capture_metadata(keeper)
                     for table in tables:
                         table["count"] = keeper.one_json("SELECT count(*) FROM ONLY " + snapshot.qualified(table) + ";")
                     # A committed later source row must not enter the exported snapshot.
                     run(admin + ["-d", "source"], data=b"INSERT INTO public.t_0(id,txt) VALUES(999,'later');")
                     args = [a for a in snapshot.dump_command(exported, root / "dump") if not a.startswith("--extension=")]
                     snapshot.command(args, source_env, logs, "local-dump")
-                    manifest = dict(tables=tables, sequences=[dict(schema="public", name="seq_a"),
+                    manifest = dict(tables=tables, schema_metadata=schema_metadata, sequences=[dict(schema="public", name="seq_a"),
                                     dict(schema="public", name="seq_b"), dict(schema="source_add_history", name="seq_c")])
                 files = snapshot.validate_archive(root / "dump", manifest, source_env, logs)
                 self.assertEqual(len(files), 49)
+                self.assertEqual(set(manifest["schema_metadata"]), set(snapshot.OBJECT_KINDS))
+                self.assertEqual(len(manifest["schema_metadata"]["relations"]), 51)
                 self.assertEqual(sum(t["digest"]["count"] for t in tables), 144)
                 # Only the disposable target: native archive contains CREATE SCHEMA public.
                 run(admin + ["-d", "target"], data=b"DROP SCHEMA public;")

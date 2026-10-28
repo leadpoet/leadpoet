@@ -117,16 +117,36 @@ class Pair:
             ["git", "show", self.args.commit + ":gw_restart.sh"],
             cwd=Path(__file__).resolve().parents[1])).hexdigest()
         installed = "/home/ec2-user/gw_restart.sh"
-        self.remote(self.args.gateway,
-                    "test ! -L " + installed + " && test -f " + installed
+        verify_installed = ("test ! -L " + installed + " && test -f " + installed
                     + " && test \"$(stat -c %u:%a " + installed + ")\" = \"$(id -u):700\""
-                    + " && test \"$(sha256sum " + installed + " | cut -d' ' -f1)\" = " + expected,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    + " && test \"$(sha256sum " + installed + " | cut -d' ' -f1)\" = " + expected)
+        bootstrap_commit = getattr(self.args, "bootstrap_controller_commit", None)
+        if bootstrap_commit is None:
+            self.remote(self.args.gateway, verify_installed, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         gateway_log = self.args.logs / "gateway.log"
         with gateway_log.open("x") as log:
-            self.remote(self.args.gateway,
+            if bootstrap_commit is not None:
+                if not re.fullmatch(r"[0-9a-f]{40}", bootstrap_commit):
+                    raise PairError("exact installed controller commit required")
+                helper = subprocess.check_output(
+                    ["git", "show", self.args.commit + ":scripts/bootstrap_gateway_restart_controller.py"],
+                    cwd=Path(__file__).resolve().parents[1])
+                # Materialize only the exact helper. It verifies main, the old
+                # installed closure and full candidate archive before canonical
+                # execution; it never pre-installs or shortens the controller.
+                command = ("set -eu; umask 077; helper=$(mktemp /tmp/arena-pair-bootstrap.XXXXXXXX); "
+                           "trap 'rm -f -- \"$helper\"' EXIT; cat >\"$helper\"; "
+                           + shell([GATEWAY_PYTHON, "-B"]) + " \"$helper\" "
+                           + shell(["--source-commit", self.args.commit,
+                                    "--expected-controller-commit", bootstrap_commit,
+                                    "--repo-root", GATEWAY_ROOT, "--paired-restart"]))
+                self.remote(self.args.gateway, command, input=helper, stdout=log, stderr=subprocess.STDOUT)
+            else:
+                self.remote(self.args.gateway,
                         "GATEWAY_PAIRED_RESTART=1 /home/ec2-user/gw_restart.sh --commit "
                         + self.args.commit, stdout=log, stderr=subprocess.STDOUT)
+        if bootstrap_commit is not None:
+            self.remote(self.args.gateway, verify_installed, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         receipts = [json.loads(line[len(PREFIX):]) for line in gateway_log.read_text().splitlines()
                     if line.startswith(PREFIX)]
         if len(receipts) != 1:
@@ -275,9 +295,12 @@ def main():
     parser.add_argument("--identity", type=Path, required=True)
     parser.add_argument("--logs", type=Path, required=True)
     parser.add_argument("--deployment-lock", type=Path, required=True)
+    parser.add_argument("--bootstrap-controller-commit", help="exact installed predecessor; run candidate full canonical bootstrap with paired guard")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
         parser.error("exact commit required")
+    if args.bootstrap_controller_commit is not None and not re.fullmatch(r"[0-9a-f]{40}", args.bootstrap_controller_commit):
+        parser.error("exact installed controller commit required")
     if any(not re.fullmatch(r"[A-Za-z0-9_.@-]+", host) or host.startswith("-")
            for host in (args.gateway, args.validator)):
         parser.error("explicit SSH targets required")

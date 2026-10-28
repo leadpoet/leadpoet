@@ -474,6 +474,9 @@ stop_arena_component() {
     # its fresh private receipt to this owner after the latest idle proof.
     process_helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
     verify_controller_process_helper "$process_helper" || return 1
+    if [ -n "${6:-}" ]; then
+      state_hash="$6"
+    else
     proof="$("$GATEWAY_PYTHON_BIN" "$process_helper" verify \
       --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$tree" --uid "$(id -u)" \
       -- "${ARENA_COMPONENT_COMMAND[@]}")" || return 1
@@ -488,6 +491,7 @@ if proof.get("ok") is not True or not isinstance(value, str) or not re.fullmatch
 print(value)
 PY
     )" || return 1
+    fi
     verified_stop_args+=(--verified-state-sha256 "$state_hash" --verified-invocation "$4" --release-sha "$5")
   fi
   "$GATEWAY_PYTHON_BIN" "$process_helper" stop \
@@ -553,7 +557,7 @@ require_arena_lock_recovery_idle() {
     "$GATEWAY_PREFLIGHT_TREE/scripts/arena_first_cutover_idle.py" \
     --environment-file "$GATEWAY_ENV_FILE" >/dev/null || return 1
   state="$(run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" owned)" || return 1
-  generation="$("$GATEWAY_PYTHON_BIN" -B - "$PREPARED_GATEWAY_SHA" "$state" <<'PY'
+  generation="$("$GATEWAY_PYTHON_BIN" -B - "$PREPARED_GATEWAY_SHA" "$state" "$GATEWAY_RESTART_GUARD_SCOPE" "${1:-}" <<'PY'
 import json
 import sys
 state = json.loads(sys.argv[2])
@@ -561,9 +565,10 @@ drain = state.get("drain", {})
 if (state.get("schema_version") != "leadpoet.lab_arena.restart_guard_state.v1"
         or state.get("guard_present") is not True or state.get("guard_active") is not True
         or state.get("candidate_commit") != sys.argv[1]
-        or state.get("restart_scope") != "gateway"
+        or state.get("restart_scope") != sys.argv[3]
         or state.get("restart_phase") != "gateway_destructive"
         or type(state.get("guard_generation")) is not int or state["guard_generation"] <= 0
+        or (sys.argv[4] and str(state["guard_generation"]) != sys.argv[4])
         or drain.get("preserved") is not True
         or any(type(drain.get(key)) is not int or drain[key] != 0 for key in
                ("current_leased_count", "still_leased_count", "lost_or_mutated_count"))):
@@ -575,6 +580,63 @@ PY
   # current drain atomically. Repeating its current destructive phase is legal.
   run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" authorize \
     --generation "$generation" --phase gateway_destructive >/dev/null
+}
+
+retire_arena_retained_overlap() {
+  (
+    # Keep the serving archive/API untouched. Recover only the opposite slot
+    # described by exact private receipts before ordinary candidate allocation.
+    PREPARED_GATEWAY_SHA="$ARENA_PREVIOUS_SHA"
+    helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
+    verify_controller_process_helper "$helper" || exit 1
+    for component in api edge; do
+      arena_component_command "$component" "$ARENA_PREVIOUS_SLOT"
+      [ "$("$GATEWAY_PYTHON_BIN" "$helper" verify-invocation \
+        --state-file "$ARENA_COMPONENT_STATE_FILE" --cwd "$(arena_runtime_tree "$ARENA_PREVIOUS_SLOT" "$ARENA_PREVIOUS_SHA")" \
+        --uid "$(id -u)" --release-sha "$ARENA_PREVIOUS_SHA" -- "${ARENA_COMPONENT_COMMAND[@]}")" = \
+        "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" ] || exit 1
+    done
+    old_slot=$((1 - ARENA_PREVIOUS_SLOT))
+    report="$("$GATEWAY_PYTHON_BIN" "$helper" inspect-retained-slot \
+      --runtime-root "$ARENA_RUNTIME_ROOT" --slot "$old_slot" --uid "$(id -u)" \
+      --python-bin "$GATEWAY_PYTHON_BIN" --environment-file "$GATEWAY_ENV_FILE" \
+      --owner "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID")" || exit 1
+    read -r old_tree old_sha old_owner <<< "$("$GATEWAY_PYTHON_BIN" -B - "$report" <<'PY'
+import json,sys
+r=json.loads(sys.argv[1])
+print(r['tree'] or '-',r['sha'] or '-',r['owner'])
+PY
+    )"
+    [ "$old_tree" != - ] || exit 0
+    [ "$old_tree" = "$(arena_runtime_tree "$old_slot" "$old_sha")" ] || exit 1
+    PYTHONPATH="$GATEWAY_PREFLIGHT_TREE" "$GATEWAY_PYTHON_BIN" -B - \
+        "$LEADPOET_REPO_ROOT" "$old_tree" "$old_sha" <<'PY' || exit 1
+from pathlib import Path
+import sys
+from scripts.gateway_git_deploy import verify_materialized_tree
+verify_materialized_tree(repo_root=Path(sys.argv[1]),materialized_root=Path(sys.argv[2]),
+                         target_sha=sys.argv[3],strict_extras=True)
+PY
+    state="$(run_lab_arena_restart_guard "$GATEWAY_PREFLIGHT_TREE" owned)" || exit 1
+    generation="$("$GATEWAY_PYTHON_BIN" -B - "$state" <<'PY'
+import json,sys
+print(json.loads(sys.argv[1])['guard_generation'])
+PY
+    )" || exit 1
+    for component in driver edge api; do
+      state_hash="$("$GATEWAY_PYTHON_BIN" -B - "$report" "$component" <<'PY'
+import json,sys
+print(json.loads(sys.argv[1])['components'].get(sys.argv[2],''))
+PY
+      )" || exit 1
+      if [ -n "$state_hash" ]; then
+        require_arena_lock_recovery_idle "$generation" || exit 1
+        stop_arena_component "$component" "$old_slot" "$old_tree" "$old_owner" "$old_sha" "$state_hash" || exit 1
+      fi
+    done
+    require_arena_lock_recovery_idle "$generation" || exit 1
+    retire_arena_runtime_tree "$old_slot" "$old_sha" "$old_tree" || exit 1
+  )
 }
 
 recover_arena_inherited_docker_locks() {
@@ -3199,6 +3261,9 @@ PY
             exit 1
           fi
         fi
+      fi
+      if [ "$ARENA_RECOVERING" = 1 ]; then
+        retire_arena_retained_overlap || exit 1
       fi
       ;;
     *) echo "ERROR: Arena ingress is not in a safe ready state" >&2; exit 1 ;;

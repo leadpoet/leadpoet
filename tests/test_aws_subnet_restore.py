@@ -77,6 +77,34 @@ class RestorePlanTests(unittest.TestCase):
                 restore.select_toc(toc, [item])
         self.assertEqual(len(entries), 4)
 
+    def test_public_schema_exclusion_is_bound_to_exact_manifest_owner(self):
+        for owner in ("postgres", "pg_database_owner"):
+            with self.subTest(owner=owner):
+                line = "5; 2615 2200 SCHEMA - public " + owner
+                acl = "6; 0 0 ACL - SCHEMA public " + owner
+                toc = (line + "\n" + acl + "\n").encode()
+                exclusion = dict(id="5", sha256=hashlib.sha256(line.encode()).hexdigest(),
+                                 reason="preserve matching initialized schema and native ACL entry")
+                metadata = dict(schemas=[dict(schema="public", name="public", owner=owner)])
+                selected, _ = restore.select_toc(toc, [exclusion], metadata)
+                self.assertIn(("; excluded " + line).encode(), selected)
+                self.assertIn(("\n" + acl + "\n").encode(), selected)
+                wrong = "pg_database_owner" if owner == "postgres" else "postgres"
+                for invalid in (None, dict(schemas=[]),
+                                dict(schemas=[dict(schema="public", name="public", owner=wrong)]),
+                                dict(schemas=metadata["schemas"] * 2)):
+                    with self.assertRaises(snapshot.Failure):
+                        restore.select_toc(toc, [exclusion], invalid)
+                bad_acl = dict(id="6", sha256=hashlib.sha256(acl.encode()).hexdigest(), reason="unsafe ACL exclusion")
+                with self.assertRaises(snapshot.Failure):
+                    restore.select_toc(toc, [bad_acl], metadata)
+        for owner in ("arena_admin", "unreviewed_owner", "postgres extra"):
+            line = "5; 2615 2200 SCHEMA - public " + owner
+            exclusion = dict(id="5", sha256=hashlib.sha256(line.encode()).hexdigest(), reason="unreviewed owner")
+            with self.assertRaises(snapshot.Failure):
+                restore.select_toc((line + "\n").encode(), [exclusion],
+                                   dict(schemas=[dict(schema="public", name="public", owner=owner)]))
+
     def test_native_candidate_preserves_owners_acls_and_uses_one_transaction(self):
         command = restore.native_restore_command(Path("reviewed.list"), Path("archive"))
         self.assertIn("--single-transaction", command)
@@ -112,6 +140,12 @@ PG17 = Path("/opt/homebrew/opt/postgresql@17/bin")
                      "opt-in two disposable local PG17 clusters")
 class NativeRestoreTests(unittest.TestCase):
     def test_native_owner_acl_rls_views_constraints_metadata_and_archive_sequences(self):
+        self.native_restore_control("pg_database_owner")
+
+    def test_native_historical_postgres_public_owner(self):
+        self.native_restore_control("postgres")
+
+    def native_restore_control(self, public_owner):
         with tempfile.TemporaryDirectory(prefix="lp-restore-", dir="/tmp") as directory:
             root = Path(directory)
             logs = root / "logs"
@@ -150,7 +184,11 @@ class NativeRestoreTests(unittest.TestCase):
                     run([str(PG17 / "pg_ctl"), "-D", str(cluster_root / "db"), "-m", "fast", "-w", "stop"])
 
             with cluster("source", "local_operator") as (source_admin, source_env, _), cluster("target", "arena_admin") as (target_admin, target_env, target_write):
-                sql = "ALTER SCHEMA public OWNER TO postgres; CREATE SCHEMA source_add_history AUTHORIZATION lab_arena_owner; CREATE SCHEMA extensions AUTHORIZATION postgres;\n"
+                sql = "CREATE SCHEMA source_add_history AUTHORIZATION lab_arena_owner; CREATE SCHEMA extensions AUTHORIZATION postgres;\n"
+                if public_owner == "postgres":
+                    sql = "ALTER SCHEMA public OWNER TO postgres; " + sql
+                else:
+                    self.assertEqual(run(source_admin, data=b"SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='public';").strip(), b"pg_database_owner")
                 sql += "CREATE SEQUENCE public.seq_a; CREATE SEQUENCE public.seq_b; CREATE SEQUENCE source_add_history.seq_c; ALTER SEQUENCE public.seq_a OWNER TO postgres; ALTER SEQUENCE public.seq_b OWNER TO postgres; ALTER SEQUENCE source_add_history.seq_c OWNER TO lab_arena_owner;\n"
                 for i in range(48):
                     schema, name, owner = ("source_add_history", "history", "lab_arena_owner") if i == 47 else ("public", f"t_{i}", "postgres")
@@ -175,10 +213,10 @@ class NativeRestoreTests(unittest.TestCase):
                 run([str(PG17 / "pg_dump"), "--dbname=service=migration", "-Fd", "--compress=gzip:1", *["--schema=" + s for s in snapshot.SCHEMAS], "--file=" + str(root / "dump")], env=source_env)
                 toc = snapshot.command(["pg_restore", "--list", str(root / "dump")], source_env, logs, "local-toc")
                 public_entry = next(line for line in toc.decode().splitlines()
-                                    if " SCHEMA - public postgres" in line)
+                                    if " SCHEMA - public " + public_owner in line)
                 public_exclusion = dict(id=public_entry.split(";", 1)[0], sha256=hashlib.sha256(public_entry.encode()).hexdigest(),
-                                        reason="retain initialized public ACLs; explicitly prepare its source owner")
-                listing, _ = restore.select_toc(toc, [public_exclusion])
+                                        reason="retain initialized public schema and its manifest-bound source owner")
+                listing, _ = restore.select_toc(toc, [public_exclusion], manifest["schema_metadata"])
                 snapshot.private_write(root / "restore.list", listing)
                 plan_dir = root / "plan"
                 plan_dir.mkdir(mode=0o700)
@@ -209,14 +247,37 @@ class NativeRestoreTests(unittest.TestCase):
                 prepared = json.loads((root / "prepared" / "plan.json").read_text())
                 self.assertFalse(prepared["execution_supported"])
                 self.assertEqual(prepared["toc_counts"]["FUNCTION"], 377)
+                self.assertEqual(prepared["source_public_schema_owner"], public_owner)
                 self.assertEqual(prepared["archive_sequences"], states)
                 for path in (root / "prepared").iterdir():
                     if path.is_file():
                         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                # Keep initialized PUBLIC USAGE ACLs and prepare the source owner.
-                # Production prerequisite authority still requires live RDS proof.
-                run(target_admin, data=b"ALTER SCHEMA public OWNER TO postgres;")
-                snapshot.command(restore.native_restore_command(root / "restore.list", root / "dump"), target_write, logs, "local-restore")
+                # Preserve an already-matching initialized public schema.
+                # Only the historical postgres variant needs a reviewed owner change.
+                target_public = restore.source_public_schema(empty["metadata"])
+                self.assertEqual(target_public["owner"], "pg_database_owner")
+                self.assertEqual(target_public["acl"]["items"],
+                                 ["=U/pg_database_owner", "pg_database_owner=UC/pg_database_owner"])
+                if target_public["owner"] != public_owner:
+                    self.assertEqual(public_owner, "postgres")
+                    run(target_admin, data=b"ALTER SCHEMA public OWNER TO postgres;")
+                else:
+                    # The initialized schema's owner is already correct. Inert
+                    # object owners still need CREATE to accept native ownership.
+                    run(target_admin, data=b"GRANT CREATE ON SCHEMA public TO postgres,lab_arena_owner;")
+                try:
+                    snapshot.command(restore.native_restore_command(root / "restore.list", root / "dump"), target_write, logs, "local-restore")
+                except snapshot.Failure:
+                    # This disposable fixture contains no credentials or live rows.
+                    # Surface only the local server's first error, not SQL output.
+                    error = next((line.split("ERROR:", 1)[1].strip()
+                                  for path in logs.glob("local-restore-*.stderr")
+                                  for line in path.read_text().splitlines() if "ERROR:" in line), "unknown")
+                    self.fail("local restore control: " + error)
+                if public_owner == "pg_database_owner":
+                    # Neither fixture source ACL nor target baseline grants
+                    # CREATE to these roles. Remove only those temporary grants.
+                    run(target_admin, data=b"REVOKE CREATE ON SCHEMA public FROM postgres,lab_arena_owner;")
                 run(target_admin, data=b"REVOKE CREATE ON DATABASE postgres FROM postgres,lab_arena_owner;")
                 with snapshot.Keeper(target_env, logs) as keeper:
                     after = snapshot.capture_metadata(keeper)

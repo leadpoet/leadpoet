@@ -111,8 +111,20 @@ def toc_entries(toc):
     return result
 
 
-def select_toc(toc, exclusions):
-    """Only exact reviewed http and initialized-public-schema entries may go."""
+def source_public_schema(schema_metadata):
+    """Read the sealed source owner; only the two reviewed owners are valid."""
+    snapshot.require(isinstance(schema_metadata, dict)
+                     and isinstance(schema_metadata.get("schemas"), list), "source-public-schema")
+    public = [item for item in schema_metadata["schemas"] if isinstance(item, dict)
+              and (item.get("schema") == "public" or item.get("name") == "public")]
+    snapshot.require(len(public) == 1 and public[0].get("schema") == "public"
+                     and public[0].get("name") == "public"
+                     and public[0].get("owner") in ("postgres", "pg_database_owner"), "source-public-schema")
+    return public[0]
+
+
+def select_toc(toc, exclusions, schema_metadata=None):
+    """Only exact http entries or the manifest-bound public creation may go."""
     entries = toc_entries(toc)
     excluded = {}
     for item in exclusions:
@@ -122,7 +134,11 @@ def select_toc(toc, exclusions):
         line = entries[key]
         snapshot.require(hashlib.sha256(line.encode()).hexdigest() == item["sha256"], "toc-exclusion-seal")
         tail = re.sub(r"^[0-9]+; [0-9]+ [0-9]+ ", "", line)
-        snapshot.require(re.fullmatch(r"(?:EXTENSION - http|COMMENT - EXTENSION http|SCHEMA - public postgres)\s*", tail), "protected-toc-exclusion")
+        public = re.fullmatch(r"SCHEMA - public (postgres|pg_database_owner)\s*", tail)
+        if public:
+            snapshot.require(public[1] == source_public_schema(schema_metadata)["owner"], "public-schema-owner-binding")
+        else:
+            snapshot.require(re.fullmatch(r"(?:EXTENSION - http|COMMENT - EXTENSION http)\s*", tail), "protected-toc-exclusion")
         excluded[key] = item
     selected = "\n".join(("; excluded " + line if line.split(";", 1)[0] in excluded else line)
                          for line in toc.decode("utf-8").splitlines()) + "\n"
@@ -219,7 +235,7 @@ def plan(args):
     snapshot.require(files == manifest["archive_files"], "archive-seal")
     toc = snapshot.command(["pg_restore", "--list", str(root / "dump")], env, logs, "restore-toc")
     exclusions = json.loads(Path(args.exclusions).read_text()) if args.exclusions else []
-    listing, entries = select_toc(toc, exclusions)
+    listing, entries = select_toc(toc, exclusions, manifest["schema_metadata"])
     counts = {kind: sum(bool(re.match(r"^[0-9]+; [0-9]+ [0-9]+ " + re.escape(kind) + r" ", line)) for line in entries.values())
               for kind in ("TABLE DATA", "SEQUENCE SET", "VIEW", "FUNCTION", "PROCEDURE")}
     snapshot.require(counts["TABLE DATA"] == 48 and counts["SEQUENCE SET"] == 3
@@ -248,6 +264,7 @@ def plan(args):
                   target=snapshot.TARGET_HOST, target_evidence_sha256=snapshot.sha256_file(inventory_path / "target.json"),
                   manifest_sha256=snapshot.sha256_file(root / "manifest.json"), toc_sha256=hashlib.sha256(toc).hexdigest(),
                   toc_counts=counts, exclusions=exclusions, archive_sequences=states,
+                  source_public_schema_owner=source_public_schema(manifest["schema_metadata"])["owner"],
                   native_restore_command=native_restore_command(output / "restore.list", root / "dump"),
                   unsupported_runtime=["7 retired postgres-owned functions using auth.jwt/auth.uid/auth.users",
                                        "2 retained functions using net.*", "http extension callers pending exact dependency review"])

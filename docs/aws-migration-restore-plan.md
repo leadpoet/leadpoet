@@ -31,6 +31,22 @@ The deployed infrastructure template is unchanged. The target continues to use
 the official regional RDS CA bundle. Prove actual hostname-validated source and
 target connections before export or target writes.
 
+The source session pooler discards startup `options`. The utility therefore
+sets and checks its read-only transaction settings with explicit SQL, including
+row security off and canonical COPY serialization. It imports a verification
+snapshot before applying transaction settings and reading rows. Keep the strict
+identity/read-only checks. PostgreSQL 17 pg_dump explicitly sets ISO dates,
+postgres intervals, float precision and row-security behavior, but inherits
+timezone and bytea output. Export checks the untouched connection defaults are
+UTC and hex before application reads, records them privately, and uses explicit
+UTF8/float dump options. An unexpected default blocks export; do not change the
+source role or weaken verification as an automatic workaround.
+
+Source `pg_stat_ssl` describes the pooler-to-PostgreSQL connection. It does not
+measure the separately certificate-verified client-to-pooler TLS connection.
+Do not infer client TLS failure from that backend-hop field or change source
+SSL enforcement. No source role or server setting change is part of this fix.
+
 The source archive must contain 48 table-data entries, 3 sequence-state entries,
 3 views and 377 nonextension function/procedure entries. The sealed snapshot
 manifest and all archive-file hashes must match. At least one table must be in
@@ -52,8 +68,12 @@ Prepare local review files with `plan --export-directory EXPORT
 --target-inventory INVENTORY --output NEW_PRIVATE_DIRECTORY`. An optional
 `--exclusions FILE` contains exact TOC IDs, SHA-256 of each full TOC line and a
 nonempty review reason. Only the unavailable `http` extension entry, its
-comment, and exact `SCHEMA - public postgres` creation/ownership entry may be
-proposed for exclusion. The public-schema ACL entry must remain. The tool cannot omit a table, sequence,
+comment, and the exact `SCHEMA - public postgres` or
+`SCHEMA - public pg_database_owner` creation/ownership entry may be proposed
+for exclusion. The public entry's owner must match the single `public` record
+in sealed `manifest.schema_metadata.schemas`. Other owners and missing,
+duplicate or mismatched source records are rejected. The public-schema ACL
+entry must remain. The tool cannot omit a table, sequence,
 view, routine, index, constraint, policy, trigger or mixed ACL entry. It records
 the exact manifest, TOC, inventory and exclusion identities.
 
@@ -67,9 +87,11 @@ The plan remains blocked until these facts are established:
 
 - A fresh target catalog proves the required extensions and versions are
   available, the target contains no application objects/default privileges,
-  and no other session can write. `http` is expected to be unavailable; this
-  remains an assumption until live evidence proves it. Verify `pgcrypto`,
-  `uuid-ossp`, `pg_trgm`, `dblink` and `pg_stat_statements` separately. Verify
+  and no other session can write. The October 28 target inventory reports
+  PostgreSQL `170009`, with `dblink` 1.2, `pg_stat_statements` 1.11, `pg_trgm`
+  1.6, `pgcrypto` 1.3 and `uuid-ossp` 1.1 available; `http` is unavailable.
+  Its preload list is `rdsutils,pg_tle,pg_stat_statements,rds_casts`. Recheck
+  this evidence immediately before any target write. Verify
   `shared_preload_libraries` and actual `pg_stat_statements` use. An installed
   extension alone does not prove its functions work.
 - Exact archived signatures, types and routine bodies have been checked for
@@ -78,10 +100,18 @@ The plan remains blocked until these facts are established:
   behavior. Preserve retained definitions and report unsupported functionality.
 - The role bootstrap, membership authority and existing empty `public` schema
   have an exact reviewed treatment. Preserve the initialized empty schema and
-  its initial ACLs. After the role review, set its source owner explicitly to
-  `postgres`, and exclude only its exact native creation/ownership TOC entry.
-  Retain its native ACL entry. The local PostgreSQL 17 control proves this
-  preserves its ownership and ACLs exactly. Dropping and recreating `public`
+  its initial ACLs. Derive the source owner from the sealed
+  `manifest.schema_metadata.schemas` public record and bind it to the exact
+  native creation/ownership TOC entry. The October 28 source observation and
+  fresh RDS inventory both use `pg_database_owner`; the initialized target ACL
+  is `pg_database_owner=UC/pg_database_owner` and `=U/pg_database_owner`.
+  When the target owner and initial ACL baseline already match the source,
+  retain that schema without an owner change. If the sealed source instead
+  uses the historical `postgres` owner, review only that exact owner change
+  before restore. Do not unconditionally change the owner to `postgres`.
+  Exclude only the reviewed creation/ownership entry and retain its native ACL
+  entry. The local PostgreSQL 17 controls cover both owner variants and compare
+  restored ownership and ACLs exactly. Dropping and recreating `public`
   loses the default PUBLIC USAGE grant because native pg_dump assumes that
   initialized baseline. The helper performs neither change. Do not add
   `--clean` as a workaround.
@@ -117,8 +147,16 @@ The restoring operator must have reviewed `SET` and inheritance authority for
 both owner roles. Do not assume RDS `rds_superuser` is PostgreSQL superuser.
 The native non-superuser control also needs temporary database CREATE grants
 to the two owner roles for schema ownership changes. Review those prerequisites,
-then revoke the temporary CREATE grants after restore and verify the database
-ACL against its saved target baseline.
+then revoke only temporary database CREATE grants after restore and verify
+the database ACL against its saved target baseline. When `public` remains owned
+by `pg_database_owner`, native ownership restoration can also require temporary
+CREATE on that schema for inert object-owner roles such as `postgres` and
+`lab_arena_owner`. Schema ownership alone does not give those roles CREATE.
+Review the exact prerequisite grants against the source manifest and saved
+target baseline. After restore, remove only added privileges absent from the
+intended source ACL; preserve every native source grant. Do not use a blanket
+REVOKE that removes source permissions. The native control compares the full
+owner and ACL metadata after this narrow prerequisite cleanup.
 Verify actual owner changes, grantors, security-definer execution and privileges
 on a native control and then on this target. Missing grantor/owner authority is
 a blocker, not a reason to discard ownership or ACLs.

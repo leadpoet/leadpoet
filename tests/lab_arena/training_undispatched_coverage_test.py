@@ -11,32 +11,48 @@ from tests.lab_arena.training_retry_snapshot_test import retry_values, save_snap
 from tests.lab_arena.training_steps_test import seal
 
 
-def undispatched_values(*, local_error=True, http_error=False):
+def undispatched_values(*, local_error=True, http_error=False, operation='deepline.execute', complete=False):
     values, predecessor, _ = retry_values()
     values['runs'].remove(predecessor)
     run = values['runs'][0]
     parameters = {'tool': 'exa_search', 'payload': {'query': 'synthetic request'}}
     body = {'provider': 'exa', 'operation': 'exa_search', 'payload': parameters['payload']}
+    annotation = None
+    if operation.startswith('openrouter.'):
+        from tests.lab_arena.training_cap_eof_test import cap_example
+        model = cap_example(operation)
+        body = deepcopy(model['provider_calls'][0]['request']['outbound']['body'])
+        parameters = {key: value for key, value in body.items() if key != 'provider'}
+        annotation = model['provider_calls'][0]['reasoning_capture']
+        values['round_row']['configuration_doc']['reasoning_route_registry'] = model['configuration']['reasoning_route_registry']
+        for row in values['ledger_rows']:
+            if 'reasoning_capture' in row.get('entry_doc', {}):
+                row['entry_doc']['reasoning_capture']['registry_sha256'] = annotation['registry_sha256']
     request_hash = contracts.document_hash(parameters)
     pointer = training_capture.RequestCapture(values['objects'])({
-        'operation_id': 'deepline.execute', 'request_hash': request_hash,
+        'operation_id': operation, 'request_hash': request_hash,
         'hashed_parameters': parameters, 'admitted_parameters': parameters,
-        'effective_parameters': parameters, 'outbound': {'method': 'POST', 'host': 'code.deepline.com',
-            'path': '/api/v2/integrations/exa_search/execute', 'query': {}, 'body': body,
+        'effective_parameters': parameters, 'outbound': {'method': 'POST',
+            'host': 'openrouter.ai' if annotation else 'code.deepline.com',
+            'path': ('/api/v1/responses' if operation.endswith('responses') else '/api/v1/chat/completions')
+                if annotation else '/api/v2/integrations/exa_search/execute', 'query': {}, 'body': body,
             'body_sha256': contracts.document_hash(body), 'content_type': 'application/json'}})
     identity = contracts.hash_bytes(b'never-dispatched-call')
     context = {key: run[key] for key in ('run_id', 'round_id', 'submission_id', 'miner_hotkey')}
-    context.update(provider='deepline', operation_id='deepline.execute', call_identity=identity, funding_source='host')
+    context.update(provider='openrouter' if annotation else 'deepline', operation_id=operation,
+        call_identity=identity, funding_source='host')
     values['ledger_rows'].extend([
         dict(context, entry_id=10001, entry_kind='reservation', amount_microusd=0,
             entry_doc={'action_sequence': 3, 'base_call_identity': identity, 'provider_attempt': 1,
                 'request_hash': request_hash, 'request_capture': pointer}),
         dict(context, entry_id=10002, entry_kind='recovery', amount_microusd=0,
             entry_doc={'reason': 'attempt_completed_before_dispatch', 'reserved_microusd': 0})])
+    if annotation:
+        values['ledger_rows'][-2]['entry_doc']['reasoning_capture'] = annotation
     snapshot = training_observations.read_snapshot(values['objects'], run['run_id'], 'execute',
         run['lease_generation'], run['claim_request_hash'])
     payload = snapshot['payload']
-    payload['observations'].append({'ordinal': 3, 'action_sequence': 3, 'operation_id': 'deepline.execute',
+    payload['observations'].append({'ordinal': 3, 'action_sequence': 3, 'operation_id': operation,
         'kind': 'transport_failure', 'request': {'admitted_parameters': parameters, 'timeout_ms': 1000},
         'outcome': {'protocol': 'frame', 'exception_class': 'ReadTimeout'}, 'call_identity': None,
         'privacy': {'redacted': False, 'redactions': []}, 'contributes_to_provider_call_count': True})
@@ -45,7 +61,7 @@ def undispatched_values(*, local_error=True, http_error=False):
         if http_error:
             payload['observations'][0]['outcome'].update(protocol='http', response={
                 'status': 503, 'headers': {}, 'body_b64': base64.b64encode(runner._http_error_body('worker_unavailable')).decode()})
-    payload.update(observation_count=1, complete=False, failures=['capture_incomplete'])
+    payload.update(observation_count=1, complete=complete, failures=[] if complete else ['capture_incomplete'])
     save_snapshot(values, run, payload)
     run['result_doc']['resource_summary']['provider_call_count'] += 1
     return values
@@ -67,6 +83,71 @@ def assess_bank(values, example, *, percent=80):
     examples = capture_bank(example)
     return training_eligibility.assess_capture(values['submission_row'], examples, list(examples),
         enabled=True, minimum_coverage_percent=percent)
+
+
+@pytest.mark.parametrize('operation', ['deepline.execute', 'openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('complete', [False, True])
+@pytest.mark.parametrize('style', ['exception', 'frame', 'http'])
+def test_undispatched_model_and_complete_capture_consume_only_one_icp(operation, complete, style):
+    values = undispatched_values(operation=operation, complete=complete,
+        local_error=style != 'exception', http_error=style == 'http')
+    example = training_export.assemble_example(**values)
+    call = example['provider_calls'][-1]
+    assert training_thinking.verified_undispatched_transport(example, call)
+    assert 'worker_response_receipt_link_invalid' not in example['completeness']['incomplete_reasons']
+    payload = example['worker_observation_artifacts'][example['run_id']]['payload']
+    assert payload['complete'] is complete
+    assert payload['failures'] == ([] if complete else ['capture_incomplete'])
+    if complete and style != 'exception':
+        assert example['completeness']['complete'] is True
+        assert example['completeness']['incomplete_reasons'] == []
+    before = deepcopy(example)
+    result = assess_bank(values, example)
+    assert result['eligible'], result
+    assert result['counts']['complete_runs'] == 9 and result['counts']['incomplete_runs'] == 1
+    assert not assess_bank(values, example, percent=100)['eligible']
+    assert training_thinking.selected_research_evidence(example) is None
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    assert not strict['train'] and not strict['eval']
+    assert 'response' not in call and call['actual_microusd'] == 0
+    assert example == before
+
+
+def test_five_undispatched_requests_with_mixed_provider_operations_consume_one_icp():
+    values = undispatched_values(operation='openrouter.responses', complete=True)
+    deepline = undispatched_values(complete=True)
+    run = values['runs'][0]
+    payload = training_observations.read_snapshot(values['objects'], run['run_id'], 'execute',
+        run['lease_generation'], run['claim_request_hash'])['payload']
+    for sequence in range(4, 8):
+        source = deepline if sequence == 7 else values
+        rows = deepcopy(source['ledger_rows'][-2:])
+        if source is deepline:
+            ref = rows[0]['entry_doc']['request_capture']['ref']
+            values['objects'].values[ref] = deepline['objects'].values[ref]
+        identity = contracts.hash_bytes(f'undispatched-{sequence}'.encode())
+        for offset, row in enumerate(rows):
+            row.update(call_identity=identity, entry_id=10001 + 2 * (sequence - 3) + offset)
+        rows[0]['entry_doc'].update(action_sequence=sequence, base_call_identity=identity)
+        values['ledger_rows'].extend(rows)
+        observation = deepcopy(payload['observations'][0])
+        observation.update(ordinal=sequence, action_sequence=sequence, operation_id=rows[0]['operation_id'])
+        observation['request']['admitted_parameters'] = training_capture.read_request(
+            values['objects'], rows[0]['entry_doc']['request_capture'])['admitted_parameters']
+        payload['observations'].append(observation)
+    payload['observation_count'] = 5
+    run['result_doc']['resource_summary']['provider_call_count'] += 4
+    save_snapshot(values, run, payload)
+    example = training_export.assemble_example(**values)
+    calls = [call for call in example['provider_calls'] if call['accounting_state'] == 'recovery']
+    assert len(calls) == 5
+    assert all(training_thinking.verified_undispatched_transport(example, call) for call in calls)
+    assert example['completeness']['complete'] is True
+    assert training_eligibility._failed_delivery_gap_verified(example) == frozenset()
+    result = assess_bank(values, example)
+    assert result['eligible'] and result['counts']['incomplete_runs'] == 1
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    assert not strict['train'] and not strict['eval']
 
 
 @pytest.mark.parametrize('role', ['baseline', 'miner'])
@@ -109,8 +190,10 @@ def test_actual_export_keeps_undispatched_failure_without_forging_a_response(rol
     assert example == before
 
 
-def test_reader_keeps_zero_recovery_proof_and_no_response_claim():
-    values = undispatched_values()
+@pytest.mark.parametrize('operation', ['deepline.execute', 'openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('complete', [False, True])
+def test_reader_keeps_zero_recovery_proof_and_no_response_claim(operation, complete):
+    values = undispatched_values(operation=operation, complete=complete)
     store = SimpleNamespace(
         get_run=lambda identity: next(row for row in values['runs'] if row['run_id'] == identity),
         get_round=lambda _: values['round_row'], get_submission=lambda _: values['submission_row'],
@@ -126,18 +209,20 @@ def test_reader_keeps_zero_recovery_proof_and_no_response_claim():
 
 
 @pytest.mark.parametrize('protocol', ['frame', 'http'])
-def test_real_runner_transport_observation_is_not_a_provider_response(tmp_path, protocol):
+@pytest.mark.parametrize('operation', ['deepline.execute', 'openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('complete', [False, True])
+def test_real_runner_transport_observation_is_not_a_provider_response(tmp_path, protocol, operation, complete):
     from tests.lab_arena.test_lab_arena_runner import lease
     class Api:
         def provider(self, *_):
             raise runner.RunnerError('synthetic transport failure')
-    values = undispatched_values()
+    values = undispatched_values(operation=operation, complete=complete)
     state = runner.RunState(lease=lease(), lease_token='private-lease-token')
     server = runner.WorkerSocketServer(tmp_path / 'worker.sock', Api(), state)
     parameters = values['ledger_rows'][-2]['entry_doc']
     request = training_capture.read_request(values['objects'], parameters['request_capture'])
-    observation = server._begin_observation('deepline.execute', request['admitted_parameters'], 1000, protocol)
-    error, document = server._dispatch_observed('deepline.execute', request['admitted_parameters'], 1000,
+    observation = server._begin_observation(operation, request['admitted_parameters'], 1000, protocol)
+    error, document = server._dispatch_observed(operation, request['admitted_parameters'], 1000,
         observation=observation)
     assert error == 'worker_unavailable' and document is None
     returned = ({'error': error} if protocol == 'frame' else {
@@ -159,8 +244,10 @@ def test_real_runner_transport_observation_is_not_a_provider_response(tmp_path, 
     assert assess_bank(values, example)['eligible']
 
 
-def test_undispatched_gap_uses_the_same_eighty_percent_floor():
-    values = undispatched_values()
+@pytest.mark.parametrize('operation', ['deepline.execute', 'openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('complete', [False, True])
+def test_undispatched_gap_uses_the_same_eighty_percent_floor(operation, complete):
+    values = undispatched_values(operation=operation, complete=complete)
     example = training_export.assemble_example(**values)
     examples = capture_bank(example)
     examples['run-8'] = None
@@ -173,14 +260,110 @@ def test_undispatched_gap_uses_the_same_eighty_percent_floor():
     assert assess()['reasons'] == ['training_coverage_incomplete']
 
 
+def test_complete_capture_without_undispatched_call_cannot_use_delivery_exception():
+    values = undispatched_values(complete=True)
+    values['ledger_rows'] = values['ledger_rows'][:-2]
+    run = values['runs'][0]
+    payload = training_observations.read_snapshot(values['objects'], run['run_id'], 'execute',
+        run['lease_generation'], run['claim_request_hash'])['payload']
+    payload.update(observations=[], observation_count=0)
+    run['result_doc']['resource_summary']['provider_call_count'] -= 1
+    save_snapshot(values, run, payload)
+    example = training_export.assemble_example(**values)
+    assert example['completeness']['complete'] is True
+    assert example['completeness']['incomplete_reasons'] == []
+    assert training_eligibility._failed_delivery_gap_verified(example) is None
+    assert training_thinking._attributed_score_only_gaps(example, set(),
+        undispatched_proof=training_thinking.verified_undispatched_transport) is None
+    assert assess_bank(values, example)['counts']['complete_runs'] == 10
+
+
+@pytest.mark.parametrize('operation', ['deepline.execute', 'openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('failure', ['socket_write', 'provider_error'])
+def test_undispatched_proof_composes_with_existing_delivered_failure_proof(operation, failure):
+    from lab_arena import broker
+    values = undispatched_values(operation=operation, complete=failure == 'provider_error')
+    run = values['runs'][0]
+    payload = training_observations.read_snapshot(values['objects'], run['run_id'], 'execute',
+        run['lease_generation'], run['claim_request_hash'])['payload']
+    write = payload['response_receipts'][0]
+    if failure == 'socket_write':
+        write.update(write_state='socket_write_failed', socket_written_at=None)
+    else:
+        terminal = values['ledger_rows'][2]
+        raw = contracts.canonical_json({'error': {'code': 503, 'message': 'Saved upstream failure'}}).encode()
+        terminal.update(amount_microusd=0, terminal_response=broker._terminal_response_document(
+            503, {}, raw, call_succeeded=False))
+        write.update(status=503, body_sha256=contracts.hash_bytes(raw), body_bytes=len(raw))
+    save_snapshot(values, run, payload)
+    example = training_export.assemble_example(**values)
+    if failure == 'provider_error':
+        assert training_thinking.verified_failed_attempt(example, example['provider_calls'][0])
+    else:
+        assert training_eligibility._failed_delivery_call_verified(example, example['provider_calls'][0])
+    result = assess_bank(values, example)
+    assert result['eligible'], result
+    assert result['counts']['complete_runs'] == 9 and result['counts']['incomplete_runs'] == 1
+    assert training_thinking.selected_research_evidence(example) is None
+    strict, _ = training_thinking.build([example], training_steps.Rules(production_rounds_only=False))
+    assert not strict['train'] and not strict['eval']
+
+
+@pytest.mark.parametrize('operation', ['openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('damage', ['duplicate_action', 'duplicate_identity', 'agent_read',
+    'unexpected_observation', 'unexpected_failure', 'missing_snapshot'])
+def test_complete_model_capture_requires_exact_unambiguous_host_proof(operation, damage):
+    values = undispatched_values(operation=operation, complete=True)
+    run = values['runs'][0]
+    snapshot = training_observations.read_snapshot(values['objects'], run['run_id'], 'execute',
+        run['lease_generation'], run['claim_request_hash'])
+    if damage == 'unexpected_observation':
+        row = deepcopy(snapshot['payload']['observations'][0])
+        row.update(ordinal=4, action_sequence=4)
+        snapshot['payload']['observations'].append(row)
+        snapshot['payload']['observation_count'] += 1
+        run['result_doc']['resource_summary']['provider_call_count'] += 1
+        save_snapshot(values, run, snapshot['payload'])
+    example = training_export.assemble_example(**values)
+    artifact = example['worker_observation_artifacts'][example['run_id']]
+    payload = artifact['payload']
+    call = example['provider_calls'][-1]
+    if damage == 'duplicate_action':
+        row = deepcopy(payload['observations'][0])
+        row['ordinal'] += 1
+        payload['observations'].append(row)
+        payload['observation_count'] += 1
+    elif damage == 'duplicate_identity':
+        example['provider_calls'][0]['call_identity'] = call['call_identity']
+    elif damage == 'agent_read':
+        write = payload['response_receipts'][0]
+        payload['agent_observations'].append({'id': 0, 'kind': 'response_received',
+            'observed_at': '2026-10-28T00:00:00Z', 'after_action_sequence': 3, 'depends_on': [],
+            'data': {key: call['call_identity'] if key == 'call_identity' else write[key]
+                for key in ('call_identity', 'status', 'body_sha256', 'body_bytes')},
+            'privacy': {'redacted': False, 'redactions': []}})
+        payload['agent_observation_count'] += 1
+        assert training_observations._validate_payload(payload) == payload
+    elif damage == 'unexpected_failure': payload['failures'] = ['capture_incomplete']
+    elif damage == 'missing_snapshot': example['worker_observation_artifacts'].pop(example['run_id'])
+    artifact['payload_sha256'] = contracts.document_hash(payload)
+    call['worker_observation_ref']['payload_sha256'] = artifact['payload_sha256']
+    seal(example)
+    if damage not in {'duplicate_identity', 'unexpected_observation'}:
+        assert not training_thinking.verified_undispatched_transport(example, call)
+    assert not assess_bank(values, example)['eligible'], damage
+
+
 @pytest.mark.parametrize('damage', ['dispatch', 'reason', 'missing_reason', 'recovery_amount', 'actual_cost',
     'bool_cost', 'reserved_mismatch', 'bool_reserved', 'reservation_id', 'terminal_id', 'duplicate_recovery',
     'response', 'response_hash', 'upstream', 'delivery_claim', 'host_receipt', 'missing_observation',
     'observation_kind', 'observation_identity', 'observation_operation', 'observation_action',
     'observation_request', 'observation_response', 'privacy', 'snapshot_hash', 'snapshot_run', 'snapshot_claim',
-    'request_hash', 'request_privacy', 'worker_ref', 'legacy', 'policy_off', 'other_operation'])
-def test_undispatched_proof_cannot_excuse_dispatched_or_unproved_failure(damage):
-    values = undispatched_values()
+    'request_hash', 'request_privacy', 'worker_ref', 'legacy', 'policy_off', 'other_operation', 'provider'])
+@pytest.mark.parametrize('operation', ['deepline.execute', 'openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('complete', [False, True])
+def test_undispatched_proof_cannot_excuse_dispatched_or_unproved_failure(damage, operation, complete):
+    values = undispatched_values(operation=operation, complete=complete)
     example = training_export.assemble_example(**values)
     call = example['provider_calls'][-1]
     artifact = example['worker_observation_artifacts'][example['run_id']]
@@ -210,7 +393,7 @@ def test_undispatched_proof_cannot_excuse_dispatched_or_unproved_failure(damage)
     elif damage == 'missing_observation': payload.update(observations=[], observation_count=0)
     elif damage == 'observation_kind': observation['kind'] = 'nonstandard_response'
     elif damage == 'observation_identity': observation['call_identity'] = wrong
-    elif damage == 'observation_operation': observation['operation_id'] = 'openrouter.chat'
+    elif damage == 'observation_operation': observation['operation_id'] = 'exa.contents'
     elif damage == 'observation_action': observation['action_sequence'] = 4
     elif damage == 'observation_request': observation['request']['admitted_parameters']['tool'] = 'different'
     elif damage == 'observation_response': observation['outcome'] = {'protocol': 'frame', 'response': {'error': 'transport'}}
@@ -224,6 +407,7 @@ def test_undispatched_proof_cannot_excuse_dispatched_or_unproved_failure(damage)
     elif damage == 'legacy': example['configuration'].pop('training_maximum_missing_reasoning_percent')
     elif damage == 'policy_off': example['configuration']['reasoning_capture_policy'] = None
     elif damage == 'other_operation': call['operation_id'] = 'exa.contents'
+    elif damage == 'provider': call['provider'] = 'exa'
     if damage != 'snapshot_hash':
         artifact['payload_sha256'] = contracts.document_hash(payload)
         if damage != 'worker_ref': call['worker_observation_ref']['payload_sha256'] = artifact['payload_sha256']
@@ -234,8 +418,10 @@ def test_undispatched_proof_cannot_excuse_dispatched_or_unproved_failure(damage)
 
 
 @pytest.mark.parametrize('damage', ['other_request', 'other_response', 'other_receipt', 'other_route', 'other_cost'])
-def test_undispatched_allowance_still_checks_each_delivered_call(damage):
-    values = undispatched_values()
+@pytest.mark.parametrize('operation', ['deepline.execute', 'openrouter.chat', 'openrouter.responses'])
+@pytest.mark.parametrize('complete', [False, True])
+def test_undispatched_allowance_still_checks_each_delivered_call(damage, operation, complete):
+    values = undispatched_values(operation=operation, complete=complete)
     example = training_export.assemble_example(**values)
     other = example['provider_calls'][0]
     if damage == 'other_request': other['request']['request_hash'] = contracts.hash_bytes(b'wrong')

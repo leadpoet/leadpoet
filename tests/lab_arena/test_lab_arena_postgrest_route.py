@@ -59,7 +59,6 @@ def stack(tmp_path_factory):
     from functools import partial
     import os
     from scripts import aws_subnet_api as api
-    from scripts.verify_arena_full_thinking_e2e import full_thinking_database
     from tests import postgres_migration_harness as pg_harness
     from tests.lab_arena import lab_arena_pg_harness as arena_pg
     psycopg2 = pytest.importorskip("psycopg2")
@@ -78,19 +77,13 @@ def stack(tmp_path_factory):
                               image=POSTGRES_IMAGE, network=network)
             patch.setattr(arena_pg, "_database_with_migrations", factory)
             patch.delenv("LAB_ARENA_PG_LOCAL", raising=False)
-            database = full_thinking_database()
+            database = arena_pg.current_service_database()
             pg, dsn = next(database)
             connection = pg.connect(**dsn)
             connection.autocommit = True
             with connection.cursor() as cursor:
                 cursor.execute("SHOW server_version_num")
                 assert cursor.fetchone()[0] == "170009"
-                # 580/582 are round-specific production data repairs. The
-                # current application functions are the remaining exact tail.
-                for number in (575, 576, 577, 578, 579, 581, 583, 584):
-                    migrations = list(SCRIPTS.glob(str(number) + "-*.sql"))
-                    assert len(migrations) == 1
-                    cursor.execute(migrations[0].read_text())
                 # The schema fixture seeds historical repair controls. HTTP
                 # behavior needs fresh test rounds, not those archived rows.
                 cursor.execute("SET session_replication_role=replica")

@@ -22,9 +22,9 @@ def refusal(status=401):
     return value
 
 
-def catalog():
-    return frozen(row("generic_http_request", provider="generic_http", billingSource="free",
-        pricing={"unit": "call", "usdPerUnit": 0, "creditsPerUnit": 0, "currency": "USD"},
+def catalog(billing_source="free"):
+    return frozen(row("generic_http_request", provider="generic_http", billingSource=billing_source,
+        pricing={"unit": "call", "usdPerUnit": 0, "creditsPerUnit": 0, "currency": "USD", "displayText": "Free"},
         inputSchema={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}))
 
 
@@ -44,11 +44,12 @@ class Transport:
 
 @pytest.mark.parametrize("status", [401, 403])
 @pytest.mark.parametrize("funding", ["host", "miner_key"])
-def test_free_target_refusal_settles_and_replays_without_billing_lookup(status, funding):
+@pytest.mark.parametrize("billing_source", [None, "free"])
+def test_free_target_refusal_settles_and_replays_without_billing_lookup(status, funding, billing_source):
     transport = Transport(refusal(status), status)
     broker, store, _ = make_broker(transport=transport, credential_for=lambda *_: DL_KEY,
         provider_funding_source_for=lambda *_: funding)
-    context = replace(CONTEXT, deepline_catalog=catalog())
+    context = replace(CONTEXT, deepline_catalog=catalog(billing_source))
     arguments = dict(operation_id="deepline.execute", parameters=PARAMETERS,
                      action_sequence=0, timeout_ms=1000)
     result = broker.execute(context, **arguments)
@@ -60,6 +61,18 @@ def test_free_target_refusal_settles_and_replays_without_billing_lookup(status, 
     assert replay.body == result.body and replay.call["idempotent"] is True
     assert replay.call["actual_microusd"] == 0
     assert len(transport.sent) == store.log.count("settle") == 1
+
+
+@pytest.mark.parametrize("change", ["unknown_label", "positive_usd", "positive_credits", "unknown_usd", "unknown_credits", "unverified"])
+def test_older_listing_requires_exact_frozen_free_call_price(change):
+    entry = deepcopy(deepline_catalog.tool_entry(catalog(None), "generic_http_request"))
+    if change == "unknown_label": entry["pricing"]["displayText"] = "Contact us"
+    elif change == "positive_usd": entry["pricing"]["usd_per_unit"] = 0.01
+    elif change == "positive_credits": entry["pricing"]["credits_per_unit"] = 1
+    elif change == "unknown_usd": entry["pricing"]["usd_per_unit"] = None
+    elif change == "unknown_credits": entry["pricing"]["credits_per_unit"] = None
+    assert provider_costs.deepline_free_completed_cost(PARAMETERS, 401, refusal(),
+        catalog_entry=entry, request_refused=change != "unverified") is None
 
 
 @pytest.mark.parametrize("change", ["legacy", "paid", "unit", "tool", "unverified", "status", "pending", "job", "billing", "nested_billing", "nested_usage", "deep"])

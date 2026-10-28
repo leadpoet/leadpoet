@@ -583,7 +583,17 @@ def deepline_free_completed_cost(
             catalog_entry.get("tool_id") == tool
             and isinstance(pricing, Mapping)
             and pricing.get("unit") in ("call", "request")
-            and pricing.get("billing_source") == "free"
+            and (
+                pricing.get("billing_source") == "free"
+                # The catalog listing omits billingSource for generic HTTP,
+                # unlike its authenticated detail's fixed no_bill contract.
+                # Accept only its explicit frozen Free/zero per-call price
+                # for the broker-bound target refusal; never infer a price.
+                or (request_refused is True and response_status in (401, 403)
+                    and tool == "generic_http_request"
+                    and pricing.get("billing_source") is None
+                    and pricing.get("displayText") == "Free")
+            )
             and _decimal(pricing.get("usd_per_unit")) == 0
             and _decimal(pricing.get("credits_per_unit")) == 0
         ):

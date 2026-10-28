@@ -2385,6 +2385,19 @@ def build_outbound_request(
             # intent in hashed/captured parameters and preserve explicit false.
             # https://openrouter.ai/docs/api_reference/parameters#parallel-tool-calls
             document.pop("parallel_tool_calls")
+        if (allow_full_thinking and operation_id == "openrouter.responses"
+                and document.get("parallel_tool_calls") is False
+                and document.get("tools") == []
+                and document.get("tool_choice", "auto") in ("auto", "none")
+                and not (isinstance(document["input"], list) and any(
+                    item.get("type") == "additional_tools"
+                    for item in document["input"]
+                ))):
+            # A validated request with no callable tools cannot make parallel
+            # calls. Omit only its irrelevant wire control; retain the original
+            # false in admission/hash/capture. Never omit false for real tools
+            # or additional declarations, including empty declarations.
+            document.pop("parallel_tool_calls")
         if openrouter_provider_policy is not None:
             if operation_id not in {"openrouter.chat", "openrouter.responses"} or not isinstance(
                 operation.fixed_params.get("provider"), Mapping

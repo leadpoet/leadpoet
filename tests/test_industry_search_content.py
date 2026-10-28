@@ -176,12 +176,15 @@ def test_native_loop_reuses_full_search_body_and_retains_its_exact_quote(monkeyp
         requested_product_service='Supplies analysis, reporting and account workflow software'))
     # Source selection must see newly loaded bodies, not only the stale gap.
     assert full_text in json.dumps(calls['model'][0]['messages'])
-    assert calls['model'][0]['tool_choice'] == 'required'
+    assert calls['model'][0]['tool_choice'] == {
+        'type': 'function', 'function': {'name': 'submit_findings'}}
     for request in calls['model']:
         validate_operation_request('openrouter.chat', request)
     assert result['_completed_submit'] is True
     claim = result['claims']['industry']
     assert claim['status'] == 'VERIFIED'
+    assert claim['_industry_review']['reused_completed_packet'] is True
+    assert len(reviews) == 2  # Initial gap and refreshed proof; no duplicate final review.
     assert any(item['url'] == service and item['quote'] == full_text for item in claim['_industry_review']['evidence'])
     assert result[c.PRIVATE_FETCHED_PAGES_KEY][service] == {'final_url':service,'text':full_text}
     assert calls['primary'] == [] and calls['contents'] == []

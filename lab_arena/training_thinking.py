@@ -670,6 +670,116 @@ def _verified_unavailable_upstream_failure(example, call) -> bool:
         return False
 
 
+def verified_undispatched_transport(example, call, *, require_observation_ref=True) -> bool:
+    """Prove the retained Deepline request never dispatched; invent no reply."""
+    from lab_arena import training_observations
+    if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
+            or call.get("run_id") != example.get("run_id")
+            or call.get("provider") != "deepline" or call.get("operation_id") != "deepline.execute"
+            or call.get("funding_source") not in {"host", "miner_key"}
+            or call.get("accounting_state") != "recovery"
+            or type(call.get("actual_microusd")) is not int or call["actual_microusd"] != 0
+            or not set(call.get("evidence_gaps") or []) <= {"full_response_unavailable"}
+            or any(key in call for key in ("response", "response_sha256", "response_status", "provider_cost"))
+            or call.get("upstream_response_receipts") or call.get("response_privacy_redactions")
+            or call.get("response_provenance") != {
+                "source": "stored_provider_ledger_receipt", "delivery_to_worker": "not_proved"}):
+        return False
+    try:
+        identity, sequence = call["call_identity"], call["action_sequence"]
+        request = call["request"]
+        capture = call["request_capture"]
+        outbound = request["outbound"]
+        if (not isinstance(capture, Mapping) or capture.get("schema_version") != training_capture.SCHEMA_VERSION
+                or capture.get("status") not in {"stored", "referenced"} or capture.get("encoding") != "gzip"
+                or not isinstance(capture.get("sha256"), str)
+                or contracts.SHA256_RE.fullmatch(capture["sha256"]) is None
+                or capture.get("ref") != training_capture.OBJECT_PREFIX + capture["sha256"][7:] + ".json.gz"
+                or capture.get("redacted") is not False or capture.get("redactions") != []
+                or request.get("schema_version") != training_capture.SCHEMA_VERSION
+                or request.get("privacy") != {"redacted": False, "redactions": []}
+                or contracts.document_hash(request) != capture["sha256"]
+                or type(capture.get("size_bytes")) is not int
+                or capture["size_bytes"] != len(contracts.canonical_json(request).encode())
+                or not 0 < capture["size_bytes"] <= training_capture.MAX_OBJECT_BYTES
+                or type(capture.get("compressed_bytes")) is not int
+                or not 0 < capture["compressed_bytes"] <= training_capture.MAX_COMPRESSED_BYTES
+                or not isinstance(outbound, Mapping) or not isinstance(outbound.get("body"), Mapping)
+                or not isinstance(outbound.get("query"), Mapping) or outbound.get("content_type") != "application/json"
+                or not training_steps._outbound_request_exact(call)):
+            return False
+        lifecycle = call["lifecycle"]
+        if (not isinstance(identity, str) or contracts.SHA256_RE.fullmatch(identity) is None
+                or type(sequence) is not int or sequence < 0
+                or len(lifecycle) != 2 or [row["entry_kind"] for row in lifecycle] != ["reservation", "recovery"]
+                or any(type(row["entry_id"]) is not int or row["entry_id"] < 1 for row in lifecycle)
+                or lifecycle[0]["entry_id"] >= lifecycle[1]["entry_id"]
+                or type(call.get("reservation_entry_id")) is not int or type(call.get("terminal_entry_id")) is not int
+                or call["reservation_entry_id"] != lifecycle[0]["entry_id"]
+                or call["terminal_entry_id"] != lifecycle[1]["entry_id"]
+                or any(row.get("funding_source") != call.get("funding_source") for row in lifecycle)
+                or type(lifecycle[0]["amount_microusd"]) is not int or lifecycle[0]["amount_microusd"] < 0
+                or type(lifecycle[1]["amount_microusd"]) is not int or lifecycle[1]["amount_microusd"] != 0
+                or lifecycle[1]["accounting"] != {"reason": "attempt_completed_before_dispatch",
+                    "reserved_microusd": lifecycle[0]["amount_microusd"]}
+                or type(lifecycle[1]["accounting"].get("reserved_microusd")) is not int
+                or any(lifecycle[0]["accounting"].get(key) != call.get(key) for key in (
+                    "request_hash", "action_sequence", "base_call_identity", "provider_attempt"))
+                or type(call.get("provider_attempt")) is not int or call["provider_attempt"] < 1
+                or not isinstance(call.get("base_call_identity"), str)
+                or contracts.SHA256_RE.fullmatch(call["base_call_identity"]) is None
+                or (call.get("request_capture") or {}).get("redacted")
+                or not training_steps._exact(request)
+                or request.get("operation_id") != call["operation_id"]
+                or request.get("request_hash") != call.get("request_hash")
+                or not isinstance(request.get("hashed_parameters"), Mapping)
+                or contracts.document_hash(request["hashed_parameters"]) != call.get("request_hash")):
+            return False
+        receipt = call["response_receipts"]
+        if (not isinstance(receipt, list) or len(receipt) != 1
+                or receipt[0] != {"created_at": lifecycle[1].get("created_at"),
+                    "entry_id": call["terminal_entry_id"], "entry_kind": "recovery",
+                    "metadata": {}, "response_unavailable": True}):
+            return False
+        artifact = (example.get("worker_observation_artifacts") or {})[call["run_id"]]
+        payload = artifact["payload"]
+        if (set(artifact) != {"schema_version", "run_id", "kind", "lease_generation",
+                              "claim_request_hash", "payload", "payload_sha256"}
+                or artifact["schema_version"] != training_observations.SCHEMA_VERSION
+                or artifact["run_id"] != call["run_id"] or artifact["kind"] != "execute"
+                or type(artifact["lease_generation"]) is not int or artifact["lease_generation"] < 1
+                or not isinstance(artifact["claim_request_hash"], str)
+                or contracts.SHA256_RE.fullmatch(artifact["claim_request_hash"]) is None
+                or artifact["payload_sha256"] != contracts.document_hash(payload)
+                or training_observations._validate_payload(payload) != payload
+                or any(row["call_identity"] == identity for row in payload["response_receipts"])
+                or any(row["kind"] == "response_received" and row["data"]["call_identity"] == identity
+                       for row in payload["agent_observations"])):
+            return False
+        observations = [row for row in payload["observations"] if row["action_sequence"] == sequence]
+        if len(observations) != 1:
+            return False
+        row = observations[0]
+        ref = {"run_id": call["run_id"], "ordinal": row["ordinal"], "payload_sha256": artifact["payload_sha256"]}
+        outcome = row["outcome"]
+        exception_only = set(outcome) == {"protocol", "exception_class"}
+        local_error = (set(outcome) == {"protocol", "exception_class", "error_code", "response"}
+                       and outcome["error_code"] == "worker_unavailable"
+                       and (outcome["protocol"] == "frame" and outcome["response"] == {"error": "worker_unavailable"}
+                            or outcome["protocol"] == "http" and outcome["response"] == {
+                                "status": 503, "headers": {}, "body_b64": base64.b64encode(json.dumps(
+                                    {"error": {"code": "worker_unavailable"}}, sort_keys=True).encode()).decode()}))
+        return (row["kind"] == "transport_failure" and row["operation_id"] == call["operation_id"]
+                and row["call_identity"] in (None, identity)
+                and row["contributes_to_provider_call_count"] is True and row["privacy"]["redacted"] is False
+                and row["request"]["admitted_parameters"] == request.get("admitted_parameters")
+                and (exception_only or local_error) and bool(outcome["exception_class"].strip())
+                and (not require_observation_ref and "worker_observation_ref" not in call
+                     or call.get("worker_observation_ref") == ref))
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
     """Prove a delivered retryable error without making it a model target.
 
@@ -1414,7 +1524,7 @@ def _selected_input_output_binding(
 
 
 def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *, target_omission_proof=None,
-                                failed_delivery_proof=None) -> frozenset[str] | None:
+                                failed_delivery_proof=None, undispatched_proof=None) -> frozenset[str] | None:
     """Use per-run export attribution only when the selected execution is exact."""
     proof = example.get("completeness") or {}
     dimensions = proof.get("dimensions") or {}
@@ -1445,9 +1555,14 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
                 or not source_costs <= source_research):
             return None
         if source_id == run_id:
+            expected = ({"worker_observations_incomplete"}
+                        if failed_delivery_proof is not None or undispatched_proof is not None else set())
+            if undispatched_proof is not None and any(
+                    "full_response_unavailable" in (call.get("evidence_gaps") or [])
+                    and undispatched_proof(example, call) for call in example.get("provider_calls") or []):
+                expected.add("full_response_unavailable")
             if (row["kind"] != "execute" or row["status"] != "accepted"
-                    or source_research != ({"worker_observations_incomplete"}
-                                           if failed_delivery_proof is not None else set())
+                    or source_research != expected
                     or source_costs):
                 return None
         elif row["kind"] != "score":
@@ -1464,7 +1579,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
         return None
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
-    if (failed_delivery_proof is None and not _provider_capture_complete(example, run_id)
+    if (failed_delivery_proof is None and undispatched_proof is None and not _provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
@@ -1479,6 +1594,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
         if call.get("run_id") not in rows or not call_gaps <= set(rows[call["run_id"]]["research_process_gaps"]):
             return None
         if call.get("run_id") != run_id:
+            continue
+        if undispatched_proof is not None and undispatched_proof(example, call):
             continue
         if (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call)
                 or verified_recovered_responses_retry(example, call)):

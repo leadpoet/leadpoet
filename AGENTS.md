@@ -384,3 +384,14 @@ merge, deployment, data, and spending limits take precedence.
 19. Use OnePatch only when explicitly requested. Verify fresh, scoped telemetry and direct production evidence; do not start monitors or schedules without authorization.
 
 20. Make the smallest durable fix at the cause; keep unrelated changes separate. Before editing, trace every affected path in the actual code, including callers, shared defaults, validators, stored state, and failure handling; do not rely on summaries or assumed file boundaries. Reproduce the defect, then test the production execution path end to end, including relevant combined failures and preserved behavior. Use independent review for high-risk changes. State test substitutions and unverified paths; passing test counts alone do not prove completion.
+
+## Scoped production authorization: champion baseline continuity
+
+On 2026-10-28 the user authorized investigation, implementation, migration,
+merge, deployment, and end-to-end verification of champion baseline continuity.
+The next eligible round must use the exact promoted champion source and its
+frozen capture contract. Apply only the committed migration for this fix and
+use the canonical gateway and normal-validator release controllers. Preserve
+historical rounds, scoring, rewards, credentials, and concurrent work. This
+scope does not authorize one-off promotions, replaying historical competition,
+or unrelated production changes. It ends when verification is complete.

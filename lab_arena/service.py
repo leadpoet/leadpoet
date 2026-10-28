@@ -21,7 +21,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations, training_coverage, training_eligibility, training_reader
+from lab_arena import telemetry, runtime_version, reviewer_runtime, training_input, training_observations, training_coverage, training_eligibility, training_reader, baseline_reasoning
 from lab_arena import code_review, code_review_policy, company_judgments, contact_policy, contact_evidence, integrity, intent_details_policy, icp_disclosure, judgment_cache, provider_observations, quality_policy, reasoning_capture, signal_judgments, trajectory, validator_events
 from lab_arena import broker as broker_module, chain as chain_module, contracts, credentials as credentials_module, operations, public_dashboard, rewards, scoring, scorer_image_access as scorer_image_access_module, signing, source_bundle, source_disclosure, submission_rate_limit, submission_similarity, verify, weight_state
 from leadpoet_verifier.identity.normalization import normalize_url
@@ -2640,7 +2640,7 @@ class ArenaService:
     def _freeze_full_thinking_baseline(
         self, round_id: str, round_row: Mapping[str, Any]
     ) -> Dict[str, Any]:
-        """Choose a compatible promoted source and the current champion payer."""
+        """Freeze the exact promoted source and its original capture contract."""
 
         if round_row.get("champion_funding_frozen") is True:
             return {"status": "existing"}
@@ -2659,22 +2659,21 @@ class ArenaService:
             if (not promotion_round_id or not winner_id
                     or re.fullmatch(r"[0-9a-f]{40}", commit) is None):
                 raise ServiceError("baseline_promotion_invalid", 500)
-            if promoted.get("reasoning_capture_policy") == reasoning_capture.POLICY:
-                source_url = (
-                    "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
-                    + commit + ".tar.gz"
-                )
-                fetcher = self._config.baseline_source_fetcher
-                if fetcher is None:
-                    raise ServiceError("baseline_source_fetcher_missing", 500)
-                try:
-                    payload = bytes(fetcher(source_url, source_bundle.MAX_SOURCE_ARCHIVE_BYTES))
-                    source_bundle.validate_source_archive(payload)
-                except source_bundle.SourceBundleError as exc:
-                    raise ServiceError("baseline_source_invalid:%s" % exc.code, 500) from exc
-                except Exception as exc:
-                    raise ServiceError("baseline_source_not_ready", 503) from exc
-                source_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
+            source_url = (
+                "https://github.com/leadpoet/leadpoet-sales-agent/archive/"
+                + commit + ".tar.gz"
+            )
+            fetcher = self._config.baseline_source_fetcher
+            if fetcher is None:
+                raise ServiceError("baseline_source_fetcher_missing", 500)
+            try:
+                payload = bytes(fetcher(source_url, source_bundle.MAX_SOURCE_ARCHIVE_BYTES))
+                source_bundle.validate_source_archive(payload)
+            except source_bundle.SourceBundleError as exc:
+                raise ServiceError("baseline_source_invalid:%s" % exc.code, 500) from exc
+            except Exception as exc:
+                raise ServiceError("baseline_source_not_ready", 503) from exc
+            source_sha256 = "sha256:" + hashlib.sha256(payload).hexdigest()
         result = self._store.freeze_full_thinking_baseline(
             round_id,
             expected_promotion_round_id=promotion_round_id,
@@ -4904,6 +4903,11 @@ class ArenaService:
             if not submission:
                 return {"eligible": False, "reasons": ["submission_evidence_missing"]}
             baseline = self._is_daily_baseline(submission, round_row)
+            if (baseline and baseline_reasoning.FIELD in (round_row.get("configuration_doc") or {})
+                    and not reasoning_capture.enabled(baseline_reasoning.for_run(
+                        round_row, dict(submission, kind="execute")))):
+                return {"eligible": False, "reasons": ["baseline_reasoning_not_required"],
+                        "exemption": "champion_baseline"}
             source = (training_eligibility.assess_source(submission, enabled=True)
                       if not baseline else {"eligible": True, "reasons": [],
                                             "exemption": "organizer_baseline"})
@@ -5900,7 +5904,8 @@ class ArenaService:
             "scoring_wall_clock_seconds", contracts.SCORING_WALL_CLOCK_SECONDS
         ))
         lease["lease_ttl_seconds"] = int(configuration["lease_ttl_seconds"])
-        if response.get("kind") == "execute" and reasoning_capture.enabled(configuration):
+        capture_configuration = baseline_reasoning.for_run(round_row, response)
+        if response.get("kind") == "execute" and reasoning_capture.enabled(capture_configuration):
             # The worker's request validator receives the frozen round policy
             # through the gateway lease, never through a miner operation frame.
             lease["reasoning_capture_policy"] = reasoning_capture.POLICY
@@ -6057,6 +6062,7 @@ class ArenaService:
                 "scorer_image_reference": configuration.get("scorer_image_reference"),
                 "scorer_policy": configuration.get("scorer_policy"),
             }
+        capture_configuration = baseline_reasoning.for_run(row, run)
         return run, broker_module.RunContext(
             run_id=run_id, assignment_id=run["assignment_id"],
             attempt=int(run["attempt"]), icp_position=int(run["icp_position"]),
@@ -6066,8 +6072,8 @@ class ArenaService:
             round_id=str(run.get("round_id") or ""),
             judgment_cache_scope=judgment_cache_scope,
             deepline_catalog=configuration.get("deepline_catalog"),
-            reasoning_capture_policy=configuration.get("reasoning_capture_policy"),
-            reasoning_route_registry=configuration.get("reasoning_route_registry"),
+            reasoning_capture_policy=capture_configuration.get("reasoning_capture_policy"),
+            reasoning_route_registry=capture_configuration.get("reasoning_route_registry"),
         )
 
     def handle_signal_judgment(
@@ -8176,6 +8182,9 @@ class ArenaService:
                 training_coverage.SETTING: training_coverage.percent_from_configuration(configuration),
                 training_coverage.MISSING_REASONING_SETTING: training_coverage.missing_reasoning_percent_from_configuration(configuration)}
                if reasoning_capture.enabled(configuration) else {}),
+            **({"baseline_reasoning_capture_policy": baseline_reasoning.validate(
+                configuration[baseline_reasoning.FIELD]).get("reasoning_capture_policy")}
+               if baseline_reasoning.FIELD in configuration else {}),
             **({"reasoning_activation_status": configuration["reasoning_activation_status"],
                 "reasoning_activation_reason": configuration["reasoning_activation_reason"]}
                if configuration.get("reasoning_activation_status") == "not_ready" else {}),

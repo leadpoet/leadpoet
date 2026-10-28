@@ -1402,6 +1402,10 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
                "configuration": copy.deepcopy(config), "evaluation_date": round_row.get("evaluation_date"),
                "role": "baseline" if submission_row.get("is_king") is True else "miner",
                "runtime": _runtime(run), "companies": []}
+    from lab_arena import baseline_reasoning
+    if (baseline_reasoning.FIELD in config
+            and submission_row.get("is_king") is True):
+        example[baseline_reasoning.EXPORT_FIELD] = baseline_reasoning.for_run(round_row, run)
     if generation_floor:
         example["scoring_generation_floor"] = generation_floor
         example["scoring_policy_history"] = copy.deepcopy(scoring_policy_history)

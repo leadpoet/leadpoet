@@ -124,12 +124,14 @@ def test_linux_strict_stop_owns_and_reaps_its_child(tmp_path, monkeypatch, contr
 
 
 @pytest.mark.parametrize('strict', [False, True])
-def test_controller_stop_uses_strict_current_helper_only_for_recovery(tmp_path, strict):
+@pytest.mark.parametrize('helper_control', ['valid', 'missing', 'symlink'])
+def test_controller_stop_uses_strict_current_helper_only_for_recovery(tmp_path, strict, helper_control):
     import shlex
     source = (Path(__file__).resolve().parents[1] / 'gw_restart.sh').read_text()
     function = source[source.index('stop_arena_component() {'):].split('\n}\n', 1)[0] + '\n}\n'
+    verifier = source[source.index('verify_controller_process_helper() {'):].split('\n}\n', 1)[0] + '\n}\n'
     output = tmp_path / 'operations.json'
-    for name in ('old', 'current'):
+    for name in (('current',) if strict else ('old', 'current')):
         directory = tmp_path / name / 'scripts'
         directory.mkdir(parents=True)
         (directory / 'manage_owned_process_group.py').write_text(
@@ -139,16 +141,24 @@ def test_controller_stop_uses_strict_current_helper_only_for_recovery(tmp_path, 
             f'rows.append([{name!r},sys.argv[1:]])\n'
             'path.write_text(json.dumps(rows))\n'
             'if sys.argv[1] == "verify": print(json.dumps({"ok":True,"state_sha256":"1"*64}))\n')
+    selected = tmp_path / ('current' if strict else 'old') / 'scripts/manage_owned_process_group.py'
+    if helper_control != 'valid':
+        selected.rename(selected.with_suffix('.saved'))
+        if helper_control == 'symlink':
+            selected.symlink_to(selected.with_suffix('.saved'))
     setup = f'''set -euo pipefail
 GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}
 ARENA_CANDIDATE_TREE={shlex.quote(str(tmp_path / 'old'))}
 GATEWAY_PREFLIGHT_TREE={shlex.quote(str(tmp_path / 'current'))}
-verify_controller_process_helper() {{ return 0; }}
 arena_component_command() {{ ARENA_COMPONENT_STATE_FILE=/fixture/state.json; ARENA_COMPONENT_COMMAND=(fixture-python service.py); }}
 '''
     extra = f' {OWNER} {SHA}' if strict else ''
-    result = subprocess.run(['bash', '-c', setup + function + f'stop_arena_component api 1 /fixture/tree{extra}\n'],
+    result = subprocess.run(['bash', '-c', setup + verifier + function + f'stop_arena_component api 1 /fixture/tree{extra}\n'],
                             capture_output=True, text=True, timeout=5)
+    if helper_control != 'valid':
+        assert result.returncode != 0
+        assert not output.exists()  # No verify/stop invocation of an unsafe helper.
+        return
     assert result.returncode == 0, result.stderr
     operations = json.loads(output.read_text())
     if strict:

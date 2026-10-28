@@ -793,6 +793,32 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
         return True
     try:
         run_id = example["run_id"]
+        # Both delivery policies reject the referenced write's status 200.
+        # This is only a negative filter; no response or target is proved here.
+        try:
+            provenance = call.get("response_provenance") or {}
+            ref = provenance.get("worker_receipt_ref") or {}
+            artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+            writes = [row for row in (artifact.get("payload") or {}).get("response_receipts") or []
+                      if row.get("ordinal") == ref.get("ordinal")]
+            if (call.get("run_id") == ref.get("run_id") == run_id
+                    and call.get("provider") == "openrouter" and call.get("operation_id") in reasoning_capture.OPERATIONS
+                    and type(call.get("action_sequence")) is int and call["action_sequence"] >= 0
+                    and type(ref.get("ordinal")) is int and ref["ordinal"] >= 0
+                    and isinstance(ref.get("payload_sha256"), str)
+                    and contracts.SHA256_RE.fullmatch(ref["payload_sha256"]) is not None
+                    and ref["payload_sha256"] == artifact.get("payload_sha256")
+                    and provenance.get("delivery_to_worker") == "socket_written" and len(writes) == 1
+                    and writes[0].get("write_state") == "socket_written"
+                    and type(writes[0].get("status")) is int and writes[0]["status"] == 200
+                    and all(writes[0].get(key) == call.get(key)
+                            for key in ("call_identity", "operation_id", "action_sequence"))
+                    and type(writes[0].get("body_bytes")) is int and writes[0]["body_bytes"] >= 0
+                    and isinstance(writes[0].get("body_sha256"), str)
+                    and contracts.SHA256_RE.fullmatch(writes[0]["body_sha256"]) is not None):
+                return False
+        except (KeyError, TypeError, ValueError, AttributeError):
+            pass  # Malformed or ambiguous references keep the full proof path.
         admission_refusal = call.get("accounting_state") == "refusal"
         if admission_refusal:
             if not _bound_admission_refusal(example, call):

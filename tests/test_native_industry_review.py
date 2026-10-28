@@ -96,6 +96,23 @@ def test_source_selection_sees_prefetched_tails_seen_by_the_industry_reviewer(mo
     assert all(tail in research for tail in tails)
 
 
+def test_industry_research_uses_the_final_review_criterion_rules(monkeypatch):
+    """Source selection must understand the same capabilities as its reviewer."""
+    from qualification.scoring import industry_classification as industry
+
+    run, calls, _, reviews = install(monkeypatch)
+    asyncio.run(run())
+    assert calls['model'] and reviews
+    criterion_rules = '\n'.join(industry.SYSTEM.splitlines()[1:5])
+    for request in calls['model']:
+        instructions = ''.join(message['content'] for message in request['messages']
+                               if message['role'] == 'system')
+        assert criterion_rules in instructions
+        assert 'judge other targets normally' in instructions
+    assert all(criterion_rules in request['messages'][0]['content']
+               for request in reviews)
+
+
 @pytest.mark.parametrize('positive_review', [False, True])
 def test_native_loop_retains_both_sources_through_fit_evidence(monkeypatch, positive_review):
     run, calls, clock, reviews = install(monkeypatch)
@@ -194,7 +211,7 @@ def test_native_source_selection_receives_verified_source_gaps_before_research(m
         prior_observations={'submitted_source_urls': [homepage]},
         prefetched_pages={homepage: {'final_url': homepage, 'text': FEATURES}},
         requested_product_service='Supplies reporting and account workflows'))
-    first = calls['model'][0]['messages'][1]['content']
+    first = next(m['content'] for m in calls['model'][0]['messages'] if m['role'] == 'user')
     document = json.loads(first[first.index('{'):])
     brief = document['industry_source_research_brief']
     assert brief['missing_requirements'] == missing
@@ -695,7 +712,7 @@ def test_industry_source_brief_exposes_the_exact_reviewed_source_set(monkeypatch
             marketplace: {'final_url': marketplace,
                           'text': 'Coreworks supplies account workflows through this listing.'},
         }))
-    document_text = calls['model'][0]['messages'][1]['content']
+    document_text = next(m['content'] for m in calls['model'][0]['messages'] if m['role'] == 'user')
     document = json.loads(document_text[document_text.index('{'):])
     brief = document['industry_source_research_brief']
     assert brief['source_urls'] == [homepage]
@@ -730,7 +747,7 @@ def test_existing_industry_source_is_reviewed_only_when_already_loaded(monkeypat
     assert (industry_url in {p['source_url'] for p in initial_sources}) is cached
     assert industry_url not in calls['primary']
     assert 'Untrusted prior assertion.' not in json.dumps(initial_sources)
-    document_text = calls['model'][0]['messages'][1]['content']
+    document_text = next(m['content'] for m in calls['model'][0]['messages'] if m['role'] == 'user')
     document = json.loads(document_text[document_text.index('{'):])
     assert any(p['url'] == industry_url for p in document['prefetched_sources']) is cached
     assert document['prior_observations']['industry_evidence_url'] == industry_url

@@ -4203,6 +4203,9 @@ async def investigate_company_evidence(
             "customer roles. Use the source-research brief to select evidence for "
             "missing facts within budget. A final review uses all fetched text. "
             "Submit industry UNPROVEN with empty citations; judge other targets normally."
+            "\nFor industry source selection, apply the same criterion rules as "
+            "the final industry review:\n"
+            + industry_classification.CRITERION_RULES
         )
     if not requested_targets or any(value not in TARGETS for value in requested_targets):
         return {"claims": {}, "failure_reason": "invalid_targets"}

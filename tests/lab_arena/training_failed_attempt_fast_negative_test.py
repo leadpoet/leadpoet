@@ -120,7 +120,7 @@ def test_hidden_retry_keeps_its_special_proof_before_any_status_filter():
     with patch.object(training_thinking, 'verified_recovered_responses_retry', return_value=True) as recovered:
         with patch.object(training_steps, '_exact', wraps=training_steps._exact) as exact:
             assert training_thinking.verified_failed_attempt(example, call)
-    recovered.assert_called_once_with(example, call)
+    recovered.assert_called_once_with(example, call, worker_proofs=None)
     assert exact.call_count == 0
     assert training_thinking.verified_failed_attempt(example, call)
 

@@ -117,7 +117,7 @@ def test_release_workflow_reclaims_only_images_created_by_the_build():
     assert source.count("preexisting-images.txt") == 2
     assert source.count("trap cleanup_release_build_images_on_exit EXIT") == 2
     assert source.count("validator_tee/scripts/reclaim_docker_storage_v2.sh") == 4
-    assert source.count("VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1") == 2
+    assert source.count("VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1") == 4
     assert source.count(
         'REQUIRE_ZERO_RUNTIME_RECONCILE="$require_zero_runtime_reconcile"'
     ) == 1

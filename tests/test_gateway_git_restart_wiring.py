@@ -73,6 +73,7 @@ def test_gateway_arena_drain_timeout_fails_before_recording_guard(
         "#!/bin/bash\nset -euo pipefail\n"
         f"CAPTURE={shlex.quote(str(capture))}\n"
         "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "GATEWAY_RESTART_GUARD_SCOPE=all\n"
         "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
         f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
         "run_lab_arena_restart_guard() {\n"
@@ -107,6 +108,7 @@ def test_gateway_arena_drain_records_generation_and_removes_report(tmp_path: Pat
         f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
         f"GATEWAY_PYTHON_BIN={shlex.quote(sys.executable)}\n"
         "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "GATEWAY_RESTART_GUARD_SCOPE=all\n"
         "LAB_ARENA_RESTART_GUARD_GENERATION=\n"
         "LAB_ARENA_RESTART_DRAIN_PID=\n"
         "LAB_ARENA_RESTART_DRAIN_REPORT=\n"
@@ -194,6 +196,7 @@ def test_gateway_parent_signal_stops_drain_and_discovers_exact_guard(
         f"ABORT={shlex.quote(str(abort))}\n"
         f"GATEWAY_RESTART_TIMING_FILE={shlex.quote(str(tmp_path / 'gateway-test.jsonl'))}\n"
         "GATEWAY_ACTIVE_RELEASE_COMPONENT=all\n"
+        "GATEWAY_RESTART_GUARD_SCOPE=all\n"
         "GATEWAY_DEPLOY_STAGE=lab_arena_claim_drain\n"
         "GATEWAY_DESTRUCTIVE_PHASE_STARTED=0\n"
         "PREPARED_GATEWAY_SHA=" + "a" * 40 + "\n"
@@ -259,6 +262,7 @@ def test_gateway_restart_releases_owned_guard_only_after_final_checks(
         "#!/bin/bash\nset -euo pipefail\n"
         f"LEADPOET_REPO_ROOT={shlex.quote(str(tmp_path / 'release'))}\n"
         "LAB_ARENA_RESTART_GUARD_GENERATION=17\n"
+        "GATEWAY_PAIRED_RESTART=0\n"
         f"CAPTURE={shlex.quote(str(capture))}\n"
         f"RELEASE_STATUS={release_status}\n"
         "run_lab_arena_restart_guard() {\n"
@@ -861,7 +865,7 @@ def test_gateway_restart_does_not_kill_colocated_runner_builds() -> None:
     assert 'pkill -KILL -f "docker build' not in script
     assert "ensure_docker_ready" in script
     assert "validator_tee/scripts/reclaim_docker_storage_v2.sh" in script
-    assert 'bash "$reclaim_script"' in script
+    assert 'bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"' in script
     assert "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1" in script
     assert "sudo nsenter -t 1 -m --" not in script
 

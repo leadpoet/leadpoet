@@ -436,12 +436,8 @@ For geography, prove the exact company's current headquarters, not its office,
 factory, incorporation, service area, customer, parent or regional HQ. Return
 country and, for US headquarters, state; deterministic geography decides fit.
 Use verified exact-company LinkedIn headquarters first: quote the identity-bound About
-Headquarters field or the server-fetched harvestapi_get_company literal selected
-provider record, never generic profile locations. For that record, quote the
-complete bounded JSON containing name, the company profile URL and the selected
-locations entry with headquarter=true and its country/locality fields. A city fragment
-alone does not prove headquarters. The ordinary identity, source and exact-quote
-checks still apply.
+Headquarters field or server-fetched "harvestapi_get_company
+locations.headquarter=true" projection, never generic profile locations.
 A valid outside-region LinkedIn HQ remains a contradiction unless fetched
 first-party evidence proves the same company's current headquarters status
 and resolves the conflict. A profile can omit another global headquarters.
@@ -615,6 +611,15 @@ target and no other target.
 VERIFIED means the requested claim is proven. CONTRADICTED means a different
 current value is proven. UNPROVEN means the evidence is absent, ambiguous,
 stale, scoped incorrectly, or conflicting."""
+
+
+_LITERAL_HEADQUARTERS_INSTRUCTION = """Use verified exact-company LinkedIn headquarters first: quote the identity-bound About
+Headquarters field or the server-fetched harvestapi_get_company literal selected
+provider record, never generic profile locations. For that record, quote the
+complete bounded JSON containing name, the company profile URL and the selected
+locations entry with headquarter=true and its country/locality fields. A city fragment
+alone does not prove headquarters. The ordinary identity, source and exact-quote
+checks still apply."""
 
 
 def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
@@ -3780,6 +3785,16 @@ async def investigate_company_evidence(
         requested_attribute or ""
     ).strip():
         return {"claims": {}, "failure_reason": "invalid_targets"}
+    # The HQ contract belongs to this invocation's original targets, even
+    # when a later correction submits only another unresolved dimension.
+    system_prompt = (
+        _SYSTEM_PROMPT.replace(
+            'Use verified exact-company LinkedIn headquarters first: quote the identity-bound About\nHeadquarters field or server-fetched "harvestapi_get_company\nlocations.headquarter=true" projection, never generic profile locations.',
+            _LITERAL_HEADQUARTERS_INSTRUCTION,
+            1,
+        )
+        if "geography" in requested_targets else _SYSTEM_PROMPT
+    )
     openrouter_key = str(
         os.environ.get("OPENROUTER_API_KEY")
         or os.environ.get("QUALIFICATION_OPENROUTER_API_KEY")
@@ -4735,7 +4750,7 @@ async def investigate_company_evidence(
                             else INVESTIGATOR_MODEL
                         ),
                         "messages": [
-                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "system", "content": system_prompt},
                             *messages,
                         ],
                         "tools": [

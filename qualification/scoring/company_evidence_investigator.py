@@ -27,6 +27,7 @@ import aiohttp
 
 from arena_reviewer_runtime.admission import ReviewerAdmission
 from arena_reviewer_runtime.transport import post_json
+from gateway.qualification.models import canonical_candidate_prompt_url
 from lab_arena.operations import OPENROUTER_MAX_CONTENT_CHARS
 from leadpoet_verifier.identity.normalization import NormalizationError, normalize_host
 from qualification.competition_models import public_http_url
@@ -40,6 +41,7 @@ from qualification.scoring.company_verification import (
     MAX_HOMEPAGE_NAVIGATION_LOCATORS,
     MAX_HOMEPAGE_NAVIGATION_TOTAL_CHARACTERS,
     _ArenaProviderFetchError,
+    _canonical_linkedin_company_url,
     _commercial_terms_navigation_locator,
     _fetch_bounded_html,
     current_exchange_profile_names_issuer,
@@ -62,6 +64,7 @@ from qualification.scoring.linkedin_company_size import (
     fetch_current_linkedin_company_size,
     extract_linkedin_company_size,
     linkedin_company_page_slug,
+    project_structured_linkedin_company_headquarters,
 )
 from qualification.scoring.pre_checks import _resolve_country
 from qualification.scoring.verification_helpers import (
@@ -608,6 +611,15 @@ target and no other target.
 VERIFIED means the requested claim is proven. CONTRADICTED means a different
 current value is proven. UNPROVEN means the evidence is absent, ambiguous,
 stale, scoped incorrectly, or conflicting."""
+
+
+_LITERAL_HEADQUARTERS_INSTRUCTION = """Use verified exact-company LinkedIn headquarters first: quote the identity-bound About
+Headquarters field or the server-fetched harvestapi_get_company literal selected
+provider record, never generic profile locations. For that record, quote the
+complete bounded JSON containing name, the company profile URL and the selected
+locations entry with headquarter=true and its country/locality fields. A city fragment
+alone does not prove headquarters. The ordinary identity, source and exact-quote
+checks still apply."""
 
 
 def _tools(targets: Sequence[str]) -> list[dict[str, Any]]:
@@ -2246,7 +2258,10 @@ def _quote_supports_headquarters(
             return country_present or postal_present
         return full_state_present or postal_present
     location_tokens = {country, state} - {""}
-    return all(token in normalized for token in location_tokens)
+    return all(
+        re.search(rf"(?<!\w){re.escape(token)}(?!\w)", normalized)
+        for token in location_tokens
+    )
 
 
 async def _post_json(
@@ -2822,6 +2837,40 @@ def _bound_structured_headquarters_finding(
         and _quote_occurs(finding["evidence_quote"], text)
     ):
         return False
+    # A literal record is authoritative only through the existing private
+    # typed source. Re-run the producer's identity, unique-HQ and geography
+    # checks; a partial quote or a model-authored lookalike is insufficient.
+    try:
+        record = json.loads(text)
+        quoted_record = json.loads(finding["evidence_quote"])
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(record, dict) or set(record) not in (
+        {"name", "linkedinUrl", "locations"}, {"name", "linkedin_url", "locations"},
+    ):
+        return False
+    projected = project_structured_linkedin_company_headquarters(
+        anchor["verified_domain"], url, source["name"],
+        {"status": 200, "element": {**record, "website": source["website"]}},
+    )
+    if not (
+        projected and projected["text"] == text and quoted_record == record
+        and _resolve_country(projected["country"]) == _resolve_country(country)
+        and projected["state"].casefold() == state.casefold()
+    ):
+        return False
+    if _resolve_country(country) != "united states":
+        location = record["locations"][0]
+        parsed = location.get("parsed") or {}
+        places = {
+            value.casefold() for value in (
+                location.get("city"), location.get("geographicArea"),
+                parsed.get("city"), parsed.get("state"),
+            ) if isinstance(value, str) and value
+        }
+        return not finding.get("observed_state") or (
+            str(finding["observed_state"]).casefold() in places
+        )
     if _resolve_country(country) == "united states":
         from qualification.company_quality import canonical_us_state
 
@@ -2830,7 +2879,7 @@ def _bound_structured_headquarters_finding(
             == canonical_us_state(finding.get("observed_state"))
             if state else not finding.get("observed_state")
         ) and (not state or bool(canonical_us_state(state)))
-    return state.casefold() == str(finding.get("observed_state") or "").casefold()
+    return False
 
 
 def _semantic_ownership_proof(
@@ -3139,6 +3188,9 @@ def _validated_findings(
                 )
                 or (
                     target == "geography"
+                    and _strict_linkedin_company_profile_url(
+                        (fetched_final_urls or {}).get(evidence_url)
+                    ) == evidence_url
                     and _bound_structured_headquarters_finding(
                         finding, structured_headquarters_evidence, identity_anchor,
                     )
@@ -3425,10 +3477,15 @@ def _validated_findings(
                     evidence_quote="",
                     reason="required-attribute relationship was invalid",
                 )
-            elif target == "geography" and not _quote_supports_headquarters(
-                finding["evidence_quote"],
-                observed_country=finding["observed_country"],
-                observed_state=finding["observed_state"],
+            elif target == "geography" and not (
+                _quote_supports_headquarters(
+                    finding["evidence_quote"],
+                    observed_country=finding["observed_country"],
+                    observed_state=finding["observed_state"],
+                )
+                or _bound_structured_headquarters_finding(
+                    finding, structured_headquarters_evidence, identity_anchor,
+                )
             ):
                 finding.update(
                     status="UNPROVEN",
@@ -3900,6 +3957,19 @@ async def investigate_company_evidence(
     observed_domain = _registrable_domain(
         (prior_observations or {}).get("observed_company_website")
     )
+    # Company tabs identify the same company. Normalize only this observed
+    # locator; submitted locators and fetched profile evidence stay strict.
+    try:
+        observed_linkedin_url = canonical_candidate_prompt_url(
+            (prior_observations or {}).get("observed_company_linkedin"),
+            "observed_company_linkedin",
+            allow_empty=True,
+        )
+    except (TypeError, ValueError):
+        observed_linkedin_url = ""
+    observed_linkedin_slug = linkedin_company_page_slug(
+        _canonical_linkedin_company_url(observed_linkedin_url)
+    )
     if (
         "rebrand" in requested_targets
         and structured_alias_slug
@@ -3907,9 +3977,7 @@ async def investigate_company_evidence(
         and re.fullmatch(r"[a-z0-9][a-z0-9-]*", structured_alias_slug)
         and submitted_domain
         and submitted_domain == observed_domain
-        and structured_alias_slug == linkedin_company_page_slug(
-            (prior_observations or {}).get("observed_company_linkedin")
-        )
+        and structured_alias_slug == observed_linkedin_slug
         and str(company_locator.get("name") or "").strip()
         and str((prior_observations or {}).get("observed_company_name") or "").strip()
     ):
@@ -4039,9 +4107,7 @@ async def investigate_company_evidence(
             or verified_structured_alias_slug
         ).casefold(),
         "verified_structured_alias_slug": verified_structured_alias_slug,
-        "observed_linkedin_slug": linkedin_company_page_slug(
-            (prior_observations or {}).get("observed_company_linkedin")
-        ),
+        "observed_linkedin_slug": observed_linkedin_slug,
         **(
             {
                 "verified_rebrand_old_domain": verified_rebrand_redirect[
@@ -4058,6 +4124,36 @@ async def investigate_company_evidence(
             else {}
         ),
     }
+
+    # Describe this private format only when its complete bound record is
+    # already available to quote. Keep one prompt for the original invocation,
+    # including later corrections that shrink the active submit targets.
+    system_prompt = _SYSTEM_PROMPT
+    if "geography" in requested_targets and isinstance(
+        structured_headquarters_evidence, Mapping,
+    ):
+        headquarters = structured_headquarters_evidence
+        headquarters_url = _strict_linkedin_company_profile_url(headquarters.get("url"))
+        if (
+            headquarters_url
+            and _strict_linkedin_company_profile_url(
+                fetched_final_urls.get(headquarters_url)
+            ) == headquarters_url
+            and _quote_occurs(
+                headquarters.get("text"), fetched_pages.get(headquarters_url, ""),
+            )
+            and _bound_structured_headquarters_finding({
+                "evidence_url": headquarters_url,
+                "evidence_quote": headquarters.get("text"),
+                "observed_country": headquarters.get("country"),
+                "observed_state": headquarters.get("state"),
+            }, headquarters, identity_anchor)
+        ):
+            system_prompt = _SYSTEM_PROMPT.replace(
+                'Use verified exact-company LinkedIn headquarters first: quote the identity-bound About\nHeadquarters field or server-fetched "harvestapi_get_company\nlocations.headquarter=true" projection, never generic profile locations.',
+                _LITERAL_HEADQUARTERS_INSTRUCTION,
+                1,
+            )
 
     started = time.monotonic()
     def retained_fetched_pages() -> dict[str, dict[str, str]]:
@@ -4674,7 +4770,7 @@ async def investigate_company_evidence(
                             else INVESTIGATOR_MODEL
                         ),
                         "messages": [
-                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "system", "content": system_prompt},
                             *messages,
                         ],
                         "tools": [

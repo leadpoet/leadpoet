@@ -8,8 +8,8 @@ from tests.postgres_migration_harness import SCRIPTS
 
 
 BASELINE = SCRIPTS / "585-lab-arena-champion-baseline-reasoning.sql"
-REVIEW = SCRIPTS / "586-lab-arena-review-deadline-recovery.sql"
-REVIEW_ROLLBACK = SCRIPTS / "586-lab-arena-review-deadline-recovery-rollback.sql.template"
+REVIEW = SCRIPTS / "587-lab-arena-review-deadline-recovery.sql"
+REVIEW_ROLLBACK = SCRIPTS / "587-lab-arena-review-deadline-recovery-rollback.sql.template"
 BASELINE_FUNCTIONS = (
     "public.lab_arena_rounds_write_once_v1()",
     "public.lab_arena_freeze_full_thinking_baseline_v1(text,text,text,text,text,text,text,text)",

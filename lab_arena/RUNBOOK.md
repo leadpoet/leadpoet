@@ -109,7 +109,7 @@ per-attempt ledger metadata retain only safe category codes, HTTP status, and
 retry flags, never provider prose, credentials, or submitted source.
 Unknown provider charges retain their reservation
 as uncertain; neither a worker crash nor a malformed response makes a free pass.
-Migration `586-lab-arena-review-deadline-recovery.sql` updates the existing
+Migration `587-lab-arena-review-deadline-recovery.sql` updates the existing
 review RPCs and widens the audit counter. It does not rewrite prior reviews,
 ledger charges, participants, or scores. Known reviewer failure codes are
 reclassified on read, including old diagnostics with a stale retry flag.
@@ -120,7 +120,7 @@ and stop the review worker through the canonical deployment workflow. Apply
 migration 586 immediately before starting the candidate. The old service cannot
 pass its review preflight while the truthful v2 RPC schema is active.
 The rollback stays outside forward migration discovery as
-`586-lab-arena-review-deadline-recovery-rollback.sql.template`. If rollback is
+`587-lab-arena-review-deadline-recovery-rollback.sql.template`. If rollback is
 needed, preserve its exact bytes in a separately reviewed and committed SQL file
 with the next unused migration number. Stop and drain the candidate, apply that
 exact committed rollback, then restart the old release. This restores all three

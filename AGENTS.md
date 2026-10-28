@@ -78,8 +78,8 @@ independent review, push, merge and release after the current canonical pair.
 The user authorized the narrow recovery of unfinished reviewer and provider
 failures until the existing admission deadline, focused tests, independent
 review, safe push and merge, exact committed
-`586-lab-arena-review-deadline-recovery.sql` and its exact-byte rollback template
-`586-lab-arena-review-deadline-recovery-rollback.sql.template`, canonical gateway
+`587-lab-arena-review-deadline-recovery.sql` and its exact-byte rollback template
+`587-lab-arena-review-deadline-recovery-rollback.sql.template`, canonical gateway
 and normal-validator deployment, and live verification. Before use, commit the
 rollback template as a separately reviewed SQL migration with a unique number. Preserve completed pass/reject decisions, source and credential
 checks, miner funding, backoff, leases, accounting limits, scoring and rewards.

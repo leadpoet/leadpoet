@@ -13,7 +13,7 @@ import re
 from collections import Counter, defaultdict
 from typing import Any, Mapping
 
-from lab_arena import contracts, operations, reasoning_capture, training_capture, training_coverage, training_dataset, training_export, training_steps
+from lab_arena import contracts, operations, reasoning_capture, training_capture, training_coverage, training_dataset, training_export, training_steps, training_worker_proof
 
 SCHEMA_VERSION = "leadpoet.lab_arena.full_thinking_dataset.v1"
 RECORD_SCHEMA_VERSION = "leadpoet.lab_arena.full_thinking_step.v1"
@@ -509,7 +509,7 @@ def _captured_reasoning_controls_match(call, registry) -> bool:
         return False
 
 
-def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
+def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
     """Prove a hidden free throttle recovered by the same request's host write.
 
     A managed retry is provider evidence, never a delivered response or target.
@@ -592,7 +592,7 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
                     or receipt.get("body_bytes") != receipt.get("wire_body_bytes")):
                 return False
         payload = ((example.get("worker_observation_artifacts") or {}).get(call["run_id"]) or {}).get("payload") or {}
-        if not _provider_capture_complete(example, call["run_id"]) or any(row.get("call_identity") == call.get("call_identity")
+        if not _provider_capture_complete(example, call["run_id"], worker_proofs=worker_proofs) or any(row.get("call_identity") == call.get("call_identity")
                for row in payload.get("response_receipts") or []):
             return False
         for recovered in example.get("provider_calls") or []:
@@ -611,7 +611,7 @@ def verified_recovered_responses_retry(example: Mapping[str, Any], call: Mapping
                 continue
             # Recovery proves a delivered provider response, not target quality.
             # Its own eligibility checks still validate or omit a cap-hit target.
-            evidence = training_steps._host_result(example, recovered)
+            evidence = training_steps._host_result(example, recovered, worker_proofs=worker_proofs)
             if (evidence["write"]["status"] != 200 or evidence["response"] != recovered.get("response")
                     or contracts.document_hash(evidence["response"]) != recovered.get("response_sha256")):
                 continue
@@ -638,7 +638,7 @@ def _terminal_accounting_matches(call, kind, amount) -> bool:
             and terminals[0]["amount_microusd"] == amount)
 
 
-def _verified_unavailable_upstream_failure(example, call) -> bool:
+def _verified_unavailable_upstream_failure(example, call, *, worker_proofs=None) -> bool:
     """Prove the observed no-upstream-response bridge error, not a free call."""
     configuration = example.get("configuration") or {}
     if (training_coverage.MISSING_REASONING_SETTING not in configuration
@@ -663,14 +663,14 @@ def _verified_unavailable_upstream_failure(example, call) -> bool:
             or receipt.get("response_unavailable") is not True):
         return False
     try:
-        evidence = training_steps._host_result(example, call, allow_worker_error=True)
+        evidence = training_steps._host_result(example, call, allow_worker_error=True, worker_proofs=worker_proofs)
         return (evidence["write"]["status"] == 502 and not evidence["receipts"]
                 and evidence["response"] == {"error": {"code": "provider_unavailable"}})
     except (KeyError, TypeError, ValueError, AttributeError, binascii.Error):
         return False
 
 
-def verified_undispatched_transport(example, call, *, require_observation_ref=True) -> bool:
+def verified_undispatched_transport(example, call, *, require_observation_ref=True, worker_proofs=None) -> bool:
     """Prove the retained provider request never dispatched; invent no reply."""
     from lab_arena import training_observations
     operation = operations.get_operation(call.get("operation_id"))
@@ -752,7 +752,7 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
                 or type(artifact["lease_generation"]) is not int or artifact["lease_generation"] < 1
                 or not isinstance(artifact["claim_request_hash"], str)
                 or contracts.SHA256_RE.fullmatch(artifact["claim_request_hash"]) is None
-                or artifact["payload_sha256"] != contracts.document_hash(payload)
+                or artifact["payload_sha256"] != training_worker_proof.payload_hash(payload, worker_proofs)
                 or training_observations._validate_payload(payload) != payload
                 or any(row["call_identity"] == identity for row in payload["response_receipts"])
                 or any(row["kind"] == "response_received" and row["data"]["call_identity"] == identity
@@ -782,14 +782,14 @@ def verified_undispatched_transport(example, call, *, require_observation_ref=Tr
         return False
 
 
-def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
+def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any], *, worker_proofs=None) -> bool:
     """Prove a delivered retryable error without making it a model target.
 
     Provider errors need no observed generation route: no generation is
     claimed. The reviewed request, saved failure bytes, host write and agent
     read must agree. Unsettled billing remains a separate eligibility gate.
     """
-    if verified_recovered_responses_retry(example, call):
+    if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
         return True
     try:
         run_id = example["run_id"]
@@ -854,14 +854,14 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
                 or not set(call.get("evidence_gaps") or []) <= (
                     {"provider_cost_unresolved", "full_response_unavailable"}
                     if "full_response_unavailable" in (call.get("evidence_gaps") or [])
-                    and _verified_unavailable_upstream_failure(example, call)
+                    and _verified_unavailable_upstream_failure(example, call, worker_proofs=worker_proofs)
                     else {"provider_cost_unresolved"})
                 or set((example.get("completeness") or {}).get("incomplete_reasons") or []) & {
                     "worker_response_receipt_link_invalid", "agent_response_receipt_link_invalid",
                     "agent_dependency_link_invalid", "runtime_input_context_mismatch"}):
             return False
         if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
-            evidence = training_steps._host_result(example, call, allow_worker_error=True)
+            evidence = training_steps._host_result(example, call, allow_worker_error=True, worker_proofs=worker_proofs)
             status = evidence["write"]["status"]
             if status not in ({402} if admission_refusal else {404, 429, 500, 502, 503, 504}):
                 return False
@@ -873,7 +873,7 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
             provenance = call.get("response_provenance") or {}
             artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
             payload = artifact.get("payload") or {}
-            payload_hash = contracts.document_hash(payload)
+            payload_hash = training_worker_proof.payload_hash(payload, worker_proofs)
             worker_ref = provenance.get("worker_receipt_ref") or {}
             if (artifact.get("payload_sha256") != payload_hash
                     or provenance.get("agent_receipt") != "reported_exact_body_received"
@@ -992,7 +992,7 @@ def _incomplete_json_object_prefix(value: str) -> bool:
     return False
 
 
-def verified_cap_truncated_target(example, call) -> bool:
+def verified_cap_truncated_target(example, call, *, worker_proofs=None) -> bool:
     """Recognize exact cap-hit tool JSON ending at EOF, never repair a target.
 
     Some providers report completed despite exhausting the requested output
@@ -1013,7 +1013,7 @@ def verified_cap_truncated_target(example, call) -> bool:
         if not any(isinstance(value, Mapping) and type((value.get("usage") or {}).get(usage_key)) is int
                    and (value.get("usage") or {})[usage_key] == cap for value in bodies):
             return False
-        evidence = training_steps._host_result(example, call)
+        evidence = training_steps._host_result(example, call, worker_proofs=worker_proofs)
         response = evidence["response"]
         usage = response.get("usage") or {}
         checked = dict(call, response=response, response_sha256=contracts.document_hash(response))
@@ -1029,7 +1029,7 @@ def verified_cap_truncated_target(example, call) -> bool:
                 or not state["provider_route_verified"] or state["redactions"]):
             return False
         try:
-            training_steps._candidate(example, call)
+            training_steps._candidate(example, call, worker_proofs=worker_proofs)
         except ValueError as exc:
             if str(exc) != "tool_call_shape_unsupported":
                 return False
@@ -1168,7 +1168,7 @@ def coverage(examples) -> dict:
             "trajectories": dict(sorted(trajectories.items()))}
 
 
-def readable_trace(example: Mapping[str, Any]) -> dict:
+def readable_trace(example: Mapping[str, Any], *, worker_proofs=None) -> dict:
     """Index a private export for review without replacing its complete raw JSON.
 
     Paths point into the supplied, hash-verified export. No text is shortened.
@@ -1325,7 +1325,7 @@ def readable_trace(example: Mapping[str, Any]) -> dict:
                       "response_provenance": copy.deepcopy(call.get("response_provenance")),
                       "reasoning_coverage": attempt_coverage(call, _role(example, call), registry),
                       **({"target_omission_reason": "inferred_output_cap_json_eof"}
-                         if verified_cap_truncated_target(example, call) else {}),
+                         if verified_cap_truncated_target(example, call, worker_proofs=worker_proofs) else {}),
                       "actual_microusd": call.get("actual_microusd"),
                       "provider_cost": copy.deepcopy(call.get("provider_cost")),
                       "lifecycle": copy.deepcopy(call.get("lifecycle")),
@@ -1552,7 +1552,7 @@ def _selected_input_output_binding(
 
 
 def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *, target_omission_proof=None,
-                                failed_delivery_proof=None, undispatched_proof=None) -> frozenset[str] | None:
+                                failed_delivery_proof=None, undispatched_proof=None, worker_proofs=None) -> frozenset[str] | None:
     """Use per-run export attribution only when the selected execution is exact."""
     proof = example.get("completeness") or {}
     dimensions = proof.get("dimensions") or {}
@@ -1613,8 +1613,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
             or reasons != research | costs
             or not reasons and not has_undispatched):
         return None
-    if (failed_delivery_proof is None and undispatched_proof is None and not _provider_capture_complete(example, run_id)
-            or artifact.get("payload_sha256") != contracts.document_hash(payload)
+    if (failed_delivery_proof is None and undispatched_proof is None and not _provider_capture_complete(example, run_id, worker_proofs=worker_proofs)
+            or artifact.get("payload_sha256") != training_worker_proof.payload_hash(payload, worker_proofs)
             or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
                    for row in payload.get(field) or [])):
@@ -1631,8 +1631,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
             continue
         if undispatched_proof is not None and undispatched_proof(example, call):
             continue
-        if (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call)
-                or verified_recovered_responses_retry(example, call)):
+        if (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call, worker_proofs=worker_proofs)
+                or verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs)):
             continue
         provenance = call.get("response_provenance") or {}
         request = call.get("request") or {}
@@ -1666,7 +1666,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
             continue
         if training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
             try:
-                evidence = training_steps._host_result(example, call)
+                evidence = training_steps._host_result(example, call, worker_proofs=worker_proofs)
                 if evidence["response"] != response:
                     return None
             except (ValueError, KeyError, TypeError, AttributeError):
@@ -1699,11 +1699,11 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
                                for read in reads for receipt in receipts)):
                 return None
         if model:
-            if failed_delivery_proof is not None and verified_failed_attempt(example, call):
+            if failed_delivery_proof is not None and verified_failed_attempt(example, call, worker_proofs=worker_proofs):
                 continue
             try:
                 try:
-                    training_steps._candidate(example, call)
+                    training_steps._candidate(example, call, worker_proofs=worker_proofs)
                 except ValueError:
                     if target_omission_proof is None or not target_omission_proof(example, call):
                         return None
@@ -1715,7 +1715,7 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
     return frozenset(reasons)
 
 
-def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_proof=None) -> frozenset[str] | None:
+def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_proof=None, worker_proofs=None) -> frozenset[str] | None:
     """Return attributable judge-only gaps, or reject an inexact selected replay.
 
     Raw export completeness remains an all-related-runs audit. A score worker's
@@ -1724,7 +1724,7 @@ def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_p
     """
     selected_id = example.get("run_id")
     if any(isinstance(call, Mapping) and call.get("run_id") == selected_id
-            and not (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call)) and (
+            and not (call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call, worker_proofs=worker_proofs)) and (
             "provider_cost_unresolved" in (call.get("evidence_gaps") or [])
             or ("accounting_state" in call and call.get("accounting_state") != "settlement")
             or ("actual_microusd" in call and type(call.get("actual_microusd")) is not int))
@@ -1738,19 +1738,19 @@ def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_p
                 for call in example.get("provider_calls") or []:
                     if call.get("run_id") != selected_id:
                         continue
-                    if verified_recovered_responses_retry(example, call):
+                    if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
                         continue
                     if call.get("accounting_state") == "refusal":
-                        if not verified_failed_attempt(example, call):
+                        if not verified_failed_attempt(example, call, worker_proofs=worker_proofs):
                             return None
                     else:
-                        training_steps._host_result(example, call, allow_worker_error=True)
+                        training_steps._host_result(example, call, allow_worker_error=True, worker_proofs=worker_proofs)
             except (KeyError, ValueError, TypeError, AttributeError):
                 return None
         return frozenset()
     allowed = {"request_privacy_nonexact", "response_privacy_nonexact", "provider_cost_unresolved"}
     if reasons and not reasons <= allowed:
-        return _attributed_score_only_gaps(example, reasons, target_omission_proof=target_omission_proof)
+        return _attributed_score_only_gaps(example, reasons, target_omission_proof=target_omission_proof, worker_proofs=worker_proofs)
     if not reasons:
         return None
     dimensions = proof.get("dimensions") or {}
@@ -1769,8 +1769,8 @@ def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_p
     run_id = example["run_id"]
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
     payload = artifact.get("payload") or {}
-    if (not _provider_capture_complete(example, run_id)
-            or artifact.get("payload_sha256") != contracts.document_hash(payload)
+    if (not _provider_capture_complete(example, run_id, worker_proofs=worker_proofs)
+            or artifact.get("payload_sha256") != training_worker_proof.payload_hash(payload, worker_proofs)
             or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
                    for row in payload.get(field) or [])):
@@ -1789,9 +1789,9 @@ def _selected_research_evidence(example: Mapping[str, Any], *, target_omission_p
         elif call_reasons:
             return None
         if call.get("run_id") == run_id:
-            if verified_recovered_responses_retry(example, call):
+            if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
                 continue
-            if call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call):
+            if call.get("accounting_state") == "refusal" and verified_failed_attempt(example, call, worker_proofs=worker_proofs):
                 continue
             redactions = set(call.get("response_privacy_redactions") or [])
             model = call.get("operation_id") in reasoning_capture.OPERATIONS
@@ -1813,7 +1813,7 @@ _LOCAL_WEB_DIAGNOSTICS = frozenset({"direct_web_usage_unverified", "direct_web_c
 _OPTIONAL_LOCAL_KINDS = frozenset({"web_fetch", "web_fetch_binary", "http_response_metadata", "state_snapshot"})
 
 
-def _provider_capture_complete(example, run_id):
+def _provider_capture_complete(example, run_id, *, worker_proofs=None):
     """Keep old failures hard; only new explicit optional tags narrow capture scope."""
     from lab_arena import training_observations
     artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
@@ -1829,11 +1829,11 @@ def _provider_capture_complete(example, run_id):
             and type(artifact.get("lease_generation")) is int and artifact["lease_generation"] > 0
             and isinstance(artifact.get("claim_request_hash"), str)
             and contracts.SHA256_RE.fullmatch(artifact["claim_request_hash"]) is not None
-            and artifact.get("payload_sha256") == contracts.document_hash(payload)
+            and artifact.get("payload_sha256") == training_worker_proof.payload_hash(payload, worker_proofs)
             and training_observations.optional_capture_only(payload))
 
 
-def _optional_capture_runs_proven(example):
+def _optional_capture_runs_proven(example, *, worker_proofs=None):
     """Every run that contributed the shared gap needs its own full host proof."""
     rows = example.get("related_run_gap_attribution") or {}
     attempts = {row.get("run_id"): row for row in example.get("attempts") or []}
@@ -1851,7 +1851,7 @@ def _optional_capture_runs_proven(example):
                 and "worker_observations_incomplete" not in (row.get("research_process_gaps") or [])):
             return False
         if "worker_observations_incomplete" in (row.get("research_process_gaps") or []):
-            if not _provider_capture_complete(example, run_id) or artifact.get("kind") != row.get("kind"):
+            if not _provider_capture_complete(example, run_id, worker_proofs=worker_proofs) or artifact.get("kind") != row.get("kind"):
                 return False
             # A complete unrelated snapshot cannot explain an incomplete journal.
             payload = example["worker_observation_artifacts"][run_id]["payload"]
@@ -1862,9 +1862,9 @@ def _optional_capture_runs_proven(example):
         calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
         delivered = []
         for call in calls:
-            if verified_recovered_responses_retry(example, call):
+            if verified_recovered_responses_retry(example, call, worker_proofs=worker_proofs):
                 continue
-            training_steps._host_result(example, call, allow_worker_error=True)
+            training_steps._host_result(example, call, allow_worker_error=True, worker_proofs=worker_proofs)
             delivered.append(call["call_identity"])
         receipts = example["worker_observation_artifacts"][run_id]["payload"]["response_receipts"]
         identities = [row["call_identity"] for row in receipts]
@@ -1879,7 +1879,7 @@ def _required_observation_redacted(example, row, *, agent=False):
                      and training_coverage.uses_host_result_evidence(example.get("configuration") or {})))
 
 
-def _provider_visible_view(example, *, not_dispatched_host_observations=None):
+def _provider_visible_view(example, *, not_dispatched_host_observations=None, worker_proofs=None):
     """Ignore only attributed local-runtime diagnostics for provider proof.
 
     This is a validation view. The saved export, completeness, hashes and
@@ -1891,7 +1891,7 @@ def _provider_visible_view(example, *, not_dispatched_host_observations=None):
     proof = example.get("completeness") or {}
     reasons = set(proof.get("incomplete_reasons") or [])
     ignored = reasons & _LOCAL_WEB_DIAGNOSTICS
-    if "worker_observations_incomplete" in reasons and _optional_capture_runs_proven(example):
+    if "worker_observations_incomplete" in reasons and _optional_capture_runs_proven(example, worker_proofs=worker_proofs):
         ignored.add("worker_observations_incomplete")
     artifacts = example.get("worker_observation_artifacts") or {}
     optional_redacted = False
@@ -1900,7 +1900,7 @@ def _provider_visible_view(example, *, not_dispatched_host_observations=None):
     not_dispatched_host_observations = not_dispatched_host_observations or {}
     for artifact in artifacts.values():
         payload = artifact.get("payload") or {}
-        if artifact.get("payload_sha256") != contracts.document_hash(payload):
+        if artifact.get("payload_sha256") != training_worker_proof.payload_hash(payload, worker_proofs):
             return example, frozenset()
         for row in payload.get("observations") or []:
             if _required_observation_redacted(example, row):
@@ -1941,20 +1941,20 @@ def _provider_visible_view(example, *, not_dispatched_host_observations=None):
     return view, frozenset(ignored)
 
 
-def provider_visible_view(example, *, not_dispatched_host_observations=None):
+def provider_visible_view(example, *, not_dispatched_host_observations=None, worker_proofs=None):
     try:
-        return _provider_visible_view(example, not_dispatched_host_observations=not_dispatched_host_observations)
+        return _provider_visible_view(example, not_dispatched_host_observations=not_dispatched_host_observations, worker_proofs=worker_proofs)
     except (TypeError, ValueError, KeyError, AttributeError):
         return example, frozenset()  # Invalid diagnostics never grant an exception.
 
 
-def selected_research_evidence(example: Mapping[str, Any], *, target_omission_proof=None) -> frozenset[str] | None:
+def selected_research_evidence(example: Mapping[str, Any], *, target_omission_proof=None, worker_proofs=None) -> frozenset[str] | None:
     # Eligibility may prove a generation unusable without treating its exact
     # capture as corruption. Exporters keep the strict default target check.
-    view, diagnostic_gaps = provider_visible_view(example)
+    view, diagnostic_gaps = provider_visible_view(example, worker_proofs=worker_proofs)
     if diagnostic_gaps and _selected_input_output_binding(view) is None:
         return None
-    result = _selected_research_evidence(view, target_omission_proof=target_omission_proof)
+    result = _selected_research_evidence(view, target_omission_proof=target_omission_proof, worker_proofs=worker_proofs)
     return None if result is None else result | diagnostic_gaps
 
 

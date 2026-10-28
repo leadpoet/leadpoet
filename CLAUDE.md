@@ -1,3 +1,54 @@
+## Scoped authorization: October 28 AWS production database migration
+
+The user explicitly authorized completing the subnet Supabase-to-AWS migration,
+including narrow CI fixes, API/client compatibility tests, final synchronization,
+tested rollback, safe merges, deployment and controlled production cutover.
+Use account 493765492819, us-east-1, and the dedicated subnet destination.
+This replaces the completed foundation/rehearsal stage limits for this task.
+Preserve all source data and SOURCE_ADD history, accepted work, provider billing,
+scoring, promotion, rewards, weight recovery and concurrent work. Use the smallest
+existing-code changes; do not add an accounting system or compatibility framework.
+The coordinator owns source/AWS writes, writer drain/fencing, exact migrations,
+canonical gateway/normal-validator restarts and live verification. Internal
+agents may implement in isolated worktrees or review read-only; they must not
+write to production. Independently review data transfer, authorization and
+rollback before activation. Do not bypass tests or canonical release gates.
+Keep current production authoritative until data integrity, client compatibility
+and rollback pass. A failed critical check leaves the current system serving.
+Do not delete Supabase source data, the verified backup or rollback evidence.
+This scope ends after the AWS production flow and durable outcomes are verified.
+
+## Scoped authorization: October 28 AWS restore rehearsal
+
+The user asked the coordinating agent to take ownership and continue the staged
+subnet Supabase-to-AWS migration. This stage may merge the reviewed foundation,
+provision a temporary isolated restore runner and scoped AWS access, create a
+complete read-only source export identity, copy a consistent source snapshot,
+and restore and verify it in the dedicated leadpoet-subnet-arena RDS target.
+Use account 493765492819, us-east-1. Preserve all source data, SOURCE_ADD history,
+current production endpoints, running jobs, accounting, scoring and chain state.
+Do not cut over production or restart the gateway/validator in this stage.
+Do not broaden the existing parity-reader identity. Keep secrets out of source,
+logs and tool output. Remove temporary export access after verified transfer;
+retain encrypted migration evidence and backups. Internal agents may prepare
+scoped files or perform read-only review; only the coordinator owns cloud and
+source permission writes. Use independent review before source grants and target
+restore. This stage ends after restored-state verification and a handoff of the
+remaining client/API and cutover steps.
+
+## Scoped authorization: October 28 AWS migration foundation
+
+The user authorized starting the subnet Supabase-to-AWS migration step by step.
+The current step creates and verifies only an isolated AWS PostgreSQL destination
+and its dedicated private network resources in account 493765492819, us-east-1.
+Use the saved reviewed CloudFormation template and existing authorized access.
+Preserve production databases, clients, source records, gateway/validator releases,
+provider work, scoring, rewards, weights, and concurrent tasks. Do not change
+source roles or copy data, expose the destination, change production endpoints,
+or restart production in this step. The coordinating task owns AWS writes and
+verification; independent reviewers are read-only. This authority ends after the
+foundation is provisioned and verified, with the next step reported to the user.
+
 ## Scoped authorization: October 28 stage-quota query performance
 
 The user authorized the measured October 28 Arena reservation query fix,

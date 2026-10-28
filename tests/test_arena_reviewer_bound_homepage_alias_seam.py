@@ -23,10 +23,11 @@ def repaired_sources():
             assert text.count(after) == 1
             text = text.replace(after, before, 1)
         sources[name] = text.encode()
-    # PR742 changed future-grader defaults outside this frozen correction.
-    # Keep this historical whole-module fixture at its reviewed committed
-    # preimage; the new function-only delta has separate current-source tests.
-    for name in (builder.GRADER_FILE, builder.FINALITY_FILE):
+    # Keep historical whole-module fixtures at their reviewed committed
+    # preimages as current grader and provider projections change.
+    # Function-only deltas have separate current-source tests.
+    for name in (builder.GRADER_FILE, builder.FINALITY_FILE,
+                 "qualification/scoring/linkedin_company_size.py"):
         sources[name] = subprocess.check_output(
             ["git", "show", "1b1da553508b639a8c9f6edf6940e67fb8b77233:" + name],
             cwd=builder.ROOT,

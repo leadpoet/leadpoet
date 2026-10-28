@@ -18,10 +18,13 @@ from tests.lab_arena.test_lab_arena_broker import (
 )
 
 RESERVATIONS = ("lab_arena_reserve_call", "lab_arena_reserve_judgment_call")
+# The dispatch marker commits before the outbound request is built, so a
+# proved rollback there is replayable on the same bound as a reservation.
+PRE_DISPATCH = RESERVATIONS + ("lab_arena_mark_dispatched",)
 LOCK_TIMEOUT = {"code": "55P03", "message": "canceling statement due to lock timeout"}
 
 
-@pytest.mark.parametrize("function", RESERVATIONS)
+@pytest.mark.parametrize("function", PRE_DISPATCH)
 @pytest.mark.parametrize("code", ["55P03", "40P01"])
 @pytest.mark.parametrize("failures", [1, DEADLOCK_RETRIES])
 def test_definite_rollback_repeats_identical_rpc_with_existing_bound(function, code, failures):
@@ -43,7 +46,7 @@ def test_definite_rollback_repeats_identical_rpc_with_existing_bound(function, c
     assert {request.url.path for request in requests} == {"/rest/v1/rpc/" + function}
 
 
-@pytest.mark.parametrize("function", RESERVATIONS)
+@pytest.mark.parametrize("function", PRE_DISPATCH)
 def test_persistent_lock_timeout_stops_at_existing_retry_bound(function):
     requests = []
     with httpx.Client(transport=httpx.MockTransport(lambda request: requests.append(request) or httpx.Response(500, json=LOCK_TIMEOUT))) as client:
@@ -59,7 +62,7 @@ def test_persistent_lock_timeout_stops_at_existing_retry_bound(function):
     *[(function, 500, LOCK_TIMEOUT) for function in (
         "lab_arena_whoami", "lab_arena_settle_call", "lab_arena_open_scoring",
     )],
-    *[(function, status, body) for function in RESERVATIONS for status, body in (
+    *[(function, status, body) for function in PRE_DISPATCH for status, body in (
         (401, LOCK_TIMEOUT), (403, LOCK_TIMEOUT), (503, LOCK_TIMEOUT),
         (500, {"code": "42501", "message": "permission denied"}),
         (500, {"code": "P0001", "message": "unknown failure"}),

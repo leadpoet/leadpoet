@@ -706,10 +706,16 @@ class PostgrestTransport(StoreTransport):
                     and code == "55P03"
                     and function in {
                         "lab_arena_reserve_call", "lab_arena_reserve_judgment_call",
+                        "lab_arena_mark_dispatched",
                     }
                 ):
-                    # An explicit reservation lock timeout rolls back the RPC.
-                    # Repeat its exact identity before any provider dispatch.
+                    # An explicit lock timeout rolls back the RPC. Repeat its
+                    # exact identity before any provider dispatch. The dispatch
+                    # marker shares that bound: it commits before the outbound
+                    # request is built, so a rolled-back marker has sent
+                    # nothing, and a marker that did commit returns
+                    # idempotent=True into the caller's existing uncertain
+                    # branch. Settlement stays out — it follows a paid call.
                     self.deadlock_retries += 1
                     deadlock_attempts += 1
                     time.sleep(0.01 * deadlock_attempts)

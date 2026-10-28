@@ -861,7 +861,7 @@ def test_gateway_restart_does_not_kill_colocated_runner_builds() -> None:
     assert 'pkill -KILL -f "docker build' not in script
     assert "ensure_docker_ready" in script
     assert "validator_tee/scripts/reclaim_docker_storage_v2.sh" in script
-    assert 'bash "$reclaim_script"' in script
+    assert 'bash "$cleanup_source_root/validator_tee/scripts/reclaim_docker_storage_v2.sh"' in script
     assert "VALIDATOR_DOCKER_ALLOW_DATA_ROOT_RESET=1" in script
     assert "sudo nsenter -t 1 -m --" not in script
 

@@ -50,11 +50,28 @@ cd "$CANDIDATE_ROOT"
 
 WORK_ROOT="${GATEWAY_V2_BUILD_WORK_ROOT:-$HOME/.cache/leadpoet/gateway-release-build-v2}"
 TEMPORARY_ROOT="$(mktemp -d /tmp/leadpoet-local-release.XXXXXX)"
+MANAGED_DOCKER_HOST=0
+if [ "$(uname -s)" = Linux ] \
+    && [ -d /home/ec2-user/.config/leadpoet/restart-controller ]; then
+  MANAGED_DOCKER_HOST=1
+fi
 . "$CANDIDATE_ROOT/validator_tee/scripts/docker_operation_lock_v2.sh"
 leadpoet_acquire_docker_operation_lock_v2
 cleanup() {
-  rm -rf -- "$TEMPORARY_ROOT"
-  leadpoet_release_docker_operation_lock_v2 || true
+  local build_status="$?" cleanup_status=0
+  trap - EXIT
+  rm -rf -- "$TEMPORARY_ROOT" || cleanup_status="$?"
+  if [ "$MANAGED_DOCKER_HOST" = 1 ]; then
+    VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1 \
+      bash "$CANDIDATE_ROOT/validator_tee/scripts/reclaim_docker_storage_v2.sh" \
+      || cleanup_status="$?"
+  fi
+  leadpoet_release_docker_operation_lock_v2 || cleanup_status="$?"
+  if [ "$cleanup_status" -ne 0 ]; then
+    echo "ERROR: local release Docker cleanup failed ($cleanup_status)" >&2
+  fi
+  if [ "$build_status" -ne 0 ]; then exit "$build_status"; fi
+  exit "$cleanup_status"
 }
 trap cleanup EXIT
 

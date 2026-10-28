@@ -19,10 +19,17 @@ from tests.lab_arena.test_lab_arena_service_round import (
     FakeProviderTransport,
     Harness,
     connect,
-    database,
     flavor_source_archive,
     keypair,
 )
+
+
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
+from tests.lab_arena.historical_service_harness import freeze_historical_intake_dates
+
+@pytest.fixture(scope="module")
+def database():
+    yield from current_service_database()
 
 
 def _iso(moment: datetime) -> str:
@@ -362,8 +369,17 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     # Freeze and publish the full round. Only the selected replacement enters
     # evaluation beside the baseline, and it receives all 20 ICP assignments.
     harness.clock.advance_to(_iso(review_cutoff))
+    # All admission checks above use real current database time. Freeze a
+    # coherent historical intake window for this fixture's legacy judge; the
+    # normal commit derives its bank/evaluation dates and retains live leases.
+    assert harness.service.store.list_runs(round_id) == []
+    freeze_historical_intake_dates(harness, "2026-10-12")
     committed = harness.service.advance_round(round_id)
     assert committed["status"] == "ok"
+    frozen = harness.service.store.get_round(round_id)
+    assert frozen["status"] == "committed"
+    assert str(frozen["evaluation_date"]) == "2026-10-12"
+    assert str(frozen["icp_set_date"]) == "2026-10-11"
     participants = harness.service.store.get_round(round_id)["participants"]
     challenger_ids = {
         row["submission_id"] for row in participants if not row["is_king"]

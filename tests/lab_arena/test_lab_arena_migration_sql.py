@@ -87,10 +87,10 @@ TABLES = (
 )
 
 
-# These two historical number collisions predate this gate. The migration
-# runner verifies full filenames and exact committed bytes, not just prefixes.
-# Never rename or extend these exceptions. Each SHA-256 was independently
-# checked with apply_supabase_migration.py --verify-only against origin/main.
+# Applied historical collisions retain their full filenames and exact bytes.
+# Never rename a member or add a member to these sealed groups. The 478/489
+# hashes were independently checked with the migration helper against main;
+# both 585 bodies are already applied and have distinct immutable identities.
 FROZEN_MIGRATION_COLLISIONS = {
     478: {
         # Last byte-changing commit: 5595ae7b2e3a4a522660a9a9f405fe7796903833
@@ -107,6 +107,14 @@ FROZEN_MIGRATION_COLLISIONS = {
         # Last byte-changing commit: 8a43dab759f696c9b1452f8dfd3e0d22f2d40c40
         "489-lab-arena-weight-write-rpc-privileges.sql":
             "73e19a8fa99a468f262846f734630fe1994264e06d2113f9bbf9ea5aac005a9c",
+    },
+    585: {
+        # Last byte-changing commit: 4f90c5172da82017c2035d1e57a9fb4e6e759e2d
+        "585-lab-arena-champion-baseline-reasoning.sql":
+            "4c070d53c5a02cb0b4d44846d13041c49e647bca165dfc415f93aaf7b79bc3db",
+        # Last byte-changing commit: 16933f72f5a686494a3cf1b7b9a6dd1909589482
+        "585-lab-arena-review-deadline-recovery.sql":
+            "e54b999380190722216c0f78a84e3ca175f9eadcf51fa68d2387a53669c3bc5a",
     },
 }
 
@@ -152,35 +160,40 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
 
 
-def test_review_recovery_uses_587_and_keeps_rollback_out_of_forward_discovery():
-    # Champion585 is already applied and main now owns publication586.
-    # Review587 was still unapplied when its path changed; retain both exact SQL bodies and forbid an implicit rollback.
+def test_applied_review_keeps_585_identity_before_atomic_587_and_excludes_rollback():
     numbered = _assert_migration_numbering(SCRIPTS)
-    assert numbered[585] == ["585-lab-arena-champion-baseline-reasoning.sql"]
+    assert numbered[585] == [
+        "585-lab-arena-champion-baseline-reasoning.sql",
+        "585-lab-arena-review-deadline-recovery.sql",
+    ]
     assert numbered[586] == ["586-lab-arena-publication-restart-drain.sql"]
-    assert numbered[587] == ["587-lab-arena-review-deadline-recovery.sql"]
+    assert numbered[587] == ["587-lab-arena-atomic-review-restart-guard.sql"]
     identities = {
-        "587-lab-arena-review-deadline-recovery.sql":
+        "585-lab-arena-review-deadline-recovery.sql":
             "e54b999380190722216c0f78a84e3ca175f9eadcf51fa68d2387a53669c3bc5a",
-        "587-lab-arena-review-deadline-recovery-rollback.sql.template":
+        "585-lab-arena-review-deadline-recovery-rollback.sql.template":
             "9c78bc154eb93482cf29f6be10609260efa8d395c6db2969edaaced52ff57e3d",
+        "587-lab-arena-atomic-review-restart-guard.sql":
+            "851eb302085924d0ce26337475f81b070380387be4b7d33813b6ccb30ec1a1b1",
     }
     for name, expected in identities.items():
         assert hashlib.sha256((SCRIPTS / name).read_bytes()).hexdigest() == expected
-    rollback = SCRIPTS / "587-lab-arena-review-deadline-recovery-rollback.sql.template"
+    rollback = SCRIPTS / "585-lab-arena-review-deadline-recovery-rollback.sql.template"
     assert rollback not in set(SCRIPTS.glob("*.sql"))
 
 
+@pytest.mark.parametrize("number", sorted(FROZEN_MIGRATION_COLLISIONS))
+@pytest.mark.parametrize("member", [0, 1])
 @pytest.mark.parametrize("mutation", ["changed_bytes", "third_member", "new_collision", "missing_member"])
-def test_migration_numbering_rejects_changes_to_frozen_exceptions(tmp_path, mutation):
+def test_migration_numbering_rejects_changes_to_frozen_exceptions(tmp_path, mutation, number, member):
     for frozen in FROZEN_MIGRATION_COLLISIONS.values():
         for name in frozen:
             (tmp_path / name).write_bytes((SCRIPTS / name).read_bytes())
-    first = tmp_path / next(iter(FROZEN_MIGRATION_COLLISIONS[478]))
+    first = tmp_path / list(FROZEN_MIGRATION_COLLISIONS[number])[member]
     if mutation == "changed_bytes":
         first.write_bytes(first.read_bytes() + b"\n-- changed historical migration\n")
     elif mutation == "third_member":
-        (tmp_path / "478-new-collision.sql").write_bytes(first.read_bytes())
+        (tmp_path / f"{number}-new-collision.sql").write_bytes(first.read_bytes())
     elif mutation == "new_collision":
         (tmp_path / "999-first.sql").write_text("SELECT 1;", encoding="utf-8")
         (tmp_path / "999-second.sql").write_text("SELECT 1;", encoding="utf-8")

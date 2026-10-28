@@ -202,8 +202,9 @@ def current_service_database():
                 "583-lab-arena-promotion-rpc-privileges.sql",
                 "584-lab-arena-stage-quota-run-lookup.sql",
                 "585-lab-arena-champion-baseline-reasoning.sql",
+                "585-lab-arena-review-deadline-recovery.sql",
                 "586-lab-arena-publication-restart-drain.sql",
-                "587-lab-arena-review-deadline-recovery.sql",
+                "587-lab-arena-atomic-review-restart-guard.sql",
             ):
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
         yield psycopg2, dsn

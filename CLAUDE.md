@@ -104,8 +104,8 @@ independent review, push, merge and release after the current canonical pair.
 The user authorized the narrow recovery of unfinished reviewer and provider
 failures until the existing admission deadline, focused tests, independent
 review, safe push and merge, exact committed
-`587-lab-arena-review-deadline-recovery.sql` and its exact-byte rollback template
-`587-lab-arena-review-deadline-recovery-rollback.sql.template`, canonical gateway
+`585-lab-arena-review-deadline-recovery.sql` and its exact-byte rollback template
+`585-lab-arena-review-deadline-recovery-rollback.sql.template`, canonical gateway
 and normal-validator deployment, and live verification. Before use, commit the
 rollback template as a separately reviewed SQL migration with a unique number. Preserve completed pass/reject decisions, source and credential
 checks, miner funding, backoff, leases, accounting limits, scoring and rewards.
@@ -115,6 +115,14 @@ historical records. Internal implementation agents may test and commit only.
 The coordinating task owns production SQL, migration and rollback application,
 canonical deployment and live verification. This authority ends after the
 scoped fix and affected future-flow verification are complete.
+
+The applied deadline SQL retains its original 585 filename and SHA-256
+`e54b999380190722216c0f78a84e3ca175f9eadcf51fa68d2387a53669c3bc5a`.
+The separately applied champion 585 keeps its own exact filename and bytes;
+the numbering gate permits only this hash-bound historical pair. Publication
+586 and atomic review guard 587 retain their distinct names and exact SQL.
+Install the deadline dependency before atomic 587; never identify these
+migrations by numeric prefix alone or discover the rollback as forward SQL.
 
 ## Scoped authorization: October 28 capture policy composition
 

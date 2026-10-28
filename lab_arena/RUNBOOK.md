@@ -109,24 +109,33 @@ per-attempt ledger metadata retain only safe category codes, HTTP status, and
 retry flags, never provider prose, credentials, or submitted source.
 Unknown provider charges retain their reservation
 as uncertain; neither a worker crash nor a malformed response makes a free pass.
-Migration `587-lab-arena-review-deadline-recovery.sql` updates the existing
+Migration `585-lab-arena-review-deadline-recovery.sql` updates the existing
 review RPCs and widens the audit counter. It does not rewrite prior reviews,
 ledger charges, participants, or scores. Known reviewer failure codes are
 reclassified on read, including old diagnostics with a stale retry flag.
 The preflight requires the deadline retry capability.
 
+The applied deadline body retains its original 585 filename and exact bytes.
+Champion-baseline 585 is a separate applied migration; the numbering gate seals
+both full filenames and hashes. Publication 586 and atomic review guard 587
+remain separate later migrations. Install deadline 585 before atomic 587, and
+follow atomic 587's worker-quiescence prerequisite and bounded lock wait.
+
 Deploy this change as a controlled pair of database and service changes. Drain
 and stop the review worker through the canonical deployment workflow. Apply
-migration 586 immediately before starting the candidate. The old service cannot
+the exact deadline migration 585 before starting the candidate. The old service cannot
 pass its review preflight while the truthful v2 RPC schema is active.
 The rollback stays outside forward migration discovery as
-`587-lab-arena-review-deadline-recovery-rollback.sql.template`. If rollback is
+`585-lab-arena-review-deadline-recovery-rollback.sql.template`. If rollback is
 needed, preserve its exact bytes in a separately reviewed and committed SQL file
 with the next unused migration number. Stop and drain the candidate, apply that
 exact committed rollback, then restart the old release. This restores all three
 exact prior RPC definitions and their existing identities and grants. It keeps the widened audit storage and all review rows.
+After atomic 587 changes the dependent RPCs, this deadline rollback template
+fails closed on those new hashes. Do not edit its guards to force rollback;
+any rollback across that dependency needs its own exact reviewed plan.
 The old RPCs fail closed for an unfinished review above six attempts. Reapplying
-migration 586 restores recovery for that row while its admission window is open.
+the exact deadline migration 585 restores recovery for that row while its admission window is open.
 Neither direction admits a closed-round or previously excluded submission.
 The rollback is a separately selected operator artifact. It is not part of the
 forward migration fixture or a bulk migration sequence.

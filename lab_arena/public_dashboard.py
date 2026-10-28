@@ -126,6 +126,7 @@ _TRAINING_REASONS = frozenset({
     "training_coverage_incomplete", "provider_response_truncated", "provider_output_untrainable",
     "accepted_output_unavailable",
     "missing_reasoning_share_exceeded", "selected_artifact_temporarily_unavailable",
+    "baseline_reasoning_not_required",
 })
 _TRAINING_COUNT_KEYS = {
     "source_review": frozenset({"enabled", "reviewed"}),

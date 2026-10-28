@@ -1703,7 +1703,9 @@ def test_bridge_worker_broker_chain_uses_the_600_second_responses_timeout(
     assert reply.status_code == 200
     assert "event: response.completed" in reply.text
     assert len(transport.sent) == len(store.calls) == 1
-    assert transport.sent[0]["timeout"] == pytest.approx(600)
+    # Dispatch subtracts elapsed monotonic time from the 600-second budget.
+    # Allow scheduling overhead without accepting the old 300-second cap.
+    assert 599 <= transport.sent[0]["timeout"] <= 600
     assert next(iter(store.calls.values()))["kind"] == "settlement"
 
 

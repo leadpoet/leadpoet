@@ -41,6 +41,30 @@ HTTP_DOMAIN_DEPENDENCY = dict(dependent_class="pg_constraint", dependent_type="d
     dependent_identity="content_type_check on public.content_type", dependency_type="a",
     referenced_kind="type", referenced_identity="public.content_type")
 COLUMN_CANONICALIZATION = "column-position-logical-ordinal-per-relation"
+DBLINK_EXTENSION = dict(name="dblink", schema="public", version="1.2")
+DBLINK_COMPOSITE = dict(schema="public", name="dblink_pkey_results", kind="c",
+    type="dblink_pkey_results", type_kind="c", dependency="e", extension="dblink",
+    extension_schema="public", extension_version="1.2", columns=[
+        dict(name="position", position=1, type="integer", not_null=False),
+        dict(name="colname", position=2, type="text", not_null=False)])
+COMPOSITE_RELATIONS_SQL = snapshot.aggregate("""SELECT n.nspname AS schema,c.relname AS name,
+ c.relkind::text AS kind,t.typname AS type,t.typtype::text AS type_kind,
+ p.deptype::text AS dependency,e.extname AS extension,en.nspname AS extension_schema,
+ e.extversion AS extension_version,
+ (SELECT coalesce(json_agg(json_build_object('name',a.attname,'position',a.attnum,
+   'type',pg_catalog.format_type(a.atttypid,a.atttypmod),'not_null',a.attnotnull)
+   ORDER BY a.attnum),'[]'::json) FROM pg_catalog.pg_attribute a
+   WHERE a.attrelid=c.oid AND a.attnum>0) AS columns
+ FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+ JOIN pg_catalog.pg_type t ON c.reltype=t.oid AND t.typrelid=c.oid
+ LEFT JOIN pg_catalog.pg_depend p ON p.classid='pg_catalog.pg_type'::regclass
+   AND p.objid=t.oid AND p.objsubid=0 AND p.deptype='e'
+   AND p.refclassid='pg_catalog.pg_extension'::regclass AND p.refobjsubid=0
+ LEFT JOIN pg_catalog.pg_extension e ON e.oid=p.refobjid
+ LEFT JOIN pg_catalog.pg_namespace en ON en.oid=e.extnamespace
+ WHERE c.relkind='c' AND """ + bootstrap.NS + """
+ AND NOT EXISTS(SELECT 1 FROM pg_catalog.pg_depend d
+   WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype='e')""", "t.schema,t.name")
 
 
 def sealed_json(path, digest):
@@ -205,6 +229,7 @@ def capture_target(keeper):
     snapshot.check_identity(keeper, "target")
     metadata = snapshot.capture_metadata(keeper)
     state = keeper.one_json(bootstrap.STATE_SQL)
+    composite_relations = keeper.one_json(COMPOSITE_RELATIONS_SQL)
     database_acl_default = keeper.one_json(DATABASE_ACL_DEFAULT_SQL)
     # Unlike source capture, target capture must retain ACL-order differences
     # as evidence rather than reject before semantic entry-order comparison.
@@ -219,7 +244,20 @@ def capture_target(keeper):
         value = keeper.one_json("SELECT json_build_object('last_value',last_value::text,'is_called',is_called) FROM " + snapshot.qualified(item) + ";")
         sequences.append(dict(schema=item["schema"], name=item["name"], **value))
     return dict(metadata=metadata, state=state, database_acl_default=database_acl_default,
-                supporting_auth_roles=supports, sequences=sequences)
+                supporting_auth_roles=supports, sequences=sequences, composite_relations=composite_relations)
+
+
+def approved_platform_objects(manifest, composite_relations):
+    """Count only the exact dblink 1.2 type-owned composite omitted by capture."""
+    dblink = [e for e in manifest.get("extensions", []) if e.get("name") == "dblink"]
+    snapshot.require(dblink == [] or dblink == [DBLINK_EXTENSION], "platform-composites")
+    expected = [DBLINK_COMPOSITE] if dblink else []
+    # JSON equality keeps booleans distinct from integer ordinals, ignores only
+    # object-key order, and rejects extra fields, rows and changed attributes.
+    snapshot.require(isinstance(composite_relations, list)
+        and json.dumps(composite_relations, sort_keys=True) == json.dumps(expected, sort_keys=True),
+        "platform-composites")
+    return copy.deepcopy(composite_relations)
 
 
 def database_acl_match(initial_target, actual):
@@ -277,6 +315,11 @@ def compare(manifest, archive_sequences, initial_target, actual, http_domain_exc
     expected = clean_source_metadata(manifest, http_domain_exclusion)
     metadata = canonical_metadata(actual["metadata"])
     differences = restore.compare_metadata(expected, metadata)
+    try:
+        platform_objects = approved_platform_objects(manifest, actual["composite_relations"])
+    except (snapshot.Failure, KeyError, TypeError, ValueError):
+        differences.append("platform-composites")
+        platform_objects = []
     state = actual["state"]
     if not (state["role"] == state["session"] == state["owner"] == "arena_admin"
             and state["database"] == "postgres" and 170000 <= state["version"] < 180000
@@ -303,7 +346,7 @@ def compare(manifest, archive_sequences, initial_target, actual, http_domain_exc
         differences.append("archive-sequences")
     # These totals include the three selected schemas plus only the one auth
     # schema/getter. They detect stray objects outside the captured categories.
-    expected_counts = dict(relations=len(expected["relations"]) + len(expected["indexes"]),
+    expected_counts = dict(relations=len(expected["relations"]) + len(expected["indexes"]) + len(platform_objects),
                            routines=len(expected["routines"]) + 1, types=len(expected["types"]),
                            schemas=sum(s["name"] != "public" for s in expected["schemas"]) + 1,
                            default_acls=len(expected["default_acls"]), event_triggers=0,
@@ -341,10 +384,13 @@ def verify(args):
     differences = compare(manifest, sequences, initial, actual, http_domain_exclusion)
     counts = {category: len(actual["metadata"][category]) for category in snapshot.OBJECT_KINDS}
     equivalence = database_acl_match(initial, actual)[1]
+    platform_objects = (approved_platform_objects(manifest, actual["composite_relations"])
+                        if "platform-composites" not in differences else [])
     report = dict(format=1, status="mismatch" if differences else "match", differences=differences, counts=counts,
                   canonicalizations=[COLUMN_CANONICALIZATION],
                   applied_equivalences=[equivalence] if equivalence else [],
                   applied_exclusions=[http_domain_exclusion] if http_domain_exclusion else [],
+                  applied_platform_objects=platform_objects,
                   manifest_sha256=args.manifest_sha256, archive_sequences_sha256=args.archive_sequences_sha256,
                   initial_target_sha256=args.initial_target_sha256,
                   data_verification="separate verify-data proof remains required")

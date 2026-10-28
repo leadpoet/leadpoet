@@ -36,7 +36,7 @@ def manifest_fixture():
     metadata["relations"] += [dict(schema=s["schema"], name=s["name"], kind="S", owner="postgres", acl=acl("postgres", "r")) for s in sequences]
     metadata["routines"] = [dict(schema="extensions" if i<6 else "public", name=f"f_{i}", arguments="", kind="f", definition="private function definition", owner="postgres", acl=dict(is_null=True, items=[])) for i in range(383)]
     return dict(format=1, source_host=snapshot.SOURCE_HOST, source_role=snapshot.SOURCE_ROLE,
-                database="postgres", tables=tables, sequences=sequences, schema_metadata=metadata,
+                database="postgres", extensions=[], tables=tables, sequences=sequences, schema_metadata=metadata,
                 supporting_auth_role=copy.deepcopy(AUTH_ROLE_SUPPORT))
 
 
@@ -60,7 +60,7 @@ def actual_fixture(manifest, archive, initial):
                  counts=dict(relations=len(metadata["relations"])+len(metadata["indexes"]),
                  routines=len(metadata["routines"])+1, types=len(metadata["types"]), schemas=3,
                  default_acls=len(metadata["default_acls"]), event_triggers=0, large_objects=0, databases=0))
-    return dict(metadata=metadata, state=state, database_acl_default=dict(database="postgres", owner="arena_admin", acl=dict(is_null=False, items=["=Tc/arena_admin", "arena_admin=CTc/arena_admin"])), supporting_auth_roles=[copy.deepcopy(manifest["supporting_auth_role"])], sequences=copy.deepcopy(archive))
+    return dict(metadata=metadata, state=state, database_acl_default=dict(database="postgres", owner="arena_admin", acl=dict(is_null=False, items=["=Tc/arena_admin", "arena_admin=CTc/arena_admin"])), supporting_auth_roles=[copy.deepcopy(manifest["supporting_auth_role"])], sequences=copy.deepcopy(archive), composite_relations=[])
 
 
 def http_proof_fixture(root, manifest, manifest_digest):
@@ -83,6 +83,47 @@ def http_proof_fixture(root, manifest, manifest_digest):
 
 
 class MetadataTests(unittest.TestCase):
+    def test_only_exact_manifest_bound_dblink_composite_gets_one_relation_credit(self):
+        manifest=manifest_fixture();manifest["extensions"]=[copy.deepcopy(verify.DBLINK_EXTENSION)]
+        archive=archive_fixture(manifest);before=baseline_fixture();actual=actual_fixture(manifest,archive,before)
+        self.assertIn("platform-composites",verify.compare(manifest,archive,before,actual))
+        actual["composite_relations"]=[copy.deepcopy(verify.DBLINK_COMPOSITE)]
+        actual["state"]["counts"]["relations"]+=1
+        original=copy.deepcopy(actual)
+        self.assertEqual(verify.compare(manifest,archive,before,actual),[])
+        self.assertEqual(verify.approved_platform_objects(manifest,actual["composite_relations"]),actual["composite_relations"])
+        self.assertEqual(actual,original)
+        for extensions in ([],[dict(verify.DBLINK_EXTENSION,version="1.1")],
+                           [dict(verify.DBLINK_EXTENSION,schema="extensions")],
+                           [verify.DBLINK_EXTENSION,verify.DBLINK_EXTENSION]):
+            changed=copy.deepcopy(manifest);changed["extensions"]=extensions
+            self.assertIn("platform-composites",verify.compare(changed,archive,before,actual))
+        changed=copy.deepcopy(actual);del changed["composite_relations"]
+        self.assertIn("platform-composites",verify.compare(manifest,archive,before,changed))
+        changed=copy.deepcopy(actual);changed["state"]["counts"]["relations"]+=1
+        self.assertEqual(verify.compare(manifest,archive,before,changed),["unexpected-objects"])
+
+    def test_dblink_allowance_rejects_extra_unbound_modified_and_malformed_composites(self):
+        manifest=manifest_fixture();manifest["extensions"]=[copy.deepcopy(verify.DBLINK_EXTENSION)]
+        mutations=[lambda c:c.update(name="ordinary_same_count"),lambda c:c.update(type="ordinary_type"),
+            lambda c:c.update(kind="r"),lambda c:c.update(type_kind="d"),
+            lambda c:c.update(dependency=None),lambda c:c.update(extension=None),
+            lambda c:c.update(extension_version="1.1"),lambda c:c.update(extension_schema="extensions"),
+            lambda c:c["columns"][0].update(name="renamed"),
+            lambda c:c["columns"][0].update(type="bigint"),
+            lambda c:c["columns"][0].update(not_null=True),
+            lambda c:c["columns"][0].update(not_null=0),
+            lambda c:c["columns"][0].update(position=True),
+            lambda c:c["columns"].reverse(),lambda c:c["columns"].pop(),
+            lambda c:c["columns"].append(dict(name="extra",position=3,type="text",not_null=False))]
+        for mutate in mutations:
+            record=copy.deepcopy(verify.DBLINK_COMPOSITE);mutate(record)
+            with self.assertRaisesRegex(snapshot.Failure,"platform-composites"):
+                verify.approved_platform_objects(manifest,[record])
+        for records in (None,{},[],[verify.DBLINK_COMPOSITE,verify.DBLINK_COMPOSITE]):
+            with self.assertRaisesRegex(snapshot.Failure,"platform-composites"):
+                verify.approved_platform_objects(manifest,records)
+
     def test_column_ordinals_preserve_visible_order_all_other_fields_and_inputs(self):
         manifest=manifest_fixture()
         def column(table,name,position):
@@ -381,8 +422,11 @@ class MetadataTests(unittest.TestCase):
 
     def test_cli_preserves_private_evidence_and_never_prints_definitions(self):
         manifest=manifest_fixture();archive=archive_fixture(manifest);before=baseline_fixture()
+        manifest["extensions"]=[copy.deepcopy(verify.DBLINK_EXTENSION)]
         before["database_acl"]=dict(is_null=True,items=[])
         actual=actual_fixture(manifest,archive,before)
+        actual["composite_relations"]=[copy.deepcopy(verify.DBLINK_COMPOSITE)]
+        actual["state"]["counts"]["relations"]+=1
         actual["state"]["database_acl"]=copy.deepcopy(actual["database_acl_default"]["acl"])
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -406,6 +450,8 @@ class MetadataTests(unittest.TestCase):
             report=json.loads((root/"proof"/"report.json").read_text())
             self.assertEqual(report["applied_equivalences"][0]["rule"],"initial-null-database-acl-equals-server-default")
             self.assertEqual(report["canonicalizations"],["column-position-logical-ordinal-per-relation"])
+            self.assertEqual(report["applied_platform_objects"],[verify.DBLINK_COMPOSITE])
+            self.assertNotIn("dblink_pkey_results",output.getvalue())
             self.assertNotIn("applied_equivalences",json.loads(output.getvalue()))
         output=io.StringIO()
         with patch.object(verify,"verify",side_effect=RuntimeError("private function definition password")),contextlib.redirect_stderr(output):
@@ -495,6 +541,10 @@ class NativeMetadataTests(unittest.TestCase):
                 bootstrap_manifest["schema_metadata"]["schemas"]=[dict(schema="public",name="public",owner="pg_database_owner",acl=dict(is_null=False,items=["=U/pg_database_owner","pg_database_owner=UC/pg_database_owner"])),dict(schema="extensions",name="extensions",owner="postgres",acl=dict(is_null=True,items=[]))]
                 # Execute the unchanged, reviewed bootstrap and its real cleanup.
                 run(master,bootstrap.build_sql(before,bootstrap_manifest).encode())
+                # Normal target extensions exclude their direct members from
+                # metadata, but dblink's type-owned composite adds one raw
+                # STATE relation. No dblink function is ever called here.
+                run(admin,b'CREATE EXTENSION dblink SCHEMA public; CREATE EXTENSION pg_trgm SCHEMA public; CREATE EXTENSION pgcrypto SCHEMA extensions; CREATE EXTENSION "uuid-ossp" SCHEMA extensions; CREATE EXTENSION pg_stat_statements SCHEMA extensions;')
                 sql="GRANT CREATE ON DATABASE postgres TO lab_arena_owner; CREATE SCHEMA source_add_history AUTHORIZATION lab_arena_owner; REVOKE CREATE ON DATABASE postgres FROM lab_arena_owner;"
                 sql+="CREATE TYPE public.qualification_status AS ENUM ('new'); CREATE SEQUENCE public.seq_0; CREATE SEQUENCE public.seq_1; CREATE SEQUENCE source_add_history.seq_2;"
                 for i in range(48):
@@ -512,8 +562,9 @@ class NativeMetadataTests(unittest.TestCase):
                 run(master,sql.encode())
                 with snapshot.Keeper(source_env,logs) as keeper:
                     metadata=snapshot.capture_metadata(keeper);tables=keeper.one_json(snapshot.CATALOG)
+                    extensions=keeper.one_json(snapshot.aggregate("SELECT e.extname AS name,n.nspname AS schema,e.extversion AS version FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid=e.extnamespace", "t.name"))
                 seqs=[dict(schema="public",name="seq_0",last_value="999",is_called=True),dict(schema="public",name="seq_1",last_value="999",is_called=True),dict(schema="source_add_history",name="seq_2",last_value="999",is_called=True)]
-                manifest=dict(tables=tables,sequences=seqs,schema_metadata=metadata,supporting_auth_role=copy.deepcopy(AUTH_ROLE_SUPPORT))
+                manifest=dict(tables=tables,sequences=seqs,schema_metadata=metadata,extensions=extensions,supporting_auth_role=copy.deepcopy(AUTH_ROLE_SUPPORT))
                 snapshot.validate_tables(tables)
                 archive=[dict(schema=s["schema"],name=s["name"],last_value=str(i+10),is_called=bool(i%2)) for i,s in enumerate(seqs)]
                 with snapshot.Keeper(target_env,logs) as keeper:unclean=verify.capture_target(keeper)
@@ -522,7 +573,23 @@ class NativeMetadataTests(unittest.TestCase):
                 run(master,bootstrap.cleanup_sql(manifest).encode())
                 with snapshot.Keeper(target_env,logs) as keeper:actual=verify.capture_target(keeper)
                 self.assertEqual(len(actual["metadata"]["routines"]),383)
+                self.assertEqual(actual["composite_relations"],[verify.DBLINK_COMPOSITE])
+                self.assertEqual(actual["state"]["counts"]["relations"],len(metadata["relations"])+len(metadata["indexes"])+1)
                 self.assertEqual(verify.compare(manifest,archive,before,actual),[])
+                run(admin,b"CREATE TYPE public.unreviewed_composite AS (value integer);")
+                with snapshot.Keeper(target_env,logs) as keeper:extra_composite=verify.capture_target(keeper)
+                self.assertIn("platform-composites",verify.compare(manifest,archive,before,extra_composite))
+                self.assertIn("unexpected-objects",verify.compare(manifest,archive,before,extra_composite))
+                run(admin,b"DROP TYPE public.unreviewed_composite; ALTER TYPE public.dblink_pkey_results RENAME ATTRIBUTE colname TO changed;")
+                with snapshot.Keeper(target_env,logs) as keeper:changed_composite=verify.capture_target(keeper)
+                self.assertIn("platform-composites",verify.compare(manifest,archive,before,changed_composite))
+                run(admin,b"ALTER TYPE public.dblink_pkey_results RENAME ATTRIBUTE changed TO colname; ALTER EXTENSION dblink DROP TYPE public.dblink_pkey_results;")
+                with snapshot.Keeper(target_env,logs) as keeper:unbound_composite=verify.capture_target(keeper)
+                self.assertEqual(unbound_composite["composite_relations"][0]["dependency"],None)
+                self.assertIn("platform-composites",verify.compare(manifest,archive,before,unbound_composite))
+                run(admin,b"ALTER EXTENSION dblink ADD TYPE public.dblink_pkey_results;")
+                with snapshot.Keeper(target_env,logs) as keeper:restored_composite=verify.capture_target(keeper)
+                self.assertEqual(verify.compare(manifest,archive,before,restored_composite),[])
                 self.assertFalse(actual["state"]["database_acl"]["is_null"])
                 self.assertEqual(actual["state"]["database_acl"],actual["database_acl_default"]["acl"])
                 self.assertEqual(verify.database_acl_match(before,actual)[1]["rule"],"initial-null-database-acl-equals-server-default")
@@ -541,7 +608,7 @@ class NativeMetadataTests(unittest.TestCase):
                 self.assertEqual(domain_dependency,dict(dependency="a",extension="plpgsql"))
                 run(admin,b"ALTER EXTENSION plpgsql DROP DOMAIN public.content_type; DROP DOMAIN public.content_type;")
                 http_manifest=copy.deepcopy(manifest)
-                http_manifest["extensions"]=[copy.deepcopy(verify.HTTP_EXTENSION)]
+                http_manifest["extensions"]=copy.deepcopy(manifest["extensions"])+[copy.deepcopy(verify.HTTP_EXTENSION)]
                 http_manifest["schema_metadata"]["constraints"]=domain_constraints
                 self.assertIn("constraints",verify.compare(http_manifest,archive,before,actual))
                 proof_dir=root/"http-proof";proof_dir.mkdir(mode=0o700)

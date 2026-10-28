@@ -317,6 +317,16 @@ other fields. Do not sort columns by name or remove missing/changed columns from
 the comparison. Keep the original manifest and raw target evidence unchanged.
 Record this physical-to-logical position normalization in the verification report.
 
+The raw relation count also includes the composite relation behind the dblink
+1.2 extension type `public.dblink_pkey_results`. Capture every indirectly
+counted composite relation, including ordinary or detached types. Allow exactly
+one additional relation only when the sealed manifest and target prove dblink
+1.2 in `public`, its exact extension dependency, and the ordered attributes
+`position integer` and `colname text`. Missing, extra or changed records must
+fail. Preserve the raw counts and record the full approved object in
+`applied_platform_objects`; do not exclude composites by name alone. This
+verifier correction does not require another restore or target schema change.
+
 The existing `aws_subnet_snapshot.py verify-data` operation remains required
 to prove every table's rows and the full stored generated-column values.
 

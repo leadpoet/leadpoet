@@ -5148,6 +5148,13 @@ class Broker:
                 )
             except ArenaStoreUnavailable as exc:
                 if getattr(exc, "transaction_rolled_back", False) is True or reserve_readback_used:
+                    if reserve_readback_used and prepared_capture is not None:
+                        # A lost reserve response may leave its request pointer
+                        # committed even when the same-identity readback fails.
+                        try:
+                            prepared_capture.persist()
+                        except Exception:
+                            pass  # Capture must not replace the admission error.
                     # The RPC already exhausted its bounded rollback retries;
                     # only an ambiguous response needs reservation readback.
                     raise

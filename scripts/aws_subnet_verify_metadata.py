@@ -184,7 +184,9 @@ def target_roles_match(state):
             # explicit owner SET/INHERIT grant, or update that same grant row.
             if not 1 <= len(grants) <= 2 or sum(owner for _, owner in grants) != 1:
                 return False
-        elif len(grants) != 1 or grants[0] != (True, False):
+        # RDS17 may omit stock PG17's automatic creator membership.
+        # A nonowner needs no access; permit at most one admin-only grant.
+        elif len(grants) > 1 or any(grant != (True, False) for grant in grants):
             return False
     return True
 

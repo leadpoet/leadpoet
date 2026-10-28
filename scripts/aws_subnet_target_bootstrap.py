@@ -164,7 +164,7 @@ def build_sql(before, manifest):
     sql += " FOR m IN SELECT * FROM jsonb_array_elements(state->'memberships') LOOP\n"
     sql += " IF m->>'member'<>'arena_admin' OR m->>'name' NOT IN (" + ROLE_LITERALS + ") THEN RAISE EXCEPTION 'unexpected membership'; END IF;\n"
     sql += " IF m->>'name' NOT IN (" + ",".join(literal(n) for n in OWNERS) + ") AND (m->>'admin'<>'true' OR m->>'inherit'<>'false' OR m->>'set'<>'false') THEN RAISE EXCEPTION 'non-owner membership changed'; END IF; END LOOP;\n"
-    sql += " IF (SELECT count(*) FROM pg_auth_members WHERE roleid=" + literal(snapshot.SOURCE_ROLE) + "::regrole)<>1 THEN RAISE EXCEPTION 'export membership changed'; END IF;\n"
+    sql += " IF (SELECT count(*) FROM pg_auth_members WHERE roleid=" + literal(snapshot.SOURCE_ROLE) + "::regrole)>1 THEN RAISE EXCEPTION 'export membership changed'; END IF;\n"
     sql += " SELECT v::jsonb INTO getter FROM (" + getter_query + ") q(v);\n"
     sql += " IF getter IS DISTINCT FROM " + json_literal(support) + " OR EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='auth') OR (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='auth')<>1 THEN RAISE EXCEPTION 'auth getter proof failed'; END IF; END $proof$;\nCOMMIT;\n"
     return sql

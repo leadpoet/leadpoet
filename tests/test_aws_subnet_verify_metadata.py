@@ -162,6 +162,24 @@ class MetadataTests(unittest.TestCase):
         changed["state"]["memberships"].append(copy.deepcopy(changed["state"]["memberships"][-1]))
         self.assertFalse(verify.target_roles_match(changed["state"]))
 
+    def test_nonowner_zero_or_one_safe_creator_grant_and_owner_authority(self):
+        manifest=manifest_fixture();before=baseline_fixture()
+        state=actual_fixture(manifest,archive_fixture(manifest),before)["state"]
+        state["memberships"]=[m for m in state["memberships"] if m["name"] in bootstrap.OWNERS]
+        self.assertTrue(verify.target_roles_match(state))
+        grant=dict(name="anon",member="arena_admin",grantor="arena_admin",admin=True,inherit=False,set=False)
+        state["memberships"].append(grant)
+        self.assertTrue(verify.target_roles_match(state))
+        duplicate=copy.deepcopy(state);duplicate["memberships"].append(copy.deepcopy(grant))
+        self.assertFalse(verify.target_roles_match(duplicate))
+        for field,bad in (("member","authenticated"),("admin",False),("inherit",True),("set",True)):
+            changed=copy.deepcopy(state);changed["memberships"][-1][field]=bad
+            self.assertFalse(verify.target_roles_match(changed))
+        for owner in bootstrap.OWNERS:
+            changed=copy.deepcopy(state)
+            changed["memberships"]=[m for m in changed["memberships"] if m["name"]!=owner]
+            self.assertFalse(verify.target_roles_match(changed))
+
     def test_invalid_reference_stops_before_secret_access_and_missing_auth_is_reported(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"manifest.json"

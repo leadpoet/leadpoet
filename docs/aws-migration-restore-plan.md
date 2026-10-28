@@ -197,6 +197,12 @@ SELECT grants on the exact 48 tables/3 sequences and USAGE on the 3 schemas,
 then drop that inert role in the same transaction. Its guards reject unsafe
 attributes and ownership. The sole allowed membership is PostgreSQL 17's
 automatic creator grant to `arena_admin`: ADMIN true, INHERIT false, SET false.
+The isolated RDS 17.9 probe creates no such grant and can still drop the inert
+role through its existing RDS administrator authority. Accept zero or one
+admin-only creator grant for non-owner roles; reject duplicates or any other
+recipient or access flag. The four owner roles still require explicit SET and
+inheritance authority. This RDS exception does not change source Supabase
+export-role validation.
 Keep that authority until `DROP ROLE` removes the inert role and its creator
 membership. Do not revoke it first or grant the operator inherited/SET access
 to the export role. Any other membership is rejected. Unexpected residual dependencies make

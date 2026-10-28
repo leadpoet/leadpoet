@@ -155,6 +155,20 @@ class NativeBootstrapTests(unittest.TestCase):
                 snapshot.command(snapshot.psql_command(),env,logs,"native-bootstrap",data=sql.encode())
                 after = bootstrap.read_state(env,logs)
                 self.assertEqual(after["roles"],bootstrap.role_expectations())
+                creator = [m for m in after["memberships"] if m["name"]==snapshot.SOURCE_ROLE]
+                self.assertEqual(len(creator),1)  # Retain stock PG17 creator proof.
+                self.assertTrue(creator[0]["admin"])
+                self.assertFalse(creator[0]["inherit"] or creator[0]["set"])
+                # RDS17.9 externally proved zero rows + successful DROP (private
+                # receipt ce17124348f0eff3e8f62a45621509aa9db909e1df3c61b0ac46000941aacddd).
+                # Remove the local row only to exercise the exact SQL guard's
+                # zero case. This does not simulate RDS DROP authority.
+                run(bootstrap_admin,data=("REVOKE "+snapshot.SOURCE_ROLE+" FROM arena_admin;").encode())
+                self.assertEqual([m for m in bootstrap.read_state(env,logs)["memberships"] if m["name"]==snapshot.SOURCE_ROLE],[])
+                proof = sql[sql.index("DO $proof$"):].rsplit("COMMIT;",1)[0]
+                snapshot.command(snapshot.psql_command(),env,logs,"zero-membership-guard",
+                                 data=("BEGIN READ ONLY;\n"+snapshot.TRANSACTION_SETTINGS+proof+"\nROLLBACK;\n").encode())
+                run(bootstrap_admin,data=("GRANT "+snapshot.SOURCE_ROLE+" TO arena_admin WITH ADMIN TRUE,INHERIT FALSE,SET FALSE;").encode())
                 self.assertEqual(after["public"]["owner"],"pg_database_owner")
                 self.assertEqual([s["name"] for s in after["bootstrap_schemas"]],["auth","extensions"])
                 with snapshot.Keeper(env,logs) as keeper:

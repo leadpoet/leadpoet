@@ -392,10 +392,15 @@ def optional_capture_failure(row: Mapping[str, Any]) -> bool:
     counts = value["counts"]
     normal = {"responses_started", "responses_complete", "responses_partial", "checkpoint_failure",
               "provider_ack_written", "response_metadata_written", "web_written"}
+    # A client read report transport failure is diagnostic only after the new frozen
+    # policy independently proves every required host result. Attribute it here
+    # so a separate generic failure remains distinguishable and cannot be waived.
     optional = {"checkpoint_failure_" + category + "_" + reason
                 for category in ("web_fetch", "web_fetch_binary", "http_response_metadata")
                 for reason in ("timeout", "host_rejected", "transport_error", "invalid_response",
                                "invalid_frame", "socket_unavailable")}
+    optional.update("checkpoint_failure_response_received_" + reason
+                    for reason in ("timeout", "transport_error", "socket_unavailable"))
     if any(not isinstance(key, str) or type(count) is not int or count < 0
            or key not in normal | optional and not key.startswith("client_")
            for key, count in counts.items()):

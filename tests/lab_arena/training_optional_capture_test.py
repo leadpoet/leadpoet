@@ -107,7 +107,8 @@ def test_failure_enum_rejects_untrusted_values_with_validation_error(failure):
 
 
 @pytest.mark.parametrize("new_policy", [False, True])
-def test_actual_export_preserves_optional_source_tag_and_raw_incompleteness(new_policy):
+@pytest.mark.parametrize("checkpoint_category", ["web_fetch", "response_received"])
+def test_actual_export_preserves_optional_source_tag_and_raw_incompleteness(new_policy, checkpoint_category):
     from lab_arena import training_export
     from tests.lab_arena.training_export_receipts_test import values_with_receipts
     from tests.lab_arena.training_observations_test import save
@@ -119,7 +120,12 @@ def test_actual_export_preserves_optional_source_tag_and_raw_incompleteness(new_
         config.pop("training_maximum_missing_reasoning_percent")
     buffer = observations.Buffer()
     assert buffer.append_response_receipt(payload["response_receipts"][0])
-    assert buffer.append_agent_observation(summary()) == 0
+    runtime_summary = summary()
+    if checkpoint_category == "response_received":
+        runtime_summary["data"]["value"]["counts"] = {
+            "responses_started": 1, "responses_complete": 1, "client_httpx": 1,
+            "checkpoint_failure": 1, "checkpoint_failure_response_received_transport_error": 1}
+    assert buffer.append_agent_observation(runtime_summary) == 0
     saved = save(values, buffer.document())
     example = training_export.assemble_example(**values)
     artifact = example["worker_observation_artifacts"]["execute:1"]

@@ -29,8 +29,10 @@ def _refuse_declared_oversize(request: Request, limit: int) -> None:
     if declared is not None:
         try:
             if int(declared) > limit:
+                telemetry.note_denial("request_body_too_large")
                 raise HTTPException(status_code=413, detail="body too large")
         except ValueError:
+            telemetry.note_denial("content_length_invalid")
             raise HTTPException(status_code=400, detail="content-length invalid")
 
 
@@ -53,16 +55,21 @@ async def _read_json(
     async for chunk in request.stream():
         total += len(chunk)
         if total > limit:
+            telemetry.note_denial("request_body_too_large")
             raise HTTPException(status_code=413, detail="body too large")
         chunks.append(chunk)
     raw = b"".join(chunks)
     try:
         document = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError):
+        telemetry.note_denial("request_body_not_json")
         raise HTTPException(status_code=400, detail="body is not JSON")
     try:
         contracts.check_strict_document(document, limits)
     except ArenaContractError as exc:
+        # Same code the ArenaContractError handler records; converting to
+        # HTTPException here would otherwise skip it and leave the span blank.
+        telemetry.note_denial("contract:%s" % str(exc)[:100])
         raise HTTPException(status_code=400, detail=str(exc)[:120])
     return document
 

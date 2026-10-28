@@ -988,7 +988,8 @@ def _failed_delivery_gap_verified(example, *, worker_proofs=None):
                 or artifact.get("payload_sha256") != training_worker_proof.payload_hash(payload, worker_proofs)
                 or not (payload.get("complete") is True and payload.get("failures") == []
                     or payload.get("complete") is False and payload.get("failures") in (["capture_incomplete"],
-                        ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE]))
+                        ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE],
+                        [training_observations.OPTIONAL_CAPTURE_INCOMPLETE]))
                 or training_observations._validate_payload(payload) != payload
                 or any(payload[count] != len(payload[rows]) for count, rows in (
                     ("observation_count", "observations"), ("response_receipt_count", "response_receipts"),
@@ -998,6 +999,8 @@ def _failed_delivery_gap_verified(example, *, worker_proofs=None):
             return None
         calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
         undispatched = [call for call in calls if training_thinking.verified_undispatched_transport(example, call, worker_proofs=worker_proofs)]
+        if payload["failures"] == [training_observations.OPTIONAL_CAPTURE_INCOMPLETE] and not undispatched:
+            return None
         # Complete capture can truthfully record a request that never reached
         # a provider. Its exact proof still consumes an incomplete ICP slot.
         if payload["complete"] and not undispatched:

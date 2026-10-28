@@ -464,7 +464,11 @@ stop_arena_component() {
   arena_component_command "$component" "$slot" || return 1
   # Use the newly verified controller helper even when retiring a different
   # source SHA. The old runtime tree supplies only the exact process cwd.
-  process_helper="$ARENA_CANDIDATE_TREE/scripts/manage_owned_process_group.py"
+  if [ -n "${4:-}" ]; then
+    process_helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
+  else
+    process_helper="$ARENA_CANDIDATE_TREE/scripts/manage_owned_process_group.py"
+  fi
   if ! verify_controller_process_helper "$process_helper"; then
     echo "ERROR: Arena release process helper is unavailable" >&2
     return 1
@@ -472,8 +476,6 @@ stop_arena_component() {
   if [ -n "${4:-}" ]; then
     # Recovery runs old source but stops through the exact new controller. Bind
     # its fresh private receipt to this owner after the latest idle proof.
-    process_helper="$GATEWAY_PREFLIGHT_TREE/scripts/manage_owned_process_group.py"
-    verify_controller_process_helper "$process_helper" || return 1
     if [ -n "${6:-}" ]; then
       state_hash="$6"
     else

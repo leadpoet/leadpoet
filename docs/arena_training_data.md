@@ -299,8 +299,11 @@ provider call. Process death can still lose evidence that has not been uploaded.
 New captures distinguish `optional_capture_incomplete` from the existing generic
 `capture_incomplete` failure in the same stored failure list. The optional tag
 applies only to validated partial web/header observations or a fully attributed
-HTTP recorder summary. Unknown failures, provider callback failures and unfinished
-queues keep the generic tag. Both tags retain `complete: false`. Only validated
+HTTP recorder summary. Balanced `response_received` checkpoint transport failures
+(`timeout`, `transport_error`, or `socket_unavailable`) also receive the optional
+tag because client read reports are optional diagnostics in the new host-result
+policy. Rejected, invalid or unknown callback failures and unfinished queues keep
+the generic tag. Both tags retain `complete: false`. Only validated
 new frozen host-result policies can exclude the optional tag from provider-visible
 training checks, after every affected run passes full snapshot, count, privacy
 and exact host-result checks. Old generic failures are never reclassified.

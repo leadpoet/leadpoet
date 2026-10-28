@@ -52,11 +52,11 @@ class SubmissionCodeReviewer:
             error_code = document.get("error_code", telemetry.NO_ERROR)
             retryable = False
             if committed == "error":
-                policy_retryable = document.get("retryable")
-                if policy_retryable is True:
-                    retryable = committed_attempt < code_review_policy.MAX_TRANSIENT_ATTEMPTS
-                elif policy_retryable is not False:
-                    retryable = committed_attempt < code_review_policy.LEGACY_MAX_ATTEMPTS
+                retryable = code_review_policy.review_retry_available({
+                    "code_review_status": committed,
+                    "code_review_attempts": committed_attempt,
+                    "code_review_doc": document,
+                })
             if result["status"] in ("deadline", "round_closed", "submission_ineligible"):
                 error_code = {
                     "deadline": "code_review_deadline_exceeded",
@@ -278,8 +278,8 @@ class SubmissionCodeReviewer:
                 )
         except Exception:
             secret = ""
-            # Unknown local failures retain the legacy cap without exposing
-            # exception text or claiming that the miner's key is invalid.
+            # A local failure is incomplete; never expose exception text or
+            # claim that the miner's key is invalid without a typed failure.
             document = code_review_policy.diagnostic(
                 "code_review_provider_unavailable"
             )
@@ -387,10 +387,12 @@ class SubmissionCodeReviewer:
                         if provider_http_status == 402 and response.status == 429:
                             document["provider_http_status"] = provider_http_status
             except code_review.CodeReviewError as exc:
-                # A malformed successful generation may already have been paid.
-                # Retain the legacy three-attempt cap rather than expanding it.
+                # An unusable provider review is not a negative code verdict.
+                # Account this call, then let the admission window and backoff
+                # bound the next independent claim. Never loop within a call.
                 document = code_review_policy.diagnostic(
-                    exc.code, error_reason=exc.response_reason
+                    exc.code, error_reason=exc.response_reason,
+                    retryable=True if exc.code in code_review_policy.TRANSIENT_ERROR_CODES else None,
                 )
             except broker.ProviderTransportError:
                 # The request may have reached the provider, so its cost is unknown.
@@ -398,7 +400,7 @@ class SubmissionCodeReviewer:
                     "code_review_transport_error", retryable=True
                 )
             except Exception:
-                # Unknown failures retain the legacy cap and no raw detail.
+                # A local/provider failure remains incomplete, with no raw detail.
                 document = code_review_policy.diagnostic(
                     "code_review_provider_unavailable"
                 )

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from lab_arena import weight_state
+from tests.lab_arena.sep20_frozen_publication_fixture import frozen_publication_document, publish_frozen_document
 from leadpoet_canonical import arena_weights
 from tests.lab_arena import sep20_authority_preserving_rejudge332_postgres_test as rerun332
 from tests.lab_arena import sep20_scored_authority_rejudge337_postgres_test as rerun337
@@ -39,24 +40,7 @@ def _digest(cursor, expression: str, parameters=()) -> str:
 
 
 def _capture_publication(service) -> dict:
-    captured = {}
-    transition = service.store.transition_round
-
-    def capture(round_id, expected_status, next_status, patch=None):
-        assert (round_id, expected_status, next_status) == (
-            ROUND,
-            "scored",
-            "published",
-        )
-        captured.update(patch or {})
-        return {"status": "captured", "round_status": "scored"}
-
-    service.store.transition_round = capture
-    try:
-        assert service.publish(ROUND)["status"] == "captured"
-    finally:
-        service.store.transition_round = transition
-    return captured["publication_doc"]
+    return frozen_publication_document(service, ROUND)
 
 
 def _render(cursor, publication: dict) -> str:
@@ -182,7 +166,7 @@ def _prepare_scored337(connection, harness, monkeypatch):
         cursor.execute(rendered337)
     connection.commit()
     rerun332._drive_rejudge_cycle(
-        harness.service, harness.objects, harness.runner_keys[0]
+        harness.service, harness.objects, harness.runner_keys[0], historical_zeros=True
     )
     with connection.cursor() as cursor:
         cursor.execute(
@@ -295,7 +279,7 @@ def test_changed_decision_publishes_without_rewriting_reward_or_weights(
             cursor.execute("ROLLBACK TO SAVEPOINT reward_drift")
         connection.commit()
 
-        assert harness.service.publish(ROUND)["status"] == "ok"
+        assert publish_frozen_document(harness.service, ROUND, publication)["status"] == "ok"
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT status,publication_doc,king_outcome,king_hotkey "

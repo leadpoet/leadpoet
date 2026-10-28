@@ -32,6 +32,9 @@ class HistoricalArenaStore(ArenaStore):
     def list_rounds(self, *, columns="*", **kwargs):
         # Compact competition publication was added after these pinned schemas.
         columns = columns.replace("publication_doc:lab_arena_competition_publication_v1", "publication_doc")
+        columns = columns.replace("configuration_doc:lab_arena_public_configuration_v1", "configuration_doc")
+        columns = ",".join(column for column in columns.split(",")
+                           if column != "scoring_generation_floor")
         return super().list_rounds(columns=columns, **kwargs)
 
     def recover_baseline(self, round_id, work_items=()):

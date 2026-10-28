@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.lab_arena.sep20_frozen_publication_fixture import frozen_publication_document, publish_frozen_document
+
 from tests.lab_arena import sep18_published_rerun295_postgres_test as lifecycle
 from tests.lab_arena import sep19_terminal309_newjudge_rerun310_postgres_test as rerun310
 from tests.lab_arena import sep20_90m_verifier_baseline_rerun328_postgres_test as rerun328
@@ -617,7 +619,7 @@ def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
     return identity
 
 
-def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
+def _drive_rejudge_cycle(service, objects, runner_hotkey, *, historical_zeros=False) -> None:
     """Use the real parallel close and score lifecycle without execute claims."""
     assert service.close_stage(ROUND, 1)["status"] == "ok"
     for stage, expected in ((1, 50), (2, 48)):
@@ -678,6 +680,9 @@ def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
                 judgment_evidence_hash=lifecycle.contracts.document_hash(evidence),
             )["status"] == "accepted"
         assert service.close_scoring(ROUND, stage)["status"] == "closed"
+        if historical_zeros:
+            from tests.lab_arena.sep20_frozen_publication_fixture import record_frozen_failed_execution_zeros
+            record_frozen_failed_execution_zeros(service, ROUND, stage)
         scored = service.score_stage(ROUND, stage)
         assert scored["status"] == "ok", scored
         if stage == 1:
@@ -890,9 +895,10 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
         connection.commit()
 
         _drive_rejudge_cycle(
-            harness.service, harness.objects, harness.runner_keys[0]
+            harness.service, harness.objects, harness.runner_keys[0], historical_zeros=True
         )
-        assert harness.service.publish(ROUND)["status"] == "ok"
+        publication = frozen_publication_document(harness.service, ROUND)
+        assert publish_frozen_document(harness.service, ROUND, publication)["status"] == "ok"
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*),count(DISTINCT assignment_id),"

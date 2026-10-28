@@ -29,6 +29,13 @@ def test_historical_projection_keeps_pinned_schema_and_database_errors(database)
             current.get_public_submissions_round(round_id)
         assert historical.get_public_submissions_round(round_id) == current.get_round(round_id)
         assert historical.get_published_results_round(round_id) is None
+        with pytest.raises(ArenaStoreError, match="lab_arena_public_configuration_v1"):
+            current.list_rounds(columns="round_id,configuration_doc:lab_arena_public_configuration_v1")
+        projected = historical.list_rounds(columns="round_id,configuration_doc:lab_arena_public_configuration_v1")
+        assert projected == [{"round_id": round_id, "configuration_doc": configuration}]
+        with pytest.raises(ArenaStoreError, match="scoring_generation_floor"):
+            current.list_rounds(columns="round_id,scoring_generation_floor")
+        assert historical.list_rounds(columns="round_id,scoring_generation_floor") == [{"round_id": round_id}]
         with pytest.raises(ArenaStoreError, match="does_not_exist"):
             historical.list_runs(round_id, columns="does_not_exist")
         # No later migration or production fallback was installed by this client.

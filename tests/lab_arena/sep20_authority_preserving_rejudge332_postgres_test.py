@@ -755,7 +755,7 @@ def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
     return identity
 
 
-def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
+def _drive_rejudge_cycle(service, objects, runner_hotkey, *, historical_zeros=False) -> None:
     """Use the real parallel close and score lifecycle without execute claims."""
     assert service.close_stage(ROUND, 1)["status"] == "ok"
     for stage, expected in ((1, 50), (2, 48)):
@@ -816,6 +816,9 @@ def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
                 judgment_evidence_hash=lifecycle.contracts.document_hash(evidence),
             )["status"] == "accepted"
         assert service.close_scoring(ROUND, stage)["status"] == "closed"
+        if historical_zeros:
+            from tests.lab_arena.sep20_frozen_publication_fixture import record_frozen_failed_execution_zeros
+            record_frozen_failed_execution_zeros(service, ROUND, stage)
         scored = service.score_stage(ROUND, stage)
         assert scored["status"] == "ok", scored
         if stage == 1:

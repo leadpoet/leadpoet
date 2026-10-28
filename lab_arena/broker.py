@@ -5148,6 +5148,13 @@ class Broker:
                 )
             except ArenaStoreUnavailable as exc:
                 if getattr(exc, "transaction_rolled_back", False) is True or reserve_readback_used:
+                    if reserve_readback_used and prepared_capture is not None:
+                        # A lost reserve response may leave its request pointer
+                        # committed even when the same-identity readback fails.
+                        try:
+                            prepared_capture.persist()
+                        except Exception:
+                            pass  # Capture must not replace the admission error.
                     # The RPC already exhausted its bounded rollback retries;
                     # only an ambiguous response needs reservation readback.
                     raise
@@ -5204,6 +5211,7 @@ class Broker:
                 return _error_result("provider_unavailable", summary)
             time.sleep(min(0.2, max(0.0, reserve_deadline - time.monotonic())))
         status = reserved.get("status")
+        reservation_readback_rows = None
         if source_content_fallback and reserved.get("idempotent") is True and status in {
             "reserved", "dispatched", "settled", "uncertain", "recovered",
         }:
@@ -5252,6 +5260,7 @@ class Broker:
                 confirmed_cost_admission=True, ledger_entries=rows,
             ):
                 return _error_result("broker_unavailable", summary)
+            reservation_readback_rows = rows
             effective_normalized = {
                 **effective_normalized,
                 "payload": {**effective_normalized["payload"], "timeout_ms": saved_timeout,
@@ -5271,19 +5280,33 @@ class Broker:
         # match the exact replayed call. Completed states keep replaying their
         # saved terminal response without a new provider request.
         if (
-            (
-                reserve_readback_used
-                and status in {
-                    "reserved", "dispatched", "settled", "uncertain", "recovered",
-                }
-                or reserved.get("idempotent") is True and status == "reserved"
-            )
-            and not _reservation_readback_matches(
+            reserve_readback_used
+            and status in {
+                "reserved", "dispatched", "settled", "uncertain", "recovered",
+            }
+            or reserved.get("idempotent") is True and status == "reserved"
+        ):
+            if reserved.get("call_identity") != call_identity:
+                return _error_result("broker_unavailable", summary)
+            try:
+                rows = (reservation_readback_rows if reservation_readback_rows is not None
+                        else self._store.list_ledger(call_identity=call_identity, limit=64))
+            except ArenaStoreUnavailable:
+                if reserve_readback_used and prepared_capture is not None:
+                    # Admission remains unverified, but the first reserve may
+                    # already reference this prepared, sanitized request.
+                    try:
+                        prepared_capture.persist()
+                    except Exception:
+                        pass
+                raise
+            if rows is None or not _reservation_readback_matches(
                 self._store, reservation_arguments, reserved,
                 confirmed_cost_admission=getattr(context, "kind", "execute") in {"execute", "score"},
-            )
-        ):
-            return _error_result("broker_unavailable", summary)
+                ledger_entries=rows,
+            ):
+                return _error_result("broker_unavailable", summary)
+            reservation_readback_rows = rows
         if status == "stale":
             return _error_result("lease_stale", summary)
         if prepared_capture is not None and (status == "reserved" or (
@@ -5294,7 +5317,8 @@ class Broker:
                 if not capture_authorized:
                     # Replays can repair a missing blob only when the exact
                     # existing receipt references the prepared content.
-                    rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+                    rows = (reservation_readback_rows if reservation_readback_rows is not None
+                            else self._store.list_ledger(call_identity=call_identity, limit=64))
                     capture_authorized = any(
                         row.get("entry_kind") == ("refusal" if status == "refused" else "reservation")
                         and row.get("run_id") == context.run_id

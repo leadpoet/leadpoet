@@ -56,7 +56,7 @@ def _install_loop(monkeypatch, *, status=403, body=REFUSAL, contents=None,
             calls["contents"].append(payload)
             assert payload == {"ids": [urls[-1]],
                                "text": {"maxCharacters": c.MAX_PAGE_CHARACTERS},
-                               "maxAgeHours": 0}
+                               "maxAgeHours": 0, "livecrawlTimeout": 20_000}
             if isinstance(contents, BaseException):
                 raise contents
             return contents if contents is not None else (200, {

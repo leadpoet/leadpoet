@@ -92,6 +92,8 @@ MAX_STAGE_ARCHIVE_CARDS = 3
 MAX_SEARCH_RESULTS = 5
 MAX_INDUSTRY_SEARCH_RESULTS = 10
 MAX_PAGE_CHARACTERS = 24_000
+# Keep exact-page live crawling within the existing 60-second broker bound.
+EXA_LIVECRAWL_TIMEOUT_MILLISECONDS = 20_000
 MAX_SUBMITTED_SOURCE_URLS = 8
 PRIVATE_FETCHED_PAGES_KEY = "_server_fetched_pages"
 REJECTED_QUOTE_CONTEXT_BEFORE_CHARACTERS = 1_000
@@ -2734,7 +2736,8 @@ async def _fetch_exa_exact_page(
             headers={"x-api-key": key, "Content-Type": "application/json"},
             payload={"ids": [canonical_url],
                      "text": {"maxCharacters": MAX_PAGE_CHARACTERS},
-                     "maxAgeHours": 0},
+                     "maxAgeHours": 0,
+                     "livecrawlTimeout": EXA_LIVECRAWL_TIMEOUT_MILLISECONDS},
         )
     except (aiohttp.ClientError, asyncio.TimeoutError):
         return {"ok": False, "error": "contents_provider_unavailable"}

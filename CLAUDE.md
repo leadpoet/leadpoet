@@ -10,6 +10,21 @@ accepted judgments, scoring, costs, publication and rewards. The coordinating
 task owns production actions and must verify actual scoring plus fresh
 OnePatch/Sentry. Preserve concurrent industry work and both instruction files.
 
+## Scoped authorization: October 27 independent verifier accuracy audit
+
+The user authorized independently checking the October 26/27 judge audit,
+reproducing actual scoring errors, implementing the smallest proven root-cause
+fixes, and pushing, merging and canonically deploying them. The coordinating
+task may run reward-disabled historical scoring replays with an aggregate
+OpenRouter limit of $8 for this task. Use isolated task state and exact source
+and image identities; stop paid admission on unknown charges. Preserve the
+original company/ICP inputs, frozen comparison labels, evidence binding, correct
+rejections, scoring standards, privacy, billing, published results and rewards.
+Do not change or stop concurrent PR793/PR825 work. Internal implementation agents
+may commit only. The coordinator owns independent review, production rollout,
+affected-flow verification and fresh OnePatch/Sentry checks. This authority ends
+when the scoped fixes and production verification are complete.
+
 ## Scoped authorization: October 27 oversized source script payloads
 
 The user authorized the confirmed HTML source fix in the existing shared

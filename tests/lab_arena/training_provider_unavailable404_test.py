@@ -10,7 +10,8 @@ import pytest
 from lab_arena import contracts, training_eligibility, training_thinking
 from tests.lab_arena.training_call_semantics_test import _failed_example
 from tests.lab_arena.training_eligibility_test import (
-    captured_example, refresh_response_links, submission, ten_selected_examples,
+    _unsettled_selected_call, captured_example, refresh_response_links, submission,
+    ten_selected_examples,
 )
 from tests.lab_arena.training_steps_test import seal
 
@@ -42,15 +43,27 @@ def selected_context(probe):
 
 
 @pytest.mark.parametrize('size', ['120b', '20b'])
-def test_saved_ignored_provider_404_is_verified_but_never_complete(size):
+@pytest.mark.parametrize('filtered_available', [False, True])
+def test_saved_ignored_provider_404_is_verified_but_never_complete(size, filtered_available):
     fixture = saved(size)
     probe = fixture['example']
     call = probe['provider_calls'][0]
     raw = base64.b64decode(fixture['wire_body_b64'], validate=True)
     assert json.loads(raw) == call['response']
-    receipt = call['response_receipts'][0]
-    assert receipt['wire_body_sha256'] == contracts.hash_bytes(raw)
-    assert receipt['wire_body_bytes'] == len(raw)
+    if filtered_available:
+        route = call['reasoning_capture']
+        endpoints = call['response']['openrouter_metadata']['endpoints']['available']
+        target = next(row for row in endpoints if row.get('model') == route['model_version']
+                      and row.get('provider') == route['provider_name'])
+        endpoints.extend([deepcopy(target), deepcopy(target)])
+        call['response']['error']['metadata']['routing_funnel'][-1]['endpoint_count'] = 2
+        refresh_response_links(probe, 0)
+        assert sum(row.get('model') == route['model_version']
+                   and row.get('provider') == route['provider_name'] for row in endpoints) == 3
+    else:
+        receipt = call['response_receipts'][0]
+        assert receipt['wire_body_sha256'] == contracts.hash_bytes(raw)
+        assert receipt['wire_body_bytes'] == len(raw)
     assert training_thinking.verified_failed_attempt(probe, call) is True
 
     example = selected_context(probe)
@@ -76,6 +89,51 @@ def test_saved_ignored_provider_404_is_verified_but_never_complete(size):
     assert strict['eligible'] is False
     assert 'full_thinking_call_missing' in strict['reasons']
     from lab_arena import training_steps
+    splits, _ = training_thinking.build(
+        [example], training_steps.Rules(production_rounds_only=False))
+    assert not splits['train'] and not splits['eval']
+
+
+def test_filtered_404_with_uncertain_cost_uses_one_incomplete_slot_at_80_and_1():
+    from lab_arena import training_steps
+    probe = saved('120b')['example']
+    call = probe['provider_calls'][0]
+    route = call['reasoning_capture']
+    endpoints = call['response']['openrouter_metadata']['endpoints']['available']
+    target = next(row for row in endpoints if row.get('model') == route['model_version']
+                  and row.get('provider') == route['provider_name'])
+    endpoints.extend([deepcopy(target), deepcopy(target)])
+    call['response']['error']['metadata']['routing_funnel'][-1]['endpoint_count'] = 2
+    refresh_response_links(probe, 0)
+
+    example = selected_context(probe)
+    example['configuration']['training_maximum_missing_reasoning_percent'] = 1
+    _unsettled_selected_call(example)
+    call = example['provider_calls'][0]
+    host = training_steps._host_result(example, call, allow_worker_error=True)
+    assert host['write']['status'] == 404 and host['response'] == call['response']
+    assert training_thinking.verified_failed_attempt(example, call)
+    assert call['accounting_state'] == 'uncertain' and call['actual_microusd'] is None
+    assert call['evidence_gaps'] == ['provider_cost_unresolved']
+    assert example['competition_cost_eligibility']['status'] == 'unavailable'
+
+    examples = ten_selected_examples()
+    for other in examples.values():
+        other['configuration']['training_maximum_missing_reasoning_percent'] = 1
+        seal(other)
+    examples.pop('run-9')
+    examples[example['run_id']] = example
+    result = training_eligibility.assess_capture(
+        submission(), examples, list(examples), enabled=True,
+        minimum_coverage_percent=80, maximum_missing_reasoning_percent=1)
+    assert result['eligible'] is True, result
+    assert result['counts']['complete_runs'] == 9
+    assert result['counts']['incomplete_runs'] == 1
+    failed_run = next(row for row in result['counts']['reasoning_by_run']
+                      if row['run_id'] == example['run_id'])
+    assert failed_run['verified_failed_model_attempts'] == 0
+    assert failed_run['completed_untruncated_verified_reasoning_tokens'] == 0
+    assert training_thinking.selected_research_evidence(example) is None
     splits, _ = training_thinking.build(
         [example], training_steps.Rules(production_rounds_only=False))
     assert not splits['train'] and not splits['eval']
@@ -171,7 +229,8 @@ def test_parameter_routing_failure_preserves_other_targets_without_client_receip
 
 
 @pytest.mark.parametrize('damage', ['selected', 'selection_unknown', 'missing_funnel', 'missing_failed_step',
-                                   'count_mismatch', 'wrong_model', 'wrong_provider', 'fallbacks'])
+                                   'count_mismatch', 'count_zero', 'count_bool',
+                                   'wrong_model', 'wrong_provider', 'fallbacks'])
 def test_routing_failure_requires_structural_no_selection_proof(damage):
     probe = deepcopy(saved('120b')['example'])
     call = probe['provider_calls'][0]
@@ -182,6 +241,8 @@ def test_routing_failure_requires_structural_no_selection_proof(damage):
     elif damage == 'missing_funnel': response['error']['metadata'].pop('routing_funnel')
     elif damage == 'missing_failed_step': response['error']['metadata'].pop('failed_routing_step')
     elif damage == 'count_mismatch': response['error']['metadata']['routing_funnel'][-1]['endpoint_count'] = 2
+    elif damage == 'count_zero': response['error']['metadata']['routing_funnel'][-1]['endpoint_count'] = 0
+    elif damage == 'count_bool': response['error']['metadata']['routing_funnel'][-1]['endpoint_count'] = True
     elif damage == 'wrong_model': response['openrouter_metadata']['requested'] = 'wrong'
     elif damage == 'wrong_provider': body['provider']['only'] = ['wrong']
     else: body['provider']['allow_fallbacks'] = True

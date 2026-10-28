@@ -1,3 +1,21 @@
+## Scoped authorization: October 28 AWS restore rehearsal
+
+The user asked the coordinating agent to take ownership and continue the staged
+subnet Supabase-to-AWS migration. This stage may merge the reviewed foundation,
+provision a temporary isolated restore runner and scoped AWS access, create a
+complete read-only source export identity, copy a consistent source snapshot,
+and restore and verify it in the dedicated leadpoet-subnet-arena RDS target.
+Use account 493765492819, us-east-1. Preserve all source data, SOURCE_ADD history,
+current production endpoints, running jobs, accounting, scoring and chain state.
+Do not cut over production or restart the gateway/validator in this stage.
+Do not broaden the existing parity-reader identity. Keep secrets out of source,
+logs and tool output. Remove temporary export access after verified transfer;
+retain encrypted migration evidence and backups. Internal agents may prepare
+scoped files or perform read-only review; only the coordinator owns cloud and
+source permission writes. Use independent review before source grants and target
+restore. This stage ends after restored-state verification and a handoff of the
+remaining client/API and cutover steps.
+
 ## Scoped authorization: October 28 AWS migration foundation
 
 The user authorized starting the subnet Supabase-to-AWS migration step by step.

@@ -875,7 +875,86 @@ def _reported_phase_coverage(payload):
                 "state_record_errors", "state_local_errors", "state_overflow_rows", "state_overflow_manifests")))
 
 
-def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True, require_client_ack=True, configuration=None):
+def _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger_rows):
+    """Prove counted local broker errors without creating provider ledger calls."""
+    from lab_arena import training_coverage, training_observations
+    if ledger_rows is None or not training_coverage.uses_host_result_evidence(configuration or {}):
+        return {}
+    payload = snapshot.get("payload") or {}
+    candidates = [row for row in payload.get("observations") or []
+                  if (row.get("outcome") or {}).get("broker_disposition")]
+    if not candidates:
+        return {}
+    try:
+        if (snapshot.get("schema_version") != training_observations.SCHEMA_VERSION
+                or snapshot.get("run_id") != run["run_id"] or snapshot.get("kind") != run["kind"]
+                or snapshot.get("payload_sha256") != contracts.document_hash(payload)):
+            return {}
+        found = {}
+        observations = payload["observations"]
+        for row in candidates:
+            identity, sequence = row.get("call_identity"), row.get("action_sequence")
+            disposition = row["outcome"]["broker_disposition"]
+            if (training_observations.clean_observation(row) != row
+                    or row["kind"] != "nonstandard_response"
+                    or row["contributes_to_provider_call_count"] is not True
+                    or not isinstance(identity, str) or contracts.SHA256_RE.fullmatch(identity) is None
+                    or type(sequence) is not int or sequence < 0
+                    or disposition != {"outcome": "not_dispatched", "reason": disposition.get("reason")}
+                    or disposition.get("reason") not in training_observations.BROKER_NOT_DISPATCHED_REASONS
+                    or not training_observations._expected_not_dispatched_response(row["outcome"].get("response"))
+                    or sum(item.get("call_identity") == identity for item in observations) != 1
+                    or sum(item.get("action_sequence") == sequence for item in observations) != 1
+                    or any(call.get("call_identity") == identity or call.get("base_call_identity") == identity
+                           or call.get("action_sequence") == sequence for call in paid)):
+                continue
+            # Supplied raw rows remain authority even if no paid call could be
+            # assembled from them. A broker tag cannot erase accounting.
+            collision = False
+            for entry in ledger_rows:
+                doc = entry.get("entry_doc") or {}
+                call = doc.get("call") or {}
+                if (entry.get("call_identity") == identity
+                        or doc.get("base_call_identity") == identity
+                        or call.get("base_call_identity") == identity
+                        or entry.get("run_id") == run["run_id"] and (
+                            doc.get("action_sequence") == sequence or call.get("action_sequence") == sequence)):
+                    collision = True
+                    break
+            if collision:
+                continue
+            writes = [item for item in payload["response_receipts"]
+                      if item.get("call_identity") == identity or item.get("ordinal") == row["ordinal"]
+                      or item.get("action_sequence") == sequence]
+            if len(writes) != 1:
+                continue
+            write = writes[0]
+            response = row["outcome"]["response"]
+            raw = base64.b64decode(response["body_b64"], validate=True)
+            if (training_observations.clean_response_receipt(write) != write
+                    or any(write[key] != row[key] for key in ("ordinal", "action_sequence", "operation_id", "call_identity"))
+                    or write["protocol"] != row["outcome"]["protocol"]
+                    or write["write_state"] != "socket_written" or write["status"] != response["status"]
+                    or write["body_bytes"] != len(raw) or write["body_sha256"] != contracts.hash_bytes(raw)):
+                continue
+            reads = [item for item in payload["agent_observations"] if item.get("kind") == "response_received"
+                     and (item.get("data") or {}).get("call_identity") == identity]
+            # Host-result rounds do not require cooperative miner callbacks.
+            # Every callback that is present must still agree with the write.
+            if any(training_observations.clean_agent_observation(read) != read
+                   or read["privacy"] != {"redacted": False, "redactions": []}
+                   or read["after_action_sequence"] != sequence
+                   or any(read["data"].get(key) != write[key]
+                          for key in ("call_identity", "status", "body_sha256", "body_bytes"))
+                   for read in reads):
+                continue
+            found[identity] = row
+        return found
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        return {}
+
+
+def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True, require_client_ack=True, configuration=None, ledger_rows=None, update_provenance=True):
     """Join host writes and cooperative read acknowledgments without guessing.
 
     A host write is not consumption. An SDK acknowledgment is an agent report,
@@ -884,11 +963,17 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
     """
     payload = snapshot["payload"]
     errors, linked = set(), {}
-    by_identity = {call["call_identity"]: call for call in paid}
+    not_dispatched = _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger_rows)
+    by_identity = {call["call_identity"]: call if update_provenance else {
+        **call, "response_provenance": copy.deepcopy(call.get("response_provenance") or {})}
+        for call in paid}
     error_observations = {row["ordinal"]: row for row in payload.get("observations", [])
                           if row.get("call_identity") is not None}
     for receipt in payload.get("response_receipts", []):
         call = by_identity.get(receipt["call_identity"])
+        if call is None and receipt["call_identity"] in not_dispatched:
+            linked[receipt["call_identity"]] = receipt
+            continue
         if (call is None or call.get("action_sequence") != receipt["action_sequence"]
                 or call.get("operation_id") != receipt["operation_id"]):
             errors.add("worker_response_receipt_link_invalid")
@@ -940,7 +1025,7 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
             errors.add("binary_privacy_review_required")
         for reference in row["depends_on"]:
             if reference.startswith("sha256:"):
-                dependency = by_identity.get(reference)
+                dependency = by_identity.get(reference) or not_dispatched.get(reference)
                 if (dependency is None or type(dependency.get("action_sequence")) is not int
                         or type(row["after_action_sequence"]) is not int
                         or dependency["action_sequence"] > row["after_action_sequence"]):
@@ -952,6 +1037,9 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
         if (receipt is None or receipt["write_state"] != "socket_written"
                 or any(receipt[key] != data[key] for key in ("status", "body_sha256", "body_bytes"))):
             errors.add("agent_response_receipt_link_invalid")
+            continue
+        if data["call_identity"] in not_dispatched:
+            acknowledged.add(data["call_identity"])
             continue
         call = by_identity[data["call_identity"]]
         ref = {"run_id": run["run_id"], "id": row["id"], "payload_sha256": snapshot["payload_sha256"]}
@@ -1064,8 +1152,9 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
         artifacts[run_id] = snapshot
         for error in _link_worker_receipts(
                 run, paid, snapshot, require_completed_phases=require_completed_phases,
-                require_client_ack=require_client_ack, configuration=configuration):
+                require_client_ack=require_client_ack, configuration=configuration, ledger_rows=ledger_rows):
             record_error(error, run_id)
+        not_dispatched = _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger_rows)
         for observation in payload["observations"]:
             if observation["privacy"]["redacted"]:
                 record_error("worker_observation_privacy_nonexact", run_id)
@@ -1096,7 +1185,7 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                     record_error("worker_observation_link_invalid", run_id)
                     continue
                 counts[run_id].add(sequence)
-                if observation["kind"] != "local_catalog":
+                if observation["kind"] != "local_catalog" and identity not in not_dispatched:
                     record_error("worker_call_accounting_unverified", run_id)
         # A lease can expire after the immutable capture upload but before the
         # completion summary. Only an earlier failed execution in a validated

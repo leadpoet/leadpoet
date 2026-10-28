@@ -1845,7 +1845,7 @@ def _required_observation_redacted(example, row, *, agent=False):
                      and training_coverage.uses_host_result_evidence(example.get("configuration") or {})))
 
 
-def _provider_visible_view(example):
+def _provider_visible_view(example, *, not_dispatched_host_observations=None):
     """Ignore only attributed local-runtime diagnostics for provider proof.
 
     This is a validation view. The saved export, completeness, hashes and
@@ -1862,19 +1862,27 @@ def _provider_visible_view(example):
     artifacts = example.get("worker_observation_artifacts") or {}
     optional_redacted = False
     optional_binary = False
+    private_local_host = False
+    not_dispatched_host_observations = not_dispatched_host_observations or {}
     for artifact in artifacts.values():
         payload = artifact.get("payload") or {}
         if artifact.get("payload_sha256") != contracts.document_hash(payload):
             return example, frozenset()
-        if any(_required_observation_redacted(example, row) for row in payload.get("observations") or []):
-            return example, frozenset()
+        for row in payload.get("observations") or []:
+            if _required_observation_redacted(example, row):
+                # Eligibility alone supplies rows already proved by the exact
+                # no-ledger host classifier. Keep their privacy flags intact.
+                if (artifact.get("run_id") != example.get("run_id")
+                        or row != not_dispatched_host_observations.get(row.get("call_identity"))):
+                    return example, frozenset()
+                private_local_host = True
         for row in payload.get("agent_observations") or []:
             if _required_observation_redacted(example, row, agent=True):
                 return example, frozenset()
             optional_redacted |= (row.get("kind") in _OPTIONAL_LOCAL_KINDS
                                   and (row.get("privacy") or {}).get("redacted") is True)
             optional_binary |= row.get("kind") == "web_fetch_binary"
-    if optional_redacted and "worker_observation_privacy_nonexact" in reasons:
+    if optional_redacted and not private_local_host and "worker_observation_privacy_nonexact" in reasons:
         ignored.add("worker_observation_privacy_nonexact")
     if optional_binary and "binary_privacy_review_required" in reasons:
         ignored.add("binary_privacy_review_required")
@@ -1899,9 +1907,9 @@ def _provider_visible_view(example):
     return view, frozenset(ignored)
 
 
-def provider_visible_view(example):
+def provider_visible_view(example, *, not_dispatched_host_observations=None):
     try:
-        return _provider_visible_view(example)
+        return _provider_visible_view(example, not_dispatched_host_observations=not_dispatched_host_observations)
     except (TypeError, ValueError, KeyError, AttributeError):
         return example, frozenset()  # Invalid diagnostics never grant an exception.
 

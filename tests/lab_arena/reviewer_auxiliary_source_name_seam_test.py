@@ -12,10 +12,22 @@ from qualification.scoring import lead_scorer
 from scripts import build_arena_reviewer_runtime as builder
 from scripts.arena_reviewer_auxiliary_source_name_seam import (
     ANCHOR, CORRECTION_ID, FUNCTION, GUARD, AuxiliarySourceNameSeamError,
+    REPAIRED_SHA256,
     convert_auxiliary_source_name_seam as convert,
 )
 from tests import test_intent_details_fetched_first_party_context as controls
 from tests.lab_arena.reviewer_runtime_composition_test import layer
+
+
+def corrected_finality(source=None):
+    # Exact reviewed function, also present at upstream600106212. Today's
+    # native scorer can evolve without changing a frozen image's repair.
+    frozen = (builder.ROOT / 'tests/fixtures/arena_reviewer/frozen_auxiliary_source_context.py.txt').read_bytes()
+    assert hashlib.sha256(frozen).hexdigest() == REPAIRED_SHA256
+    text = (source if source is not None else (builder.ROOT / builder.FINALITY_FILE).read_bytes()).decode()
+    node = next(n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == FUNCTION)
+    lines = text.splitlines(keepends=True)
+    return ''.join(lines[:node.lineno - 1]).encode() + frozen + ''.join(lines[node.end_lineno:]).encode()
 
 
 def sources(**options):
@@ -31,6 +43,9 @@ def sources(**options):
                               if name == "scorer_entrypoint.py" else name)).read_bytes()
         for name in names
     }
+    if options.get("rejected_final_packet"):
+        from tests.lab_arena.reviewer_rejected_final_packet_seam_test import corrected_grader
+        result[builder.GRADER_FILE] = corrected_grader()
     if options.get("bound_homepage_legal_alias"):
         # That existing whole-module seam accepts its historical preimage,
         # rather than today's grader with later independent default changes.
@@ -39,8 +54,8 @@ def sources(**options):
     elif options.get("structured_homepage_numeric_alias"):
         from tests.lab_arena.reviewer_runtime_composition_test import _numeric_alias_sources
         result[builder.FINALITY_FILE] = _numeric_alias_sources()[builder.FINALITY_FILE]
-    else:
-        assert result[builder.FINALITY_FILE].count(GUARD.encode()) == 1
+    result[builder.FINALITY_FILE] = corrected_finality(result[builder.FINALITY_FILE])
+    assert result[builder.FINALITY_FILE].count(GUARD.encode()) == 1
     result[builder.FINALITY_FILE] = result[builder.FINALITY_FILE].replace(
         GUARD.encode(), b"", 1,
     )
@@ -50,9 +65,14 @@ def sources(**options):
 def test_exact_function_guard_is_the_only_change_and_is_idempotent():
     original = sources()[builder.FINALITY_FILE]
     repaired = convert(original)
-    assert repaired == (builder.ROOT / builder.FINALITY_FILE).read_bytes()
+    assert repaired == corrected_finality()
     assert repaired.replace(GUARD.encode(), b"", 1) == original
     assert convert(repaired) == repaired
+
+
+def test_current_industry_source_cannot_be_substituted_for_frozen_function():
+    with pytest.raises(AuxiliarySourceNameSeamError, match='unrecognized'):
+        convert((builder.ROOT / builder.FINALITY_FILE).read_bytes())
 
 
 @pytest.mark.parametrize("fault", [

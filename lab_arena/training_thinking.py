@@ -671,11 +671,13 @@ def _verified_unavailable_upstream_failure(example, call) -> bool:
 
 
 def verified_undispatched_transport(example, call, *, require_observation_ref=True) -> bool:
-    """Prove the retained Deepline request never dispatched; invent no reply."""
+    """Prove the retained provider request never dispatched; invent no reply."""
     from lab_arena import training_observations
+    operation = operations.get_operation(call.get("operation_id"))
     if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
             or call.get("run_id") != example.get("run_id")
-            or call.get("provider") != "deepline" or call.get("operation_id") != "deepline.execute"
+            or operation is None or call.get("operation_id") not in {"deepline.execute", *reasoning_capture.OPERATIONS}
+            or call.get("provider") != operation.provider
             or call.get("funding_source") not in {"host", "miner_key"}
             or call.get("accounting_state") != "recovery"
             or type(call.get("actual_microusd")) is not int or call["actual_microusd"] != 0
@@ -1536,6 +1538,11 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
             or not isinstance(example.get("related_run_gap_attribution"), Mapping)):
         return None
     run_id = example["run_id"]
+    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+    payload = artifact.get("payload") or {}
+    has_undispatched = undispatched_proof is not None and any(
+        call.get("run_id") == run_id and undispatched_proof(example, call)
+        for call in example.get("provider_calls") or [])
     rows = example["related_run_gap_attribution"]
     attempts = {row.get("run_id"): row for row in example.get("attempts") or []
                 if isinstance(row, Mapping) and isinstance(row.get("run_id"), str)}
@@ -1556,7 +1563,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
             return None
         if source_id == run_id:
             expected = ({"worker_observations_incomplete"}
-                        if failed_delivery_proof is not None or undispatched_proof is not None else set())
+                        if (failed_delivery_proof is not None or undispatched_proof is not None)
+                        and payload.get("complete") is False else set())
             if undispatched_proof is not None and any(
                     "full_response_unavailable" in (call.get("evidence_gaps") or [])
                     and undispatched_proof(example, call) for call in example.get("provider_calls") or []):
@@ -1571,14 +1579,14 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
         costs.update(source_costs)
     if (research != set(by_dimension.get("research_process") or [])
             or costs != set(by_dimension.get("costs") or [])
-            or proof.get("complete") is not False
+            # Complete capture can record an undispatched request without a
+            # missing artifact. Only its exact proof permits empty raw gaps.
+            or proof.get("complete") is not (not reasons)
             or dimensions.get("research_process") is not (not research)
             or dimensions.get("costs") is not (not costs)
             or reasons != research | costs
-            or not reasons):
+            or not reasons and not has_undispatched):
         return None
-    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
-    payload = artifact.get("payload") or {}
     if (failed_delivery_proof is None and undispatched_proof is None and not _provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(_required_observation_redacted(example, row, agent=field == "agent_observations")

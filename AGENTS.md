@@ -49,6 +49,17 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped authorization: October 28 obsolete AWS key retirement
+
+The user authorized removal and retirement of the obsolete `pranav-main` static
+AWS key after dependency checks, replacement of pinned-key maintenance paths
+with existing temporary operator and IAM role authority, focused regression
+tests, safe merge, and deployment. Do not grant broader IAM permissions or
+change gateway, Arena, validator, restart, scoring, billing or reward behavior.
+Preserve concurrent work. Internal implementation agents may commit only; the
+coordinating task owns production credential changes, deployment and live
+verification. This authority ends after removal and affected-flow verification.
+
 ## Scoped authorization: October 28 Tyche company precheck
 
 The user authorized the October 28 Tyche audit and the narrow confirmed company

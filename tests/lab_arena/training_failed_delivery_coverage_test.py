@@ -339,7 +339,8 @@ def test_exact_failed_delivery_does_not_hide_a_missing_execution_model_call():
 @pytest.mark.parametrize('model,status', [(False, 502), (True, 200)])
 @pytest.mark.parametrize('optional', [False, True])
 @pytest.mark.parametrize('uncertain_cost', [False, True, 'failed', 'bodyless'])
-def test_worker_failed_write_through_actual_export_assembly_and_eligibility(model, status, optional, uncertain_cost):
+@pytest.mark.parametrize('pre_dispatch', [None, False, True])
+def test_worker_failed_write_through_actual_export_assembly_and_eligibility(model, status, optional, uncertain_cost, pre_dispatch):
     from lab_arena import broker, training_capture
     from tests.lab_arena.training_export_test import per_icp_cost_fixture, per_icp_cost_reader
     from tests.lab_arena.training_observations_test import save
@@ -410,12 +411,22 @@ def test_worker_failed_write_through_actual_export_assembly_and_eligibility(mode
             key: bridge[key] for key in ('status', 'headers', 'body_b64')}}
         payload['observations'] = [row]
         payload['observation_count'] = 1
+    if pre_dispatch is not None:
+        from tests.lab_arena.training_predispatch_host_test import host_only_values
+        _, local = host_only_values(paid=False, privacy=pre_dispatch, acknowledged=False)
+        row = deepcopy(local['observations'][0]); row.update(ordinal=1000, action_sequence=1000)
+        write = deepcopy(local['response_receipts'][0]); write.update(ordinal=1000, action_sequence=1000)
+        payload['observations'].append(row); payload['observation_count'] += 1
+        payload['response_receipts'].append(write); payload['response_receipt_count'] += 1
+        run['result_doc']['resource_summary']['provider_call_count'] += 1
     save(values, payload)
     example = training_export.assemble_example(**values,
         cost_eligibility_reader=per_icp_cost_reader(
             spend=100, reason='provider_cost_uncertain' if uncertain_cost else 'eligible'))
     before = deepcopy(example)
     expected = {'worker_observations_incomplete'}
+    if pre_dispatch is True:
+        expected.add('worker_observation_privacy_nonexact')
     if uncertain_cost:
         expected |= {'provider_cost_unresolved', 'competition_cost_eligibility_unavailable'}
         assert example['competition_cost_eligibility']['reason'] == 'provider_cost_uncertain'

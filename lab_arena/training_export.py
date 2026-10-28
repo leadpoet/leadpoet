@@ -778,11 +778,17 @@ def _calls(rows, run_ids, objects, run_order):
                 receipt["terminal_source"] = row["retained_terminal_source"]
             receipt["metadata"].update(copy.deepcopy(observations(terminal)))
             try:
-                response, redactions = _response_value(terminal, reserve.get("provider"))
+                # The latest receipt references the response already validated
+                # above. Keep wire proof and every other receipt's checks.
+                reuse_latest = terminal is latest_terminal and latest_digest is not None
+                if reuse_latest:
+                    response, redactions = latest_response, latest_redactions
+                else:
+                    response, redactions = _response_value(terminal, reserve.get("provider"))
                 wire_body = base64.b64decode(terminal["body_b64"], validate=True)
                 receipt["wire_body_sha256"] = contracts.hash_bytes(wire_body)
                 receipt["wire_body_bytes"] = len(wire_body)
-                digest = contracts.document_hash(response)
+                digest = latest_digest if reuse_latest else contracts.document_hash(response)
                 receipt["response_sha256"], receipt["privacy_redactions"] = digest, redactions
                 if digest == latest_digest:
                     receipt["response_ref"] = {"field": "response", "entry_id": latest_id}

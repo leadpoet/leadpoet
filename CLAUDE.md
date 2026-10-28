@@ -49,6 +49,19 @@ or restart production in this step. The coordinating task owns AWS writes and
 verification; independent reviewers are read-only. This authority ends after the
 foundation is provisioned and verified, with the next step reported to the user.
 
+## Scoped authorization: October 28 Tyche company precheck
+
+The user authorized the October 28 Tyche audit and the narrow confirmed company
+name precheck correction. Reject exact placeholder tokens without rejecting a
+real multiword company name from its first token alone. Test the saved AAA Cooper
+input and preserved identity, evidence, scoring and rejection controls. The
+coordinating task owns independent review, push, merge, future scorer image
+selection, canonical rollout and live verification. Internal implementation
+agents may commit only. Preserve frozen judgments, accepted results, costs,
+privacy, rewards and all concurrent work. Do not rewrite historical records or
+interrupt another owner's deployment. This authority ends after the scoped
+fix and future-flow verification are complete.
+
 ## Scoped authorization: October 28 stage-quota query performance
 
 The user authorized the measured October 28 Arena reservation query fix,
@@ -68,7 +81,9 @@ capture-only overflow handler on the same socket while preserving eight provider
 slots and all frame, byte, privacy and lease checks. Reuse worker hash proofs only
 for fresh, owned immutable snapshots within one assessment; preserve every
 validation result and stored export. Preserve prepared request capture after
-ambiguous fallback reservation failures. Preserve submitted sources, accepted
+ambiguous fallback reservation failures. Reuse the validated latest response only
+within its call assembly, preserving wire checks and export privacy.
+Preserve submitted sources, accepted
 outputs, provider requests and responses, privacy filtering, costs,
 scoring, rewards, and concurrent work. Do not replay paid calls or rewrite
 historical records. Internal implementation agents may commit only; the

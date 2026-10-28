@@ -74,7 +74,9 @@ def test_metadata_stays_incomplete_through_snapshot_and_journal(tmp_path):
     assert journal._prepare() and journal._send_pending()
     segments, prefix, failure = obs.read_journal_prefix(objects, "r1", "execute", 1, CLAIM_HASH)
     assert len(segments) == 1 and failure is None
-    assert segments[0]["payload"]["failures"] == [obs.OPTIONAL_CAPTURE_INCOMPLETE]
+    # This older lease does not negotiate optional failure tags. Its journal
+    # must conservatively retain the hard gap while the buffer stays optional.
+    assert segments[0]["payload"]["failures"] == ["capture_incomplete"]
     # A journal prefix still lacks the final snapshot and keeps a hard gap.
     assert prefix == {**document, "failures": ["capture_incomplete"]}
     assert not obs.optional_capture_only(prefix)

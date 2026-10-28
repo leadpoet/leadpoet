@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lab_arena import contracts, scoring
+from lab_arena import scoring
 
 
 def _run(
@@ -47,15 +47,18 @@ def _plan(runs: list[dict]) -> dict:
     )
 
 
-def test_deadline_closed_dispatched_retry_uses_prior_provider_error_zero():
+def test_deadline_closed_dispatched_retry_preserves_provider_incompleteness():
     plan = _plan([_run(1, "provider_error"), _deadline_retry()])
 
     assert plan["work_items"] == []
-    assert plan["zero_rows"] == [
+    # Publication isolation (ffb48c012) keeps infrastructure failures unmeasured.
+    # A deadline marker cannot turn a provider failure into a miner's zero.
+    assert plan["zero_rows"] == []
+    assert plan["incomplete_rows"] == [
         {
             "submission_id": "submission-1",
             "icp_position": 0,
-            "cause": "provider_error",
+            "cause": "stage_closed",
         }
     ]
 
@@ -78,9 +81,13 @@ def test_deadline_closed_dispatched_retry_uses_prior_provider_error_zero():
         ],
     ],
 )
-def test_unproved_or_unsupported_deadline_retry_stays_fail_closed(runs):
-    with pytest.raises(contracts.ArenaContractError, match="stage must cancel"):
-        _plan(runs)
+def test_unproved_or_unsupported_deadline_retry_never_invents_a_score(runs):
+    plan = _plan(runs)
+    assert plan["work_items"] == []
+    assert plan["zero_rows"] == []
+    assert plan["incomplete_rows"] == [{
+        "submission_id": "submission-1", "icp_position": 0, "cause": "stage_closed",
+    }]
 
 
 def test_accepted_attempt_keeps_authority_over_deadline_marker():
@@ -94,6 +101,7 @@ def test_accepted_attempt_keeps_authority_over_deadline_marker():
     plan = _plan([accepted, _deadline_retry()])
 
     assert plan["zero_rows"] == []
+    assert not plan.get("incomplete_rows")
     assert plan["work_items"] == [
         {
             "scored_run_id": accepted["run_id"],

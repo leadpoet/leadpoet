@@ -25,8 +25,12 @@ the coordinating task owns production writes and live verification.
 The user authorized tracing October 28 miner training capture and fixing confirmed
 capture defects, then testing, safely merging, canonically deploying, and verifying
 the affected live flows. This task may drain already-started worker socket handlers
-for a bounded time before final observation capture. Preserve submitted sources,
-accepted outputs, provider requests and responses, privacy filtering, costs,
+for a bounded time before final observation capture, and admit one bounded
+capture-only overflow handler on the same socket while preserving eight provider
+slots and all frame, byte, privacy and lease checks. Reuse worker hash proofs only
+for fresh, owned immutable snapshots within one assessment; preserve every
+validation result and stored export. Preserve submitted sources, accepted
+outputs, provider requests and responses, privacy filtering, costs,
 scoring, rewards, and concurrent work. Do not replay paid calls or rewrite
 historical records. Internal implementation agents may commit only; the
 coordinating task owns push, merge, deployment, and production verification.

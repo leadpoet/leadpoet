@@ -1,4 +1,4 @@
-"""A prior-day scored round stays frozen; new rounds wait for real judges."""
+"""Prior-day work is not rescored; expired unmeasured work cannot publish."""
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -9,7 +9,7 @@ from tests.lab_arena.complete_baseline_final_authority_test import fixture
 from tests.lab_arena.icp_fixtures import daily_icps
 
 
-def test_oct13_scored_round_does_not_restart_or_cancel_after_deadline():
+def test_oct13_unmeasured_round_cancels_without_rescoring_after_deadline():
     instance, row, sources, judges, writes, clock, _ = fixture()
     row["evaluation_date"] = "2026-10-13"
     sources[0]["per_icp_score"] = None
@@ -18,9 +18,8 @@ def test_oct13_scored_round_does_not_restart_or_cancel_after_deadline():
     instance._record_recovered_judgment_scores = lambda _row: (_ for _ in ()).throw(
         AssertionError("prior evaluation must not be rescored"))
 
-    assert instance.publish(row["round_id"]) == {
-        "status": "retry", "round_status": "scored", "reason": "baseline_incomplete"}
-    assert writes == []
+    assert instance.publish(row["round_id"]) == {"status": "cancelled"}
+    assert writes == [(row["round_id"], "scoring_incomplete")]
     assert sources[0]["per_icp_score"] is None
     assert judges[0]["status"] == "failed"
 

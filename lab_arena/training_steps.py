@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
-from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset, training_coverage, reasoning_capture
+from lab_arena import contracts, integrity, operations, training_capture, training_export, training_dataset, training_coverage, reasoning_capture, training_worker_proof
 
 SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_dataset.v1'
 RECORD_SCHEMA_VERSION = 'leadpoet.lab_arena.agent_step_candidate.v1'
@@ -378,7 +378,7 @@ def _target(body, response, operation, *, allow_reasoning_history=False, argumen
     return target, reasoning
 
 
-def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False):
+def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False, worker_proofs=None):
     """Resolve saved gateway bytes against one existing host socket write.
 
     The caller keeps route, cost, privacy-admission and target-schema policy.
@@ -386,7 +386,7 @@ def _host_result(example, call, *, allow_privacy=False, allow_worker_error=False
     an existing report must still agree. No consumption claim is synthesized.
     """
     return _host_response(example, call, write_state='socket_written',
-                          allow_privacy=allow_privacy, allow_worker_error=allow_worker_error)
+                          allow_privacy=allow_privacy, allow_worker_error=allow_worker_error, worker_proofs=worker_proofs)
 
 
 def _failed_host_result(example, call):
@@ -411,7 +411,7 @@ def _receipt_response(call, receipt):
 
 
 def _host_response(example, call, *, write_state, allow_privacy=False, allow_worker_error=False,
-                   require_client_ack=None):
+                   require_client_ack=None, worker_proofs=None):
     provenance = call.get('response_provenance') or {}
     run_id = call.get('run_id')
     request = call.get('request') or {}
@@ -427,7 +427,7 @@ def _host_response(example, call, *, write_state, allow_privacy=False, allow_wor
                  'request_identity_mismatch')
     artifact = (example.get('worker_observation_artifacts') or {}).get(run_id) or {}
     payload = artifact.get('payload') or {}
-    digest = contracts.document_hash(payload)
+    digest = training_worker_proof.payload_hash(payload, worker_proofs)
     _require(artifact.get('payload_sha256') == digest, 'worker_payload_hash_mismatch')
     ref = provenance.get('worker_receipt_ref') or {}
     writes = [row for row in payload.get('response_receipts') or [] if row.get('ordinal') == ref.get('ordinal')]
@@ -576,7 +576,7 @@ def _model_request(example, call):
     return op, body, tools
 
 
-def _candidate(example, call, *, host_observed=False):
+def _candidate(example, call, *, host_observed=False, worker_proofs=None):
     op, body, tools = _model_request(example, call)
     request = call.get('request') or {}
     provider_visible = host_observed or training_coverage.uses_host_result_evidence(
@@ -584,8 +584,8 @@ def _candidate(example, call, *, host_observed=False):
     if provider_visible:
         # Generic observed steps prove only the exact provider-visible pair.
         # Strict policy callers keep their existing frozen read-proof rules.
-        evidence = (_host_response(example, call, write_state='socket_written', require_client_ack=False)
-                    if host_observed else _host_result(example, call))
+        evidence = (_host_response(example, call, write_state='socket_written', require_client_ack=False, worker_proofs=worker_proofs)
+                    if host_observed else _host_result(example, call, worker_proofs=worker_proofs))
         _require(evidence['write']['status'] == 200, 'agent_read_identity_mismatch')
         responses = [evidence['response']]
         matches = evidence['receipts']
@@ -595,7 +595,7 @@ def _candidate(example, call, *, host_observed=False):
                  and provenance.get('delivery_to_worker') == 'socket_written', 'agent_read_unverified')
         snapshot = (example.get('worker_observation_artifacts') or {}).get(call['run_id']) or {}
         payload = snapshot.get('payload') or {}
-        _require(contracts.document_hash(payload) == snapshot.get('payload_sha256'), 'worker_payload_hash_mismatch')
+        _require(training_worker_proof.payload_hash(payload, worker_proofs) == snapshot.get('payload_sha256'), 'worker_payload_hash_mismatch')
         refs = provenance.get('agent_receipt_refs') or []
         acks = [row for row in payload.get('agent_observations', []) if row.get('kind') == 'response_received'
                 and any(ref.get('id') == row.get('id') and ref.get('run_id') == call['run_id']

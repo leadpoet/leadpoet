@@ -695,17 +695,7 @@ def _transient_artifact_gap_verified(example, submission, artifacts):
 
 def _retained_delivery_evidence_exact(call):
     """Check every retained result and API route, including unselected receipts."""
-    request = call.get("request") or {}
-    outbound = request.get("outbound") or {}
-    operation = operations.get_operation(call.get("operation_id"))
-    if (operation is None or call.get("provider") != operation.provider
-            or outbound.get("method") != operation.method
-            or outbound.get("host") != (operation.outbound_host or operation.host)
-            or outbound.get("path") != (operation.outbound_path or operations._render_path(
-                operation, request.get("hashed_parameters") or {}))
-            or outbound.get("body_sha256") != (
-                contracts.hash_bytes(b"") if outbound.get("body") is None
-                else contracts.document_hash(outbound["body"]))):
+    if not training_steps._outbound_request_exact(call):
         return False
     lifecycle_ids = {row.get("entry_id") for row in call.get("lifecycle") or []}
     permitted = {"hidden_reasoning"} if call.get("operation_id") in reasoning_capture.OPERATIONS else set()
@@ -793,7 +783,7 @@ def _failed_delivery_call_verified(example, call):
 
 
 def _failed_delivery_gap_verified(example):
-    """An exact failed write consumes coverage; unknown capture loss stays hard."""
+    """Proven failed writes or undispatched requests consume one coverage slot."""
     example, _ = training_thinking.provider_visible_view(example)
     if not training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
         return None
@@ -820,14 +810,16 @@ def _failed_delivery_gap_verified(example):
                 or example.get("partial_worker_observation_artifacts")):
             return None
         calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
+        undispatched = [call for call in calls if training_thinking.verified_undispatched_transport(example, call)]
+        delivered = [call for call in calls if call not in undispatched]
         receipts = payload["response_receipts"]
         identities = [call["call_identity"] for call in calls]
         if (not any(call.get("operation_id") in reasoning_capture.OPERATIONS for call in calls)
                 or len(identities) != len(set(identities))
-                or len(receipts) != len(calls)
-                or {row["call_identity"] for row in receipts} != set(identities)
+                or len(receipts) != len(delivered)
+                or {row["call_identity"] for row in receipts} != {call["call_identity"] for call in delivered}
                 or any(row["write_state"] not in {"socket_written", "socket_write_failed"} for row in receipts)
-                or not any(row["write_state"] == "socket_write_failed" for row in receipts)):
+                or not undispatched and not any(row["write_state"] == "socket_write_failed" for row in receipts)):
             return None
         # The failed-write proof explains only the generic flag. Every
         # optional failure needs the same independent proof as optional-only
@@ -837,7 +829,7 @@ def _failed_delivery_gap_verified(example):
         if (bool(failures) is not optional
                 or not all(training_observations.optional_capture_failure(row) for row in failures)):
             return None
-        for call in calls:
+        for call in delivered:
             if (call.get("accounting_state") != "settlement"
                     or type(call.get("actual_microusd")) is not int or call["actual_microusd"] < 0
                     or not _retained_delivery_evidence_exact(call)
@@ -845,7 +837,8 @@ def _failed_delivery_gap_verified(example):
                 return None
         reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])
         return training_thinking._attributed_score_only_gaps(
-            example, reasons, failed_delivery_proof=_failed_delivery_call_verified)
+            example, reasons, failed_delivery_proof=_failed_delivery_call_verified,
+            undispatched_proof=training_thinking.verified_undispatched_transport if undispatched else None)
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
         return None
 
@@ -929,7 +922,8 @@ def assess_capture(submission: Mapping, examples_by_run: Mapping[str, Mapping | 
             # selected call. The narrow 80% verifier below must prove it.
             if any(call.get("run_id") == run_id
                     and not (new_policy and call.get("accounting_state") == "refusal"
-                             and training_thinking.verified_failed_attempt(example, call)) and (
+                             and training_thinking.verified_failed_attempt(example, call))
+                    and not (new_policy and training_thinking.verified_undispatched_transport(example, call)) and (
                     call.get("accounting_state") != "settlement"
                     or type(call.get("actual_microusd")) is not int)
                     for call in example.get("provider_calls") or []):

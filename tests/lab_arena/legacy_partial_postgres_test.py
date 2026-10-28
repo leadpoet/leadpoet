@@ -16,6 +16,7 @@ from qualification.scoring import lead_scorer
 from tests.lab_arena import zero_call_setup_recovery467_postgres_test as deployed
 from tests.lab_arena.company_judgments_postgres_test import _frozen_participants
 from tests.lab_arena.partial_company_judgments_postgres_test import _sign
+from tests.lab_arena.scorer_environment_fixture import isolated_scorer_environment
 from tests.lab_arena.test_lab_arena_migration_postgres import _commit_plan, _execute_everything, claim, commit_round, round_config
 from tests.lab_arena.test_lab_arena_object_store import _ConditionalS3
 from tests.lab_arena.test_lab_arena_service_round import keypair, wallet_verify, FakeChain

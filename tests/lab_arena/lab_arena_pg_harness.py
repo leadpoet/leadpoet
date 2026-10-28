@@ -192,6 +192,7 @@ def current_service_database():
         psycopg2, dsn = next(database)
         with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
             for migration in (
+                "443-lab-arena-competition-publication-projection.sql",
                 "575-lab-arena-score-host-continuation.sql",
                 "576-lab-arena-champion-score-funding.sql",
                 "577-lab-arena-judge-continuation-runner-handoff.sql",

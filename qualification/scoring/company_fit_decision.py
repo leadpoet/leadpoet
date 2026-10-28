@@ -439,6 +439,7 @@ def company_quality_receipt_matches_claim(
         })
         return bool(
             receipt.get("evidence_source") == "company_web_reverification"
+            and receipt.get("verified_homepage_brand_alias") is True
             and brand and _company_name(brand) == observed_name
             and raw_aliases
             and all(

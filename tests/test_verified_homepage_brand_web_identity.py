@@ -36,6 +36,7 @@ def _anchor(**changes):
         "registrable_dns_domain": "acme.com",
         "linkedin_company_slug": "northstar-holdings",
         "verified_legal_name_aliases": [LEGAL],
+        "verified_homepage_brand_alias": True,
         "verified_brand_name": BRAND, **changes,
     }
 
@@ -82,6 +83,7 @@ def test_generic_homepage_organization_brand_reaches_canonical_host_receipt(monk
     assert homepage.decision == "match"
     anchor = lead_scorer._verified_homepage_identity_anchor(homepage)
     assert anchor["verified_brand_name"] == BRAND
+    assert anchor["verified_homepage_brand_alias"] is True
     receipt = lead_scorer._web_identity_receipt(
         _company(), _web(), verified_homepage_identity=anchor, company_quality=quality,
     )
@@ -97,6 +99,8 @@ def test_generic_homepage_organization_brand_reaches_canonical_host_receipt(monk
 @pytest.mark.parametrize("anchor_changes", [
     {"verified_brand_name": ""}, {"verified_brand_name": None},
     {"verified_brand_name": "Sibling Brand"},
+    {"verified_homepage_brand_alias": False},
+    {"verified_homepage_brand_alias": 1},
     {"verified_legal_name_aliases": []}, {"verified_legal_name_aliases": None},
     {"verified_legal_name_aliases": ["Unrelated Parent Holdings Inc."]},
     {"verified_legal_name_aliases": [LEGAL, "Sibling Residential Holdings Inc."]},
@@ -140,6 +144,39 @@ def test_model_brand_and_alias_fields_do_not_supply_homepage_proof():
     assert "verified_legal_name_aliases" not in receipt
 
 
+@pytest.mark.parametrize("quality", [False, True])
+@pytest.mark.parametrize("raw_changes", [
+    {"verified_legal_name_aliases": [LEGAL, LEGAL, LEGAL, "Sibling Holdings Inc."]},
+    {"verified_legal_name_aliases": [LEGAL, {"name": LEGAL}]},
+    {"verified_legal_name_aliases": [LEGAL, None]},
+    {"verified_legal_name_aliases": [LEGAL, ""]},
+    {"verified_legal_name_aliases": [LEGAL, "x" * 201]},
+    {"verified_legal_name_aliases": [LEGAL, "Sibling Holdings Inc."]},
+    {"submitted_name": "siblingresidential"},
+    {"submitted_domain": "other.example"},
+    {"submitted_linkedin_slug": "sibling"},
+    {"submitted_name": None},
+])
+def test_projector_cannot_launder_invalid_raw_brand_proof(quality, raw_changes):
+    raw = {
+        "decision": "match", "evidence_source": "company_homepage",
+        "submitted_name": "northstarresidential", "observed_name": "northstarresidential",
+        "submitted_domain": "acme.com", "observed_domain": "acme.com",
+        "submitted_linkedin_slug": "northstar-holdings",
+        "observed_linkedin_slug": "northstar-holdings",
+        "verified_brand_name": BRAND, "verified_legal_name_aliases": [LEGAL],
+        "verified_homepage_brand_alias": True,
+        **raw_changes,
+    }
+    homepage = CompanyFitDecisionResult("match", details={"identity": raw})
+    anchor = lead_scorer._verified_homepage_identity_anchor(homepage)
+    receipt = lead_scorer._web_identity_receipt(
+        _company(), _web(), verified_homepage_identity=anchor, company_quality=quality,
+    )
+    assert receipt["decision"] != "match"
+    assert not company_quality_receipt_matches_claim(receipt, _company().model_dump())
+
+
 def _brand_receipt():
     return {
         "decision": "match", "reason_code": "verified_homepage_brand_alias",
@@ -149,6 +186,7 @@ def _brand_receipt():
         "observed_name": "bluehaven", "observed_domain": "acme.com",
         "observed_linkedin_slug": "northstar-holdings",
         "verified_brand_name": BRAND, "verified_legal_name_aliases": [LEGAL],
+        "verified_homepage_brand_alias": True,
     }
 
 
@@ -158,6 +196,8 @@ def test_host_validates_canonical_verified_brand_receipt():
 
 @pytest.mark.parametrize("changes", [
     {"verified_brand_name": ""}, {"verified_brand_name": "Sibling Brand"},
+    {"verified_homepage_brand_alias": False},
+    {"verified_homepage_brand_alias": 1},
     {"verified_legal_name_aliases": []}, {"verified_legal_name_aliases": [BRAND]},
     {"verified_legal_name_aliases": [LEGAL, "Sibling Residential Holdings Inc."]},
     {"verified_legal_name_aliases": [LEGAL] * 4},

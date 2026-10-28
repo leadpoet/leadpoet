@@ -9637,7 +9637,10 @@ async def _llm_reverify_company(
             "not proof of any fit dimension):\n"
             "<verified_homepage_identity>"
             + json.dumps(
-                verified_identity,
+                {
+                    key: value for key, value in verified_identity.items()
+                    if key != "verified_homepage_brand_alias"
+                },
                 sort_keys=True,
                 separators=(",", ":"),
             )

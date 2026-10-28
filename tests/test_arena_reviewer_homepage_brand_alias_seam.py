@@ -1,4 +1,4 @@
-"""Brand composition changes only three owned spans and names its host gate."""
+"""Brand composition owns three proof spans and two private prompt copies."""
 
 from copy import deepcopy
 import ast
@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -15,15 +16,18 @@ from tests.lab_arena.reviewer_runtime_composition_test import layer
 
 
 def sources():
-    corrected = {name: (builder.ROOT / name).read_bytes() for name in (seam.SCORER, seam.FIT)}
+    corrected = {name: (builder.ROOT / name).read_bytes()
+                 for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}
     return reverse(corrected), corrected
 
 
 def reverse(files):
     original = dict(files)
     for path, pairs in (
-        (seam.SCORER, ((seam.OLD_PROJECTOR, seam.NEW_PROJECTOR), (seam.OLD_WEB, seam.NEW_WEB))),
+        (seam.SCORER, ((seam.OLD_PROJECTOR, seam.NEW_PROJECTOR), (seam.OLD_WEB, seam.NEW_WEB),
+                      (seam.OLD_SCORER_PROMPT, seam.NEW_SCORER_PROMPT))),
         (seam.FIT, ((seam.OLD_HOST, seam.NEW_HOST),)),
+        (seam.INVESTIGATOR, ((seam.OLD_INVESTIGATOR_PROMPT, seam.NEW_INVESTIGATOR_PROMPT),)),
     ):
         for old, new in pairs:
             assert original[path].count(new.encode()) == 1
@@ -41,7 +45,7 @@ def originals(include_brand=True):
     return files
 
 
-def test_exact_three_owned_spans_only_and_idempotence():
+def test_exact_five_owned_spans_only_and_idempotence():
     original, corrected = sources()
     assert seam.convert_homepage_brand_alias_files(original) == corrected
     assert seam.convert_homepage_brand_alias_files(corrected) == corrected
@@ -57,6 +61,8 @@ def test_exact_three_owned_spans_only_and_idempotence():
     ("_verified_homepage_identity_anchor", seam.SCORER),
     ("_web_identity_receipt", seam.SCORER),
     ("company_quality_receipt_matches_claim", seam.FIT),
+    ("_llm_reverify_company", seam.SCORER),
+    ("investigate_company_evidence", seam.INVESTIGATOR),
 ])
 @pytest.mark.parametrize("fault", ["missing", "duplicate", "shadow", "decorated", "signature"])
 def test_ambiguous_owner_or_changed_signature_fails_closed(function, path, fault):
@@ -80,6 +86,8 @@ def test_ambiguous_owner_or_changed_signature_fails_closed(function, path, fault
     "utf8", "syntax", "crlf", "mixed_files", "mixed_projector", "mixed_web", "unknown_projector",
     "unknown_host", "rebound_dependency", "changed_helper", "shadowed_helper", "escaped_local",
     "global_local", "quoted_owners", "missing_file", "extra_file",
+    "mixed_scorer_prompt", "mixed_investigator_prompt", "unknown_prompt_guard",
+    "unknown_prompt_literal", "duplicate_prompt_key", "moved_prompt_copy",
 ])
 def test_unknown_partial_or_mixed_correction_fails_closed(fault):
     original, corrected = sources()
@@ -117,6 +125,25 @@ def test_unknown_partial_or_mixed_correction_fails_closed(fault):
         original[seam.SCORER] = ("quoted = " + repr(original[seam.SCORER].decode()) + "\n").encode()
     elif fault == "missing_file":
         original.pop(seam.FIT)
+    elif fault in {"mixed_scorer_prompt", "mixed_investigator_prompt"}:
+        path, old, new = ((seam.SCORER, seam.OLD_SCORER_PROMPT, seam.NEW_SCORER_PROMPT)
+                          if fault == "mixed_scorer_prompt" else
+                          (seam.INVESTIGATOR, seam.OLD_INVESTIGATOR_PROMPT, seam.NEW_INVESTIGATOR_PROMPT))
+        original[path] = original[path].replace(old.encode(), new.encode(), 1)
+    elif fault == "unknown_prompt_guard":
+        original[seam.SCORER] = original[seam.SCORER].replace(
+            b"    if verified_identity:\n        verified_identity_context = (",
+            b"    if verified_identity is not None:\n        verified_identity_context = (", 1)
+    elif fault == "unknown_prompt_literal":
+        original[seam.SCORER] = original[seam.SCORER].replace(
+            b"Server-verified homepage identity anchor (lookup context only; ",
+            b"Unreviewed identity context: ", 1)
+    elif fault == "duplicate_prompt_key":
+        original[seam.INVESTIGATOR] = original[seam.INVESTIGATOR].replace(
+            seam.OLD_INVESTIGATOR_PROMPT.encode(), seam.OLD_INVESTIGATOR_PROMPT.encode() * 2, 1)
+    elif fault == "moved_prompt_copy":
+        original[seam.INVESTIGATOR] = original[seam.INVESTIGATOR].replace(
+            b"    input_document = {\n", b"    unrelated_document = {\n", 1)
     else:
         original["unrelated.py"] = b"pass\n"
     with pytest.raises(seam.HomepageBrandAliasSeamError):
@@ -220,8 +247,8 @@ def test_both_exact_frozen_bases_preserve_final670_and_all_other_bytes(cohort, b
     assert {name: hashlib.sha256(data).hexdigest() for name, data in prior.items()} == receipt["overlay_files"]
     candidate = builder.expected_overlay(files, **flags, verified_homepage_brand_alias=True)
     assert set(candidate) == set(prior)
-    assert {name for name in prior if prior[name] != candidate[name]} == {seam.SCORER, seam.FIT}
-    owned = {name: candidate[name] for name in (seam.SCORER, seam.FIT)}
+    assert {name for name in prior if prior[name] != candidate[name]} == {seam.SCORER, seam.FIT, seam.INVESTIGATOR}
+    owned = {name: candidate[name] for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}
     assert reverse(owned) == {name: prior[name] for name in owned}
     for path, functions in (
         (seam.SCORER, ("_verified_homepage_identity_anchor", "_web_identity_receipt")),
@@ -244,3 +271,55 @@ def test_both_exact_frozen_bases_preserve_final670_and_all_other_bytes(cohort, b
         seam.HOST_VALIDATOR_REQUIREMENT["function_source_sha256"]
     )
     builder.verify_overlay(layer([("model/" + name, data) for name, data in candidate.items()]), candidate)
+
+
+@pytest.mark.parametrize("cohort,base_directory,receipt_name,receipt_hash", [
+    ("8d", "monzo-identity/direct-image-composition-inputs/base", "build-8d.log",
+     "8517ffa8dbccf2b26175e3a071e415a31bacf8b1c15542b7097c16f90090f516"),
+    ("8761", "oct28-exact-images/base", "build-8761.log",
+     "ec999fb5a88c1bdde07236d9a1f2261d05c79b9e45fcc9e1b84a326dc9f3610d"),
+    ("8bd", None, "build-8bd-after-pull.log",
+     "a4508762ad0f99e780df43e08239d117623e91ed4f0f8d3e1bb1d44d78432b7c"),
+])
+def test_all_three_published_brand_overlays_change_only_prompt_copy_filters(
+    cohort, base_directory, receipt_name, receipt_hash,
+):
+    directory = os.environ.get("ARENA_HOMEPAGE_BRAND_ARTIFACT_ROOT")
+    if not directory:
+        pytest.skip("hash-bound published brand build receipts not supplied")
+    root = Path(directory)
+    raw = (root / "verified-homepage-brand/remote-image-proof" / receipt_name).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == receipt_hash
+    receipts = [json.loads(line) for line in raw.splitlines() if line.startswith(b"{")]
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    original = {}
+    for name, expected_hash in receipt["original_files"].items():
+        if base_directory:
+            data = (root / base_directory / name).read_bytes()
+        else:
+            source_name = "lab_arena/scorer_entrypoint.py" if name == "scorer_entrypoint.py" else name
+            data = subprocess.run(
+                ["git", "show", "c249928613cfe7df8db90f82c0b824ffacdf4dd6:" + source_name],
+                cwd=builder.ROOT, check=True, stdout=subprocess.PIPE, timeout=10,
+            ).stdout
+        assert hashlib.sha256(data).hexdigest() == expected_hash
+        original[name] = data
+    flags = {"verified_homepage_brand_alias": True}
+    if cohort != "8bd":
+        flags.update(source_blocked_alias=True, completed_investigation_finality=True,
+                     auxiliary_source_name_binding=True, homepage_linkedin_conflict_repair=True,
+                     observed_linkedin_ampersand=True)
+    candidate = builder.expected_overlay(original, **flags)
+    inverse = dict(candidate)
+    for path, old, new in (
+        (seam.SCORER, seam.OLD_SCORER_PROMPT, seam.NEW_SCORER_PROMPT),
+        (seam.INVESTIGATOR, seam.OLD_INVESTIGATOR_PROMPT, seam.NEW_INVESTIGATOR_PROMPT),
+    ):
+        assert inverse[path].count(new.encode()) == 1
+        inverse[path] = inverse[path].replace(new.encode(), old.encode(), 1)
+    assert {name: hashlib.sha256(data).hexdigest() for name, data in inverse.items()} == receipt["overlay_files"]
+    assert {name for name in candidate if candidate[name] != inverse[name]} == {seam.SCORER, seam.INVESTIGATOR}
+    assert seam.convert_homepage_brand_alias_files({
+        name: candidate[name] for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)
+    }) == {name: candidate[name] for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}

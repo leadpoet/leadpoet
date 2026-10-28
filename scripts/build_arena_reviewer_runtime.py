@@ -329,7 +329,7 @@ def expected_overlay(
     if verified_homepage_brand_alias:
         from scripts.arena_reviewer_homepage_brand_alias_seam import convert_homepage_brand_alias_files
         files.update(convert_homepage_brand_alias_files(
-            {name: files[name] for name in BRAND_IDENTITY_FILES},
+            {name: files[name] for name in (*BRAND_IDENTITY_FILES, GRADER_FILE)},
         ))
     for path in sorted((ROOT / RUNTIME_DIRECTORY).glob("*.py")):
         if path.is_symlink():

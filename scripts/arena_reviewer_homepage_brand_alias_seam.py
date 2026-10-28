@@ -2,9 +2,9 @@
 
 The host must deploy the matching company_quality_receipt_matches_claim
 validator before accepting this runtime's verified_homepage_brand_alias receipt.
-The marker enters whole-anchor model prompts, so a fresh native full-scorer
-check is required. This option does not deploy host source or import current
-grading modules.
+The proof marker stays in server anchors and receipts; the two model prompt
+copies omit only that marker. A fresh native full-scorer check is required.
+This option does not deploy host source or import current grading modules.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from scripts.arena_reviewer_investigation_finality_seam import _named_bindings
 CORRECTION_ID = "verified_homepage_brand_legal_identity_v1"
 SCORER = "qualification/scoring/lead_scorer.py"
 FIT = "qualification/scoring/company_fit_decision.py"
+INVESTIGATOR = "qualification/scoring/company_evidence_investigator.py"
 HOST_VALIDATOR_REQUIREMENT = {
     "module": "qualification.scoring.company_fit_decision",
     "function": "company_quality_receipt_matches_claim",
@@ -198,6 +199,44 @@ BRAND_HELPER = r'''def verified_homepage_brand_name(identity: Mapping[str, Any])
 '''
 
 
+OLD_SCORER_PROMPT = '''            + json.dumps(
+                verified_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+'''
+NEW_SCORER_PROMPT = '''            + json.dumps(
+                {
+                    key: value for key, value in verified_identity.items()
+                    if key != "verified_homepage_brand_alias"
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+'''
+OLD_INVESTIGATOR_PROMPT = '''        "verified_homepage_identity": dict(verified_homepage_identity or {}),
+'''
+NEW_INVESTIGATOR_PROMPT = '''        "verified_homepage_identity": {
+            key: value for key, value in (verified_homepage_identity or {}).items()
+            if key != "verified_homepage_brand_alias"
+        },
+'''
+
+# Exact prompt owners after existing overlays on the 8d, 8761 and 8bd bases.
+# Reverse only the owned copy filter before checking these original hashes.
+PROMPT_FUNCTION_SHA256 = {
+    "_llm_reverify_company": frozenset({
+        "254737f6424356190f62f3496acce81379cbfb1d08609ce572b4dadc95943683",
+        "8b6d0f580854704111f1720aa4789b5a6d4f492ad25cfa752b6a7771cd1cfb39",
+    }),
+    "investigate_company_evidence": frozenset({
+        "d3b3848dc7751c6019b41b9a310aec64e2dc45343d5b96ccae0ab7e69146c01f",
+        "34a42f7cf46b403d9125fbc403250a284923cac49b7a1c699e92e31fde5ce1a0",
+        "5695fb8c525810d8e8f7e4eddb989c2a90ba6b1a5529c7625335e5cfb15a661f",
+    }),
+}
+
+
 ORIGINAL_FUNCTION_SHA256 = {'_verified_homepage_identity_anchor': 'c244aefac41b72109b1b848df8fe02dfde6877d3abf002dba5c0c6de6eddbd08', '_web_identity_receipt': 'e257bd2a364b20039915d3ae26af11f4f38f0130450036183723afedb5cc6916', 'company_quality_receipt_matches_claim': '13fd832087df8fb3d701ff34254655c12ff6df22c9aee3d8974f4656d4c06044'}
 
 
@@ -208,9 +247,9 @@ SIGNATURES = {
 }
 
 
-def _function(module: ast.Module, name: str) -> ast.FunctionDef:
+def _function(module: ast.Module, name: str, kind: type = ast.FunctionDef) -> ast.AST:
     nodes = [node for node in module.body
-             if isinstance(node, ast.FunctionDef) and node.name == name]
+             if isinstance(node, kind) and node.name == name]
     if (len(nodes) != 1 or _named_bindings(module, name) != nodes
             or nodes[0].decorator_list):
         raise HomepageBrandAliasSeamError("brand function binding is missing or ambiguous")
@@ -232,7 +271,37 @@ def _reason_if(function: ast.FunctionDef, reason: str) -> ast.If:
     return nodes[0]
 
 
-def _owned_spans(path: str, module: ast.Module) -> list[tuple[ast.FunctionDef, int, int, str, str, tuple[str, ...]]]:
+def _prompt_span(path: str, module: ast.Module) -> tuple:
+    if path == SCORER:
+        owner = _function(module, "_llm_reverify_company", ast.AsyncFunctionDef)
+        guards = [node for node in ast.walk(owner) if isinstance(node, ast.If)
+                  and isinstance(node.test, ast.Name) and node.test.id == "verified_identity"]
+        if (len(guards) != 1 or guards[0].orelse or len(guards[0].body) != 1
+                or not isinstance(guards[0].body[0], ast.Assign)
+                or len(guards[0].body[0].targets) != 1
+                or not isinstance(guards[0].body[0].targets[0], ast.Name)
+                or guards[0].body[0].targets[0].id != "verified_identity_context"):
+            raise HomepageBrandAliasSeamError("homepage prompt guard is missing or ambiguous")
+        sites = [node for node in ast.walk(guards[0].body[0]) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+                 and node.func.value.id == "json" and node.func.attr == "dumps"]
+        old, new = OLD_SCORER_PROMPT, NEW_SCORER_PROMPT
+    else:
+        owner = _function(module, "investigate_company_evidence", ast.AsyncFunctionDef)
+        documents = [node for node in owner.body if isinstance(node, ast.Assign)
+                     and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                     and node.targets[0].id == "input_document" and isinstance(node.value, ast.Dict)]
+        if len(documents) != 1:
+            raise HomepageBrandAliasSeamError("investigator prompt document is missing or ambiguous")
+        sites = [value for key, value in zip(documents[0].value.keys, documents[0].value.values)
+                 if isinstance(key, ast.Constant) and key.value == "verified_homepage_identity"]
+        old, new = OLD_INVESTIGATOR_PROMPT, NEW_INVESTIGATOR_PROMPT
+    if len(sites) != 1:
+        raise HomepageBrandAliasSeamError("homepage prompt copy is missing or ambiguous")
+    return owner, sites[0].lineno - 1, sites[0].end_lineno, old, new, ()
+
+
+def _owned_spans(path: str, module: ast.Module) -> list[tuple]:
     if path == FIT:
         function = _function(module, "company_quality_receipt_matches_claim")
         assignments = [node for node in function.body if isinstance(node, ast.Assign)
@@ -242,6 +311,8 @@ def _owned_spans(path: str, module: ast.Module) -> list[tuple[ast.FunctionDef, i
             raise HomepageBrandAliasSeamError("host alias projection is missing or ambiguous")
         return [(function, assignments[0].lineno - 1, function.end_lineno,
                  OLD_HOST, NEW_HOST, ("brand",))]
+    if path == INVESTIGATOR:
+        return [_prompt_span(path, module)]
     projector = _function(module, "_verified_homepage_identity_anchor")
     anchors = [node for node in ast.walk(projector) if isinstance(node, ast.If)
                and isinstance(node.test, ast.Name) and node.test.id == "brand"]
@@ -257,6 +328,7 @@ def _owned_spans(path: str, module: ast.Module) -> list[tuple[ast.FunctionDef, i
          OLD_PROJECTOR, NEW_PROJECTOR, ()),
         (web, first.lineno - 1, following.lineno - 1,
          OLD_WEB, NEW_WEB, ("homepage_brand", "homepage_legal_aliases")),
+        _prompt_span(path, module),
     ]
 
 
@@ -273,7 +345,7 @@ def _convert_file(path: str, source: bytes) -> tuple[bytes, set[str]]:
         helper = _function(module, "verified_homepage_brand_name")
         if "".join(lines[helper.lineno - 1:helper.end_lineno]) != BRAND_HELPER:
             raise HomepageBrandAliasSeamError("unrecognized verified brand dependency")
-    else:
+    elif path == SCORER:
         imports = [alias for node in module.body if isinstance(node, ast.ImportFrom)
                    and node.module == "qualification.scoring.company_fit_decision"
                    for alias in node.names
@@ -296,7 +368,8 @@ def _convert_file(path: str, source: bytes) -> tuple[bytes, set[str]]:
         if owner.name == "_web_identity_receipt":
             from scripts.arena_reviewer_homepage_linkedin_conflict_seam import OLD_DISPATCH, NEW_DISPATCH
             original_function = original_function.replace(NEW_DISPATCH, OLD_DISPATCH, 1)
-        if hashlib.sha256(original_function.encode()).hexdigest() != ORIGINAL_FUNCTION_SHA256[owner.name]:
+        allowed = PROMPT_FUNCTION_SHA256.get(owner.name, (ORIGINAL_FUNCTION_SHA256.get(owner.name),))
+        if hashlib.sha256(original_function.encode()).hexdigest() not in allowed:
             raise HomepageBrandAliasSeamError("unrecognized bytes in owned brand function")
         states.add(state)
         for name in introduced:
@@ -321,8 +394,8 @@ def _convert_file(path: str, source: bytes) -> tuple[bytes, set[str]]:
 
 
 def convert_homepage_brand_alias_files(files: dict[str, bytes]) -> dict[str, bytes]:
-    if set(files) != {SCORER, FIT}:
-        raise HomepageBrandAliasSeamError("exact scorer and host-validator source files are required")
+    if set(files) != {SCORER, FIT, INVESTIGATOR}:
+        raise HomepageBrandAliasSeamError("exact scorer, investigator and host-validator sources are required")
     converted, states = {}, set()
     for path, source in files.items():
         converted[path], state = _convert_file(path, source)

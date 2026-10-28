@@ -15,15 +15,18 @@ def undispatched_values(*, local_error=True, http_error=False):
     values, predecessor, _ = retry_values()
     values['runs'].remove(predecessor)
     run = values['runs'][0]
-    parameters = {'tool': 'synthetic_tool', 'arguments': {'query': 'synthetic request'}}
+    parameters = {'tool': 'exa_search', 'payload': {'query': 'synthetic request'}}
+    body = {'provider': 'exa', 'operation': 'exa_search', 'payload': parameters['payload']}
     request_hash = contracts.document_hash(parameters)
     pointer = training_capture.RequestCapture(values['objects'])({
         'operation_id': 'deepline.execute', 'request_hash': request_hash,
         'hashed_parameters': parameters, 'admitted_parameters': parameters,
-        'effective_parameters': parameters, 'outbound': {'body': parameters}})
+        'effective_parameters': parameters, 'outbound': {'method': 'POST', 'host': 'code.deepline.com',
+            'path': '/api/v2/integrations/exa_search/execute', 'query': {}, 'body': body,
+            'body_sha256': contracts.document_hash(body), 'content_type': 'application/json'}})
     identity = contracts.hash_bytes(b'never-dispatched-call')
     context = {key: run[key] for key in ('run_id', 'round_id', 'submission_id', 'miner_hotkey')}
-    context.update(provider='deepline', operation_id='deepline.execute', call_identity=identity, funding_source='miner')
+    context.update(provider='deepline', operation_id='deepline.execute', call_identity=identity, funding_source='host')
     values['ledger_rows'].extend([
         dict(context, entry_id=10001, entry_kind='reservation', amount_microusd=0,
             entry_doc={'action_sequence': 3, 'base_call_identity': identity, 'provider_attempt': 1,
@@ -243,3 +246,69 @@ def test_undispatched_allowance_still_checks_each_delivered_call(damage):
     seal(example)
     assert training_thinking.verified_undispatched_transport(example, example['provider_calls'][-1])
     assert not assess_bank(values, example)['eligible'], damage
+
+
+@pytest.mark.parametrize('damage', ['capture_missing', 'capture_empty', 'capture_hash', 'capture_status',
+    'capture_ref', 'capture_size', 'capture_compression', 'capture_redactions', 'request_privacy',
+    'request_redactions', 'outbound_missing', 'outbound_body', 'outbound_hash', 'outbound_host',
+    'outbound_path', 'outbound_method', 'outbound_query', 'outbound_content_type', 'worker_ref_missing',
+    'funding_missing', 'funding_unknown', 'funding_miner'])
+def test_missing_request_evidence_or_unknown_funding_cannot_use_recovery_allowance(damage):
+    values = undispatched_values()
+    example = training_export.assemble_example(**values)
+    call = example['provider_calls'][-1]
+    if damage == 'capture_missing': call.pop('request_capture')
+    elif damage == 'capture_empty': call['request_capture'] = {}
+    elif damage == 'capture_hash': call['request_capture']['sha256'] = 'invalid'
+    elif damage == 'capture_status': call['request_capture'].pop('status')
+    elif damage == 'capture_ref': call['request_capture']['ref'] = 'unrelated.json.gz'
+    elif damage == 'capture_size': call['request_capture']['size_bytes'] += 1
+    elif damage == 'capture_compression': call['request_capture']['compressed_bytes'] = -1
+    elif damage == 'capture_redactions': call['request_capture']['redactions'] = ['credential']
+    elif damage == 'request_privacy': call['request']['privacy']['redacted'] = True
+    elif damage == 'request_redactions': call['request']['privacy']['redactions'] = ['credential']
+    elif damage == 'outbound_missing': call['request'].pop('outbound')
+    elif damage == 'outbound_body': call['request']['outbound']['body'] = {'unrelated': 'body'}
+    elif damage == 'outbound_hash': call['request']['outbound']['body_sha256'] = contracts.hash_bytes(b'wrong')
+    elif damage == 'outbound_host': call['request']['outbound']['host'] = 'unrelated.example'
+    elif damage == 'outbound_path': call['request']['outbound']['path'] = '/unrelated'
+    elif damage == 'outbound_method': call['request']['outbound']['method'] = 'GET'
+    elif damage == 'outbound_query': call['request']['outbound'].pop('query')
+    elif damage == 'outbound_content_type': call['request']['outbound'].pop('content_type')
+    elif damage == 'worker_ref_missing': call.pop('worker_observation_ref')
+    else:
+        for record in [call, *call['lifecycle']]:
+            if damage == 'funding_missing': record.pop('funding_source')
+            else: record['funding_source'] = 'miner' if damage == 'funding_miner' else 'unknown'
+    seal(example)
+    assert not training_thinking.verified_undispatched_transport(example, call)
+    assert not assess_bank(values, example)['eligible']
+
+
+@pytest.mark.parametrize('funding_source', ['host', 'miner_key'])
+def test_valid_funding_and_observation_attachment_phases(funding_source):
+    values = undispatched_values()
+    for row in values['ledger_rows'][-2:]:
+        row['funding_source'] = funding_source
+    example = training_export.assemble_example(**values)
+    call = example['provider_calls'][-1]
+    assert training_thinking.verified_undispatched_transport(example, call)
+    assert assess_bank(values, example)['eligible']
+    call.pop('worker_observation_ref')
+    assert not training_thinking.verified_undispatched_transport(example, call)
+    assert training_thinking.verified_undispatched_transport(example, call, require_observation_ref=False)
+
+
+@pytest.mark.parametrize('field', ['method', 'host', 'path', 'body_sha256', 'query', 'content_type'])
+def test_outbound_validation_is_independent_of_the_capture_document_hash(field):
+    values = undispatched_values()
+    example = training_export.assemble_example(**values)
+    call = example['provider_calls'][-1]
+    call['request']['outbound'].pop(field)
+    raw = contracts.canonical_json(call['request']).encode()
+    digest = contracts.hash_bytes(raw)
+    call['request_capture'].update(sha256=digest,
+        ref=training_capture.OBJECT_PREFIX + digest[7:] + '.json.gz', size_bytes=len(raw))
+    seal(example)
+    assert not training_thinking.verified_undispatched_transport(example, call)
+    assert not assess_bank(values, example)['eligible']

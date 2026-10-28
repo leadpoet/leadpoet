@@ -670,12 +670,13 @@ def _verified_unavailable_upstream_failure(example, call) -> bool:
         return False
 
 
-def verified_undispatched_transport(example, call) -> bool:
+def verified_undispatched_transport(example, call, *, require_observation_ref=True) -> bool:
     """Prove the retained Deepline request never dispatched; invent no reply."""
     from lab_arena import training_observations
     if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
             or call.get("run_id") != example.get("run_id")
             or call.get("provider") != "deepline" or call.get("operation_id") != "deepline.execute"
+            or call.get("funding_source") not in {"host", "miner_key"}
             or call.get("accounting_state") != "recovery"
             or type(call.get("actual_microusd")) is not int or call["actual_microusd"] != 0
             or not set(call.get("evidence_gaps") or []) <= {"full_response_unavailable"}
@@ -687,6 +688,26 @@ def verified_undispatched_transport(example, call) -> bool:
     try:
         identity, sequence = call["call_identity"], call["action_sequence"]
         request = call["request"]
+        capture = call["request_capture"]
+        outbound = request["outbound"]
+        if (not isinstance(capture, Mapping) or capture.get("schema_version") != training_capture.SCHEMA_VERSION
+                or capture.get("status") not in {"stored", "referenced"} or capture.get("encoding") != "gzip"
+                or not isinstance(capture.get("sha256"), str)
+                or contracts.SHA256_RE.fullmatch(capture["sha256"]) is None
+                or capture.get("ref") != training_capture.OBJECT_PREFIX + capture["sha256"][7:] + ".json.gz"
+                or capture.get("redacted") is not False or capture.get("redactions") != []
+                or request.get("schema_version") != training_capture.SCHEMA_VERSION
+                or request.get("privacy") != {"redacted": False, "redactions": []}
+                or contracts.document_hash(request) != capture["sha256"]
+                or type(capture.get("size_bytes")) is not int
+                or capture["size_bytes"] != len(contracts.canonical_json(request).encode())
+                or not 0 < capture["size_bytes"] <= training_capture.MAX_OBJECT_BYTES
+                or type(capture.get("compressed_bytes")) is not int
+                or not 0 < capture["compressed_bytes"] <= training_capture.MAX_COMPRESSED_BYTES
+                or not isinstance(outbound, Mapping) or not isinstance(outbound.get("body"), Mapping)
+                or not isinstance(outbound.get("query"), Mapping) or outbound.get("content_type") != "application/json"
+                or not training_steps._outbound_request_exact(call)):
+            return False
         lifecycle = call["lifecycle"]
         if (not isinstance(identity, str) or contracts.SHA256_RE.fullmatch(identity) is None
                 or type(sequence) is not int or sequence < 0
@@ -753,7 +774,8 @@ def verified_undispatched_transport(example, call) -> bool:
                 and row["contributes_to_provider_call_count"] is True and row["privacy"]["redacted"] is False
                 and row["request"]["admitted_parameters"] == request.get("admitted_parameters")
                 and (exception_only or local_error) and bool(outcome["exception_class"].strip())
-                and ("worker_observation_ref" not in call or call["worker_observation_ref"] == ref))
+                and (not require_observation_ref and "worker_observation_ref" not in call
+                     or call.get("worker_observation_ref") == ref))
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
         return False
 

@@ -973,7 +973,8 @@ def _link_worker_receipts(run, paid, snapshot, *, require_completed_phases=True,
                  "provider_calls": paid, "worker_observation_artifacts": {run["run_id"]: snapshot}}
         if any(call["call_identity"] not in linked
                and not training_thinking.verified_recovered_responses_retry(proof, call)
-               and not training_thinking.verified_undispatched_transport(proof, call) for call in paid):
+               and not training_thinking.verified_undispatched_transport(
+                   proof, call, require_observation_ref=False) for call in paid):
             errors.add("worker_response_receipt_link_invalid")
     if run["kind"] == "execute":
         expected = {call["call_identity"] for call in paid

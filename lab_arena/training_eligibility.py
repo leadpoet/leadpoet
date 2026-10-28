@@ -695,17 +695,7 @@ def _transient_artifact_gap_verified(example, submission, artifacts):
 
 def _retained_delivery_evidence_exact(call):
     """Check every retained result and API route, including unselected receipts."""
-    request = call.get("request") or {}
-    outbound = request.get("outbound") or {}
-    operation = operations.get_operation(call.get("operation_id"))
-    if (operation is None or call.get("provider") != operation.provider
-            or outbound.get("method") != operation.method
-            or outbound.get("host") != (operation.outbound_host or operation.host)
-            or outbound.get("path") != (operation.outbound_path or operations._render_path(
-                operation, request.get("hashed_parameters") or {}))
-            or outbound.get("body_sha256") != (
-                contracts.hash_bytes(b"") if outbound.get("body") is None
-                else contracts.document_hash(outbound["body"]))):
+    if not training_steps._outbound_request_exact(call):
         return False
     lifecycle_ids = {row.get("entry_id") for row in call.get("lifecycle") or []}
     permitted = {"hidden_reasoning"} if call.get("operation_id") in reasoning_capture.OPERATIONS else set()

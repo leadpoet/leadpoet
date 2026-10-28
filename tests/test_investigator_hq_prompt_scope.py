@@ -234,6 +234,8 @@ def test_bound_hq_instruction_composes_with_enabled_industry_review(monkeypatch)
     assert result['claims']['geography']['status'] == 'VERIFIED'
     assert result['claims']['industry']['status'] == 'UNPROVEN'
     for request in requests:
-        prompt = request['messages'][0]['content']
+        from lab_arena.operations import validate_operation_request
+        validate_operation_request('openrouter.chat', request)
+        prompt = ''.join(m['content'] for m in request['messages'] if m['role'] == 'system')
         assert inv._LITERAL_HEADQUARTERS_INSTRUCTION in prompt
         assert 'Submit industry UNPROVEN with empty citations; judge other targets normally.' in prompt

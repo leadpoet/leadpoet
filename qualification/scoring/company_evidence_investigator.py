@@ -1146,6 +1146,20 @@ def _visible_stage_archive_cards(
     ][:MAX_STAGE_ARCHIVE_CARDS]
 
 
+def _bounded_system_messages(prompt: str) -> list[dict[str, str]]:
+    """Keep composed instructions intact within the existing per-message cap."""
+    messages = []
+    while prompt:
+        end = min(len(prompt), OPENROUTER_MAX_CONTENT_CHARS)
+        if end < len(prompt):
+            boundary = prompt.rfind("\n", 0, end)
+            if boundary >= 0:
+                end = boundary + 1
+        messages.append({"role": "system", "content": prompt[:end]})
+        prompt = prompt[end:]
+    return messages
+
+
 def _bounded_message_json(value: Any, *, prefix: str = "") -> str:
     """Serialize JSON within the broker message bound by trimming evidence text."""
 
@@ -5363,7 +5377,7 @@ async def investigate_company_evidence(
                             else INVESTIGATOR_MODEL
                         ),
                         "messages": [
-                            {"role": "system", "content": system_prompt},
+                            *_bounded_system_messages(system_prompt),
                             *messages,
                         ],
                         "tools": [

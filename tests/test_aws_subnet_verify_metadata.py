@@ -63,7 +63,133 @@ def actual_fixture(manifest, archive, initial):
     return dict(metadata=metadata, state=state, database_acl_default=dict(database="postgres", owner="arena_admin", acl=dict(is_null=False, items=["=Tc/arena_admin", "arena_admin=CTc/arena_admin"])), supporting_auth_roles=[copy.deepcopy(manifest["supporting_auth_role"])], sequences=copy.deepcopy(archive))
 
 
+def http_proof_fixture(root, manifest, manifest_digest):
+    """Synthetic sealed catalog proof; no source/API access."""
+    current = dict(capture=dict(sealed_manifest_sha256=manifest_digest), evidence=dict(
+        evidence_kind="supplemental-current-source-catalog-not-sealed-snapshot",
+        project="qplwoislplkcegvdmbim", current_user="postgres", current_database="postgres",
+        transaction_read_only="on", search_path="pg_catalog",
+        extension=dict(**verify.HTTP_EXTENSION, owner="supabase_admin"),
+        members=[copy.deepcopy(verify.HTTP_DOMAIN_MEMBER)],
+        direct_non_extension_owned_dependents=[copy.deepcopy(verify.HTTP_DOMAIN_DEPENDENCY)]))
+    current_path = root / "source-members-pg-catalog.json"
+    snapshot.private_json(current_path, current)
+    proof = dict(format=1, manifest_sha256=manifest_digest, extension=copy.deepcopy(verify.HTTP_EXTENSION),
+        current_source_members=dict(file=current_path.name, sha256=snapshot.sha256_file(current_path)),
+        constraint=copy.deepcopy(verify.HTTP_DOMAIN_CONSTRAINT))
+    path = root / "http-domain-proof.json"
+    snapshot.private_json(path, proof)
+    return path, proof, current
+
+
 class MetadataTests(unittest.TestCase):
+    def test_http_domain_exception_is_optional_exact_and_preserves_application_constraints(self):
+        # This literal is transcribed independently from the sealed catalog,
+        # rather than deriving every positive fixture from the implementation.
+        self.assertEqual(verify.HTTP_DOMAIN_CONSTRAINT,dict(schema="public",name="content_type_check",
+            relation=None,kind="c",validated=True,deferrable=False,initially_deferred=False,
+            definition=r"CHECK ((VALUE ~ '^\S+\/\S+'::text))"))
+        manifest=manifest_fixture();manifest["extensions"]=[copy.deepcopy(verify.HTTP_EXTENSION)]
+        app=dict(schema="public",name="t_0_positive",relation="t_0",kind="c",validated=True,
+                 deferrable=False,initially_deferred=False,definition="CHECK ((id > 0))")
+        manifest["schema_metadata"]["constraints"]=[copy.deepcopy(verify.HTTP_DOMAIN_CONSTRAINT),app]
+        original=copy.deepcopy(manifest)
+        archive=archive_fixture(manifest);before=baseline_fixture();actual=actual_fixture(manifest,archive,before)
+        actual["metadata"]["constraints"]=[copy.deepcopy(app)]
+        self.assertIn("constraints",verify.compare(manifest,archive,before,actual))
+        self.assertIsNone(verify.validate_http_domain_exclusion(None,None,manifest,"a"*64))
+        with tempfile.TemporaryDirectory() as directory:
+            path,_,_=http_proof_fixture(Path(directory),manifest,"a"*64)
+            exception=verify.validate_http_domain_exclusion(path,snapshot.sha256_file(path),manifest,"a"*64)
+            self.assertEqual(verify.compare(manifest,archive,before,actual,exception),[])
+            for constraints in ([],[dict(app,definition="CHECK ((id >= 0))")],
+                                [copy.deepcopy(app),copy.deepcopy(verify.HTTP_DOMAIN_CONSTRAINT)]):
+                changed=copy.deepcopy(actual);changed["metadata"]["constraints"]=constraints
+                self.assertIn("constraints",verify.compare(manifest,archive,before,changed,exception))
+            duplicate=copy.deepcopy(manifest)
+            duplicate["schema_metadata"]["constraints"].append(copy.deepcopy(verify.HTTP_DOMAIN_CONSTRAINT))
+            with self.assertRaisesRegex(snapshot.Failure,"http-domain-manifest"):
+                verify.validate_http_domain_exclusion(path,snapshot.sha256_file(path),duplicate,"a"*64)
+        self.assertEqual(manifest,original)
+
+    def test_http_domain_proof_rejects_hash_identity_dependency_and_scope_drift(self):
+        manifest=manifest_fixture();manifest["extensions"]=[copy.deepcopy(verify.HTTP_EXTENSION)]
+        manifest["schema_metadata"]["constraints"]=[copy.deepcopy(verify.HTTP_DOMAIN_CONSTRAINT)]
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);path,proof,current=http_proof_fixture(root,manifest,"a"*64)
+            digest=snapshot.sha256_file(path)
+            for args in ((None,digest),(path,None),(path,"0"*64)):
+                with self.assertRaises(snapshot.Failure):
+                    verify.validate_http_domain_exclusion(*args,manifest,"a"*64)
+            with self.assertRaisesRegex(snapshot.Failure,"http-domain-proof"):
+                verify.validate_http_domain_exclusion(path,digest,manifest,"b"*64)
+            for change in (lambda p:p.update(extension=dict(verify.HTTP_EXTENSION,version="1.7")),
+                           lambda p:p["constraint"].update(relation="t_0"),
+                           lambda p:p["constraint"].update(definition="CHECK (true)"),
+                           lambda p:p["constraint"].update(validated=1),
+                           lambda p:p["current_source_members"].update(file="../source-members-pg-catalog.json")):
+                changed=copy.deepcopy(proof);change(changed)
+                path.write_text(json.dumps(changed))
+                with self.assertRaises(snapshot.Failure):
+                    verify.validate_http_domain_exclusion(path,snapshot.sha256_file(path),manifest,"a"*64)
+            path.write_text(json.dumps(proof))
+            digest=snapshot.sha256_file(path)
+            source=root/"source-members-pg-catalog.json"
+            changed=copy.deepcopy(current);changed["evidence"]["extension"]["owner"]="postgres"
+            source.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(snapshot.Failure,"reference-seal"):
+                verify.validate_http_domain_exclusion(path,digest,manifest,"a"*64)
+            # Resealing bytes cannot authorize a different object or dependency.
+            for change in (lambda e:e["extension"].update(owner="postgres"),
+                           lambda e:e.update(search_path="public"),
+                           lambda e:e.update(project="another_project"),
+                           lambda e:e["members"].append(copy.deepcopy(verify.HTTP_DOMAIN_MEMBER)),
+                           lambda e:e["members"][0].update(identity="public.application_domain"),
+                           lambda e:e["direct_non_extension_owned_dependents"][0].update(dependency_type="n"),
+                           lambda e:e["direct_non_extension_owned_dependents"][0].update(referenced_identity="public.application_domain")):
+                changed=copy.deepcopy(current);change(changed["evidence"])
+                source.write_text(json.dumps(changed))
+                changed_proof=copy.deepcopy(proof)
+                changed_proof["current_source_members"]["sha256"]=snapshot.sha256_file(source)
+                path.write_text(json.dumps(changed_proof))
+                with self.assertRaisesRegex(snapshot.Failure,"http-domain-current-proof"):
+                    verify.validate_http_domain_exclusion(path,snapshot.sha256_file(path),manifest,"a"*64)
+
+    def test_http_domain_cli_records_private_exclusion_before_comparison(self):
+        manifest=manifest_fixture();manifest["extensions"]=[copy.deepcopy(verify.HTTP_EXTENSION)]
+        manifest["schema_metadata"]["constraints"]=[copy.deepcopy(verify.HTTP_DOMAIN_CONSTRAINT)]
+        archive=archive_fixture(manifest);before=baseline_fixture();actual=actual_fixture(manifest,archive,before)
+        actual["metadata"]["constraints"]=[]
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            for name,value in (("manifest.json",manifest),("sequences.json",archive),("before.json",before)):
+                snapshot.private_json(root/name,value)
+            mh=snapshot.sha256_file(root/"manifest.json")
+            snapshot.private_write(root/"manifest.sha256",(mh+"\n").encode())
+            proof,_,_=http_proof_fixture(root,manifest,mh)
+            args=SimpleNamespace(manifest=str(root/"manifest.json"),manifest_sha256=mh,
+                archive_sequences=str(root/"sequences.json"),archive_sequences_sha256=snapshot.sha256_file(root/"sequences.json"),
+                initial_target=str(root/"before.json"),initial_target_sha256=snapshot.sha256_file(root/"before.json"),
+                directory=str(root/"proof"),http_domain_exclusion_proof=str(proof),
+                http_domain_exclusion_proof_sha256=snapshot.sha256_file(proof))
+            output=io.StringIO()
+            with patch.object(bootstrap,"guard_empty"),patch.object(snapshot,"secret",return_value={}), \
+                 patch.object(snapshot,"connection_config",return_value={}),patch.object(snapshot,"service"), \
+                 patch.object(snapshot,"Keeper"),patch.object(verify,"capture_target",return_value=actual),contextlib.redirect_stdout(output):
+                verify.verify(args)
+            self.assertEqual(json.loads(output.getvalue())["status"],"match")
+            self.assertNotIn("content_type_check",output.getvalue())
+            report=json.loads((root/"proof"/"report.json").read_text())
+            self.assertEqual(report["applied_exclusions"][0]["constraint"],verify.HTTP_DOMAIN_CONSTRAINT)
+            self.assertEqual(report["applied_exclusions"][0]["proof_sha256"],args.http_domain_exclusion_proof_sha256)
+            self.assertEqual(json.loads((root/"proof"/"expected-metadata.json").read_text())["constraints"],[])
+            # Bad optional evidence must fail before any target secret is read.
+            args.http_domain_exclusion_proof_sha256="0"*64
+            with patch.object(snapshot,"secret") as secret:
+                with self.assertRaisesRegex(snapshot.Failure,"reference-seal"):
+                    verify.verify(args)
+                secret.assert_not_called()
+
     def test_only_exact_export_grants_are_removed(self):
         manifest = manifest_fixture()
         cleaned = verify.clean_source_metadata(manifest)
@@ -293,6 +419,31 @@ class NativeMetadataTests(unittest.TestCase):
                 self.assertFalse(actual["state"]["database_acl"]["is_null"])
                 self.assertEqual(actual["state"]["database_acl"],actual["database_acl_default"]["acl"])
                 self.assertEqual(verify.database_acl_match(before,actual)[1]["rule"],"initial-null-database-acl-equals-server-default")
+                # Reproduce the catalog gap with the bundled plpgsql extension:
+                # its member domain is excluded, but the auto-dependent CHECK
+                # is not itself an extension member and remains in capture.
+                # No HTTP installation or application function call is needed.
+                run(admin,br"CREATE DOMAIN public.content_type AS text CHECK (VALUE ~ '^\S+\/\S+'::text); ALTER EXTENSION plpgsql ADD DOMAIN public.content_type;")
+                with snapshot.Keeper(source_env,logs) as keeper:
+                    domain_constraints=keeper.one_json(snapshot.METADATA_QUERIES["constraints"])
+                    captured_types=keeper.one_json(snapshot.METADATA_QUERIES["types"])
+                    domain_dependency=keeper.one_json("SELECT json_build_object('dependency',d.deptype,'extension',e.extname) FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_depend d ON d.classid='pg_catalog.pg_constraint'::regclass AND d.objid=c.oid JOIN pg_catalog.pg_depend t ON t.classid=d.refclassid AND t.objid=d.refobjid AND t.deptype='e' AND t.refclassid='pg_catalog.pg_extension'::regclass JOIN pg_catalog.pg_extension e ON e.oid=t.refobjid WHERE c.conname='content_type_check';")
+                self.assertEqual([c for c in domain_constraints if c["name"]=="content_type_check"],
+                                 [verify.HTTP_DOMAIN_CONSTRAINT])
+                self.assertFalse(any(t["name"]=="content_type" for t in captured_types))
+                self.assertEqual(domain_dependency,dict(dependency="a",extension="plpgsql"))
+                run(admin,b"ALTER EXTENSION plpgsql DROP DOMAIN public.content_type; DROP DOMAIN public.content_type;")
+                http_manifest=copy.deepcopy(manifest)
+                http_manifest["extensions"]=[copy.deepcopy(verify.HTTP_EXTENSION)]
+                http_manifest["schema_metadata"]["constraints"]=domain_constraints
+                self.assertIn("constraints",verify.compare(http_manifest,archive,before,actual))
+                proof_dir=root/"http-proof";proof_dir.mkdir(mode=0o700)
+                proof,_,_=http_proof_fixture(proof_dir,http_manifest,"a"*64)
+                exclusion=verify.validate_http_domain_exclusion(proof,snapshot.sha256_file(proof),http_manifest,"a"*64)
+                self.assertEqual(verify.compare(http_manifest,archive,before,actual,exclusion),[])
+                app_constraint_drift=copy.deepcopy(actual)
+                app_constraint_drift["metadata"]["constraints"].pop()
+                self.assertIn("constraints",verify.compare(http_manifest,archive,before,app_constraint_drift,exclusion))
                 # Native non-default ACLs cannot use the NULL-baseline exception.
                 for grant,revoke in ((b"GRANT CREATE ON DATABASE postgres TO PUBLIC;",b"REVOKE CREATE ON DATABASE postgres FROM PUBLIC;"),
                                      (b"REVOKE TEMPORARY ON DATABASE postgres FROM PUBLIC;",b"GRANT TEMPORARY ON DATABASE postgres TO PUBLIC;"),

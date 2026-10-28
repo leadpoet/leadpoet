@@ -79,6 +79,30 @@ def empty_evidence():
                 available_extensions=[dict(name=n) for n in snapshot.EXTENSIONS])
 
 
+def http_acl_fixture():
+    members, lines, fragments = [], ["1; 3079 100 EXTENSION - http "], []
+    for i in range(19):
+        name, key = "http_member_" + str(i), str(100 + i)
+        members.append(dict(**{"class": "pg_proc"}, kind="function", schema="public",
+                            name=name, identity_arguments="data bytea", owner="supabase_admin"))
+        lines.append(key + "; 0 0 ACL public FUNCTION " + name + "(data bytea) supabase_admin")
+        fragments.append("-- Name: FUNCTION " + name + "(data bytea); Type: ACL; Schema: public; Owner: supabase_admin\n--\n\n"
+                         + "".join("GRANT ALL ON FUNCTION public." + name + "(data bytea) TO " + role + ";\n"
+                                   for role in ("postgres", "anon", "authenticated", "service_role")) + "\n\n")
+    lines += ["200; 0 0 ACL public FUNCTION ordinary() postgres", "201; 0 0 ACL public TYPE http_request supabase_admin"]
+    toc = ("\n".join(lines) + "\n").encode()
+    proof = dict(capture=dict(sealed_manifest_sha256="f" * 64, sealed_manifest_unchanged=True),
+                 evidence=dict(evidence_kind="supplemental-current-source-catalog-not-sealed-snapshot",
+                               transaction_read_only="on", search_path="pg_catalog", project="qplwoislplkcegvdmbim",
+                               extension=dict(name="http", schema="public", owner="supabase_admin", version="1.6"), members=members))
+    review = dict(source_proof=json.dumps(proof).encode(), acl_sql="".join(fragments).encode(), manifest_sha256="f" * 64)
+    seals = dict(toc=hashlib.sha256(toc).hexdigest(), manifest="f" * 64,
+                 **{k: hashlib.sha256(review[k]).hexdigest() for k in ("source_proof", "acl_sql")})
+    exclusions = [dict(id=line.split(";", 1)[0], sha256=hashlib.sha256(line.encode()).hexdigest(), reason="reviewed fixture")
+                  for line in lines[:20]]
+    return toc, dict(routines=[dict(schema="public", name="ordinary")]), review, seals, exclusions
+
+
 class RestorePlanTests(unittest.TestCase):
     def test_target_guard_rejects_identity_existing_objects_sessions_and_unsafe_roles(self):
         evidence = empty_evidence()
@@ -125,6 +149,59 @@ class RestorePlanTests(unittest.TestCase):
             with self.assertRaises(snapshot.Failure):
                 restore.select_toc(toc, [item])
         self.assertEqual(len(entries), 4)
+
+    def test_http_acl_exceptions_are_complete_exact_and_default_denied(self):
+        toc, metadata, review, seals, exclusions = http_acl_fixture()
+        with self.assertRaises(snapshot.Failure):
+            restore.select_toc(toc, exclusions, metadata)
+        with patch.dict(restore.HTTP_ACL_REVIEW_SHA256, seals, clear=True):
+            selected, _ = restore.select_toc(toc, exclusions, metadata, review)
+            self.assertEqual(selected.count(b"; excluded "), 20)
+            self.assertIn(b"\n200; 0 0 ACL public FUNCTION ordinary() postgres\n", selected)
+            self.assertIn(b"\n201; 0 0 ACL public TYPE http_request supabase_admin\n", selected)
+            records = restore.reviewed_http_acls(toc, metadata, review)
+            self.assertEqual(len(records), 19)
+            self.assertTrue(all(len(r["acl_sql_sha256"]) == 64 for r in records.values()))
+            for omitted in (exclusions[1:], exclusions[:-1]):
+                with self.assertRaises(snapshot.Failure):
+                    restore.select_toc(toc, omitted, metadata, review)
+            for key in ("200", "201"):
+                line = restore.toc_entries(toc)[key]
+                extra = dict(id=key, sha256=hashlib.sha256(line.encode()).hexdigest(), reason="unapproved")
+                with self.assertRaises(snapshot.Failure):
+                    restore.select_toc(toc, exclusions + [extra], metadata, review)
+            for key in ("source_proof", "acl_sql", "manifest_sha256"):
+                changed = dict(review)
+                changed[key] += b" " if isinstance(changed[key], bytes) else "0"
+                with self.assertRaises(snapshot.Failure):
+                    restore.select_toc(toc, exclusions, metadata, changed)
+            with self.assertRaises(snapshot.Failure):
+                restore.select_toc(toc + b"202; 0 0 ACL public FUNCTION different() postgres\n", exclusions, metadata, review)
+            with self.assertRaises(snapshot.Failure):
+                restore.select_toc(toc, [{**exclusions[0], "sha256": "0" * 64}] + exclusions[1:], metadata, review)
+            collision = dict(routines=metadata["routines"] + [dict(schema="public", name="http_member_0", arguments="other text")])
+            with self.assertRaises(snapshot.Failure):
+                restore.select_toc(toc, exclusions, collision, review)
+
+    def test_http_acl_review_semantics_reject_wrong_identity_extension_and_mixed_sql(self):
+        toc, metadata, review, seals, exclusions = http_acl_fixture()
+        proof = json.loads(review["source_proof"])
+        variants = []
+        for key, value in (("version", "1.7"), ("name", "pgcrypto"), ("schema", "extensions")):
+            changed = copy.deepcopy(proof)
+            changed["evidence"]["extension"][key] = value
+            variants.append(dict(review, source_proof=json.dumps(changed).encode()))
+        for key, value in (("identity_arguments", "data text"), ("owner", "postgres"), ("kind", "type")):
+            changed = copy.deepcopy(proof)
+            changed["evidence"]["members"][0][key] = value
+            variants.append(dict(review, source_proof=json.dumps(changed).encode()))
+        variants.append(dict(review, acl_sql=review["acl_sql"].replace(b"TO postgres;", b"TO postgres;\nGRANT ALL ON FUNCTION public.ordinary() TO anon;", 1)))
+        for changed in variants:
+            # Re-pin synthetic fixture bytes to exercise the semantic guards too.
+            changed_seals = {**seals, **{k: hashlib.sha256(changed[k]).hexdigest() for k in ("source_proof", "acl_sql")}}
+            with self.subTest(changed=variants.index(changed)), patch.dict(restore.HTTP_ACL_REVIEW_SHA256, changed_seals, clear=True):
+                with self.assertRaises(snapshot.Failure):
+                    restore.select_toc(toc, exclusions, metadata, changed)
 
     def test_public_schema_exclusion_is_bound_to_exact_manifest_owner(self):
         for owner in ("postgres", "pg_database_owner"):
@@ -314,6 +391,52 @@ class NativeRestoreTests(unittest.TestCase):
                     run([str(PG17 / "pg_ctl"), "-D", str(cluster_root / "db"), "-m", "fast", "-w", "stop"])
 
             with cluster("source", "local_operator") as (source_admin, source_env, _), cluster("target", "arena_admin") as (target_admin, target_env, target_write):
+                if public_owner == "pg_database_owner":
+                    # Native ACL-only records survive omitted extension pre-data.
+                    # Model that boundary without installing the unsupported HTTP
+                    # extension: omit these fixture definitions from the list.
+                    setup = "CREATE FUNCTION public.ordinary() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$; ALTER FUNCTION public.ordinary() OWNER TO postgres; REVOKE ALL ON FUNCTION public.ordinary() FROM PUBLIC; GRANT EXECUTE ON FUNCTION public.ordinary() TO lab_arena_service;"
+                    for i in range(19):
+                        identity = "public.http_member_" + str(i) + "(data bytea)"
+                        setup += ("CREATE FUNCTION " + identity + " RETURNS text LANGUAGE sql AS $$ SELECT encode(data,'hex') $$; ALTER FUNCTION "
+                                  + identity + " OWNER TO supabase_admin; GRANT ALL ON FUNCTION " + identity
+                                  + " TO postgres,anon,authenticated,service_role;")
+                    run(source_admin, data=setup.encode())
+                    archive = root / "http-acl-dump"
+                    run([str(PG17 / "pg_dump"), "--dbname=service=migration", "-Fd", "--schema=public", "--file=" + str(archive)], env=source_env)
+                    original = run([str(PG17 / "pg_restore"), "--list", str(archive)])
+                    acl_list = root / "native-acl-only.list"
+                    snapshot.private_write(acl_list, ("\n".join(line for line in original.decode().splitlines() if " ACL " in line) + "\n").encode())
+                    acl_sql = run([str(PG17 / "pg_restore"), "--use-list=" + str(acl_list), "--file=-", str(archive)])
+                    omitted = [line for line in original.decode().splitlines()
+                               if " FUNCTION public http_member_" not in line and " SCHEMA - public " not in line]
+                    omitted.append("999999; 3079 100 EXTENSION - http ")
+                    toc = ("\n".join(omitted) + "\n").encode()
+                    _, metadata, review, seals, _ = http_acl_fixture()
+                    review["acl_sql"] = acl_sql
+                    seals.update(toc=hashlib.sha256(toc).hexdigest(), acl_sql=hashlib.sha256(acl_sql).hexdigest())
+                    run(target_admin, data=b"GRANT CREATE ON SCHEMA public TO postgres;")
+                    bad_list = root / "http-bad.list"
+                    snapshot.private_write(bad_list, toc.replace(b"999999;", b"; excluded 999999;"))
+                    command = restore.native_restore_command(bad_list, archive)
+                    with self.assertRaises(snapshot.Failure):
+                        snapshot.command(command, target_write, logs, "local-http-missing")
+                    self.assertTrue(any("function public.http_member_" in p.read_text() and "does not exist" in p.read_text()
+                                        for p in logs.glob("local-http-missing-*.stderr")))
+                    self.assertEqual(run(target_admin, data=b"SELECT to_regprocedure('public.ordinary()') IS NULL;").strip(), b"t")
+                    with patch.dict(restore.HTTP_ACL_REVIEW_SHA256, seals, clear=True):
+                        records = restore.reviewed_http_acls(toc, metadata, review)
+                        exclusions = [dict(record, reason="fixture exact unsupported member ACL") for record in records.values()]
+                        extension_line = toc.decode().splitlines()[-1]
+                        exclusions.append(dict(id="999999", sha256=hashlib.sha256(extension_line.encode()).hexdigest(), reason="fixture unsupported extension"))
+                        selected, _ = restore.select_toc(toc, exclusions, metadata, review)
+                    good_list = root / "http-good.list"
+                    snapshot.private_write(good_list, selected)
+                    snapshot.command(restore.native_restore_command(good_list, archive), target_write, logs, "local-http-filtered")
+                    self.assertEqual(run(target_admin, data=b"SELECT pg_get_userbyid(proowner),has_function_privilege('lab_arena_service',oid,'EXECUTE'),proacl::text LIKE '%lab_arena_service=X/postgres%' FROM pg_proc WHERE oid='public.ordinary()'::regprocedure;").strip(), b"postgres|t|t")
+                    self.assertEqual(run(target_admin, data=b"SELECT count(*) FROM pg_proc WHERE proname LIKE 'http_member_%';").strip(), b"0")
+                    run(target_admin, data=b"DROP FUNCTION public.ordinary(); REVOKE CREATE ON SCHEMA public FROM postgres;")
+                    run(source_admin, data=("DROP FUNCTION public.ordinary();" + "".join("DROP FUNCTION public.http_member_" + str(i) + "(bytea);" for i in range(19))).encode())
                 sql = "CREATE SCHEMA source_add_history AUTHORIZATION lab_arena_owner; CREATE SCHEMA extensions AUTHORIZATION postgres;\n"
                 if public_owner == "postgres":
                     sql = "ALTER SCHEMA public OWNER TO postgres; " + sql

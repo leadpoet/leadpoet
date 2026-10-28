@@ -29,6 +29,17 @@ HASH = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
 DATABASE_ACL_DEFAULT_SQL = ("SELECT json_build_object('database',d.datname,"
     "'owner',pg_get_userbyid(d.datdba),'acl'," + snapshot.acl("pg_catalog.acldefault('d',d.datdba)")
     + ") FROM pg_catalog.pg_database d WHERE d.datname=current_database();")
+HTTP_EXTENSION = dict(name="http", schema="public", version="1.6")
+HTTP_DOMAIN_CONSTRAINT = dict(schema="public", name="content_type_check", relation=None,
+    kind="c", validated=True, deferrable=False, initially_deferred=False,
+    definition=r"CHECK ((VALUE ~ '^\S+\/\S+'::text))")
+HTTP_DOMAIN_MEMBER = dict(kind="type", **{"class": "pg_type"}, schema="public", name="content_type",
+    owner="supabase_admin", identity="public.content_type", identity_arguments=None,
+    result=None, acl=None, acl_entries=[])
+HTTP_DOMAIN_DEPENDENCY = dict(dependent_class="pg_constraint", dependent_type="domain constraint",
+    dependent_schema="public", dependent_name=None,
+    dependent_identity="content_type_check on public.content_type", dependency_type="a",
+    referenced_kind="type", referenced_identity="public.content_type")
 
 
 def sealed_json(path, digest):
@@ -36,6 +47,46 @@ def sealed_json(path, digest):
     snapshot.require(isinstance(digest, str) and HASH.fullmatch(digest)
                      and snapshot.sha256_file(path) == digest, "reference-seal")
     return json.loads(path.read_text())
+
+
+def exact_http_constraint(record):
+    return (isinstance(record, dict) and record == HTTP_DOMAIN_CONSTRAINT
+            and all(type(record[key]) is type(value) for key, value in HTTP_DOMAIN_CONSTRAINT.items()))
+
+
+def validate_http_domain_exclusion(path, digest, manifest, manifest_digest):
+    """Optional reviewed exception for one auto-dependent HTTP domain CHECK."""
+    if path is None and digest is None:
+        return None
+    snapshot.require(path is not None and digest is not None, "http-domain-proof")
+    proof = sealed_json(path, digest)
+    snapshot.require(isinstance(proof, dict) and set(proof) == {
+        "format", "manifest_sha256", "extension", "current_source_members", "constraint"}
+        and type(proof["format"]) is int and proof["format"] == 1
+        and proof["manifest_sha256"] == manifest_digest
+        and proof["extension"] == HTTP_EXTENSION
+        and exact_http_constraint(proof["constraint"]), "http-domain-proof")
+    snapshot.require([e for e in manifest["extensions"] if e.get("name") == "http"] == [HTTP_EXTENSION]
+        and sum(exact_http_constraint(c) for c in manifest["schema_metadata"]["constraints"]) == 1,
+        "http-domain-manifest")
+    reference = proof["current_source_members"]
+    snapshot.require(isinstance(reference, dict) and set(reference) == {"file", "sha256"}
+        and reference["file"] == "source-members-pg-catalog.json", "http-domain-current-proof")
+    current = sealed_json(Path(path).parent / reference["file"], reference["sha256"])
+    evidence = current["evidence"]
+    snapshot.require(current["capture"]["sealed_manifest_sha256"] == manifest_digest
+        and evidence["evidence_kind"] == "supplemental-current-source-catalog-not-sealed-snapshot"
+        and evidence["project"] == "qplwoislplkcegvdmbim"
+        and evidence["current_user"] == evidence["current_database"] == "postgres"
+        and evidence["transaction_read_only"] == "on" and evidence["search_path"] == "pg_catalog"
+        and evidence["extension"] == dict(**HTTP_EXTENSION, owner="supabase_admin")
+        and [m for m in evidence["members"] if m.get("identity") == "public.content_type"] == [HTTP_DOMAIN_MEMBER]
+        and [d for d in evidence["direct_non_extension_owned_dependents"]
+             if d.get("dependent_identity") == HTTP_DOMAIN_DEPENDENCY["dependent_identity"]] == [HTTP_DOMAIN_DEPENDENCY],
+        "http-domain-current-proof")
+    return dict(rule="excluded-http-extension-domain-constraint", constraint=proof["constraint"],
+                extension=proof["extension"], proof_sha256=digest, manifest_sha256=manifest_digest,
+                current_source_members_sha256=reference["sha256"])
 
 
 def acl_items(value):
@@ -56,11 +107,15 @@ def canonical_acl(value):
     return dict(is_null=value["is_null"], items=sorted(value["items"]))
 
 
-def clean_source_metadata(manifest):
-    """Approve only removal of the exact temporary export identity's grants."""
+def clean_source_metadata(manifest, http_domain_exclusion=None):
+    """Remove export grants and, only with reviewed proof, one HTTP CHECK."""
     metadata = copy.deepcopy(manifest["schema_metadata"])
     snapshot.require(set(metadata) == set(snapshot.OBJECT_KINDS)
                      and all(isinstance(items, list) for items in metadata.values()), "source-metadata")
+    if http_domain_exclusion is not None:
+        snapshot.require(exact_http_constraint(http_domain_exclusion["constraint"])
+            and sum(exact_http_constraint(c) for c in metadata["constraints"]) == 1, "http-domain-manifest")
+        metadata["constraints"] = [c for c in metadata["constraints"] if not exact_http_constraint(c)]
     tables = {(t["schema"], t["name"]) for t in manifest["tables"]}
     sequences = {(s["schema"], s["name"]) for s in manifest["sequences"]}
     for category, records in metadata.items():
@@ -191,8 +246,8 @@ def target_roles_match(state):
     return True
 
 
-def compare(manifest, archive_sequences, initial_target, actual):
-    expected = clean_source_metadata(manifest)
+def compare(manifest, archive_sequences, initial_target, actual, http_domain_exclusion=None):
+    expected = clean_source_metadata(manifest, http_domain_exclusion)
     metadata = canonical_metadata(actual["metadata"])
     differences = restore.compare_metadata(expected, metadata)
     state = actual["state"]
@@ -240,7 +295,9 @@ def verify(args):
                      and manifest["source_role"] == snapshot.SOURCE_ROLE and manifest["database"] == "postgres", "manifest-identity")
     snapshot.validate_tables(manifest["tables"])
     snapshot.require(any(t["schema"] == "source_add_history" for t in manifest["tables"]), "protected-history-missing")
-    clean_source_metadata(manifest)
+    http_domain_exclusion = validate_http_domain_exclusion(getattr(args, "http_domain_exclusion_proof", None),
+        getattr(args, "http_domain_exclusion_proof_sha256", None), manifest, args.manifest_sha256)
+    expected = clean_source_metadata(manifest, http_domain_exclusion)
     canonical_support(manifest["supporting_auth_role"])
     sequences = validate_sequences(sealed_json(args.archive_sequences, args.archive_sequences_sha256), manifest)
     initial = sealed_json(args.initial_target, args.initial_target_sha256)
@@ -253,12 +310,13 @@ def verify(args):
     with snapshot.service(config) as env, snapshot.Keeper(env, logs) as keeper:
         actual = capture_target(keeper)
     snapshot.private_json(directory / "actual.json", actual)
-    snapshot.private_json(directory / "expected-metadata.json", clean_source_metadata(manifest))
-    differences = compare(manifest, sequences, initial, actual)
+    snapshot.private_json(directory / "expected-metadata.json", expected)
+    differences = compare(manifest, sequences, initial, actual, http_domain_exclusion)
     counts = {category: len(actual["metadata"][category]) for category in snapshot.OBJECT_KINDS}
     equivalence = database_acl_match(initial, actual)[1]
     report = dict(format=1, status="mismatch" if differences else "match", differences=differences, counts=counts,
                   applied_equivalences=[equivalence] if equivalence else [],
+                  applied_exclusions=[http_domain_exclusion] if http_domain_exclusion else [],
                   manifest_sha256=args.manifest_sha256, archive_sequences_sha256=args.archive_sequences_sha256,
                   initial_target_sha256=args.initial_target_sha256,
                   data_verification="separate verify-data proof remains required")
@@ -273,6 +331,8 @@ def main(argv=None):
         parser.add_argument("--" + name, required=True)
         parser.add_argument("--" + name + "-sha256", required=True)
     parser.add_argument("--directory", required=True)
+    parser.add_argument("--http-domain-exclusion-proof")
+    parser.add_argument("--http-domain-exclusion-proof-sha256")
     args = parser.parse_args(argv)
     os.umask(0o077)
     previous = signal.signal(signal.SIGTERM, snapshot.interrupted)

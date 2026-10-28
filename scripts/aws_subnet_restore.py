@@ -30,6 +30,14 @@ NOINHERIT = {"lab_arena_owner", "lab_arena_service", "leadpoet_parity_reader", s
 OWNER_ROLES = {"postgres", "lab_arena_owner", "supabase_admin", "supabase_auth_admin"}
 OBJECT_KINDS = snapshot.OBJECT_KINDS
 AUTH_ROLE_SHA256 = "c96a9358b02089b03f3962fd85c5f83c9d64f32240481915c0efe74398dc761b"
+# One reviewed immutable archive and supplemental CURRENT catalog proof. These
+# exceptions do not replace the sealed snapshot's ordinary-object metadata.
+HTTP_ACL_REVIEW_SHA256 = {
+    "toc": "de56bb235302015478bf7bd1b9c28f79af7f8b8f77b19b81d023ecb3c737d8c9",
+    "source_proof": "da10e68a4ca65caf03810c50e4d97ae2cfb9373dd45784109c75cedc1dbebd32",
+    "acl_sql": "aaec2549c6ae2165873a840aaf096c99f1ff8a0e7acf42da38f49aad8cbbc4e2",
+    "manifest": "d93ddef1740ecfa1bb74a186f36c918ca731e4973cfd756fa69f9a62d8138f56",
+}
 
 
 def target_evidence(keeper):
@@ -204,9 +212,61 @@ def source_extensions_schema(schema_metadata):
     return records[0]
 
 
-def select_toc(toc, exclusions, schema_metadata=None):
-    """Omit only http or exact manifest-bound precreated schema entries."""
+def reviewed_http_acls(toc, schema_metadata, review):
+    """Join exact archive ACL fragments to the pinned HTTP-only catalog proof."""
+    snapshot.require(isinstance(review, dict) and set(review) == {
+        "source_proof", "acl_sql", "manifest_sha256"}, "http-acl-review")
+    for key, value in (("toc", toc), ("source_proof", review["source_proof"]),
+                       ("acl_sql", review["acl_sql"])):
+        snapshot.require(isinstance(value, bytes)
+                         and hashlib.sha256(value).hexdigest() == HTTP_ACL_REVIEW_SHA256[key],
+                         "http-acl-review-seal")
+    snapshot.require(review["manifest_sha256"] == HTTP_ACL_REVIEW_SHA256["manifest"], "http-acl-manifest")
+    proof = json.loads(review["source_proof"])
+    evidence = proof["evidence"]
+    snapshot.require(proof["capture"]["sealed_manifest_sha256"] == review["manifest_sha256"]
+                     and proof["capture"]["sealed_manifest_unchanged"] is True
+                     and evidence["evidence_kind"] == "supplemental-current-source-catalog-not-sealed-snapshot"
+                     and evidence["transaction_read_only"] == "on" and evidence["search_path"] == "pg_catalog"
+                     and evidence["project"] == "qplwoislplkcegvdmbim"
+                     and evidence["extension"] == dict(name="http", schema="public", owner="supabase_admin", version="1.6"),
+                     "http-acl-membership-proof")
+    members = [m for m in evidence["members"] if m["class"] == "pg_proc"]
+    snapshot.require(len(members) == 19, "http-acl-member-count")
+    snapshot.require(isinstance(schema_metadata, dict) and isinstance(schema_metadata.get("routines"), list),
+                     "http-acl-ordinary-inventory")
+    entries, records = toc_entries(toc), {}
+    sql = review["acl_sql"].decode("utf-8")
+    for member in members:
+        snapshot.require(member["kind"] == "function" and member["schema"] == "public"
+                         and member["owner"] == "supabase_admin", "http-acl-member-identity")
+        snapshot.ident(member["name"])
+        # Reject even a same-name ordinary overload: it is not an extension ACL.
+        snapshot.require(not any(r["schema"] == "public" and r["name"] == member["name"]
+                                 for r in schema_metadata["routines"]), "http-acl-ordinary-collision")
+        identity = member["name"] + "(" + member["identity_arguments"] + ")"
+        suffix = "ACL public FUNCTION " + identity + " supabase_admin"
+        matches = [(key, line) for key, line in entries.items()
+                   if re.sub(r"^[0-9]+; [0-9]+ [0-9]+ ", "", line) == suffix]
+        snapshot.require(len(matches) == 1, "http-acl-archive-identity")
+        key, line = matches[0]
+        snapshot.require(key not in records, "http-acl-duplicate-member")
+        marker = "-- Name: FUNCTION " + identity + "; Type: ACL; Schema: public; Owner: supabase_admin\n--\n\n"
+        snapshot.require(sql.count(marker) == 1, "http-acl-fragment")
+        fragment = sql.split(marker, 1)[1].split("\n\n", 1)[0] + "\n"
+        expected = "".join("GRANT ALL ON FUNCTION public." + identity + " TO " + role + ";\n"
+                           for role in ("postgres", "anon", "authenticated", "service_role"))
+        snapshot.require(fragment == expected, "http-acl-mixed-or-changed-fragment")
+        records[key] = dict(id=key, sha256=hashlib.sha256(line.encode()).hexdigest(),
+                            acl_sql_sha256=hashlib.sha256(fragment.encode()).hexdigest(),
+                            identity="public." + identity)
+    return records
+
+
+def select_toc(toc, exclusions, schema_metadata=None, http_acl_review=None):
+    """Omit reviewed platform entries; all ordinary object ACLs stay intact."""
     entries = toc_entries(toc)
+    http_acls = reviewed_http_acls(toc, schema_metadata, http_acl_review) if http_acl_review is not None else {}
     excluded = {}
     for item in exclusions:
         key = str(item["id"])
@@ -220,9 +280,15 @@ def select_toc(toc, exclusions, schema_metadata=None):
             snapshot.require(public[1] == source_public_schema(schema_metadata)["owner"], "public-schema-owner-binding")
         elif re.fullmatch(r"SCHEMA - extensions postgres\s*", tail):
             source_extensions_schema(schema_metadata)
+        elif key in http_acls:
+            snapshot.require(item["sha256"] == http_acls[key]["sha256"], "http-acl-exclusion-seal")
         else:
             snapshot.require(re.fullmatch(r"(?:EXTENSION - http|COMMENT - EXTENSION http)\s*", tail), "protected-toc-exclusion")
         excluded[key] = item
+    if http_acls:
+        snapshot.require(set(http_acls) <= set(excluded) and any(
+            re.fullmatch(r"[0-9]+; [0-9]+ [0-9]+ EXTENSION - http\s*", entries[key])
+            for key in excluded), "http-acl-complete-exclusions")
     selected = "\n".join(("; excluded " + line if line.split(";", 1)[0] in excluded else line)
                          for line in toc.decode("utf-8").splitlines()) + "\n"
     return selected.encode(), entries
@@ -319,7 +385,13 @@ def plan(args):
     snapshot.require(files == manifest["archive_files"], "archive-seal")
     toc = snapshot.command(["pg_restore", "--list", str(root / "dump")], env, logs, "restore-toc")
     exclusions = json.loads(Path(args.exclusions).read_text()) if args.exclusions else []
-    listing, entries = select_toc(toc, exclusions, manifest["schema_metadata"])
+    http_review = None
+    proof_path, sql_path = getattr(args, "http_acl_source_proof", None), getattr(args, "http_acl_sql", None)
+    snapshot.require(bool(proof_path) == bool(sql_path), "http-acl-review-files")
+    if proof_path:
+        http_review = dict(source_proof=Path(proof_path).read_bytes(), acl_sql=Path(sql_path).read_bytes(),
+                           manifest_sha256=snapshot.sha256_file(root / "manifest.json"))
+    listing, entries = select_toc(toc, exclusions, manifest["schema_metadata"], http_review)
     counts = validate_toc_inventory(entries, manifest["schema_metadata"])
     inventory_path = Path(args.target_inventory)
     snapshot.require(snapshot.sha256_file(inventory_path / "target.json") == (inventory_path / "target.sha256").read_text().strip(), "target-inventory-seal")
@@ -347,6 +419,9 @@ def plan(args):
                   target=snapshot.TARGET_HOST, target_evidence_sha256=snapshot.sha256_file(inventory_path / "target.json"),
                   manifest_sha256=snapshot.sha256_file(root / "manifest.json"), toc_sha256=hashlib.sha256(toc).hexdigest(),
                   toc_counts=counts, exclusions=exclusions, archive_sequences=states,
+                  http_acl_review=(dict(seals=HTTP_ACL_REVIEW_SHA256,
+                                       entries=list(reviewed_http_acls(toc, manifest["schema_metadata"], http_review).values()))
+                                   if http_review is not None else None),
                   source_public_schema_owner=source_public_schema(manifest["schema_metadata"])["owner"],
                   supporting_auth_role_sha256=AUTH_ROLE_SHA256,
                   native_restore_command=native_restore_command(output / "restore.list", root / "dump"),
@@ -367,6 +442,8 @@ def main(argv=None):
     prep.add_argument("--export-directory", required=True)
     prep.add_argument("--target-inventory", required=True)
     prep.add_argument("--exclusions")
+    prep.add_argument("--http-acl-source-proof", help="Exact reviewed supplemental CURRENT HTTP catalog JSON")
+    prep.add_argument("--http-acl-sql", help="Exact reviewed original archive ACL-only SQL")
     prep.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     os.umask(0o077)

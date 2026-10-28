@@ -144,6 +144,49 @@ The plan remains blocked until these facts are established:
   wrapper and checks all target identity/empty-state gates immediately before
   its first write. The existing snapshot service is deliberately read-only.
 
+## Exact unavailable HTTP extension treatment
+
+The first native restore rolled back on an ACL for
+`public.bytea_to_text(bytea)`. PostgreSQL archives changed extension-member
+ACLs separately from `CREATE EXTENSION`; omitting the unavailable HTTP
+extension alone does not omit those ACLs. The target was then verified equal
+to its post-bootstrap state. Retain that failed attempt and rollback evidence.
+
+For this exact sealed October 28 archive only, the planner accepts paired
+`--http-acl-source-proof` and `--http-acl-sql` files. It pins the original TOC,
+original ACL-only SQL, sealed manifest and supplemental current-source catalog
+hashes. The catalog was read with `search_path=pg_catalog`; it is current
+evidence, not part of the earlier snapshot. Join each of its 19 HTTP function
+identities to exactly one original ACL TOC entry and its complete native SQL
+fragment. Require the four exact grants to postgres, anon, authenticated and
+service_role. Record the TOC-line and fragment hashes. Exclude all 19 together
+with the unavailable extension; reject partial lists, ordinary-function name
+collisions, mixed statements and type ACLs. The 10 HTTP types have NULL ACLs
+and need no additional ACL exclusion. Preserve all 383 ordinary routines and
+every application/schema/default ACL. Never use `--no-acl` or placeholder
+HTTP functions.
+
+The sealed metadata also contains one HTTP-internal domain constraint:
+`public.content_type_check`, with no table relation. Its automatic dependency
+on the extension-owned `public.content_type` domain is not a direct extension
+dependency. The optional paired `--http-domain-exclusion-proof` and
+`--http-domain-exclusion-proof-sha256` verifier arguments require the exact
+sealed record, HTTP 1.6/public identity and a hash-bound sibling current catalog
+proof of that domain and dependency. Remove only this record from expected
+metadata and record the exception in the private report. Do not alter actual
+metadata or any application constraint. Expected constraints are then 717
+rather than 718; all other categories retain their original strict checks.
+
+Before another bulk restore, independently review a full native
+`--schema-only --use-list=REVISED_LIST` script. Run it and the exact reviewed
+cleanup SQL bodies in one bounded transaction that ends with explicit ROLLBACK.
+Keep `ON_ERROR_STOP`, owners and ACLs; do not use `--create`, `--clean` or
+`--section=post-data` alone (function ACLs are not confined to that section).
+Compare all 12 metadata categories inside the transaction and prove that the
+target returns to its exact post-bootstrap state afterward. The empty-table
+trial does not replace the subsequent full-row, generated-value, sequence or
+data-dependent constraint checks.
+
 ## Role and ownership treatment
 
 Keep owner names `postgres`, `lab_arena_owner`, `supabase_admin` and

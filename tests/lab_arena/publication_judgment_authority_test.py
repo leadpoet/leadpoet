@@ -73,7 +73,11 @@ def test_unfinished_or_unbound_judgments_still_block(format, mutation):
         judges[0]["stage"] = 2
     elif mutation == "missing_output":
         judges[0]["output_ref"] = None
-    assert instance._unfinished_judgments(row)
+    if mutation in {"wrong_miner", "wrong_round", "wrong_stage", "missing_output"}:
+        with pytest.raises(service.ServiceError, match="accepted_judgment_binding_invalid"):
+            instance._unfinished_judgments(row)
+    else:
+        assert instance._unfinished_judgments(row)
 
 
 @pytest.mark.parametrize("format", ["integrity", "company"])
@@ -97,7 +101,8 @@ def test_cache_formats_cannot_fall_back_to_legacy_authority(format, mutation):
             scope.pop("cache_key")
             scope["scorer_image_digest" if mutation == "wrong_image" else "round_id"] = "wrong"
             ref["cache_key"] = scope["cache_key"] = contracts.document_hash(scope)
-    assert instance._unfinished_judgments(row)
+    with pytest.raises(service.ServiceError, match="accepted_judgment_binding_invalid"):
+        instance._unfinished_judgments(row)
 
 
 @pytest.mark.parametrize("empty", [True, False])
@@ -108,7 +113,11 @@ def test_empty_company_refs_require_a_valid_empty_execution(empty):
         "schema_version": service.contact_policy.output_schema(row["configuration_doc"]),
         "companies": [] if empty else [_company("A")],
     }).encode())
-    assert instance._unfinished_judgments(row) is (not empty)
+    if empty:
+        assert instance._unfinished_judgments(row) is False
+    else:
+        with pytest.raises(service.ServiceError, match="accepted_judgment_binding_invalid"):
+            instance._unfinished_judgments(row)
 
 
 @pytest.mark.parametrize("format", ["legacy", "integrity", "company"])

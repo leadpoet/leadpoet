@@ -12,6 +12,7 @@ from qualification.scoring.competition import (
 )
 from tests.test_arena_score_integrity import _icp, _positive_breakdown, _public_company
 from tests.lab_arena.company_judgments_test import _miss
+from tests.lab_arena.scorer_environment_fixture import isolated_scorer_environment
 
 
 def _input(names=("A", "B"), *, policy=None):

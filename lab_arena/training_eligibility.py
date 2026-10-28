@@ -397,7 +397,7 @@ def _selected_cost_gap_verified(example, run_id, *, unavailable_source=False):
     return True
 
 
-def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False):
+def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False, not_dispatched=None):
     """Compose documented privacy/cost gaps without changing retained evidence.
 
     Only the failed-delivery verifier can enable its mode, after proving the
@@ -409,15 +409,19 @@ def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False
     call_allowed = {"request_privacy_nonexact", "response_privacy_nonexact", "provider_cost_unresolved"}
     cost_gap = "provider_cost_unresolved" in reasons
     snapshot_gap = "competition_cost_eligibility_unavailable" in reasons
+    not_dispatched = not_dispatched or {}
     delivery_reasons = {"worker_observations_incomplete"} if failed_delivery else set()
+    local_privacy = {"worker_observation_privacy_nonexact"} if any(
+        row["privacy"]["redacted"] for row in not_dispatched.values()) else set()
     snapshot_reasons = {"competition_cost_eligibility_unavailable"} if snapshot_gap else set()
     cost_reasons = ({"provider_cost_unresolved"} if cost_gap else set()) | snapshot_reasons
-    allowed = call_allowed | {"context_privacy_nonexact"} | snapshot_reasons | delivery_reasons
+    allowed = call_allowed | {"context_privacy_nonexact"} | snapshot_reasons | delivery_reasons | local_privacy
     by_dimension = proof.get("reasons_by_dimension") or {}
     dimensions = proof.get("dimensions") or {}
     if (proof.get("complete") is not False
             or not reasons or not reasons <= allowed
-            or not call_allowed & reasons
+            or not (call_allowed & reasons or not_dispatched)
+            or not local_privacy <= reasons
             or (cost_gap or failed_delivery) and training_coverage.MISSING_REASONING_SETTING not in (
                 example.get("configuration") or {})
             or not delivery_reasons <= reasons
@@ -443,7 +447,8 @@ def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(training_thinking._required_observation_redacted(example, row, agent=field == "agent_observations")
                    for field in ("observations", "agent_observations")
-                   for row in payload.get(field) or [])):
+                   for row in payload.get(field) or []
+                   if not (field == "observations" and row.get("call_identity") in not_dispatched))):
         return False
     selected = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
     selected_gaps = set()
@@ -480,7 +485,7 @@ def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False
                         for row in call.get("response_receipts") or []))):
                 return False
             attributed.update(gaps)
-        if (not selected_gaps or attributed | delivery_reasons | snapshot_reasons | (
+        if (not (selected_gaps or not_dispatched) or attributed | delivery_reasons | local_privacy | snapshot_reasons | (
                 {"context_privacy_nonexact"} if "context_privacy_nonexact" in reasons else set()) != reasons):
             return False
         if failed_delivery:
@@ -497,7 +502,7 @@ def _selected_privacy_cascade_verified(example, run_id, *, failed_delivery=False
                 if source_id == run_id:
                     if attempt.get("kind") != "execute" or attempt.get("status") != "accepted":
                         return False
-                    expected |= delivery_reasons
+                    expected |= delivery_reasons | local_privacy
                 elif attempt.get("kind") != "score":
                     return False
                 if (not isinstance(row, Mapping) or row.get("kind") != attempt.get("kind")
@@ -928,7 +933,7 @@ def _failed_delivery_call_verified(example, call):
 
 def _failed_delivery_gap_verified(example):
     """Proven failed writes or undispatched requests consume one coverage slot."""
-    example, _ = training_thinking.provider_visible_view(example)
+    example, diagnostic_gaps = training_thinking.provider_visible_view(example)
     if not training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
         return None
     run_id = example.get("run_id")
@@ -943,9 +948,9 @@ def _failed_delivery_gap_verified(example):
                 or not isinstance(artifact.get("claim_request_hash"), str)
                 or contracts.SHA256_RE.fullmatch(artifact["claim_request_hash"]) is None
                 or artifact.get("payload_sha256") != contracts.document_hash(payload)
-                or payload.get("complete") is not False
-                or payload.get("failures") not in (["capture_incomplete"],
-                    ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE])
+                or not (payload.get("complete") is True and payload.get("failures") == []
+                    or payload.get("complete") is False and payload.get("failures") in (["capture_incomplete"],
+                        ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE]))
                 or training_observations._validate_payload(payload) != payload
                 or any(payload[count] != len(payload[rows]) for count, rows in (
                     ("observation_count", "observations"), ("response_receipt_count", "response_receipts"),
@@ -955,15 +960,40 @@ def _failed_delivery_gap_verified(example):
             return None
         calls = [call for call in example.get("provider_calls") or [] if call.get("run_id") == run_id]
         undispatched = [call for call in calls if training_thinking.verified_undispatched_transport(example, call)]
+        # Complete capture can truthfully record a request that never reached
+        # a provider. Its exact proof still consumes an incomplete ICP slot.
+        if payload["complete"] and not undispatched:
+            return None
         delivered = [call for call in calls if call not in undispatched]
-        receipts = payload["response_receipts"]
+        # Reuse the exporter's exact local-event proof. The export retains
+        # every provider lifecycle; no synthetic call, charge or receipt is made.
+        ledger_rows = [{"run_id": call.get("run_id"), "call_identity": call.get("call_identity"),
+                        "entry_doc": entry.get("accounting") or {}}
+                       for call in example.get("provider_calls") or [] for entry in call.get("lifecycle") or []]
+        not_dispatched = training_export._not_dispatched_host_observations(
+            {"run_id": run_id, "kind": "execute"}, calls, artifact,
+            example.get("configuration") or {}, ledger_rows)
+        if not_dispatched:
+            example, local_diagnostics = training_thinking.provider_visible_view(
+                example, not_dispatched_host_observations=not_dispatched)
+            diagnostic_gaps |= local_diagnostics
+            link_errors = training_export._link_worker_receipts(
+                {"run_id": run_id, "kind": "execute"}, calls, artifact,
+                require_client_ack=False, configuration=example.get("configuration") or {},
+                ledger_rows=ledger_rows, update_provenance=False)
+            # Required privacy is independently checked by the existing
+            # selected-call verifier below; all link/dependency errors stay hard.
+            if link_errors - diagnostic_gaps - {"worker_observation_privacy_nonexact"}:
+                return None
+        receipts = [row for row in payload["response_receipts"] if row["call_identity"] not in not_dispatched]
         identities = [call["call_identity"] for call in calls]
         if (not any(call.get("operation_id") in reasoning_capture.OPERATIONS for call in calls)
                 or len(identities) != len(set(identities))
                 or len(receipts) != len(delivered)
                 or {row["call_identity"] for row in receipts} != {call["call_identity"] for call in delivered}
                 or any(row["write_state"] not in {"socket_written", "socket_write_failed"} for row in receipts)
-                or not undispatched and not any(row["write_state"] == "socket_write_failed" for row in receipts)):
+                or not undispatched and not not_dispatched
+                   and not any(row["write_state"] == "socket_write_failed" for row in receipts)):
             return None
         # The failed-write proof explains only the generic flag. Every
         # optional failure needs the same independent proof as optional-only
@@ -974,10 +1004,10 @@ def _failed_delivery_gap_verified(example):
                 or not all(training_observations.optional_capture_failure(row) for row in failures)):
             return None
         reasons = set((example.get("completeness") or {}).get("incomplete_reasons") or [])
-        if any(set(call.get("evidence_gaps") or []) & {
+        if not_dispatched or any(set(call.get("evidence_gaps") or []) & {
                 "provider_cost_unresolved", "request_privacy_nonexact", "response_privacy_nonexact"} for call in calls):
             return (frozenset(reasons) if _selected_privacy_cascade_verified(
-                example, run_id, failed_delivery=True) else None)
+                example, run_id, failed_delivery=True, not_dispatched=not_dispatched) else None)
         for call in delivered:
             if (call.get("accounting_state") != "settlement"
                     or type(call.get("actual_microusd")) is not int or call["actual_microusd"] < 0

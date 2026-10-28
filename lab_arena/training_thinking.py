@@ -671,11 +671,13 @@ def _verified_unavailable_upstream_failure(example, call) -> bool:
 
 
 def verified_undispatched_transport(example, call, *, require_observation_ref=True) -> bool:
-    """Prove the retained Deepline request never dispatched; invent no reply."""
+    """Prove the retained provider request never dispatched; invent no reply."""
     from lab_arena import training_observations
+    operation = operations.get_operation(call.get("operation_id"))
     if (not training_coverage.uses_host_result_evidence(example.get("configuration") or {})
             or call.get("run_id") != example.get("run_id")
-            or call.get("provider") != "deepline" or call.get("operation_id") != "deepline.execute"
+            or operation is None or call.get("operation_id") not in {"deepline.execute", *reasoning_capture.OPERATIONS}
+            or call.get("provider") != operation.provider
             or call.get("funding_source") not in {"host", "miner_key"}
             or call.get("accounting_state") != "recovery"
             or type(call.get("actual_microusd")) is not int or call["actual_microusd"] != 0
@@ -791,6 +793,32 @@ def verified_failed_attempt(example: Mapping[str, Any], call: Mapping[str, Any])
         return True
     try:
         run_id = example["run_id"]
+        # Both delivery policies reject the referenced write's status 200.
+        # This is only a negative filter; no response or target is proved here.
+        try:
+            provenance = call.get("response_provenance") or {}
+            ref = provenance.get("worker_receipt_ref") or {}
+            artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+            writes = [row for row in (artifact.get("payload") or {}).get("response_receipts") or []
+                      if row.get("ordinal") == ref.get("ordinal")]
+            if (call.get("run_id") == ref.get("run_id") == run_id
+                    and call.get("provider") == "openrouter" and call.get("operation_id") in reasoning_capture.OPERATIONS
+                    and type(call.get("action_sequence")) is int and call["action_sequence"] >= 0
+                    and type(ref.get("ordinal")) is int and ref["ordinal"] >= 0
+                    and isinstance(ref.get("payload_sha256"), str)
+                    and contracts.SHA256_RE.fullmatch(ref["payload_sha256"]) is not None
+                    and ref["payload_sha256"] == artifact.get("payload_sha256")
+                    and provenance.get("delivery_to_worker") == "socket_written" and len(writes) == 1
+                    and writes[0].get("write_state") == "socket_written"
+                    and type(writes[0].get("status")) is int and writes[0]["status"] == 200
+                    and all(writes[0].get(key) == call.get(key)
+                            for key in ("call_identity", "operation_id", "action_sequence"))
+                    and type(writes[0].get("body_bytes")) is int and writes[0]["body_bytes"] >= 0
+                    and isinstance(writes[0].get("body_sha256"), str)
+                    and contracts.SHA256_RE.fullmatch(writes[0]["body_sha256"]) is not None):
+                return False
+        except (KeyError, TypeError, ValueError, AttributeError):
+            pass  # Malformed or ambiguous references keep the full proof path.
         admission_refusal = call.get("accounting_state") == "refusal"
         if admission_refusal:
             if not _bound_admission_refusal(example, call):
@@ -1536,6 +1564,11 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
             or not isinstance(example.get("related_run_gap_attribution"), Mapping)):
         return None
     run_id = example["run_id"]
+    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
+    payload = artifact.get("payload") or {}
+    has_undispatched = undispatched_proof is not None and any(
+        call.get("run_id") == run_id and undispatched_proof(example, call)
+        for call in example.get("provider_calls") or [])
     rows = example["related_run_gap_attribution"]
     attempts = {row.get("run_id"): row for row in example.get("attempts") or []
                 if isinstance(row, Mapping) and isinstance(row.get("run_id"), str)}
@@ -1556,7 +1589,8 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
             return None
         if source_id == run_id:
             expected = ({"worker_observations_incomplete"}
-                        if failed_delivery_proof is not None or undispatched_proof is not None else set())
+                        if (failed_delivery_proof is not None or undispatched_proof is not None)
+                        and payload.get("complete") is False else set())
             if undispatched_proof is not None and any(
                     "full_response_unavailable" in (call.get("evidence_gaps") or [])
                     and undispatched_proof(example, call) for call in example.get("provider_calls") or []):
@@ -1571,14 +1605,14 @@ def _attributed_score_only_gaps(example: Mapping[str, Any], reasons: set[str], *
         costs.update(source_costs)
     if (research != set(by_dimension.get("research_process") or [])
             or costs != set(by_dimension.get("costs") or [])
-            or proof.get("complete") is not False
+            # Complete capture can record an undispatched request without a
+            # missing artifact. Only its exact proof permits empty raw gaps.
+            or proof.get("complete") is not (not reasons)
             or dimensions.get("research_process") is not (not research)
             or dimensions.get("costs") is not (not costs)
             or reasons != research | costs
-            or not reasons):
+            or not reasons and not has_undispatched):
         return None
-    artifact = (example.get("worker_observation_artifacts") or {}).get(run_id) or {}
-    payload = artifact.get("payload") or {}
     if (failed_delivery_proof is None and undispatched_proof is None and not _provider_capture_complete(example, run_id)
             or artifact.get("payload_sha256") != contracts.document_hash(payload)
             or any(_required_observation_redacted(example, row, agent=field == "agent_observations")
@@ -1845,7 +1879,7 @@ def _required_observation_redacted(example, row, *, agent=False):
                      and training_coverage.uses_host_result_evidence(example.get("configuration") or {})))
 
 
-def _provider_visible_view(example):
+def _provider_visible_view(example, *, not_dispatched_host_observations=None):
     """Ignore only attributed local-runtime diagnostics for provider proof.
 
     This is a validation view. The saved export, completeness, hashes and
@@ -1862,19 +1896,27 @@ def _provider_visible_view(example):
     artifacts = example.get("worker_observation_artifacts") or {}
     optional_redacted = False
     optional_binary = False
+    private_local_host = False
+    not_dispatched_host_observations = not_dispatched_host_observations or {}
     for artifact in artifacts.values():
         payload = artifact.get("payload") or {}
         if artifact.get("payload_sha256") != contracts.document_hash(payload):
             return example, frozenset()
-        if any(_required_observation_redacted(example, row) for row in payload.get("observations") or []):
-            return example, frozenset()
+        for row in payload.get("observations") or []:
+            if _required_observation_redacted(example, row):
+                # Eligibility alone supplies rows already proved by the exact
+                # no-ledger host classifier. Keep their privacy flags intact.
+                if (artifact.get("run_id") != example.get("run_id")
+                        or row != not_dispatched_host_observations.get(row.get("call_identity"))):
+                    return example, frozenset()
+                private_local_host = True
         for row in payload.get("agent_observations") or []:
             if _required_observation_redacted(example, row, agent=True):
                 return example, frozenset()
             optional_redacted |= (row.get("kind") in _OPTIONAL_LOCAL_KINDS
                                   and (row.get("privacy") or {}).get("redacted") is True)
             optional_binary |= row.get("kind") == "web_fetch_binary"
-    if optional_redacted and "worker_observation_privacy_nonexact" in reasons:
+    if optional_redacted and not private_local_host and "worker_observation_privacy_nonexact" in reasons:
         ignored.add("worker_observation_privacy_nonexact")
     if optional_binary and "binary_privacy_review_required" in reasons:
         ignored.add("binary_privacy_review_required")
@@ -1899,9 +1941,9 @@ def _provider_visible_view(example):
     return view, frozenset(ignored)
 
 
-def provider_visible_view(example):
+def provider_visible_view(example, *, not_dispatched_host_observations=None):
     try:
-        return _provider_visible_view(example)
+        return _provider_visible_view(example, not_dispatched_host_observations=not_dispatched_host_observations)
     except (TypeError, ValueError, KeyError, AttributeError):
         return example, frozenset()  # Invalid diagnostics never grant an exception.
 

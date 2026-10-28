@@ -23,6 +23,18 @@ def install(monkeypatch, *, decision='match', missing=None, mutation=None,
     monkeypatch.setenv('ARENA_INDUSTRY_EVIDENCE_MODEL', MODEL)
     original = c._post_json
     review_calls = []
+    original_search = c._search_web
+
+    async def search(session, query, **options):
+        # The empty-corpus discovery now precedes the first model turn. Keep
+        # this offline locator lookup fast; later searches retain this fixture's
+        # deliberate deadline crossing. Deadline controls also test slow reads.
+        if options.get('read_source_text') and not review_calls:
+            calls['search'].append(query)
+            return {'results': [], 'notice': 'discovery_only_not_evidence'}
+        return await original_search(session, query, **options)
+
+    monkeypatch.setattr(c, '_search_web', search)
 
     if not locator_transport:
         # These loop fixtures share an offline search stub. Real Sonar request
@@ -391,7 +403,7 @@ def test_reserved_industry_judgment_finishes_after_admitted_fetch(monkeypatch):
     assert len(reviews) == result['usage']['industry_review_calls'] == 1
     assert result['_completed_submit'] is True
     assert result['failure_reason'] == ''
-    assert len(calls['primary']) == 2 and not calls['search']
+    assert len(calls['primary']) == 2 and len(calls['search']) == 1
 
 
 @pytest.mark.parametrize('fault', ['truncated', 'invalid_json', 'missing_role', 'foreign_citation'])

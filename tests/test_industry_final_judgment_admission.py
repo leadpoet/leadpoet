@@ -44,7 +44,7 @@ def test_admitted_submission_finishes_reserved_industry_review(monkeypatch, deci
     assert len(reviews) == result['usage']['industry_review_calls'] == 1
     assert result['usage']['reasoning_turns'] <= c.MAX_REASONING_TURNS
     assert len(calls['primary']) == 2
-    assert not calls['search']
+    assert len(calls['search']) == 1  # Initial empty-corpus discovery.
 
 
 def test_unadmitted_industry_review_still_stops_at_research_deadline(monkeypatch):

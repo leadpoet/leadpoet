@@ -2410,6 +2410,10 @@ async def _review_industry_sources(
             pages.append({'source_id': f's{index}', 'source_url': url, 'body': text})
     if not pages:
         review['missing_requirements'] = ['Company-bound source text for the requested activity']
+        if research:
+            review['research_query'] = ' '.join(
+                criteria.get(key, '') for key in ('product_service', 'subindustry', 'industry')
+            ).strip()[:300]
         return unproven, '', 0
     packet = industry_classification.prepare(criteria, {
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
@@ -5034,9 +5038,12 @@ async def investigate_company_evidence(
                 input_document['investigation_limits']['reasoning_turns'] = reasoning_turn_limit
             industry_gap_search_needed = bool(
                 industry_research_brief
-                and industry_review_calls
                 and industry_research_brief['decision'] == 'unavailable'
                 and industry_research_brief['missing_requirements']
+                and industry_research_brief.get('research_query')
+                and any(_independently_bound_first_party_url(
+                    f'https://{domain}/', first_party_domains, identity_anchor,
+                ) for domain in first_party_domains)
                 and search_calls < MAX_SEARCH_CALLS
                 and fetch_calls < MAX_FETCH_CALLS
                 and time.monotonic() - started

@@ -878,8 +878,8 @@ def test_unsettled_cost_cannot_hide_unbound_score_or_output(damage):
 def test_readable_projection_must_retain_paths_to_raw_provider_text(monkeypatch):
     original = training_thinking.readable_trace
 
-    def missing_text(example):
-        report = original(example)
+    def missing_text(example, **kwargs):
+        report = original(example, **kwargs)
         for call in report["calls"]:
             call["events"] = [event for event in call["events"] if not event.get("reasoning_field")]
         return report

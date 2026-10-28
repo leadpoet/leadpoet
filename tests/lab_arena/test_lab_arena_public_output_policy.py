@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -27,7 +28,8 @@ def _round(round_id: str, status: str, **policies: str) -> dict:
         "status": status,
         "configuration_doc": {
             "mode": "shadow",
-            "schedule": {"submission_cutoff": "2026-09-15T12:00:00Z"},
+            "schedule": {"submission_open": "2026-09-14T00:00:00Z",
+                         "submission_cutoff": "2026-09-15T12:00:00Z"},
             "private_icps": ["PRIVATE ICP MUST NOT LEAK"],
             "runner_hotkeys": ["PRIVATE RUNNER MUST NOT LEAK"],
             **policies,
@@ -48,6 +50,8 @@ def _service(rows: list[dict]) -> ArenaService:
             return []
 
     service._store = Store()
+    service._clock = lambda: datetime(2026, 9, 14, tzinfo=timezone.utc)
+    service.public_reward_basis = lambda *_args, **_kwargs: None
     service._config = SimpleNamespace(
         mode="shadow",
         network_name="finney",

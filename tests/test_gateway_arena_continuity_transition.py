@@ -103,7 +103,8 @@ def _runtime_clone(tmp_path: Path, origin: str) -> str:
 
 
 def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
-         runtime_clone: str = "", review_rows: list[dict] | None = None) -> subprocess.CompletedProcess[str]:
+         runtime_clone: str = "", review_rows: list[dict] | None = None,
+         guard_scope: str = "gateway", paired: bool = False) -> subprocess.CompletedProcess[str]:
     preflight = tmp_path / "preflight"
     preflight.mkdir(exist_ok=True)
     (preflight / "marker").write_text("candidate\n", encoding="utf-8")
@@ -133,6 +134,13 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
     python.write_text(
         '#!/bin/bash\n'
         'printf "python:%s\\n" "$*" >> "$EVENTS"\n'
+        'if [ "$1" = -B ]; then shift; fi\n'
+        'if [[ "$*" == *" inspect-retained-slot "* ]]; then\n'
+        '  if [ -f "$TASK_TMP/retained-report.json" ]; then cat "$TASK_TMP/retained-report.json"; '
+        'else printf \'{"tree":null,"sha":null,"owner":"gateway-1792000000-123","components":{}}\\n\'; fi; exit 0; fi\n'
+        'if [ "$1" = - ] && [[ "$*" == *"$TASK_TMP/repo"* ]]; then '
+        'if [ "${FAIL:-}" = bad_retained_source ] && [[ "$*" == *slot0-6666* ]]; then exit 1; fi; exit 0; fi\n'
+        'if [ "$1" = - ] && [ "$2" = 8792 ] && [ -f "$TASK_TMP/runtime/api-slot0-process.json" ]; then exit 1; fi\n'
         'if [ "${FAIL_IDLE:-}" = 1 ] && [[ "$*" == *arena_first_cutover_idle.py* ]]; '
         'then exit 1; fi\n'
         'if [ -n "${IDLE_REVIEW_FILE:-}" ] && [[ "$*" == *arena_first_cutover_idle.py* ]]; '
@@ -144,6 +152,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         '  state_file=""; prior=""\n'
         '  for item in "$@"; do if [ "$prior" = --state-file ]; then state_file="$item"; break; fi; prior="$item"; done\n'
         '  if [[ "$state_file" == "$TASK_TMP/runtime/"* ]]; then\n'
+        '    if [ "${FAIL:-}" = old_driver_busy ] && [[ "$state_file" == *driver-slot0-process.json ]]; then exit 1; fi\n'
         '    if [[ "$*" == *"manage_owned_process_group.py stop "* ]]; then rm -f "$state_file"; '
         'else [ -f "$state_file" ] || exit 1; fi\n'
         '  fi\n'
@@ -159,8 +168,8 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         '  active=true; if [ "${FAIL:-}" = expired_guard ]; then active=false; fi\n'
         '  printf \'{"schema_version":"leadpoet.lab_arena.restart_guard_state.v1",'
         '"guard_present":true,"guard_active":%s,"candidate_commit":"%s",'
-        '"restart_scope":"gateway","restart_phase":"gateway_destructive",'
-        '"guard_generation":1}\\n\' "$active" "$requested"\n'
+        '"restart_scope":"%s","restart_phase":"gateway_destructive",'
+        '"guard_generation":1}\\n\' "$active" "$requested" "${TEST_GUARD_SCOPE:-gateway}"\n'
         '  exit 0\n'
         'fi\n'
         'if [ "${FAIL:-}" = occupied ] && [ "$1" = - ] && [ "$2" = 8794 ]; then exit 1; fi\n'
@@ -175,6 +184,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         "arena_ingress_transition", "arena_component_command",
         "rollback_arena_candidate_before_destructive",
         "recover_arena_restart_owner", "restore_arena_recovery_guard_before_destructive",
+        "retire_arena_retained_overlap", "require_arena_lock_recovery_idle",
         "wait_for_gateway_v2_authority", "wait_for_arena_driver_startup",
         "wait_for_arena_current_readiness",
         "abort_lab_arena_restart_guard_before_destructive",
@@ -242,6 +252,15 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         run_lab_arena_restart_guard() {
           record "guard:$2"
           case "$2" in
+            owned)
+              generation=1
+              phase=gateway_destructive
+              if [ -f "$TASK_TMP/guard" ] && [ "$(cat "$TASK_TMP/guard")" = gateway_ready ]; then phase=gateway_ready; fi
+              if [ "${FAIL:-}" = changed_generation ]; then
+                if [ -f "$TASK_TMP/owned-read" ]; then generation=2; else touch "$TASK_TMP/owned-read"; fi
+              fi
+              printf '{"schema_version":"leadpoet.lab_arena.restart_guard_state.v1","guard_present":true,"guard_active":true,"paused":true,"candidate_commit":"%s","restart_scope":"%s","restart_phase":"%s","guard_generation":%s,"drain":{"preserved":true,"current_leased_count":0,"still_leased_count":0,"lost_or_mutated_count":0}}\\n' "$PREPARED_GATEWAY_SHA" "$GATEWAY_RESTART_GUARD_SCOPE" "$phase" "$generation"
+              ;;
             state)
               if [ "${FAIL:-}" = bad_guard_state ]; then printf '{"guard_present":"false"}\n'; return; fi
               if [ -f "$TASK_TMP/guard" ]; then present=true; else present=false; fi
@@ -250,6 +269,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
               ;;
             drain) printf 'draining\\n' > "$TASK_TMP/guard" ;;
             authorize) printf 'gateway_destructive\\n' > "$TASK_TMP/guard" ;;
+            ready) printf 'gateway_ready\\n' > "$TASK_TMP/guard" ;;
             abort)
               if [ -f "$TASK_TMP/guard" ] && [ "$(cat "$TASK_TMP/guard")" != draining ]; then
                 record guard:abort-refused
@@ -312,8 +332,8 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         GATEWAY_CONTROLLER_PROCESS_HELPER="$TASK_TMP/helper"
         GATEWAY_CONTROLLER_PROCESS_STATE_FILE="$TASK_TMP/old-worker.json"
         GATEWAY_ACTIVE_RELEASE_COMPONENT=gateway
-        GATEWAY_RESTART_GUARD_SCOPE=gateway
-        GATEWAY_PAIRED_RESTART=0
+        GATEWAY_RESTART_GUARD_SCOPE="${TEST_GUARD_SCOPE:-gateway}"
+        GATEWAY_PAIRED_RESTART="${TEST_PAIRED_RESTART:-0}"
         GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID=gateway-1792000000-123
         GATEWAY_RESTART_INVOCATION_ID=gateway-1792000000-456
         GATEWAY_LOG_FILE="$TASK_TMP/log"
@@ -352,6 +372,8 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
     )
     env = {**os.environ, "TASK_TMP": str(tmp_path), "INGRESS_FILE": str(ingress),
            "EVENTS": str(tmp_path / "events"), "TEST_SHA": sha, "FAIL": fail,
+           "TEST_GUARD_SCOPE": guard_scope,
+           "TEST_PAIRED_RESTART": str(int(paired)),
            "FAIL_IDLE": "1" if fail == "idle" else "0",
            "IDLE_REVIEW_FILE": str(tmp_path / "review-rows.json") if review_rows is not None else ""}
     return subprocess.run(["bash", str(harness)], cwd=tmp_path, env=env,
@@ -360,6 +382,66 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
 
 def _events(tmp_path: Path) -> list[str]:
     return (tmp_path / "events").read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize("same_source", [True, False])
+@pytest.mark.parametrize("driver_present", [True, False])
+@pytest.mark.parametrize("scope", ["gateway", "all"])
+def test_retained_old_slot_drains_before_reallocation_without_moving_serving_api(tmp_path, same_source, driver_present, scope):
+    assert _run(tmp_path, guard_scope=scope).returncode == 0
+    old_tree, old_sha, components = _retained_slot_fixture(tmp_path, driver_present)
+    before = len(_events(tmp_path))
+    if driver_present:
+        refused = _run(tmp_path, fail="old_driver_busy", guard_scope=scope)
+        assert refused.returncode != 0
+        events = _events(tmp_path)[before:]
+        assert "stop:driver:0" in events
+        assert not any(e in events for e in ("stop:edge:0", "stop:api:0", "guard:release"))
+        assert (tmp_path / "ingress").read_text().strip() == f"dual 1 {SHA} ready"
+        assert all((tmp_path / "runtime" / f"{name}-slot0-process.json").exists() for name in components)
+        before = len(_events(tmp_path))
+    target = SHA if same_source else "d" * 40
+    resumed = _run(tmp_path, sha=target, guard_scope=scope)
+    assert resumed.returncode == 0, resumed.stderr
+    events = _events(tmp_path)[before:]
+    assert events.index("stop:edge:0") < events.index("start:api:0")
+    if driver_present:
+        assert events.index("stop:driver:0") < events.index("stop:edge:0")
+    assert f"retire:0:{old_sha}" in events and not old_tree.exists()
+    assert events.index("stop:api:0") < events.index("start:api:0")
+    assert events.index("start:api:0") < events.index("stop:api:1")
+    assert events.index("start:driver:0") < events.index("guard:release")
+    assert (tmp_path / "ingress").read_text().strip() == f"dual 0 {target} ready"
+
+
+def _retained_slot_fixture(tmp_path, driver_present=True):
+    (tmp_path / "guard").write_text("gateway_destructive\n")
+    old_sha = "6" * 40
+    old_tree = tmp_path / "runtime" / ("slot0-" + old_sha)
+    old_tree.mkdir()
+    (old_tree / "marker").write_text("retained old source\n")
+    components = {name: "a" * 64 for name in (["driver"] if driver_present else []) + ["edge", "api"]}
+    for name in components:
+        (tmp_path / "runtime" / f"{name}-slot0-process.json").write_text("private old receipt\n")
+    (tmp_path / "retained-report.json").write_text(json.dumps({
+        "tree": str(old_tree), "sha": old_sha, "owner": "gateway-1000-2000", "components": components,
+    }))
+    return old_tree, old_sha, components
+
+
+@pytest.mark.parametrize("failure", ["owner_mismatch", "bad_retained_source", "changed_generation"])
+def test_retained_slot_requires_same_guard_and_exact_source_before_stop(tmp_path, failure):
+    assert _run(tmp_path).returncode == 0
+    old_tree, _, components = _retained_slot_fixture(tmp_path)
+    before = len(_events(tmp_path))
+    refused = _run(tmp_path, fail=failure)
+    assert refused.returncode != 0
+    events = _events(tmp_path)[before:]
+    assert not any(event.startswith("stop:") for event in events)
+    assert "guard:release" not in events
+    assert old_tree.exists()
+    assert all((tmp_path / "runtime" / f"{name}-slot0-process.json").exists() for name in components)
+    assert (tmp_path / "ingress").read_text().strip() == f"dual 1 {SHA} ready"
 
 
 @pytest.mark.parametrize("decision", ["passed", "rejected"])

@@ -70,6 +70,11 @@ def host(tmp_path, monkeypatch):
         [ -z "${AWS_ACCESS_KEY_ID+x}" ]
         [ -z "${LAB_ARENA_OPENROUTER_API_KEY+x}" ]
         [ -z "${GIT_SSH_COMMAND+x}" ]
+        if [ -f canonical-paired ]; then
+          [ "${GATEWAY_PAIRED_RESTART:-}" = 1 ]
+        else
+          [ -z "${GATEWAY_PAIRED_RESTART+x}" ]
+        fi
         if [ -f canonical-resume-owner ]; then
           [ "$GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID" = "$(cat canonical-resume-owner)" ]
         else
@@ -328,6 +333,34 @@ def test_pre_shutdown_resume_validates_existing_owner_without_inheriting_restart
     assert not any(key.startswith(("GATEWAY_", "LAB_ARENA_", "AWS_")) for key in calls[0][1])
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["installed_controller"] == "candidate" and receipt["canonical_exit_code"] == 0
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_explicit_paired_bootstrap_preserves_full_canonical_and_drops_ambient_mode(host, monkeypatch, capsys, paired):
+    monkeypatch.setenv("GATEWAY_PAIRED_RESTART", "1" if not paired else "invalid")
+    if paired:
+        (host["repo"] / "canonical-paired").write_text("all-component guard")
+    assert bootstrap.bootstrap(**host, paired_restart=paired) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["installed_controller"] == "candidate"
+    events = (host["repo"] / "canonical-events").read_text()
+    assert all("gate:" + gate in events for gate in ("release", "epoch", "ownership", "drain", "readiness"))
+
+
+@pytest.mark.parametrize("paired", [1, "1", None])
+def test_bootstrap_rejects_nonboolean_paired_mode_before_mutation(host, paired):
+    with pytest.raises(bootstrap.BootstrapError, match="explicit boolean"):
+        bootstrap.bootstrap(**host, paired_restart=paired)
+    assert not (host["repo"] / "canonical-events").exists()
+
+
+def test_paired_resume_requires_all_scope_without_weakening_owner(host, monkeypatch):
+    args, _ledger, _rows, state, _calls = _resume(host, monkeypatch)
+    args["paired_restart"] = True
+    (host["repo"] / "canonical-paired").write_text("all-component guard")
+    (host["repo"] / "canonical-resume-owner").write_text(args["resume_invocation"])
+    state["restart_scope"] = "all"
+    assert bootstrap.bootstrap(**args) == 0
 
 
 @pytest.mark.parametrize("change", ["owner", "guard-source", "generation-zero", "generation-string", "generation-bool",

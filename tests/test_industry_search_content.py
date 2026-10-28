@@ -222,8 +222,9 @@ def test_full_loaded_search_corpus_fits_native_selection_request(monkeypatch):
     source_parts = [p for m in first['messages'] if m['role'] == 'user'
                     and m['content'].startswith('{"untrusted_source_pages"')
                     for p in json.loads(m['content'])['untrusted_source_pages']]
-    assert {p['source_url'] for p in source_parts} == set(pages)
-    assert sum(len(s['text']) for p in source_parts for s in p['spans']) == industry.MAX_TOTAL_CHARS
+    assert {p['source_url'] for p in source_parts} == set(pages) | {URL}
+    total = sum(len(s['text']) for p in source_parts for s in p['spans'])
+    assert industry.MAX_TOTAL_CHARS - len(pages) < total <= industry.MAX_TOTAL_CHARS
     for request in calls['model']:
         validate_operation_request('openrouter.chat', request)
     assert result['usage']['search_calls'] <= c.MAX_SEARCH_CALLS

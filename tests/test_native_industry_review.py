@@ -72,6 +72,29 @@ def install(monkeypatch, *, decision='match', missing=None, mutation=None,
     return run, calls, clock, review_calls
 
 
+def test_source_selection_sees_prefetched_tails_seen_by_the_industry_reviewer(monkeypatch):
+    """The bounded metadata message must not hide already-loaded source facts."""
+    def bounded_review(result):
+        result['evidence_span_ids'] = result['evidence_span_ids'][:8]
+        result.update(decision='unavailable', missing_requirements=['Account workflow'])
+
+    run, calls, _, reviews = install(monkeypatch, mutation=bounded_review)
+    urls = [f'https://www.coreworks.ai/source-{index}' for index in range(3)]
+    tails = [f'Coreworks uniquely documented capability number {index}.' for index in range(3)]
+    pages = {url: {'final_url': url, 'text': 'Coreworks documentation. ' * 950 + tail}
+             for url, tail in zip(urls, tails)}
+    asyncio.run(run(prefetched_pages=pages,
+                    prior_observations={'submitted_source_urls': urls}))
+    assert calls['model'] and reviews
+    first = calls['model'][0]['messages']
+    metadata = next(m['content'] for m in first if m['role'] == 'user')
+    assert not any(tail in metadata for tail in tails)  # Existing message cap is real.
+    research = json.dumps(first)
+    initial_review = json.dumps(reviews[0]['messages'])
+    assert all(tail in initial_review for tail in tails)
+    assert all(tail in research for tail in tails)
+
+
 @pytest.mark.parametrize('positive_review', [False, True])
 def test_native_loop_retains_both_sources_through_fit_evidence(monkeypatch, positive_review):
     run, calls, clock, reviews = install(monkeypatch)

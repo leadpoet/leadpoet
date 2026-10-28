@@ -5179,10 +5179,11 @@ async def investigate_company_evidence(
             }]
             loaded_industry_sources = []
             if industry_review_model:
-                visible_urls = {page['url'] for page in input_document.get('prefetched_sources', [])}
+                # Metadata serialization can shorten prefetched bodies. Share
+                # the same complete bounded source packet used by the reviewer,
+                # including those pages, so research can see their remaining facts.
                 for index, (url, body) in enumerate(fetched_pages.items()):
-                    if (url not in visible_urls
-                            and _independently_bound_first_party_url(url, first_party_domains, identity_anchor)
+                    if (_independently_bound_first_party_url(url, first_party_domains, identity_anchor)
                             and _independently_bound_first_party_url(
                                 fetched_final_urls.get(url, ''), first_party_domains, identity_anchor)):
                         text = _visible_quote_surface(body).strip()

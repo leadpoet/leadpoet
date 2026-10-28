@@ -301,7 +301,7 @@ def test_bound_profile_compaction_settles_in_one_submit_without_research(monkeyp
     fetch.assert_not_called()
 
 
-def test_repeated_oversized_quotes_finish_unproven_within_existing_turn_limit(monkeypatch):
+def test_repeated_oversized_quotes_remain_incomplete_within_existing_turn_limit(monkeypatch):
     post = AsyncMock(return_value=(200, {"choices": [{"message": {"tool_calls": [{
         "id": "unchanged-oversized-quote", "type": "function", "function": {
             "name": "submit_findings", "arguments": json.dumps(
@@ -324,7 +324,8 @@ def test_repeated_oversized_quotes_finish_unproven_within_existing_turn_limit(mo
         prior_observations={"submitted_source_urls": [URL]},
         prefetched_pages={URL: {"final_url": URL, "text": PAGE}},
     ))
-    assert result["_completed_submit"] is True and result["failure_reason"] == ""
+    assert result["_completed_submit"] is False
+    assert result["failure_reason"] == "malformed_response"
     assert result["claims"]["headcount"]["status"] == "UNPROVEN"
     assert result["claims"]["headcount"]["reason"] == investigator.OVERSIZED_QUOTE_REASON
     assert 1 < post.call_count <= investigator.MAX_REASONING_TURNS + 1

@@ -204,3 +204,78 @@ def test_source_fallback_revalidates_rebuilt_request_using_same_rows(tmp_path, m
     pointer = receipt["call_doc"]["request_capture"]
     assert validations[-1][0]["call_doc"]["request_capture"] == pointer
     assert capture.read_request(objects, pointer)["outbound"]["body"] == json.loads(transport.sent[0]["body"])
+
+
+@pytest.mark.parametrize("case", ["ambiguous", "no_ambiguity", "wrong_identity", "persist_false", "persist_raises"])
+def test_source_fallback_first_proof_failure_preserves_only_own_ambiguous_request(tmp_path, monkeypatch, case):
+    from tests.lab_arena.test_lab_arena_broker import HOST_KEYS
+
+    terminal = ArenaStoreUnavailable("fallback first proof unavailable")
+    ambiguous = case != "no_ambiguity"
+    objects = LocalObjectStore(tmp_path)
+    persist_attempts = []
+    original_persist = capture.PreparedRequest.persist
+
+    def persist(prepared):
+        persist_attempts.append(copy.deepcopy(prepared.pointer))
+        if case == "persist_raises":
+            raise RuntimeError("offline object failure")
+        if case == "persist_false":
+            return False
+        return original_persist(prepared)
+
+    monkeypatch.setattr(capture.PreparedRequest, "persist", persist)
+
+    class FailedFallbackProof(OneReadStore):
+        def reserve_call(self, **kwargs):
+            assert persist_attempts == []  # No write before the failed proof.
+            result = super().reserve_call(**kwargs)
+            self.committed_doc = copy.deepcopy(self.calls[kwargs["call_identity"]]["call_doc"])
+            return {**result, "call_identity": "sha256:" + "0" * 64} if case == "wrong_identity" else result
+
+        def list_ledger(self, **kwargs):
+            self.ledger_reads += 1
+            raise terminal
+
+    store = FailedFallbackProof(ambiguous=ambiguous)
+    provider, _, transport = make_broker(
+        store=store, capture_request=capture.RequestCapture(objects).prepare,
+        credential_for=lambda _context, name: HOST_KEYS[name],
+        funding_source_for=lambda _context: "miner_key",
+    )
+
+    def execute():
+        return provider._execute_once(
+            replace(CONTEXT, kind="score", round_id="arena-2026-10-13"),
+            operation_id="scrapingdog.scrape", parameters={"url": "https://example.com/about"},
+            action_sequence=1, timeout_ms=30_000, provider_attempt=2,
+            champion_credential_retry=False, source_content_fallback=True,
+        )
+
+    if case == "wrong_identity":
+        assert execute().status == 503
+    else:
+        with pytest.raises(ArenaStoreUnavailable) as raised:
+            execute()
+        assert raised.value is terminal
+    attempts = 2 if ambiguous else 1
+    assert len(store.reserve_arguments) == attempts
+    assert all(row == store.reserve_arguments[0] for row in store.reserve_arguments)
+    assert store.log == ["reserve"] * attempts and len(store.calls) == 1
+    assert transport.sent == []  # No dispatch, settlement or provider retry.
+    assert store.ledger_reads == int(case != "wrong_identity")
+    receipt = next(iter(store.calls.values()))
+    assert receipt["kind"] == "reservation"
+    assert receipt["call_doc"] == store.committed_doc
+    pointer = receipt["call_doc"]["request_capture"]
+    assert persist_attempts == ([pointer] if ambiguous and case != "wrong_identity" else [])
+    if case == "ambiguous":
+        saved = capture.read_request(objects, pointer)
+        assert saved["request_hash"] == receipt["call_doc"]["request_hash"]
+        assert saved["effective_operation_id"] == "deepline.execute"
+        assert saved["effective_parameters"]["tool"] == "generic_http_request"
+        assert saved["outbound"]["body"]["payload"]["url"] == "https://example.com/about"
+        assert "headers" not in saved["outbound"]
+        assert not any(secret in json.dumps(saved) for secret in HOST_KEYS.values())
+    else:
+        assert not list(tmp_path.rglob("*.gz"))

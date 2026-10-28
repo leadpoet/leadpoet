@@ -5239,7 +5239,19 @@ class Broker:
         if source_content_fallback and reserved.get("idempotent") is True and status in {
             "reserved", "dispatched", "settled", "uncertain", "recovered",
         }:
-            rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+            if reserved.get("call_identity") != call_identity:
+                return _error_result("broker_unavailable", summary)
+            try:
+                rows = self._store.list_ledger(call_identity=call_identity, limit=64)
+            except ArenaStoreUnavailable:
+                if reserve_readback_used and prepared_capture is not None:
+                    # The first reserve may already reference these exact
+                    # sanitized bytes, before fallback proof can be rebuilt.
+                    try:
+                        prepared_capture.persist()
+                    except Exception:
+                        pass  # Preserve the original proof-read failure.
+                raise
             if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
                 return _error_result("broker_unavailable", summary)
             reservations = [row for row in rows if isinstance(row, Mapping)

@@ -7,8 +7,10 @@ import json
 from urllib.parse import urlsplit
 
 import pytest
+from fastapi.testclient import TestClient
 
-from lab_arena import contracts, runtime, scoring
+from lab_arena import contracts, runner, runtime, scoring
+from lab_arena.api import create_app
 from qualification.scoring.competition import apply_company_judgment_context
 from tests.test_arena_company_quality_policy import _positive_breakdown
 from lab_arena.service import ServiceError
@@ -25,7 +27,7 @@ def database():
     yield from current_service_database()
 
 
-def _scored_round(database, tmp_path, *, flat):
+def _scored_round(database, tmp_path, *, flat, http_runner=False):
     psycopg2, dsn = database
     harness = IntegrityHarness(
         lambda: psycopg2.connect(**dsn), tmp_path,
@@ -101,14 +103,56 @@ def _scored_round(database, tmp_path, *, flat):
     for participant in committed["participants"]:
         harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
-    harness.advance_until("scored", runners=2)
+    if http_runner:
+        paths = []
+        with TestClient(create_app(harness.service)) as http:
+            http.event_hooks["request"].append(lambda request: paths.append(request.url.path))
+            harness.api_factory = lambda: runner.HttpArenaApiClient("http://localhost", client=http)
+            try:
+                harness.advance_until("scored", runners=2)
+            finally:
+                harness.api_factory = None
+        assert "/arena/v1/runs/claim" in paths
+        assert any(path.endswith("/source") for path in paths)
+        assert any(path.endswith("/complete") for path in paths)
+    else:
+        harness.advance_until("scored", runners=2)
     return harness
+
+
+def _assert_publication_http(harness, published):
+    round_id = harness.round_id
+    executions = harness.service.store.list_runs(round_id, kind="execute")
+    with TestClient(create_app(harness.service)) as http:
+        response = http.get("/arena/v1/current")
+        assert response.status_code == 200, response.text
+        assert response.json()["published_round"]["round_id"] == round_id
+        response = http.get("/arena/v1/rounds/" + round_id)
+        assert response.status_code == 200, response.text
+        view = response.json()
+        assert view["status"] == "published"
+        assert view["company_judgment_policy"] == "company_judgment_v1"
+        assert view["final_ranking"] == published["publication_doc"]["final_ranking"]
+        for participant in published["publication_doc"]["final_ranking"]:
+            submission_id = participant["submission_id"]
+            response = http.get(f"/arena/v1/rounds/{round_id}/results/{submission_id}")
+            assert response.status_code == 200, response.text
+            result = response.json()
+            expected = {run["run_id"]: run["per_icp_score"] for run in executions
+                        if run["submission_id"] == submission_id}
+            assert result["score_status"] == "published"
+            assert result["public_icp_status"] == "ready"
+            assert result["public_icp_count"] == len(expected) == 5
+            scores = result["scores"]["stage_1"] + result["scores"]["stage_2"]
+            assert {row["run_id"]: row["per_icp_score"] for row in scores} == expected
+            assert set(result["outputs"]) == set(expected)
+            assert result["submission_scores"]["final"] == participant["final_score"]
 
 
 @pytest.mark.parametrize("flat", [False, True], ids=["legacy-cost", "flat-cost"])
 @pytest.mark.parametrize("fault", [None, "missing_judge", "wrong_miner", "stale_generation"])
 def test_current_ordinary_baseline_requires_bound_judges_before_publication(database, tmp_path, flat, fault):
-    harness = _scored_round(database, tmp_path, flat=flat)
+    harness = _scored_round(database, tmp_path, flat=flat, http_runner=flat and fault is None)
     store = harness.service.store
     before = store.get_round(harness.round_id)
     executions = store.list_runs(harness.round_id, kind="execute")
@@ -150,6 +194,7 @@ def test_current_ordinary_baseline_requires_bound_judges_before_publication(data
         assert store.get_run(source["run_id"])["per_icp_score"] == 80
         assert all(run["per_icp_score"] is not None
                    for run in store.list_runs(harness.round_id, kind="execute"))
+        _assert_publication_http(harness, final)
     assert {run["run_id"] for run in store.list_runs(harness.round_id, kind="execute")} == {
         run["run_id"] for run in executions
     }

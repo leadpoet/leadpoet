@@ -1,3 +1,14 @@
+## Scoped authorization: October 28 retained Arena slot recovery
+
+The user authorized the narrow canonical recovery fix after a graceful driver
+stop timeout. Retire only the opposite slot proved by private receipts, exact
+source, process identities and the retained restart owner/generation. Preserve
+the serving API and edge, no-kill waits, paid-work drain and canonical readiness.
+The paired coordinator may run the exact committed full canonical bootstrap
+with an explicit paired flag under its existing deployment lock.
+Internal agents may test and commit only; the coordinating task owns independent
+review, push, merge, controller installation, deployment and live verification.
+
 ## Scoped authorization: October 28 obsolete AWS key retirement
 
 The user authorized removal and retirement of the obsolete `pranav-main` static

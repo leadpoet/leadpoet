@@ -263,6 +263,7 @@ def test_review_span_uses_its_exact_fail_closed_envelope():
     assert span.instrumentation_scope.name == ARENA_REVIEW_SCOPE
     assert set(span.attributes) == REVIEW_SPAN_ATTRIBUTE_ALLOWLIST
     assert span.attributes["arena.error_code"] == "code_review_provider_credit"
+    assert span.attributes["arena.error_reason"] == "-"
     assert span.attributes["arena.review_categories"] == "-"
     assert span.attributes["arena.provider_http_status"] == 402
 
@@ -277,6 +278,7 @@ def test_review_span_uses_its_exact_fail_closed_envelope():
         {"miner_hotkey": "invalid"},
         {"attempt": 0},
         {"provider_http_status": 900},
+        {"error_reason": "provider prose about the submitted source"},
     ):
         recorder.record_review("error", **{**values, **changed})
     assert exp.get_finished_spans() == ()
@@ -286,6 +288,16 @@ def test_review_span_uses_its_exact_fail_closed_envelope():
     })
     (span,) = exp.get_finished_spans()
     assert span.attributes["arena.review_categories"] == "duplicate_submission;fabricated_evidence"
+
+    # The reason is why the decision lane exists: a parse refusal must say
+    # which clause refused it, or a truncated reply and a fabricated evidence
+    # quote are the same row.
+    exp.clear()
+    recorder.record_review("error", **{
+        **values, "error_code": "review_response_invalid", "error_reason": "finding_evidence_mismatch",
+    })
+    (span,) = exp.get_finished_spans()
+    assert span.attributes["arena.error_reason"] == "finding_evidence_mismatch"
 
 
 def test_stage_span_carries_only_the_approved_attributes():

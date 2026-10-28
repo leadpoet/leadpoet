@@ -160,6 +160,34 @@ def _reviewer(payload, transport, *, store=None, credential_for=None):
     return reviewer, row, store, objects
 
 
+def test_review_span_names_the_clause_that_refused_the_response():
+    """A 200 the reviewer cannot parse must say WHICH clause refused it.
+
+    Without the reason, a reply the provider truncated at the output cap and
+    a reply quoting evidence absent from the source are the same row, and the
+    operator cannot tell a capacity problem from a model problem.
+    """
+    exporter = InMemorySpanExporter()
+    telemetry.install_recorder(configure_arena_otel(None, span_exporter=exporter))
+
+    def truncated(parameters):
+        body = _review_body(parameters)
+        # What the provider returns when the reply hits the output-token cap.
+        body["choices"][0]["finish_reason"] = "length"
+        return {"status": 200, "body": body}
+
+    reviewer, row, _store, _objects = _reviewer(_archive(_source()), ReviewTransport(truncated))
+    try:
+        assert reviewer.review(row)["status"] == "error"
+        (span,) = exporter.get_finished_spans()
+        assert set(span.attributes) == REVIEW_SPAN_ATTRIBUTE_ALLOWLIST
+        assert span.attributes["arena.error_code"] == "review_response_invalid"
+        assert span.attributes["arena.error_reason"] == "not_finished"
+        assert span.attributes["arena.provider_http_status"] == 200
+    finally:
+        telemetry.install_recorder(None)
+
+
 @pytest.mark.parametrize(("http_status", "expected_status", "error_code", "retryable"), [
     (200, "passed", "-", False),
     (402, "error", "code_review_provider_credit", False),
@@ -189,6 +217,9 @@ def test_review_telemetry_tracks_only_committed_outcome(
         assert dict(span.attributes) == {
             "arena.review_status": expected_status,
             "arena.error_code": error_code,
+            # None of these four outcomes is a response-level parse refusal,
+            # so the reason stays absent.
+            "arena.error_reason": "-",
             "arena.review_categories": "-",
             "arena.provider_http_status": http_status,
             "arena.retryable": retryable,

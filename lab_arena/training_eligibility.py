@@ -794,6 +794,7 @@ def _failed_delivery_call_verified(example, call):
 
 def _failed_delivery_gap_verified(example):
     """An exact failed write consumes coverage; unknown capture loss stays hard."""
+    example, _ = training_thinking.provider_visible_view(example)
     if not training_coverage.uses_host_result_evidence(example.get("configuration") or {}):
         return None
     run_id = example.get("run_id")
@@ -808,7 +809,9 @@ def _failed_delivery_gap_verified(example):
                 or not isinstance(artifact.get("claim_request_hash"), str)
                 or contracts.SHA256_RE.fullmatch(artifact["claim_request_hash"]) is None
                 or artifact.get("payload_sha256") != contracts.document_hash(payload)
-                or payload.get("complete") is not False or payload.get("failures") != ["capture_incomplete"]
+                or payload.get("complete") is not False
+                or payload.get("failures") not in (["capture_incomplete"],
+                    ["capture_incomplete", training_observations.OPTIONAL_CAPTURE_INCOMPLETE])
                 or training_observations._validate_payload(payload) != payload
                 or any(payload[count] != len(payload[rows]) for count, rows in (
                     ("observation_count", "observations"), ("response_receipt_count", "response_receipts"),
@@ -826,13 +829,13 @@ def _failed_delivery_gap_verified(example):
                 or any(row["write_state"] not in {"socket_written", "socket_write_failed"} for row in receipts)
                 or not any(row["write_state"] == "socket_write_failed" for row in receipts)):
             return None
-        # A generic capture flag needs a complete provider journal. Unrelated
-        # reported capture failures cannot be explained by one failed write.
-        if any(row["kind"] in {"capture_failure", "http_response_metadata"}
-               or row["kind"] in {"web_fetch", "web_fetch_binary"} and row["data"].get("capture", {}).get("complete") is False
-               or row["kind"] == "state_snapshot" and row["data"]["name"] == "automatic_capture_summary"
-               and isinstance(row["data"]["value"], dict) and row["data"]["value"].get("complete") is False
-               for row in payload["agent_observations"]):
+        # The failed-write proof explains only the generic flag. Every
+        # optional failure needs the same independent proof as optional-only
+        # capture; unknown or untagged runtime failures remain hard.
+        optional = training_observations.OPTIONAL_CAPTURE_INCOMPLETE in payload["failures"]
+        failures = training_observations._capture_failure_rows(payload)
+        if (bool(failures) is not optional
+                or not all(training_observations.optional_capture_failure(row) for row in failures)):
             return None
         for call in calls:
             if (call.get("accounting_state") != "settlement"

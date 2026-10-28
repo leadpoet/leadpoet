@@ -45,7 +45,7 @@ def archive_fixture(manifest):
 
 
 def baseline_fixture():
-    return dict(database_acl=dict(is_null=False, items=["=Tc/arena_admin", "arena_admin=CTc/arena_admin"]),
+    return dict(owner="arena_admin", database="postgres", database_acl=dict(is_null=False, items=["=Tc/arena_admin", "arena_admin=CTc/arena_admin"]),
                 counts=dict(large_objects=0, databases=0))
 
 
@@ -60,7 +60,7 @@ def actual_fixture(manifest, archive, initial):
                  counts=dict(relations=len(metadata["relations"])+len(metadata["indexes"]),
                  routines=len(metadata["routines"])+1, types=len(metadata["types"]), schemas=3,
                  default_acls=len(metadata["default_acls"]), event_triggers=0, large_objects=0, databases=0))
-    return dict(metadata=metadata, state=state, supporting_auth_roles=[copy.deepcopy(manifest["supporting_auth_role"])], sequences=copy.deepcopy(archive))
+    return dict(metadata=metadata, state=state, database_acl_default=dict(database="postgres", owner="arena_admin", acl=dict(is_null=False, items=["=Tc/arena_admin", "arena_admin=CTc/arena_admin"])), supporting_auth_roles=[copy.deepcopy(manifest["supporting_auth_role"])], sequences=copy.deepcopy(archive))
 
 
 class MetadataTests(unittest.TestCase):
@@ -95,7 +95,36 @@ class MetadataTests(unittest.TestCase):
             changed=copy.deepcopy(actual);changed["state"]["database_acl"]=replacement
             self.assertIn("database-acl",verify.compare(manifest,archive,before,changed))
         null_before=copy.deepcopy(before);null_before["database_acl"]=dict(is_null=True,items=[])
-        self.assertIn("database-acl",verify.compare(manifest,archive,null_before,actual))
+        self.assertNotIn("database-acl",verify.compare(manifest,archive,null_before,actual))
+        # The exception is database-only; source schema/object NULL stays strict.
+        changed=copy.deepcopy(actual)
+        changed["metadata"]["routines"][0]["acl"]=dict(is_null=False,items=[])
+        self.assertIn("routines",verify.compare(manifest,archive,null_before,changed))
+
+    def test_only_initial_null_database_acl_accepts_exact_server_defaults(self):
+        manifest=manifest_fixture();archive=archive_fixture(manifest);before=baseline_fixture()
+        before["database_acl"]=dict(is_null=True,items=[])
+        actual=actual_fixture(manifest,archive,before)
+        self.assertEqual(verify.database_acl_match(before,actual),(True,None))
+        actual["state"]["database_acl"]=copy.deepcopy(actual["database_acl_default"]["acl"])
+        matched,equivalence=verify.database_acl_match(before,actual)
+        self.assertTrue(matched)
+        self.assertEqual(equivalence["rule"],"initial-null-database-acl-equals-server-default")
+        self.assertEqual(equivalence["owner"],"arena_admin")
+        for entries in (["=CTc/arena_admin","arena_admin=CTc/arena_admin"],
+                        ["=Tc/postgres","arena_admin=CTc/arena_admin"],
+                        ["=c/arena_admin","arena_admin=CTc/arena_admin"],
+                        ["=T*c/arena_admin","arena_admin=CTc/arena_admin"]):
+            changed=copy.deepcopy(actual);changed["state"]["database_acl"]["items"]=entries
+            self.assertEqual(verify.database_acl_match(before,changed),(False,None))
+        for key in ("state","database_acl_default"):
+            changed=copy.deepcopy(actual);changed[key]["owner"]="postgres"
+            self.assertEqual(verify.database_acl_match(before,changed),(False,None))
+        changed=copy.deepcopy(actual);changed["state"]["database_acl"]=dict(is_null=True,items=[])
+        changed["state"]["owner"]="postgres"
+        self.assertEqual(verify.database_acl_match(before,changed),(False,None))
+        explicit=copy.deepcopy(before);explicit["database_acl"]=dict(is_null=False,items=["arena_admin=CTc/arena_admin"])
+        self.assertEqual(verify.database_acl_match(explicit,actual),(False,None))
 
     def test_every_category_and_unreviewed_support_or_sequence_delta_fails(self):
         manifest=manifest_fixture();archive=archive_fixture(manifest);before=baseline_fixture()
@@ -150,7 +179,9 @@ class MetadataTests(unittest.TestCase):
 
     def test_cli_preserves_private_evidence_and_never_prints_definitions(self):
         manifest=manifest_fixture();archive=archive_fixture(manifest);before=baseline_fixture()
+        before["database_acl"]=dict(is_null=True,items=[])
         actual=actual_fixture(manifest,archive,before)
+        actual["state"]["database_acl"]=copy.deepcopy(actual["database_acl_default"]["acl"])
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             for name,value in (("manifest.json",manifest),("sequences.json",archive),("before.json",before)):
@@ -170,6 +201,9 @@ class MetadataTests(unittest.TestCase):
             for path in (root/"proof").iterdir():
                 self.assertEqual(path.stat().st_mode&0o777,0o700 if path.is_dir() else 0o600)
             self.assertEqual(json.loads((root/"proof"/"actual.json").read_text()),actual)
+            report=json.loads((root/"proof"/"report.json").read_text())
+            self.assertEqual(report["applied_equivalences"][0]["rule"],"initial-null-database-acl-equals-server-default")
+            self.assertNotIn("applied_equivalences",json.loads(output.getvalue()))
         output=io.StringIO()
         with patch.object(verify,"verify",side_effect=RuntimeError("private function definition password")),contextlib.redirect_stderr(output):
             code=verify.main(["--manifest","x","--manifest-sha256","x","--archive-sequences","x", "--archive-sequences-sha256","x","--initial-target","x","--initial-target-sha256","x","--directory","x"])
@@ -197,7 +231,6 @@ class NativeMetadataTests(unittest.TestCase):
             try:
                 run(admin,b"CREATE ROLE arena_admin LOGIN NOSUPERUSER CREATEROLE CREATEDB INHERIT NOBYPASSRLS; ALTER DATABASE postgres OWNER TO arena_admin;")
                 master=admin.copy();master[master.index("-U")+1]="arena_admin"
-                run(master,b"GRANT CONNECT,TEMPORARY ON DATABASE postgres TO PUBLIC;")
                 def read_env(user):
                     path=root/(user+".service")
                     snapshot.private_write(path,(f"[migration]\nhost=127.0.0.1\nport={port}\nuser={user}\ndbname=postgres\nsslmode=disable\noptions={snapshot.OPTIONS}\n").encode())
@@ -206,9 +239,12 @@ class NativeMetadataTests(unittest.TestCase):
                 with snapshot.Keeper(target_env,logs) as keeper:
                     before=keeper.one_json(bootstrap.STATE_SQL)
                 bootstrap.guard_empty(before)
-                sql="\n".join("CREATE ROLE "+snapshot.ident(n)+" NOLOGIN "+("NOINHERIT" if n in restore.NOINHERIT else "INHERIT")+" NOBYPASSRLS;" for n in bootstrap.ROLES)
-                sql+="GRANT postgres,lab_arena_owner,supabase_admin,supabase_auth_admin TO arena_admin WITH INHERIT TRUE,SET TRUE; GRANT CREATE ON DATABASE postgres TO postgres,lab_arena_owner,supabase_admin,supabase_auth_admin; GRANT CREATE ON SCHEMA public TO postgres,lab_arena_owner; CREATE SCHEMA source_add_history AUTHORIZATION lab_arena_owner; CREATE SCHEMA extensions AUTHORIZATION postgres; GRANT CREATE ON SCHEMA extensions TO supabase_admin;"
-                sql+=auth_schema_sql()+auth_function_sql()
+                self.assertEqual(before["database_acl"],dict(is_null=True,items=[]))
+                bootstrap_manifest=manifest_fixture()
+                bootstrap_manifest["schema_metadata"]["schemas"]=[dict(schema="public",name="public",owner="pg_database_owner",acl=dict(is_null=False,items=["=U/pg_database_owner","pg_database_owner=UC/pg_database_owner"])),dict(schema="extensions",name="extensions",owner="postgres",acl=dict(is_null=True,items=[]))]
+                # Execute the unchanged, reviewed bootstrap and its real cleanup.
+                run(master,bootstrap.build_sql(before,bootstrap_manifest).encode())
+                sql="GRANT CREATE ON DATABASE postgres TO lab_arena_owner; CREATE SCHEMA source_add_history AUTHORIZATION lab_arena_owner; REVOKE CREATE ON DATABASE postgres FROM lab_arena_owner;"
                 sql+="CREATE TYPE public.qualification_status AS ENUM ('new'); CREATE SEQUENCE public.seq_0; CREATE SEQUENCE public.seq_1; CREATE SEQUENCE source_add_history.seq_2;"
                 for i in range(48):
                     schema,name,owner=("source_add_history","history","lab_arena_owner") if i==47 else ("public",f"t_{i}","postgres")
@@ -232,10 +268,25 @@ class NativeMetadataTests(unittest.TestCase):
                 with snapshot.Keeper(target_env,logs) as keeper:unclean=verify.capture_target(keeper)
                 self.assertIn("temporary-export-role",verify.compare(manifest,archive,before,unclean))
                 run(master,restore.export_role_cleanup(manifest).encode())
-                run(master,b"REVOKE CREATE ON DATABASE postgres FROM postgres,lab_arena_owner,supabase_admin,supabase_auth_admin;")
+                run(master,bootstrap.cleanup_sql(manifest).encode())
                 with snapshot.Keeper(target_env,logs) as keeper:actual=verify.capture_target(keeper)
                 self.assertEqual(len(actual["metadata"]["routines"]),383)
                 self.assertEqual(verify.compare(manifest,archive,before,actual),[])
+                self.assertFalse(actual["state"]["database_acl"]["is_null"])
+                self.assertEqual(actual["state"]["database_acl"],actual["database_acl_default"]["acl"])
+                self.assertEqual(verify.database_acl_match(before,actual)[1]["rule"],"initial-null-database-acl-equals-server-default")
+                # Native non-default ACLs cannot use the NULL-baseline exception.
+                for grant,revoke in ((b"GRANT CREATE ON DATABASE postgres TO PUBLIC;",b"REVOKE CREATE ON DATABASE postgres FROM PUBLIC;"),
+                                     (b"REVOKE TEMPORARY ON DATABASE postgres FROM PUBLIC;",b"GRANT TEMPORARY ON DATABASE postgres TO PUBLIC;"),
+                                     (b"GRANT CONNECT ON DATABASE postgres TO anon WITH GRANT OPTION;",b"REVOKE CONNECT ON DATABASE postgres FROM anon;")):
+                    run(master,grant)
+                    with snapshot.Keeper(target_env,logs) as keeper:acl_drift=verify.capture_target(keeper)
+                    self.assertIn("database-acl",verify.compare(manifest,archive,before,acl_drift))
+                    run(master,revoke)
+                run(admin,b"ALTER DATABASE postgres OWNER TO postgres;")
+                with snapshot.Keeper(target_env,logs) as keeper:owner_drift=verify.capture_target(keeper)
+                self.assertIn("database-acl",verify.compare(manifest,archive,before,owner_drift))
+                run(admin,b"ALTER DATABASE postgres OWNER TO arena_admin;")
                 # A legitimate revoke/regrant restores identical privileges but
                 # changes native ACL array order. No grantor/right/option changes.
                 run(master,b"BEGIN; SET ROLE supabase_auth_admin; REVOKE EXECUTE ON FUNCTION auth.role() FROM PUBLIC; GRANT EXECUTE ON FUNCTION auth.role() TO PUBLIC; RESET ROLE; COMMIT;")

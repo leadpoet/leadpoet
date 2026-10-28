@@ -77,8 +77,9 @@ comment, and the exact `SCHEMA - public postgres` or
 `SCHEMA - public pg_database_owner` creation/ownership entry may be proposed
 for exclusion. The exact `SCHEMA - extensions postgres` entry may also be
 excluded after the bootstrap creates that schema with the captured owner.
-This permits a narrow temporary CREATE grant needed to restore the six
-`supabase_admin`-owned helper functions. Its owner must match one and only one
+This permits a narrow temporary CREATE grant needed to restore the four
+`supabase_admin`-owned helpers among the six retained helper functions.
+Its owner must match one and only one
 `extensions` schema record in the sealed manifest. Retain its native ACL entry.
 The public entry's owner must match the single `public` record
 in sealed `manifest.schema_metadata.schemas`. Other owners and missing,
@@ -174,7 +175,8 @@ CREATE on that schema for inert object-owner roles such as `postgres` and
 `lab_arena_owner`. Schema ownership alone does not give those roles CREATE.
 The bootstrap also creates `extensions` with its captured owner `postgres` and
 grants only temporary CREATE to `supabase_admin`. Native `ALTER FUNCTION OWNER`
-requires that privilege for the six retained helpers. Exclude only the exact
+requires that privilege for the four `supabase_admin`-owned helpers. The other
+two retain their `postgres` owner. Exclude only the exact
 manifest-bound schema creation entry; keep all extension, function and ACL entries.
 Remove this CREATE grant after restore if it is absent from the source ACL.
 Review the exact prerequisite grants against the source manifest and saved
@@ -249,7 +251,14 @@ initial target database ACL, each bound to its reviewed file hash. It compares
 all 12 catalog categories, exact auth support, owner and grantor identities,
 inert role attributes and memberships, and absence of unexpected objects. It
 allows only removal of the temporary exporter grants and ACL entry ordering.
-It does not allow changed grant rights, grantors, options or NULL semantics.
+It does not allow changed grant rights, grantors, options or NULL semantics in
+the source metadata. One database-only equivalence is recorded explicitly:
+when the initial target database ACL is NULL and its owner remains `arena_admin`,
+temporary GRANT/REVOKE may materialize the exact server `acldefault('d', owner)`.
+The verifier accepts only that exact default ACL, with unchanged grantors,
+rights and grant options; it rejects any additional access. A non-NULL initial
+database ACL still requires exact equality. This does not normalize schema,
+table, function or default-privilege ACLs.
 The existing `aws_subnet_snapshot.py verify-data` operation remains required
 to prove every table's rows and the full stored generated-column values.
 

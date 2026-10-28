@@ -26,6 +26,9 @@ else:
 
 
 HASH = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
+DATABASE_ACL_DEFAULT_SQL = ("SELECT json_build_object('database',d.datname,"
+    "'owner',pg_get_userbyid(d.datdba),'acl'," + snapshot.acl("pg_catalog.acldefault('d',d.datdba)")
+    + ") FROM pg_catalog.pg_database d WHERE d.datname=current_database();")
 
 
 def sealed_json(path, digest):
@@ -120,6 +123,7 @@ def capture_target(keeper):
     snapshot.check_identity(keeper, "target")
     metadata = snapshot.capture_metadata(keeper)
     state = keeper.one_json(bootstrap.STATE_SQL)
+    database_acl_default = keeper.one_json(DATABASE_ACL_DEFAULT_SQL)
     # Unlike source capture, target capture must retain ACL-order differences
     # as evidence rather than reject before semantic entry-order comparison.
     support_sql = snapshot.SUPPORTING_AUTH_ROLE_SQL.strip().rstrip(";")
@@ -132,7 +136,29 @@ def capture_target(keeper):
     for item in metadata["sequence_definitions"]:
         value = keeper.one_json("SELECT json_build_object('last_value',last_value::text,'is_called',is_called) FROM " + snapshot.qualified(item) + ";")
         sequences.append(dict(schema=item["schema"], name=item["name"], **value))
-    return dict(metadata=metadata, state=state, supporting_auth_roles=supports, sequences=sequences)
+    return dict(metadata=metadata, state=state, database_acl_default=database_acl_default,
+                supporting_auth_roles=supports, sequences=sequences)
+
+
+def database_acl_match(initial_target, actual):
+    """The sole NULL equivalence: this database's unchanged owner's defaults."""
+    initial_acl = canonical_acl(initial_target["database_acl"])
+    state = actual["state"]
+    actual_acl = canonical_acl(state["database_acl"])
+    if not initial_acl["is_null"]:
+        return actual_acl == initial_acl, None
+    default = actual["database_acl_default"]
+    if not (initial_target.get("owner") == state.get("owner") == default.get("owner") == "arena_admin"
+            and initial_target.get("database") == state.get("database") == default.get("database") == "postgres"):
+        return False, None
+    if actual_acl["is_null"]:
+        return True, None
+    default_acl = canonical_acl(default["acl"])
+    if default_acl["is_null"] or actual_acl != default_acl:
+        return False, None
+    return True, dict(rule="initial-null-database-acl-equals-server-default", scope="database-acl",
+                      owner="arena_admin", initial_raw_acl_is_null=True, actual_raw_acl_is_null=False,
+                      server_default_acl=default_acl)
 
 
 def target_roles_match(state):
@@ -174,7 +200,7 @@ def compare(manifest, archive_sequences, initial_target, actual):
         differences.append("target-identity")
     if not target_roles_match(state):
         differences.append("target-role-security")
-    if canonical_acl(state["database_acl"]) != canonical_acl(initial_target["database_acl"]):
+    if not database_acl_match(initial_target, actual)[0]:
         differences.append("database-acl")
     if any(r["name"] == snapshot.SOURCE_ROLE for r in state["roles"]) or any(
             snapshot.SOURCE_ROLE in (m["name"], m["member"]) for m in state["memberships"]):
@@ -228,7 +254,9 @@ def verify(args):
     snapshot.private_json(directory / "expected-metadata.json", clean_source_metadata(manifest))
     differences = compare(manifest, sequences, initial, actual)
     counts = {category: len(actual["metadata"][category]) for category in snapshot.OBJECT_KINDS}
+    equivalence = database_acl_match(initial, actual)[1]
     report = dict(format=1, status="mismatch" if differences else "match", differences=differences, counts=counts,
+                  applied_equivalences=[equivalence] if equivalence else [],
                   manifest_sha256=args.manifest_sha256, archive_sequences_sha256=args.archive_sequences_sha256,
                   initial_target_sha256=args.initial_target_sha256,
                   data_verification="separate verify-data proof remains required")

@@ -3210,14 +3210,10 @@ def _retain_unresolved_industry_retry_sources(
     result: CompanyFitDecisionResult,
     investigation: Mapping[str, Any],
 ) -> None:
-    """Keep checked text for another review, never an unresolved fit verdict."""
+    """Keep checked industry text for another review, never a fit verdict."""
 
     model = os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip()
-    if (
-        not model or not isinstance(retry_cache, MutableMapping)
-        or investigation.get("_completed_submit") is not True
-        or investigation.get("failure_reason") != ""
-    ):
+    if not model or not isinstance(retry_cache, MutableMapping):
         return
     claims = investigation.get("claims")
     finding = claims.get("industry") if isinstance(claims, Mapping) else None
@@ -3226,7 +3222,7 @@ def _retain_unresolved_industry_retry_sources(
         not isinstance(review, Mapping)
         or review.get("schema") != "industry_evidence_review_v1"
         or review.get("model") != model
-        or finding.get("status") != "UNPROVEN"
+        or finding.get("status") not in {"VERIFIED", "CONTRADICTED", "UNPROVEN"}
         or review.get("decision") not in {"match", "mismatch", "unavailable"}
         or not isinstance(review.get("packet_sha256"), str)
         or not re.fullmatch(r"[0-9a-f]{64}", review["packet_sha256"])
@@ -3267,9 +3263,10 @@ def _retain_unresolved_industry_retry_sources(
         and item["url"] in admitted and isinstance(item.get("quote"), str)
         and item["quote"] and _quote_occurs(item["quote"], admitted[item["url"]]["text"])
     }
-    # Native source/relationship gates can withhold a model's conclusive
-    # proposal. Retain the checked text in that case too, including contrary
-    # facts, so another retry cannot see only older positive evidence.
+    # A completed industry review can coexist with a failed unrelated finding.
+    # Its checked pages remain source facts, including uncited contrary facts.
+    # Keep them regardless of the proposal or whole-investigation outcome;
+    # neither a verdict nor failure finality is copied into the source cache.
     # Preserve matched dimensions, then partial facts and fresh sources.
     # The next invocation independently binds and reclassifies this text.
     retained = {**protected, **cited, **{url: page for url, page in admitted.items() if url not in prior},

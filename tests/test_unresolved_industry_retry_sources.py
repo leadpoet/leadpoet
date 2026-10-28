@@ -106,8 +106,10 @@ def test_incomplete_or_unbound_review_does_not_change_cache(monkeypatch, fault):
         monkeypatch.delenv("ARENA_INDUSTRY_EVIDENCE_MODEL")
     elif fault == "incomplete":
         change["_completed_submit"] = False
+        review["packet_sha256"] = None  # No completed industry review.
     elif fault == "failure":
         change["failure_reason"] = "provider_error"
+        review["packet_sha256"] = None  # Provider failed before industry review.
     elif fault == "missing_receipt":
         review["schema"] = "not_a_host_receipt"
     else:

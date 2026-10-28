@@ -8,7 +8,9 @@ import pytest
 
 from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
-from lab_arena.store import ArenaStore, PsycopgTransport
+from lab_arena.store import PsycopgTransport
+from tests.lab_arena.historical_service_harness import HistoricalArenaStore
+from tests.lab_arena.sep20_frozen_publication_fixture import commit_oct10_frozen_scoring_plan
 from tests.lab_arena import oct10_baseline_recovery440_postgres_test as old
 from tests.lab_arena import settled_score_host_recovery441_postgres_test as current
 from tests.lab_arena.icp_fixtures import daily_icps
@@ -218,7 +220,7 @@ def _snapshot(cur):
     return result
 
 
-def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, monkeypatch):
+def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, monkeypatch, request):
     psycopg, dsn = seeded
     with psycopg.connect(**dsn) as conn:
         conn.autocommit = True
@@ -233,9 +235,11 @@ def test_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, mon
             assert [{k:v for k,v in r.items() if k not in ('qualification_doc','per_icp_score')} for r in immediate_exec] == [{k:v for k,v in r.items() if k not in ('qualification_doc','per_icp_score')} for r in original_exec]
             cur.execute(sql)
             assert _snapshot(cur) == after
-    store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    store = HistoricalArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    request.addfinalizer(store.close)
     service = object.__new__(ArenaService)
     service._store = store
+    service.commit_scoring_plan = lambda rid, stage: commit_oct10_frozen_scoring_plan(service, rid, stage)
     service._lock = threading.RLock()
     service._round = lambda rid: store.get_round(rid)
     service.now = lambda: datetime(2026, 10, 10, 13, 59, 59, tzinfo=timezone.utc)

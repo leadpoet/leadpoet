@@ -668,7 +668,7 @@ def test_industry_source_brief_exposes_the_exact_reviewed_source_set(monkeypatch
 
 
 @pytest.mark.parametrize('cached', [False, True])
-def test_existing_industry_locator_is_read_before_initial_gap_review(monkeypatch, cached):
+def test_existing_industry_source_is_reviewed_only_when_already_loaded(monkeypatch, cached):
     run, calls, _, reviews = install(monkeypatch)
     homepage = 'https://www.coreworks.ai/'
     industry_url = 'https://www.coreworks.ai/workflows'
@@ -682,15 +682,14 @@ def test_existing_industry_locator_is_read_before_initial_gap_review(monkeypatch
         prefetched_pages=pages))
     initial_sources = [page for msg in reviews[0]['messages'][2:]
                        for page in json.loads(msg['content'])['untrusted_source_pages']]
-    assert industry_url in {p['source_url'] for p in initial_sources}
-    assert calls['primary'].count(industry_url) == (0 if cached else 1)
-    if not cached:
-        assert calls['primary'][0] == industry_url
+    assert (industry_url in {p['source_url'] for p in initial_sources}) is cached
+    assert industry_url not in calls['primary']
     assert 'Untrusted prior assertion.' not in json.dumps(initial_sources)
     document_text = calls['model'][0]['messages'][1]['content']
     document = json.loads(document_text[document_text.index('{'):])
-    assert any(p['url'] == industry_url for p in document['prefetched_sources'])
-    assert document['investigation_limits']['remaining_fetch_calls'] == c.MAX_FETCH_CALLS - (0 if cached else 1)
+    assert any(p['url'] == industry_url for p in document['prefetched_sources']) is cached
+    assert document['prior_observations']['industry_evidence_url'] == industry_url
+    assert document['investigation_limits']['remaining_fetch_calls'] == c.MAX_FETCH_CALLS
     assert result['_completed_submit']
     assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS
 
@@ -745,6 +744,16 @@ def test_existing_industry_locator_does_not_trust_failure_or_cross_company_redir
             'ok': True, 'url': url, 'final_url': 'https://other.example/workflows',
             'text': 'Other Company supplies all required software.'})
 
+    original_post = c._post_json
+    selected = False
+    async def choose(session, url, *, headers, payload):
+        nonlocal selected
+        if 'response_format' not in payload and not selected:
+            from tests.test_company_evidence_judgment_reserve import _response
+            selected = True
+            return 200, _response('fetch_page', {'url': industry_url})
+        return await original_post(session, url, headers=headers, payload=payload)
+    monkeypatch.setattr(c, '_post_json', choose)
     monkeypatch.setattr(c, '_fetch_page', fetch)
     result = asyncio.run(run(prior_observations={'industry_evidence_url': industry_url}))
     reviewed_urls = {page['source_url'] for request in reviews
@@ -757,7 +766,7 @@ def test_existing_industry_locator_does_not_trust_failure_or_cross_company_redir
 
 
 @pytest.mark.parametrize('source_kind', ['bound_redirect', 'third_party_redirect', 'different_final_url'])
-def test_industry_prefetch_reuses_only_an_already_bound_exact_redirect(monkeypatch, source_kind):
+def test_retained_industry_redirects_keep_the_original_request_binding(monkeypatch, source_kind):
     run, calls, _, reviews = install(monkeypatch)
     requested_url = ('https://other.example/article' if source_kind == 'third_party_redirect'
                      else 'https://coreworks.ai/')
@@ -769,7 +778,7 @@ def test_industry_prefetch_reuses_only_an_already_bound_exact_redirect(monkeypat
                             'industry_evidence_url': industry_url},
         prefetched_pages={requested_url: {'final_url': final_url, 'text': FEATURES}}))
     reused = source_kind == 'bound_redirect'
-    assert calls['primary'].count(industry_url) == (0 if reused else 1)
+    assert industry_url not in calls['primary']
     first_sources = {page['source_url'] for message in reviews[0]['messages'][2:]
                      for page in json.loads(message['content'])['untrusted_source_pages']}
     if reused:
@@ -777,6 +786,7 @@ def test_industry_prefetch_reuses_only_an_already_bound_exact_redirect(monkeypat
         assert industry_url not in first_sources  # Keep the real request binding.
         assert industry_url not in result[c.PRIVATE_FETCHED_PAGES_KEY]
     else:
-        assert industry_url in first_sources
+        assert industry_url not in first_sources
+        assert (requested_url in first_sources) is (source_kind != 'third_party_redirect')
     assert result['_completed_submit']
     assert result['usage']['fetch_calls'] <= c.MAX_FETCH_CALLS

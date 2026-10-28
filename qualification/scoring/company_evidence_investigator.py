@@ -4889,47 +4889,9 @@ async def investigate_company_evidence(
                 input_document["investigation_limits"]["remaining_search_calls"] = (
                     MAX_SEARCH_CALLS - search_calls
                 )
-            # Read the existing industry locator before diagnosing source gaps.
-            # Prior quotes remain untrusted: only a fresh, company-bound page
-            # enters the same source map and the unchanged fetch budget.
-            industry_source_url = _safe_https_url(
-                bounded_prior_observations.get("industry_evidence_url")
-            )
-            if (
-                industry_review_model
-                and industry_source_url
-                and industry_source_url not in fetched_pages
-                # A server-observed exact redirect is already loaded. Keep its
-                # original request binding rather than fetching or aliasing it.
-                # A third-party request cannot supply first-party authority.
-                and not any(
-                    final_url == industry_source_url
-                    and _independently_bound_first_party_url(
-                        request_url, first_party_domains, identity_anchor
-                    )
-                    for request_url, final_url in fetched_final_urls.items()
-                )
-                and _independently_bound_first_party_url(
-                    industry_source_url, first_party_domains, identity_anchor
-                )
-                and fetch_calls < MAX_FETCH_CALLS
-                and time.monotonic() - started
-                < ADMISSION_DEADLINE_SECONDS - JUDGMENT_ADMISSION_RESERVE_SECONDS
-            ):
-                industry_source = await fetch_fresh_page(industry_source_url)
-                if industry_source.get("ok"):
-                    fetched_pages[industry_source_url] = str(industry_source["text"])
-                    fetched_final_urls[industry_source_url] = str(
-                        industry_source.get("final_url") or industry_source_url
-                    )
-                    input_document["prefetched_sources"] = [
-                        {"url": url, "text": text}
-                        for url, text in fetched_pages.items()
-                    ]
-                input_document["investigation_limits"].update(
-                    remaining_fetch_calls=max(0, MAX_FETCH_CALLS - fetch_calls),
-                    server_prefetch_fetch_calls=fetch_calls,
-                )
+            # Prior industry citations remain untrusted locators in the input.
+            # Let the shared researcher select them against the missing facts;
+            # eager reads and recovery can exhaust its budget before selection.
             if industry_review_model and retained_industry_pages:
                 retry_pages, retry_final_urls = _validated_matched_retry_pages(retained_industry_pages)
                 for url, text in retry_pages.items():

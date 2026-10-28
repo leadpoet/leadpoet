@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
@@ -84,12 +87,49 @@ TABLES = (
 )
 
 
-def test_arena_migrations_are_uniquely_numbered():
+# These two historical number collisions predate this gate. The migration
+# runner verifies full filenames and exact committed bytes, not just prefixes.
+# Never rename or extend these exceptions. Each SHA-256 was independently
+# checked with apply_supabase_migration.py --verify-only against origin/main.
+FROZEN_MIGRATION_COLLISIONS = {
+    478: {
+        # Last byte-changing commit: 5595ae7b2e3a4a522660a9a9f405fe7796903833
+        "478-lab-arena-baseline-closed-settlement-recovery.sql":
+            "850c3ecb8967d219a6ed46cc7218bbf8eccf875c4f5d799d5c2f9a2887b48325",
+        # Last byte-changing commit: 4654b49f24417e79ea7f42e69ac1faace9108191
+        "478-lab-arena-infrastructure-retry-cost.sql":
+            "7c56999a360aa29bc1f0e18598c69321edeeb662c428d69d89abb46c462cd017",
+    },
+    489: {
+        # Last byte-changing commit: f520c7e3d9b97593cb15f8adec913864f2a77374
+        "489-lab-arena-chain-outcome-resigning.sql":
+            "98627134f3ba469d26dc588f5a4ae48d40680e7223ba82f0ece2df94dd410fa3",
+        # Last byte-changing commit: 8a43dab759f696c9b1452f8dfd3e0d22f2d40c40
+        "489-lab-arena-weight-write-rpc-privileges.sql":
+            "73e19a8fa99a468f262846f734630fe1994264e06d2113f9bbf9ea5aac005a9c",
+    },
+}
+
+
+def _assert_migration_numbering(scripts: Path) -> dict[int, list[str]]:
     numbered = {}
-    for path in SCRIPTS.glob("*.sql"):
+    by_name = {}
+    for path in sorted(scripts.glob("*.sql")):
         match = re.match(r"^(\d+)-", path.name)
         if match and int(match.group(1)) >= 100:
             numbered.setdefault(int(match.group(1)), []).append(path.name)
+            by_name[path.name] = path
+    for number, frozen in FROZEN_MIGRATION_COLLISIONS.items():
+        assert set(numbered.get(number, ())) == set(frozen), (number, numbered.get(number))
+        for name, digest in frozen.items():
+            assert hashlib.sha256(by_name[name].read_bytes()).hexdigest() == digest, name
+    for number, names in numbered.items():
+        assert len(names) == 1 or number in FROZEN_MIGRATION_COLLISIONS, (number, names)
+    return numbered
+
+
+def test_arena_migrations_are_uniquely_numbered():
+    numbered = _assert_migration_numbering(SCRIPTS)
     assert numbered[179] == ["179-lab-arena-v1.sql"]
     assert numbered[180] == ["180-lab-arena-daily-competition.sql"]
     assert numbered[181] == ["181-lab-arena-source-submissions.sql"]
@@ -110,7 +150,33 @@ def test_arena_migrations_are_uniquely_numbered():
     assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
     assert numbered[203] == ["203-retire-legacy-incentive-weight-bridge.sql"]
     assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
-    assert all(len(paths) == 1 for paths in numbered.values()), numbered
+
+
+@pytest.mark.parametrize("mutation", ["changed_bytes", "third_member", "new_collision", "missing_member"])
+def test_migration_numbering_rejects_changes_to_frozen_exceptions(tmp_path, mutation):
+    for frozen in FROZEN_MIGRATION_COLLISIONS.values():
+        for name in frozen:
+            (tmp_path / name).write_bytes((SCRIPTS / name).read_bytes())
+    first = tmp_path / next(iter(FROZEN_MIGRATION_COLLISIONS[478]))
+    if mutation == "changed_bytes":
+        first.write_bytes(first.read_bytes() + b"\n-- changed historical migration\n")
+    elif mutation == "third_member":
+        (tmp_path / "478-new-collision.sql").write_bytes(first.read_bytes())
+    elif mutation == "new_collision":
+        (tmp_path / "999-first.sql").write_text("SELECT 1;", encoding="utf-8")
+        (tmp_path / "999-second.sql").write_text("SELECT 1;", encoding="utf-8")
+    else:
+        first.unlink()
+    with pytest.raises(AssertionError):
+        _assert_migration_numbering(tmp_path)
+
+
+def test_migration_numbering_accepts_new_unique_numbers(tmp_path):
+    for frozen in FROZEN_MIGRATION_COLLISIONS.values():
+        for name in frozen:
+            (tmp_path / name).write_bytes((SCRIPTS / name).read_bytes())
+    (tmp_path / "999-new-unique.sql").write_text("SELECT 1;", encoding="utf-8")
+    assert _assert_migration_numbering(tmp_path)[999] == ["999-new-unique.sql"]
 
 
 def test_validator_scoring_authority_migration_delegates_only_role_to_gateway():

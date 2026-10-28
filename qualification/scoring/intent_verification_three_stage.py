@@ -403,12 +403,34 @@ def _careers_index_receipt(value: Any) -> Optional[_CareersIndexReceipt]:
 
     if (
         not isinstance(value, Mapping)
-        or set(value) != {"kind", "observed_job_link_count"}
+        or set(value) not in (
+            {"kind", "observed_job_link_count"},
+            {"kind", "observed_job_link_count", "observed_ownership_links"},
+        )
         or value.get("kind") != "first_party_careers_index"
         or type(value.get("observed_job_link_count")) is not int
         or not 1 <= value["observed_job_link_count"] <= 200
     ):
         return None
+    if "observed_ownership_links" in value:
+        links = value["observed_ownership_links"]
+        if not isinstance(links, list) or len(links) > 80:
+            return None
+        for link in links:
+            if (
+                not isinstance(link, Mapping) or set(link) != {"url", "label"}
+                or not isinstance(link["url"], str)
+                or not isinstance(link["label"], str)
+                or len(link["label"]) > 300
+            ):
+                return None
+            try:
+                if canonical_candidate_prompt_url(
+                    link["url"], "observed_ownership_link.url",
+                ) != link["url"]:
+                    return None
+            except (TypeError, ValueError):
+                return None
     return {
         "kind": "first_party_careers_index",
         "observed_job_link_count": value["observed_job_link_count"],
@@ -1838,7 +1860,7 @@ def _observed_ownership_links(
         visible.extend((url, label) for label, url in re.findall(
             r"(?<!!)\[([^\]\n]{1,300})\]\((https?://[^\s()]+)\)",
             body[:MAX_SCRAPED_CHARS],
-        )[:80])
+        )[:500])
     for href, label in visible:
         try:
             href = urljoin(archive_url or source_url, href)
@@ -1850,9 +1872,39 @@ def _observed_ownership_links(
         except (TypeError, ValueError):
             continue
         links.append({"url": url, "label": " ".join(label.split())[:300]})
-        if len(links) >= 80:
-            break
-    return links
+    # Navigation can contain more than eighty unrelated links before Careers.
+    # Prioritize observed recruiting routes/ATS links without increasing the cap.
+    return sorted(links, key=lambda link: _ownership_link_priority(
+        link["url"], link["label"],
+    ))[:80]
+
+
+_RECRUITING_LINK_LABEL_RE = re.compile(
+    r"\b(?:jobs?|vacanc(?:y|ies)|hir(?:e|es|ing)|apply|open\s+positions?)\b",
+    re.I,
+)
+
+
+def _is_labeled_careers_listing(url: str, label: str) -> bool:
+    """Discover an explicitly labeled recruiting page, never prove ownership."""
+    parsed = urlsplit(url)
+    segments = {part.casefold() for part in parsed.path.split("/") if part}
+    return bool(
+        parsed.scheme == "https" and not parsed.query and not parsed.fragment
+        and (segments & {"careers", "jobs"}
+             or (parsed.hostname or "").casefold().startswith("careers."))
+        and _RECRUITING_LINK_LABEL_RE.search(label)
+    )
+
+
+def _ownership_link_priority(url: str, label: str) -> int:
+    if _is_labeled_careers_listing(url, label):
+        return 0
+    if _is_careers_index_url(url):
+        return 1
+    if _ats_board_identity(url) is not None:
+        return 2
+    return 3
 
 
 def _ats_board_identity(url: str) -> tuple[str, str] | None:
@@ -1936,6 +1988,7 @@ def _ats_ownership_anchors(
 def _observed_official_careers_url(
     results: list[Dict[str, Any]], identity: Mapping[str, Any], attempted: list[str]
 ) -> str:
+    candidates = []
     for result in results:
         if not _url_on_verified_company_identity(str(result.get("url") or ""), identity):
             continue
@@ -1943,11 +1996,15 @@ def _observed_official_careers_url(
             if not isinstance(link, Mapping):
                 continue
             url = str(link.get("url") or "")
+            label = str(link.get("label") or "")
             if (_url_on_verified_company_identity(url, identity)
-                and _is_careers_index_url(url)
+                and (_is_careers_index_url(url)
+                     or _is_labeled_careers_listing(url, label))
                 and _normalize_url(url) not in attempted):
-                return url
-    return ""
+                candidates.append((url, label))
+    if not candidates:
+        return ""
+    return min(candidates, key=lambda pair: _ownership_link_priority(*pair))[0]
 
 
 async def _resolve_ats_employer_ownership(
@@ -1960,6 +2017,7 @@ async def _resolve_ats_employer_ownership(
     anchors = _ats_ownership_anchors(results, target_urls, identity)
     domain = str(identity.get("observed_domain") or "")
     next_url = _observed_official_careers_url(results, identity, attempted)
+    observed_careers_listing = bool(next_url)
     if not next_url and domain:
         next_url = "https://" + domain + "/"
     while not anchors and next_url and len(attempted) < 3:
@@ -1967,12 +2025,20 @@ async def _resolve_ats_employer_ownership(
         if key in attempted or not _url_on_verified_company_identity(next_url, identity):
             break
         attempted.append(key)
-        extra = await _fetch_sd_then_exa([next_url])
+        if observed_careers_listing:
+            extra = await _fetch_sd_then_exa(
+                [next_url], prefer_dynamic_job_index=True,
+                trusted_company_domain=domain,
+                trusted_company_name=str(identity.get("observed_name") or ""),
+            )
+        else:
+            extra = await _fetch_sd_then_exa([next_url])
         contents.setdefault("statuses", []).extend(extra.get("statuses") or [])
         fetched = list(extra.get("results") or [])
         results.extend(fetched)
         anchors = _ats_ownership_anchors(results, target_urls, identity)
         next_url = _observed_official_careers_url(fetched, identity, attempted)
+        observed_careers_listing = bool(next_url)
     return {"anchors": anchors, "source_count": len(attempted),
             "resolved": bool(anchors)}
 
@@ -2345,8 +2411,7 @@ async def _scrape_sd_hardened(
                                 continue
                             break
                     result_meta: Dict[str, Any] = dict(listing_receipt or {})
-                    if listing_receipt is None:
-                        result_meta["observed_ownership_links"] = _observed_ownership_links(raw_body, url)
+                    result_meta["observed_ownership_links"] = _observed_ownership_links(raw_body, url)
                     if same_host_event_links and listing_receipt is None:
                         result_meta["same_host_event_links"] = (
                             same_host_event_links

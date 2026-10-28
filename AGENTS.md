@@ -49,6 +49,18 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped authorization: October 26 verifier accuracy audit
+
+The user authorized the independent October 26 verifier audit, narrow proven
+root-cause fixes, rigorous controls, safe merge and canonical deployment.
+This task may repair bound headquarters evidence, observed company-URL identity,
+and bounded careers-link retrieval, build and select the reviewed scorer for future rounds, and run
+bounded reward-disabled baseline/miner scoring tests. OpenRouter spend must stay
+within $8 for this task. Preserve identity/source proof, frozen rounds,
+accepted judgments, scoring, costs, publication and rewards. The coordinating
+task owns production actions and must verify actual scoring plus fresh
+OnePatch/Sentry. Preserve concurrent industry work and both instruction files.
+
 ## Scoped authorization: October 27 independent verifier accuracy audit
 
 The user authorized independently checking the October 26/27 judge audit,

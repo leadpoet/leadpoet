@@ -989,6 +989,8 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
     require_client_ack = not training_coverage.uses_host_result_evidence(configuration or {})
     artifacts, partial_artifacts, errors, counts = {}, {}, set(), {}
     per_run_errors, verified_counts = {}, {}
+    selected = next((row for row in related if row["run_id"] == selected_run_id
+                     and row["kind"] == "execute" and row.get("status") == "accepted"), {})
 
     def record_error(code, run_id):
         errors.add(code)
@@ -1092,13 +1094,17 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                 if observation["kind"] != "local_catalog":
                     record_error("worker_call_accounting_unverified", run_id)
         # A lease can expire after the immutable capture upload but before the
-        # completion summary. Only a failed, nonselected execution may use that
-        # exact complete capture for absent counters. Present counters remain
-        # independent checks, including invalid values and contradictions.
+        # completion summary. Only an earlier failed execution in a validated
+        # host-result round may use exact complete capture for absent counters.
+        # Present counters remain independent checks, including invalid values
+        # and contradictions.
         run_errors = per_run_errors.get(run_id, set())
         missing_local = "provider_local_refusal_count" not in summary
         expected_calls = summary.get("provider_call_count", len(counts[run_id]))
-        if (run_id != selected_run_id and run["kind"] == "execute" and run.get("status") == "failed"
+        if (not require_client_ack and run_id != selected_run_id
+                and run["kind"] == "execute" and run.get("status") == "failed"
+                and type(run.get("attempt")) is int and type(selected.get("attempt")) is int
+                and 0 < run["attempt"] < selected["attempt"]
                 and payload["complete"] and "response_receipts" in payload
                 and not run_errors - ({"worker_local_refusals_unverified"} if missing_local else set())
                 and type(expected_calls) is int and expected_calls == len(counts[run_id])

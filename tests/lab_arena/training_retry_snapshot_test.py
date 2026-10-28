@@ -180,3 +180,24 @@ def test_selected_execution_and_score_attempts_still_require_completion_counters
     assert {'provider_capture_count_unverified', 'worker_local_refusals_unverified'} <= set(gaps['research_process_gaps'])
     assert training_thinking.selected_research_evidence(example) is None
 
+
+@pytest.mark.parametrize('damage', ['policy_off', 'legacy_configuration', 'invalid_registry',
+    'same_attempt', 'future_attempt', 'invalid_prior_attempt', 'zero_prior_attempt',
+    'invalid_selected_attempt'])
+def test_snapshot_counter_fallback_is_only_for_prior_attempts_in_host_result_rounds(damage):
+    values, predecessor, _ = retry_values()
+    configuration = values['round_row']['configuration_doc']
+    if damage == 'policy_off': configuration['reasoning_capture_policy'] = None
+    elif damage == 'legacy_configuration': configuration.pop('training_maximum_missing_reasoning_percent')
+    elif damage == 'invalid_registry': configuration['reasoning_route_registry'] = {}
+    elif damage == 'same_attempt': predecessor['attempt'] = values['runs'][0]['attempt']
+    elif damage == 'future_attempt': predecessor['attempt'] = values['runs'][0]['attempt'] + 1
+    elif damage == 'invalid_prior_attempt': predecessor['attempt'] = True
+    elif damage == 'zero_prior_attempt': predecessor['attempt'] = 0
+    elif damage == 'invalid_selected_attempt': values['runs'][0]['attempt'] = '2'
+    example = training_export.assemble_example(**values)
+    gaps = example['related_run_gap_attribution'][predecessor['run_id']]
+    assert {'provider_capture_count_unverified', 'worker_local_refusals_unverified'} <= set(gaps['research_process_gaps'])
+    assert gaps['cost_gaps'] == ['provider_capture_count_unverified']
+    assert training_thinking.selected_research_evidence(example) is None
+

@@ -4094,6 +4094,31 @@ def _web_identity_receipt(
             reason_code="verified_legal_name_initialism",
         )
         return receipt
+    homepage_brand = verified_homepage_brand_name(verified_alias_anchor)
+    homepage_legal_aliases = verified_alias_anchor.get("verified_legal_name_aliases")
+    if (
+        receipt.get("decision") != COMPANY_FIT_MATCH
+        and verified_brand_receipt.get("decision") == COMPANY_FIT_MATCH
+        and receipt.get("submitted_name") == verified_alias_name
+        and receipt_submitted_domain == receipt_observed_domain == verified_alias_domain
+        and receipt_submitted_slug == receipt_observed_slug == verified_alias_slug
+        and homepage_brand
+        and receipt.get("observed_name") == _company_name(homepage_brand)
+        and isinstance(homepage_legal_aliases, list)
+        and 0 < len(homepage_legal_aliases) <= 3
+        and all(
+            isinstance(alias, str) and alias.strip() and len(alias.strip()) <= 200
+            and _company_name(alias) == verified_alias_name
+            for alias in homepage_legal_aliases
+        )
+    ):
+        receipt.update(
+            decision=COMPANY_FIT_MATCH,
+            reason_code="verified_homepage_brand_alias",
+            verified_brand_name=homepage_brand,
+            verified_legal_name_aliases=list(homepage_legal_aliases),
+        )
+        return receipt
     if (
         receipt.get("decision") != COMPANY_FIT_MATCH
         and verified_brand_receipt.get("decision") == COMPANY_FIT_MATCH

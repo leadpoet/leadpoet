@@ -1,0 +1,38 @@
+{
+  "provenance": {
+    "scope": "Exact identity fields projected from saved Oct27 public company and server-verified homepage/web receipts.",
+    "cache_key": "sha256:dcad7431b2843a9013da4bb65a055c72bfc108704fc98aa2c841a189012793b6",
+    "company_input_hash": "sha256:8f711f713d02060cadbf26c5acfc8ab639aea29a086da3d07cc2458539e6a088",
+    "evidence_hash": "sha256:3c9ca5c0db01d0618771783c427b5575166233fa8033e36e0f5683f3991d10ee"
+  },
+  "company": {
+    "company_name": "Mid-America Apartment Communities",
+    "company_website": "https://maac.com/",
+    "company_linkedin": "https://www.linkedin.com/company/mid-america-apartment-communities"
+  },
+  "homepage": {
+    "decision": "match",
+    "details": {
+      "identity": {
+        "decision": "match",
+        "reason_code": "verifier_accepted",
+        "observed_name": "midamericaapartmentcommunities",
+        "submitted_name": "midamericaapartmentcommunities",
+        "evidence_source": "company_homepage",
+        "observed_domain": "maac.com",
+        "submitted_domain": "maac.com",
+        "verified_brand_name": "MAA",
+        "observed_linkedin_slug": "mid-america-apartment-communities",
+        "submitted_linkedin_slug": "mid-america-apartment-communities",
+        "verified_legal_name_aliases": [
+          "Mid-America Apartment Communities, Inc."
+        ]
+      }
+    }
+  },
+  "web_observations": {
+    "observed_company_name": "MAA",
+    "observed_company_website": "https://www.maac.com/",
+    "observed_company_linkedin": "https://www.linkedin.com/company/mid-america-apartment-communities"
+  }
+}

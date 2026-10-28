@@ -7,6 +7,7 @@ Native restore and target role/ACL writes require separate review and execution.
 """
 
 import argparse
+from collections import Counter
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -22,12 +23,13 @@ else:
     import aws_subnet_snapshot as snapshot
 
 
-ROLES = ("anon", "authenticated", "lab_arena_owner", "lab_arena_service",
+ROLES = ("anon", "authenticated", "dashboard_user", "lab_arena_owner", "lab_arena_service",
          "leadpoet_parity_reader", "pg_database_owner", "postgres", "service_role",
-         "supabase_admin", snapshot.SOURCE_ROLE)
+         "supabase_admin", "supabase_auth_admin", snapshot.SOURCE_ROLE)
 NOINHERIT = {"lab_arena_owner", "lab_arena_service", "leadpoet_parity_reader", snapshot.SOURCE_ROLE}
-OWNER_ROLES = {"postgres", "lab_arena_owner"}
+OWNER_ROLES = {"postgres", "lab_arena_owner", "supabase_admin", "supabase_auth_admin"}
 OBJECT_KINDS = snapshot.OBJECT_KINDS
+AUTH_ROLE_SHA256 = "c96a9358b02089b03f3962fd85c5f83c9d64f32240481915c0efe74398dc761b"
 
 
 def target_evidence(keeper):
@@ -107,8 +109,75 @@ def toc_entries(toc):
             continue
         match = re.fullmatch(r"([0-9]+); [0-9]+ [0-9]+ (.+)", line)
         snapshot.require(match is not None and match[1] not in result, "restore-toc")
+        snapshot.require(not re.match(r"(?:EVENT TRIGGER |(?:COMMENT|SECURITY LABEL) - EVENT TRIGGER )", match[2]),
+                         "event-trigger-review-required")
         result[match[1]] = line
     return result
+
+
+def validate_toc_inventory(entries, metadata):
+    """Compare every selected routine/view name and kind with sealed metadata."""
+    expected = Counter()
+    for category in ("routines", "views"):
+        records = metadata.get(category)
+        snapshot.require(isinstance(records, list), "manifest-object-inventory")
+        identities = set()
+        for item in records:
+            snapshot.require(isinstance(item, dict) and item.get("schema") in snapshot.SCHEMAS,
+                             "manifest-object-inventory")
+            snapshot.ident(item["schema"])
+            snapshot.ident(item["name"])
+            if category == "routines":
+                snapshot.require(item.get("kind") in ("f", "p")
+                                 and isinstance(item.get("arguments"), str), "manifest-routine-kind")
+                kind = "FUNCTION" if item["kind"] == "f" else "PROCEDURE"
+                identity = (item["schema"], item["name"], item["kind"], item["arguments"])
+            else:
+                kind = "VIEW"
+                identity = (item["schema"], item["name"])
+            snapshot.require(identity not in identities, "duplicate-manifest-object")
+            identities.add(identity)
+            expected[kind, item["schema"], item["name"]] += 1
+    actual = Counter()
+    counts = Counter()
+    for line in entries.values():
+        tail = re.sub(r"^[0-9]+; [0-9]+ [0-9]+ ", "", line)
+        match = re.match(r"(TABLE DATA|SEQUENCE SET|VIEW|FUNCTION|PROCEDURE) ", tail)
+        if not match:
+            continue
+        kind = match[1]
+        counts[kind] += 1
+        if kind in ("VIEW", "FUNCTION", "PROCEDURE"):
+            obj = re.match(r"(?:VIEW|FUNCTION|PROCEDURE) ([a-z_][a-z0-9_]*) ([a-z_][a-z0-9_]*)(?:\(| )", tail)
+            snapshot.require(obj is not None, "archive-object-identity")
+            actual[kind, obj[1], obj[2]] += 1
+    snapshot.require(counts["TABLE DATA"] == 48 and counts["SEQUENCE SET"] == 3
+                     and actual == expected, "archive-object-inventory")
+    return {kind: counts[kind] for kind in ("TABLE DATA", "SEQUENCE SET", "VIEW", "FUNCTION", "PROCEDURE")}
+
+
+def validate_supporting_auth_role(value):
+    """Require the exact audited claim getter, never a replacement Auth API."""
+    snapshot.require(isinstance(value, dict) and set(value) == {"schema", "function", "dependencies"},
+                     "supporting-auth-role")
+    schema, function = value["schema"], value["function"]
+    snapshot.require(isinstance(schema, dict) and set(schema) == {"name", "owner", "acl"}
+                     and schema.get("name") == "auth" and schema.get("owner") == "supabase_admin"
+                     and isinstance(schema.get("acl"), str), "supporting-auth-schema")
+    required = dict(schema="auth", name="role", arguments="", result="text", owner="supabase_auth_admin",
+                    language="sql", volatility="s", parallel="u", config=None)
+    snapshot.require(isinstance(function, dict) and set(function) == set(required) | {
+        "acl", "security_definer", "leakproof", "strict", "definition", "sha256"}, "supporting-auth-role")
+    snapshot.require(all(function.get(key) == expected for key, expected in required.items())
+                     and all(function.get(key) is False for key in ("security_definer", "leakproof", "strict"))
+                     and isinstance(function.get("acl"), str), "supporting-auth-role-identity")
+    definition = function.get("definition")
+    snapshot.require(isinstance(definition, str) and function.get("sha256") == AUTH_ROLE_SHA256
+                     and hashlib.sha256(definition.encode()).hexdigest() == AUTH_ROLE_SHA256,
+                     "supporting-auth-role-definition")
+    snapshot.require(value["dependencies"] == [dict(identity="auth", kind="n", name="auth", schema=None, type="schema")],
+                     "supporting-auth-role-dependencies")
+    return value
 
 
 def source_public_schema(schema_metadata):
@@ -230,16 +299,14 @@ def plan(args):
     snapshot.require(isinstance(manifest.get("schema_metadata"), dict)
                      and set(manifest["schema_metadata"]) == set(OBJECT_KINDS), "source-metadata-reference")
     snapshot.require(any(t["schema"] == "source_add_history" for t in manifest["tables"]), "protected-history-missing")
+    supporting_auth = validate_supporting_auth_role(manifest.get("supporting_auth_role"))
     env = snapshot.pg_environment()
     files = snapshot.validate_archive(root / "dump", manifest, env, logs)
     snapshot.require(files == manifest["archive_files"], "archive-seal")
     toc = snapshot.command(["pg_restore", "--list", str(root / "dump")], env, logs, "restore-toc")
     exclusions = json.loads(Path(args.exclusions).read_text()) if args.exclusions else []
     listing, entries = select_toc(toc, exclusions, manifest["schema_metadata"])
-    counts = {kind: sum(bool(re.match(r"^[0-9]+; [0-9]+ [0-9]+ " + re.escape(kind) + r" ", line)) for line in entries.values())
-              for kind in ("TABLE DATA", "SEQUENCE SET", "VIEW", "FUNCTION", "PROCEDURE")}
-    snapshot.require(counts["TABLE DATA"] == 48 and counts["SEQUENCE SET"] == 3
-                     and counts["VIEW"] == 3 and counts["FUNCTION"] + counts["PROCEDURE"] == 377, "archive-object-inventory")
+    counts = validate_toc_inventory(entries, manifest["schema_metadata"])
     inventory_path = Path(args.target_inventory)
     snapshot.require(snapshot.sha256_file(inventory_path / "target.json") == (inventory_path / "target.sha256").read_text().strip(), "target-inventory-seal")
     evidence = json.loads((inventory_path / "target.json").read_text())
@@ -247,12 +314,14 @@ def plan(args):
     # Even an explicit http exclusion cannot prove callers do not need its types.
     blockers.extend(["extension-type-and-runtime-dependencies-require-review",
                      "approved-platform-metadata-deltas-required",
+                     "exact-auth-role-schema-owner-acl-prerequisites-require-review",
                      "public-schema-owner-and-initial-acl-preservation-require-review",
                      "write-enabled-target-service-and-final-preflight-not-implemented"])
     if any(re.match(r"^[0-9]+; [0-9]+ [0-9]+ SCHEMA - public(?: |$)", line) for line in entries.values()):
         blockers.append("existing-public-schema-requires-reviewed-empty-target-handling")
     snapshot.private_write(output / "restore.list", listing)
     snapshot.private_json(output / "source-metadata.json", manifest["schema_metadata"])
+    snapshot.private_json(output / "supporting-auth-role.json", supporting_auth)
     snapshot.private_write(output / "source-schema.sql", snapshot.command(
         ["pg_restore", "--schema-only", "--file=-", str(root / "dump")], env, logs, "archive-schema"))
     states = sequence_states(toc, root / "dump", env, logs, output)
@@ -265,9 +334,11 @@ def plan(args):
                   manifest_sha256=snapshot.sha256_file(root / "manifest.json"), toc_sha256=hashlib.sha256(toc).hexdigest(),
                   toc_counts=counts, exclusions=exclusions, archive_sequences=states,
                   source_public_schema_owner=source_public_schema(manifest["schema_metadata"])["owner"],
+                  supporting_auth_role_sha256=AUTH_ROLE_SHA256,
                   native_restore_command=native_restore_command(output / "restore.list", root / "dump"),
-                  unsupported_runtime=["7 retired postgres-owned functions using auth.jwt/auth.uid/auth.users",
-                                       "2 retained functions using net.*", "http extension callers pending exact dependency review"])
+                  unsupported_runtime=["5 retired postgres-owned functions using auth.jwt/auth.uid/auth.users",
+                                       "2 retired postgres-owned functions using net.*"],
+                  retained_platform_helpers="6 non-extension functions in extensions; do not register source event triggers")
     snapshot.private_json(output / "plan.json", result)
     print("restore plan saved privately; review required; no target writes")
 

@@ -20,6 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import aws_subnet_snapshot as snapshot
 
 
+def supporting_auth_role_fixture():
+    return dict(schema=dict(name="auth", owner="supabase_admin", acl="{supabase_admin=UC/supabase_admin,anon=U/supabase_admin,authenticated=U/supabase_admin,service_role=U/supabase_admin,supabase_auth_admin=UC/supabase_admin,dashboard_user=UC/supabase_admin,postgres=U/supabase_admin}"),
+                function=dict(schema="auth",name="role",arguments="",result="text",owner="supabase_auth_admin",
+                              acl="{=X/supabase_auth_admin,supabase_auth_admin=X/supabase_auth_admin,dashboard_user=X/supabase_auth_admin}",
+                              security_definer=False,leakproof=False,volatility="s",parallel="u",strict=False,
+                              config=None,language="sql",definition="CREATE OR REPLACE FUNCTION auth.role()\n RETURNS text\n LANGUAGE sql\n STABLE\nAS $function$\n  select \n  coalesce(\n    nullif(current_setting('request.jwt.claim.role', true), ''),\n    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')\n  )::text\n$function$\n"),
+                dependencies=[dict(identity="auth",kind="n",name="auth",schema=None,type="schema")])
+
+
 class SnapshotTests(unittest.TestCase):
     def test_manifest_metadata_is_captured_by_the_exact_snapshot_keeper(self):
         tables = [dict(schema="public", name=f"t_{i}", kind="r", filtered_rls=False, inherited=False,
@@ -36,6 +45,8 @@ class SnapshotTests(unittest.TestCase):
             def one_json(self, sql):
                 if sql == snapshot.CATALOG:
                     return tables
+                if sql == snapshot.SUPPORTING_AUTH_ROLE_SQL:
+                    return supporting_auth_role_fixture()
                 if sql.startswith("SELECT count(*)"):
                     return 2
                 if "c.relkind='S'" in sql:
@@ -49,9 +60,12 @@ class SnapshotTests(unittest.TestCase):
         metadata = {key: [] for key in snapshot.OBJECT_KINDS}
         full = dict(count=2, sum256="1" * 64, xor256="2" * 64)
         with patch.object(snapshot, "capture_metadata", return_value=metadata) as capture, \
-             patch.object(snapshot, "copy_digest", return_value=full) as generated_copy:
+             patch.object(snapshot, "copy_digest", return_value=full) as generated_copy, \
+             patch.object(snapshot, "capture_supporting_auth_role", wraps=snapshot.capture_supporting_auth_role) as support:
             manifest = snapshot.capture_manifest(keeper, "00000003-0000001B-1")
         capture.assert_called_once_with(keeper)
+        support.assert_called_once_with(keeper)
+        self.assertEqual(manifest["supporting_auth_role"]["function"]["sha256"], snapshot.AUTH_ROLE_DEFINITION_SHA256)
         generated_copy.assert_called_once_with(tables[0], "00000003-0000001B-1", keeper.env, keeper.logs, include_generated=True)
         self.assertEqual(manifest["tables"][0]["generated_full_digest"], full)
         self.assertEqual(len(manifest["tables"][0]["columns"]), 3)
@@ -59,6 +73,27 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(manifest["snapshot"], "00000003-0000001B-1")
         self.assertEqual(len(manifest["tables"]), 48)
         self.assertTrue(keeper.lock.startswith("LOCK TABLE"))
+
+    def test_supporting_auth_role_rejects_changed_identity_definition_or_security(self):
+        def capture(value):
+            return snapshot.capture_supporting_auth_role(SimpleNamespace(one_json=lambda _: value))
+        self.assertEqual(capture(supporting_auth_role_fixture())["function"]["sha256"], snapshot.AUTH_ROLE_DEFINITION_SHA256)
+        for key, bad in (("schema","public"),("name","other"),("arguments","text"),("result","integer"),
+                         ("owner","postgres"),("security_definer",True),("leakproof",True),("volatility","v"),
+                         ("parallel","s"),("strict",True),("config",["search_path=public"]),("language","plpgsql"),
+                         ("acl","{}"),("definition","SELECT 'unreviewed getter'")):
+            value = supporting_auth_role_fixture()
+            value["function"][key] = bad
+            with self.assertRaises(snapshot.Failure):
+                capture(value)
+        value = supporting_auth_role_fixture()
+        value["dependencies"].append(dict(identity="auth.users",kind="n",name="users",schema="auth",type="table"))
+        with self.assertRaises(snapshot.Failure):
+            capture(value)
+        value = supporting_auth_role_fixture()
+        value["schema"]["owner"] = "postgres"
+        with self.assertRaises(snapshot.Failure):
+            capture(value)
 
     def test_dump_defaults_fail_closed_without_changing_source_role(self):
         snapshot.check_dump_defaults(SimpleNamespace(initial_settings=dict(timezone="UTC", bytea_output="hex")))
@@ -213,6 +248,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual({a.split("=", 1)[1] for a in args if a.startswith("--schema=")}, set(snapshot.SCHEMAS))
         self.assertEqual({a.split("=", 1)[1] for a in args if a.startswith("--extension=")}, set(snapshot.EXTENSIONS))
         self.assertNotIn("--enable-row-security", args)
+        self.assertNotIn("--schema=auth", args)
         self.assertIn("READ ONLY", snapshot.BEGIN)
         self.assertIn("--no-psqlrc", snapshot.psql_command())
         self.assertIn("--set=ON_ERROR_STOP=1", snapshot.psql_command())
@@ -273,6 +309,12 @@ class NativePostgresTests(unittest.TestCase):
             try:
                 admin = [str(PG17 / "psql"), "-XqAt", "-v", "ON_ERROR_STOP=1", "-h", "127.0.0.1", "-p", str(port), "-U", "local_operator"]
                 run(admin + ["-d", "postgres"], data=b"CREATE DATABASE source; CREATE DATABASE target;")
+                # Reproduce only the reviewed getter's catalog facts. No auth
+                # tables exist and the native archive still selects 3 schemas.
+                auth_sql = "CREATE ROLE supabase_admin NOLOGIN; CREATE ROLE supabase_auth_admin NOLOGIN; CREATE ROLE dashboard_user NOLOGIN; CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN; CREATE ROLE service_role NOLOGIN; CREATE ROLE postgres NOLOGIN; CREATE SCHEMA auth AUTHORIZATION supabase_admin;\n"
+                auth_sql += supporting_auth_role_fixture()["function"]["definition"] + ";\n"
+                auth_sql += "ALTER FUNCTION auth.role() OWNER TO supabase_auth_admin; GRANT EXECUTE ON FUNCTION auth.role() TO dashboard_user; GRANT USAGE ON SCHEMA auth TO anon; GRANT USAGE ON SCHEMA auth TO authenticated; GRANT USAGE ON SCHEMA auth TO service_role; GRANT USAGE,CREATE ON SCHEMA auth TO supabase_auth_admin; GRANT USAGE,CREATE ON SCHEMA auth TO dashboard_user; GRANT USAGE ON SCHEMA auth TO postgres;"
+                run(admin + ["-d", "source"], data=auth_sql.encode())
                 seed = "CREATE SCHEMA source_add_history; CREATE SCHEMA extensions;\n"
                 for i in range(48):
                     name = "lab_arena_rounds" if i == 0 else f"t_{i}"
@@ -310,6 +352,8 @@ class NativePostgresTests(unittest.TestCase):
                     tables = keeper.one_json(snapshot.CATALOG)
                     snapshot.validate_tables(tables)
                     schema_metadata = snapshot.capture_metadata(keeper)
+                    supporting_auth_role = snapshot.capture_supporting_auth_role(keeper)
+                    self.assertEqual(supporting_auth_role["function"]["sha256"], snapshot.AUTH_ROLE_DEFINITION_SHA256)
                     for table in tables:
                         table["count"] = keeper.one_json("SELECT count(*) FROM ONLY " + snapshot.qualified(table) + ";")
                         if any(c["generated"] for c in table["columns"]):
@@ -318,7 +362,7 @@ class NativePostgresTests(unittest.TestCase):
                     run(admin + ["-d", "source"], data=b"INSERT INTO public.lab_arena_rounds(id,txt) VALUES(999,'later');")
                     args = [a for a in snapshot.dump_command(exported, root / "dump") if not a.startswith("--extension=")]
                     snapshot.command(args, source_env, logs, "local-dump")
-                    manifest = dict(tables=tables, schema_metadata=schema_metadata, sequences=[dict(schema="public", name="seq_a"),
+                    manifest = dict(tables=tables, schema_metadata=schema_metadata, supporting_auth_role=supporting_auth_role, sequences=[dict(schema="public", name="seq_a"),
                                     dict(schema="public", name="seq_b"), dict(schema="source_add_history", name="seq_c")])
                 files = snapshot.validate_archive(root / "dump", manifest, source_env, logs)
                 self.assertEqual(len(files), 49)

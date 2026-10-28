@@ -47,9 +47,14 @@ measure the separately certificate-verified client-to-pooler TLS connection.
 Do not infer client TLS failure from that backend-hop field or change source
 SSL enforcement. No source role or server setting change is part of this fix.
 
-The source archive must contain 48 table-data entries, 3 sequence-state entries,
-3 views and 377 nonextension function/procedure entries. The sealed snapshot
-manifest and all archive-file hashes must match. At least one table must be in
+The source archive must contain 48 table-data entries and 3 sequence-state
+entries. Every selected view and nonextension function/procedure must match
+`manifest.schema_metadata` in count, schema, name and kind, including overload
+counts. The current source audit has 3 views and 383 functions: 376 in `public`,
+1 in `source_add_history` and 6 platform helpers in `extensions`. Derive these
+counts from the sealed manifest; do not drop the six helpers to satisfy the old
+377-function assumption. The sealed snapshot manifest and all archive-file
+hashes must match. At least one table must be in
 `source_add_history`. Never remove application/history tables or their ACLs
 from a restore list to make a failed restore pass.
 
@@ -75,12 +80,18 @@ in sealed `manifest.schema_metadata.schemas`. Other owners and missing,
 duplicate or mismatched source records are rejected. The public-schema ACL
 entry must remain. The tool cannot omit a table, sequence,
 view, routine, index, constraint, policy, trigger or mixed ACL entry. It records
-the exact manifest, TOC, inventory and exclusion identities.
+the exact manifest, TOC, inventory and exclusion identities. Any EVENT TRIGGER
+registration, comment or security-label entry stops planning for separate
+review. The helper does not silently exclude those entries. Keep the six
+ordinary function entries that return `event_trigger`; their definitions do
+not register the source platform hooks on RDS.
 
 The output includes `source-schema.sql`, an unchanged private schema script
 from the archive; `restore.list`; the archive's actual `setval` statements and
-parsed sequence states; an exact temporary-role cleanup SQL candidate; and
-`plan.json`. All native command diagnostics stay private. This is preparation,
+parsed sequence states; an exact temporary-role cleanup SQL candidate;
+`supporting-auth-role.json`; and `plan.json`. The supporting record is required
+in the sealed manifest and its definition hash must match the audited getter.
+All native command diagnostics stay private. This is preparation,
 not proof that the target can run the application.
 
 The plan remains blocked until these facts are established:
@@ -129,9 +140,11 @@ The plan remains blocked until these facts are established:
 
 ## Role and ownership treatment
 
-Keep owner names `postgres` and `lab_arena_owner`. Keep ACL grantee names `anon`,
-`authenticated`, `lab_arena_owner`, `lab_arena_service`, `leadpoet_parity_reader`,
-`pg_database_owner`, `postgres`, `service_role` and `supabase_admin`.
+Keep owner names `postgres`, `lab_arena_owner`, `supabase_admin` and
+`supabase_auth_admin`. Keep ACL grantee names `anon`, `authenticated`,
+`dashboard_user`, `lab_arena_owner`, `lab_arena_service`, `leadpoet_parity_reader`,
+`pg_database_owner`, `postgres`, `service_role`, `supabase_admin` and
+`supabase_auth_admin`.
 Do not copy source passwords, logins, superuser, replication, role/database
 creation or bypass-RLS privileges into this rehearsal target.
 
@@ -144,9 +157,11 @@ explicit rehearsal security changes from the hosted platform role attributes.
 They do not prove future client authentication or service-role behavior.
 
 The restoring operator must have reviewed `SET` and inheritance authority for
-both owner roles. Do not assume RDS `rds_superuser` is PostgreSQL superuser.
-The native non-superuser control also needs temporary database CREATE grants
-to the two owner roles for schema ownership changes. Review those prerequisites,
+all four owner roles. The two additional platform owners cover the retained
+`extensions` helpers and the exact supporting auth getter. Do not assume RDS
+`rds_superuser` is PostgreSQL superuser. The native non-superuser control also
+needs temporary database CREATE grants for reviewed schema ownership changes.
+Review those prerequisites,
 then revoke only temporary database CREATE grants after restore and verify
 the database ACL against its saved target baseline. When `public` remains owned
 by `pg_database_owner`, native ownership restoration can also require temporary
@@ -176,12 +191,45 @@ to the export role. Any other membership is rejected. Unexpected residual depend
 `DROP ROLE` fail and roll back the cleanup. Do not use `DROP OWNED`, `CASCADE`,
 blanket `--no-acl` or exclusion of mixed ACL TOC entries.
 
+## Exact auth policy prerequisite
+
+The retained `qualification_private_icp_sets` policy `Service role full access`
+uses `auth.role()` in both USING and WITH CHECK. The source has a real catalog
+dependency on that function. Keep this policy. Excluding it or creating a
+replacement claim function changes the source security behavior.
+
+Require `manifest.supporting_auth_role` with the exact schema, function and
+dependency metadata captured by the source keeper. The allowed function is
+`auth.role()` returning text, SQL STABLE SECURITY INVOKER, with no arguments,
+configuration or table dependency. Its exact definition SHA-256 is
+`c96a9358b02089b03f3962fd85c5f83c9d64f32240481915c0efe74398dc761b`.
+The plan rejects a missing record, another identity, changed attributes,
+additional dependencies or a different definition, even if its supplied hash
+is changed too. It saves the complete supporting record privately for review.
+
+Before restoring the policy, separately review and preserve this exact getter,
+its `auth` schema, owner names and ACLs. The schema owner is `supabase_admin`;
+the function owner is `supabase_auth_admin`. The source function ACL also names
+`dashboard_user` and PUBLIC. Precreate the two additional names
+`supabase_auth_admin` and `dashboard_user` as inert roles under the rules above.
+Do not import role logins, credentials or administrative privileges. Review the
+captured schema USAGE/CREATE grants and function EXECUTE grants exactly.
+
+This prerequisite contains one claim getter. It does not create an Auth server,
+`auth.users`, JWT verification or a new authentication design. The native local
+control restores a policy bound to this function: restore fails without the
+getter, succeeds with its exact definition, and leaves `auth.users` absent.
+Future client authentication and claim binding remain separate compatibility
+work. The helper prepares evidence only; it does not create the schema, roles
+or function.
+
 ## Native restore phases
 
 1. Bind the reviewed code, export hashes, target inventory, role SQL and exact
    TOC selection. Obtain independent review of the remaining platform changes.
 2. Recheck the dedicated target and empty state. Apply only the reviewed role,
-   extension and empty-schema prerequisites. Do not modify source roles here.
+   extension, empty-schema and exact `auth.role()` prerequisites. Do not modify
+   source roles here.
 3. Run the exact native `pg_restore` candidate with `--exit-on-error`,
    `--single-transaction` and the reviewed `--use-list`. Keep native owner and
    ACL restoration enabled. Serial restore gives one atomic database restore;
@@ -208,9 +256,24 @@ dumps, SSM payloads or logs. A timeout requires a fresh target-state audit.
 
 ## Compatibility limits
 
-The current source audit found 7 retired `postgres` functions that use
-`auth.jwt`, `auth.uid` or `auth.users`, and 2 retained definitions that use
-`net.*`. Keep their definitions and report their unsupported functionality.
+The source audit found 5 retired `postgres` functions that use `auth.jwt`,
+`auth.uid` or `auth.users`: `create_queries_table`, `enforce_rate_limits`,
+`is_token_valid`, `pull_prospects_for_validator` and `setup_rls`. Two other
+retired `postgres` functions, `process_consensus_async(uuid)` and
+`process_rep_score_async(uuid)`, use `net.http_post` and `net._http_response`.
+Keep all seven definitions and report their unsupported runtime behavior.
+Their old queue/auth-era tables are absent; no bound triggers or active Arena
+call paths were found. Do not invoke them during restore or verification.
+
+Keep the six nonextension functions in `extensions`: `grant_pg_cron_access`,
+`grant_pg_graphql_access`, `grant_pg_net_access`, `pgrst_ddl_watch`,
+`pgrst_drop_watch` and `set_graphql_placeholder`. Their source event-trigger
+registrations are outside the schema-filtered dump; confirm the actual TOC has
+none. Do not register those hosted-platform hooks on RDS. No unsupported types
+or noncatalog function dependencies were found in selected column types,
+custom routine signatures, generated/default expressions, CHECK constraints,
+index expressions or the three views. That catalog audit does not replace the
+native restore and post-restore checks.
 An `auth.*` alias in an active function is not itself a dependency. Inspect
 actual definitions, bound object dependencies and reachable calls; a text match
 alone does not prove an active dependency or successful operation.

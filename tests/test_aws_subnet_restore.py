@@ -20,6 +20,55 @@ from scripts import aws_subnet_restore as restore
 from scripts import aws_subnet_snapshot as snapshot
 
 
+AUTH_ROLE_SUPPORT = {'dependencies': [{'identity': 'auth',
+                   'kind': 'n',
+                   'name': 'auth',
+                   'schema': None,
+                   'type': 'schema'}],
+ 'function': {'acl': '{=X/supabase_auth_admin,supabase_auth_admin=X/supabase_auth_admin,dashboard_user=X/supabase_auth_admin}',
+              'arguments': '',
+              'config': None,
+              'definition': 'CREATE OR REPLACE FUNCTION auth.role()\n'
+                            ' RETURNS text\n'
+                            ' LANGUAGE sql\n'
+                            ' STABLE\n'
+                            'AS $function$\n'
+                            '  select \n'
+                            '  coalesce(\n'
+                            "    nullif(current_setting('request.jwt.claim.role', true), ''),\n"
+                            "    (nullif(current_setting('request.jwt.claims', true), '')::jsonb "
+                            "->> 'role')\n"
+                            '  )::text\n'
+                            '$function$\n',
+              'language': 'sql',
+              'leakproof': False,
+              'name': 'role',
+              'owner': 'supabase_auth_admin',
+              'parallel': 'u',
+              'result': 'text',
+              'schema': 'auth',
+              'security_definer': False,
+              'sha256': 'c96a9358b02089b03f3962fd85c5f83c9d64f32240481915c0efe74398dc761b',
+              'strict': False,
+              'volatility': 's'},
+ 'schema': {'acl': '{supabase_admin=UC/supabase_admin,anon=U/supabase_admin,authenticated=U/supabase_admin,service_role=U/supabase_admin,supabase_auth_admin=UC/supabase_admin,dashboard_user=UC/supabase_admin,postgres=U/supabase_admin}',
+            'name': 'auth',
+            'owner': 'supabase_admin'}}
+
+
+def auth_schema_sql():
+    return ("CREATE SCHEMA auth AUTHORIZATION supabase_admin; "
+            "GRANT USAGE ON SCHEMA auth TO anon,authenticated,service_role,postgres; "
+            "GRANT USAGE,CREATE ON SCHEMA auth TO supabase_auth_admin,dashboard_user;")
+
+
+def auth_function_sql():
+    return (AUTH_ROLE_SUPPORT["function"]["definition"]
+            + ";\nALTER FUNCTION auth.role() OWNER TO supabase_auth_admin; "
+            "SET ROLE supabase_auth_admin; "
+            "GRANT EXECUTE ON FUNCTION auth.role() TO PUBLIC,supabase_auth_admin,dashboard_user; RESET ROLE;")
+
+
 def empty_evidence():
     roles = [dict(name=n, super=False, inherit=n not in restore.NOINHERIT,
                   createrole=False, createdb=False, login=False, replication=False,
@@ -105,6 +154,65 @@ class RestorePlanTests(unittest.TestCase):
                 restore.select_toc((line + "\n").encode(), [exclusion],
                                    dict(schemas=[dict(schema="public", name="public", owner=owner)]))
 
+    def test_toc_inventory_matches_all_manifest_routines_and_views(self):
+        routines = [dict(schema="public", name=f"f_{i}", arguments="", kind="f") for i in range(377)]
+        routines += [dict(schema="extensions", name=name, arguments="", kind="f") for name in (
+            "grant_pg_cron_access", "grant_pg_graphql_access", "grant_pg_net_access",
+            "pgrst_ddl_watch", "pgrst_drop_watch", "set_graphql_placeholder")]
+        views = [dict(schema="public", name=f"v_{i}") for i in range(3)]
+        metadata = dict(routines=routines, views=views)
+        tails = [f"FUNCTION {r['schema']} {r['name']}() postgres" for r in routines]
+        tails += [f"VIEW {v['schema']} {v['name']} postgres" for v in views]
+        tails += [f"TABLE DATA public t_{i} postgres" for i in range(48)]
+        tails += [f"SEQUENCE SET public seq_{i} postgres" for i in range(3)]
+        toc = ("\n".join(f"{i + 1}; 0 0 {tail}" for i, tail in enumerate(tails)) + "\n").encode()
+        entries = restore.toc_entries(toc)
+        counts = restore.validate_toc_inventory(entries, metadata)
+        self.assertEqual(counts["FUNCTION"], 383)
+        self.assertEqual(counts["VIEW"], 3)
+        for mismatch in ({**metadata, "routines": routines[:377]},
+                         {**metadata, "views": views[:-1]},
+                         {**metadata, "routines": [{**routines[0], "name": "missing"}, *routines[1:]]}):
+            with self.assertRaises(snapshot.Failure):
+                restore.validate_toc_inventory(entries, mismatch)
+        omitted = {key: line for key, line in entries.items() if "FUNCTION extensions " not in line}
+        with self.assertRaises(snapshot.Failure):
+            restore.validate_toc_inventory(omitted, metadata)
+
+    def test_event_trigger_entries_require_separate_review_not_exclusion(self):
+        for tail in ("EVENT TRIGGER - issue_pg_net_access postgres",
+                     "COMMENT - EVENT TRIGGER issue_pg_net_access postgres",
+                     "SECURITY LABEL - EVENT TRIGGER issue_pg_net_access postgres"):
+            line = "1; 3466 100 " + tail
+            toc = (line + "\n").encode()
+            exclusion = dict(id="1", sha256=hashlib.sha256(line.encode()).hexdigest(),
+                             reason="must not silently omit an event trigger")
+            with self.assertRaisesRegex(snapshot.Failure, "event-trigger-review-required"):
+                restore.select_toc(toc, [])
+            with self.assertRaisesRegex(snapshot.Failure, "event-trigger-review-required"):
+                restore.select_toc(toc, [exclusion])
+
+    def test_supporting_auth_role_requires_exact_getter_identity_and_definition(self):
+        self.assertEqual(restore.validate_supporting_auth_role(copy.deepcopy(AUTH_ROLE_SUPPORT)), AUTH_ROLE_SUPPORT)
+        invalid = [None, {}, {**AUTH_ROLE_SUPPORT, "extra": "unreviewed"}]
+        for field, bad in (("schema", "public"), ("name", "jwt"), ("arguments", "p_input text"),
+                           ("result", "jsonb"), ("owner", "postgres"), ("security_definer", True),
+                           ("language", "plpgsql"), ("volatility", "v"), ("config", ["search_path=public"]),
+                           ("definition", AUTH_ROLE_SUPPORT["function"]["definition"] + "-- altered"),
+                           ("sha256", "0" * 64), ("acl", [])):
+            value = copy.deepcopy(AUTH_ROLE_SUPPORT)
+            value["function"][field] = bad
+            invalid.append(value)
+        value = copy.deepcopy(AUTH_ROLE_SUPPORT)
+        value["schema"]["owner"] = "postgres"
+        invalid.append(value)
+        value = copy.deepcopy(AUTH_ROLE_SUPPORT)
+        value["dependencies"].append(dict(identity="auth.users", kind="n", name="users", schema="auth", type="table"))
+        invalid.append(value)
+        for value in invalid:
+            with self.assertRaises(snapshot.Failure):
+                restore.validate_supporting_auth_role(value)
+
     def test_native_candidate_preserves_owners_acls_and_uses_one_transaction(self):
         command = restore.native_restore_command(Path("reviewed.list"), Path("archive"))
         self.assertIn("--single-transaction", command)
@@ -172,7 +280,7 @@ class NativeRestoreTests(unittest.TestCase):
                     role_sql = "\n".join("CREATE ROLE " + snapshot.ident(n) + " NOLOGIN " + ("NOINHERIT" if n in restore.NOINHERIT else "INHERIT") + " NOBYPASSRLS;" for n in restore.ROLES if n != "pg_database_owner")
                     run(admin, data=role_sql.encode())
                     if user == "arena_admin":
-                        run(admin, data=b"GRANT postgres,lab_arena_owner TO arena_admin WITH INHERIT TRUE, SET TRUE; GRANT CREATE ON DATABASE postgres TO postgres,lab_arena_owner;")
+                        run(admin, data=b"GRANT postgres,lab_arena_owner,supabase_admin,supabase_auth_admin TO arena_admin WITH INHERIT TRUE, SET TRUE; GRANT CREATE ON DATABASE postgres TO postgres,lab_arena_owner,supabase_admin,supabase_auth_admin;")
                         self.assertEqual(run(admin, data=b"SELECT rolsuper,rolcreaterole,rolcreatedb FROM pg_roles WHERE rolname=current_user;").strip(), b"f|t|t")
                     service = cluster_root / "service"
                     snapshot.private_write(service, (f"[migration]\nhost=127.0.0.1\nport={port}\nuser={user}\ndbname=postgres\nsslmode=disable\noptions={snapshot.OPTIONS}\n").encode())
@@ -201,6 +309,8 @@ class NativeRestoreTests(unittest.TestCase):
                     sql += f"CREATE FUNCTION public.f_{i}() RETURNS integer LANGUAGE sql {'SECURITY DEFINER SET search_path=pg_catalog' if i == 1 else ''} AS $$SELECT {i}$$; ALTER FUNCTION public.f_{i}() OWNER TO postgres;\n"
                 exact_tables = ",".join([f"public.t_{i}" for i in range(47)] + ["source_add_history.history"])
                 sql += "GRANT USAGE ON SCHEMA public,source_add_history,extensions TO " + snapshot.SOURCE_ROLE + "; GRANT SELECT ON TABLE " + exact_tables + " TO " + snapshot.SOURCE_ROLE + "; GRANT SELECT ON ALL SEQUENCES IN SCHEMA public,source_add_history TO " + snapshot.SOURCE_ROLE + "; GRANT SELECT ON public.t_0 TO anon,authenticated,lab_arena_service; GRANT EXECUTE ON FUNCTION public.f_1() TO lab_arena_service; ALTER DEFAULT PRIVILEGES FOR ROLE lab_arena_owner IN SCHEMA source_add_history GRANT SELECT ON TABLES TO lab_arena_service; SELECT setval('public.seq_a',100,true); SELECT setval('public.seq_b',50,false); SELECT setval('source_add_history.seq_c',9,true);"
+                run(source_admin, data=(auth_schema_sql() + auth_function_sql()).encode())
+                sql += "CREATE POLICY source_auth_claim ON public.t_0 USING (auth.role()='service_role') WITH CHECK (auth.role()='service_role');"
                 run(source_admin, data=sql.encode())
                 with snapshot.Keeper(source_env, logs) as keeper:
                     before = snapshot.capture_metadata(keeper)
@@ -231,7 +341,8 @@ class NativeRestoreTests(unittest.TestCase):
                                     and m["admin"] and not m["inherit"] and not m["set"] for m in empty["memberships"]))
                 # Exercise the complete local planning path with sealed synthetic
                 # export and target evidence. It must remain review-required.
-                manifest.update(format=1, source_host=snapshot.SOURCE_HOST, source_role=snapshot.SOURCE_ROLE, database="postgres")
+                manifest.update(format=1, source_host=snapshot.SOURCE_HOST, source_role=snapshot.SOURCE_ROLE,
+                                database="postgres", supporting_auth_role=copy.deepcopy(AUTH_ROLE_SUPPORT))
                 manifest["archive_files"] = snapshot.validate_archive(root / "dump", manifest, source_env, logs)
                 snapshot.private_json(root / "manifest.json", manifest)
                 snapshot.private_write(root / "manifest.sha256", (snapshot.sha256_file(root / "manifest.json") + "\n").encode())
@@ -248,6 +359,8 @@ class NativeRestoreTests(unittest.TestCase):
                 self.assertFalse(prepared["execution_supported"])
                 self.assertEqual(prepared["toc_counts"]["FUNCTION"], 377)
                 self.assertEqual(prepared["source_public_schema_owner"], public_owner)
+                self.assertEqual(prepared["supporting_auth_role_sha256"], restore.AUTH_ROLE_SHA256)
+                self.assertEqual(json.loads((root / "prepared" / "supporting-auth-role.json").read_text()), AUTH_ROLE_SUPPORT)
                 self.assertEqual(prepared["archive_sequences"], states)
                 for path in (root / "prepared").iterdir():
                     if path.is_file():
@@ -265,6 +378,17 @@ class NativeRestoreTests(unittest.TestCase):
                     # The initialized schema's owner is already correct. Inert
                     # object owners still need CREATE to accept native ownership.
                     run(target_admin, data=b"GRANT CREATE ON SCHEMA public TO postgres,lab_arena_owner;")
+                run(target_admin, data=auth_schema_sql().encode())
+                with self.assertRaises(snapshot.Failure):
+                    snapshot.command(restore.native_restore_command(root / "restore.list", root / "dump"), target_write, logs, "local-missing-auth")
+                missing_auth = "\n".join(path.read_text() for path in logs.glob("local-missing-auth-*.stderr"))
+                self.assertIn("function auth.role() does not exist", missing_auth)
+                self.assertEqual(run(target_admin, data=b"SELECT to_regclass('public.t_0') IS NULL;").strip(), b"t")
+                run(target_admin, data=auth_function_sql().encode())
+                definition = run(target_admin, data=b"SELECT pg_get_functiondef('auth.role()'::regprocedure);").decode().rstrip("\n") + "\n"
+                self.assertEqual(hashlib.sha256(definition.encode()).hexdigest(), restore.AUTH_ROLE_SHA256)
+                self.assertEqual(run(target_admin, data=b"SELECT to_regclass('auth.users') IS NULL;").strip(), b"t")
+                self.assertEqual(run(target_admin, data=b"SELECT set_config('request.jwt.claim.role','service_role',false); SELECT auth.role();").strip(), b"service_role\nservice_role")
                 try:
                     snapshot.command(restore.native_restore_command(root / "restore.list", root / "dump"), target_write, logs, "local-restore")
                 except snapshot.Failure:
@@ -278,7 +402,7 @@ class NativeRestoreTests(unittest.TestCase):
                     # Neither fixture source ACL nor target baseline grants
                     # CREATE to these roles. Remove only those temporary grants.
                     run(target_admin, data=b"REVOKE CREATE ON SCHEMA public FROM postgres,lab_arena_owner;")
-                run(target_admin, data=b"REVOKE CREATE ON DATABASE postgres FROM postgres,lab_arena_owner;")
+                run(target_admin, data=b"REVOKE CREATE ON DATABASE postgres FROM postgres,lab_arena_owner,supabase_admin,supabase_auth_admin;")
                 with snapshot.Keeper(target_env, logs) as keeper:
                     after = snapshot.capture_metadata(keeper)
                     actual = restore.target_evidence(keeper)

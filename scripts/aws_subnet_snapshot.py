@@ -36,6 +36,9 @@ SOURCE_ROLE = "leadpoet_aws_export_20261028"
 SOURCE_USER = SOURCE_ROLE + ".qplwoislplkcegvdmbim"
 SCHEMAS = ("public", "source_add_history", "extensions")
 EXTENSIONS = ("pgcrypto", "uuid-ossp", "pg_trgm", "dblink", "http", "pg_stat_statements")
+AUTH_ROLE_DEFINITION_SHA256 = "c96a9358b02089b03f3962fd85c5f83c9d64f32240481915c0efe74398dc761b"
+AUTH_SCHEMA_ACL = "{supabase_admin=UC/supabase_admin,anon=U/supabase_admin,authenticated=U/supabase_admin,service_role=U/supabase_admin,supabase_auth_admin=UC/supabase_admin,dashboard_user=UC/supabase_admin,postgres=U/supabase_admin}"
+AUTH_ROLE_ACL = "{=X/supabase_auth_admin,supabase_auth_admin=X/supabase_auth_admin,dashboard_user=X/supabase_auth_admin}"
 SOURCE_CA = "/etc/leadpoet-migration/supabase-prod-ca-2021.crt"
 TARGET_CA = "/etc/leadpoet-migration/rds-us-east-1-bundle.pem"
 IDENT = re.compile(r"[a-z_][a-z0-9_]*\Z", re.ASCII)
@@ -353,6 +356,47 @@ def capture_metadata(keeper):
     return {key: keeper.one_json(query) for key, query in METADATA_QUERIES.items()}
 
 
+SUPPORTING_AUTH_ROLE_SQL = """WITH f AS (
+ SELECT p.*,n.nspname,n.nspowner,n.nspacl,l.lanname
+ FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+ JOIN pg_catalog.pg_language l ON l.oid=p.prolang
+ WHERE n.nspname='auth' AND p.proname='role' AND p.pronargs=0
+ AND p.prokind='f' AND p.prorettype='pg_catalog.text'::regtype AND NOT p.proretset
+ AND p.proargmodes IS NULL AND p.proallargtypes IS NULL
+ AND p.pronargdefaults=0 AND p.provariadic=0
+) SELECT json_build_object(
+ 'schema',json_build_object('name',f.nspname,'owner',pg_get_userbyid(f.nspowner),'acl',f.nspacl::text),
+ 'function',json_build_object('schema',f.nspname,'name',f.proname,
+  'arguments',pg_catalog.pg_get_function_identity_arguments(f.oid),
+  'result',pg_catalog.pg_get_function_result(f.oid),'owner',pg_get_userbyid(f.proowner),
+  'acl',f.proacl::text,'security_definer',f.prosecdef,'leakproof',f.proleakproof,
+  'volatility',f.provolatile,'parallel',f.proparallel,'strict',f.proisstrict,
+  'config',f.proconfig,'language',f.lanname,'definition',pg_catalog.pg_get_functiondef(f.oid)),
+ 'dependencies',(SELECT coalesce(json_agg(json_build_object('identity',i.identity,
+  'kind',d.deptype,'name',i.name,'schema',i.schema,'type',i.type)
+  ORDER BY i.type,i.identity,d.deptype),'[]'::json)
+  FROM pg_catalog.pg_depend d CROSS JOIN LATERAL
+   pg_catalog.pg_identify_object(d.refclassid,d.refobjid,d.refobjsubid) i
+  WHERE d.classid='pg_catalog.pg_proc'::regclass AND d.objid=f.oid)
+) FROM f;"""
+
+
+def capture_supporting_auth_role(keeper):
+    """Capture only the one audited JWT-context getter; never auth table data."""
+    support = keeper.one_json(SUPPORTING_AUTH_ROLE_SQL)
+    require(support["schema"] == dict(name="auth", owner="supabase_admin", acl=AUTH_SCHEMA_ACL), "supporting-auth-schema")
+    function = support["function"]
+    expected = dict(schema="auth", name="role", arguments="", result="text", owner="supabase_auth_admin",
+                    acl=AUTH_ROLE_ACL, security_definer=False, leakproof=False, volatility="s",
+                    parallel="u", strict=False, config=None, language="sql")
+    require({k: function.get(k) for k in expected} == expected, "supporting-auth-identity-security")
+    require(isinstance(function.get("definition"), str), "supporting-auth-definition")
+    function["sha256"] = hashlib.sha256(function["definition"].encode("utf-8")).hexdigest()
+    require(function["sha256"] == AUTH_ROLE_DEFINITION_SHA256, "supporting-auth-definition")
+    require(support["dependencies"] == [dict(identity="auth", kind="n", name="auth", schema=None, type="schema")], "supporting-auth-dependencies")
+    return support
+
+
 def capture_manifest(keeper, snapshot):
     tables = keeper.one_json(CATALOG)
     validate_tables(tables)
@@ -379,7 +423,8 @@ def capture_manifest(keeper, snapshot):
                 snapshot=snapshot, serialization=OPTIONS, tables=tables, sequences=sequences,
                 sequence_caveat="Sequence state is non-MVCC and may advance independently of the table snapshot.",
                 extensions=extensions, schema_metadata=capture_metadata(keeper),
-                dump_session_defaults=keeper.initial_settings)
+                dump_session_defaults=keeper.initial_settings,
+                supporting_auth_role=capture_supporting_auth_role(keeper))
 
 
 def dump_command(snapshot, directory):

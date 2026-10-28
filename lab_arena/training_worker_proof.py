@@ -6,8 +6,35 @@ them with explicit dict/list base-class mutation calls.
 """
 
 from dataclasses import dataclass
+import hashlib
+import json
 
 from lab_arena import contracts
+
+
+MAX_EXACT_PRIVACY_PROOFS = 1024
+
+
+def _exact_privacy_digest(value, response):
+    """Hash current plain JSON in its original order, including the scan mode."""
+    def validate(item):
+        if type(item) is dict:
+            for key, child in item.items():
+                if type(key) is not str:
+                    raise _NotPlainJSON()
+                validate(child)
+        elif type(item) is list:
+            for child in item:
+                validate(child)
+        elif item is not None and type(item) not in (str, bool, int, float):
+            raise _NotPlainJSON()
+
+    if type(response) is not bool:
+        raise _NotPlainJSON()
+    validate(value)
+    encoded = json.dumps([response, value], ensure_ascii=False, allow_nan=False,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).digest()
 
 
 def _immutable(*args, **kwargs):
@@ -61,6 +88,26 @@ class WorkerProofs:
 
     def __init__(self):
         self._proofs = {}
+        self._exact_privacy = {}
+
+    def exact_privacy(self, value, *, response, check):
+        # Requests remain mutable. Never reuse object identity or retain input
+        # bytes; recompute content plus mode even for a previous cache hit.
+        try:
+            digest = _exact_privacy_digest(value, response)
+        except Exception:
+            # Unsupported values or hashing failures keep the original scan,
+            # including its exceptions. Scanner exceptions are never cached.
+            return check(value, response=response)
+        key = (digest, response)
+        if key in self._exact_privacy:
+            return self._exact_privacy[key]
+        result = check(value, response=response)
+        if type(result) is bool:
+            if len(self._exact_privacy) >= MAX_EXACT_PRIVACY_PROOFS:
+                del self._exact_privacy[next(iter(self._exact_privacy))]
+            self._exact_privacy[key] = result
+        return result
 
     def prepare(self, example):
         view = dict(example)

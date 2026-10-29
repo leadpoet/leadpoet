@@ -39,13 +39,35 @@ report missing credentials even when the current CLI has a valid login session.
 
 For a host with an appropriately permitted EC2 instance role, select
 `--aws-instance-role`. It accepts only the instance metadata credential provider.
-Both options apply only to this guard. The helper rejects inherited AWS authority
+Instance-role mode applies only to this guard. The helper rejects inherited AWS authority
 overrides, long-lived credentials, IAM user callers and other accounts. STS and
 IAM clients ignore configured endpoint URLs. The recovery root caller is allowed
 only through the explicit existing recovery profile. No role permissions change.
 Gateway, Arena and canonical restart authentication continue to use their
 existing instance roles. Keep obsolete static keys out of both the cache and its
 authoritative Secrets Manager document.
+
+Arena environment configuration now runs locally with the named temporary
+`leadpoet-lab` operator profile. `--aws-profile` can select another approved
+temporary operator profile, including the explicit existing recovery profile.
+The two fixed environment documents and scoped service key stay in process
+memory. They do not pass through SSH, command arguments or temporary files.
+EC2 and container credential providers are rejected for secret configuration.
+Only `--prepare-runner` still uses SSH and needs the private key and host STS
+check; the validator IAM guard keeps its separate authority rules above.
+
+For example, inspect a scoped configuration without changing it:
+
+```bash
+python3 -m scripts.configure_lab_arena_production --openrouter-max-concurrency 4 --check --allowed-account 493765492819 --aws-profile leadpoet-lab
+```
+
+`--apply` still requires `LEADPOET_LAB_ARENA_PRODUCTION_APPLY=1`. Full gateway and
+validator configuration checks both documents before its first write, rechecks
+the version and document immediately before each write, and verifies readback.
+A partial-apply error reports how many targets completed; inspect version stages
+before retrying. Secrets Manager has no atomic compare-and-swap operation, so
+these checks do not make concurrent operator writes transactional.
 
 The live `leadpoet-lab-operator` policy's own-session condition was corrected
 from the literal `${!aws:userid}` to `${aws:userid}`. All other permissions stayed

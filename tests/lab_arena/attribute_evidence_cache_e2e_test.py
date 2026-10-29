@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
+import pytest
 
 from lab_arena import contracts
 from lab_arena.api import create_app
@@ -30,6 +31,12 @@ from qualification.scoring import competition
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
 from tests.lab_arena.attribute_evidence_cache_postgres_test import database, migrated
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
+
+
+@pytest.fixture()
+def current_database():
+    yield from current_service_database()
 
 
 def _install_hints(harness):
@@ -48,7 +55,7 @@ def _install_hints(harness):
                     status, _, _ = shim.dispatch(
                         "openrouter.chat",
                         {
-                            "model": "google/gemini-2.5-flash",
+                            "model": document['scorer_policy']['judge_models']['role_batch_check'],
                             "messages": [
                                 {
                                     "role": "user",
@@ -97,7 +104,7 @@ def _install_hints(harness):
 
 
 def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
-    database, migrated, tmp_path, monkeypatch
+    current_database, tmp_path, monkeypatch
 ):
     original_send = fixtures.FakeProviderTransport.send
 
@@ -122,7 +129,7 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
         return original_send(self, **kwargs)
 
     monkeypatch.setattr(fixtures.FakeProviderTransport, "send", priced_local_response)
-    psycopg, dsn = database
+    psycopg, dsn = current_database
     harness = QualityHarness(
         lambda: psycopg.connect(**dsn),
         tmp_path,
@@ -206,10 +213,7 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
                     break
                 if status in ("stage1", "stage1_scoring", "stage2", "stage2_scoring"):
                     _drain_both(harness, (small, large))
-                if status == "stage1_scored":
-                    assert harness.service._baseline_fully_succeeded(
-                        harness.service.store.get_round(harness.round_id)
-                    )
+                if status == "stage1_scoring" and not old_baseline:
                     old_baseline = {
                         r["run_id"]: (
                             r["judgment_cache_key"],
@@ -223,6 +227,12 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
                         if r["status"] == "accepted"
                     }
                     assert len(old_baseline) == 10
+                    # 572 opens miners before the accepted baseline judgments
+                    # are recorded numerically. Preserve the actual old cache
+                    # artifacts before changing the projection for miners.
+                    assert all(r['status'] == 'accepted' and r['per_icp_score'] is None
+                        for r in harness.service.store.list_runs(
+                            harness.round_id, stage=1, kind='execute'))
                     monkeypatch.setattr(
                         competition, "effective_competition_input", current_projection
                     )
@@ -235,7 +245,7 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
                     "stale",
                 ), (status, transition)
             else:
-                raise AssertionError("round did not publish")
+                raise AssertionError(("round did not publish", harness.status(), transition))
         finally:
             small.close()
             large.close()
@@ -292,6 +302,7 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
     burn = fixtures.keypair("attribute-evidence-cache-burn").ss58_address
     state = _accepted_state(harness, int(activated["effective_reward_epoch"]), burn)
     weights = arena_weights.derive_arena_weights(state, [burn, winner_hotkey])
-    assert weights["champion_share_ppb"] == 300_000_000
-    assert weights["burned_residual_ppb"] == 700_000_000
-    fixtures.assert_canary_absent(harness, lambda: database[0].connect(**database[1]))
+    # Current reward slots allocate the frozen 50% achievement pot.
+    assert weights["champion_share_ppb"] == 500_000_000
+    assert weights["burned_residual_ppb"] == 500_000_000
+    fixtures.assert_canary_absent(harness, lambda: psycopg.connect(**dsn))

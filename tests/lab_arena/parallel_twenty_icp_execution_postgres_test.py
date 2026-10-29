@@ -340,11 +340,11 @@ def test_ten_slot_round_has_a_strict_ten_plus_ten_barrier_and_retry_recovery(
         )
 
 
-def test_twenty_slot_round_allows_two_validator_identities_independently(
+def test_twenty_stage_one_jobs_allow_two_validator_identities_independently(
     connect, tmp_path
 ):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha", "beta"])
-    _start_parallel_round(harness, "arena-2099-01-01-d20", slot_ceiling=20)
+    harness = Harness(connect, tmp_path, challengers=["Challenger"], runners=["alpha", "beta"])
+    participants = _start_parallel_round(harness, "arena-2099-01-01-d20", slot_ceiling=20)
     store = harness.service.store
     first_runner, second_runner = harness.runner_keys
 
@@ -372,14 +372,16 @@ def test_twenty_slot_round_allows_two_validator_identities_independently(
             store,
             harness.round_id,
             second_runner,
-            parallelism=20,
+            parallelism=10,
             ceiling=20,
         )[0]
         for _ in range(10)
     ]
-    assert {run["icp_position"] for run in first_identity + second_identity} == set(
-        range(20)
-    )
+    assert {(run["submission_id"], run["icp_position"])
+            for run in first_identity + second_identity} == {
+        (participant["submission_id"], position)
+        for participant in participants for position in range(10)
+    }
     assert {
         store.get_run(run["run_id"])["runner_hotkey"] for run in first_identity
     } == {first_runner}
@@ -390,10 +392,10 @@ def test_twenty_slot_round_allows_two_validator_identities_independently(
         store,
         harness.round_id,
         second_runner,
-        parallelism=20,
+        parallelism=10,
         ceiling=20,
     )
-    assert drained["status"] == "no_pending"
+    assert drained == {"status": "no_free_slot", "active_leases": 10, "slot_limit": 10}
 
 
 def test_parallel_execution_preserves_standard_twenty_icp_scoring_and_costs(

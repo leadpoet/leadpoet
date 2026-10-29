@@ -53,6 +53,10 @@ def signed(h, miner, round_id, scope, body):
 
 
 def reserve(h, round_id, miner, source, *, uploaded_source=None):
+    # These fixture miners are registered on the finalized test metagraph.
+    # The real owner-admission check still validates every signed request.
+    if miner.ss58_address not in h.chain.registered:
+        h.chain.registered.append(miner.ss58_address)
     checksum = base64.b64encode(hashlib.md5(source, usedforsecurity=False).digest()).decode()
     fact = source_bundle.validate_source_archive(source)
     row = h.service.handle_submission_presign(signed(h, miner, round_id, contracts.SCOPE_SUBMISSION_PRESIGN, {

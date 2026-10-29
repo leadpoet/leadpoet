@@ -92,6 +92,7 @@ from qualification.scoring.company_evidence_investigator import (
     _bound_structured_headquarters_finding,
     _linkedin_about_headquarters_field,
     _complete_verified_first_party_identity,
+    _industry_source_is_bound,
     _plain_text,
     _priority_headquarters_navigation_source,
     _quote_occurs,
@@ -3209,6 +3210,7 @@ def _retain_unresolved_industry_retry_sources(
     retry_cache: Optional[Mapping[str, Any]],
     result: CompanyFitDecisionResult,
     investigation: Mapping[str, Any],
+    *, homepage_navigation_locators: Sequence[Mapping[str, Any]] = (),
 ) -> None:
     """Keep checked industry text for another review, never a fit verdict."""
 
@@ -3240,11 +3242,19 @@ def _retain_unresolved_industry_retry_sources(
         investigation.get(PRIVATE_FETCHED_PAGES_KEY), submitted_source_urls=tuple(urls),
     )
     domain = identity["registrable_dns_domain"]
+    careers_locators = _validated_homepage_navigation_locators(
+        homepage_navigation_locators, positive_semantic_review=False,
+        industry_review=True, verified_homepage_identity=identity,
+    )
     admitted = {
         url: {"final_url": final_urls[url], "text": pages[url]}
         for url in urls if url in pages
-        and _registrable_domain(url) == domain
-        and _registrable_domain(final_urls[url]) == domain
+        and _industry_source_is_bound(
+            url, final_urls[url], domains={domain},
+            identity={'submitted_domain': domain, 'observed_domain': domain,
+                      'observed_name': identity['normalized_name']},
+            careers_locators=careers_locators,
+        )
     }
     if not admitted:
         return
@@ -9383,6 +9393,7 @@ async def _run_targeted_company_evidence_investigation(
         )
         _retain_unresolved_industry_retry_sources(
             matched_company_retry_source_cache, retention_projection, investigation,
+            homepage_navigation_locators=homepage_navigation_locators,
         )
     return (
         projected,

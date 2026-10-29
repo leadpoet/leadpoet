@@ -46,6 +46,7 @@ from qualification.scoring.company_verification import (
     _ArenaProviderFetchError,
     _canonical_linkedin_company_url,
     _commercial_terms_navigation_locator,
+    _recognized_careers_board_locator,
     _fetch_bounded_html,
     current_exchange_profile_names_issuer,
 )
@@ -917,7 +918,7 @@ def _validated_homepage_navigation_locators(
     stage_review: bool = False,
     industry_review: bool = False,
 ) -> list[dict[str, str]]:
-    """Admit only bounded same-verified-domain untrusted navigation locators."""
+    """Admit bounded verified-company navigation and observed careers locators."""
 
     if (
         not (positive_semantic_review or headquarters_review or stage_review or industry_review)
@@ -968,7 +969,9 @@ def _validated_homepage_navigation_locators(
         ):
             continue
         try:
-            if _registrable_domain(safe_url) != verified_domain:
+            if _registrable_domain(safe_url) != verified_domain and not (
+                industry_review and _recognized_careers_board_locator(safe_url, label)
+            ):
                 continue
         except (TypeError, ValueError):
             continue
@@ -1073,6 +1076,15 @@ def _plain_text(value: str) -> str:
             flags=re.I | re.S,
         )
     without_markup = re.sub(r"<[^>]+>", " ", decoded)
+    if os.environ.get("ARENA_INDUSTRY_EVIDENCE_MODEL", "").strip():
+        # Exact-page recovery can return Markdown instead of HTML. Preserve
+        # its visible link destinations in the same non-quote metadata so
+        # research can select a linked document or job description. Links do
+        # not grant source ownership; each subsequent fetch is bound anew.
+        markdown_urls = [match.group(2) for match in
+                         _VISIBLE_MARKDOWN_LINK_RE.finditer(without_markup)
+                         if _safe_https_url(match.group(2))]
+        linked_urls = " ".join(dict.fromkeys([*linked_urls.split(), *markdown_urls]))
     visible_quote_text = _visible_markdown_link_label_surface(without_markup)
     # HTML text nodes can split at inline elements immediately before
     # punctuation. Restore the visible punctuation boundary for exact quotes.
@@ -1816,6 +1828,43 @@ def _independently_bound_first_party_url(
     )
 
 
+def _industry_source_is_bound(
+    url: str, final_url: str, *, domains: set[str], identity: Mapping[str, Any],
+    careers_locators: Sequence[Mapping[str, str]] = (),
+) -> bool:
+    """Bind both URLs to the company or its observed, exact ATS employer.
+
+    careers_locators comes only from server-observed verified homepage links.
+    No search result, model assertion, or matching tenant name supplies that link.
+    This grants industry-source authorship only, never capability or hiring proof.
+    """
+    if not _safe_https_url(url) or not _safe_https_url(final_url):
+        return False
+    if all(_independently_bound_first_party_url(value, domains, identity)
+           for value in (url, final_url)):
+        return True
+    domain = str(identity.get('verified_domain') or identity.get('observed_domain') or '')
+    if not _independently_bound_first_party_url('https://' + domain + '/', domains, identity):
+        return False
+    from qualification.scoring.intent_verification_three_stage import (
+        _ats_board_identity, _ats_tenant_matches_company,
+    )
+    board = _ats_board_identity(url)
+    if (board is None or board != _ats_board_identity(final_url)
+            or not _ats_tenant_matches_company(
+                board[1], company_domain=domain,
+                company_name=str(identity.get('verified_name') or identity.get('observed_name') or ''),
+            )):
+        return False
+    return any(
+        isinstance(locator, Mapping) and set(locator) == {'url', 'label'}
+        and isinstance(locator.get('url'), str) and _safe_https_url(locator['url'])
+        and isinstance(locator.get('label'), str)
+        and _recognized_careers_board_locator(locator['url'], locator['label']) == board
+        for locator in careers_locators[:MAX_HOMEPAGE_NAVIGATION_LOCATORS]
+    )
+
+
 def _complete_verified_first_party_identity(
     url: str,
     domains: set[str],
@@ -2404,6 +2453,7 @@ async def _review_industry_sources(
     identity_names, rebrand_finding=None, research=False,
     admitted_final_judgment=False,
     completed_review=None,
+    careers_locators=(),
 ):
     """Use one reserved turn for the full criterion; retain every bound quote.
 
@@ -2441,7 +2491,11 @@ async def _review_industry_sources(
         # Identity-only link destinations are host metadata, not source facts.
         # Use exactly the surface that the native quote verifier can ground.
         text = _visible_quote_surface(raw_text).strip()
-        if bound(url) and bound(fetched_final_urls.get(url, '')) and text:
+        final_url = fetched_final_urls.get(url, '')
+        if text and ((bound(url) and bound(final_url)) or _industry_source_is_bound(
+            url, final_url, domains=first_party_domains, identity=identity_anchor,
+            careers_locators=careers_locators,
+        )):
             pages.append({'source_id': f's{index}', 'source_url': url, 'body': text})
     if not pages:
         review['missing_requirements'] = ['Company-bound source text for the requested activity']
@@ -2450,6 +2504,12 @@ async def _review_industry_sources(
         key: str(company_locator.get(key) or '') for key in ('name', 'website', 'linkedin')
     }, pages)
     review['source_urls'] = [page['source_url'] for page in pages]
+    careers = [dict(locator) for locator in careers_locators
+               if _recognized_careers_board_locator(locator['url'], locator['label'])]
+    if careers:
+        # Host-built source relationship, never accepted from model output.
+        # Retry admission rechecks it against the complete company identity.
+        review['careers_source_locators'] = careers
     # The initial review already uses the full criterion and the same native
     # source/relationship validation. Do not sample that completed decision
     # again when the independently rebound evidence packet is byte-identical.
@@ -2489,7 +2549,8 @@ async def _review_industry_sources(
     # that names the company; preserve every other bound passage as support.
     # Citation order must not discard an otherwise attributable verdict.
     primary_index = next((i for i, item in enumerate(evidence)
-                          if _quote_names_company(item['quote'], identity_names)), None)
+                          if bound(item['url'])
+                          and _quote_names_company(item['quote'], identity_names)), None)
     if primary_index is not None:
         evidence.insert(0, evidence.pop(primary_index))
     elif result['decision'] in {'match', 'mismatch'}:
@@ -2497,7 +2558,8 @@ async def _review_industry_sources(
         # one explicit identity passage from this same independently bound
         # corpus. It adds attribution, never a capability or a model verdict.
         identity_span = next((item for item in packet.spans().values()
-                              if _quote_names_company(item['text'], identity_names)), None)
+                              if bound(item['source_url'])
+                              and _quote_names_company(item['text'], identity_names)), None)
         if identity_span:
             evidence.insert(0, {'url': identity_span['source_url'], 'quote': identity_span['text']})
     review.update(packet_sha256=packet.digest, decision=result['decision'],
@@ -5019,9 +5081,10 @@ async def investigate_company_evidence(
             if industry_review_model and retained_industry_pages:
                 retry_pages, retry_final_urls = _validated_matched_retry_pages(retained_industry_pages)
                 for url, text in retry_pages.items():
-                    if (_independently_bound_first_party_url(url, first_party_domains, identity_anchor)
-                            and _independently_bound_first_party_url(
-                                retry_final_urls[url], first_party_domains, identity_anchor)):
+                    if _industry_source_is_bound(
+                        url, retry_final_urls[url], domains=first_party_domains,
+                        identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators,
+                    ):
                         # Keep the shared researcher's prefetch input unchanged.
                         # This exact, host-retained corpus is reclassified, never
                         # treated as a cached verdict. Fresh bodies take priority.
@@ -5039,6 +5102,7 @@ async def investigate_company_evidence(
                 'fetched_pages': fetched_pages, 'fetched_final_urls': fetched_final_urls,
                 'first_party_domains': first_party_domains,
                 'identity_anchor': identity_anchor, 'identity_names': identity_names,
+                'careers_locators': bounded_homepage_navigation_locators,
             }
             if industry_review_model:
                 initial_industry, initial_failure, industry_review_calls = (
@@ -5074,7 +5138,10 @@ async def investigate_company_evidence(
                     'A marketplace or third-party description cannot close these '
                     'industry gaps; find the company-bound source for that fact. '
                     'New industry sources need independently bound first-party '
-                    'requested and final URLs, or separately verified rebrand continuity. '
+                    'requested and final URLs, an observed company careers link to '
+                    'the same exact ATS employer, or verified rebrand continuity. '
+                    'Company job descriptions may describe work on its own offering; '
+                    'experience requested from applicants alone does not prove a product capability. '
                     'Use remaining research to resolve these specific capability or '
                     'customer-role gaps. Search for the missing fact, then select '
                     'specific product/service documentation, technical brochures, '
@@ -5165,9 +5232,9 @@ async def investigate_company_evidence(
                 capacity = max(0, industry_classification.MAX_TOTAL_CHARS - sum(
                     len(_visible_quote_surface(body).strip())
                     for source_url, body in fetched_pages.items()
-                    if _independently_bound_first_party_url(source_url, first_party_domains, identity_anchor)
-                    and _independently_bound_first_party_url(
-                        fetched_final_urls.get(source_url, ''), first_party_domains, identity_anchor)))
+                    if _industry_source_is_bound(
+                        source_url, fetched_final_urls.get(source_url, ''), domains=first_party_domains,
+                        identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators)))
                 return domains, capacity
 
             def remaining_industry_research_budget():
@@ -5199,9 +5266,10 @@ async def investigate_company_evidence(
                 # the same complete bounded source packet used by the reviewer,
                 # including those pages, so research can see their remaining facts.
                 for index, (url, body) in enumerate(fetched_pages.items()):
-                    if (_independently_bound_first_party_url(url, first_party_domains, identity_anchor)
-                            and _independently_bound_first_party_url(
-                                fetched_final_urls.get(url, ''), first_party_domains, identity_anchor)):
+                    if _industry_source_is_bound(
+                        url, fetched_final_urls.get(url, ''), domains=first_party_domains,
+                        identity=identity_anchor, careers_locators=bounded_homepage_navigation_locators,
+                    ):
                         text = _visible_quote_surface(body).strip()
                         if text:
                             loaded_industry_sources.append({

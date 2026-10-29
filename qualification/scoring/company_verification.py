@@ -932,13 +932,23 @@ def _commercial_terms_navigation_locator(url: str, label: str) -> bool:
     )
 
 
+def _recognized_careers_board_locator(url: str, label: str) -> tuple[str, str] | None:
+    """Identify a careers locator; callers must separately prove its source."""
+    if not re.search(r"\b(careers?|jobs?|apply|positions?|openings?|open roles|join (?:us|our team))\b", label, re.I):
+        return None
+    # Reuse the exact Greenhouse/Ashby/Lever tenant parsers used for hiring.
+    # A recognized board or matching tenant name alone is never ownership.
+    from qualification.scoring.intent_verification_three_stage import _ats_board_identity
+    return _ats_board_identity(url)
+
+
 def _homepage_navigation_locators(
     page_text: str,
     *,
     final_url: str,
     verified_domain: str,
 ) -> list[dict[str, str]]:
-    """Resolve visible same-domain homepage links as untrusted locators."""
+    """Resolve visible company navigation and scoped careers locators."""
 
     parser = _HomepageNavigationParser()
     try:
@@ -976,7 +986,11 @@ def _homepage_navigation_locators(
             ("https", parsed.netloc.casefold(), parsed.path, parsed.query, "")
         )
         try:
-            if _registrable_domain(canonical) != verified_domain:
+            if _registrable_domain(canonical) != verified_domain and not (
+                industry_review
+                and _registrable_domain(final_url) == verified_domain
+                and _recognized_careers_board_locator(canonical, label)
+            ):
                 continue
         except Exception:
             continue

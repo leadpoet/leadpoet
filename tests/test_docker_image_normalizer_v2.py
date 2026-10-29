@@ -438,3 +438,58 @@ def test_unfamiliar_layer_paths_preserve_records_and_clear_comparison_state(tmp_
     ])
     assert unfamiliar in result[2][1]
     assert "etc" in result[2][1]
+
+
+@pytest.mark.parametrize("directory,child", [
+    ("etc", "etc/config"), ("etc", "./etc/config"),
+    ("etc", "etc/.wh.config"), ("etc", "etc/.wh..wh..opq"),
+    ("etc", "etc/sub"), ("etc", "etc/link"), (".", "config"),
+])
+def test_parent_directory_headers_remain_when_any_child_changes(tmp_path, directory, child):
+    if child.endswith("sub"):
+        descendant = _entry(child)
+    elif child.endswith("link"):
+        descendant = _entry(child, type=tarfile.SYMTYPE, linkname="elsewhere")
+    else:
+        descendant = _entry(child, b"" if ".wh." in child else b"data")
+    result = _normalize_layers(tmp_path, "parent", [
+        [_entry(directory)], [_entry(directory), descendant],
+    ])
+    assert directory in result[2][1]
+
+
+def test_layer_replay_preserves_parent_directory_mtime(tmp_path):
+    _normalize_layers(tmp_path, "mtime", [
+        [_entry("etc")], [_entry("etc"), _entry("etc/config", b"data")],
+    ])
+    filesystem = tmp_path / "filesystem"
+    filesystem.mkdir()
+    with tarfile.open(tmp_path / "mtime-normalized.tar") as image:
+        manifest = json.load(image.extractfile("manifest.json"))[0]
+        for name in manifest["Layers"]:
+            with tarfile.open(fileobj=image.extractfile(name)) as layer:
+                layer.extractall(filesystem)
+    assert (filesystem / "etc/config").read_bytes() == b"data"
+    assert (filesystem / "etc").stat().st_mtime_ns == 0
+
+
+def test_later_directory_header_restores_time_after_child_only_layer(tmp_path):
+    result = _normalize_layers(tmp_path, "later-mtime", [
+        [_entry("etc")], [_entry("etc/config", b"data")], [_entry("etc")],
+    ])
+    filesystem = tmp_path / "filesystem"
+    filesystem.mkdir()
+    with tarfile.open(tmp_path / "later-mtime-normalized.tar") as image:
+        manifest = json.load(image.extractfile("manifest.json"))[0]
+        for name in manifest["Layers"]:
+            with tarfile.open(fileobj=image.extractfile(name)) as layer:
+                layer.extractall(filesystem)
+    assert (filesystem / "etc").stat().st_mtime_ns == 0
+    assert result[2][-1] == ["etc"]
+
+
+def test_elided_child_noop_does_not_invalidate_parent_metadata(tmp_path):
+    result = _normalize_layers(tmp_path, "elided-child", [
+        [_entry("etc"), _entry("etc/sub")], [_entry("etc/sub")], [_entry("etc")],
+    ])
+    assert result[2][1:] == [[], []]

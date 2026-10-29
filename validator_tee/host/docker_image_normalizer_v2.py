@@ -136,14 +136,21 @@ def normalize_layer_archive(
     # Docker's containerd image store emits gzip-compressed layer blobs while
     # the classic image store emits plain tar layers. Always rewrite either
     # representation as one canonical uncompressed tar stream.
+    emitted_ancestors: set[str] = set()
+    emitted_directories: set[str] = set()
     with tarfile.open(source, "r:*") as original, tarfile.open(
         destination, "w:"
     ) as output:
         members = sorted(original.getmembers(), key=lambda item: item.name)
         directory_counts: dict[str, int] = {}
+        directories_with_descendants: set[str] = set()
         for member in members:
+            path = PurePosixPath(member.name)
+            directories_with_descendants.update(
+                parent.as_posix() for parent in path.parents
+            )
             if member.isdir():
-                name = PurePosixPath(member.name).as_posix()
+                name = path.as_posix()
                 directory_counts[name] = directory_counts.get(name, 0) + 1
         if inherited_directories is not None:
             # OCI whiteouts affect lower layers only and precede same-layer
@@ -183,6 +190,9 @@ def normalize_layer_archive(
                         )) + (tuple(sorted(normalized.pax_headers.items())),)
                         redundant = (
                             directory_counts[name] == 1
+                            # Child changes can update parent mtime during
+                            # extraction. Its header must restore that time.
+                            and name not in directories_with_descendants
                             and inherited_directories.get(name) == metadata
                         )
                         if redundant:
@@ -195,6 +205,15 @@ def normalize_layer_archive(
                                 del inherited_directories[old]
             content = original.extractfile(member) if member.isfile() else None
             output.addfile(normalized, content)
+            path = PurePosixPath(normalized.name)
+            emitted_ancestors.update(parent.as_posix() for parent in path.parents)
+            if normalized.isdir():
+                emitted_directories.add(path.as_posix())
+    if inherited_directories is not None:
+        # A child-only layer can change an inherited parent's mtime. Without
+        # an emitted header restoring it, a later matching header is required.
+        for parent in emitted_ancestors - emitted_directories:
+            inherited_directories.pop(parent, None)
     return _sha256_file(destination)
 
 

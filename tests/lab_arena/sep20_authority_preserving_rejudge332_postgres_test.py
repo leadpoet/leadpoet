@@ -60,6 +60,11 @@ RENDERED = TEMPLATE.with_suffix("")
 
 
 class IsolatedHarness(lifecycle.Harness):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from tests.lab_arena.historical_service import pin_sep20_round_reads
+        pin_sep20_round_reads(self.service, self.connect)
+
     def objects_key(self) -> str:
         return "rerun332-" + self.tmp.name
 
@@ -760,7 +765,9 @@ def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
 
 
 def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
-    """Use the real parallel close and score lifecycle without execute claims."""
+    """Use the original Sep20 service algorithms with real historical SQL."""
+    from tests.lab_arena.historical_service import pin_sep20_publication_service
+    pin_sep20_publication_service(service, service._store._transport._connect, round_id=ROUND)
     assert service.close_stage(ROUND, 1)["status"] == "ok"
     for stage, expected in ((1, 50), (2, 48)):
         assert service.open_scoring(ROUND, stage)["assignments"] == expected

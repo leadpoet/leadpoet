@@ -34,9 +34,18 @@ ROLE = "leadpoet_aws_export_20261028"
 HOST = "aws-0-us-east-1.pooler.supabase.com"
 SCHEMAS = ("public", "source_add_history", "extensions")
 AWS = "/Users/pranav/.local/bin/aws"
-PROFILE = "leadpoet-recovery-console-20261026"
+PROFILE = "leadpoet-admin"
 REGION = "us-east-1"
 ACCOUNT = "493765492819"
+AWS_AUTHORITY_OVERRIDES = frozenset({
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "AWS_SECURITY_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
+    "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
+    "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_EC2_METADATA_SERVICE_ENDPOINT", "AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE",
+    "BOTO_CONFIG",
+})
 SECRET_NAME = "leadpoet/migration/subnet/source-export-20261028"
 COMMENT_PREFIX = "leadpoet-aws-source-export:"
 CREATOR_MEMBERSHIP = [{"role": ROLE, "member": "postgres", "admin": True, "inherit": False, "set": False}]
@@ -80,7 +89,8 @@ def run(args, data=None):
     try:
         return subprocess.run(args, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                               check=False, timeout=120,
-                              env={**os.environ, "AWS_PAGER": "", "AWS_CLI_AUTO_PROMPT": "off"})
+                              env={**os.environ, "AWS_PAGER": "", "AWS_CLI_AUTO_PROMPT": "off",
+                                   "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true"})
     except (OSError, subprocess.SubprocessError):
         raise Failure("command") from None
 
@@ -121,6 +131,7 @@ def query(sql, *, read_only=True):
 
 
 def aws(*args, payload=None):
+    require(not any(os.environ.get(name) for name in AWS_AUTHORITY_OVERRIDES), "aws-authority")
     command = [AWS, *args, "--profile", PROFILE, "--region", REGION,
                "--output", "json", "--no-cli-pager"]
     if payload is None:
@@ -153,6 +164,8 @@ def aws_json(*args, payload=None):
 def check_aws():
     value = aws_json("sts", "get-caller-identity")
     require(value.get("Account") == ACCOUNT, "aws-account")
+    require(re.fullmatch(rf"arn:aws:sts::{ACCOUNT}:assumed-role/[^/]+/[^/]+",
+                         str(value.get("Arn") or "")) is not None, "aws-identity")
 
 
 def secret_absent():

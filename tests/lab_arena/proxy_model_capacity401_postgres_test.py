@@ -9,11 +9,12 @@ from pathlib import Path
 import pytest
 
 from lab_arena import contracts
-from lab_arena.store import hash_lease_token
+from lab_arena.store import ArenaStore, PsycopgTransport, hash_lease_token
 from tests.lab_arena import untransitioned_host_fault_guard399_postgres_test as prior399
 from tests.lab_arena.execute_host_cooldown396_postgres_test import _hash, _security
 from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
+    current_service_database,
     migrations_before,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete
@@ -252,18 +253,43 @@ def test_frozen_old_round_cap_limits_new_validator_slots(connect, tmp_path):
     assert full == {"status": "no_free_slot", "active_leases": 20, "slot_limit": 20}
 
 
-def test_new_service_startup_accepts_expanded_schema(connect, tmp_path):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+@pytest.fixture()
+def startup_harness(connect, tmp_path):
+    # Keep SQL401's actual capability readers on its historical upgrade chain.
+    # Unrelated startup requirements use the complete current service schema.
+    generator = current_service_database()
+    pg, dsn = next(generator)
+    old_store = ArenaStore(PsycopgTransport(connect))
+    harness = Harness(lambda: pg.connect(**dsn), tmp_path, challengers=[], runners=['alpha'])
+    capability = old_store.parallel_execution_schema
+    ceilings = []
+
+    def checked_capability(max_parallel_icps=20):
+        ceilings.append(max_parallel_icps)
+        return capability(max_parallel_icps)
+
+    harness.service.store.parallel_execution_schema = checked_capability
+    try:
+        yield harness, ceilings
+    finally:
+        harness.service.store.close()
+        old_store.close()
+        generator.close()
+
+
+def test_new_service_startup_accepts_expanded_schema(startup_harness):
+    harness, ceilings = startup_harness
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING,
         parallel_twenty_icp_execution=True,
     )
     harness.service.startup_checks()
+    assert ceilings == [contracts.RUNNER_SLOT_CEILING]
 
 
-def test_legacy_gateway_capability_still_starts_after_migration(connect, tmp_path):
-    harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
+def test_legacy_gateway_capability_still_starts_after_migration(startup_harness):
+    harness, ceilings = startup_harness
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         runner_slot_ceiling=20,
@@ -275,6 +301,7 @@ def test_legacy_gateway_capability_still_starts_after_migration(connect, tmp_pat
         "max_parallel_icps": 20,
     }
     harness.service.startup_checks()
+    assert ceilings == [20, 20]
 
 
 def test_interleaved_validators_admit_disjoint_models(connect, tmp_path):

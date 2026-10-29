@@ -16,12 +16,12 @@ from lab_arena.proxy_workers import (
     VerifiedProxyWorker,
     VerifiedProxyWorkerInventory,
 )
-from lab_arena.store import ArenaStoreError, hash_lease_token
+from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport, hash_lease_token
 from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete, sha
 from tests.lab_arena.test_lab_arena_service_round import (
     Harness,
-    connect,
-    database,
+    scenario_connect as connect,
+    scenario_database,
     keypair,
 )
 
@@ -35,6 +35,15 @@ ISOLATION_MIGRATION = (
     / "scripts"
     / "356-lab-arena-deadline-provider-retry-isolation.sql"
 )
+
+
+@pytest.fixture()
+def historical_connect():
+    from tests.lab_arena.lab_arena_pg_harness import (
+        CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+    )
+    for pg, dsn in database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS):
+        yield lambda: pg.connect(**dsn)
 
 
 def _verified_test_pool(process_capacity: int) -> ProxyWorkerPool:
@@ -157,13 +166,23 @@ def test_parallel_execution_migration_is_idempotent_and_keeps_score_guard(
         connection.close()
 
 
-def test_parallel_default_startup_requires_the_255_capability(connect, tmp_path):
+def test_parallel_default_startup_requires_the_255_capability(connect, historical_connect, tmp_path, request):
     harness = Harness(connect, tmp_path, challengers=[], runners=["alpha"])
     observed = []
-    real_capability = harness.service.store.parallel_execution_schema
+    old_store = ArenaStore(PsycopgTransport(historical_connect))
+    request.addfinalizer(old_store.close)
+    with historical_connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT to_regprocedure('public.lab_arena_parallel_execution_schema_v1()') "
+                       "IS NOT NULL,to_regprocedure('public.lab_arena_parallel_execution_schema_v2()') IS NULL")
+        assert cursor.fetchone() == (True, True)
+    # All other startup readers stay current. Only this capability dependency
+    # reads the real pre401 database, which cannot serve expanded ceilings.
+    real_capability = old_store.parallel_execution_schema
+    ceilings = []
 
     def checked_capability(max_parallel_icps):
         observed.append("checked")
+        ceilings.append(max_parallel_icps)
         return real_capability(max_parallel_icps)
 
     harness.service.store.parallel_execution_schema = checked_capability
@@ -184,6 +203,7 @@ def test_parallel_default_startup_requires_the_255_capability(connect, tmp_path)
     with pytest.raises(ServiceError) as old_schema:
         harness.service.startup_checks()
     assert old_schema.value.code == "parallel_execution_schema_unavailable"
+    assert ceilings == [8, contracts.RUNNER_SLOT_CEILING]
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         runner_slot_ceiling=8,
@@ -196,6 +216,17 @@ def test_parallel_default_startup_requires_the_255_capability(connect, tmp_path)
     with pytest.raises(ServiceError) as caught:
         harness.service.startup_checks()
     assert caught.value.code == "parallel_execution_schema_unavailable"
+
+
+def test_current_expanded_parallel_startup_accepts_the_401_capability(connect, tmp_path):
+    harness = Harness(connect, tmp_path, challengers=[], runners=['alpha'])
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults, parallel_twenty_icp_execution=True,
+        runner_slot_ceiling=contracts.RUNNER_SLOT_CEILING)
+    capability = harness.service.store.parallel_execution_schema(contracts.RUNNER_SLOT_CEILING)
+    assert capability['version'] == 401
+    assert capability['max_parallel_icps'] >= contracts.RUNNER_SLOT_CEILING
+    harness.service.startup_checks()
 
 
 def test_ten_slot_round_has_a_strict_ten_plus_ten_barrier_and_retry_recovery(
@@ -845,6 +876,12 @@ def _seed_deadline_close_guard(
             ),
         )
         cursor.execute(
+            "INSERT INTO public.lab_arena_submissions("
+            "submission_id,round_id,miner_hotkey,status,is_king,submission_doc) "
+            "VALUES (%s,%s,%s,'frozen',FALSE,'{}'::jsonb)",
+            (submission_id, round_id, miner_hotkey),
+        )
+        cursor.execute(
             "INSERT INTO public.lab_arena_runs("
             "run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,"
             "icp_position,attempt,kind,status,terminal_cause,result_doc,output_ref,"
@@ -941,9 +978,9 @@ def _seed_deadline_close_guard(
     ],
 )
 def test_deadline_provider_retry_guards_stay_fail_closed(
-    connect, suffix, retry_status, prior_cause, ledger_kinds
+    historical_connect, suffix, retry_status, prior_cause, ledger_kinds
 ):
-    connection = connect()
+    connection = historical_connect()
     connection.autocommit = False
     round_id = "arena-2099-01-02-" + suffix
     try:
@@ -974,8 +1011,8 @@ def test_deadline_provider_retry_guards_stay_fail_closed(
         connection.close()
 
 
-def test_sequential_close_marks_a_dispatched_deadline_retry_complete(connect):
-    connection = connect()
+def test_sequential_close_marks_a_dispatched_deadline_retry_complete(historical_connect):
+    connection = historical_connect()
     connection.autocommit = False
     round_id = "arena-2099-01-02-gs"
     try:
@@ -1009,8 +1046,8 @@ def test_sequential_close_marks_a_dispatched_deadline_retry_complete(connect):
         connection.close()
 
 
-def test_parallel_close_keeps_incomplete_assignment_cardinality_fail_closed(connect):
-    connection = connect()
+def test_parallel_close_keeps_incomplete_assignment_cardinality_fail_closed(historical_connect):
+    connection = historical_connect()
     connection.autocommit = False
     round_id = "arena-2099-01-02-gc"
     try:

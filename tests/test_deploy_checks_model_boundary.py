@@ -83,13 +83,14 @@ def test_sentry_receives_only_trusted_main_workflow_events_without_checkout():
 import pytest
 
 
+@pytest.mark.parametrize('response_status', [200, 201, 202, 204])
 @pytest.mark.parametrize('action,conclusion,expected', [
     ('in_progress', None, 'in_progress'), ('completed', 'success', 'ok'),
     ('completed', 'failure', 'error'), ('completed', 'timed_out', 'error'),
     ('completed', 'cancelled', 'error'),
 ])
 def test_sentry_check_in_correlates_start_and_completion_without_logging_key(
-        tmp_path, monkeypatch, capsys, action, conclusion, expected):
+        tmp_path, monkeypatch, capsys, action, conclusion, expected, response_status):
     import json
     import urllib.parse
     import urllib.request
@@ -105,7 +106,7 @@ def test_sentry_check_in_correlates_start_and_completion_without_logging_key(
     monkeypatch.setenv('LEADPOET_SENTRY_CRON_URL', 'https://sentry.io/api/123/cron/deploy-checks/test-only-key/')
     observed = []
     class Response:
-        status = 200
+        status = response_status
         def __enter__(self): return self
         def __exit__(self, *_): pass
     def receive(request, timeout):
@@ -124,8 +125,9 @@ def test_sentry_check_in_correlates_start_and_completion_without_logging_key(
     assert 'test-only-key' not in capsys.readouterr().out
 
 
+@pytest.mark.parametrize('response_status', [None, 199, 300, 400, 429, 500])
 def test_sentry_check_in_transport_failure_does_not_print_the_authenticated_url(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, monkeypatch, capsys, response_status):
     import json
     import urllib.request
     import yaml
@@ -136,8 +138,14 @@ def test_sentry_check_in_transport_failure_does_not_print_the_authenticated_url(
     monkeypatch.setenv('GITHUB_EVENT_PATH', str(path))
     monkeypatch.setenv('GITHUB_REPOSITORY', 'leadpoet/leadpoet')
     monkeypatch.setenv('LEADPOET_SENTRY_CRON_URL', 'https://sentry.io/api/123/cron/deploy-checks/test-only-key/')
+    class Response:
+        status = response_status
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
     def fail(request, timeout):
-        raise ValueError(request.full_url)
+        if response_status is None:
+            raise ValueError(request.full_url)
+        return Response()
     monkeypatch.setattr(urllib.request, 'urlopen', fail)
     workflow = yaml.load((WORKFLOW.parent / 'deploy-checks-sentry.yml').read_text(),
                          Loader=yaml.BaseLoader)

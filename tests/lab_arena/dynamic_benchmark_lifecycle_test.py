@@ -183,8 +183,11 @@ def test_ten_parallel_icps_form_one_execution_wave(connect, tmp_path):
     assert blocked["status"] == "no_pending"
 
 
-@pytest.mark.parametrize("count", [5, 10, 15, 17, 20, 30])
-def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(connect, tmp_path, count, monkeypatch):
+@pytest.mark.parametrize("count,judge_outage", [(5, False), (10, False), (15, False),
+    (17, False), (17, True), (20, False), (30, False)])
+def test_current_per_icp_cost_policy_preserves_measured_scores_and_excludes_judge_cost(
+    connect, tmp_path, count, judge_outage, monkeypatch,
+):
     harness = PerIcpHarness(connect, tmp_path, challengers=["Miner"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
@@ -245,7 +248,7 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
                 finally:
                     os.environ.pop(shim.WORKER_SOCKET_ENV, None)
 
-            if count == 17 and document["icp"]["icp_id"].endswith("_017"):
+            if judge_outage and document["icp"]["icp_id"].endswith("_017"):
                 return runtime.fake_result(
                     exit_code=0,
                     output_bytes=json.dumps(scoring.build_scoring_failure(
@@ -277,6 +280,10 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
         source_result = original_run_icp(spec, **kwargs)
         assert source_result.output_bytes
         companies = json.loads(source_result.output_bytes)["companies"]
+        if count == 17 and not judge_outage and document['icp']['icp_id'].endswith('_017'):
+            # An accepted empty model result is a measured zero. A failed
+            # judge below remains unknown and cannot authorize publication.
+            companies = []
         for company in companies:
             company.update(company_linkedin="https://linkedin.com/company/" + company["company_name"].lower().replace(" ", "-"), state="CA")
             company["contact"] = _claim(company, valid_role=True)
@@ -288,6 +295,27 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
     assert configuration["execution_sequence_policy"] == contracts.BASELINE_SCORED_FIRST_POLICY
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     assert harness.service.advance_round(harness.round_id)["assignments"] == count
+    if judge_outage:
+        harness.advance_until('stage2_judged', runners=2)
+        store = harness.service.store
+        before = store.list_runs(harness.round_id)
+        ledger = store.list_ledger()
+        held = harness.service.advance_round(harness.round_id)
+        assert held['status'] == 'retry' and held['reason'] == 'judge_incomplete'
+        assert store.list_runs(harness.round_id) == before
+        assert store.list_ledger() == ledger
+        for participant in participants:
+            source = next(run for run in before if run['kind'] == 'execute'
+                and run['submission_id'] == participant['submission_id'] and run['icp_position'] == 16)
+            assert source['status'] == 'accepted' and source['output_ref']
+            assert source['per_icp_score'] is None
+            assert any(judge['kind'] == 'score' and judge['scored_run_id'] == source['run_id']
+                and judge['status'] == 'failed' and judge['terminal_cause'] == 'judge_error'
+                for judge in before)
+        row = store.get_round(harness.round_id)
+        assert row['publication_doc'] is None and row['reward_activated_at'] is None
+        assert not harness.service._baseline_fully_succeeded(row)
+        return
     if count == 5:
         harness.advance_until("scored", runners=2)
         reads = Counter()
@@ -424,10 +452,10 @@ def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_ju
                 )
                 if run["scored_run_id"] == last["run_id"]
             ]
-            assert len(score_attempts) == 2
+            assert len(score_attempts) == 1
             assert all(
-                run["status"] == "failed"
-                and run["terminal_cause"] == "judge_error"
+                run["status"] == "accepted" and run['output_ref']
+                and run["terminal_cause"] == "accepted"
                 for run in score_attempts
             )
 

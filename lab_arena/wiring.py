@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import httpx
 import json
 import os
 import re
@@ -457,6 +458,26 @@ def build_service_from_environment(mode: str):
         service_key=service_key,
     )
     store = ArenaStore(transport)
+    # A second connection pool the public pages do not have to share with run
+    # work. Run work arrives in waves an order of magnitude above the steady
+    # rate and can hold every connection in a single pool, which leaves a
+    # visitor's page and a competitor's claim waiting with no error of their
+    # own. This pool is small on purpose: public reads are short, and a ceiling
+    # of its own is the point.
+    public_read_transport = PostgrestTransport(
+        supabase_url,
+        service_key=service_key,
+        limits=httpx.Limits(
+            max_connections=int(
+                os.environ.get("LAB_ARENA_PUBLIC_READ_CONNECTIONS", "20")
+            ),
+            max_keepalive_connections=int(
+                os.environ.get("LAB_ARENA_PUBLIC_READ_CONNECTIONS", "20")
+            ),
+            keepalive_expiry=30.0,
+        ),
+    )
+    public_read_store = ArenaStore(public_read_transport)
     objects = S3ObjectStore(
         _required("LAB_ARENA_BUCKET"),
         region_name=os.environ.get("AWS_REGION"),
@@ -661,7 +682,7 @@ def build_service_from_environment(mode: str):
         return store.current_daily_icp_set(set_id)
 
     config = ServiceConfig(
-        mode=mode, store=store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
+        mode=mode, store=store, public_read_store=public_read_store, object_store=objects, training_object_store=capture_objects, signer=None, chain=chain_reads, verify_signature=chain_module.verify_hotkey_signature,
         daily_icp_source=daily_icp_source,
         deepline_catalog_source=deepline_catalog_source,
         # Approved routes are pinned locally and never inferred from a live catalog.

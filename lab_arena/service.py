@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import hashlib
+import contextlib
 import hmac
 import json
 import logging
@@ -728,6 +729,12 @@ class ServiceConfig:
     ] = None
     # Observational uploads use a separate bounded client in production.
     training_object_store: Optional[ObjectStore] = None
+    # A second store, on its own connection pool, reserved for the public read
+    # path. Run work and public pages otherwise share one pool, so a busy
+    # entrant's writes can hold every connection and a visitor's page waits
+    # behind them. Absent, the public path keeps using ``store`` and nothing
+    # about today's behaviour changes.
+    public_read_store: Optional[ArenaStore] = None
 
     def __post_init__(self) -> None:
         if (
@@ -996,7 +1003,9 @@ class _PublicRunLookup(Mapping):
 class ArenaService:
     def __init__(self, config: ServiceConfig) -> None:
         self._config = config
-        self._store = config.store
+        self._primary_store = config.store
+        self._public_read_store = config.public_read_store or config.store
+        self._reading_public = threading.local()
         self._objects = config.object_store
         self._public_result_reads = _PublicResultInFlightReads(self._objects)
         self._signer = config.signer
@@ -1028,8 +1037,34 @@ class ArenaService:
         return self._config
 
     @property
+    def _store(self) -> ArenaStore:
+        """The store this thread should use.
+
+        Every read and write in this class goes through here. A public request
+        marks its own worker thread with :meth:`public_reads` and so gets the
+        reserved pool; everything else keeps the primary one. Selecting per
+        thread rather than per call site means the whole public read path moves
+        together, including the helpers it reaches through.
+        """
+
+        if getattr(self._reading_public, "active", False):
+            return self._public_read_store
+        return self._primary_store
+
+    @property
     def store(self) -> ArenaStore:
-        return self._store
+        return self._primary_store
+
+    @contextlib.contextmanager
+    def public_reads(self):
+        """Serve the work in this block from the reserved public pool."""
+
+        previous = getattr(self._reading_public, "active", False)
+        self._reading_public.active = True
+        try:
+            yield
+        finally:
+            self._reading_public.active = previous
 
     @property
     def scorer_policy(self) -> Dict[str, Any]:

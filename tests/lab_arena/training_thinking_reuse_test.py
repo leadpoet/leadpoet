@@ -143,7 +143,14 @@ def test_delivery_failure_precedes_trajectory_validation():
         for record in splits[split]:
             for ref in record['source_refs']:
                 ref['delivered_response_sha256'] = contracts.hash_bytes(b'unretained')
-    with patch.object(training_steps, '_build', return_value=(splits, historical)):
+    def deliver_candidates(examples, rules, *, full_thinking_candidate):
+        for source in examples:
+            for split in ('train', 'eval'):
+                for record in splits[split]:
+                    full_thinking_candidate(source, record)
+        return splits, historical
+
+    with patch.object(training_steps, '_build', side_effect=deliver_candidates):
         with patch.object(training_thinking, '_trajectory_reason', wraps=training_thinking._trajectory_reason) as validate:
             output, manifest = training_thinking.build([example], RULES)
     assert not output['train'] and not output['eval']

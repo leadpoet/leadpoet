@@ -3807,6 +3807,12 @@ async def _ground_required_attribute_evidence(
     final_url = str(entry.get("final_url") or "")
     source_text = str(entry.get("text") or "")
     if entry.get("status") == "fetched" and _quote_occurs(quote, source_text):
+        if cache_hit:
+            # An investigator-fetched page can ground this attempt without a
+            # new fetch. Keep that checked text for a later company retry too.
+            _retain_successful_required_attribute_source(
+                successful_source_sink, canonical_url, entry,
+            )
         grounded[_REQUIRED_ATTRIBUTE_GROUNDING] = (
             _required_attribute_source_receipt(
                 status="grounded",
@@ -8616,6 +8622,20 @@ async def _run_targeted_company_evidence_investigation(
         matched_company_retry_source_cache,
         investigation_verified_identity,
     )
+    retained_attribute_retry_pages = (
+        _validated_retry_retained_sources(successful_required_attribute_source_sink)
+        if "required_attribute" in investigation_targets or preserve_matched_industry
+        else {}
+    )
+    current_attribute_pages = required_attribute_source_cache or {}
+    prefetch_attribute_pages = {
+        **current_attribute_pages,
+        **retained_attribute_retry_pages,
+    }
+    prefetch_attribute_pages.update({
+        url: entry for url, entry in current_attribute_pages.items()
+        if isinstance(entry, Mapping) and entry.get("status") == "fetched"
+    })
     source_candidates = [
         *(
             [(linkedin_profile_source or {}).get("url")]
@@ -8647,6 +8667,10 @@ async def _run_targeted_company_evidence_investigation(
             (required_attribute_source_cache or {}).keys()
             if preserve_matched_industry or review_positive_semantics
             else []
+        ),
+        *(
+            retained_attribute_retry_pages.keys()
+            if "required_attribute" in investigation_targets else []
         ),
         *(
             [
@@ -8809,7 +8833,7 @@ async def _run_targeted_company_evidence_investigation(
             else ()
         ),
         prefetched_pages=_investigator_prefetched_pages(
-            required_attribute_source_cache or {},
+            prefetch_attribute_pages,
             submitted_source_urls,
             verified_homepage_pages=(
                 homepage_pages

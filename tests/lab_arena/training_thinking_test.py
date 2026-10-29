@@ -764,3 +764,43 @@ def test_readable_cli_keeps_raw_bytes_and_renders_native_metadata(tmp_path):
     assert 'native_finish_reason' in markdown and 'end_turn' in markdown
     assert os.stat(output).st_mode & 0o777 == 0o700
     assert all(os.stat(path).st_mode & 0o777 == 0o600 for path in output.iterdir())
+
+
+def test_build_does_not_retain_raw_episode_batch():
+    import weakref
+
+    class TrackedDict(dict):
+        pass
+
+    refs = []
+
+    def sources():
+        for index in range(4):
+            # The consumer may still hold its current source while requesting
+            # the next one, but earlier raw sources must already be released.
+            assert all(ref() is None for ref in refs[:-1])
+            example = TrackedDict(full_example())
+            refs.append(weakref.ref(example))
+            yield example
+            del example
+
+    expected = training_thinking.build([full_example()])
+    assert training_thinking.build(sources()) == expected
+    assert all(ref() is None for ref in refs)
+
+
+def test_invalid_neighbor_with_claimed_hash_cannot_poison_valid_source():
+    valid = full_example()
+    invalid = copy.deepcopy(valid)
+    invalid["provider_calls"][0]["response"]["choices"][0]["message"]["reasoning_content"] = "unbound tampered text"
+    # Deliberately keep the valid source's claimed hash. No invalid evidence
+    # can replace its bound trajectory, regardless of source order.
+    expected, _ = training_thinking.build([valid])
+    forward = training_thinking.build(iter([valid, invalid]))
+    backward = training_thinking.build(iter([invalid, valid]))
+    assert forward == backward
+    for split in ("train", "eval"):
+        assert forward[0][split] == expected[split]
+    assert forward[0]["analysis"] == [{"source_example_hash": valid["example_hash"],
+                                        "reason": "example_hash_mismatch"}]
+    assert forward[1]["coverage"]["distinct_verified_exports"] == 1

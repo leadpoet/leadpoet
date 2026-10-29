@@ -265,3 +265,18 @@ def test_real_scorer_hands_fetched_page_to_paragraph_gate(monkeypatch):
     ))
     assert breakdown.final_score > 0
     assert any(context["url"] == ABOUT for context in seen)
+
+
+def test_returned_page_limit_accepts_its_exact_boundary():
+    company, fit = _case()
+    investigation = _investigation()
+    pages = investigation[PRIVATE_FETCHED_PAGES_KEY]
+    for index in range(MAX_RETURNED_FETCHED_PAGES - len(pages)):
+        url = f"https://www.chemify.example/other-{index}"
+        pages[url] = {"final_url": url, "text": "Other page"}
+    assert len(pages) == MAX_RETURNED_FETCHED_PAGES
+    retained = {}
+    lead_scorer._retain_matched_investigator_source_contexts(
+        retained, fit, investigation, company=company,
+    )
+    assert ABOUT in retained

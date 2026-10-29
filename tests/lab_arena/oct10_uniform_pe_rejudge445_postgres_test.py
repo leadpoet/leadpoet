@@ -1,5 +1,5 @@
 """Local PostgreSQL proof for the unrendered Oct10 uniform rejudge template."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import threading
@@ -637,3 +637,218 @@ def test_fenced_billing_guard_keeps_mutation_and_null_identity_semantics(seeded)
             assert heads==_billing_heads(cur,fenced=False)
             assert next(row[1] for row in heads if row[0]=='sha256:'+'8'*64)=='refusal'
             cur.execute('ROLLBACK')
+
+from lab_arena.store import ArenaStore, PsycopgTransport
+from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
+from tests.lab_arena.historical_service import pin_pre470_baseline_service
+
+
+def assert_current_oct10_plan(plan, original_runs, *, extra_failures=False):
+    # ffb48c012 stopped turning infrastructure failures into invented zeros.
+    # Keep this fixture's exact selected executions and every terminal cause.
+    actual = lambda rows: {(r['submission_id'], r['icp_position'], r['cause']) for r in rows}
+    incomplete = {
+        ('miner440-1', 0, 'lease_expired'), ('miner440-1', 1, 'lease_expired'),
+        ('miner440-2', 2, 'lease_expired'), ('miner440-2', 3, 'lease_expired'),
+        *{('miner440-3', i, 'provider_error') for i in range(3)},
+    }
+    zeros = set()
+    if extra_failures:
+        incomplete.add(('miner440-6', 0, 'provider_error'))
+        zeros = {(sid, i, 'model_error') for sid in ('miner440-5', 'miner440-7') for i in range(5)}
+    assert actual(plan.get('incomplete_rows', [])) == incomplete
+    assert actual(plan['zero_rows']) == zeros
+    assert len(plan.get('incomplete_rows', [])) == len(incomplete)
+    assert len(plan['zero_rows']) == len(zeros)
+    assert {r['scored_run_id'] for r in plan['work_items']} == {
+        r['run_id'] for r in original_runs
+        if r['round_id'] == plan['round_id'] and r['kind'] == 'execute'
+        and r['stage'] == 2 and r['status'] == 'accepted'
+    }
+
+
+def assert_current_oct10_scores(latest, aggregates, plan, original_runs):
+    incomplete = {(r['submission_id'], r['icp_position']) for r in plan['incomplete_rows']}
+    retained = ('miner440-6', 0)
+    if retained in incomplete:
+        # This failed execution already held a stored legacy zero before the
+        # rejudge. Current planning cannot invent another zero or erase that
+        # historical authority while the exact migration preserves executions.
+        prior = [r for r in original_runs if r['round_id'] == plan['round_id']
+                 and r['kind'] == 'execute' and r['stage'] == 2
+                 and (r['submission_id'], r['icp_position']) == retained]
+        assert prior and all(r['per_icp_score'] == 0 and r['qualification_doc'] == {'companies': []} for r in prior)
+        current = next(r for r in latest.values() if (r['submission_id'], r['icp_position']) == retained)
+        assert current['per_icp_score'] == 0
+        assert current['qualification_doc'] == {'companies': []}
+        incomplete.remove(retained)
+    assert {(r['submission_id'], r['icp_position']) for r in latest.values()
+            if r['per_icp_score'] is None} == incomplete
+    zeros = {(r['submission_id'], r['icp_position']) for r in plan['zero_rows']}
+    assert all(r['per_icp_score'] == 0 for r in latest.values()
+               if (r['submission_id'], r['icp_position']) in zeros)
+    assert {r['submission_id'] for r in aggregates if r['final_score'] is None} == {
+        sid for sid, _ in incomplete
+    }
+
+
+def assert_current_incomplete_round_holds_then_cancels(service, store, connect, snapshot):
+    """Current incomplete policy preserves every historical migration record."""
+    row = store.get_round(ROUND)
+    deadline = datetime.fromisoformat(row['configuration_doc']['schedule']['publication_deadline'].replace('Z', '+00:00'))
+    with connect() as conn, conn.cursor() as cur:
+        before = snapshot(cur)
+    service.now = lambda: deadline - timedelta(seconds=1)
+    assert service._advance_round_locked(ROUND) == {
+        'status': 'retry', 'round_status': 'scored', 'reason': 'baseline_incomplete',
+    }
+    with connect() as conn, conn.cursor() as cur:
+        assert snapshot(cur) == before
+    service.now = lambda: deadline + timedelta(seconds=1)
+    assert service._advance_round_locked(ROUND)['status'] == 'cancelled'
+    with connect() as conn, conn.cursor() as cur:
+        after = snapshot(cur)
+    assert {k:v for k,v in after.items() if k != 'lab_arena_rounds'} == {
+        k:v for k,v in before.items() if k != 'lab_arena_rounds'}
+    assert [r for r in after['lab_arena_rounds'] if r['round_id'] != ROUND] == [
+        r for r in before['lab_arena_rounds'] if r['round_id'] != ROUND]
+    old = next(r for r in before['lab_arena_rounds'] if r['round_id'] == ROUND)
+    current = next(r for r in after['lab_arena_rounds'] if r['round_id'] == ROUND)
+    assert current['status'] == 'cancelled' and current['cancel_reason'] == 'scoring_incomplete'
+    assert current['status_generation'] == old['status_generation'] + 1
+    assert current['stage_generation'] == old['stage_generation'] + 1
+    changed = {'status', 'cancel_reason', 'status_generation', 'stage_generation', 'updated_at'}
+    assert {k:v for k,v in current.items() if k not in changed} == {
+        k:v for k,v in old.items() if k not in changed}
+
+
+def test_current_archive_prefixes_uniform_driver_and_no_execution_generation(seeded, monkeypatch):
+    psycopg, dsn = seeded
+    prepare_current_service_reads(lambda: psycopg.connect(**dsn), include_round_reads=False)
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            before = _snapshot(cur)
+            sql = _render(cur)
+            cur.execute(sql)
+            after = _snapshot(cur)
+            assert next(r for r in after['lab_arena_rounds'] if r['round_id'] == ROUND)['stage_generation'] == 12
+            original_exec = [r for r in before['lab_arena_runs'] if r['round_id'] == ROUND and r['kind'] == 'execute']
+            immediate_exec = [r for r in after['lab_arena_runs'] if r['round_id'] == ROUND and r['kind'] == 'execute']
+            assert [{k:v for k,v in r.items() if k not in ('qualification_doc','per_icp_score')} for r in immediate_exec] == [{k:v for k,v in r.items() if k not in ('qualification_doc','per_icp_score')} for r in original_exec]
+            cur.execute(sql)
+            assert _snapshot(cur) == after
+    store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    service = object.__new__(ArenaService)
+    service._store = store
+    pin_pre470_baseline_service(service, lambda: psycopg.connect(**dsn), round_id=ROUND)
+    service._lock = threading.RLock()
+    service._round = lambda rid: store.get_round(rid)
+    service.now = lambda: datetime(2026, 10, 10, 13, 59, 59, tzinfo=timezone.utc)
+    service._require_code_review = lambda *args: None
+    service.benchmark_icps = service.evaluation_icps = lambda rid: daily_icps()[:10]
+    class Objects:
+        @staticmethod
+        def get_bounded(ref, max_bytes):
+            return json.dumps({'schema_version': contact_policy.output_schema(store.get_round(ROUND)['configuration_doc']), 'companies': []}).encode()
+    service._objects = Objects()
+    service._outputs_by_run = lambda rid, stage: {r['run_id']: [] for r in store.list_runs(rid, stage=stage, kind='execute') if r['status'] == 'accepted'}
+    service._verified_breakdowns = lambda *args, **kwargs: []
+    monkeypatch.setattr(provider_observations, 'resolve_observations', lambda *args, **kwargs: [])
+    statuses = []
+    for _ in range(15):
+        row = store.get_round(ROUND)
+        statuses.append(row['status'])
+        if row['status'] == 'scored':
+            break
+        if row['status'] == 'stage1_scoring':
+            lease, token, _, _ = claim(store, ROUND, hotkey('new-judge445'), parallelism=20, ceiling=20)
+            assert lease['status'] == 'leased' and lease['kind'] == 'score'
+            assert complete(store, lease['run_id'], hash_lease_token(token), 'accepted', output_ref='arena/test/rpc445-judge.json')['status'] == 'accepted'
+        if row['status'].endswith('_scoring'):
+            with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
+                cur.execute('SET LOCAL session_replication_role=replica')
+                cur.execute("INSERT INTO public.lab_arena_ledger (entry_kind,round_id,submission_id,miner_hotkey,run_id,stage,provider,operation_id,funding_source,call_identity,amount_microusd) SELECT 'settlement',round_id,submission_id,miner_hotkey,run_id,stage,'openrouter','new_judge445','host','sha256:'||encode(extensions.digest(run_id,'sha256'),'hex'),50 FROM public.lab_arena_runs WHERE round_id=%s AND kind='score' AND NOT EXISTS (SELECT 1 FROM public.lab_arena_ledger l WHERE l.run_id=public.lab_arena_runs.run_id AND l.operation_id='new_judge445')", (ROUND,))
+                cur.execute("UPDATE public.lab_arena_runs SET status='accepted',terminal_cause='accepted',output_ref='arena/test/new445-judge.json',result_doc='{\"terminal_status\":\"accepted\"}' WHERE round_id=%s AND kind='score' AND status='pending'", (ROUND,))
+                cur.execute('SET LOCAL session_replication_role=origin')
+        if row['status'] == 'stage1_scored':
+            original = {r['run_id']: r for r in before['lab_arena_runs'] if r['round_id'] == ROUND and r['kind'] == 'execute'}
+            changed = {r['run_id']: {k: (original[r['run_id']].get(k), v) for k, v in r.items() if k not in ('qualification_doc','per_icp_score','updated_at') and original[r['run_id']].get(k) != v} for r in store.list_runs(ROUND,kind='execute')}
+            assert not {k:v for k,v in changed.items() if v}
+            with psycopg.connect(**dsn) as conn:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    original_state = _snapshot(cur)
+                    participants = [{'submission_id': p['submission_id'], 'miner_hotkey': p['miner_hotkey']} for p in row['participants'] if not p['is_king']]
+                    for mutation in (
+                        "UPDATE public.lab_arena_runs SET output_ref='arena/tampered.json' WHERE round_id='arena-2026-10-10' AND stage=2 AND kind='execute' AND icp_position=0",
+                        "UPDATE public.lab_arena_runs SET stage_generation=99 WHERE round_id='arena-2026-10-10' AND stage=2 AND kind='execute' AND icp_position=0",
+                        "UPDATE public.lab_arena_submissions SET source_size_bytes=999 WHERE submission_id='miner440-4'",
+                        "UPDATE public.qualification_private_icp_sets SET icps='[]' WHERE set_id=20261009",
+                        "UPDATE public.lab_arena_ledger SET amount_microusd=1 WHERE round_id='arena-2026-10-10-r445archive' AND run_id='old445-score-1'",
+                        "UPDATE public.lab_arena_trajectory_events SET content='{}' WHERE round_id='arena-2026-10-10-r445archive'",
+                    ):
+                        cur.execute('BEGIN')
+                        cur.execute('SET LOCAL session_replication_role=replica')
+                        cur.execute(mutation)
+                        assert cur.rowcount > 0
+                        cur.execute('SET LOCAL session_replication_role=origin')
+                        with pytest.raises(psycopg.Error, match='preserved execution differs'):
+                            cur.execute('SELECT public.lab_arena_open_stage(%s,2::smallint,%s::jsonb,%s::integer[])', (ROUND, json.dumps(participants), list(range(10))))
+                        cur.execute('ROLLBACK')
+                        assert _snapshot(cur) == original_state
+        result = service._advance_round_locked(ROUND)
+        if row['status'] == 'stage1_scored':
+            assert result['resumed'] and result['stage_generation'] == row['stage_generation'] + 1
+        assert result['status'] not in ('cancelled', 'retry', 'stale'), (statuses, result)
+    assert statuses[-1] == 'scored', statuses
+    assert statuses == ['stage1_closed', 'stage1_closed', 'stage1_scoring', 'stage1_judged', 'stage1_scored', 'stage2', 'stage2_closed', 'stage2_scoring', 'stage2_judged', 'scored']
+    row = store.get_round(ROUND)
+    assert_current_oct10_plan(row['stage2_scoring_plan_doc'], before['lab_arena_runs'])
+    scores = store.list_runs(ROUND, kind='score')
+    assert len(scores) == 10 + 683
+    assert all(r['assignment_id'].endswith(':score:rerun445') for r in scores)
+    assert all(r['judgment_scope_doc']['scorer_image_digest'] == DIGEST for r in scores)
+    assert all(r['judgment_scope_doc']['scorer_image_reference'].endswith('@' + DIGEST) for r in scores)
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            final = _snapshot(cur)
+            original_exec = [r for r in before['lab_arena_runs'] if r['round_id'] == ROUND and r['kind'] == 'execute']
+            actual_exec = [r for r in final['lab_arena_runs'] if r['round_id'] == ROUND and r['kind'] == 'execute']
+            strip = lambda rows: [{k: v for k, v in r.items() if k not in ('qualification_doc', 'per_icp_score', 'updated_at')} for r in rows]
+            assert strip(actual_exec) == strip(original_exec)
+            assert len(actual_exec) == 24 + 698
+            assert all(r['stage_generation'] == 9 for r in actual_exec if r['stage'] == 2)
+            latest = {}
+            for run in actual_exec:
+                if run['stage'] == 2 and (run['assignment_id'] not in latest or run['attempt'] > latest[run['assignment_id']]['attempt']):
+                    latest[run['assignment_id']] = run
+            aggregates = service._score_entries_from_runs(row, range(10), 'final_score')
+            assert_current_oct10_scores(latest, aggregates, row['stage2_scoring_plan_doc'], before['lab_arena_runs'])
+            canonical = lambda r: {**r, 'round_id': ROUND, 'submission_id': BASE if r['submission_id'] == BASE+'-r445archive' else r['submission_id']}
+            for table, key in (('lab_arena_ledger', 'entry_id'), ('lab_arena_trajectory_events', 'trajectory_id')):
+                old_rows = [r for r in before[table] if r['round_id'] == ROUND]
+                final_rows = {r[key]: canonical(r) for r in final[table] if r['round_id'] in (ROUND, ARCHIVE)}
+                assert [final_rows[r[key]] for r in old_rows] == old_rows
+            archived = [canonical(r) for r in final['lab_arena_runs'] if r['round_id'] == ARCHIVE]
+            assert archived == [r for r in before['lab_arena_runs'] if r['round_id'] == ROUND and r['kind'] == 'score']
+            for run_id, sid in (('old445-score-0', BASE), ('old445-score-1', 'miner440-4')):
+                for provider in ('openrouter', 'deepline', 'scrapingdog'):
+                    cur.execute('SELECT public.lab_arena_provider_funding(%s,%s)', (run_id, provider))
+                    funding = cur.fetchone()[0]
+                    assert funding['funding_source'] == 'miner_key'
+                    assert funding['credential_submission_id'] == sid
+                    assert funding['credential_miner_hotkey'] == hotkey(sid)
+            # The unchanged real RPC appends one settlement; the uncertain
+            # receipt and old prefix remain immutable and replay still passes.
+            cur.execute("SELECT entry_id FROM public.lab_arena_ledger WHERE round_id=%s AND call_identity=%s AND entry_kind='uncertain'", (ARCHIVE, 'sha256:' + 'f' * 64))
+            uncertain_id = cur.fetchone()[0]
+            arguments = (ARCHIVE, 'old445-score-1', 'sha256:' + 'f' * 64, uncertain_id, 'gen-test445', 'sha256:' + 'a' * 64, 111, '0.000111')
+            for idempotent in (False, True):
+                cur.execute('SELECT public.lab_arena_reconcile_openrouter_cost_v1(%s,%s,%s,%s,%s,%s,%s,%s)', arguments)
+                settled = cur.fetchone()[0]
+                assert settled['status'] == 'settled' and settled['idempotent'] is idempotent
+            cur.execute(sql)
+            cur.execute("SELECT count(*),sum(amount_microusd) FROM public.lab_arena_ledger WHERE round_id=%s AND operation_id='new_judge445'", (ROUND,))
+            assert cur.fetchone() == (693, 693 * 50)

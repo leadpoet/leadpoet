@@ -96,26 +96,38 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     assert any(call[1] == "miner" and call[4] == {"rejection_rule": "code_review_incomplete"} for call in updates)
 
 
-@pytest.mark.parametrize('attempts,error_code,retryable,pending', [
-    # A saved retryable flag alone does not classify a provider failure.
-    (3, None, True, False), (5, None, True, False), (6, None, True, False),
-    (1, None, False, False), (2, None, None, True), (3, None, None, False),
-    # Known transient failures wait for the deadline, even past the old cap
-    # and when old diagnostics saved a false or absent retryable flag.
-    (3, 'review_response_invalid', True, True),
-    (5, 'code_review_provider_timeout', True, True),
-    (6, 'review_response_invalid', True, True),
-    (10, 'review_response_invalid', False, True),
-    (10, 'code_review_provider_unavailable', None, True),
-    (1, 'source_unreadable', False, False),
+@pytest.mark.parametrize('attempts,retryable,error_code,pending', [
+    (3, True, None, False), (5, True, None, False), (6, True, None, False),
+    (1, False, None, False), (2, None, None, True), (3, None, None, False),
+    (2, True, None, True),
+    (2, True, "unknown_provider_failure", True),
+    (3, True, "unknown_provider_failure", False),
+    (1, False, "source_contains_credentials", False),
+    (1, False, "code_review_provider_credit", False),
+    (1, False, "source_unreadable", False),
+    (3, True, "review_response_invalid", True),
+    (5, True, "code_review_provider_timeout", True),
+    (6, True, "review_response_invalid", True),
+    (10, False, "review_response_invalid", True),
+    (10, None, "code_review_provider_unavailable", True),
+    (3, True, "code_review_provider_timeout", True),
+    (50, None, "code_review_provider_rate_limited", True),
+    # Persisted retryable=False can predate classification. Explicit transient
+    # codes recover until the deadline; anonymous errors still stop at three.
+    *[(50, False, code, True) for code in (
+        "code_review_preparation_unavailable",
+        "code_review_provider_rate_limited",
+        "code_review_provider_timeout",
+        "code_review_provider_unavailable",
+        "code_review_transport_error",
+        "review_response_invalid",
+        "code_review_research_unverified",
+    )],
 ])
-@pytest.mark.parametrize('at_deadline', [False, True])
-def test_freeze_waits_for_classified_retry_until_deadline(
-    attempts, error_code, retryable, pending, at_deadline,
+def test_freeze_waits_only_for_available_review_attempts(
+    attempts, retryable, error_code, pending
 ):
     now = datetime(2026, 9, 11, tzinfo=timezone.utc)
-    if at_deadline:
-        now += timedelta(minutes=30)
     baseline = {'submission_id': 'baseline-test', 'miner_hotkey': 'host', 'is_king': True,
                 'source_ref': 'baseline', 'source_size_bytes': 10, 'status': 'accepted'}
     miner = {'submission_id': 'miner', 'miner_hotkey': 'miner-owner', 'is_king': False,
@@ -137,11 +149,19 @@ def test_freeze_waits_for_classified_retry_until_deadline(
         list_submissions=lambda _, status: [baseline, miner] if status == 'accepted' else [],
         update_submission=lambda *args: updates.append(args) or {'status': 'ok'},
     )
-    if pending and not at_deadline:
+    if pending:
         with pytest.raises(ServiceError, match='code_review_pending'):
             service.freeze_participants('arena-test')
         assert not updates
-    else:
-        assert len(service.freeze_participants('arena-test')) == 1
-        assert any(call[1] == 'miner' and call[4] == {'rejection_rule': 'code_review_incomplete'}
-                   for call in updates)
+        # The deadline remains an absolute bound, even for a classified
+        # transient after many attempts and despite a stale retry flag.
+        now += timedelta(minutes=30)
+    assert service.freeze_participants('arena-test') == [{
+        key: baseline[key] for key in (
+            'submission_id', 'miner_hotkey', 'source_ref', 'source_size_bytes', 'is_king'
+        )
+    }]
+    assert [call for call in updates if call[1] == 'miner'] == [
+        ('arena-test', 'miner', 'accepted', 'rejected',
+         {'rejection_rule': 'code_review_incomplete'})
+    ]

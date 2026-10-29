@@ -58,16 +58,14 @@ class FakeService:
         self._ensure_error = ensure_error
         self._reward_error = reward_error
         self._activated = activated
-        self._config = types.SimpleNamespace(defaults=types.SimpleNamespace(daily_cutoff_hour_utc=None))
-        self._store = types.SimpleNamespace(_transport=types.SimpleNamespace(rpc=lambda *_: {
-            "schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False}))
         self.advanced = []
         self.ensured = 0
+        self._config = types.SimpleNamespace(defaults=types.SimpleNamespace(daily_cutoff_hour_utc=None))
 
     def startup_checks(self):
         return {"database_identity": {"current_user": "test"}}
 
-    def review_pending_submissions(self, **_kwargs):
+    def review_pending_submissions(self, *, should_continue=None):
         return {"reviewed": 0}
 
     def activate_pending_rewards(self):
@@ -85,6 +83,10 @@ class FakeService:
         self.ensured += 1
         if self._ensure_error is not None:
             raise self._ensure_error
+        if self._ensure.get("status") == "created" and not any(
+            row["round_id"] == self._ensure["round_id"] for row in self._active
+        ):
+            self._active.append({"round_id": self._ensure["round_id"], "status": "open"})
         return self._ensure
 
     def active_rounds(self):
@@ -112,11 +114,14 @@ def test_scheduler_flags_split_the_driver_from_the_api(script):
 
 def _patch_runtime(monkeypatch, script, service):
     wiring = types.ModuleType("lab_arena.wiring")
+    handlers = []
     app = types.SimpleNamespace(router=types.SimpleNamespace(
-        add_event_handler=lambda event, handler: None))
+        add_event_handler=lambda event, handler: handlers.append((event, handler))))
     wiring.build_service_from_environment = lambda mode: (service, app)
     monkeypatch.setitem(sys.modules, "lab_arena.wiring", wiring)
     monkeypatch.setenv("LAB_ARENA_MODE", "live")
+    monkeypatch.setattr(script.signal, "signal", lambda *_: None)
+    return app, handlers
 
 
 def test_api_only_startup_serves_without_running_a_driver_tick(script, monkeypatch):
@@ -134,17 +139,57 @@ def test_api_only_startup_serves_without_running_a_driver_tick(script, monkeypat
     assert len(served) == 1
 
 
-def test_normal_startup_keeps_the_initial_driver_tick(script, monkeypatch):
+def test_normal_startup_serves_before_initial_driver_tick_and_joins_workers(script, monkeypatch):
     service = FakeService()
     ticks = []
-    _patch_runtime(monkeypatch, script, service)
+    app, handlers = _patch_runtime(monkeypatch, script, service)
+    workers = {}
+    events = []
+    class ControlledThread:
+        def __init__(self, *, target, name, daemon):
+            self.target, self.name = target, name
+            assert daemon
+            workers[name] = self
+
+        def start(self):
+            events.append("start:" + self.name)
+
+        def join(self, timeout=None):
+            assert timeout == 5
+            events.append("join:" + self.name)
+
+    monkeypatch.setattr(script.threading, "Thread", ControlledThread)
+    # Stop after one initial tick. The test controls exactly when the driver
+    # starts instead of racing a daemon thread against an instant fake server.
+    class OneTickEvent:
+        stopped = False
+
+        def is_set(self):
+            return self.stopped
+
+        def set(self):
+            self.stopped = True
+
+        def wait(self, timeout):
+            self.set()
+            return True
+
+    monkeypatch.setattr(script.threading, "Event", OneTickEvent)
     monkeypatch.setattr(script, "drive_once", lambda service: ticks.append(service) or "idle")
     uvicorn = types.ModuleType("uvicorn")
-    uvicorn.run = lambda app, **kwargs: None
+    def serve(served_app, **kwargs):
+        assert served_app is app and ticks == []
+        assert [event for event, _ in handlers] == ["shutdown"]
+        events.append("serve")
+        workers["lab-arena-driver"].target()
+        handlers[0][1]()
+    uvicorn.run = serve
     monkeypatch.setitem(sys.modules, "uvicorn", uvicorn)
 
     assert script.main([]) == 0
     assert ticks == [service]
+    assert events == ["start:lab-arena-code-review", "start:lab-arena-driver", "serve",
+                      "join:lab-arena-driver", "join:lab-arena-code-review"]
 
 
 def test_driver_only_keeps_the_initial_tick_and_runs_the_loop(script, monkeypatch):
@@ -156,19 +201,23 @@ def test_driver_only_keeps_the_initial_tick_and_runs_the_loop(script, monkeypatc
     class FiniteEvent:
         def __init__(self):
             self.waits = 0
+            self.stopped = False
 
         def wait(self, timeout):
             self.waits += 1
-            return self.waits >= 2
-
-        def is_set(self):
-            return self.waits >= 2
+            if self.waits >= 2:
+                self.set()
+            return self.is_set()
 
         def set(self):
-            self.waits = 2
+            self.stopped = True
+
+        def is_set(self):
+            return self.stopped
 
     monkeypatch.setattr(script.threading, "Event", FiniteEvent)
     workers = []
+    joins = []
     class FakeThread:
         def __init__(self, **kwargs):
             workers.append(kwargs)
@@ -176,14 +225,16 @@ def test_driver_only_keeps_the_initial_tick_and_runs_the_loop(script, monkeypatc
         def start(self):
             pass
 
-        def join(self, **_kwargs):
-            pass
+        def join(self, timeout=None):
+            assert timeout is None
+            joins.append(timeout)
 
     monkeypatch.setattr(script.threading, "Thread", FakeThread)
 
     assert script.main(["--driver-only", "--tick-seconds", "5"]) == 0
     assert ticks == [service, service]
     assert [worker["name"] for worker in workers] == ["lab-arena-code-review"]
+    assert joins == [None]
 
 
 def test_check_only_performs_startup_checks_without_writes(script, monkeypatch):
@@ -207,14 +258,14 @@ def test_a_tick_advances_the_current_round(script):
     assert service.ensured == 1  # no round is open for submissions, so the next daily round is offered
 
 
-def test_a_tick_advances_every_active_round_oldest_first_and_opens_nothing_while_one_is_open(script):
-    """Rounds overlap: the running round and the open round both advance; an open round means no new one."""
+def test_a_tick_advances_every_active_round_and_delegates_daily_creation_to_service(script):
+    """The driver asks the service to ensure intake before advancing old work."""
 
     service = FakeService(active=[{"round_id": "arena-2026-09-03", "status": "stage1"}, {"round_id": "arena-2026-09-04", "status": "open"}])
     assert script.drive_once(service) == "advanced arena-2026-09-03; advanced arena-2026-09-04"
     assert service.advanced == ["arena-2026-09-03", "arena-2026-09-04"] and service.ensured == 1
     running_only = FakeService(active=[{"round_id": "arena-2026-09-03", "status": "stage1_scoring"}], ensure={"status": "created", "round_id": "arena-2026-09-04"})
-    assert script.drive_once(running_only) == "created arena-2026-09-04; advanced arena-2026-09-03"
+    assert script.drive_once(running_only) == "created arena-2026-09-04; advanced arena-2026-09-03; advanced arena-2026-09-04"
     one_failing = FakeService(active=[{"round_id": "arena-2026-09-03", "status": "stage1"}, {"round_id": "arena-2026-09-04", "status": "open"}], advance_error=RuntimeError("secret"))
     assert script.drive_once(one_failing) == "failed advance_round arena-2026-09-03: RuntimeError; failed advance_round arena-2026-09-04: RuntimeError"
 
@@ -223,7 +274,7 @@ def test_a_tick_without_a_round_is_idle_unless_it_creates_the_next_daily_round(s
     disabled = FakeService(current=None)
     assert script.drive_once(disabled) == "idle" and disabled.ensured == 1
     creating = FakeService(current=None, ensure={"status": "created", "round_id": "arena-2026-09-04"})
-    assert script.drive_once(creating) == "created arena-2026-09-04"
+    assert script.drive_once(creating) == "created arena-2026-09-04; advanced arena-2026-09-04"
     assert script.drive_once(FakeService(current=None, ensure_error=ConnectionError("db"))) == "failed ensure_daily_round: ConnectionError"
 
 

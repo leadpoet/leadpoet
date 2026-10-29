@@ -983,3 +983,16 @@ def test_non_us_state_remains_optional_and_historical_state_path_is_unchanged():
 
     assert canada == COMPANY_FIT_MATCH
     assert historical == COMPANY_FIT_MATCH
+
+
+@pytest.mark.parametrize("quote", [
+    "", "Acme has an office in California, United States.",
+    "Acme location: California, United States.",
+])
+def test_quality_state_normalization_requires_headquarters_proof(quote):
+    assert _decision_from_observed_geography(
+        {"observed_hq_country": "United States", "observed_hq_state": "California",
+         "geography_matches": True, "geography_evidence_url": "https://acme.com/about",
+         "geography_evidence_quote": quote},
+        _icp(), company=_company(state="California"), company_quality=True,
+    ) == COMPANY_FIT_UNAVAILABLE

@@ -898,6 +898,13 @@ def _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger
             return {}
         found = {}
         observations = payload["observations"]
+        # Both callers validate the full hash-bound host payload. The runner
+        # stamps callbacks with its latest started action, which can advance
+        # while an earlier call is in flight. Only host rows in this snapshot
+        # can corroborate that frontier; callbacks cannot corroborate themselves.
+        host_sequences = {item["action_sequence"]
+                          for rows in (observations, payload["response_receipts"]) for item in rows
+                          if type(item.get("action_sequence")) is int}
         for row in candidates:
             identity, sequence = row.get("call_identity"), row.get("action_sequence")
             disposition = row["outcome"]["broker_disposition"]
@@ -949,7 +956,9 @@ def _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger
             # Every callback that is present must still agree with the write.
             if any(training_observations.clean_agent_observation(read) != read
                    or read["privacy"] != {"redacted": False, "redactions": []}
-                   or read["after_action_sequence"] != sequence
+                   or type(read["after_action_sequence"]) is not int
+                   or read["after_action_sequence"] < sequence
+                   or read["after_action_sequence"] not in host_sequences
                    or any(read["data"].get(key) != write[key]
                           for key in ("call_identity", "status", "body_sha256", "body_bytes"))
                    for read in reads):
@@ -1086,7 +1095,8 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
     from lab_arena import training_observations
     from lab_arena import training_coverage
     require_client_ack = not training_coverage.uses_host_result_evidence(configuration or {})
-    artifacts, partial_artifacts, errors, counts = {}, {}, set(), {}
+    artifacts, partial_artifacts, unverified_artifacts = {}, {}, {}
+    errors, counts = set(), {}
     per_run_errors, verified_counts = {}, {}
     selected = next((row for row in related if row["run_id"] == selected_run_id
                      and row["kind"] == "execute" and row.get("status") == "accepted"), {})
@@ -1149,6 +1159,17 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
                 or capture.get("observation_count") != payload["observation_count"]
                 or capture.get("local_refusal_count") != payload["local_refusal_count"]
                 or capture.get("complete") != payload["complete"]):
+            # The object passed identity, hash, schema and privacy validation.
+            # Retain it for inspection, but a failed or conflicting completion
+            # summary cannot authorize receipt links or verified counters.
+            # Journal prefixes have separate eligibility semantics, so keep
+            # this unconfirmed snapshot outside their partial collection.
+            # Outer completeness describes that unverified audit status; the
+            # original payload and its claimed completeness remain unchanged.
+            unverified_artifacts[run_id] = {
+                **snapshot, "complete": False,
+                "unverified_reasons": ["worker_observation_summary_invalid"],
+            }
             record_error("worker_observation_summary_invalid", run_id)
             continue
         if not payload["complete"]:
@@ -1223,7 +1244,7 @@ def _worker_evidence(related, calls, objects, *, selected_run_id, configuration=
             if missing_local:
                 run_errors.discard("worker_local_refusals_unverified")
     errors = set().union(*per_run_errors.values()) if per_run_errors else set()
-    return artifacts, partial_artifacts, errors, counts, per_run_errors, verified_counts
+    return artifacts, partial_artifacts, errors, counts, per_run_errors, verified_counts, unverified_artifacts
 
 
 def _competition_cost_snapshot(*, run, configuration, scored, related,
@@ -1519,7 +1540,8 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
             raise ExportError("ledger_context_mismatch")
     calls, gaps = _calls([row for row in ledger_rows if row.get("run_id") in run_ids], run_ids, objects,
                          {row["run_id"]: index for index, row in enumerate(related)})
-    observations, partial_observations, observation_gaps, observed_actions, worker_gaps_by_run, verified_worker_counts = _worker_evidence(
+    (observations, partial_observations, observation_gaps, observed_actions,
+     worker_gaps_by_run, verified_worker_counts, unverified_observations) = _worker_evidence(
         related, calls, objects, selected_run_id=run_id, configuration=config, ledger_rows=ledger_rows)
     # Recompute payload gaps after exact worker-side fallback joins. Structural
     # ledger failures and every accounting gap retain their original authority.
@@ -1752,7 +1774,11 @@ def assemble_example(*, run_id: str, round_row: Mapping[str, Any],
     clean["worker_observation_artifacts"] = observations
     if partial_observations:
         clean["partial_worker_observation_artifacts"] = partial_observations
-    observation_redactions = {reason for artifact in list(observations.values()) + list(partial_observations.values())
+    if unverified_observations:
+        clean["unverified_worker_observation_artifacts"] = unverified_observations
+    worker_artifacts = (list(observations.values()) + list(partial_observations.values())
+                        + list(unverified_observations.values()))
+    observation_redactions = {reason for artifact in worker_artifacts
                              for item in artifact["payload"]["observations"] + artifact["payload"].get("agent_observations", [])
                              for reason in item["privacy"]["redactions"]}
     hidden_removed = removed or "hidden_reasoning" in observation_redactions or "hidden_reasoning" in privacy_redactions or any(

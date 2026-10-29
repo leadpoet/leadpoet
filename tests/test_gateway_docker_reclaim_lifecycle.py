@@ -301,3 +301,31 @@ docker() {
     assert calls == ([] if host == 'production-identity' else ['ps'] if host == 'occupied' else ['ps', 'info'])
     assert 'unsafe-docker-command' not in result.stderr
     assert retained.read_bytes() == b'rollback-state'
+
+
+def test_release_builder_isolation_preserves_production_role_cleanup_guards():
+    import yaml
+    workflow = yaml.safe_load(Path('.github/workflows/attested-v2-release.yml').read_text())
+    builds = workflow['jobs']['builds']
+    assert builds['strategy']['matrix']['include'] == [
+        {'domain': 'gateway', 'runner': 'ubuntu-24.04'},
+        {'domain': 'validator', 'runner': 'runs-on'},
+    ]
+    assert '/runner=attested-v2-isolated/spot=false/retry=false' in builds['runs-on']
+    assert any(step.get('run') == 'bash .github/scripts/build_attested_release.sh'
+               for step in builds['steps'])
+    release = Path('.github/scripts/build_attested_release.sh').read_text()
+    build = release.index('/usr/bin/time -v bash gateway/tee/build_release_evidence_v2.sh')
+    assert release.index('verify_attested_builder_isolation.py') < build
+    assert release.index('test -z "$existing_containers"') < build
+    assert release.index('leadpoet_acquire_docker_operation_lock_v2') < build
+    assert "trap 'leadpoet_release_docker_operation_lock_v2' EXIT" in release
+    assert 'reclaim_docker_storage_v2.sh' not in release
+
+    # Managed production hosts retain their existing terminal cleanup trap.
+    role = Path('gateway/tee/build_role_enclaves.sh').read_text()
+    cleanup = function(role, 'cleanup_build')
+    assert 'trap cleanup_build EXIT' in role
+    assert '[ "$MANAGED_DOCKER_HOST" = 1 ] && [ "$COLD_DOCKER_BUILD_STARTED" = 1 ]' in cleanup
+    assert 'VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1' in cleanup
+    assert 'reclaim_docker_storage_v2.sh' in cleanup

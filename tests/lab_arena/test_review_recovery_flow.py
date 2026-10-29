@@ -12,6 +12,9 @@ import pytest
 from lab_arena import broker, code_review, contracts, source_bundle
 from lab_arena.service import ServiceError
 from lab_arena.store import new_lease_token
+from tests.lab_arena.lab_arena_pg_harness import (
+    current_service_database,
+)
 from tests.lab_arena.test_lab_arena_service_round import (
     CANARY_KEYS,
     CANARY_OPENROUTER_KEY,
@@ -24,9 +27,6 @@ from tests.lab_arena.test_lab_arena_service_round import (
 )
 
 
-from tests.lab_arena.lab_arena_pg_harness import current_service_database
-from tests.lab_arena.historical_service_harness import freeze_historical_intake_dates
-
 @pytest.fixture(scope="module")
 def database():
     yield from current_service_database()
@@ -36,22 +36,13 @@ def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-@pytest.mark.parametrize("cutoff", [
-    "2026-10-29T00:00:00Z", "2026-11-01T00:00:00Z",
-    "2027-01-01T00:00:00Z", "2028-03-01T00:00:00Z",
-])
-def test_midnight_replacement_freeze_remains_2300_across_date_boundaries(cutoff):
-    row = {"configuration_doc": {"schedule": {"submission_cutoff": cutoff}}}
-    from lab_arena.service import ArenaService
-    freeze = ArenaService._submission_replacement_cutoff(row)
-    assert (freeze.hour, freeze.minute) == (23, 0)
-    assert freeze + timedelta(hours=1) == datetime.fromisoformat(cutoff.replace("Z", "+00:00"))
-
-
 def _signed_reserve(harness: Harness, round_id: str, flavor: str, miner_label: str):
     """Reserve an upload through the same signed API used by a real miner."""
 
     miner = keypair("svc-miner-" + miner_label)
+    # Positive admission fixtures are registered miners; request validation stays real.
+    if miner.ss58_address not in harness.chain.registered:
+        harness.chain.registered.append(miner.ss58_address)
     payload = flavor_source_archive(flavor)
     facts = source_bundle.validate_source_archive(payload)
     request = contracts.build_signed_request(
@@ -218,8 +209,7 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     harness.review_transport = transport
     assert harness.service.store.code_review_schema()["max_transient_attempts"] is None
 
-    # Keep real PostgreSQL admission before the one-hour replacement freeze,
-    # including when CI runs during the last UTC hour.
+    # Leave two real hours for admission, including in the last UTC hour.
     now = datetime.now(timezone.utc)
     harness.clock.now = now
     cutoff = now + timedelta(hours=2)
@@ -392,17 +382,8 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     # Freeze and publish the full round. Only the selected replacement enters
     # evaluation beside the baseline, and it receives all 20 ICP assignments.
     harness.clock.advance_to(_iso(review_cutoff))
-    # All admission checks above use real current database time. Freeze a
-    # coherent historical intake window for this fixture's legacy judge; the
-    # normal commit derives its bank/evaluation dates and retains live leases.
-    assert harness.service.store.list_runs(round_id) == []
-    freeze_historical_intake_dates(harness, "2026-10-12")
     committed = harness.service.advance_round(round_id)
     assert committed["status"] == "ok"
-    frozen = harness.service.store.get_round(round_id)
-    assert frozen["status"] == "committed"
-    assert str(frozen["evaluation_date"]) == "2026-10-12"
-    assert str(frozen["icp_set_date"]) == "2026-10-11"
     participants = harness.service.store.get_round(round_id)["participants"]
     challenger_ids = {
         row["submission_id"] for row in participants if not row["is_king"]
@@ -484,3 +465,15 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
         404,
     )
     assert run_reads == []
+
+
+@pytest.mark.parametrize("cutoff", [
+    "2026-10-29T00:00:00Z", "2026-11-01T00:00:00Z",
+    "2027-01-01T00:00:00Z", "2028-03-01T00:00:00Z",
+])
+def test_midnight_replacement_freeze_remains_2300_across_date_boundaries(cutoff):
+    row = {"configuration_doc": {"schedule": {"submission_cutoff": cutoff}}}
+    from lab_arena.service import ArenaService
+    freeze = ArenaService._submission_replacement_cutoff(row)
+    assert (freeze.hour, freeze.minute) == (23, 0)
+    assert freeze + timedelta(hours=1) == datetime.fromisoformat(cutoff.replace("Z", "+00:00"))

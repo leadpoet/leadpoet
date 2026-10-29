@@ -40,6 +40,7 @@ def _row():
 def _long_job_body():
     return (
         "SOURCE-START Example enterprise account executive opening.\n"
+        "[Example careers](https://example.com/careers)\n"
         + ("Responsibilities, qualifications, and company context. " * 530)
         + "\nSOURCE-END Applications are closed for this position."
     )
@@ -204,6 +205,7 @@ def test_long_evidence_still_requires_stage3_terminal_verdict():
             miner_signal_date=SIGNAL_DATE,
             evidence_type="HIRING",
             stage1_soft_reject=True,
+            verified_company_identity=_verified_identity(),
         ))
 
     assert len(prompts) == 1
@@ -249,6 +251,7 @@ def _exact_ats_contents(
     title="Enterprise Account Executive",
     text=(
         "Enterprise Account Executive\n"
+        "[Example careers](https://example.com/careers)\n"
         "Responsibilities: own the sales cycle. Qualifications: five years "
         "of sales experience. Apply for this job. Employment type: full-time."
     ),
@@ -399,6 +402,7 @@ def test_full_verifier_budgets_verified_identity_and_exact_ats_sources(
     ]
     body = (
         "SOURCE-START Example enterprise account executive opening.\n"
+        "[Example careers](https://example.com/careers)\n"
         + ("Responsibilities, qualifications, and company context. " * 1_200)
         + "\nSOURCE-END Applications are open for this position."
     )

@@ -202,7 +202,7 @@ def test_late_failure_cannot_create_a_final_judgment(monkeypatch, failure):
 @pytest.mark.parametrize("bad_final", [
     "fabricated_quote", "research_tool", "provider_failure",
 ])
-def test_late_final_turn_keeps_evidence_and_bounded_correction_limits(
+def test_late_final_turn_keeps_one_correction_and_cannot_relax_evidence(
     monkeypatch, bad_final,
 ):
     clock = _Clock()
@@ -213,22 +213,22 @@ def test_late_final_turn_keeps_evidence_and_bounded_correction_limits(
         if len(requests) == 1:
             clock.now = 122.5
             return 200, _response("fetch_page", {"url": URL})
-        assert len(requests) <= (3 if bad_final == "fabricated_quote" else 2)
+        assert len(requests) == 2 or (bad_final == "fabricated_quote" and len(requests) == 3)
         if bad_final == "provider_failure":
             return 503, {"error": "unavailable"}
         if bad_final == "research_tool":
             return 200, _response("search_web", {"query": "Acme"}, call=2)
         return 200, _response("submit_findings", {"findings": [
             _finding(quote="A fabricated statement absent from the loaded source."),
-        ]}, call=2)
+        ]}, call=len(requests))
 
     result = _investigate(monkeypatch, post, clock)
 
     assert len(requests) == (3 if bad_final == "fabricated_quote" else 2)
     assert result.get("_completed_submit") is not True
-    assert result["failure_reason"] in {
-        "admission_budget_interrupted", "malformed_response", "provider_error",
-    }
+    assert result["failure_reason"] == (
+        "provider_error" if bad_final == "provider_failure" else "malformed_response"
+    )
     assert result.get("claims", {}).get("industry", {}).get("status") != "VERIFIED"
 
 

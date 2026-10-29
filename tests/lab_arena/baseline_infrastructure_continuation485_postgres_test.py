@@ -280,7 +280,11 @@ def test_signed_runner_completes_missing_tenth_pair_and_publishes(database,tmp_p
     preserved=[r for r in old_runs if r['status']=='accepted']
     assert len([r for r in preserved if r['submission_id']==baseline])==18
     assert not harness.service._baseline_final_ready(frozen)
-    assert harness.service.publish(round_id)['status']!='ok'
+    before_ledger=harness.service.store.list_ledger()
+    assert harness.service.publish(round_id)=={'status':'stale','round_status':'stage2_scoring'}
+    assert harness.service.store.get_round(round_id)==frozen
+    assert harness.service.store.list_runs(round_id)==old_runs
+    assert harness.service.store.list_ledger()==before_ledger
     harness.service.advance_round(round_id)
     pending=harness.service.store.list_runs(round_id,status='pending')
     assert len(pending)==1 and pending[0]['attempt']==4 and pending[0]['icp_position']==0
@@ -289,7 +293,10 @@ def test_signed_runner_completes_missing_tenth_pair_and_publishes(database,tmp_p
     final=harness.service.store.get_round(round_id)
     rows=harness.service.store.list_runs(round_id)
     new=next(r for r in rows if r['run_id']==failed['assignment_id']+':4')
-    assert new['status']=='accepted' and new['per_icp_score']==80
+    assert new['status']=='accepted'
+    # Continuation judgments remain unmaterialized until publication's guarded
+    # score writer validates the accepted output and its bound judgment.
+    assert new['per_icp_score'] is None and new['qualification_doc'] is None
     assert new['lease_token_hash'] and new['claim_request_id'] and new['claim_response']['status']=='leased'
     judges=[r for r in rows if r['kind']=='score' and r['scored_run_id']==new['run_id']]
     assert len(judges)==1 and judges[0]['status']=='accepted'
@@ -299,9 +306,21 @@ def test_signed_runner_completes_missing_tenth_pair_and_publishes(database,tmp_p
     ledger=harness.service.store.list_ledger(run_id=new['run_id'])
     assert {'reservation','dispatch','settlement'}<={r['entry_kind'] for r in ledger}
     assert any(r['entry_kind']=='settlement' and r['amount_microusd']>0 for r in ledger)
-    assert harness.service._baseline_final_ready(final)
+    assert not harness.service._baseline_final_ready(final)
+    assert final['publication_doc'] is None and final['reward_activated_at'] is None
+    before_publication_ledger=harness.service.store.list_ledger()
     assert harness.service.publish(round_id)['status']=='ok'
-    assert harness.service.store.get_round(round_id)['status']=='published'
+    published=harness.service.store.get_round(round_id)
+    assert published['status']=='published'
+    scored=harness.service.store.get_run(new['run_id'])
+    assert scored['per_icp_score']==80 and scored['qualification_doc'] is not None
+    assert {k:v for k,v in scored.items() if k not in ('per_icp_score','qualification_doc','updated_at')}=={
+        k:v for k,v in new.items() if k not in ('per_icp_score','qualification_doc','updated_at')}
+    assert datetime.fromisoformat(scored['updated_at'])>=datetime.fromisoformat(new['updated_at'])
+    assert [r for r in harness.service.store.list_runs(round_id) if r['run_id']!=new['run_id']]==[
+        r for r in rows if r['run_id']!=new['run_id']]
+    assert harness.service.store.list_ledger()==before_publication_ledger
+    assert harness.service._baseline_final_ready(published)
     harness.service.store.close()
 
 

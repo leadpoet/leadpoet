@@ -1883,7 +1883,7 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
             text=True,
             timeout=5,
             env={
-                **os.environ,
+                **_current_restart_environment(),
                 "GATEWAY_ROOT": str(tmp_path / "missing-gateway"),
                 "GATEWAY_RESTART_LOCK_FILE": str(lock_file),
                 "GATEWAY_RESTART_RECOVERY_LOCK_FILE": str(
@@ -2159,3 +2159,14 @@ def test_pre_shutdown_cleanup_uses_candidate_helper_before_old_checkout_activati
         ("--max-candidates", "64"),
     ):
         assert args[args.index(option) + 1] == expected
+
+
+def _current_restart_environment():
+    """Model the controller's instance-role environment, not CI credentials."""
+    return {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("AWS_") and key not in {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "BOTO_CONFIG", "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
+        }
+    }

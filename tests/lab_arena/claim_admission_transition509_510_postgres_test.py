@@ -76,6 +76,8 @@ def _assert_complete_current_round(database,tmp_path,monkeypatch):
     from tests.lab_arena.test_integrity_round import IntegrityHarness
     from tests.lab_arena.baseline_scored_first_postgres_test import _baseline_first_judge,_enable_verified_proxy_runtime
     from tests.lab_arena.icp_fixtures import daily_icps
+    from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
+    prepare_current_service_reads(lambda:database[0].connect(**database[1]))
     with database[0].connect(**database[1]) as conn,conn.cursor() as cur:
         cur.execute('SET LOCAL session_replication_role=replica')
         cur.execute('TRUNCATE public.lab_arena_rounds RESTART IDENTITY CASCADE')

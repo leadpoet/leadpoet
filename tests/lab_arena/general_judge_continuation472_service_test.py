@@ -1,4 +1,5 @@
-"""Prior-day work is not rescored; expired unmeasured work cannot publish."""
+"""Incomplete prior work is preserved while the publication deadline is enforced."""
+import copy
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -9,19 +10,25 @@ from tests.lab_arena.complete_baseline_final_authority_test import fixture
 from tests.lab_arena.icp_fixtures import daily_icps
 
 
-def test_oct13_unmeasured_round_cancels_without_rescoring_after_deadline():
+@pytest.mark.parametrize("moment,cancelled", [
+    (datetime(2026, 10, 13, 20, 30, 2, tzinfo=timezone.utc), False),
+    (datetime(2026, 10, 13, 20, 30, 3, tzinfo=timezone.utc), True),
+    (datetime(2026, 10, 14, tzinfo=timezone.utc), True),
+])
+def test_oct13_incomplete_round_obeys_deadline_without_rescoring(moment, cancelled):
     instance, row, sources, judges, writes, clock, _ = fixture()
     row["evaluation_date"] = "2026-10-13"
     sources[0]["per_icp_score"] = None
     judges[0].update(status="failed", terminal_cause="judge_error")
-    clock[0] = datetime(2026, 10, 14, tzinfo=timezone.utc)
+    clock[0] = moment
+    before = copy.deepcopy((sources, judges))
     instance._record_recovered_judgment_scores = lambda _row: (_ for _ in ()).throw(
         AssertionError("prior evaluation must not be rescored"))
 
-    assert instance.publish(row["round_id"]) == {"status": "cancelled"}
-    assert writes == [(row["round_id"], "scoring_incomplete")]
-    assert sources[0]["per_icp_score"] is None
-    assert judges[0]["status"] == "failed"
+    assert instance.publish(row["round_id"]) == ({"status": "cancelled"} if cancelled else {
+        "status": "retry", "round_status": "scored", "reason": "baseline_incomplete"})
+    assert writes == ([(row["round_id"], "scoring_incomplete")] if cancelled else [])
+    assert (sources, judges) == before
 
 
 def test_shadow_rollout_matches_database_reward_gate():

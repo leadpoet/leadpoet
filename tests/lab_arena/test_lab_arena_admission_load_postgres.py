@@ -77,6 +77,9 @@ def _signed(harness, miner, scope, body):
 
 def _upload(harness, http, flavor, *, miner_label=None):
     miner = keypair("svc-miner-" + (miner_label or flavor))
+    # Positive admission fixtures are registered miners; request validation stays real.
+    if miner.ss58_address not in harness.chain.registered:
+        harness.chain.registered.append(miner.ss58_address)
     payload = flavor_source_archive(flavor)
     facts = source_bundle.validate_source_archive(payload, require_license=True)
     response = http.post("/arena/v1/submissions/presign", json=_signed(
@@ -199,17 +202,28 @@ def _admit_at_cap(harness, http):
     return first
 
 
-def _freeze_and_open(harness):
-    # Admission uses current SQL and real time. This load proof retains its
-    # original legacy judge, with coherent pre-continuation intake authority.
+def _freeze_and_open(harness, *, historical_intake):
+    # The current queue proof keeps current continuation authority. Only the
+    # separate legacy-judge publication proof reconstructs the old intake.
     assert harness.service.store.list_runs(harness.round_id) == []
-    cutoff = freeze_historical_intake_dates(harness, "2026-09-02")
+    cutoff = harness.schedule()["submission_cutoff"]
+    if historical_intake:
+        freeze_historical_intake_dates(harness, "2026-09-02")
+        expected_cutoff = "2026-09-02T00:00:00Z"
+    else:
+        expected_cutoff = cutoff
     harness.clock.advance_to(cutoff)
     assert harness.service.advance_round(harness.round_id)["participants"] == 257
     row = harness.service.store.get_round(harness.round_id)
-    assert row["evaluation_date"] == "2026-09-02"
-    assert row["icp_set_date"] == "2026-09-01"
-    assert row["configuration_doc"]["schedule"]["submission_cutoff"] == "2026-09-02T00:00:00Z"
+    evaluation_date = expected_cutoff[:10]
+    assert row["evaluation_date"] == evaluation_date
+    assert row["icp_set_date"] == (
+        datetime.strptime(evaluation_date, "%Y-%m-%d") - timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    assert row["configuration_doc"]["schedule"]["submission_cutoff"] == expected_cutoff
+    with harness.connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT public.lab_arena_judge_continuation_enabled_v1(%s)", (harness.round_id,))
+        assert cur.fetchone() == (not historical_intake,)
     assert harness.service.store.list_runs(harness.round_id) == []
     for p in row["participants"]:
         harness.flavors.setdefault(p["submission_id"], "PublicBaseline")
@@ -221,12 +235,18 @@ def test_256_admission_ten_icp_queue_and_concurrent_claims(connect, tmp_path):
     harness = _harness(connect, tmp_path, count=10, suffix="queue", baseline_first=True)
     with TestClient(create_app(harness.service)) as http:
         _admit_at_cap(harness, http)
-        assert _freeze_and_open(harness)["assignments"] == 10
+        assert _freeze_and_open(harness, historical_intake=False)["assignments"] == 10
         harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=http)
-        harness.advance_until("stage1_scored", runners=2)
+        # Current continuation opens miner execution from stage1_scoring once
+        # the baseline executions are accepted. Its accepted judgments are
+        # materialized by the guarded publication writer at the final phase.
+        opened = harness.advance_until("stage2", runners=2)
         baseline = harness.service.store.list_runs(harness.round_id, stage=1, kind="execute")
-        assert len(baseline) == 10 and all(r["per_icp_score"] > 0 for r in baseline)
-        assert harness.service.advance_round(harness.round_id)["assignments"] == 10 * 256
+        assert len(baseline) == 10 and all(r["status"] == "accepted" for r in baseline)
+        baseline_judges = harness.service.store.list_runs(harness.round_id, stage=1, kind="score")
+        assert len(baseline_judges) == 10 and all(r["status"] == "accepted" for r in baseline_judges)
+        assert all(r["per_icp_score"] is None for r in baseline)
+        assert opened["assignments"] == 10 * 256
         runs = harness.service.store.list_runs(harness.round_id, stage=2, kind="execute")
         expected = {(p["submission_id"], position) for p in harness.service.store.get_round(harness.round_id)["participants"] for position in range(10) if not p["is_king"]}
         assert len(runs) == len({r["assignment_id"] for r in runs}) == len(expected)
@@ -262,7 +282,7 @@ def test_256_backlog_executes_scores_and_publishes_over_http(connect, tmp_path):
     with TestClient(create_app(harness.service)) as http:
         example = _admit_at_cap(harness, http)
         harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=http)
-        assert _freeze_and_open(harness)["assignments"] == 2
+        assert _freeze_and_open(harness, historical_intake=True)["assignments"] == 2
         # Keep actual runners and their caches across the full competition.
         runners = [harness.runner(i) for i in range(2)]
         # Cache eviction has separate tests. Keep these small fixture archives

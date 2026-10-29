@@ -6,7 +6,7 @@ import pytest
 
 from tests.lab_arena import proxy_model_capacity401_e2e_test as prior
 from tests.lab_arena import proxy_model_capacity401_postgres_test as frozen401
-from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
+from tests.lab_arena.proxy_model_capacity401_e2e_test import complete_application_database
 
 
 database = frozen401.database
@@ -32,22 +32,10 @@ def migrated(database, migrated399):
 
 
 def test_delay_fixes_preserve_baseline_miners_costs_promotion_and_weights(
-    database, migrated, tmp_path, monkeypatch,
+    complete_application_database, tmp_path,
 ):
-    monkeypatch.setattr(prior, "QualityHarness", _FrozenQualityHarness)
-    prior.test_company_only_baseline_miners_costs_promotion_and_publication(
-        database, migrated, tmp_path,
+    # Exact delay-migration replay fixtures remain available above. This flow
+    # invokes the current service and its complete guarded schema.
+    prior._exercise_company_only_round(
+        complete_application_database, True, tmp_path,
     )
-
-
-class _FrozenQualityHarness(HistoricalStoreHarnessMixin, prior.QualityHarness):
-    def build_service(self):
-        service = super().build_service()
-        commit = service.commit_benchmark
-
-        def commit_historical(round_id):
-            freeze_historical_intake_dates(self, "2026-10-07")
-            return commit(round_id)
-
-        service.commit_benchmark = commit_historical
-        return service

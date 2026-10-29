@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gzip
 import json
 import os
 import sys
@@ -25,8 +26,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# Worker snapshots alone may reach 256 MiB. Parse one bounded export at a
-# time; the dataset builder retains only the much smaller projected records.
+# Conservative default; large native exports need an explicit byte budget.
+# The bound applies after decompression. Parse only one export at a time.
 MAX_EXAMPLE_BYTES = 256 * 1024 * 1024
 MAX_REVIEW_BYTES = 16 * 1024 * 1024
 
@@ -34,19 +35,36 @@ MAX_REVIEW_BYTES = 16 * 1024 * 1024
 def _example_paths(paths):
     for path in paths:
         if path.is_dir():
-            yield from sorted(item for item in path.glob("*.json") if item.is_file())
+            yield from sorted(item for item in path.iterdir()
+                              if item.is_file() and (item.name.endswith(".json") or item.name.endswith(".json.gz")))
         else:
             yield path
 
 
-def _examples(paths):
+def _example_limit_argument(parser):
+    parser.add_argument("--max-example-bytes", type=int, default=MAX_EXAMPLE_BYTES,
+                        help="maximum decompressed bytes per example (default: 268435456); "
+                             "raise explicitly for large native episodes; JSON parsing needs extra memory")
+
+
+def _examples(paths, *, max_example_bytes=MAX_EXAMPLE_BYTES, max_total_bytes=None):
+    if isinstance(max_example_bytes, bool) or not isinstance(max_example_bytes, int) or max_example_bytes <= 0:
+        raise ValueError("invalid_max_example_bytes")
+    total_bytes = 0
     for path in _example_paths(paths):
-        with path.open("rb") as stream:
-            if os.fstat(stream.fileno()).st_size > MAX_EXAMPLE_BYTES:
+        compressed = path.name.endswith(".gz")
+        with path.open("rb") as source:
+            if not compressed and os.fstat(source.fileno()).st_size > max_example_bytes:
                 raise ValueError("example_too_large")
-            raw = stream.read(MAX_EXAMPLE_BYTES + 1)
-            if len(raw) > MAX_EXAMPLE_BYTES:
-                raise ValueError("example_too_large")
+            with contextlib.ExitStack() as stack:
+                stream = stack.enter_context(gzip.GzipFile(fileobj=source)) if compressed else source
+                remaining = max_example_bytes if max_total_bytes is None else min(max_example_bytes, max_total_bytes - total_bytes)
+                if remaining < 0:
+                    raise ValueError("input_batch_too_large")
+                raw = stream.read(remaining + 1)
+                if len(raw) > remaining:
+                    raise ValueError("example_too_large")
+        total_bytes += len(raw)
         document = json.loads(raw)
         del raw
         if not isinstance(document, dict):
@@ -80,7 +98,8 @@ def main(argv=None):
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--examples", type=Path, nargs="+", required=True,
-                        help="exported example files, or directories whose top-level *.json files are exports")
+                        help="exported example files, or directories whose top-level *.json and *.json.gz files are exports")
+    _example_limit_argument(parser)
     parser.add_argument("--output", type=Path, required=True, help="new directory for the dataset")
     parser.add_argument("--eval-percent", type=int, default=training_dataset.Rules.eval_percent)
     parser.add_argument("--seed", default=training_dataset.Rules.seed)
@@ -94,6 +113,8 @@ def main(argv=None):
     parser.add_argument("--review-decisions", type=Path,
                         help="exact-record review JSONL; write a separate reviewed dataset")
     args = parser.parse_args(argv)
+    if args.max_example_bytes <= 0:
+        parser.error("max-example-bytes must be positive")
     if args.review_sample_size < 0:
         parser.error("review-sample-size must be nonnegative")
     try:
@@ -108,7 +129,7 @@ def main(argv=None):
     created = False
     try:
         projections = {}
-        splits, manifest = training_dataset.build(_examples(args.examples), rules,
+        splits, manifest = training_dataset.build(_examples(args.examples, max_example_bytes=args.max_example_bytes), rules,
                                                   curation_metadata=projections)
         source_counts = manifest["counts"]
         curation = training_curation.flag_manifest(splits, manifest["dataset_version"], projections)

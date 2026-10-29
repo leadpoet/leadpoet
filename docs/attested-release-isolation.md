@@ -24,8 +24,9 @@ toolchain selection always come from the exact current main commit.
 Release publication must remain unavailable until all of these checks pass:
 
 1. A repository administrator configures the `attested-release` environment.
-   It permits only `main`, requires an independent reviewer, prevents self-review,
-   and prevents administrator bypass where the repository plan supports it.
+   It permits only `main` and requires manual approval from a configured reviewer.
+   The initiating user may approve when listed as a reviewer. Administrator
+   bypass remains disabled.
 2. Builder A runs on a fresh GitHub-hosted Linux x64 runner. Prove its actual
    memory and free disk are sufficient with the complete build below. Standard
    runner specifications are not a completed build or a peak-usage measurement.

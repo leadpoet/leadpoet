@@ -110,7 +110,7 @@ class _Clock:
 
 
 @pytest.mark.parametrize("search_limit", [1, 2])
-def test_time_forced_valid_negative_completes_with_unused_research(
+def test_time_forced_valid_unproven_can_complete_from_loaded_evidence(
     monkeypatch, search_limit,
 ):
     clock = _Clock()
@@ -161,6 +161,8 @@ def test_time_forced_valid_negative_completes_with_unused_research(
     assert result["usage"]["search_calls"] == 1
     assert result["usage"]["fetch_calls"] == 0
     assert result["claims"]["industry"]["status"] == "UNPROVEN"
+    # A valid negative packet can finish bounded review of loaded evidence.
+    # Unused research capacity is not itself a failed provider obligation.
     assert result["_completed_submit"] is True
     assert result["failure_reason"] == ""
     assert result[investigator.PRIVATE_FETCHED_PAGES_KEY][URL]["text"] == QUOTE
@@ -649,7 +651,10 @@ def test_late_repair_still_rejects_fabricated_quote(monkeypatch):
         )
 
     result = _run(monkeypatch, fake_post_json)
+    # The admitted serialization retry owns one final submit-only correction;
+    # fabricated proof remains invalid after that correction settles.
     assert len(requests) == 3
+    assert requests[-1]["tool_choice"]["function"]["name"] == "submit_findings"
     assert result["_completed_submit"] is False
     assert result["failure_reason"] == MALFORMED_RESPONSE_FAILURE_REASON
     assert result["claims"]["industry"]["status"] != "VERIFIED"

@@ -12,8 +12,8 @@ import json
 import shutil
 import socket
 import subprocess
+import sys
 import time
-from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -22,8 +22,6 @@ import pytest
 from lab_arena import contracts
 from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport, TABLES
 
-ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = ROOT / "scripts"
 DOCKER = shutil.which("docker")
 POSTGREST_IMAGE = "postgrest/postgrest:v14.5@sha256:b574528fe109c8343c1247155734d03df8c34b462f342dca0ccc20244fc36ef9"
 POSTGRES_IMAGE = "postgres:17.9@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545"
@@ -459,3 +457,17 @@ def test_private_backend_has_no_anonymous_fallback(stack):
     response = _docker("exec", stack["proxy_name"], "wget", "-q", "-O", "-",
                        "http://" + stack["rest_name"] + ":3000/rpc/api_test_identity")
     assert response.returncode != 0 and "401" in response.stderr
+
+
+def test_long_run_filter_and_postgrest_content_location_survive_target(stack):
+    run_ids = ["run-" + "x" * 36 + "-%03d" % number for number in range(215)]
+    params = [("select", "run_id"), ("run_id", "in.(" + ",".join(run_ids) + ")"), ("limit", "1")]
+    with httpx.Client(timeout=10, trust_env=False) as client:
+        request = client.build_request("GET", stack["base_url"] + "/rest/v1/lab_arena_runs",
+                                       params=params, headers={"apikey": stack["values"]["arena_key"]})
+        assert 8192 < len(request.url.raw_path) < 16384
+        response = client.send(request)
+    assert response.status_code == 200
+    assert response.json() == []
+    assert len(response.headers["Content-Location"]) > 8192
+    assert "run_id=in." in response.headers["Content-Location"]

@@ -23,6 +23,20 @@ def _isolate_optional_industry_policy(monkeypatch):
     # Tests of the new reviewer or policy conflicts set the value themselves.
     monkeypatch.delenv("ARENA_INDUSTRY_EVIDENCE_MODEL", raising=False)
 
+@pytest.fixture
+def scorer_process_environment():
+    """Run the scorer entrypoint with its proxy credentials, then restore CI env.
+
+    The gateway CI keys belong to a different process. Entrypoint tests use
+    the scorer container's placeholders and retain the real conflict checks.
+    This is opt-in; credential-conflict tests keep their supplied environment.
+    """
+    from unittest.mock import patch
+    from lab_arena.scorer_entrypoint import PLACEHOLDER_CREDENTIALS
+
+    with patch.dict(os.environ, PLACEHOLDER_CREDENTIALS):
+        yield
+
 # `lab_arena.validator.main` replaces its own process with `sudo ... validator`
 # when it runs on a non-root Linux host that already grants non-interactive
 # sudo. CI runners are exactly that host, so any check that calls `main`

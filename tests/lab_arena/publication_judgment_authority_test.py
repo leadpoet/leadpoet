@@ -1,6 +1,7 @@
 """Publication recognizes each frozen judgment format without replaying work."""
 import copy
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -53,9 +54,8 @@ def test_completed_judgments_use_the_frozen_scorer_format(format):
 @pytest.mark.parametrize("format", ["legacy", "integrity", "company"])
 @pytest.mark.parametrize("mutation", [
     "missing_score", "missing_judge", "failed_judge", "wrong_execution",
-    "wrong_miner", "wrong_round", "wrong_stage", "missing_output",
 ])
-def test_unfinished_or_unbound_judgments_still_block(format, mutation):
+def test_unfinished_judgments_wait_for_bound_work(format, mutation):
     instance, row, sources, judges = authority_fixture(format)
     if mutation == "missing_score":
         sources[0]["per_icp_score"] = None
@@ -65,19 +65,28 @@ def test_unfinished_or_unbound_judgments_still_block(format, mutation):
         judges[0].update(status="failed", terminal_cause="judge_error")
     elif mutation == "wrong_execution":
         judges[0]["scored_run_id"] = "different-execution"
-    elif mutation == "wrong_miner":
-        judges[0]["miner_hotkey"] = "different-miner"
-    elif mutation == "wrong_round":
-        judges[0]["round_id"] = "different-round"
-    elif mutation == "wrong_stage":
-        judges[0]["stage"] = 2
-    elif mutation == "missing_output":
-        judges[0]["output_ref"] = None
-    if mutation in {"wrong_miner", "wrong_round", "wrong_stage", "missing_output"}:
-        with pytest.raises(service.ServiceError, match="accepted_judgment_binding_invalid"):
-            instance._unfinished_judgments(row)
-    else:
-        assert instance._unfinished_judgments(row)
+    before = copy.deepcopy((row, sources, judges))
+    assert instance._unfinished_judgments(row) is True
+    assert (row, sources, judges) == before
+
+
+@pytest.mark.parametrize("format", ["legacy", "integrity", "company"])
+@pytest.mark.parametrize("field,value", [
+    ("miner_hotkey", "different-miner"), ("round_id", "different-round"),
+    ("stage", 2), ("output_ref", None),
+    ("submission_id", "different-submission"), ("icp_position", 9),
+    ("terminal_cause", "judge_error"),
+])
+def test_accepted_unbound_judgments_fail_closed(format, field, value):
+    instance, row, sources, judges = authority_fixture(format)
+    judges[0][field] = value
+    before = copy.deepcopy((row, sources, judges))
+    # An accepted invalid judgment is an integrity failure. It must never
+    # become unfinished work that publication could later omit.
+    with pytest.raises(service.ServiceError, match="^accepted_judgment_binding_invalid$") as error:
+        instance._unfinished_judgments(row)
+    assert error.value.status == 500
+    assert (row, sources, judges) == before
 
 
 @pytest.mark.parametrize("format", ["integrity", "company"])
@@ -101,7 +110,7 @@ def test_cache_formats_cannot_fall_back_to_legacy_authority(format, mutation):
             scope.pop("cache_key")
             scope["scorer_image_digest" if mutation == "wrong_image" else "round_id"] = "wrong"
             ref["cache_key"] = scope["cache_key"] = contracts.document_hash(scope)
-    with pytest.raises(service.ServiceError, match="accepted_judgment_binding_invalid"):
+    with pytest.raises(service.ServiceError, match="^accepted_judgment_binding_invalid$"):
         instance._unfinished_judgments(row)
 
 
@@ -116,8 +125,24 @@ def test_empty_company_refs_require_a_valid_empty_execution(empty):
     if empty:
         assert instance._unfinished_judgments(row) is False
     else:
-        with pytest.raises(service.ServiceError, match="accepted_judgment_binding_invalid"):
+        with pytest.raises(service.ServiceError, match="^accepted_judgment_binding_invalid$"):
             instance._unfinished_judgments(row)
+
+
+@pytest.mark.parametrize("format", ["legacy", "integrity", "company"])
+@pytest.mark.parametrize("hour", [19, 21])
+def test_publication_never_omits_accepted_unbound_judgments(format, hour):
+    instance, row, sources, judges = authority_fixture(format)
+    row["evaluation_date"] = "2026-10-13"
+    instance.now = lambda: datetime(2026, 10, 13, hour, tzinfo=timezone.utc)
+    judges[0]["miner_hotkey"] = "different-miner"
+    before = copy.deepcopy((row, sources, judges))
+    instance._store.record_run_scores = lambda *_, **__: pytest.fail("invalid score persisted")
+    instance._store.transition_round = lambda *_, **__: pytest.fail("invalid publication persisted")
+    # Exercise the real publication caller on both sides of its deadline.
+    with pytest.raises(service.ServiceError, match="^accepted_judgment_binding_invalid$"):
+        instance.publish(row["round_id"])
+    assert (row, sources, judges) == before
 
 
 @pytest.mark.parametrize("format", ["legacy", "integrity", "company"])

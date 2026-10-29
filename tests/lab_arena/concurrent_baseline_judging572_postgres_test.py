@@ -38,6 +38,46 @@ def prepare(scenario, attempt=1, floor=0):
     return rid, baseline, pending
 
 
+def publish_recovered_baseline(scenario, pending):
+    db,h,_,_=scenario
+    rid=h.round_id
+    before=h.service.store.list_runs(rid)
+    source=h.service.store.get_run(pending['scored_run_id'])
+    assert h.status()=='scored' and source['per_icp_score'] is None
+    assert source['qualification_doc'] is None
+    assert h.service.store.get_run(pending['run_id'])['status']=='accepted'
+    # This fixture has genuine accepted empty outputs: its exact measured
+    # projection is zero/empty qualification, materialized only by publish.
+    assert json.loads(h.objects.get(source['output_ref']))['companies']==[]
+    with db[0].connect(**db[1]) as conn,conn.cursor() as cur:
+        preserved=prior.fingerprint(cur,rid)
+        assert scalar(cur,'public.lab_arena__baseline_final_ready_v1(%s)',(rid,)) is False
+        for patch in ("status='published'","promotion_doc='{}'::jsonb","reward_activated_at=now()"):
+            cur.execute('SAVEPOINT unmaterialized572')
+            with pytest.raises(db[0].Error,match='lab_arena_final_baseline_incomplete'):
+                cur.execute('UPDATE public.lab_arena_rounds SET '+patch+' WHERE round_id=%s',(rid,))
+            cur.execute('ROLLBACK TO SAVEPOINT unmaterialized572')
+    assert h.service.publish(rid)['status']=='ok'
+    assert h.status()=='published'
+    projected=h.service.store.get_run(source['run_id'])
+    assert projected['per_icp_score']==0
+    assert projected['qualification_doc']=={'companies':[]}
+    after={run['run_id']:run for run in h.service.store.list_runs(rid)}
+    assert set(after)=={run['run_id'] for run in before}
+    for run in before:
+        if run['kind']=='execute' and run['per_icp_score'] is None:
+            assert after[run['run_id']]['per_icp_score']==0
+            assert after[run['run_id']]['qualification_doc']=={'companies':[]}
+            for key in run.keys()-{'per_icp_score','qualification_doc','updated_at'}:
+                assert after[run['run_id']][key]==run[key],key
+        else:
+            assert after[run['run_id']]==run
+    with db[0].connect(**db[1]) as conn,conn.cursor() as cur:
+        assert prior.fingerprint(cur,rid)==preserved
+    ranking=h.service.store.get_round(rid)['publication_doc']['final_ranking']
+    assert len(ranking)==2 and all(row['final_score']==0 for row in ranking)
+
+
 @pytest.mark.parametrize('attempt,floor', [(1,0),(2,0),(20,0),(1,1)])
 def test_real_overlap_and_final_authority(scenario, attempt, floor):
     db,h,_,_=scenario
@@ -100,9 +140,7 @@ def test_real_overlap_and_final_authority(scenario, attempt, floor):
     finally:
         runner.close()
     h.advance_until('scored',runners=1)
-    assert h.service.store.get_run(pending['scored_run_id'])['per_icp_score'] is not None
-    assert h.service.publish(rid)['status']=='ok'
-    assert h.status()=='published'
+    publish_recovered_baseline(scenario,pending)
 
 
 @pytest.mark.parametrize('variant',['missing','pending_source','duplicate','binding','deadline','cancelled','published','legacy'])
@@ -158,8 +196,7 @@ def test_miners_finish_while_baseline_retry_keeps_its_backoff(scenario):
     h.run_stage_with_runners(1)
     assert h.service.store.get_run(pending['run_id'])['status']=='accepted'
     h.advance_until('scored',runners=1)
-    assert h.service.store.get_run(pending['scored_run_id'])['per_icp_score'] is not None
-    assert h.service.publish(rid)['status']=='ok'
+    publish_recovered_baseline(scenario,pending)
 
 
 @pytest.mark.parametrize('signature',[

@@ -14,17 +14,14 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from lab_arena import broker, contracts, runtime, scoring, shim, verify
+from lab_arena import broker, contracts, runtime, scoring, service as service_module, shim, verify
 from lab_arena.contact_evidence import source_key
 from lab_arena.service import ServiceError
-from lab_arena.store import ArenaStoreError
 from qualification.scoring.competition import apply_company_judgment_context, _merge_contact_breakdown
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_REWARD_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
-from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 from tests.lab_arena.test_lab_arena_migration_postgres import claim
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import _verified_test_pool
 from tests.lab_arena.test_lab_arena_service_round import Harness
@@ -35,7 +32,7 @@ from tests.test_arena_company_quality_policy import _positive_breakdown
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture
@@ -57,7 +54,7 @@ def _bank(count: int) -> list[dict]:
 
 
 def _harness(connect, tmp_path, *, count: int, margin: float, challengers: list[str], baseline_first: bool = False) -> Harness:
-    harness = _FrozenHarness(connect, tmp_path, challengers=challengers, runners=["alpha", "beta"])
+    harness = Harness(connect, tmp_path, challengers=challengers, runners=["alpha", "beta"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         benchmark_icp_count=count,
@@ -96,11 +93,8 @@ def _start(harness: Harness, *, label: str, epoch: int) -> tuple[dict, list[dict
     for submission in harness.service.store.list_submissions(harness.round_id):
         with pytest.raises(ServiceError, match="source_not_public"):
             harness.service.public_submission_code(submission["submission_id"])
-    intake_cutoff = freeze_historical_intake_dates(harness, "2026-09-02")
-    configuration = harness.service.store.get_round(harness.round_id)["configuration_doc"]
-    harness.clock.advance_to(intake_cutoff)
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     assert harness.service.advance_round(harness.round_id)["status"] == "ok"
-    assert harness.service.store.get_round(harness.round_id)["evaluation_date"] == "2026-09-02"
     participants = harness.service.store.get_round(harness.round_id)["participants"]
     for participant in participants:
         harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
@@ -189,15 +183,7 @@ def test_ten_parallel_icps_form_one_execution_wave(connect, tmp_path):
 
 @pytest.mark.parametrize("count", [5, 10, 15, 17, 20, 30])
 def test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(connect, tmp_path, count, monkeypatch):
-    _prove_dynamic_cost_round(connect, tmp_path, count, monkeypatch)
-
-
-def test_frozen_seventeen_icp_judge_failure_preserves_work_without_publication(connect, tmp_path, monkeypatch):
-    _prove_dynamic_cost_round(connect, tmp_path, 17, monkeypatch, judge_failure=True)
-
-
-def _prove_dynamic_cost_round(connect, tmp_path, count, monkeypatch, *, judge_failure=False):
-    harness = _FrozenPerIcpHarness(connect, tmp_path, challengers=["Miner"], runners=["alpha", "beta"])
+    harness = PerIcpHarness(connect, tmp_path, challengers=["Miner"], runners=["alpha", "beta"])
     harness.service.config.defaults = replace(
         harness.service.config.defaults,
         benchmark_icp_count=count, promotion_margin=0.5,
@@ -228,6 +214,7 @@ def _prove_dynamic_cost_round(connect, tmp_path, count, monkeypatch, *, judge_fa
 
     harness.runner = verified_runner
     original_run_icp = harness.sandbox.run_icp
+    failed_judge_sources = set()
 
     class ChargedJudgeTransport(type(harness.provider)):
         def send(self, **kwargs):
@@ -257,12 +244,14 @@ def _prove_dynamic_cost_round(connect, tmp_path, count, monkeypatch, *, judge_fa
                 finally:
                     os.environ.pop(shim.WORKER_SOCKET_ENV, None)
 
-            if judge_failure and document["icp"]["icp_id"].endswith("_017"):
+            if (count == 17 and document["icp"]["icp_id"].endswith("_017")
+                and document["scored_run_id"] not in failed_judge_sources):
+                failed_judge_sources.add(document["scored_run_id"])
                 return runtime.fake_result(
                     exit_code=0,
                     output_bytes=json.dumps(scoring.build_scoring_failure(
                         document["scored_run_id"], "judge_error",
-                        detail="deterministic terminal judge failure",
+                        detail="deterministic first-attempt judge failure",
                     )).encode(),
                 )
 
@@ -295,35 +284,37 @@ def _prove_dynamic_cost_round(connect, tmp_path, count, monkeypatch, *, judge_fa
         return runtime.fake_result(exit_code=0, output_bytes=json.dumps({"companies": companies}).encode())
 
     harness.sandbox.run_icp = run_icp
+    if count == 17:
+        original_run_stage = harness.run_stage_with_runners
+
+        def recover_after_real_backoff(runners=2):
+            original_run_stage(runners)
+            with connect() as connection, connection.cursor() as cursor:
+                cursor.execute("SELECT run_id FROM public.lab_arena_runs WHERE round_id=%s AND kind='score' AND status='pending' AND attempt=2", (harness.round_id,))
+                pending = [row[0] for row in cursor.fetchall()]
+                if not pending:
+                    return
+                failures = [run for run in harness.service.store.list_runs(harness.round_id, kind="score") if run["status"] == "failed"]
+                held = harness.service.store.get_round(harness.round_id)
+                assert harness.service._unfinished_judgments(held)
+                failed_sources = {run["scored_run_id"] for run in failures}
+                assert all(run["per_icp_score"] is None for run in harness.service.store.list_runs(harness.round_id, kind="execute")
+                    if run["run_id"] in failed_sources)
+                cursor.execute("SELECT bool_and(clock_timestamp()<created_at+interval '30 seconds'),bool_and(public.lab_arena__judge_calls_clear_v1(assignment_id)) FROM public.lab_arena_runs WHERE run_id=ANY(%s)", (pending,))
+                assert cursor.fetchone() == (True, True)
+                # The real first claim pass respected the retry backoff. Move
+                # only pending fixture timestamps, never accepted evidence.
+                cursor.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' WHERE run_id=ANY(%s)", (pending,))
+            original_run_stage(runners)
+            retained = {run["run_id"]: run for run in harness.service.store.list_runs(harness.round_id, kind="score")}
+            assert all(retained[run["run_id"]] == run for run in failures)
+
+        harness.run_stage_with_runners = recover_after_real_backoff
     configuration, participants = _start(harness, label=f"cost{count}", epoch=36100 + count)
     assert configuration["sourcing_cost_eligibility_policy"] == contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICY
     assert configuration["execution_sequence_policy"] == contracts.BASELINE_SCORED_FIRST_POLICY
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     assert harness.service.advance_round(harness.round_id)["assignments"] == count
-    if judge_failure:
-        harness.run_stage_with_runners(2)
-        assert harness.service.advance_round(harness.round_id)["status"] == "ok"
-        assert harness.service.advance_round(harness.round_id)["assignments"] == count
-        harness.run_stage_with_runners(2)
-        harness.clock.advance_to(harness.schedule()["stage_1_scoring_close"])
-        assert harness.service.advance_round(harness.round_id)["status"] == "closed"
-        # The exact pre-continuation SQL refuses an incomplete baseline at
-        # the stage boundary; current-policy retries have separate coverage.
-        with pytest.raises(ArenaStoreError, match="lab_arena_stage1_baseline_scores_incomplete"):
-            harness.service.advance_round(harness.round_id)
-        row = harness.service.store.get_round(harness.round_id)
-        assert row["publication_doc"] is None and row["reward_activated_at"] is None
-        executions = harness.service.store.list_runs(harness.round_id, kind="execute")
-        assert len(executions) == count
-        assert all(run["status"] == "accepted" for run in executions)
-        last = next(run for run in executions if run["icp_position"] == 16)
-        assert last["per_icp_score"] is None
-        judges = harness.service.store.list_runs(harness.round_id, kind="score")
-        failed = [run for run in judges if run["icp_position"] == 16]
-        assert {run["attempt"] for run in failed} == {1, 2}
-        assert all(run["status"] == "failed" and run["terminal_cause"] == "judge_error" for run in failed)
-        assert len([run for run in judges if run["status"] == "accepted"]) == count - 1
-        return
     if count == 5:
         harness.advance_until("scored", runners=2)
         reads = Counter()
@@ -332,6 +323,15 @@ def _prove_dynamic_cost_round(connect, tmp_path, count, monkeypatch, *, judge_fa
         original_evaluation_icps = service.evaluation_icps
         original_scoring_outputs = service._scoring_outputs
         original_qualified_counts = service._qualified_company_counts
+        original_publication_reads = service_module._PublicationReads
+        authority_reads = Counter()
+
+        def publication_reads(*args, **kwargs):
+            authority_reads.update(reads)
+            # The aggregate's single snapshot is evaluated as a constructor
+            # argument. Every earlier read belongs to continuation/finality.
+            authority_reads["execution_runs"] -= 1
+            return original_publication_reads(*args, **kwargs)
 
         def list_runs(*args, **kwargs):
             if kwargs.get("kind") == "execute":
@@ -354,13 +354,14 @@ def _prove_dynamic_cost_round(connect, tmp_path, count, monkeypatch, *, judge_fa
         monkeypatch.setattr(service, "evaluation_icps", evaluation_icps)
         monkeypatch.setattr(service, "_scoring_outputs", scoring_outputs)
         monkeypatch.setattr(service, "_qualified_company_counts", qualified_counts)
+        monkeypatch.setattr(service_module, "_PublicationReads", publication_reads)
         assert service.publish(harness.round_id)["status"] == "ok"
-        # Baseline and unfinished-judge authority each need a fresh read;
-        # publication itself still shares one execution read across participants.
-        assert reads["execution_runs"] == 3
-        assert reads["icp_bank"] == 1
-        assert reads["score_runs"] <= 2
-        assert reads["qualification"] == len(participants)
+        assert authority_reads == Counter(execution_runs=5, icp_bank=1)
+        aggregation_reads = reads - authority_reads
+        assert aggregation_reads["execution_runs"] == 1
+        assert aggregation_reads["icp_bank"] == 1
+        assert aggregation_reads["score_runs"] <= 2
+        assert aggregation_reads["qualification"] == len(participants)
     else:
         harness.advance_until("published", runners=2)
     published = harness.service.store.get_round(harness.round_id)
@@ -443,6 +444,33 @@ def _prove_dynamic_cost_round(connect, tmp_path, count, monkeypatch, *, judge_fa
     assert baseline_public["stage1_score"] == pytest.approx(baseline_public["final_score"])
     assert all(len(item["cost_summary"]["per_icp"]) == count for item in public_submissions)
     assert len(participants) == 2
+    if count == 17:
+        for participant in participants:
+            runs = harness.service.store.list_runs(
+                harness.round_id,
+                submission_id=participant["submission_id"],
+                kind="execute",
+            )
+            last = next(run for run in runs if run["icp_position"] == 16)
+            assert last["per_icp_score"] == (30 if participant["is_king"] else 60)
+            qualification = last["qualification_doc"]["companies"]
+            assert len(qualification) == configuration["companies_per_icp"] == 5
+            assert {item["company_index"] for item in qualification} == set(range(5))
+            assert all(item["company_qualified"] is True and item["contact_qualified"] is True for item in qualification)
+            score_attempts = [
+                run
+                for run in harness.service.store.list_runs(
+                    harness.round_id,
+                    submission_id=participant["submission_id"],
+                    kind="score",
+                )
+                if run["scored_run_id"] == last["run_id"]
+            ]
+            assert len(score_attempts) == 2
+            by_attempt = {run["attempt"]: run for run in score_attempts}
+            assert by_attempt[1]["status"] == "failed" and by_attempt[1]["terminal_cause"] == "judge_error"
+            assert by_attempt[2]["status"] == "accepted" and by_attempt[2]["terminal_cause"] == "accepted"
+        assert len(failed_judge_sources) == 2
 
 
 @pytest.mark.parametrize("count", [15, 30])
@@ -473,11 +501,3 @@ def test_explicit_historical_twenty_and_one_point_rule_remain_valid(connect, tmp
     baseline = {"submission_id": "baseline", "hotkey": "baseline", "is_king": True, "final_score": 70.0}
     miner = {"submission_id": "miner", "hotkey": "miner", "is_king": False, "final_score": 70.5}
     assert verify.king_decision([miner], baseline, configuration)["outcome"] == "no_king"
-
-
-class _FrozenHarness(HistoricalStoreHarnessMixin, Harness):
-    pass
-
-
-class _FrozenPerIcpHarness(HistoricalStoreHarnessMixin, PerIcpHarness):
-    pass

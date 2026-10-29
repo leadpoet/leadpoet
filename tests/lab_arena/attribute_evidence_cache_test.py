@@ -123,8 +123,8 @@ def test_no_hint_inputs_keep_historical_keys_and_malformed_hints_still_fail():
     from tests.lab_arena.judgment_cache_test import _input, _scope
 
     old = _input()
-    # Freeze the policy used when this historical key was recorded. Current
-    # model defaults intentionally produce a different policy and cache key.
+    # These are the recorded defaults at ad72859fc, when the fixed key below
+    # was introduced. Future default model upgrades must not alter this input.
     old["scorer_policy"] = scoring.build_scorer_policy(
         scoring_adapter_version="qualification_integrity_v2",
         judge_models={
@@ -144,6 +144,9 @@ def test_no_hint_inputs_keep_historical_keys_and_malformed_hints_still_fail():
         expected["cache_key"]
         == "sha256:86afab1d39f512ca1a3477eefc05fb6da2c4204415f8afee4168b44dcece3014"
     )
+    changed_policy = copy.deepcopy(old)
+    changed_policy["scorer_policy"]["judge_models"]["intent_signal_judge"] = "other/model"
+    assert _scope(changed_policy)["cache_key"] != expected["cache_key"]
     c = copy.deepcopy(COMPANY)
     c["required_attribute"]["evidence_quote"] = ""
     with pytest.raises(competition.CompetitionScorerInputError):

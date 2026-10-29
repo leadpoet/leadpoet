@@ -13,6 +13,7 @@ from tests.lab_arena import dynamic_benchmark_lifecycle_test as dynamic_lifecycl
 from tests.lab_arena.lab_arena_pg_harness import (
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.test_lab_arena_broker import (
     FakeTransport,
@@ -98,11 +99,21 @@ def test_late_admission_migrations_preserve_current_round_semantics(connect):
     assert "deadline_provider_retry_exhausted" in definitions[signatures[6]]
 
 
-def test_late_admission_migrations_publish_dynamic_ten(connect, tmp_path, monkeypatch):
+@pytest.fixture()
+def current_connect():
+    database = current_service_database()
+    try:
+        psycopg2, dsn = next(database)
+        yield lambda: psycopg2.connect(**dsn)
+    finally:
+        database.close()
+
+
+def test_late_admission_migrations_publish_dynamic_ten(current_connect, tmp_path, monkeypatch):
     # Reuses the lifecycle test body directly, so it has to request and forward
     # every fixture that body takes.
     dynamic_lifecycle.test_current_per_icp_cost_policy_publishes_each_frozen_count_and_excludes_judge_cost(
-        connect, tmp_path, 10, monkeypatch
+        current_connect, tmp_path, 10, monkeypatch
     )
 
 

@@ -1,9 +1,12 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from botocore.httpsession import URLLib3Session
 
 from scripts import gateway_iam_session as subject
 
@@ -12,6 +15,7 @@ from scripts import gateway_iam_session as subject
 def isolated_authority_environment(monkeypatch):
     for name in subject.FORBIDDEN:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(URLLib3Session, "send", lambda *_a, **_k: pytest.fail("unexpected network call"))
 
 
 class FakeSession:
@@ -33,7 +37,7 @@ class FakeSession:
         return SimpleNamespace(get_caller_identity=lambda: self.identity)
 
 
-@pytest.mark.parametrize("profile,method", [("leadpoet-lab", "sso"), (None, "iam-role"), ("operator-role", "assume-role"), ("leadpoet-admin", "sso")])
+@pytest.mark.parametrize("profile,method", [("leadpoet-lab", "sso"), (None, "iam-role"), ("operator-role", "assume-role")])
 def test_temporary_roles_work_without_gateway_cache(monkeypatch, profile, method):
     session = FakeSession(method=method)
     captured = {}
@@ -88,7 +92,7 @@ def test_retired_root_profile_is_rejected_before_session_or_export(monkeypatch):
         subject.gateway_iam_session(profile="leadpoet-recovery-console-20261026")
 
 
-@pytest.mark.parametrize("profile", ["leadpoet-lab", "leadpoet-admin"])
+@pytest.mark.parametrize("profile", ["leadpoet-lab"])
 def test_root_is_rejected_without_export_for_each_operator_profile(monkeypatch, profile):
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: pytest.fail("must not export root credentials"))
     session = FakeSession(arn="arn:aws:iam::493765492819:root")
@@ -96,6 +100,116 @@ def test_root_is_rejected_without_export_for_each_operator_profile(monkeypatch, 
     with pytest.raises(subject.GatewayIamSessionError, match="identity"):
         subject.gateway_iam_session(profile=profile)
     assert session.clients == ["sts"]
+
+
+def admin_cache(tmp_path, monkeypatch, *, expires=None, account=subject.ACCOUNT,
+                role="Admin", session_name="leadpoet-admin", data=None):
+    from botocore.credentials import SSOCredentialFetcher
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    aws_dir = tmp_path / ".aws"
+    aws_dir.mkdir()
+    (aws_dir / "config").write_text(
+        f"[profile leadpoet-admin]\nsso_account_id = {account}\n"
+        f"sso_role_name = {role}\nsso_session = {session_name}\n"
+        f"[sso-session {session_name}]\nsso_start_url = https://example.awsapps.com/start\n"
+        "sso_region = us-east-1\n"
+    )
+    cache_dir = aws_dir / "cli" / "cache"
+    cache_dir.mkdir(parents=True)
+    key = hashlib.sha1(json.dumps({"accountId": account, "roleName": role,
+                                   "sessionName": session_name},
+                                  sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    cache_file = cache_dir / f"{key}.json"
+    if data is not None:
+        cache_file.write_text(json.dumps(data))
+    elif expires is not None:
+        # Generate the persisted response with the installed SDK fetcher.
+        client = SimpleNamespace(get_role_credentials=lambda **_k: {"roleCredentials": {
+            "accessKeyId": "ASIA" + "A" * 16, "secretAccessKey": "s" * 40,
+            "sessionToken": "temporary-token", "expiration": int(expires.timestamp() * 1000)}})
+        fetcher = SSOCredentialFetcher(
+            start_url="https://example.awsapps.com/start", sso_region="us-east-1",
+            role_name=role, account_id=account, sso_session_name=session_name,
+            client_creator=lambda *_a, **_k: client,
+            token_loader=lambda *_a: {"accessToken": "synthetic-token",
+                                     "expiresAt": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()},
+            cache={})
+        assert fetcher._cache_key == key
+        cache_file.write_text(json.dumps(fetcher._get_credentials()))
+    return cache_file
+
+
+def test_admin_uses_exact_valid_cache_without_sso_provider(monkeypatch, tmp_path):
+    admin_cache(tmp_path, monkeypatch, expires=datetime.now(timezone.utc) + timedelta(hours=1))
+    real_session = subject.boto3.session.Session
+    seen = []
+
+    def explicit_session(**kwargs):
+        seen.append(kwargs)
+        assert "profile_name" not in kwargs
+        session = real_session(**kwargs)
+        assert session.get_credentials().method == "explicit"
+        monkeypatch.setattr(session, "client", lambda service, **opts: (
+            FakeSession(arn=f"arn:aws:sts::{subject.ACCOUNT}:assumed-role/AWSReservedSSO_Admin_9f135d1e5dbc915b/pranav-admin")
+            .client(service, **opts)))
+        return session
+
+    monkeypatch.setattr(subject.boto3.session, "Session", explicit_session)
+    session = subject.gateway_iam_session(profile="leadpoet-admin")
+    assert session.get_credentials().method == "explicit"
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize("case", ["missing", "expired", "near_expiry", "malformed", "static_key", "wrong_cached_account"])
+def test_admin_bad_cache_fails_before_credential_provider(monkeypatch, tmp_path, case):
+    expires = datetime.now(timezone.utc) + (timedelta(hours=-1) if case == "expired" else
+                                            timedelta(seconds=30) if case == "near_expiry" else timedelta(hours=1))
+    path = admin_cache(tmp_path, monkeypatch, expires=None if case == "missing" else expires)
+    if case == "malformed":
+        path.write_text("{invalid")
+    if case == "static_key":
+        payload = json.loads(path.read_text())
+        payload["Credentials"]["AccessKeyId"] = "AKIA" + "A" * 16
+        path.write_text(json.dumps(payload))
+    if case == "wrong_cached_account":
+        payload = json.loads(path.read_text())
+        payload["Credentials"]["AccountId"] = "111111111111"
+        path.write_text(json.dumps(payload))
+    monkeypatch.setattr(subject.boto3.session, "Session", lambda **_k: pytest.fail("must not resolve a provider"))
+    with pytest.raises(subject.GatewayIamSessionError) as failure:
+        subject.gateway_iam_session(profile="leadpoet-admin")
+    assert "credential" not in str(failure.value).lower() or "cache" in str(failure.value).lower()
+
+
+@pytest.mark.parametrize("field,value", [("account", "111111111111"), ("role", "Other"),
+                                          ("session_name", "other")])
+def test_admin_wrong_profile_authority_never_resolves(monkeypatch, tmp_path, field, value):
+    values = {field: value}
+    admin_cache(tmp_path, monkeypatch, expires=datetime.now(timezone.utc) + timedelta(hours=1), **values)
+    monkeypatch.setattr(subject.boto3.session, "Session", lambda **_k: pytest.fail("must not resolve a provider"))
+    with pytest.raises(subject.GatewayIamSessionError, match="authority"):
+        subject.gateway_iam_session(profile="leadpoet-admin")
+
+
+@pytest.mark.parametrize("arn", [
+    f"arn:aws:sts::{subject.ACCOUNT}:assumed-role/AWSReservedSSO_Admin_9f135d1e5dbc915b/other-user",
+    f"arn:aws:sts::{subject.ACCOUNT}:assumed-role/AWSReservedSSO_Admin_bad/pranav-admin",
+    f"arn:aws:sts::{subject.ACCOUNT}:assumed-role/Other/pranav-admin",
+    f"arn:aws:iam::{subject.ACCOUNT}:root",
+])
+def test_admin_wrong_sts_identity_is_rejected(monkeypatch, tmp_path, arn):
+    admin_cache(tmp_path, monkeypatch, expires=datetime.now(timezone.utc) + timedelta(hours=1))
+    real_session = subject.boto3.session.Session
+
+    def explicit_session(**kwargs):
+        session = real_session(**kwargs)
+        monkeypatch.setattr(session, "client", lambda service, **opts: FakeSession(arn=arn).client(service, **opts))
+        return session
+
+    monkeypatch.setattr(subject.boto3.session, "Session", explicit_session)
+    with pytest.raises(subject.GatewayIamSessionError, match="identity"):
+        subject.gateway_iam_session(profile="leadpoet-admin")
 
 
 def test_authority_errors_do_not_expose_provider_output(monkeypatch):

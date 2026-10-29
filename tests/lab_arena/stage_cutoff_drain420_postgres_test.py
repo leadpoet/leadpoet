@@ -273,7 +273,7 @@ def test_service_billing_return_only_yields_at_execution_cutoff(case):
     service._clock=lambda:now
     service._invalidate_hot_round=lambda:None
     service._round=lambda _:dict(status=status,configuration_doc=config)
-    service._reconcile_deepline_cost=lambda _:{"status":"none"}
+    service._reconcile_active_deepline_cost=lambda _:{"status":"none"}
     service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(now+timedelta(days=1))}
     service._store=SimpleNamespace(operator_hold_active=lambda:case=="held",expire_leases=lambda _:calls.append("expire"))
     service._advance_round_locked=lambda _:calls.append("advance") or {"status":"draining"}
@@ -400,7 +400,17 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
         service._clock=lambda:datetime.now(timezone.utc)
         service._invalidate_hot_round=lambda:None
         service._round=lambda _:store.get_round(ROUND)
-        service._reconcile_deepline_cost=lambda _:{"status":"none"}
+        service._reconcile_active_deepline_cost=lambda _:{"status":"none"}
+        recovery_calls=[]
+        def no_post470_baseline_recovery(row):
+            # This exact pre470 billing fixture has only a challenger in
+            # stage two. Optional later baseline recovery is outside its
+            # schema; billing, SQL closure and drain guards stay real.
+            assert row['round_id'] == ROUND
+            assert not any(participant.get('is_king') for participant in row['participants'])
+            assert store.list_runs(ROUND, stage=1) == []
+            recovery_calls.append(row['round_id'])
+        service._recover_baseline=no_post470_baseline_recovery
         service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(datetime.now(timezone.utc)+timedelta(days=1))}
         with connect() as conn: before=_state(conn)
         assert service.advance_round(ROUND)["status"]=="draining"
@@ -409,6 +419,7 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
             _boundary(conn,-4501)
             before_close=_state(conn)
         assert service.advance_round(ROUND)["status"]=="cancelled"
+        assert recovery_calls == [ROUND, ROUND]
         with connect() as conn: after=_state(conn)
         # Original uncertain charge stays counted and retains its source key.
         assert after["lab_arena_ledger"][:len(before_close["lab_arena_ledger"])]==before_close["lab_arena_ledger"]

@@ -665,14 +665,9 @@ def _serve(args: argparse.Namespace) -> int:
         review_transport = broker_module.HttpxProviderTransport()
 
         def broker_factory(service: ArenaService, round_row: Mapping[str, Any]):
-            del round_row
-            judge_models = sorted(
-                {
-                    str(model)
-                    for model in (service.scorer_policy.get("judge_models") or {}).values()
-                    if model
-                }
-            )
+            # Match production routing, including resumed rounds' frozen roles.
+            configuration = round_row.get("configuration_doc") or {}
+            judge_models = dict((configuration.get("scorer_policy") or {}).get("judge_models") or {})
             return broker_module.Broker(
                 store=store,
                 key_for=lambda provider: provider_keys[provider],

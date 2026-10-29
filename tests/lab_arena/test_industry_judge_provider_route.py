@@ -120,3 +120,63 @@ def test_frozen_role_map_is_not_changed_by_caller_mutation():
     assert result.status == 200
     assert json.loads(transport.sent[0]["body"])["provider"] == dict(
         operations.OPENROUTER_STRICT_PROVIDER_POLICY)
+
+
+@pytest.mark.parametrize("funding", ["host", "miner_key"])
+@pytest.mark.parametrize("industry_role", [False, True, None])
+def test_testnet_factory_uses_frozen_round_roles_not_service_defaults(funding, industry_role):
+    import ast
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    # Execute the real nested factory without starting the testnet CLI,
+    # loading credentials, or opening network connections.
+    source = Path(__file__).resolve().parents[2] / "scripts/validate_miner_testnet.py"
+    factories = [node for node in ast.walk(ast.parse(source.read_text()))
+                 if isinstance(node, ast.FunctionDef) and node.name == "broker_factory"]
+    assert len(factories) == 1
+    module = ast.Module(body=[
+        ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+        factories[0],
+    ], type_ignores=[])
+    ast.fix_missing_locations(module)
+    frozen_role = "industry_evidence_review" if industry_role else "company_fit_reverification"
+    service_role = "company_fit_reverification" if industry_role else "industry_evidence_review"
+    frozen = {frozen_role: MODEL} if industry_role is not None else {}
+    reference, store, transport = fixture(roles=frozen, funding=funding)
+    namespace = {
+        "broker_module": SimpleNamespace(Broker=br.Broker, HttpxProviderTransport=lambda: transport),
+        "store": store,
+        "provider_keys": HOST_KEYS,
+        "price_table": reference._price_table,
+        "submission_keys": SimpleNamespace(
+            credential_for=lambda _context, provider: HOST_KEYS[provider],
+            funding_source_for=lambda _context: funding,
+        ),
+    }
+    exec(compile(module, str(source), "exec"), namespace)
+    instance = namespace["broker_factory"](
+        SimpleNamespace(scorer_policy={"judge_models": {service_role: MODEL}}),
+        {"configuration_doc": {"scorer_policy": {"judge_models": frozen}}
+         if industry_role is not None else {}},
+    )
+    frozen.clear()  # The constructed broker must retain its frozen role map.
+    result = instance.execute(
+        replace(CONTEXT, kind="score"), operation_id="openrouter.chat",
+        parameters={**CHAT, "model": MODEL}, action_sequence=0, timeout_ms=65000,
+    )
+    if industry_role is None:
+        assert result.status == 400
+        assert json.loads(result.body)["error"] == {"code": "model_not_allowed"}
+        assert not transport.sent
+        return
+    assert result.status == 200
+    sent = json.loads(transport.sent[0]["body"])
+    expected_route = {"data_collection": "deny", "zdr": True,
+                      "only": ["azure/us", "azure/eu"], "allow_fallbacks": True,
+                      "max_price": {"prompt": 2.75, "completion": 11, "request": 0}}
+    assert sent["provider"] == (expected_route if industry_role else dict(
+        operations.OPENROUTER_STRICT_PROVIDER_POLICY))
+    assert result.call["funding_source"] == funding
+    assert result.call["actual_microusd"] == 200
+    assert store.calls[result.call["call_identity"]]["actual"] == 200

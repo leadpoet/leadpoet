@@ -334,7 +334,12 @@ Assess every Boolean
 independently: a factual defect makes facts_supported false, but does not by
 itself make signal coverage, relevance, ICP connection or paragraph structure
 false. Require natural prose, not headings, bullet lists, field labels or
-internal scoring commentary. A sentence that stops after naming its actors
+internal scoring commentary.
+Selection commentary describes why the company or activity matches the search
+request, its filters or the scoring rubric. Any such commentary makes
+natural_paragraph false, even when the paragraph also states a supported
+business connection.
+A sentence that stops after naming its actors
 without stating a complete assertion is an incomplete clause: return
 natural_paragraph=false. Do not repair the sentence using the source evidence.
 Assess any facts actually asserted in the fragment independently; a missing

@@ -246,13 +246,17 @@ def test_supporting_sources_follow_existing_paragraph_context_contract(monkeypat
     document = intent_details.review_evidence(
         company, icp, signals, fit.receipt("company_fit"), company_source_contexts=contexts,
     )
-    assert len(contexts) == 2
-    assert [c["dimension"] for c in contexts] == ["industry", "first_party_context"]
-    assert contexts[0]["url"] == primary["url"]
-    assert contexts[1]["url"] in {p["url"] for p in support}
+    # Select the relevant cited support as the single industry context. The
+    # original primary quote remains admitted through the final fit receipt.
+    assert len(contexts) == 1
+    assert contexts[0]["dimension"] == "industry"
+    assert contexts[0]["url"] in {p["url"] for p in support}
     admitted = [item for item in document["admitted_evidence"]
                 if item["evidence_kind"] == "verified_company_source_context"]
     assert {item["source_url"] for item in admitted} == {c["url"] for c in contexts}
+    assert any(item["source_url"] == primary["url"]
+               and primary["quote"] in item.get("admitted_text", [])
+               for item in document["admitted_evidence"])
     assert sum(len(text.encode()) for item in document["admitted_evidence"]
                if item["evidence_kind"] in {"verified_source_context", "verified_company_source_context"}
                for text in item.get("admitted_text", [])) <= intent_details._MAX_SOURCE_CONTEXT_BYTES

@@ -1593,6 +1593,7 @@ def _deepline_execution_response_readback(
     # Wait with GETs only, and only when the caller retained the original
     # request/deadline. Other errors and unbound/malformed proofs fail closed.
     attempts = _DEEPLINE_BILLING_MAX_ATTEMPTS if resume_request is not None else 1
+    awaiting_native_id: Optional[str] = None
     for attempt in range(attempts):
         if recovery_deadline is not None:
             remaining = recovery_deadline - time.monotonic()
@@ -1614,93 +1615,117 @@ def _deepline_execution_response_readback(
             )
         except ProviderTransportError:
             return None
-        if lookup.status != 404:
-            break
-        if (lookup.internal_provenance is not None
+        if lookup.status == 404:
+            if (lookup.internal_provenance is not None
+                or len(lookup.body) > max_response_bytes + 16_384
+                or _response_contains_credential(lookup, secret)):
+                return None
+            continue
+        if recovery_deadline is not None and time.monotonic() >= recovery_deadline:
+            return None
+        if (lookup.status != 200 or lookup.internal_provenance is not None
             or len(lookup.body) > max_response_bytes + 16_384
+            or [value for name, value in lookup.headers.items()
+                if name.lower() == "x-deepline-idempotency-supported"] != ["true"]
             or _response_contains_credential(lookup, secret)):
             return None
-    else:
-        return None
-    if recovery_deadline is not None and time.monotonic() >= recovery_deadline:
-        return None
-    if (lookup.status != 200 or lookup.internal_provenance is not None
-        or len(lookup.body) > max_response_bytes + 16_384
-        or [value for name, value in lookup.headers.items()
-            if name.lower() == "x-deepline-idempotency-supported"] != ["true"]
-        or _response_contains_credential(lookup, secret)):
-        return None
-    try:
-        document = json.loads(lookup.body.decode("utf-8"))
-        recovery = document.get("executionRecovery") if isinstance(document, Mapping) else None
-        native_id = document.get("requestId") if isinstance(document, Mapping) else None
-        saved = document.get("response") if isinstance(document, Mapping) else None
-        status = document.get("responseStatus") if isinstance(document, Mapping) else None
-        if (resume_request is not None and isinstance(recovery, Mapping)
-            and (observed_status is None or 200 <= observed_status < 300)
-            and recovery.get("idempotencyKey") == execution_key
-            and recovery.get("state") == "running"
-            and document.get("toolId") in (operation, *operation_aliases)
-            and isinstance(native_id, str)
-            and _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id)
-            and not _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id)):
-            # The observed workspace key already owns this execution. An
-            # identical POST can continue its declared lifecycle, not launch
-            # a new paid request. Unknown/missing keys never reach this branch.
-            if resume_request.get("headers", {}).get("idempotency-key") != execution_key:
+        try:
+            document = json.loads(lookup.body.decode("utf-8"))
+            recovery = document.get("executionRecovery") if isinstance(document, Mapping) else None
+            native_id = document.get("requestId") if isinstance(document, Mapping) else None
+            saved = document.get("response") if isinstance(document, Mapping) else None
+            status = document.get("responseStatus") if isinstance(document, Mapping) else None
+            if awaiting_native_id is not None and native_id != awaiting_native_id:
                 return None
-            if recovery_deadline is None or time.monotonic() >= recovery_deadline:
+            if ((resume_request is not None or awaiting_native_id is not None)
+                and isinstance(recovery, Mapping)
+                and (observed_status is None or 200 <= observed_status < 300)
+                and recovery.get("idempotencyKey") == execution_key
+                and recovery.get("state") == "running"
+                and document.get("toolId") in (operation, *operation_aliases)
+                and isinstance(native_id, str)
+                and _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id)
+                and not _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id)):
+                if awaiting_native_id is not None:
+                    # The sole continuation conflicted; only GETs may follow.
+                    continue
+                # The observed workspace key already owns this execution. An
+                # identical POST can continue its declared lifecycle, not launch
+                # a new paid request. Unknown/missing keys never reach this branch.
+                if resume_request.get("headers", {}).get("idempotency-key") != execution_key:
+                    return None
+                if recovery_deadline is None or time.monotonic() >= recovery_deadline:
+                    return None
+                try:
+                    resumed = transport.send(**dict(resume_request,
+                        timeout_seconds=max(0.001, recovery_deadline - time.monotonic())))
+                except ProviderTransportError:
+                    return None
+                if (time.monotonic() >= recovery_deadline
+                    or resumed.internal_provenance is not None
+                    or len(resumed.body) > max_response_bytes
+                    or _response_contains_credential(resumed, secret)):
+                    return None
+                resumed_document = json.loads(resumed.body.decode("utf-8"))
+                resumed_recovery = (resumed_document.get("executionRecovery")
+                                    if isinstance(resumed_document, Mapping) else None)
+                if resumed.status == 409:
+                    # A same-key continuation can conflict while the original
+                    # execution is still finishing. The conflict proves no
+                    # result: await independently authenticated saved content
+                    # for the already-bound native ID, with no further POST.
+                    if (not isinstance(resumed_document, Mapping)
+                        or any(resumed_document[name] != native_id
+                               for name in ("job_id", "request_id", "requestId")
+                               if name in resumed_document)
+                        or ("toolId" in resumed_document
+                            and resumed_document["toolId"] not in (operation, *operation_aliases))
+                        or (resumed_recovery is not None and (
+                            not isinstance(resumed_recovery, Mapping)
+                            or resumed_recovery.get("idempotencyKey") != execution_key
+                            or resumed_recovery.get("state") != "running"))):
+                        return None
+                    awaiting_native_id = native_id
+                    resume_request = None
+                    continue
+                if (_deepline_job_request_id(resumed_document) != native_id
+                    or not isinstance(resumed_document, Mapping)
+                    or resumed_document.get("status") != "completed"
+                    or (resumed_recovery is not None and (
+                        not isinstance(resumed_recovery, Mapping)
+                        or resumed_recovery.get("idempotencyKey") != execution_key
+                        or resumed_recovery.get("state") != "completed"))
+                    or (observed_status is not None and resumed.status != observed_status)):
+                    return None
+                # Retain the standard execute envelope, but hide the recovery key.
+                if isinstance(resumed_document, Mapping):
+                    resumed_document = dict(resumed_document)
+                    resumed_document.pop("executionRecovery", None)
+                body = json.dumps(resumed_document, ensure_ascii=False, allow_nan=False,
+                                  separators=(",", ":")).encode("utf-8")
+                return ProviderResponse(resumed.status, resumed.headers, body,
+                                        deepline_completed_execution=True)
+            # A Vercel trace hint can differ from the keyed native billing ID.
+            # The authenticated saved key/tool/body binding is stronger authority.
+            if (not isinstance(recovery, Mapping) or recovery.get("idempotencyKey") != execution_key
+                or recovery.get("state") != "completed" or document.get("toolId") not in (operation, *operation_aliases)
+                or not isinstance(native_id, str) or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id) is None
+                or _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id) is not None
+                or type(status) is not int or not 200 <= status <= 599
+                or (observed_status is not None and observed_status != status)
+                or not isinstance(saved, Mapping) or _deepline_job_request_id(saved) != native_id):
                 return None
-            try:
-                resumed = transport.send(**dict(resume_request,
-                    timeout_seconds=max(0.001, recovery_deadline - time.monotonic())))
-            except ProviderTransportError:
-                return None
-            if (time.monotonic() >= recovery_deadline
-                or resumed.internal_provenance is not None
-                or len(resumed.body) > max_response_bytes
-                or _response_contains_credential(resumed, secret)):
-                return None
-            resumed_document = json.loads(resumed.body.decode("utf-8"))
-            resumed_recovery = (resumed_document.get("executionRecovery")
-                                if isinstance(resumed_document, Mapping) else None)
-            if (_deepline_job_request_id(resumed_document) != native_id
-                or not isinstance(resumed_document, Mapping)
-                or resumed_document.get("status") != "completed"
-                or (resumed_recovery is not None and (
-                    not isinstance(resumed_recovery, Mapping)
-                    or resumed_recovery.get("idempotencyKey") != execution_key
-                    or resumed_recovery.get("state") != "completed"))
-                or (observed_status is not None and resumed.status != observed_status)):
-                return None
-            # Retain the standard execute envelope, but hide the recovery key.
-            if isinstance(resumed_document, Mapping):
-                resumed_document = dict(resumed_document)
-                resumed_document.pop("executionRecovery", None)
-            body = json.dumps(resumed_document, ensure_ascii=False, allow_nan=False,
-                              separators=(",", ":")).encode("utf-8")
-            return ProviderResponse(resumed.status, resumed.headers, body,
-                                    deepline_completed_execution=True)
-        # A Vercel trace hint can differ from the keyed native billing ID.
-        # The authenticated saved key/tool/body binding is stronger authority.
-        if (not isinstance(recovery, Mapping) or recovery.get("idempotencyKey") != execution_key
-            or recovery.get("state") != "completed" or document.get("toolId") not in (operation, *operation_aliases)
-            or not isinstance(native_id, str) or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id) is None
-            or _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id) is not None
-            or type(status) is not int or not 200 <= status <= 599
-            or (observed_status is not None and observed_status != status)
-            or not isinstance(saved, Mapping) or _deepline_job_request_id(saved) != native_id):
+            saved = dict(saved)
+            saved.pop("executionRecovery", None)
+            body = json.dumps(saved, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        except (UnicodeError, ValueError, TypeError, RecursionError):
             return None
-        saved = dict(saved)
-        saved.pop("executionRecovery", None)
-        body = json.dumps(saved, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
-    except (UnicodeError, ValueError, TypeError, RecursionError):
-        return None
-    response = ProviderResponse(status, {"content-type": "application/json", "x-deepline-request-id": native_id}, body,
-                                deepline_completed_execution=True)
-    if len(body) > max_response_bytes or _response_contains_credential(response, secret):
-        return None
-    return response
+        response = ProviderResponse(status, {"content-type": "application/json", "x-deepline-request-id": native_id}, body,
+                                    deepline_completed_execution=True)
+        if len(body) > max_response_bytes or _response_contains_credential(response, secret):
+            return None
+        return response
+    return None
 
 
 

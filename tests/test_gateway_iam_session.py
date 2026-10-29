@@ -1,20 +1,33 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
+import socket
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from botocore.session import Session as BotocoreSession
+from botocore.credentials import SSOProvider
 from botocore.httpsession import URLLib3Session
+from botocore.tokens import SSOTokenProvider
 
 from scripts import gateway_iam_session as subject
 
 
 @pytest.fixture(autouse=True)
-def isolated_authority_environment(monkeypatch):
+def isolated_authority_environment(monkeypatch, tmp_path):
     for name in subject.FORBIDDEN:
         monkeypatch.delenv(name, raising=False)
+    # Isolate both Path.home() and botocore's os.path.expanduser() lookup.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # These SDK defaults are fixed at import time, before HOME changes.
+    token_cache = str(tmp_path / ".aws" / "sso" / "cache")
+    monkeypatch.setattr(SSOProvider, "_SSO_TOKEN_CACHE_DIR", token_cache)
+    monkeypatch.setattr(SSOTokenProvider, "_SSO_TOKEN_CACHE_DIR", token_cache)
+    monkeypatch.setattr(socket.socket, "connect", lambda *_a, **_k: pytest.fail("unexpected socket connection"))
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_a, **_k: pytest.fail("unexpected DNS lookup"))
     monkeypatch.setattr(URLLib3Session, "send", lambda *_a, **_k: pytest.fail("unexpected network call"))
 
 
@@ -35,6 +48,16 @@ class FakeSession:
         assert kwargs["region_name"] == "us-east-1"
         self.clients.append(name)
         return SimpleNamespace(get_caller_identity=lambda: self.identity)
+
+
+def test_sdk_uses_only_isolated_home_and_token_cache(tmp_path):
+    assert os.path.expanduser("~") == str(tmp_path)
+    sdk = BotocoreSession()
+    assert os.path.expanduser(sdk.get_config_variable("config_file")) == str(tmp_path / ".aws" / "config")
+    assert os.path.expanduser(sdk.get_config_variable("credentials_file")) == str(tmp_path / ".aws" / "credentials")
+    expected = str(tmp_path / ".aws" / "sso" / "cache")
+    assert SSOProvider._SSO_TOKEN_CACHE_DIR == expected
+    assert SSOTokenProvider._SSO_TOKEN_CACHE_DIR == expected
 
 
 @pytest.mark.parametrize("profile,method", [("leadpoet-lab", "sso"), (None, "iam-role"), ("operator-role", "assume-role")])
@@ -203,6 +226,8 @@ def test_admin_wrong_sts_identity_is_rejected(monkeypatch, tmp_path, arn):
     real_session = subject.boto3.session.Session
 
     def explicit_session(**kwargs):
+        assert "profile_name" not in kwargs
+        assert {"aws_access_key_id", "aws_secret_access_key", "aws_session_token"} <= kwargs.keys()
         session = real_session(**kwargs)
         monkeypatch.setattr(session, "client", lambda service, **opts: FakeSession(arn=arn).client(service, **opts))
         return session

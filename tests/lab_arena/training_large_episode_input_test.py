@@ -70,6 +70,35 @@ def test_multiple_episodes_release_previous_document_before_next_parse(tmp_path,
     assert not any(ref() is not None for ref in refs)
 
 
+@pytest.mark.parametrize("valid_final_source", [False, True])
+def test_grouping_sources_release_before_next_parse_and_record_iteration(valid_final_source):
+    from lab_arena import training_dataset
+    from tests.lab_arena.training_dataset_test import example, row, claim
+
+    class TrackedDict(dict):
+        pass
+
+    refs = []
+
+    def grouping_sources():
+        for index in range(3):
+            assert not any(ref() is not None for ref in refs)
+            source = TrackedDict(example(f"source-{index}", [row(0, claim(), "qualified")]))
+            if index == 2 and not valid_final_source:
+                source["example_hash"] = "invalid"
+            refs.append(weakref.ref(source))
+            yield source
+            del source
+
+    def record_sources():
+        assert not any(ref() is not None for ref in refs)
+        yield example("selected", [row(0, claim(), "qualified")])
+
+    splits, _ = training_dataset.build(record_sources(), split_sources=grouping_sources())
+    assert sum(len(splits[key]) for key in ("train", "eval")) == 1
+    assert not any(ref() is not None for ref in refs)
+
+
 def test_report_batch_limit_counts_decompressed_bytes(tmp_path):
     paths = []
     raw = json.dumps({"text": "a" * 1000}).encode()

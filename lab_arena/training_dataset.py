@@ -580,7 +580,7 @@ def _split_model_request_links(example: Mapping[str, Any]) -> List[str]:
         if (not isinstance(call, Mapping) or call.get("run_id") != example.get("run_id")
                 or call.get("provider") != "openrouter"
                 or call.get("operation_id") not in {"openrouter.chat", "openrouter.responses"}
-                or isinstance(capture, Mapping) and capture.get("redacted") is True
+                or isinstance(capture, Mapping) and bool(capture.get("redacted"))
                 or isinstance(gaps, list) and set(value for value in gaps if isinstance(value, str)) & {
                     "full_request_unavailable", "request_privacy_nonexact",
                     "worker_observation_request_mismatch", "worker_observation_link_invalid"}):
@@ -680,6 +680,8 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
         for source in split_sources:
             source_groups.add(source, production_rounds_only=rules.production_rounds_only,
                               eval_mode=rules.eval_mode)
+            # Release each raw export before the source iterator parses the next.
+            del source
     for example in examples:
         # Link every verified source before label, cohort, privacy and dedup
         # gates can remove the only bridge between two original episodes.

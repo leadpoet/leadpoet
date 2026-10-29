@@ -147,6 +147,11 @@ def test_retries_share_original_episode_and_only_exact_main_requests_bridge():
     third = graph.add(unrelated, production_rounds_only=True, eval_mode="company_and_icp")
     assert graph.group(first) != graph.group(third)
 
+    outbound["host"] = "openrouter.ai"
+    unrelated["provider_calls"][0]["request_capture"] = {"redacted": "truthy malformed flag"}
+    training_dataset_test.seal(unrelated)
+    assert training_dataset._split_model_request_links(unrelated) == []
+
 
 def test_missing_episode_identity_fails_closed_and_temporal_split_matches():
     invalid = hybrid("run-invalid", 0)

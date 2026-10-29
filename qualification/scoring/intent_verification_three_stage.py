@@ -2340,28 +2340,32 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                 return {"ok": False, "stage": "wayback_http_error",
                         "content": "", "error": f"HTTP {r.status_code}"}
             body = r.text or ""
-            if len(body) < 500:
+            empty_html_body = _has_empty_html_body(body)
+            if len(body) < 500 and not empty_html_body:
                 return {"ok": False, "stage": "wayback_too_short",
                         "content": "", "error": f"len={len(body)}"}
             # Archive scripts can make an empty challenge shell long enough
             # to pass the raw-size bound. Reuse direct-fetch body validation
             # so the caller can continue its exact-source Exa fallback.
-            if _has_empty_html_body(body):
-                return {"ok": False, "stage": "wayback_html_empty_body",
-                        "content": "", "error": "empty visible HTML body"}
-            if _has_wayback_error_body(body):
+            if empty_html_body or _has_wayback_error_body(body):
+                failure_stage = (
+                    "wayback_html_empty_body" if empty_html_body else "wayback_error_body"
+                )
                 # Discovery may use this failure only when the actual archive
                 # response still belongs to this exact requested source.
                 actual_archive_url = _prompt_exact_url_or_empty(str(r.url))
                 original = _wayback_original_url(actual_archive_url)
                 bound_failure = (
                     {"requested_url": url, "archive_url": actual_archive_url,
-                     "stage": "wayback_error_body"}
+                     "stage": failure_stage}
                     if original and _normalize_url(original) == _normalize_url(url)
                     else None
                 )
-                return {"ok": False, "stage": "wayback_error_body",
-                        "content": "", "error": "archive error without source body",
+                return {"ok": False, "stage": failure_stage,
+                        "content": "", "error": (
+                            "empty visible HTML body" if empty_html_body
+                            else "archive error without source body"
+                        ),
                         **({"archive_failure": bound_failure} if bound_failure else {})}
             snapshot_url = str(r.url)
             ownership_meta = {}
@@ -3489,7 +3493,7 @@ def _unusable_source_allows_same_event_search(
         isinstance(archive_failure, Mapping)
         and set(archive_failure) == {"requested_url", "archive_url", "stage"}
         and archive_failure.get("requested_url") == requested_url
-        and archive_failure.get("stage") == "wayback_error_body"
+        and archive_failure.get("stage") in ("wayback_error_body", "wayback_html_empty_body")
         and _prompt_exact_url_or_empty(archive_failure.get("archive_url"))
         and (archived_original := _wayback_original_url(archive_failure["archive_url"]))
         and _normalize_url(archived_original) == _normalize_url(requested_url)

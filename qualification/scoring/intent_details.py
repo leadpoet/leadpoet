@@ -307,6 +307,9 @@ operations, not an imagined seller or product. For connects_icp, require a
 grounded explanation of why the verified activity is relevant to the ICP, but
 allow that explanation anywhere in the paragraph and within another sentence;
 merely repeating filters or events is insufficient.
+A supported business purpose, use or effect stated in the activity sentence
+can itself explain the connection to the company's supported ICP offering.
+Do not require a separate concluding explanation when that connection is clear.
 For example, when funding and the company's workflow platform are independently
 verified, "This funding may help the company expand its workflow platform"
 connects that activity to an ICP seeking funded workflow software companies.
@@ -387,9 +390,9 @@ itself. The paragraph may paraphrase its source; only the returned evidence
 quote must be an exact source span.
 
 facts_supported must equal the logical AND of all factual unit statuses being
-VERIFIED. Assess and return unit_grounding first, then signal_coverage, then the
-five aggregate checks in this order: facts_supported, verified_signals_covered,
-relevance_grounded, connects_icp, natural_paragraph. Return only those fields.
+VERIFIED. Assess unit_grounding and signal_coverage against the supplied
+evidence and apply each aggregate check independently. Return only the fields
+required by the supplied response schema.
 """
 _NON_QUALIFYING_SYSTEM_APPENDIX = """
 

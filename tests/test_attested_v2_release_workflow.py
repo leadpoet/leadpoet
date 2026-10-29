@@ -108,222 +108,69 @@ fi
     assert inventory.read_text(encoding="utf-8").splitlines() == [first, second]
 
 
-def test_release_workflow_reclaims_only_images_created_by_the_build():
+
+
+def _workflow():
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def test_release_authority_is_limited_to_separate_protected_publisher():
+    workflow = _workflow()
+    assert workflow["permissions"] == {"contents": "read"}
+    assert set(workflow["jobs"]) == {"source", "builds", "verify", "publish"}
+    for name, job in workflow["jobs"].items():
+        if name == "publish":
+            assert job["environment"] == "attested-release"
+            assert job["permissions"] == {"contents": "read", "id-token": "write"}
+            assert job["runs-on"] == "ubuntu-24.04"
+            assert "inputs.reproduce_commit == ''" in job["if"]
+            assert "needs.source.outputs.mode == 'publish'" in job["if"]
+        else:
+            assert "environment" not in job
+            assert "permissions" not in job
+        for step in job.get("steps", []):
+            if "uses" in step:
+                action, pin = step["uses"].split("@", 1)
+                assert len(pin) == 40 and all(c in "0123456789abcdef" for c in pin)
+                if action == "actions/checkout":
+                    assert step["with"]["persist-credentials"] is False
+                    assert step["with"]["ref"] == "${{ github.sha }}"
+            if "run" in step:
+                subprocess.run(["bash", "-n"], input=step["run"], text=True, check=True)
     source = WORKFLOW.read_text(encoding="utf-8")
-
-    assert "docker image prune --all --force" not in source
-    assert source.count("docker builder prune --all --force") == 2
-    assert source.count("reclaim_release_build_images_v2.sh") == 4
-    assert source.count("preexisting-images.txt") == 2
-    assert source.count("trap cleanup_release_build_images_on_exit EXIT") == 2
-    assert source.count("validator_tee/scripts/reclaim_docker_storage_v2.sh") == 4
-    assert source.count("VALIDATOR_DOCKER_ALLOW_LIVE_HOST_GATEWAY_PRUNE=1") == 4
-    assert source.count(
-        'REQUIRE_ZERO_RUNTIME_RECONCILE="$require_zero_runtime_reconcile"'
-    ) == 1
-    assert source.count(
-        'sudo rm -rf -- \\\n            "$RUNNER_TEMP/offline-artifacts"'
-    ) == 4
-    assert source.count('"$RUNNER_TEMP/release-evidence" \\') == 4
-    assert "Reclaim gateway-parent storage after evidence generation" in source
-    assert "Reclaim gateway-parent-b storage after evidence generation" in source
-    assert "docker image prune --force" not in source
-
-    workflow = yaml.safe_load(source)
-    cleanup_steps = [
-        step
-        for job in workflow["jobs"].values()
-        for step in job.get("steps", [])
-        if str(step.get("name", "")).startswith("Reclaim ")
-        and "storage after evidence generation" in str(step.get("name", ""))
+    for forbidden in ("self-hosted", "leadpoet-gateway-v2-builder", "leadpoet-validator-v2-builder", "secrets."):
+        assert forbidden not in source
+    assert workflow["jobs"]["builds"]["strategy"]["matrix"]["include"] == [
+        {"domain": "gateway", "runner": "ubuntu-24.04"},
+        {"domain": "validator", "runner": "runs-on"},
     ]
-    assert len(cleanup_steps) == 2
-    assert all(step.get("if") == "always()" for step in cleanup_steps)
-
-    gateway_steps = workflow["jobs"]["gateway-parent"]["steps"]
-    gateway_prebuild = next(
-        step
-        for step in gateway_steps
-        if step.get("name") == "Reclaim unreferenced gateway build space"
-    )
-    gateway_prebuild_command = gateway_prebuild["run"]
-    assert 'container_ids="$(timeout 10 docker ps -aq --no-trunc 2>/dev/null)"' in (
-        gateway_prebuild_command
-    )
-    assert "require_zero_runtime_reconcile=0" in gateway_prebuild_command
-    assert 'if [ -z "$container_ids" ]; then' in gateway_prebuild_command
-    assert "require_zero_runtime_reconcile=1" in gateway_prebuild_command
-    assert (
-        'REQUIRE_ZERO_RUNTIME_RECONCILE="$require_zero_runtime_reconcile"'
-        in gateway_prebuild_command
-    )
-    reclaim_steps = [
-        step
-        for job in workflow["jobs"].values()
-        for step in job.get("steps", [])
-        if "validator_tee/scripts/reclaim_docker_storage_v2.sh"
-        in str(step.get("run", ""))
-    ]
-    assert len(reclaim_steps) == 4
-    assert all(
-        (
-            'REQUIRE_ZERO_RUNTIME_RECONCILE="$require_zero_runtime_reconcile"'
-            in str(step.get("run", ""))
-        )
-        == (step is gateway_prebuild)
-        for step in reclaim_steps
-    )
-    for job_name in ("gateway-parent", "gateway-parent-b"):
-        build_step = next(
-            step
-            for step in workflow["jobs"][job_name]["steps"]
-            if step.get("name") in ("Build gateway evidence", "Build independent gateway evidence")
-        )
-        subprocess.run(
-            ["bash", "-n"],
-            input=build_step["run"],
-            text=True,
-            check=True,
-        )
+    runner = workflow["jobs"]["builds"]["runs-on"]
+    assert "/runner=attested-v2-isolated/spot=false/retry=false" in runner
+    assert "|| 'ubuntu" not in runner
 
 
-def test_release_workflow_is_valid_yaml():
-    document = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-
-    assert document["name"] == "Gateway Attested Release"
-    assert set(document["jobs"]) == {"gateway-parent", "gateway-parent-b", "publish"}
-
-
-def test_attested_release_builders_are_not_block_gated():
-    workflow = WORKFLOW.read_text(encoding="utf-8")
-
-    assert "Wait for safe subnet build window" not in workflow
-    assert "subnet71_position" not in workflow
-    assert "chain.get_current_block()" not in workflow
+def test_release_runner_does_not_inherit_custom_image_hooks():
+    config = yaml.safe_load((ROOT / ".github/runs-on.yml").read_text())
+    # RunsOn replaces common top-level keys, so even a same-named image in a
+    # future inherited configuration cannot add hooks to the release runner.
+    assert config["images"] == {}
+    assert config["runners"]["attested-v2-isolated"]["image"] == "ubuntu24-full-x64"
 
 
-def test_gateway_release_uses_two_exact_source_gateway_builds_only():
-    source = WORKFLOW.read_text(encoding="utf-8")
-    workflow = yaml.safe_load(source)
-
-    assert source.count("Require exact main source") == 3
-    assert source.count('test "$(git rev-parse HEAD)" = "$GITHUB_SHA"') == 3
-    assert source.count(
-        'test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"'
-    ) == 3
-    assert source.count("gateway/tee/build_release_evidence_v2.sh") == 2
-    assert "--validator-manifest" not in source
-    assert "--validator-output" not in source
-    assert "scripts/admit_gateway_runner_v2.py" not in source
-    assert "Assemble gateway six-build manifest" in source
-    assert workflow["jobs"]["gateway-parent"]["runs-on"] != workflow["jobs"][
-        "gateway-parent-b"
-    ]["runs-on"]
-
-
-def test_release_workflow_resets_exact_runner_workspace_before_checkout():
-    source = WORKFLOW.read_text(encoding="utf-8")
-    workflow = yaml.safe_load(source)
-
-    step_name = "Reset stale V2 runner workspace before checkout"
-    assert source.count(step_name) == 3
-    for job_name in ("gateway-parent", "gateway-parent-b", "publish"):
-        steps = workflow["jobs"][job_name]["steps"]
-        repair_index = next(
-            index
-            for index, step in enumerate(steps)
-            if step.get("name") == step_name
-        )
-        checkout_index = next(
-            index
-            for index, step in enumerate(steps)
-            if step.get("name") == "Check out exact release source"
-        )
-        assert repair_index < checkout_index
-
-        repair = steps[repair_index]
-        command = repair["run"]
-        assert repair.get("id") == "stale_cleanup"
-        assert 'test ! -L "$GITHUB_WORKSPACE"' in command
-        assert 'realpath -- "$GITHUB_WORKSPACE"' in command
-        assert 'realpath -- "$(dirname -- "$RUNNER_TEMP")"' in command
-        assert '$(dirname -- "$(dirname -- "$workspace")")' in command
-        assert '$(basename -- "$workspace")' in command
-        assert (
-            'sudo find -P "$workspace" -xdev -depth -mindepth 1 -delete'
-            in command
-        )
-        assert "sudo rm" not in command
-        assert "sudo chown" not in command
-        subprocess.run(
-            ["bash", "-n"],
-            input=command,
-            text=True,
-            check=True,
-        )
-
-
-def test_release_workspace_reset_is_bounded_and_fail_closed(tmp_path):
-    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    command = next(
-        step["run"]
-        for step in workflow["jobs"]["gateway-parent"]["steps"]
-        if step.get("name") == "Reset stale V2 runner workspace before checkout"
-    )
-
-    repository_name = "leadpoet"
-    runner_work_root = tmp_path / "runner" / "_work"
-    runner_temp = runner_work_root / "_temp"
-    workspace = runner_work_root / repository_name / repository_name
-    stale_cache = workspace / "Leadpoet" / "__pycache__"
-    stale_cache.mkdir(parents=True)
-    (stale_cache / "module.cpython-311.pyc").write_bytes(b"stale")
-    (workspace / ".drand-cabi-v2.stale").mkdir()
-    runner_temp.mkdir()
-
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    outside_marker = outside / "must-remain"
-    outside_marker.write_text("outside", encoding="utf-8")
-    (workspace / "outside-link").symlink_to(outside, target_is_directory=True)
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_sudo = fake_bin / "sudo"
-    fake_sudo.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
-    fake_sudo.chmod(0o700)
-
-    env = os.environ.copy()
-    env.update(
-        {
-            "GITHUB_REPOSITORY": f"leadpoet/{repository_name}",
-            "GITHUB_WORKSPACE": str(workspace),
-            "RUNNER_TEMP": str(runner_temp),
-            "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
-        }
-    )
-    result = subprocess.run(
-        ["bash", "-c", command],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    assert list(workspace.iterdir()) == []
-    assert outside_marker.read_text(encoding="utf-8") == "outside"
-
-    wrong_workspace = runner_work_root / repository_name
-    wrong_workspace.mkdir(exist_ok=True)
-    wrong_marker = wrong_workspace / "must-remain"
-    wrong_marker.write_text("wrong path", encoding="utf-8")
-    env["GITHUB_WORKSPACE"] = str(wrong_workspace)
-    rejected = subprocess.run(
-        ["bash", "-c", command],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert rejected.returncode != 0
-    assert wrong_marker.read_text(encoding="utf-8") == "wrong path"
+def test_artifact_validation_precedes_oidc_and_uses_exact_separate_artifacts():
+    for name in ("verify", "publish"):
+        steps = _workflow()["jobs"][name]["steps"]
+        downloads = [s for s in steps if s.get("uses", "").startswith("actions/download-artifact@")]
+        assert len(downloads) == 2
+        assert len({s["with"]["path"] for s in downloads}) == 2
+        for download in downloads:
+            assert "pattern" not in download["with"]
+            assert "merge-multiple" not in download["with"]
+            artifact = download["with"]["name"]
+            assert "${{ needs.source.outputs.build_commit }}" in artifact
+            assert "${{ github.run_id }}-${{ github.run_attempt }}" in artifact
+        if name == "publish":
+            verify = next(i for i, s in enumerate(steps) if s.get("run") == "bash .github/scripts/assemble_attested_release.sh")
+            oidc = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("aws-actions/configure-aws-credentials@"))
+            assert verify < oidc
+            assert steps[oidc]["with"]["role-to-assume"] == "arn:aws:iam::493765492819:role/leadpoet-attested-release-publisher"

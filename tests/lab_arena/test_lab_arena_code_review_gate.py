@@ -97,7 +97,7 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
 
 
 @pytest.mark.parametrize('attempts,retryable,pending', [
-    (3, True, True), (5, True, True), (6, True, False),
+    (3, True, False), (5, True, False), (6, True, False),
     (1, False, False), (2, None, True), (3, None, False),
 ])
 def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pending):
@@ -129,3 +129,11 @@ def test_freeze_waits_only_for_available_review_attempts(attempts, retryable, pe
         assert len(service.freeze_participants('arena-test')) == 1
         assert any(call[1] == 'miner' and call[4] == {'rejection_rule': 'code_review_incomplete'}
                    for call in updates)
+
+
+@pytest.mark.parametrize("attempts", [3, 5, 6, 100])
+def test_classified_transient_review_uses_deadline_instead_of_legacy_retry_flag(attempts):
+    from lab_arena.code_review_policy import review_retry_available
+    row = {"code_review_status": "error", "code_review_attempts": attempts,
+           "code_review_doc": {"error_code": "code_review_provider_timeout", "retryable": False}}
+    assert review_retry_available(row)

@@ -13,10 +13,11 @@ import pytest
 from scripts import arena_reviewer_homepage_brand_alias_seam as seam
 from scripts import build_arena_reviewer_runtime as builder
 from tests.lab_arena.reviewer_runtime_composition_test import layer
+from tests.reviewer_frozen_sources import frozen_source
 
 
 def sources():
-    corrected = {name: (builder.ROOT / name).read_bytes()
+    corrected = {name: frozen_source("homepage_brand", name)
                  for name in (seam.SCORER, seam.FIT, seam.INVESTIGATOR)}
     return reverse(corrected), corrected
 
@@ -40,6 +41,9 @@ def originals(include_brand=True):
     files = {name: (builder.ROOT / ("lab_arena/scorer_entrypoint.py"
                                    if name == "scorer_entrypoint.py" else name)).read_bytes()
              for name in names}
+    # The investigator is also the base grader. Both overlay paths must start
+    # from the same reviewed historical bytes, independent of current source.
+    files[builder.GRADER_FILE] = frozen_source("homepage_brand", builder.GRADER_FILE)
     if include_brand:
         files.update(sources()[0])
     return files

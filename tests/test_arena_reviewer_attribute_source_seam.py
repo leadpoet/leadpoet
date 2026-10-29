@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from scripts import build_arena_reviewer_runtime as composer
+from tests.reviewer_frozen_sources import frozen_source
 from scripts.arena_reviewer_attribute_source_seam import (
     AttributeSourceSeamError, CORRECTION_ID, DELTAS, convert_attribute_source_seam,
 )
@@ -18,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _sources():
-    current = (ROOT / composer.FINALITY_FILE).read_bytes()
+    current = frozen_source("attribute_source", composer.FINALITY_FILE)
     original = current
     for _, old, new in DELTAS:
         assert original.count(new.encode()) == 1

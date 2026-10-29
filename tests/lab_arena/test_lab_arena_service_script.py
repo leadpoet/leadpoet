@@ -51,6 +51,8 @@ def test_scoped_environment_rejects_invalid_configuration(script, tmp_path, raw)
 class FakeService:
     def __init__(self, *, current=None, active=None, current_error=None, advance_error=None, ensure=None, ensure_error=None, reward_error=None, activated=0):
         # ``current``: one running round (no status: not open); ``active``: the full active list.
+        self._config = types.SimpleNamespace(defaults=types.SimpleNamespace(daily_cutoff_hour_utc=None))
+        self._store = types.SimpleNamespace(_transport=types.SimpleNamespace(rpc=lambda *_: {"schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False}))
         self._active = list(active) if active is not None else ([current] if current else [])
         self._current_error = current_error
         self._advance_error = advance_error
@@ -64,7 +66,7 @@ class FakeService:
     def startup_checks(self):
         return {"database_identity": {"current_user": "test"}}
 
-    def review_pending_submissions(self):
+    def review_pending_submissions(self, **_kwargs):
         return {"reviewed": 0}
 
     def activate_pending_rewards(self):
@@ -109,7 +111,8 @@ def test_scheduler_flags_split_the_driver_from_the_api(script):
 
 def _patch_runtime(monkeypatch, script, service):
     wiring = types.ModuleType("lab_arena.wiring")
-    wiring.build_service_from_environment = lambda mode: (service, object())
+    from fastapi import FastAPI
+    wiring.build_service_from_environment = lambda mode: (service, FastAPI())
     monkeypatch.setitem(sys.modules, "lab_arena.wiring", wiring)
     monkeypatch.setenv("LAB_ARENA_MODE", "live")
 
@@ -152,6 +155,9 @@ def test_driver_only_keeps_the_initial_tick_and_runs_the_loop(script, monkeypatc
         def __init__(self):
             self.waits = 0
 
+        def is_set(self):
+            return False
+
         def wait(self, timeout):
             self.waits += 1
             return self.waits >= 2
@@ -166,6 +172,9 @@ def test_driver_only_keeps_the_initial_tick_and_runs_the_loop(script, monkeypatc
             workers.append(kwargs)
 
         def start(self):
+            pass
+
+        def join(self, timeout=None):
             pass
 
     monkeypatch.setattr(script.threading, "Thread", FakeThread)
@@ -201,9 +210,9 @@ def test_a_tick_advances_every_active_round_oldest_first_and_opens_nothing_while
 
     service = FakeService(active=[{"round_id": "arena-2026-09-03", "status": "stage1"}, {"round_id": "arena-2026-09-04", "status": "open"}])
     assert script.drive_once(service) == "advanced arena-2026-09-03; advanced arena-2026-09-04"
-    assert service.advanced == ["arena-2026-09-03", "arena-2026-09-04"] and service.ensured == 0
+    assert service.advanced == ["arena-2026-09-03", "arena-2026-09-04"] and service.ensured == 1
     running_only = FakeService(active=[{"round_id": "arena-2026-09-03", "status": "stage1_scoring"}], ensure={"status": "created", "round_id": "arena-2026-09-04"})
-    assert script.drive_once(running_only) == "advanced arena-2026-09-03; created arena-2026-09-04"
+    assert script.drive_once(running_only) == "created arena-2026-09-04; advanced arena-2026-09-03"
     one_failing = FakeService(active=[{"round_id": "arena-2026-09-03", "status": "stage1"}, {"round_id": "arena-2026-09-04", "status": "open"}], advance_error=RuntimeError("secret"))
     assert script.drive_once(one_failing) == "failed advance_round arena-2026-09-03: RuntimeError; failed advance_round arena-2026-09-04: RuntimeError"
 

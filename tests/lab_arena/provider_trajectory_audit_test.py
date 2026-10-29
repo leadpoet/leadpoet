@@ -281,7 +281,9 @@ def test_provider_exception_keeps_frame_correlation():
 
 def test_exception_trace_instrumentation_failure_preserves_original_exception():
     class LockedFailure(ArenaStoreUnavailable):
-        def __setattr__(self, _name, _value):
+        def __setattr__(self, name, value):
+            if name == "transaction_rolled_back":
+                return super().__setattr__(name, value)
             raise RuntimeError("metadata disabled")
 
     failure = LockedFailure("provider ledger unavailable")

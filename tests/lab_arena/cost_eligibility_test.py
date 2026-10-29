@@ -196,7 +196,7 @@ def test_paragraph_failed_company_is_excluded_from_qualified_cost_count():
     service.evaluation_icps = lambda _round_id: [
         {"employee_count": ["1-10"], "max_companies": 5}
     ]
-    service._scoring_outputs = lambda _round_id, _stage: {
+    service._scoring_outputs = lambda _round_id, _stage, **_kwargs: {
         runs[0]["run_id"]: {"status": "accepted"}
     }
     failed = {
@@ -210,7 +210,7 @@ def test_paragraph_failed_company_is_excluded_from_qualified_cost_count():
         ],
     }
 
-    def verified_breakdowns(_run, *, icp, companies, policy):
+    def verified_breakdowns(_run, *, icp, companies, policy, **_kwargs):
         assert icp == service.evaluation_icps(ROUND_ID)[0]
         assert companies[0]["company_name"] == "Company 0 0"
         assert policy["max_scored_companies"] == 0
@@ -483,6 +483,12 @@ def _publish_cost_case(
         + _runs("high", high_score)
         + _runs("low", low_score)
     )
+    hotkeys = {p["submission_id"]: p["miner_hotkey"] for p in participants}
+    for run in runs:
+        run.update(kind="execute", miner_hotkey=hotkeys[run["submission_id"]],
+                   result_doc={"terminal_status": "accepted"})
+    judgments = [{**run, "kind": "score", "run_id": "judge-" + run["run_id"],
+                  "scored_run_id": run["run_id"]} for run in runs]
     objects = {
         run["output_ref"]: _output(
             [_company("%s-%d.example.com" % (run["submission_id"], run["icp_position"]), "Company")]
@@ -498,8 +504,9 @@ def _publish_cost_case(
 
     class Store:
         @staticmethod
-        def list_runs(_round_id, **_filters):
-            return runs
+        def list_runs(_round_id, **filters):
+            selected = judgments if filters.get("kind") == "score" else runs
+            return [run for run in selected if all(run.get(key) == value for key, value in filters.items())]
 
         @staticmethod
         def submission_costs(submission_id):
@@ -536,6 +543,7 @@ def _publish_cost_case(
         "execution_cap_microusd": execution_cap,
         "cost_per_company_microusd": per_company_cap,
         "sourcing_cost_eligibility_policy": contracts.SUCCESSFUL_CALLS_COST_POLICY,
+        "schedule": {"publication_deadline": "2026-09-13T00:00:00Z"},
     }
     if integrity_enabled:
         configuration["integrity_policy"] = integrity.POLICY
@@ -548,7 +556,7 @@ def _publish_cost_case(
     }
 
     result = service.publish(ROUND_ID)
-    return result, writes[0][2]["publication_doc"], runs
+    return result, writes[0][2]["publication_doc"] if writes else None, runs
 
 
 @pytest.mark.parametrize(
@@ -657,7 +665,7 @@ def test_zeroed_baseline_does_not_weaken_challenger_promotion_rules(
 
 
 def test_uncertain_baseline_cost_does_not_invent_a_zero_score():
-    result, publication, _runs_used = _publish_cost_case(
+    result, publication, runs_used = _publish_cost_case(
         baseline_amount=10_000_000,
         uncertain_submissions=frozenset({"baseline"}),
         high_score=50.5,
@@ -666,11 +674,9 @@ def test_uncertain_baseline_cost_does_not_invent_a_zero_score():
         low_amount=0,
     )
 
-    assert result["king_outcome"] == "no_king"
-    ranking = {row["submission_id"]: row for row in publication["final_ranking"]}
-    assert ranking["baseline"]["final_score"] == 50.0
-    assert ranking["baseline"]["eligible"] is False
-    assert ranking["baseline"]["eligibility_reason"] == "provider_cost_uncertain"
+    assert result == {"status": "retry", "round_status": "scored", "reason": "baseline_incomplete"}
+    assert publication is None
+    assert {run["per_icp_score"] for run in runs_used if run["submission_id"] == "baseline"} == {50.0}
 
 
 def test_non_integrity_round_keeps_its_frozen_baseline_score_policy():

@@ -47,6 +47,9 @@ class _Store:
         for row in published or []:
             self.rounds[row["round_id"]] = row
 
+    def latest_published_day(self, **_kwargs):
+        return None
+
     def get_round(self, round_id):
         return self.rounds.get(round_id)
 
@@ -136,6 +139,11 @@ def _round(round_id: str = "arena-2026-09-05") -> dict:
 
 def _service(store: _Store, objects: _Objects, payload: bytes) -> ArenaService:
     service = object.__new__(ArenaService)
+    # These source-admission cases use completed published promotion authority.
+    # Baseline work and cost readiness have their own dedicated tests.
+    service._baseline_final_ready = lambda row: True
+    for row in store.rounds.values():
+        row.setdefault("evaluation_date", row["round_id"][-10:])
     service._store = store
     service._objects = objects
     service._config = SimpleNamespace(

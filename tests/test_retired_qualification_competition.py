@@ -16,12 +16,15 @@ def test_retired_qualification_routes_are_not_mounted() -> None:
 
 def test_retired_qualification_runtime_is_removed() -> None:
     for path in (
-        ROOT / "neurons",
         ROOT / "miner_models",
         ROOT / "gateway" / "qualification" / "api",
         ROOT / "qualification" / "validator",
     ):
         assert not any(path.glob("*.py"))
+
+    neurons = ROOT / "neurons"
+    assert {p.name for p in neurons.glob("*.py")} == {"__init__.py", "validator.py"}
+    assert "from lab_arena.validator import main" in (neurons / "validator.py").read_text()
 
     for name in (
         "baseline.py",

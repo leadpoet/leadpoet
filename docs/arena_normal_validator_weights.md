@@ -217,6 +217,11 @@ python neurons/validator.py \
   --wallet.path /absolute/path/to/YOUR_WALLETS_DIRECTORY
 ```
 
+`validator-state/` and `arena-runner/` are local runtime directories at the
+checkout root. Git ignores them, but an update must keep their contents and
+their configured absolute paths. Keep a separate backup of persistent state.
+Do not remove these directories to make a checkout appear clean.
+
 For a local **Finney node**, keep the network identity and add the RPC endpoint:
 
 ```bash
@@ -298,6 +303,17 @@ for a continuously supervised process or finalized reveal verification.
 Run only one process per hotkey. Keep the same weight state directory across
 updates and retries. Never put provider keys or wallet seed values in service
 configuration, logs, or Git.
+
+The supplied systemd unit is the canonical supervisor. It sends SIGTERM to the
+validator and allows 9,300 seconds for current work to drain. If PM2 supervises
+the direct `scripts/run_arena_validator.py` Python launcher, use fork mode,
+one instance, `treekill: false`, and `kill_timeout: 9300000` milliseconds.
+The Python parent handles SIGINT and SIGTERM; PM2 must signal that parent
+without signaling its sandbox children at the same time. Verify the active PM2
+options and the persistent state paths before a restart during active work.
+The timeout alone does not prove that work drained. PM2 documents its default
+1.6-second forced stop and the configurable timeout in its
+[graceful shutdown guide](https://pm2.keymetrics.io/docs/usage/signals-clean-restart/).
 
 ## Diagnose scoring setup
 

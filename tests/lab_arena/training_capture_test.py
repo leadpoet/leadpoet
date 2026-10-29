@@ -1281,6 +1281,60 @@ def test_repeated_text_scans_once_but_still_checks_every_node(monkeypatch):
     assert calls == {public: 1, oversized: 1}
 
 
+def test_aggregate_reuses_short_plain_keys_and_values_with_node_limit(monkeypatch):
+    label = "public short label"
+    value_text = "public short value"
+    value = {"catalog": [{"label": label, "value": value_text} for _ in range(80)]}
+    original = trajectory.redact_text
+    calls = {"label": 0, "value": 0, label: 0, value_text: 0}
+
+    def counted(text, *args, **kwargs):
+        if text in calls:
+            calls[text] += 1
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(trajectory, "redact_text", counted)
+    assert capture.sanitize_training_value(value, aggregate_parts=True) == (value, [])
+    assert calls == {key: 1 for key in calls}
+    with pytest.raises(capture.CaptureError, match="request_structure_limit"):
+        capture.sanitize_training_value(value, aggregate_parts=True, max_nodes=15)
+
+
+def test_aggregate_short_cache_preserves_privacy_and_custom_string_behavior():
+    secret = "private-token-value"
+    value = {"catalog": ["private " + secret] * 20}
+    cleaned, reasons = capture.sanitize_training_value(
+        value, secrets=(secret,), aggregate_parts=True)
+    assert cleaned == {"catalog": ["private [REDACTED]"] * 20}
+    assert reasons == ["credential"]
+    assert capture.sanitize_training_value(value, aggregate_parts=True) == (value, [])
+
+    class UnhashableText(str):
+        __hash__ = None
+
+    custom = UnhashableText("public short value")
+    assert capture.sanitize_training_value(
+        {"catalog": [custom, custom]}, aggregate_parts=True) == (
+            {"catalog": [custom, custom]}, [])
+
+
+def test_aggregate_short_cache_keeps_existing_entry_bound(monkeypatch):
+    texts = [f"public short item {index:03d}" for index in range(600)]
+    original = trajectory.redact_text
+    first_scans = 0
+
+    def counted(text, *args, **kwargs):
+        nonlocal first_scans
+        if text == texts[0]:
+            first_scans += 1
+        return original(text, *args, **kwargs)
+
+    monkeypatch.setattr(trajectory, "redact_text", counted)
+    value = {"catalog": texts + [texts[0]]}
+    assert capture.sanitize_training_value(value, aggregate_parts=True) == (value, [])
+    assert first_scans == 2
+
+
 def test_long_text_working_set_does_not_evict_itself(monkeypatch):
     texts = [(f"public catalog entry {index:03d} " * 50) for index in range(408)]
     original = trajectory.redact_text

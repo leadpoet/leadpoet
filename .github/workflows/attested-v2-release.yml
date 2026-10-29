@@ -168,7 +168,10 @@ jobs:
       - name: Independently revalidate original build artifacts before credentials
         run: bash .github/scripts/assemble_attested_release.sh
       - name: Prepare publisher dependency
-        run: python3 -m pip install --user boto3==1.40.0
+        run: |
+          python3 -m venv "$RUNNER_TEMP/publisher-venv"
+          "$RUNNER_TEMP/publisher-venv/bin/python" -m pip install boto3==1.40.0
+          echo "$RUNNER_TEMP/publisher-venv/bin" >> "$GITHUB_PATH"
       - name: Recheck current main before requesting AWS authority
         run: bash .github/scripts/require_attested_release_source.sh
       - name: Obtain narrow short-lived release publication role

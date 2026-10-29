@@ -5005,6 +5005,7 @@ class Broker:
                 # and its failure behavior unchanged.
                 captured_outbound = operations.build_outbound_request(
                     effective_operation_id, effective_normalized,
+                    host_score=context.kind == "score",
                     deepline_catalog=context.deepline_catalog,
                     source_html_profile=source_html_profile,
                     openrouter_provider_policy=(
@@ -5077,6 +5078,7 @@ class Broker:
                 cached_outbound = captured_outbound or operations.build_outbound_request(
                     effective_operation_id,
                     effective_normalized,
+                    host_score=context.kind == "score",
                     deepline_catalog=context.deepline_catalog,
                     openrouter_provider_policy=(
                         openrouter_host_route.provider_policy
@@ -5691,6 +5693,7 @@ class Broker:
                 if request_accounting.get("deepline_execution_key"):
                     recovery_outbound = operations.build_outbound_request(
                         effective_operation_id, effective_normalized,
+                        host_score=context.kind == "score",
                         deepline_catalog=context.deepline_catalog,
                         source_html_profile=source_html_profile,
                     )
@@ -5958,6 +5961,7 @@ class Broker:
                 # reservation must not require the new profile's schema.
                 captured_outbound = operations.build_outbound_request(
                     effective_operation_id, effective_normalized,
+                    host_score=context.kind == "score",
                     deepline_catalog=context.deepline_catalog,
                     source_html_profile=source_html_profile,
                 )
@@ -5984,6 +5988,7 @@ class Broker:
         outbound = captured_outbound or operations.build_outbound_request(
             effective_operation_id,
             effective_normalized,
+            host_score=context.kind == "score",
             deepline_catalog=context.deepline_catalog,
             source_html_profile=source_html_profile,
             openrouter_provider_policy=(

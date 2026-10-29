@@ -2332,6 +2332,37 @@ def _explicit_responses_open_maps(document: Dict[str, Any]) -> bool:
     return changed
 
 
+# This exact host reviewer contract is defined in qualification/scoring/
+# intent_details.py. Its fingerprint prevents a caller-authored schema with
+# the same name from selecting a different encoding. A regression test binds
+# this value to that definition. The marker versions the normalized request;
+# hashes, shim frames and all other provider bodies remain canonical.
+_INTENT_DETAILS_EVIDENCE_FIRST_FORMAT_HASH = (
+    "sha256:035df5a9dbc3005fc0eb0802332f9bfa90800e1a198f4e0d53e06e5276dfd7c3"
+)
+
+
+def _host_review_wire_document(document: Dict[str, Any]) -> Dict[str, Any]:
+    response_format = document.get("response_format")
+    declared = response_format.get("json_schema") if isinstance(response_format, Mapping) else None
+    if (
+        not isinstance(declared, Mapping)
+        or declared.get("name") != "arena_intent_details_review_evidence_first_v1"
+        or contracts.document_hash(response_format)
+        != _INTENT_DETAILS_EVIDENCE_FIRST_FORMAT_HASH
+    ):
+        return document
+    # The native shim necessarily canonicalizes JSON objects. The existing
+    # required array survives that boundary and records the review sequence:
+    # grounding, coverage, then aggregate checks. Change only this one map.
+    ordered = _deep_copy_json(document)
+    schema = ordered["response_format"]["json_schema"]["schema"]
+    schema["properties"] = {
+        name: schema["properties"][name] for name in schema["required"]
+    }
+    return ordered
+
+
 def build_outbound_request(
     operation_id: str,
     parameters: Any,
@@ -2340,6 +2371,7 @@ def build_outbound_request(
     deepline_catalog: Optional[Mapping[str, Any]] = None,
     allow_full_thinking: bool = False,
     source_html_profile: bool = False,
+    host_score: bool = False,
 ) -> OutboundRequest:
     """Build the credential-free outbound request from validated parameters.
 
@@ -2349,6 +2381,8 @@ def build_outbound_request(
     the credential per ``operation.credential`` and adds nothing else from the
     model request. Only the broker's HTML fallback selects the fixed target
     header profile; it is not a caller request field.
+    Only a host-owned score run may select the versioned paragraph review
+    schema ordering. Miner execution and historical formats retain their bytes.
     """
 
     operation = _operation(operation_id)
@@ -2480,7 +2514,13 @@ def build_outbound_request(
                 schema = catalog.tool_entry(deepline_catalog, normalized["tool"])["input_schema"]
                 if not Draft202012Validator(schema).is_valid(document["payload"]):
                     raise OperationRequestError("invalid_request")
-        body = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+        wire_document = (
+            _host_review_wire_document(document)
+            if host_score is True and operation_id == "openrouter.chat"
+            else document
+        )
+        body = json.dumps(wire_document, sort_keys=wire_document is document,
+                          separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         if schema_expanded:
             try:
                 contracts.check_strict_document(document, _request_structure_limits(operation_id, allow_full_thinking))

@@ -1,3 +1,19 @@
+## Scoped authorization: October 28 production runner and CI security
+
+The user authorized inspection and narrow fixes for production-host GitHub
+release runners, release isolation and protected OIDC publishing, unused IAM
+trust, verified unnecessary cross-account grants, and Deploy Checks reliability.
+The coordinator may remove idle production runner services and registrations,
+apply independently reviewed least-privilege IAM/resource-policy changes, and
+push, merge and verify the exact fixes. Verify ownership and actual usage before
+revoking cross-account access or rotating any key. Preserve live gateway, Arena,
+validator, restart and deployment paths, concurrent work and stored results.
+Keep tests on GitHub-hosted runners, cap test shard concurrency at four, and
+configure the requested daily Sentry main-test monitoring. Do not provision
+paid runner infrastructure or invent an external account without confirmed
+access and scope. Internal implementation agents may test and commit only.
+This authority ends when these fixes and live verification are complete.
+
 ## Scoped authorization: October 28 aggregate exporter text reuse
 
 The user authorized bounded reuse of exact plain-string sanitizer results only

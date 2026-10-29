@@ -14,35 +14,50 @@ from __future__ import annotations
 import collections
 import json
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 
 import pytest
 
 from lab_arena import contracts
-from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES
+from lab_arena.store import ArenaStore, ArenaStoreError, FUNCTION_SIGNATURES, PsycopgTransport
 from tests.lab_arena import test_lab_arena_service_round as rt
-from tests.lab_arena.test_lab_arena_postgrest_route import make_transport, stack  # noqa: F401  (module fixture)
+from tests.lab_arena.test_integrity_round import IntegrityHarness
+from tests.lab_arena.test_lab_arena_postgrest_route import make_transport, stack as compatibility_stack
 
 psycopg2 = pytest.importorskip("psycopg2")
 
 ROUTING_OR_COERCION_MARKERS = ("code=42883", "code=42P01", "code=22P02", "code=22003", "code=22007", "PGRST", "HTTP 404", "HTTP 400 code=None")
 
 
-class RestHarness(rt.Harness):
-    def __init__(self, stack, tmp_path, **kwargs):
+@pytest.fixture()
+def stack(tmp_path_factory):
+    # Each sequence variant owns its publication/reward history.
+    yield from compatibility_stack.__wrapped__(tmp_path_factory)
+
+
+class RestHarness(IntegrityHarness):
+    advance_until = rt.Harness.advance_until
+
+    def __init__(self, stack, tmp_path, *, baseline_first=False, **kwargs):
         self.stack = stack
+        self.baseline_first = baseline_first
         self.calls = collections.Counter()
         info = stack["connection"].info
         connect = lambda: psycopg2.connect(host=info.host, port=info.port, user="postgres", password="postgres", dbname="postgres")
         super().__init__(connect, tmp_path, **kwargs)
+
+    def build_service(self):
+        service = super().build_service()
+        if self.baseline_first:
+            service.config.defaults = replace(service.config.defaults,
+                execution_sequence_from="2000-01-01T00:00:00Z", per_icp_cost_policy=True)
+        return service
 
     def objects_key(self) -> str:
         return "postgrest"
 
     def make_store(self) -> ArenaStore:
         transport = make_transport(self.stack, "lab_arena_service")
-        original_post, original_get = transport._client.post, transport._client.get
-        transport._client.post = lambda url, **kw: original_post(url.replace("/rest/v1", ""), **kw)
-        transport._client.get = lambda url, **kw: original_get(url.replace("/rest/v1", ""), **kw)
         original_rpc = transport.rpc
         calls = self.calls
 
@@ -72,8 +87,18 @@ def placeholder(param: str, sql_type: str):
     return "missing-" + param.replace("p_", "").replace("_", "-")
 
 
-def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_path):
-    harness = RestHarness(stack, tmp_path, challengers=["Rest-A", "Rest-B", "Rest-C"], runners=["alpha", "beta"])
+@pytest.mark.parametrize("baseline_first", [False, True])
+def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_path, monkeypatch, baseline_first):
+    from tests.lab_arena.champion_funding_round_test import ChampionTransport
+    from tests.lab_arena.baseline_scored_first_postgres_test import _baseline_first_judge
+    # Current billing requires the final request-bound Deepline receipt that
+    # the current native champion fixture supplies. No paid service is used.
+    monkeypatch.setattr(rt, "FakeProviderTransport", ChampionTransport)
+    monkeypatch.setattr(rt, "deterministic_scorer", _baseline_first_judge)
+    harness = RestHarness(stack, tmp_path, baseline_first=baseline_first, challengers=["Rest-A", "Rest-B", "Rest-C"], runners=["alpha", "beta"])
+    if baseline_first:
+        from tests.lab_arena.baseline_scored_first_postgres_test import _enable_verified_proxy_runtime
+        _enable_verified_proxy_runtime(harness)
     service = harness.service
     identity = service.store.require_service_role()
     assert identity["current_user"] == "lab_arena_service" and identity["jwt_role"] == "lab_arena_service"
@@ -83,8 +108,11 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     # The operator's first command (--check-only) parses PostgREST error bodies for the function probes.
     checks = service.startup_checks()
     assert checks["database_identity"]["current_user"] == "lab_arena_service" and checks["current_round"] is None
+    # Current review admission starts after the replacement freeze. Match
+    # the existing native full-round helper's real SQL/signed-clock window.
+    harness.clock.now = datetime.now(timezone.utc)
     cutoff = datetime.now(timezone.utc) + timedelta(minutes=30)
-    configuration = service.create_round(cutoff, round_id="arena-2026-09-03-rest")
+    configuration = service.create_round(cutoff, round_id="arena-2026-10-28-rest" + str(int(baseline_first)))
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
     # With a current round, startup also compares the pinned identities of this build.
@@ -92,24 +120,41 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     harness.clock.now = cutoff - timedelta(minutes=15)
     submissions = {flavor: harness.submit(flavor, round_id) for flavor in harness.challengers}
     participant_count = len(harness.challengers) + 1  # challengers plus the daily public baseline
+    stage_one_work = contracts.BENCHMARK_ICP_COUNT if baseline_first else contracts.STAGE_1_ICP_COUNT * participant_count
     assert service.advance_round(round_id)["status"] == "waiting"
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     committed = service.advance_round(round_id)
     assert committed["status"] == "ok" and committed["participants"] == participant_count and harness.status() == "committed"
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     opened = service.advance_round(round_id)
-    assert opened["status"] == "ok" and opened["assignments"] == contracts.STAGE_1_ICP_COUNT * participant_count and harness.status() == "stage1"
+    assert opened["status"] == "ok" and opened["assignments"] == stage_one_work and harness.status() == "stage1"
     harness.run_stage_with_runners(2)
     runs = service.store.list_runs(round_id, stage=1)
-    assert len(runs) == contracts.STAGE_1_ICP_COUNT * participant_count and all(run["status"] == "accepted" for run in runs)
-    assert service.advance_round(round_id)["work_items"] == contracts.STAGE_1_ICP_COUNT * participant_count and harness.status() == "stage1_closed"
-    assert service.advance_round(round_id)["work_items"] == contracts.STAGE_1_ICP_COUNT * participant_count and harness.status() == "stage1_scoring"
+    assert len(runs) == stage_one_work and all(run["status"] == "accepted" for run in runs)
+    assert service.advance_round(round_id)["work_items"] == stage_one_work and harness.status() == "stage1_closed"
+    assert service.advance_round(round_id)["work_items"] == stage_one_work and harness.status() == "stage1_scoring"
     harness.run_stage_with_runners(2)
-    assert service.advance_round(round_id)["status"] == "closed" and harness.status() == "stage1_judged"
+    after_baseline = service.advance_round(round_id)
+    if baseline_first:
+        # Current continuation SQL opens miner execution directly once every
+        # baseline judgment is accepted; legacy rounds retain the old phases.
+        assert after_baseline["status"] == "ok"
+        assert after_baseline["assignments"] == contracts.BENCHMARK_ICP_COUNT * len(harness.challengers)
+        assert harness.status() == "stage2"
+    else:
+        assert after_baseline["status"] == "closed" and harness.status() == "stage1_judged"
     # A restarted service (a fresh PostgREST client) continues the same round.
     harness.service = harness.build_service()
     service = harness.service
-    assert service.advance_round(round_id)["judge_executions"] == contracts.STAGE_1_ICP_COUNT * participant_count and harness.status() == "stage1_scored"
+    if not baseline_first:
+        assert service.advance_round(round_id)["judge_executions"] == stage_one_work and harness.status() == "stage1_scored"
+    else:
+        assert service.store.get_round(round_id)["status"] == "stage2"
+    harness.advance_until("scored", runners=2)
+    with harness.connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s),"
+                       "public.lab_arena__all_judgments_ready_v1(%s)", (round_id, round_id))
+        assert cursor.fetchone() == (True, True)
     harness.advance_until("published", runners=2)
     assert harness.status() == "published"
     rt.assert_canary_absent(harness, harness.connect)
@@ -134,99 +179,25 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     assert "lab_arena_register_submission" in reached or "lab_arena_register_submission_v2" in reached
     assert "lab_arena_open_scoring" in reached or "lab_arena_open_scoring_v2" in reached
     assert "lab_arena_complete_attempt" in reached or "lab_arena_complete_attempt_v2" in reached
-    # Every unvisited RPC must reach its domain check or exact empty-result
-    # contract. Read-only lookups and capability probes legitimately succeed.
-    empty_results = {
-        "lab_arena__miner_credit_judgment_terminal_v1": False,
-        "lab_arena_latest_promoted_champion_v1": None,
-        "lab_arena_signal_authority_exclusions_v1": None,
-        "lab_arena_scoring_policy_history_v1": {"revisions": [], "round_id": "missing-round-id"},
-        "lab_arena_next_closed_provider_reconciliation_v1": {"status": "none"},
-        "lab_arena_retry_credit_failures_v1": {"status": "no_eligible", "reason": "invalid_request_hash", "requeued_count": 0},
-        "lab_arena_review_guard_state_v1": {"schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False},
-        "lab_arena_deepline_catalog_schema_v1": {"schema_version": "leadpoet.lab_arena.deepline_catalog_schema.v1", "version": 415},
-        "lab_arena_deepline_response_schema_v1": {"schema_version": "leadpoet.lab_arena.deepline_response_schema.v1", "version": 426, "status": "ok"},
-        "lab_arena_infrastructure_retry_cost_schema_v1": {"schema_version": "leadpoet.lab_arena.infrastructure_retry_cost_schema.v1", "version": 478, "policy": "trusted_infrastructure_v1"},
-        "lab_arena_parallel_execution_schema_v2": {"schema_version": "leadpoet.lab_arena.parallel_execution_schema.v2", "version": 401, "max_parallel_icps": 251},
-        "lab_arena_per_icp_cost_schema_v1": {"schema_version": "leadpoet.lab_arena.per_icp_cost_schema.v1", "version": 289, "policy": "successful_calls_per_icp_v1"},
-    }
-    unexpected_results = {}
-    for function in sorted(set(FUNCTION_SIGNATURES) - reached):
-        params = {name: placeholder(name, sql_type) for name, sql_type in FUNCTION_SIGNATURES[function]}
-        if function in empty_results:
-            assert harness.transport.rpc(function, params) == empty_results[function], function
-            continue
-        if function == "lab_arena_restart_guard_state_v1":
-            state = harness.transport.rpc(function, params)
-            assert state["schema_version"] == "leadpoet.lab_arena.restart_guard_state.v1"
-            assert all(state[field] is False for field in ("guard_active", "guard_present", "operator_paused", "paused"))
-            assert all(state[field] == "" for field in ("candidate_commit", "guard_commitment", "owner_commitment", "restart_phase", "restart_scope"))
-            assert state["guard_expires_at"] is None
-            assert type(state["guard_generation"]) is int and state["guard_generation"] >= 0
-            drain = state["drain"]
-            assert drain["schema_version"] == "leadpoet.lab_arena.restart_drain_state.v1"
-            assert drain["preserved"] is True
-            assert all(value == 0 for name, value in drain.items() if name.endswith("_count"))
-            assert drain["snapshot_commitment"] == contracts.document_hash([])
-            assert drain["outcome_commitment"].startswith("sha256:") and len(drain["outcome_commitment"]) == 71
-            continue
-        if function == "lab_arena_current_daily_icp_set":
-            response = harness.transport.rpc(function, params)
-            assert response["status"] == "unavailable"
-            continue
-        if function == "lab_arena_next_closed_deepline_reconciliation_v1":
-            assert harness.transport.rpc(function, params) == {"status": "none"}
-            continue
-        if function == "lab_arena_weight_state_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 202
-            continue
-        if function == "lab_arena_validator_scoring_authority_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 208
-            continue
-        if function == "lab_arena_code_review_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 207
-            continue
-        if function == "lab_arena_participation_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 221
-            continue
-        if function == "lab_arena_integrity_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 213
-            continue
-        if function == "lab_arena_twenty_icp_promotion_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 251
-            continue
-        if function == "lab_arena_baseline_cost_eligibility_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 254
-            continue
-        if function == "lab_arena_parallel_execution_schema_v1":
-            assert harness.transport.rpc(function, params) == {
-                "schema_version": (
-                    "leadpoet.lab_arena.parallel_execution_schema.v1"
-                ),
-                "version": 255,
-                "max_parallel_icps": 20,
-            }
-            continue
-        if function == "lab_arena_contact_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 215
-            continue
-        if function == "lab_arena_company_quality_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 1
-            continue
-        if function == "lab_arena_next_closed_deepline_reconciliation_v1":
-            assert harness.transport.rpc(function, params)["status"] == "none"
-            continue
-        try:
-            response = harness.transport.rpc(function, params)
-        except ArenaStoreError as error:
-            message = str(error)
-        else:
-            unexpected_results[function] = response
-            continue
-        assert not any(marker in message for marker in ROUTING_OR_COERCION_MARKERS), (function, message)
-        assert "lab_arena_" in message or "code=P0" in message, (function, message)
-    assert not unexpected_results, json.dumps(unexpected_results, sort_keys=True, indent=2)
+    # Compare every remaining registered RPC against the same native SQL
+    # signature/role. Current capability reads and missing-item predicates may
+    # return normal JSON/booleans instead of a domain error; both are valid.
+    native = PsycopgTransport(harness.connect, pool_size=1)
+    try:
+        for function in sorted(set(FUNCTION_SIGNATURES) - reached):
+            params = {name: placeholder(name, sql_type) for name, sql_type in FUNCTION_SIGNATURES[function]}
+            try:
+                expected = native.rpc(function, params)
+            except ArenaStoreError as expected_error:
+                with pytest.raises(ArenaStoreError) as received:
+                    harness.transport.rpc(function, params)
+                assert received.value.store_error.get("code") == expected_error.store_error.get("code"), function
+                assert not any(marker in str(received.value) for marker in ROUTING_OR_COERCION_MARKERS), function
+            else:
+                assert harness.transport.rpc(function, params) == expected, function
+    finally:
+        native.close()
     # The cancel path is real, not a probe: a fresh round is cancelled through PostgREST.
-    second = service.create_round(cutoff, round_id="arena-2026-09-03-restcancel")
+    second = service.create_round(harness.clock() + timedelta(hours=1), round_id="arena-2026-10-28-restcancel" + str(int(baseline_first)))
     assert service.store.cancel_round(second["round_id"], "operator_abort")["status"] in ("ok", "cancelled")
     assert service.store.get_round(second["round_id"])["status"] == "cancelled"

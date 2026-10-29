@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import threading
+import time
 
 import pytest
 
@@ -13,8 +14,10 @@ from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
 from tests.lab_arena.proxy_model_capacity401_e2e_test import complete_application_database
 
 
-database=recovery.database
-migrated=recovery.migrated
+# Exact migration 412 upgrades retain their historical SQL fixture. This file
+# drives the current HTTP service, which also needs all later read/recovery RPCs.
+database=fullflow.database
+migrated=fullflow.migrated
 
 
 @pytest.mark.parametrize('fault_kind', ['execute', 'score_continuation'])
@@ -92,12 +95,23 @@ def _exercise_host_fault(database,migrated,tmp_path,monkeypatch,*,fault_kind='ex
             healthy_config=healthy._config
             healthy.close()
             replacement=type(healthy)(healthy_config)
+            # The current score retry has a real 30-second backoff. Preserve
+            # its queue timestamp and wait only for that existing admission
+            # boundary, rather than requiring an immediate retry lease.
+            retry=run.rsplit(':',1)[0]+':2'
+            with psycopg.connect(**dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT extract(epoch FROM created_at+interval '30 seconds'-clock_timestamp()) FROM public.lab_arena_runs WHERE run_id=%s",(retry,))
+                    delay=float(cur.fetchone()[0])
+            assert delay<=30
+            time.sleep(max(0,delay)+0.01)
             drain(harness,(replacement,))
             with psycopg.connect(**dsn) as conn:
                 with conn.cursor() as cur:
-                    cur.execute('SELECT status,runner_hotkey FROM public.lab_arena_runs WHERE run_id=%s',(run.rsplit(':',1)[0]+':2',))
+                    cur.execute('SELECT status,runner_hotkey FROM public.lab_arena_runs WHERE run_id=%s',(retry,))
                     state,runner=cur.fetchone()
                     assert state=='accepted' and runner!=failed_hotkey
+                    assert expiry>datetime.now(timezone.utc)
             observed['recovered']=True
             replacements[id(failed)]=replacement
             replacements[id(healthy)]=replacement

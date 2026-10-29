@@ -175,11 +175,21 @@ def test_downstream_budget_retry_quota_and_eligibility_keep_policy(database):
     prior.test_absent_opt_in_preserves_old_published_cost_policy(database)
 
 
-def test_real_execution_judge_and_publication_use_indexed_helper(database, tmp_path):
+@pytest.fixture
+def current_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    for db in current_service_database():
+        with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
+            # Later service prerequisites retain the exact indexed482 helper.
+            assert hashlib.sha256(definition(cur).encode()).hexdigest() == POST
+        yield db
+
+
+def test_real_execution_judge_and_publication_use_indexed_helper(current_database, tmp_path):
     from tests.lab_arena.infrastructure_retry_cost478_lifecycle_test import (
         test_both_roles_keep_cost_credit_through_real_judge_and_publication,
     )
-    test_both_roles_keep_cost_credit_through_real_judge_and_publication(database, tmp_path)
+    test_both_roles_keep_cost_credit_through_real_judge_and_publication(current_database, tmp_path)
 
 
 # Every original/head binding stays enforced, including nullable columns.
@@ -278,6 +288,15 @@ def test_production_cardinality_lookup_is_indexed_and_bounded(database):
                 '{"reason":"worker_reported","call":{"reason":"transport_failure","call_succeeded":false}}'::jsonb
               FROM public.lab_arena_runs r CROSS JOIN generate_series(1,60000) g
               WHERE r.run_id=%s""", (lease['run_id'],))
+            cur.execute("""INSERT INTO public.lab_arena_ledger
+              (entry_kind,miner_hotkey,round_id,submission_id,run_id,stage,call_identity,
+               provider,operation_id,funding_source,amount_microusd,entry_doc)
+              SELECT 'uncertain',miner_hotkey,round_id,submission_id,run_id,stage,
+                'sha256:'||lpad(to_hex(g+100000),64,'0'),'deepline','deepline.execute','miner_key',0,
+                '{"reason":"worker_reported","call":{"reason":"transport_failure","call_succeeded":false}}'::jsonb
+              FROM public.lab_arena_runs r CROSS JOIN generate_series(1,333) g
+              WHERE r.run_id=%s""", (lease['run_id'],))
+            assert cur.rowcount == 333
             cur.execute('SET LOCAL session_replication_role=origin')
             cur.execute('ANALYZE public.lab_arena_ledger')
             cur.execute("""CREATE TEMP TABLE cost_proof_heads_482 AS
@@ -304,6 +323,8 @@ def test_production_cardinality_lookup_is_indexed_and_bounded(database):
         with conn.cursor() as cur:
             before = rows(cur)
             cur.execute('SET jit=off')
+            cur.execute('SHOW statement_timeout')
+            previous_timeout = cur.fetchone()[0]
             cur.execute('EXPLAIN (FORMAT JSON) ' + query)
             old_plan = cur.fetchone()[0][0]['Plan']
             cur.execute('EXPLAIN (FORMAT JSON) ' + indexed)
@@ -326,6 +347,7 @@ def test_production_cardinality_lookup_is_indexed_and_bounded(database):
             assert cur.fetchone()[0] == 0
             new_seconds = time.monotonic() - started
             assert new_seconds < 1 and new_seconds * 5 < old_seconds
+            cur.execute("SELECT set_config('statement_timeout',%s,FALSE)", (previous_timeout,))
             assert proof(conn, lease['run_id']) == (True, True)
             assert rows(cur) == before
             print(f'lookup482 old_cost={old_plan["Total Cost"]} new_cost={new_plan["Total Cost"]} '

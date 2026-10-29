@@ -26,17 +26,6 @@ def _ordered_offsets(text: str, markers: tuple[str, ...]) -> list[int]:
     return offsets
 
 
-def _current_restart_environment():
-    """Model the controller's instance-role environment, not CI credentials."""
-    return {
-        key: value for key, value in os.environ.items()
-        if not key.startswith("AWS_") and key not in {
-            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
-            "all_proxy", "BOTO_CONFIG", "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
-        }
-    }
-
-
 def _shell_function_source(script: str, name: str) -> str:
     lines = script.splitlines()
     start = lines.index(f"{name}() {{")
@@ -1851,8 +1840,8 @@ except BlockingIOError:
     assert "Stopping existing gateway" not in result.stdout
 
 
-@pytest.mark.parametrize("runtime,recovers", [("gateway", True), ("relay", False)])
-def test_restart_recovers_only_lock_inherited_by_gateway_runtime(tmp_path: Path, runtime, recovers) -> None:
+@pytest.mark.parametrize("holder_module, recover", [("gateway.main", True), ("gateway.utils.tee_inter_enclave_relay", False)])
+def test_restart_recovers_only_the_allowed_gateway_lock_holder(tmp_path: Path, holder_module: str, recover: bool) -> None:
     if not Path("/proc/self/fd").exists() or shutil.which("flock") is None:
         return
 
@@ -1862,22 +1851,25 @@ import fcntl
 import sys
 import time
 
-with open(sys.argv[-1], "w", encoding="utf-8") as handle:
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     print("ready", flush=True)
     time.sleep(30)
 """
+    # Start a real -m process so the controller sees the allowed entrypoint,
+    # not a marker hidden in the arguments of an arbitrary inline program.
+    holder_root = tmp_path / "holder"
+    module = holder_root.joinpath(*holder_module.split(".")).with_suffix(".py")
+    module.parent.mkdir(parents=True)
+    package = module.parent
+    while package != holder_root:
+        (package / "__init__.py").write_text("")
+        package = package.parent
+    module.write_text(holder_code)
     holder = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            holder_code,
-            # The production lock classifier permits only the gateway main
-            # runtime. A relay-shaped command remains an unknown lock owner.
-            *( ["-m", "gateway.main"] if runtime == "gateway" else
-               ["gateway.utils.tee_inter_enclave_relay"] ),
-            str(lock_file),
-        ],
+        [sys.executable, "-m", holder_module, str(lock_file)],
+        cwd=holder_root,
+        env={**os.environ, "PYTHONPATH": str(holder_root)},
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -1909,8 +1901,8 @@ with open(sys.argv[-1], "w", encoding="utf-8") as handle:
     assert (
         "Recovering gateway restart lock inherited by a detached runtime process"
         in result.stdout
-    ) is recovers
-    assert ("another gateway restart is already running" in result.stderr) is (not recovers)
+    ) is recover
+    assert ("another gateway restart is already running" in result.stderr) is not recover
 
 
 def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:
@@ -1998,7 +1990,13 @@ def test_gateway_restart_does_not_require_closed_model_identity() -> None:
 def _run_current_restart_helpers(names, command, *, environment=None):
     script = (ROOT / "gw_restart.sh").read_text(encoding="utf-8")
     source = "\n\n".join(_shell_function_source(script, name) for name in names)
-    env = _current_restart_environment()
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("AWS_") and key not in {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "BOTO_CONFIG", "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
+        }
+    }
     env.update(environment or {})
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + source + "\n" + command],
@@ -2161,3 +2159,14 @@ def test_pre_shutdown_cleanup_uses_candidate_helper_before_old_checkout_activati
         ("--max-candidates", "64"),
     ):
         assert args[args.index(option) + 1] == expected
+
+
+def _current_restart_environment():
+    """Model the controller's instance-role environment, not CI credentials."""
+    return {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("AWS_") and key not in {
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy",
+            "all_proxy", "BOTO_CONFIG", "LEADPOET_AWS_INSTANCE_ROLE_ONLY",
+        }
+    }

@@ -1,7 +1,7 @@
 """Future baseline-first rounds through the real service and PostgreSQL."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,7 @@ from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
+    CURRENT_SERVICE_MIGRATIONS, CURRENT_REWARD_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
     migrations_before,
 )
@@ -297,3 +297,157 @@ def test_sep22_open_round_opt_in_changes_only_the_execution_policy(
         key: value for key, value in before.items()
         if key not in {"configuration_doc", "updated_at"}
     }
+
+
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
+
+@pytest.fixture()
+def historical_reward_database():
+    """Frozen baseline-first service proof; current database stays complete."""
+    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
+
+
+class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+    pass
+
+
+def _start_frozen_round(harness, *, day, epoch):
+    harness.chain.epoch = epoch
+    harness.clock.now = datetime.now(timezone.utc)
+    configuration = harness.service.create_round(
+        harness.clock.now + timedelta(minutes=30), round_id="arena-2026-10-%02d" % day,
+    )
+    assert capacity.daily_challenger_capacity(configuration) >= len(harness.challengers)
+    harness.round_id = configuration["round_id"]
+    for flavor in harness.challengers:
+        harness.submit(flavor, harness.round_id)
+    original_cutoff = freeze_historical_intake_dates(harness, "2026-09-23")
+    harness.clock.advance_to(original_cutoff)
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["evaluation_date"] == "2026-09-23"
+    for participant in row["participants"]:
+        harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
+    return len(row["participants"])
+
+
+def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
+    historical_reward_database, tmp_path, monkeypatch
+):
+    database = historical_reward_database
+    psycopg2, dsn = database
+    connect = lambda: psycopg2.connect(**dsn)
+    flavors = ["Miner%d" % index for index in range(5)]
+    harness = _FrozenIntegrityHarness(
+        connect, tmp_path, challengers=flavors, runners=["alpha", "beta"]
+    )
+    harness.service.config.defaults = replace(
+        harness.service.config.defaults,
+        execution_sequence_from="2000-01-01T00:00:00Z",
+        per_icp_cost_policy=True,
+        rewards_enabled=True,
+    )
+    _enable_verified_proxy_runtime(harness)
+
+    monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
+    participants = _start_frozen_round(harness, day=31, epoch=62_031)
+    assert participants == 6
+    committed = harness.service.store.get_round(harness.round_id)
+    configuration = committed["configuration_doc"]
+    assert configuration["execution_sequence_policy"] == (
+        contracts.BASELINE_SCORED_FIRST_POLICY
+    )
+    assert "parallel_twenty_icp_execution" not in configuration
+    # Capacity was checked against the actual intake schedule before this
+    # historical replay moved its execution windows forward.
+    bank_ref = committed["benchmark_ref"]
+    bank_bytes = harness.objects.get(bank_ref)
+    baseline_id = next(
+        item["submission_id"] for item in committed["participants"]
+        if item["is_king"]
+    )
+    miner_ids = {
+        item["submission_id"] for item in committed["participants"]
+        if not item["is_king"]
+    }
+
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    opened = harness.service.advance_round(harness.round_id)
+    assert opened["assignments"] == contracts.BENCHMARK_ICP_COUNT
+    baseline_runs = harness.service.store.list_runs(
+        harness.round_id, kind="execute"
+    )
+    assert {run["submission_id"] for run in baseline_runs} == {baseline_id}
+    assert {run["icp_position"] for run in baseline_runs} == set(range(20))
+    assert harness.service.store.list_runs(
+        harness.round_id, stage=2, kind="execute"
+    ) == []
+
+    harness.advance_until("stage1_scored", runners=2)
+    scored_baseline = harness.service.store.list_runs(
+        harness.round_id, stage=1, kind="execute"
+    )
+    assert len(scored_baseline) == 20
+    assert all(run["per_icp_score"] is not None for run in scored_baseline)
+    assert harness.service._baseline_fully_succeeded(
+        harness.service.store.get_round(harness.round_id)
+    )
+    assert harness.service.store.list_runs(
+        harness.round_id, stage=2, kind="execute"
+    ) == []
+
+    opened = harness.service.advance_round(harness.round_id)
+    assert opened["assignments"] == 5 * contracts.BENCHMARK_ICP_COUNT
+    miner_runs = harness.service.store.list_runs(
+        harness.round_id, stage=2, kind="execute"
+    )
+    assert {run["submission_id"] for run in miner_runs} == miner_ids
+    assert all(
+        sum(run["submission_id"] == submission_id for run in miner_runs) == 20
+        for submission_id in miner_ids
+    )
+    assert harness.service.store.get_round(harness.round_id)["status"] == "stage2"
+
+    harness.advance_until("published", runners=2, max_steps=120)
+    published = harness.service.store.get_round(harness.round_id)
+    assert published["benchmark_ref"] == bank_ref
+    assert harness.objects.get(bank_ref) == bank_bytes
+    publication = published["publication_doc"]
+    assert len(publication["stage1_ranking"]) == 5
+    assert {row["submission_id"] for row in publication["stage1_ranking"]} == miner_ids
+    assert publication["finalists"] == sorted(miner_ids)
+    assert len(publication["final_ranking"]) == 6
+    assert publication["king_decision"]["outcome"] == "no_king"
+    dashboard = public_dashboard.submissions_snapshot(
+        harness.service, harness.round_id
+    )
+    dashboard_scores = {
+        item["submission_id"]: item["stage1_score"]
+        for item in dashboard["submissions"]
+    }
+    assert set(dashboard_scores) == miner_ids | {baseline_id}
+    assert all(score is not None for score in dashboard_scores.values())
+    for result in publication["final_ranking"]:
+        summary = result["cost_summary"]
+        assert len(summary["per_icp"]) == 20
+        assert summary["competition_sourcing_microusd"] == summary["execution"][
+            "successful_microusd"
+        ]
+        assert summary["judge"]["call_count"] > 0
+        public_result = harness.service.public_results(
+            harness.round_id, result["submission_id"]
+        )
+        assert public_result["submission_scores"]["final"] == result["final_score"]
+        expected_stage = "stage_1" if result["submission_id"] == baseline_id else "stage_2"
+        assert len(public_result["scores"][expected_stage]) == 20
+
+    assert harness.service.activate_reward(harness.round_id)["status"] == "activated"
+    activated = harness.service.store.get_round(harness.round_id)
+    assert activated["reward_basis_doc"]["king_outcome"] == "no_king"
+    burn = fixtures.keypair("baseline-first-burn").ss58_address
+    state = _accepted_state(
+        harness, int(activated["effective_reward_epoch"]), burn
+    )
+    weights = arena_weights.derive_arena_weights(state, [burn])
+    assert weights["champion_share_ppb"] == 0
+    assert weights["burned_residual_ppb"] == 1_000_000_000

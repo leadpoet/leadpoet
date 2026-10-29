@@ -54,7 +54,7 @@ def _install_hints(harness):
                     status, _, _ = shim.dispatch(
                         "openrouter.chat",
                         {
-                            "model": scoring.DEFAULT_JUDGE_MODELS["intent_signal_judge"],
+                            "model": document["scorer_policy"]["judge_models"]["role_batch_check"],
                             "messages": [
                                 {
                                     "role": "user",
@@ -212,27 +212,31 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
                     break
                 if status in ("stage1", "stage1_scoring", "stage2", "stage2_scoring"):
                     _drain_both(harness, (small, large))
-                if status == "stage1_scoring":
-                    # Drain baseline judges before opening miner execution.
-                    # Current continuation stores their score projections at
-                    # publication; their accepted cache evidence is already fixed.
-                    old_baseline = {
+                if not old_baseline:
+                    baseline_scores = harness.service.store.list_runs(
+                        harness.round_id, stage=1, kind="score"
+                    )
+                    accepted_baseline = {
                         r["run_id"]: (
                             r["judgment_cache_key"],
                             r["judgment_scope_doc"],
                             r["result_doc"],
                             r["output_ref"],
                         )
-                        for r in harness.service.store.list_runs(
-                            harness.round_id, stage=1, kind="score"
-                        )
+                        for r in baseline_scores
                         if r["status"] == "accepted"
                     }
-                    assert len(old_baseline) == 10
-                    monkeypatch.setattr(
-                        competition, "effective_competition_input", current_projection
-                    )
-                    harness.clock.advance_to(harness.schedule()["stage_2_start"])
+                    if len(accepted_baseline) == 10:
+                        # Current concurrency can skip the old stage1_scored
+                        # state. Upgrade after all baseline judgments exist,
+                        # while no miner judgment has been planned or accepted.
+                        assert not harness.service.store.list_runs(
+                            harness.round_id, stage=2, kind="score"
+                        )
+                        old_baseline = accepted_baseline
+                        monkeypatch.setattr(
+                            competition, "effective_competition_input", current_projection
+                        )
                 transition = harness.service.advance_round(harness.round_id)
                 assert transition.get("status") not in (
                     "cancelled",
@@ -248,6 +252,7 @@ def test_cached_judgments_and_old_baseline_publish_after_projection_upgrade(
 
     published = harness.service.store.get_round(harness.round_id)
     assert published["status"] == "published"
+    assert harness.service._baseline_fully_succeeded(published)
     assert observed == {"execute": 30, "score": 26}
     score_runs = harness.service.store.list_runs(harness.round_id, kind="score")
     cached = [r for r in score_runs if r["judgment_cache_source_run_id"] != r["run_id"]]

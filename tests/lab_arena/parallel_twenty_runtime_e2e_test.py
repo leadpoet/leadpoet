@@ -49,9 +49,9 @@ def database():
     # Current full-flow coverage needs the deployed claim and scoring helpers.
     # Reuse the descendant builder without changing historical migration tests.
     # Providers, verified exits and the sandbox boundary remain controlled here.
-    from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
-    yield from full_thinking_database()
+    yield from current_service_database()
 
 
 def _proxy_pool(process_capacity: int) -> ProxyWorkerPool:

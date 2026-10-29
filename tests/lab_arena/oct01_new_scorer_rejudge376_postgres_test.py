@@ -11,6 +11,7 @@ from lab_arena import contact_policy, provider_observations, public_dashboard
 from lab_arena.broker import RunContext
 from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
+from tests.lab_arena.historical_service_harness import HistoricalArenaStore
 from lab_arena.submission_runtime import SubmissionProviderKeys
 from tests.lab_arena import oct01_held_deadline_recovery372_postgres_test as prior
 from tests.lab_arena.icp_fixtures import daily_icps
@@ -205,7 +206,7 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     assert keys.credential_for(context, 'deepline') == 'test-miner-key'
     assert public_dashboard._is_administrative_archive(archive)
     service = object.__new__(ArenaService)
-    service._clock = lambda: datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
+    service._clock = lambda: datetime(2026, 10, 1, 6, 30, tzinfo=timezone.utc)
     service._store = store
     service._config = SimpleNamespace(mode='live', pinned_round_id=None)
     service._chain_scope = lambda: ('finney', 71)
@@ -214,10 +215,15 @@ def test_rejudge_archives_history_and_reopens_only_baseline_scoring(database):
     service._public_round_output_policy = lambda config: {}
     assert service.current_round()['round_id'] != archive['round_id']
     assert archive['round_id'] not in {r['round_id'] for r in service.active_rounds()}
-    assert service.open_round()['round_id'] != archive['round_id']
+    # This sealed fixture has active scoring work and no open admission round.
+    assert service.open_round() is None
     # Historical recovery assertions above use the original schema. Current
     # dashboard reads require their publication projection migration first.
-    prepare_current_service_reads(lambda: psycopg.connect(**dsn))
+    with psycopg.connect(**dsn) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cursor:
+            cursor.execute((MIGRATION.parent / "443-lab-arena-competition-publication-projection.sql").read_text())
+    service._store = HistoricalArenaStore(store._transport)
     assert archive['round_id'] not in {
         r['round_id'] for r in public_dashboard._recent_competition_rounds(
             service, network_name='finney', netuid=71, limit=20)
@@ -288,7 +294,7 @@ def test_canonical_open_scoring_uses_fresh_namespace_and_image_scope(database, m
             cursor.execute("SET session_replication_role=origin")
     store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
     service = object.__new__(ArenaService)
-    service._clock = lambda: datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
+    service._clock = lambda: datetime(2026, 10, 1, 6, 30, tzinfo=timezone.utc)
     service._store = store
     service._round = lambda rid: store.get_round(rid)
     service._load_scoring_plan = lambda row, stage: plan

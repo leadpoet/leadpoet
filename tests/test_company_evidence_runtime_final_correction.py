@@ -12,16 +12,24 @@ from tests.test_company_evidence_judgment_reserve import (
 
 def _run_correction(monkeypatch, *, final, cross_after=8, positive=False):
     clock = _Clock()
+    clock.now = 10.0
+    first_clock_read = True
+
+    def monotonic():
+        nonlocal first_clock_read
+        if first_clock_read:
+            first_clock_read = False
+            return 0.0
+        # Ordinary turns start before the judgment reserve. The eighth
+        # turn is the forced judgment; only it earns the final correction.
+        return clock.now
+
+    monkeypatch.setattr(clock, "monotonic", monotonic)
     requests = []
 
     async def post(_session, _url, *, headers, payload):
         requests.append(payload)
         turn = len(requests)
-        if turn == investigator.MAX_REASONING_TURNS - 1:
-            # Keep ordinary attempts outside the judgment reserve. Enter it
-            # for the eighth admission, which owns one final correction.
-            clock.now = (investigator.ADMISSION_DEADLINE_SECONDS
-                         - investigator.JUDGMENT_ADMISSION_RESERVE_SECONDS)
         if cross_after and turn == cross_after:
             # The ordinary request was admitted before the deadline. Its
             # response settles late, with no provider cancellation or retry.
@@ -76,11 +84,9 @@ def test_late_eighth_judgment_keeps_existing_ninth_correction_and_validation(
     assert len(late_requests) == len(fast_requests) == 9
     assert late_requests == fast_requests
     assert late == fast
-    # A rejected final positive packet stays retryably incomplete. Its
-    # defensive UNPROVEN projection is not a completed negative judgment.
-    rejected = final in {"fabricated_quote", "missing_citation"}
-    assert late["_completed_submit"] is (not rejected)
-    assert late["failure_reason"] == ("malformed_response" if rejected else "")
+    complete = final in {"verified", "unproven"}
+    assert late["_completed_submit"] is complete
+    assert late["failure_reason"] == ("" if complete else "malformed_response")
     assert late["usage"]["reasoning_turns"] == 9
     assert late["usage"]["search_calls"] == late["usage"]["fetch_calls"] == 0
     assert late["claims"]["industry"]["status"] == status

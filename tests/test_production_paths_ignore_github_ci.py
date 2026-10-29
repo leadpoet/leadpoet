@@ -87,6 +87,10 @@ def test_attested_release_workflow_is_manual_only_with_integrity_guards() -> Non
     for job in jobs.values():
         assert any('require_attested_release_source.sh' in step.get('run', '')
                    for step in job['steps'])
+    build_script = (ROOT / ".github/scripts/build_attested_release.sh").read_text()
+    assert "leadpoet_acquire_docker_operation_lock_v2" in build_script
+    assert any(step.get("run") == "bash .github/scripts/build_attested_release.sh"
+               for step in jobs["builds"]["steps"])
     source_gate = (ROOT / '.github/scripts/require_attested_release_source.sh').read_text()
     assert '"${GITHUB_EVENT_NAME:-}" = workflow_dispatch' in source_gate
     assert '"${GITHUB_REF:-}" = refs/heads/main' in source_gate

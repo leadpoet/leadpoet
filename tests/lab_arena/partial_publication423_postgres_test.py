@@ -1,6 +1,7 @@
 """Publication permits only proof-backed unfinished Arena assignments."""
 
 from pathlib import Path
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import copy
@@ -83,7 +84,7 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
     connect = lambda: psycopg2.connect(**dsn)
     with connect() as connection, connection.cursor() as cursor:
         cursor.execute(MIGRATION.read_text())
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=["PartialMiner"], runners=["alpha"]
     )
     harness.service.config.defaults = replace(
@@ -236,3 +237,15 @@ def test_partial_publication_requires_closed_proof_and_cannot_promote_unknown_ba
         attempt(incomplete_baseline=False, null_score=False)
     with pytest.raises(psycopg2.Error):
         attempt(incomplete_baseline=False, incomplete_reason=False)
+
+
+class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+    """The lifecycle belongs to this file's pinned SQL and original judge."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-27")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service

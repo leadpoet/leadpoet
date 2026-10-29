@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from lab_arena.store import ArenaStore,PsycopgTransport
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena import score_cooldown_claim_index510_postgres_test as prior
 from tests.lab_arena import test_lab_arena_service_round as flows
 
@@ -21,6 +22,11 @@ def database():
         finally:conn.close()
         yield db
     finally:gen.close()
+
+
+@pytest.fixture(scope='module')
+def current_database():
+    yield from current_service_database()
 
 
 def test_company_failure_retry_preserves_completed_authorities_and_finishes(database):
@@ -57,7 +63,13 @@ def test_company_failure_retry_preserves_completed_authorities_and_finishes(data
     finally:store.close()
 
 
-def test_latest_schema_retains_complete_normal_round_aggregate_and_publication(database,tmp_path,monkeypatch):
+def test_latest_schema_retains_complete_normal_round_aggregate_and_publication(current_database,tmp_path,monkeypatch):
+    # This is current client/publication coverage, separate from the sealed509/510
+    # source/hash and cached-retry controls in this module's historical database.
+    _assert_complete_current_round(current_database,tmp_path,monkeypatch)
+
+
+def _assert_complete_current_round(database,tmp_path,monkeypatch):
     # Use the current complete-baseline fixture, rather than an older partial
     # baseline rehearsal that predates the final-baseline authority guard.
     from dataclasses import replace

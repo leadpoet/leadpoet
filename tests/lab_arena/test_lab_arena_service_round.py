@@ -3395,3 +3395,697 @@ def test_a_banned_miner_cannot_submit_to_the_frozen_round(connect, tmp_path):
     with pytest.raises(svc.ServiceError) as refused:
         service.handle_submission_presign(envelope)
     assert refused.value.code == "hotkey_banned"
+
+
+@pytest.fixture(scope="module")
+def historical_main_database():
+    from tests.lab_arena.lab_arena_pg_harness import (
+        CURRENT_PROVIDER_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+    )
+    yield from database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS)
+
+
+@pytest.fixture(scope="module")
+def historical_main_connect(historical_main_database):
+    pg, dsn = historical_main_database
+    return lambda: pg.connect(**dsn)
+
+
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
+
+
+_FROZEN_SERVICE_TRANSPORTS = []
+
+
+@pytest.fixture(autouse=True)
+def close_frozen_service_transports():
+    """Each test owns its service pools although this module shares one DB."""
+    yield
+    while _FROZEN_SERVICE_TRANSPORTS:
+        _FROZEN_SERVICE_TRANSPORTS.pop().close()
+
+
+class _FrozenServiceHarness(HistoricalStoreHarnessMixin, Harness):
+    """Only this module's frozen provider SQL tests use historical projections."""
+
+    def make_store(self):
+        store = super().make_store()
+        _FROZEN_SERVICE_TRANSPORTS.append(store._transport)
+        return store
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.clock.now = datetime.now(timezone.utc)
+
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+
+        def commit_historical(round_id):
+            result = commit(round_id)
+            if result.get("status") == "ok":
+                # Retain the legacy judge's grading date after normal admission
+                # and commit. All execution windows and source evidence stay real.
+                freeze_historical_intake_dates(self, "2026-09-02")
+                with self.connect() as connection, connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL session_replication_role=replica")
+                    cursor.execute(
+                        "UPDATE public.lab_arena_rounds SET evaluation_date='2026-09-02',icp_set_date='2026-09-01',"
+                        "created_at=CASE WHEN configuration_doc->>'mode'='shadow' THEN "
+                        "'2026-09-02T00:00:00Z'::timestamptz ELSE created_at END WHERE round_id=%s",
+                        (round_id,),
+                    )
+                service._invalidate_hot_round()
+            return result
+
+        service.commit_benchmark = commit_historical
+        return service
+
+    def objects_key(self):
+        # A promoted source must survive across test harnesses on the same DB.
+        with self.connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_postmaster_start_time()::text")
+            identity = str(connection.info.port) + cursor.fetchone()[0]
+        return "frozen-service-" + hashlib.sha256(identity.encode()).hexdigest()[:12]
+
+
+def _assert_baseline_publication_held(harness):
+    result = harness.service.publish(harness.round_id)
+    assert result == {"status": "retry", "round_status": "scored", "reason": "baseline_incomplete"}
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["publication_doc"] is None
+    assert row["reward_basis_doc"] is None and row["reward_activated_at"] is None
+
+
+def _assert_judge_publication_held(harness, *, stage, runners):
+    harness.advance_until("stage%d_judged" % stage, runners=runners)
+    result = harness.service.advance_round(harness.round_id)
+    assert result["status"] == "retry" and result["reason"] == "judge_incomplete", result
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["publication_doc"] is None and row["reward_activated_at"] is None
+    return row
+
+
+def test_all_failed_baseline_keeps_model_zero_rows_without_publication(
+    historical_main_connect, tmp_path
+):
+    harness = _FrozenServiceHarness(historical_main_connect, tmp_path, challengers=[], runners=["alpha"])
+    prior_published = harness.service.latest_published_round()
+    _start_round(harness, day=7, epoch=24840)
+    participants = harness.service.store.get_round(harness.round_id)["participants"]
+    baseline = next(
+        participant for participant in participants if participant["is_king"]
+    )
+    harness.broken.add(baseline["submission_id"])
+
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    harness.advance_until("scored", runners=1)
+    _assert_baseline_publication_held(harness)
+
+    runs = harness.service.store.list_runs(
+        harness.round_id,
+        submission_id=baseline["submission_id"],
+        kind="execute",
+    )
+    scored = [run for run in runs if run["per_icp_score"] is not None]
+    assert len(scored) == contracts.BENCHMARK_ICP_COUNT
+    assert all(float(run["per_icp_score"]) == 0.0 for run in scored)
+    row = harness.service.store.get_round(harness.round_id)
+    assert row["publication_doc"] is None
+    assert harness.service.latest_published_round() == prior_published
+
+    harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])
+
+
+def test_partial_baseline_preserves_numeric_scores_without_false_publication(historical_main_connect, tmp_path):
+    harness = _FrozenServiceHarness(historical_main_connect, tmp_path, challengers=[], runners=["alpha"])
+    _start_round(harness, day=8, epoch=24860)
+    participants = harness.service.store.get_round(harness.round_id)["participants"]
+    baseline = next(
+        participant for participant in participants if participant["is_king"]
+    )
+    original_run_icp = harness.sandbox.run_icp
+
+    def run_icp(spec, **kwargs):
+        if spec.source_dir is None:
+            return original_run_icp(spec, **kwargs)
+        document = json.loads(
+            (spec.input_dir / runtime.INPUT_FILE_NAME).read_text(encoding="utf-8")
+        )
+        submission_id = spec.source_dir.parent.name.removeprefix("submission-")
+        position = int(str(document["icp"]["icp_id"]).rsplit("_", 1)[-1]) - 1
+        if submission_id == baseline["submission_id"] and position != 0:
+            return runtime.fake_result(
+                exit_code=1, output_bytes=None, stderr=b"model failure"
+            )
+        return original_run_icp(spec, **kwargs)
+
+    harness.sandbox.run_icp = run_icp
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    harness.advance_until("scored", runners=1)
+    _assert_baseline_publication_held(harness)
+    runs = [run for run in harness.service.store.list_runs(
+        harness.round_id, submission_id=baseline["submission_id"], kind="execute",
+    ) if run["per_icp_score"] is not None]
+    assert len(runs) == 20
+    assert sum(float(run["per_icp_score"]) == 0 for run in runs) == 19
+    assert verify.stage_score([run["per_icp_score"] for run in runs], 20) > 0
+    with pytest.raises(svc.ServiceError, match="results_not_public"):
+        harness.service.public_results(harness.round_id, baseline["submission_id"])
+    harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])
+
+
+def test_publish_holds_existing_scored_state_with_missing_baseline_score(
+    historical_main_connect, tmp_path, monkeypatch
+):
+    harness = _FrozenServiceHarness(historical_main_connect, tmp_path, challengers=[], runners=["alpha"])
+    _start_round(harness, day=9, epoch=24880)
+    participants = harness.service.store.get_round(harness.round_id)["participants"]
+    baseline = next(
+        participant for participant in participants if participant["is_king"]
+    )
+    harness.clock.advance_to(harness.schedule()["stage_1_start"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    harness.advance_until("scored", runners=1)
+
+    source = next(run for run in harness.service.store.list_runs(
+        harness.round_id, kind="execute", submission_id=baseline["submission_id"],
+    ) if run["status"] == "accepted")
+    with historical_main_connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SET LOCAL session_replication_role=replica")
+        cursor.execute("UPDATE public.lab_arena_runs SET per_icp_score=NULL WHERE run_id=%s", (source["run_id"],))
+    _assert_baseline_publication_held(harness)
+    harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])
+
+
+def test_persistent_stage_one_judge_failure_keeps_work_without_publication(historical_main_connect, tmp_path):
+    harness = _FrozenServiceHarness(
+        historical_main_connect,
+        tmp_path,
+        challengers=["JudgeFailOne", "JudgePassOne"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=10, epoch=30100)
+    failed = next(
+        participant
+        for participant in harness.service.store.get_round(harness.round_id)[
+            "participants"
+        ]
+        if harness.flavors[participant["submission_id"]] == "JudgeFailOne"
+    )
+    harness.sandbox.judge_failures.add(("JudgeFailOne", 0))
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    harness.run_stage_with_runners(2)
+
+    closed = harness.service.advance_round(harness.round_id)
+    _assert_judge_publication_held(harness, stage=1, runners=2)
+
+    row = harness.service.store.get_round(harness.round_id)
+    assert closed["status"] == "closed"
+    assert closed["round_status"] == "stage1_judged"
+    assert closed["incomplete_assignments"] == 1
+    assert row["status"] == "stage1_judged" and row["cancel_reason"] is None
+    assert row["publication_doc"] is None and row["reward_activated_at"] is None
+    score_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=1,
+        submission_id=failed["submission_id"],
+        kind="score",
+    )
+    failed_score_runs = [run for run in score_runs if run["status"] == "failed"]
+    assert len(failed_score_runs) == 2
+    assert {run["terminal_cause"] for run in failed_score_runs} == {"judge_error"}
+    assert {int(run["attempt"]) for run in failed_score_runs} == {1, 2}
+    assert {
+        tuple(sorted(run["result_doc"]["failure_diagnostic"].items()))
+        for run in failed_score_runs
+    } == {
+        (("error_class", "missing_output"), ("stage", "sandbox_output"))
+    }
+    assert all(
+        set(run["result_doc"])
+        == {
+            "schema_version",
+            "resource_summary",
+            "started_at",
+            "finished_at",
+            "terminal_status",
+            "failure_diagnostic",
+        }
+        for run in failed_score_runs
+    )
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=1,
+        kind="execute",
+    )
+    affected = [
+        run for run in execute_runs
+        if run["submission_id"] == failed["submission_id"]
+        and run["icp_position"] == 0
+    ]
+    assert len(affected) == 1 and affected[0]["per_icp_score"] is None
+
+    harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])
+
+
+def test_systemic_verifier_reason_survives_completion_and_blocks_publication(
+    historical_main_connect, tmp_path, monkeypatch
+):
+    import os
+
+    from lab_arena import quality_policy, scorer_entrypoint
+
+    harness = _FrozenServiceHarness(
+        historical_main_connect,
+        tmp_path,
+        challengers=["BlockedReason", "BlockedReasonPass"],
+        runners=["alpha"],
+    )
+    # The module database retains prior rounds; day 24 belongs to the late
+    # completion test above and is already closed to new submissions.
+    participants = _start_round(harness, day=25, epoch=30425)
+    _run_stage_one_to_scoring(harness, participants, runners=1)
+    original_run_icp = harness.sandbox.run_icp
+    scorer_calls = 0
+
+    def run_icp(spec, **kwargs):
+        nonlocal scorer_calls
+        document = json.loads(
+            (spec.input_dir / runtime.INPUT_FILE_NAME).read_text()
+        )
+        companies = list(document.get("companies") or [])
+        blocked = (
+            document.get("schema_version") == scoring.SCORING_INPUT_SCHEMA_VERSION
+            and companies
+            and str(companies[0].get("company_name") or "").startswith(
+                "BlockedReason Company"
+            )
+            and int(str(document["icp"]["icp_id"]).rsplit("_", 1)[-1]) == 1
+        )
+        if not blocked:
+            return original_run_icp(spec, **kwargs)
+
+        def fixed_scorer(_policy, **_kwargs):
+            def score(batch, icp, _is_reference_model):
+                nonlocal scorer_calls
+                scorer_calls += 1
+                scored, _ = verify.bucket_skip(icp, batch)
+                return [
+                    {
+                        "final_score": 0.0,
+                        "failure_reason": "Company fit unavailable",
+                        "intent_signals_detail": [],
+                        "verifier_gate_receipts": [
+                            {
+                                "gate": "company_fit",
+                                "decision": "unavailable",
+                                "failure_reason_code": "provider_error",
+                            }
+                        ],
+                    }
+                    for _ in scored
+                ]
+
+            return score
+
+        saved_environment = dict(os.environ)
+        try:
+            with monkeypatch.context() as patch:
+                # Each production judge starts in a fresh process. Earlier
+                # unit tests may leave inert provider keys in this process.
+                for name in scoring.CREDENTIAL_ENV_NAMES:
+                    patch.delenv(name, raising=False)
+                patch.setattr(scoring, "lab_scorer", fixed_scorer)
+                patch.setattr(quality_policy, "scorer_enabled", lambda _policy: False)
+                output = scorer_entrypoint.score_input(document)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved_environment)
+        assert output["reason"] == "provider_error"
+        return runtime.fake_result(
+            exit_code=0,
+            output_bytes=json.dumps(output).encode(),
+        )
+
+    monkeypatch.setattr(harness.sandbox, "run_icp", run_icp)
+    build_runner = harness.runner
+    monkeypatch.setattr(
+        harness,
+        "runner",
+        lambda index, parallel=4: build_runner(index, parallel=1),
+    )
+    harness.run_stage_with_runners(1)
+    closed = harness.service.advance_round(harness.round_id)
+
+    assert closed["status"] == "closed"
+    assert closed["round_status"] == "stage1_judged"
+    assert closed["incomplete_assignments"] == 1
+    round_row = harness.service.store.get_round(harness.round_id)
+    assert round_row["status"] == "stage1_judged"
+    failed_runs = [
+        run
+        for run in harness.service.store.list_runs(
+            harness.round_id, stage=1, kind="score"
+        )
+        if run["status"] == "failed"
+        and run["result_doc"].get("failure_diagnostic", {}).get("reason")
+        == "provider_error"
+    ]
+    assert len(failed_runs) == contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
+    assert scorer_calls == (
+        contracts.MAX_ATTEMPTS_PER_ASSIGNMENT * scoring.MAX_JUDGE_RETRIES
+    )
+    reopened_store = harness.make_store()
+    try:
+        reloaded = [reopened_store.get_run(run["run_id"]) for run in failed_runs]
+    finally:
+        reopened_store.close()
+    assert {
+        run["result_doc"]["failure_diagnostic"]["reason"] for run in reloaded
+    } == {"provider_error"}
+    _assert_judge_publication_held(harness, stage=1, runners=1)
+    harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])
+
+
+def test_exhausted_judge_failure_preserves_receipts_without_partial_scores(
+    historical_main_connect, tmp_path
+):
+    harness = _FrozenServiceHarness(
+        historical_main_connect,
+        tmp_path,
+        challengers=["EarlyCancelFail", "EarlyCancelVisible"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=23, epoch=30423)
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    assert len(harness.service.public_benchmark(harness.round_id)["icps"]) == 20
+    expected_icps = harness.service.benchmark_icps(harness.round_id)
+    store = harness.service.store
+    round_participants = store.get_round(harness.round_id)["participants"]
+    failing = next(
+        participant
+        for participant in round_participants
+        if harness.flavors[participant["submission_id"]] == "EarlyCancelFail"
+    )
+    visible = next(
+        participant
+        for participant in round_participants
+        if harness.flavors[participant["submission_id"]] == "EarlyCancelVisible"
+    )
+
+    def claim_for(participant, runner_index):
+        token = new_lease_token()
+        request_id = contracts.new_request_id()
+        result = store.claim_assignment(
+            round_id=harness.round_id,
+            runner_hotkey=harness.runner_keys[runner_index],
+            declared_parallelism=1,
+            slot_ceiling=1,
+            excluded_miner_hotkeys=[
+                row["miner_hotkey"]
+                for row in round_participants
+                if row["submission_id"] != participant["submission_id"]
+            ],
+            request_id=request_id,
+            request_hash=contracts.document_hash({"request_id": request_id}),
+            lease_token_hash=hash_lease_token(token),
+        )
+        assert result["status"] == "leased", result
+        return result, token
+
+    accepted, accepted_token = claim_for(visible, 0)
+    accepted_ref = "arena/%s/outputs/%s.json" % (
+        harness.round_id,
+        accepted["run_id"],
+    )
+    scored_execution = store.get_run(accepted["scored_run_id"])
+    companies = json.loads(
+        harness.objects.get(scored_execution["output_ref"]).decode("utf-8")
+    )["companies"]
+    assert companies
+    icp = harness.service.benchmark_icps(harness.round_id)[
+        int(accepted["icp_position"])
+    ]
+    harness.objects.put(
+        accepted_ref,
+        json.dumps(
+            scoring.build_scoring_output(
+                accepted["scored_run_id"],
+                deterministic_scorer(companies, icp, False),
+            )
+        ).encode("utf-8"),
+    )
+    assert store.complete_attempt(
+        run_id=accepted["run_id"],
+        lease_token_hash=hash_lease_token(accepted_token),
+        result={"terminal_status": "accepted"},
+        terminal_cause="accepted",
+        output_ref=accepted_ref,
+    )["status"] == "accepted"
+
+    first, first_token = claim_for(failing, 0)
+    first_failure = store.complete_attempt(
+        run_id=first["run_id"],
+        lease_token_hash=hash_lease_token(first_token),
+        result={"terminal_status": "judge_error"},
+        terminal_cause="judge_error",
+        output_ref="",
+    )
+    assert first_failure["confirmation_attempt"] == 2
+    assert harness.service.advance_round(harness.round_id) == {
+        "status": "waiting",
+        "round_status": "stage1_scoring",
+    }
+
+    second, second_token = claim_for(failing, 1)
+    assert second["assignment_id"] == first["assignment_id"]
+    assert int(second["attempt"]) == contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
+    decisive_failure_result = {
+        "terminal_status": "judge_error",
+        "failure_diagnostic": {
+            "stage": "scorer",
+            "error_class": "judge_error",
+            "reason": "source_blocked",
+        },
+    }
+    assert store.complete_attempt(
+        run_id=second["run_id"],
+        lease_token_hash=hash_lease_token(second_token),
+        result=decisive_failure_result,
+        terminal_cause="judge_error",
+        output_ref="",
+    )["status"] == "failed"
+    assert store.list_runs(
+        harness.round_id, stage=1, status="pending", kind="score"
+    )
+
+    waiting = harness.service.advance_round(harness.round_id)
+    assert waiting == {
+        "status": "waiting",
+        "round_status": "stage1_scoring",
+    }
+    row = store.get_round(harness.round_id)
+    assert row["status"] == "stage1_scoring"
+    assert store.list_runs(harness.round_id, stage=1, status="pending")
+
+    harness.run_stage_with_runners(2)
+    _assert_judge_publication_held(harness, stage=1, runners=2)
+    row = store.get_round(harness.round_id)
+    assert row["status"] == "stage1_judged"
+    assert row["cancel_reason"] is None
+    post_close_token = new_lease_token()
+    post_close_request_id = contracts.new_request_id()
+    post_close = store.claim_assignment(
+        round_id=harness.round_id,
+        runner_hotkey=harness.runner_keys[0],
+        declared_parallelism=1,
+        slot_ceiling=1,
+        excluded_miner_hotkeys=[],
+        request_id=post_close_request_id,
+        request_hash=contracts.document_hash({"request_id": post_close_request_id}),
+        lease_token_hash=hash_lease_token(post_close_token),
+    )
+    assert post_close == {"status": "stage_closed", "round_status": "stage1_judged"}
+
+    reopened_store = harness.make_store()
+    try:
+        persisted_failure = reopened_store.get_run(second["run_id"])
+    finally:
+        reopened_store.close()
+    assert persisted_failure["status"] == "failed"
+    assert persisted_failure["result_doc"] == decisive_failure_result
+
+    accepted_after = store.get_run(accepted["run_id"])
+    assert accepted_after["status"] == "accepted"
+    assert accepted_after["output_ref"] == accepted_ref
+    assert len(harness.service.public_benchmark(harness.round_id)["icps"]) == 20
+    assert harness.service.benchmark_icps(harness.round_id) == expected_icps
+    execution_runs = store.list_runs(
+        harness.round_id, stage=1, kind="execute"
+    )
+    assert len(execution_runs) == contracts.STAGE_1_ICP_COUNT * participants
+    assert all(run["status"] == "accepted" for run in execution_runs)
+    affected = [
+        run for run in execution_runs
+        if run["submission_id"] == failing["submission_id"]
+        and run["icp_position"] == int(first["icp_position"])
+    ]
+    assert len(affected) == 1 and affected[0]["per_icp_score"] is None
+    assert store.get_run(accepted["scored_run_id"])["per_icp_score"] is None
+    assert all(
+        run["per_icp_score"] is None
+        for run in execution_runs
+        if run["submission_id"] == visible["submission_id"]
+    )
+    harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])
+
+
+def test_persistent_final_judge_failure_preserves_stage_one_without_publication(historical_main_connect, tmp_path):
+    harness = _FrozenServiceHarness(
+        historical_main_connect,
+        tmp_path,
+        challengers=["JudgeFailFinal", "JudgePassFinal"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=11, epoch=30200)
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    harness.advance_until("stage1_scored", runners=2)
+    failed = next(
+        participant
+        for participant in harness.service.store.get_round(harness.round_id)[
+            "participants"
+        ]
+        if harness.flavors[participant["submission_id"]] == "JudgeFailFinal"
+    )
+    assert failed["submission_id"] in harness.service.store.get_round(
+        harness.round_id
+    )["finalists"]
+    finalists_before = list(
+        harness.service.store.get_round(harness.round_id)["finalists"]
+    )
+    harness.sandbox.judge_failures.add(("JudgeFailFinal", 10))
+    harness.advance_until("stage2_scoring", runners=2)
+    harness.run_stage_with_runners(2)
+    final_scoring_close = datetime.strptime(
+        harness.schedule()["final_scoring_close"], "%Y-%m-%dT%H:%M:%SZ"
+    ).replace(tzinfo=timezone.utc)
+    assert harness.clock.now < final_scoring_close
+
+    closed = harness.service.advance_round(harness.round_id)
+    _assert_judge_publication_held(harness, stage=2, runners=2)
+
+    row = harness.service.store.get_round(harness.round_id)
+    assert closed["status"] == "closed"
+    assert closed["round_status"] == "stage2_judged"
+    assert closed["incomplete_assignments"] == 1
+    assert row["status"] == "stage2_judged" and row["cancel_reason"] is None
+    assert row["finalists"] == finalists_before
+    assert row["publication_doc"] is None and row["reward_activated_at"] is None
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=2,
+        submission_id=failed["submission_id"],
+        kind="execute",
+    )
+    assert len(execute_runs) == 10
+    affected = [run for run in execute_runs if run["icp_position"] == 10]
+    assert len(affected) == 1 and affected[0]["per_icp_score"] is None
+    assert all(
+        run["per_icp_score"] is None
+        for run in execute_runs
+        if run["icp_position"] != 10
+    )
+
+    assert all(run["per_icp_score"] is not None for run in harness.service.store.list_runs(
+        harness.round_id, stage=1, kind="execute",
+    ))
+    harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])
+
+
+def test_miner_credential_failure_keeps_model_and_work_without_inventing_scores(
+    historical_main_connect, tmp_path, monkeypatch
+):
+    harness = _FrozenServiceHarness(
+        historical_main_connect,
+        tmp_path,
+        challengers=["CredentialFail", "CredentialPass"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=15, epoch=30275)
+    failed = next(
+        participant
+        for participant in harness.service.store.get_round(harness.round_id)[
+            "participants"
+        ]
+        if harness.flavors[participant["submission_id"]] == "CredentialFail"
+    )
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    credentials = harness.service.config.credential_manager
+    original_runtime_key = credentials.runtime_key
+
+    def runtime_key(row, provider):
+        if row["submission_id"] == failed["submission_id"]:
+            return "miner-refused"
+        return original_runtime_key(row, provider)
+
+    monkeypatch.setattr(credentials, "runtime_key", runtime_key)
+    _assert_judge_publication_held(harness, stage=1, runners=2)
+
+    row = harness.service.store.get_round(harness.round_id)
+    assert failed["submission_id"] in {p["submission_id"] for p in row["participants"]}
+    score_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=1,
+        submission_id=failed["submission_id"],
+        kind="score",
+    )
+    assert score_runs and {run["terminal_cause"] for run in score_runs} == {
+        "credential_error"
+    }
+    assert {int(run["attempt"]) for run in score_runs} == {1}
+    execute_runs = harness.service.store.list_runs(
+        harness.round_id,
+        stage=1,
+        submission_id=failed["submission_id"],
+        kind="execute",
+    )
+    assert all(run["per_icp_score"] is None for run in execute_runs)
+    harness.service.cancel(harness.round_id, sorted(svc.CANCEL_REASONS.values())[0])
+
+
+def test_baseline_judge_failure_holds_publication_without_a_false_zero(historical_main_connect, tmp_path):
+    harness = _FrozenServiceHarness(
+        historical_main_connect,
+        tmp_path,
+        challengers=["JudgePassAgainstBaseline"],
+        runners=["alpha", "beta"],
+    )
+    participants = _start_round(harness, day=14, epoch=30250)
+    harness.sandbox.judge_failures.add(("PublicBaseline", 0))
+    _run_stage_one_to_scoring(harness, participants, runners=2)
+    harness.run_stage_with_runners(2)
+
+    closed = harness.service.advance_round(harness.round_id)
+
+    assert closed["status"] == "closed"
+    assert closed["round_status"] == "stage1_judged"
+    assert closed["incomplete_assignments"] == 1
+    _assert_judge_publication_held(harness, stage=1, runners=2)
+    assert harness.status() == "stage1_judged"
+    baseline_id = next(
+        participant["submission_id"]
+        for participant in harness.service.store.get_round(harness.round_id)["participants"]
+        if participant["is_king"]
+    )
+    affected = [
+        run for run in harness.service.store.list_runs(
+            harness.round_id, stage=1, submission_id=baseline_id, kind="execute"
+        )
+        if run["icp_position"] == 0
+    ]
+    assert len(affected) == 1 and affected[0]["per_icp_score"] is None
+
+    harness.service.cancel(harness.round_id, svc.CANCEL_REASONS["operator"])

@@ -53,12 +53,6 @@ PUBLISH = 'GATEWAY_DEPLOY_STAGE="host_restart_script_install"' + _between(
 )
 
 
-def test_publication_fixture_excludes_deployment_finalization():
-    assert 'GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"' in PUBLISH
-    assert 'GATEWAY_DEPLOY_PLAN_FILE' not in PUBLISH
-    assert 'finalize_deployment_record' not in PUBLISH
-
-
 def _runtime_clone(tmp_path: Path, origin: str) -> str:
     """Run the controller's real environment projections with stale state."""
     stale = {
@@ -215,9 +209,9 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         record() { printf '%s\\n' "$*" >> "$EVENTS"; }
         arena_ingress_tool() {
           local root="$1"; shift
-          # Bash 5 return-without-status inside EXIT inherits the failing
-          # trap status. The real inspector exits zero for this valid state.
-          if [ "$1" = --inspect ]; then cat "$INGRESS_FILE"; return 0; fi
+          # Bash 5 inherits the pre-trap failure for a bare return in EXIT.
+          # This mock inspection succeeded, as the real Python command does.
+          if [ "$1" = --inspect ]; then cat "$INGRESS_FILE" || return 1; return 0; fi
           [ "$1" = --activate ] || return 1
           shift
           local old_mode= old_slot= old_sha= old_backend=
@@ -354,6 +348,7 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
         GATEWAY_ACTIVE_RELEASE_RESTART_INVOCATION_ID=gateway-1792000000-123
         GATEWAY_RESTART_INVOCATION_ID=gateway-1792000000-456
         GATEWAY_LOG_FILE="$TASK_TMP/log"
+        GATEWAY_DEPLOY_PLAN_FILE="$TASK_TMP/deploy-plan.json"
         GATEWAY_V2_HEALTH_MAX_ATTEMPTS=2
         GATEWAY_V2_HEALTH_RETRY_SECONDS=0
         GATEWAY_V2_HEALTH_DEADLINE_SECONDS=10
@@ -395,10 +390,8 @@ def _run(tmp_path: Path, *, fail: str = "", sha: str = SHA,
            "IDLE_REVIEW_FILE": str(tmp_path / "review-rows.json") if review_rows is not None else ""}
     result = subprocess.run(["bash", str(harness)], cwd=tmp_path, env=env,
                             capture_output=True, text=True, timeout=20)
-    # Bash 3 can report a successful outer command after nounset terminates a
-    # command-substitution subshell. Never accept an incomplete fixture path.
-    assert 'unbound variable' not in result.stderr, result.stderr
-    assert ': command not found' not in result.stderr, result.stderr
+    assert "unbound variable" not in result.stderr, result.stderr
+    assert ": command not found" not in result.stderr, result.stderr
     return result
 
 
@@ -903,3 +896,9 @@ def test_failed_current_read_never_releases_guard(tmp_path: Path):
     events = (tmp_path / "events").read_text()
     assert "guard:release" not in events
     assert "backend:install" not in events
+
+
+def test_publication_fixture_excludes_deployment_finalization():
+    assert 'GATEWAY_DEPLOY_STAGE="lab_arena_claim_guard_release"' in PUBLISH
+    assert 'GATEWAY_DEPLOY_PLAN_FILE' not in PUBLISH
+    assert 'finalize_deployment_record' not in PUBLISH

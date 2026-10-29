@@ -5,16 +5,17 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena import proxy_model_capacity401_e2e_test as prior
+from tests.lab_arena import proxy_model_capacity401_postgres_test as frozen401
 from tests.lab_arena.proxy_model_capacity401_e2e_test import complete_application_database
 
 
-database = prior.database
-migrated399 = prior.migrated399
+database = frozen401.database
+migrated399 = frozen401.migrated399
 
 
 @pytest.fixture(scope="module")
 def migrated(database, migrated399):
-    prior.migrated.__wrapped__(database, migrated399)
+    frozen401.migrated.__wrapped__(database, migrated399)
     psycopg, dsn = database
     with psycopg.connect(**dsn) as connection:
         connection.autocommit = True

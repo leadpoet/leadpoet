@@ -19,6 +19,8 @@ from tests.lab_arena.oct07_cutoff_recovery419_postgres_test import (
     _verified_test_pool, daily_icps,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
 ROOT = Path(__file__).resolve().parents[2]
 SQL = ROOT / "scripts/420-lab-arena-bounded-stage-cutoff-drain.sql"
@@ -45,7 +47,7 @@ def _stamp(at):
     return at.isoformat().replace("+00:00", "Z")
 
 
-def _seed(conn, *, profile=PROFILES[1], kind="execute", policy=True, positions=2):
+def _seed(conn, *, profile=PROFILES[1], kind="execute", policy=True, positions=2, current_schema=False):
     config = fixture_configuration(ROUND)
     minutes, wall, ttl = profile
     config.update(checkpoint_deadline_policy=f"atomic_checkpoint_{minutes}m_v1",
@@ -68,7 +70,9 @@ def _seed(conn, *, profile=PROFILES[1], kind="execute", policy=True, positions=2
         cur.execute("INSERT INTO public.lab_arena_submissions(submission_id,round_id,miner_hotkey,status,is_king,source_ref,source_size_bytes,submission_doc,code_review_status,code_review_doc,code_review_claim,code_review_started_at,code_review_attempts) VALUES (%s,%s,%s,'frozen',false,%s,123,'{}','passed','{\"decision\":\"pass\"}','sha256:'||repeat('1',64),now(),1)",(SUB,ROUND,hotkey(SUB),source))
         for index in range(positions):
             assignment=f"{ROUND}:{SUB}:2:{10+index}" + (":score" if kind=="score" else "")
-            cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,stage_generation) VALUES (%s,%s,%s,%s,%s,2,%s,1,%s,'pending',7)",(assignment+":1",assignment,ROUND,SUB,hotkey(SUB),10+index,kind))
+            generation_column = ",scoring_generation_floor" if current_schema else ""
+            generation_value = ",0" if current_schema else ""
+            cur.execute("INSERT INTO public.lab_arena_runs(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,kind,status,stage_generation" + generation_column + ") VALUES (%s,%s,%s,%s,%s,2,%s,1,%s,'pending',7" + generation_value + ")",(assignment+":1",assignment,ROUND,SUB,hotkey(SUB),10+index,kind))
         cur.execute("SET LOCAL session_replication_role=origin")
     conn.commit()
     return config
@@ -271,6 +275,7 @@ def test_service_billing_return_only_yields_at_execution_cutoff(case):
     status="stage2_scoring" if case=="scoring" else "stage2"
     config={"schedule":{"stage_2_close":_stamp(now+timedelta(seconds=1 if case=="before" else -1))}}
     if case!="legacy": config["execution_sequence_policy"]=contracts.BASELINE_SCORED_FIRST_POLICY
+    service._lock=threading.RLock()
     service._clock=lambda:now
     service._invalidate_hot_round=lambda:None
     service._round=lambda _:dict(status=status,configuration_doc=config)
@@ -379,15 +384,19 @@ def test_authenticated_abandoned_host_after_cutoff_keeps_failure_without_retry(d
         assert _close(conn)["status"]=="cancelled"
 
 
-def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(database):
+@pytest.fixture
+def current_billing_database():
+    yield from current_service_database()
+
+
+def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(current_billing_database,tmp_path):
     from lab_arena.store import ArenaStore,PsycopgTransport
-    from tests.lab_arena.historical_service import pin_pre470_baseline_service
-    psycopg,dsn=database
+    psycopg,dsn=current_billing_database
     connect=lambda:psycopg.connect(**dsn)
     store=ArenaStore(PsycopgTransport(connect),lease_ttl_seconds=4500)
     try:
         with connect() as conn:
-            _seed(conn); lease=_claim(conn)
+            _seed(conn,current_schema=True); lease=_claim(conn)
             _boundary(conn)
         arguments=dict(run_id=lease["run_id"],lease_token_hash="sha256:"+"a"*64,call_identity="sha256:"+"e"*64)
         reserved=store.reserve_call(**arguments,operation_id="openrouter.chat",provider="openrouter",funding_source="miner_key",amount_microusd=1000,call_doc={})
@@ -396,14 +405,19 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
         assert store.mark_uncertain(**arguments,call_doc={"reason":"missing_provider_cost","call_succeeded":True,"provider_status":200})["status"]=="uncertain"
         with connect() as conn,conn.cursor() as cur:
             cur.execute("UPDATE public.lab_arena_runs SET lease_expires_at=clock_timestamp()+interval '1 day' WHERE run_id=%s",(lease["run_id"],))
-        service=svc.ArenaService(SimpleNamespace(
-            store=store,object_store=None,signer=None,
-            clock=lambda:datetime.now(timezone.utc)))
-        pin_pre470_baseline_service(service, connect, round_id=ROUND)
+        from tests.lab_arena.test_lab_arena_service_round import Harness
+        service=Harness(connect,tmp_path,challengers=[],runners=["alpha"]).service
+        service._store=store
+        service._config.store=store
+        service._objects.put(f"arena/{ROUND}/benchmark.json", json.dumps({
+            "schema_version": "leadpoet.lab_arena.benchmark.v1", "round_id": ROUND,
+            "icps": daily_icps(),
+        }).encode())
+        service._lock=threading.RLock()
+        service._clock=lambda:datetime.now(timezone.utc)
         service._invalidate_hot_round=lambda:None
         service._round=lambda _:store.get_round(ROUND)
-        # This pinned migration420 fixture predates the Deepline selection
-        # RPCs. The test exercises real OpenRouter ledger/drain authority.
+        service._reconcile_deepline_cost=lambda _:{"status":"none"}
         service._reconcile_active_deepline_cost=lambda _:{"status":"none"}
         service._reconcile_openrouter_cost=lambda _:{"status":"pending","run_status":"leased","lease_expires_at":_stamp(datetime.now(timezone.utc)+timedelta(days=1))}
         with connect() as conn: before=_state(conn)
@@ -412,8 +426,16 @@ def test_real_service_billing_renewal_reaches_sql_bound_and_keeps_cost_history(d
             assert _state(conn)==before
             _boundary(conn,-4501)
             before_close=_state(conn)
-        assert service.advance_round(ROUND)["status"]=="cancelled"
+        service.advance_round(ROUND)
         with connect() as conn: after=_state(conn)
+        # Later drivers retain incomplete work instead of cancelling it. The
+        # absolute lease bound must still end this execution without grading it.
+        final_lease = store.get_run(lease["run_id"])
+        assert final_lease["status"] == "failed"
+        assert final_lease["terminal_cause"] in ("stage_closed", "lease_expired")
+        final_round = store.get_round(ROUND)
+        assert final_round["publication_doc"] is None
+        assert final_round["reward_activated_at"] is None
         # Original uncertain charge stays counted and retains its source key.
         assert after["lab_arena_ledger"][:len(before_close["lab_arena_ledger"])]==before_close["lab_arena_ledger"]
         assert any(e["entry_kind"]=="uncertain" and e["call_identity"]==arguments["call_identity"] for e in after["lab_arena_ledger"])
@@ -442,7 +464,7 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(current_applic
     with connect() as conn,conn.cursor() as cur:
         cur.execute("SET LOCAL session_replication_role=replica")
         cur.execute("TRUNCATE public.lab_arena_rounds CASCADE")
-    h=QualityHarness(connect,tmp_path,challengers=["PublicBaselineAlternate"],runners=["alpha","beta"])
+    h=_FrozenQualityHarness(connect,tmp_path,challengers=["PublicBaselineAlternate"],runners=["alpha","beta"])
     h.service.config.defaults=replace(h.service.config.defaults,benchmark_icp_count=10,checkpoint_deadline_enabled=True,runner_slot_ceiling=10,company_quality_from=None,intent_details_from="2026-01-01T00:00:00Z",contacts_from=None,execution_sequence_from="2026-01-01T00:00:00Z",per_icp_cost_policy=True,rewards_enabled=True)
     h.service.config.daily_icp_source=lambda **kwargs:{"status":"ready","set_id":int(kwargs["set_id"]),"icps":copy.deepcopy(daily_icps()[:10])}
     observed=_install_company_only_sandbox(h)
@@ -478,7 +500,7 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(current_applic
     # Preserve monotonic dates while placing the local stage2 cutoff seconds
     # away. All subsequent signed leases bind this same frozen document.
     for index,field in enumerate(fields):
-        if field=="submission_open": continue  # frozen previous-day bank date
+        if field in ("submission_open","submission_cutoff"): continue  # frozen Day0/Day1 authority
         if field=="stage_2_close": at=now+timedelta(seconds=5)
         elif field in ("final_scoring_close","publication_deadline"):
             at=now+timedelta(hours=6,seconds=index)
@@ -519,7 +541,8 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(current_applic
     assert final["publication_doc"]["final_ranking"]
     assert observed=={"execute":20,"score":20}
     assert runtime_budgets==[3600]*20
-    assert h.service.activate_reward(ROUND)["status"]=="activated"
+    from tests.lab_arena.baseline_cost_zero_round_test import _activate_single_champion_reward
+    assert _activate_single_champion_reward(h)["status"]=="activated"
     h.clock.now=datetime.now(timezone.utc)+timedelta(days=2)
     for participant in participants:
         public=h.service.public_results(ROUND,participant["submission_id"])
@@ -554,3 +577,16 @@ def test_real_signed_late_execution_preserves_costs_and_publishes(current_applic
 def test_confirmed_billed_failure_still_reaches_cap_across_attempts(database,tmp_path):
     from tests.lab_arena.confirmed_cost_admission_postgres_test import test_confirmed_billed_failure_reaches_cap_across_attempts
     test_confirmed_billed_failure_reaches_cap_across_attempts(database,tmp_path)
+
+
+class _FrozenQualityHarness(HistoricalStoreHarnessMixin, QualityHarness):
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+
+        def commit_historical(round_id):
+            freeze_historical_intake_dates(self, "2026-10-07")
+            return commit(round_id)
+
+        service.commit_benchmark = commit_historical
+        return service

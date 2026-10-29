@@ -178,6 +178,10 @@ def test_capture_and_early_recovery_share_claim_control_lock(database,migrated,w
 
 def test_http_host_recovery_publishes_and_promotes_with414_active(complete_application_database,tmp_path,monkeypatch):
     from tests.lab_arena import abandoned_host_recovery412_e2e_test as full_http
+    # Historical414 guards above stay pinned; current HTTP needs its complete schema.
+    with complete_application_database[0].connect(**complete_application_database[1]) as conn,conn.cursor() as cur:
+        cur.execute("SELECT pg_get_functiondef('public.lab_arena_expire_leases(text)'::regprocedure)")
+        assert 'v_early_recovery_allowed' in cur.fetchone()[0]
     full_http._exercise_host_fault(
         complete_application_database,True,tmp_path,monkeypatch,
     )

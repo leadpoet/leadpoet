@@ -40,6 +40,7 @@ from tests.lab_arena.champion_funding_paid_e2e_test import (
     Evidence, LocalEntrypointRuntime, PaidHarness, _capture_database_snapshot,
 )
 from tests.lab_arena import restore_recorded_results538_postgres_test as authority_fixture
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.test_lab_arena_service_round import FakeChain, Harness, InProcessApi, keypair
 
 
@@ -218,7 +219,7 @@ def _capture_private_ledger(harness: "FullThinkingHarness", report: Path,
 
 
 def full_thinking_database(*, production_order: bool = True):
-    """Disposable current mainline and full-thinking PostgreSQL authority."""
+    """Historical full-thinking authority through574, for migration controls."""
     # The 538 fixture carries the 517 write-once trigger and scorer history.
     # It omits several independently tested mainline branches. Apply their
     # exact guarded migrations before the post-538 tail; the dated 542-546
@@ -755,7 +756,7 @@ def run_e2e(*, source_archive: Path, baseline_archive: Path, icp_file: Path,
             policy_activations: Mapping[str, str | None] = CURRENT_COMPANY_ONLY_ACTIVATIONS,
             expected_scorer_policy_hash: str = EXPECTED_COMPANY_ONLY_SCORER_POLICY_HASH,
             report: Path,
-            database_factory: Any = full_thinking_database) -> dict[str, Any]:
+            database_factory: Any = current_service_database) -> dict[str, Any]:
     """Run real source review, worker/scorer, publication, and strict export.
 
     The caller owns paid authorization and supplies a fail-closed transport

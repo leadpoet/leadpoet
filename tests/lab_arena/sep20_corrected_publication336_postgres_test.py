@@ -14,6 +14,7 @@ from tests.lab_arena import sep20_terminal_native_parity_baseline_rerun326_postg
 from tests.lab_arena.icp_fixtures import daily_icps
 from leadpoet_canonical import arena_weights
 from tests.lab_arena import sep20_authority_preserving_rejudge332_postgres_test as rerun332
+from tests.lab_arena import sep20_scored_authority_rejudge337_postgres_test as rerun337
 from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS
 
 
@@ -592,3 +593,148 @@ def test_disabled_user_trigger_is_rejected_without_changing_operator_state(
                 "lab_arena_rounds_write_once"
             )
         connection.commit()
+
+
+def _prepare_historical_scored337(connection, harness, monkeypatch):
+    rerun337._prepare_scored335(connection, harness, monkeypatch)
+    with connection.cursor() as cursor:
+        rendered337, _, _ = rerun337._render337(
+            cursor, rerun332._schedule(), harness.objects, monkeypatch
+        )
+        cursor.execute(rendered337)
+    connection.commit()
+    rerun332._drive_rejudge_cycle(
+        harness.service, harness.objects, harness.runner_keys[0], historical_zeros=True
+    )
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT active_round.status,count(*) FILTER(WHERE run.kind='score'),"
+            "count(*) FILTER(WHERE run.kind='score' AND run.status='accepted' "
+            "AND run.terminal_cause='accepted' "
+            "AND run.assignment_id LIKE '%%:score:rerun337') "
+            "FROM public.lab_arena_rounds active_round "
+            "JOIN public.lab_arena_runs run USING(round_id) "
+            "WHERE active_round.round_id=%s GROUP BY active_round.status",
+            (ROUND,),
+        )
+        assert cursor.fetchone() == ("scored", 98, 98)
+    connection.commit()
+
+
+def test_historical_changed_decision_publishes_without_rewriting_reward_or_weights(
+    database, tmp_path, monkeypatch
+):
+    monkeypatch.setitem(globals(), "SCORE_NAMESPACE", "rerun337")
+    from tests.lab_arena.sep20_frozen_publication_fixture import frozen_publication_document, publish_frozen_document
+    psycopg2, dsn = database
+    harness = rerun332.IsolatedHarness(
+        lambda: psycopg2.connect(**dsn), tmp_path, challengers=[], runners=["alpha"]
+    )
+    harness.round_id = ROUND
+    with psycopg2.connect(**dsn) as connection:
+        _prepare_historical_scored337(connection, harness, monkeypatch)
+        publication = frozen_publication_document(harness.service, ROUND)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT king_outcome,king_hotkey FROM public.lab_arena_rounds "
+                "WHERE round_id=%s",
+                (ARCHIVE,),
+            )
+            archived_decision = cursor.fetchone()
+            assert archived_decision != (
+                publication["king_decision"]["outcome"],
+                publication["king_decision"].get("king_hotkey") or None,
+            )
+            historical = _reward_promotion_snapshot(cursor)
+            weights = _weight_snapshot(cursor)
+            rendered336 = _render(cursor, publication)
+            cursor.execute(rendered336)
+            cursor.execute(
+                "SELECT king_outcome,king_hotkey FROM public.lab_arena_rounds "
+                "WHERE round_id=%s",
+                (ROUND,),
+            )
+            assert cursor.fetchone() == (
+                publication["king_decision"]["outcome"],
+                publication["king_decision"].get("king_hotkey") or None,
+            )
+            cursor.execute("BEGIN")
+            cursor.execute("SAVEPOINT reward_drift")
+            with pytest.raises(
+                psycopg2.Error,
+                match="write-once",
+            ):
+                cursor.execute(
+                    "UPDATE public.lab_arena_rounds SET status='published',"
+                    "status_generation=status_generation+1,publication_doc=%s::jsonb,"
+                    "published_at=%s::timestamptz,king_outcome=%s,king_hotkey=%s,"
+                    "reward_basis_hash='sha256:'||repeat('0',64) WHERE round_id=%s",
+                    (
+                        json.dumps(publication),
+                        publication["published_at"],
+                        publication["king_decision"]["outcome"],
+                        publication["king_decision"].get("king_hotkey") or None,
+                        ROUND,
+                    ),
+                )
+            cursor.execute("ROLLBACK TO SAVEPOINT reward_drift")
+        connection.commit()
+
+        assert publish_frozen_document(harness.service, ROUND, publication)["status"] == "ok"
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT status,publication_doc,king_outcome,king_hotkey "
+                "FROM public.lab_arena_rounds WHERE round_id=%s",
+                (ROUND,),
+            )
+            status, saved, outcome, hotkey = cursor.fetchone()
+            assert status == "published"
+            assert saved["king_decision"] == publication["king_decision"]
+            assert outcome == publication["king_decision"]["outcome"]
+            assert hotkey == (publication["king_decision"].get("king_hotkey") or None)
+            assert _reward_promotion_snapshot(cursor) == historical
+            assert _weight_snapshot(cursor) == weights
+            assert harness.service.public_reward_basis(int(historical[1])) == historical[3]
+        rows = harness.service.store.published_reward_bases(
+            mode="live", network_name="finney", netuid=71, limit=200
+        )
+        usable = harness.service._usable_reward_bases(rows)
+        assert historical[3] in usable
+        assert harness.service._latest_miner_basis(usable) == historical[3]
+        burn_hotkey = rerun332.fixtures.keypair("correction336-burn").ss58_address
+        accepted = weight_state.build_accepted_weight_state(
+            harness.signer,
+            network="finney",
+            genesis_hash="1" * 64,
+            netuid=71,
+            epoch=int(historical[1]),
+            valid_from_block=1,
+            valid_until_block=360,
+            reward_basis=historical[3],
+            burn_hotkey=burn_hotkey,
+            issued_at=historical[3]["published_at"],
+        )
+        assert arena_weights.verify_accepted_weight_state_signature(
+            accepted,
+            public_key_der=harness.signer.public_key_der,
+            expected_public_key_hash=harness.signer.public_key_hash,
+        ) == accepted["state_hash"]
+        vector = arena_weights.derive_arena_weights(
+            accepted, [historical[3]["king_hotkey"], burn_hotkey]
+        )
+        assert vector["champion_share_ppb"] > 0
+        competition = harness.service.public_competition()
+        completed = competition["latest_completed_round"]
+        assert completed["round_id"] == ROUND
+        if publication["king_decision"]["outcome"] == "no_king":
+            assert completed["champion"] is None
+        else:
+            assert completed["champion"]["submission_id"] == publication[
+                "king_decision"
+            ]["winner_submission_id"]
+        assert harness.service.promote_baseline(ROUND)["status"] == "existing"
+        assert harness.service.activate_reward(ROUND)["status"] == "existing"
+        with psycopg2.connect(**dsn) as retry:
+            with retry.cursor() as cursor:
+                cursor.execute(rendered336)
+            retry.commit()

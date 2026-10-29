@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
@@ -84,12 +87,57 @@ TABLES = (
 )
 
 
-def test_arena_migrations_preserve_unique_identities_and_recorded_sequences():
+# Applied historical collisions retain their full filenames and exact bytes.
+# Never rename a member or add a member to these sealed groups. The 478/489
+# hashes were independently checked with the migration helper against main;
+# both 585 bodies are already applied and have distinct immutable identities.
+FROZEN_MIGRATION_COLLISIONS = {
+    478: {
+        # Last byte-changing commit: 5595ae7b2e3a4a522660a9a9f405fe7796903833
+        "478-lab-arena-baseline-closed-settlement-recovery.sql":
+            "850c3ecb8967d219a6ed46cc7218bbf8eccf875c4f5d799d5c2f9a2887b48325",
+        # Last byte-changing commit: 4654b49f24417e79ea7f42e69ac1faace9108191
+        "478-lab-arena-infrastructure-retry-cost.sql":
+            "7c56999a360aa29bc1f0e18598c69321edeeb662c428d69d89abb46c462cd017",
+    },
+    489: {
+        # Last byte-changing commit: f520c7e3d9b97593cb15f8adec913864f2a77374
+        "489-lab-arena-chain-outcome-resigning.sql":
+            "98627134f3ba469d26dc588f5a4ae48d40680e7223ba82f0ece2df94dd410fa3",
+        # Last byte-changing commit: 8a43dab759f696c9b1452f8dfd3e0d22f2d40c40
+        "489-lab-arena-weight-write-rpc-privileges.sql":
+            "73e19a8fa99a468f262846f734630fe1994264e06d2113f9bbf9ea5aac005a9c",
+    },
+    585: {
+        # Last byte-changing commit: 4f90c5172da82017c2035d1e57a9fb4e6e759e2d
+        "585-lab-arena-champion-baseline-reasoning.sql":
+            "4c070d53c5a02cb0b4d44846d13041c49e647bca165dfc415f93aaf7b79bc3db",
+        # Last byte-changing commit: 16933f72f5a686494a3cf1b7b9a6dd1909589482
+        "585-lab-arena-review-deadline-recovery.sql":
+            "e54b999380190722216c0f78a84e3ca175f9eadcf51fa68d2387a53669c3bc5a",
+    },
+}
+
+
+def _assert_migration_numbering(scripts: Path) -> dict[int, list[str]]:
     numbered = {}
-    for path in SCRIPTS.glob("*.sql"):
+    by_name = {}
+    for path in sorted(scripts.glob("*.sql")):
         match = re.match(r"^(\d+)-", path.name)
         if match and int(match.group(1)) >= 100:
             numbered.setdefault(int(match.group(1)), []).append(path.name)
+            by_name[path.name] = path
+    for number, frozen in FROZEN_MIGRATION_COLLISIONS.items():
+        assert set(numbered.get(number, ())) == set(frozen), (number, numbered.get(number))
+        for name, digest in frozen.items():
+            assert hashlib.sha256(by_name[name].read_bytes()).hexdigest() == digest, name
+    for number, names in numbered.items():
+        assert len(names) == 1 or number in FROZEN_MIGRATION_COLLISIONS, (number, names)
+    return numbered
+
+
+def test_arena_migrations_are_uniquely_numbered():
+    numbered = _assert_migration_numbering(SCRIPTS)
     assert numbered[179] == ["179-lab-arena-v1.sql"]
     assert numbered[180] == ["180-lab-arena-daily-competition.sql"]
     assert numbered[181] == ["181-lab-arena-source-submissions.sql"]
@@ -110,8 +158,57 @@ def test_arena_migrations_preserve_unique_identities_and_recorded_sequences():
     assert numbered[202] == ["202-arena-accepted-weight-state.sql"]
     assert numbered[203] == ["203-retire-legacy-incentive-weight-bridge.sql"]
     assert numbered[208] == ["208-lab-arena-validator-scoring-authority.sql"]
-    from tests.lab_arena.full_thinking_e2e_schema_tail_test import _assert_migration_identities
-    _assert_migration_identities([SCRIPTS / name for paths in numbered.values() for name in paths])
+
+
+def test_applied_review_keeps_585_identity_before_atomic_587_and_excludes_rollback():
+    numbered = _assert_migration_numbering(SCRIPTS)
+    assert numbered[585] == [
+        "585-lab-arena-champion-baseline-reasoning.sql",
+        "585-lab-arena-review-deadline-recovery.sql",
+    ]
+    assert numbered[586] == ["586-lab-arena-publication-restart-drain.sql"]
+    assert numbered[587] == ["587-lab-arena-atomic-review-restart-guard.sql"]
+    identities = {
+        "585-lab-arena-review-deadline-recovery.sql":
+            "e54b999380190722216c0f78a84e3ca175f9eadcf51fa68d2387a53669c3bc5a",
+        "585-lab-arena-review-deadline-recovery-rollback.sql.template":
+            "9c78bc154eb93482cf29f6be10609260efa8d395c6db2969edaaced52ff57e3d",
+        "587-lab-arena-atomic-review-restart-guard.sql":
+            "851eb302085924d0ce26337475f81b070380387be4b7d33813b6ccb30ec1a1b1",
+    }
+    for name, expected in identities.items():
+        assert hashlib.sha256((SCRIPTS / name).read_bytes()).hexdigest() == expected
+    rollback = SCRIPTS / "585-lab-arena-review-deadline-recovery-rollback.sql.template"
+    assert rollback not in set(SCRIPTS.glob("*.sql"))
+
+
+@pytest.mark.parametrize("number", sorted(FROZEN_MIGRATION_COLLISIONS))
+@pytest.mark.parametrize("member", [0, 1])
+@pytest.mark.parametrize("mutation", ["changed_bytes", "third_member", "new_collision", "missing_member"])
+def test_migration_numbering_rejects_changes_to_frozen_exceptions(tmp_path, mutation, number, member):
+    for frozen in FROZEN_MIGRATION_COLLISIONS.values():
+        for name in frozen:
+            (tmp_path / name).write_bytes((SCRIPTS / name).read_bytes())
+    first = tmp_path / list(FROZEN_MIGRATION_COLLISIONS[number])[member]
+    if mutation == "changed_bytes":
+        first.write_bytes(first.read_bytes() + b"\n-- changed historical migration\n")
+    elif mutation == "third_member":
+        (tmp_path / f"{number}-new-collision.sql").write_bytes(first.read_bytes())
+    elif mutation == "new_collision":
+        (tmp_path / "999-first.sql").write_text("SELECT 1;", encoding="utf-8")
+        (tmp_path / "999-second.sql").write_text("SELECT 1;", encoding="utf-8")
+    else:
+        first.unlink()
+    with pytest.raises(AssertionError):
+        _assert_migration_numbering(tmp_path)
+
+
+def test_migration_numbering_accepts_new_unique_numbers(tmp_path):
+    for frozen in FROZEN_MIGRATION_COLLISIONS.values():
+        for name in frozen:
+            (tmp_path / name).write_bytes((SCRIPTS / name).read_bytes())
+    (tmp_path / "999-new-unique.sql").write_text("SELECT 1;", encoding="utf-8")
+    assert _assert_migration_numbering(tmp_path)[999] == ["999-new-unique.sql"]
 
 
 def test_validator_scoring_authority_migration_delegates_only_role_to_gateway():

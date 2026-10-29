@@ -10,7 +10,7 @@ import pytest
 from lab_arena import contact_policy, integrity, intent_details_policy, quality_policy
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.lab_arena_pg_harness import (
-    DEFAULT_MIGRATIONS, database_with_lab_arena_migration, prepare_current_service_reads,
+    DEFAULT_MIGRATIONS, current_service_database, database_with_lab_arena_migration,
 )
 from tests.lab_arena.scoring_validator_attribution_test import (
     MINER, ROUND_ID, SUBMISSION_ID, _service,
@@ -46,6 +46,15 @@ def projected_database(database):
         assert cursor.fetchone() == base_security
     connection.close()
     return psycopg2, dsn
+
+
+@pytest.fixture(scope="module")
+def current_projected_database():
+    # Current readers require the later generation projection. Exact 449
+    # replay/security tests above keep their historical schema unchanged.
+    for database in current_service_database():
+        test_view_permissions_and_published_only_scope(database)
+        yield database
 
 
 def _insert(connection, round_id, publication, *, status="published", configuration=None):
@@ -115,9 +124,8 @@ def test_view_permissions_and_published_only_scope(projected_database):
         assert cursor.fetchall() == []
 
 
-def test_view_only_drops_nested_cost_and_preserves_order_and_malformed_values(projected_database):
-    psycopg2, dsn = projected_database
-    prepare_current_service_reads(lambda: psycopg2.connect(**dsn), include_run_reads=False)
+def test_view_only_drops_nested_cost_and_preserves_order_and_malformed_values(current_projected_database):
+    psycopg2, dsn = current_projected_database
     variants = [
         _publication(), None, False, [], {},
         {"final_ranking": None}, {"final_ranking": {}},
@@ -149,9 +157,8 @@ def test_view_only_drops_nested_cost_and_preserves_order_and_malformed_values(pr
         transport.close()
 
 
-def test_long_published_ranking_matches_live_shape_without_stored_change(projected_database):
-    psycopg2, dsn = projected_database
-    prepare_current_service_reads(lambda: psycopg2.connect(**dsn), include_run_reads=False)
+def test_long_published_ranking_matches_live_shape_without_stored_change(current_projected_database):
+    psycopg2, dsn = current_projected_database
     ranking = [
         {"submission_id": "submission-%03d" % index, "final_score": index / 10,
          "rank": index + 1, "cost_summary": {"metering": "m" * 5_000},
@@ -195,9 +202,8 @@ def test_long_published_ranking_matches_live_shape_without_stored_change(project
                                 "company_quality_policy": quality_policy.POLICY,
                                 "intent_details_policy": intent_details_policy.POLICY}}),
 ])
-def test_actual_view_keeps_public_result_body(projected_database, mode, policies):
-    psycopg2, dsn = projected_database
-    prepare_current_service_reads(lambda: psycopg2.connect(**dsn), include_run_reads=False)
+def test_actual_view_keeps_public_result_body(current_projected_database, mode, policies):
+    psycopg2, dsn = current_projected_database
     suffix = "shadow" if mode == "shadow" else "policy%d" % len(policies)
     round_id = "arena-2026-10-10-v449" + suffix
     configuration = {"mode": mode, "network_name": "finney", "netuid": 71,
@@ -230,9 +236,8 @@ def test_actual_view_keeps_public_result_body(projected_database, mode, policies
     [None],
     {"legacy": "malformed"},
 ])
-def test_missing_and_malformed_rankings_keep_result_behavior(projected_database, final_ranking):
-    psycopg2, dsn = projected_database
-    prepare_current_service_reads(lambda: psycopg2.connect(**dsn), include_run_reads=False)
+def test_missing_and_malformed_rankings_keep_result_behavior(current_projected_database, final_ranking):
+    psycopg2, dsn = current_projected_database
     round_id = "arena-2026-10-10-v449shape%d" % len(json.dumps(final_ranking))
     publication = _publication()
     publication["final_ranking"] = final_ranking

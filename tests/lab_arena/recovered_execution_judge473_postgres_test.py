@@ -206,9 +206,17 @@ def test_signed_http_source_three_judge_four_persists_and_publishes(database, tm
     from lab_arena import runtime, scoring
     from lab_arena.api import create_app
     from lab_arena.runner import HttpArenaApiClient
-    from lab_arena.store import ArenaStore
+    from lab_arena.store import ArenaStore, PsycopgTransport
     from tests.lab_arena import test_lab_arena_service_round as flows
-    from tests.lab_arena.test_integrity_round import IntegrityHarness
+    from tests.lab_arena import test_integrity_round as integrity_flows
+    from tests.lab_arena.historical_service_harness import HistoricalArenaStore
+    class FrozenRecoveryStore(HistoricalArenaStore):
+        # This schema has the actual470 recovery RPC; preserve that authority.
+        recover_baseline = ArenaStore.recover_baseline
+    class IntegrityHarness(integrity_flows.IntegrityHarness):
+        def make_store(self):
+            return FrozenRecoveryStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
+    monkeypatch.setattr(integrity_flows, 'IntegrityHarness', IntegrityHarness)
 
     clients = []
     build = IntegrityHarness.build_service
@@ -268,24 +276,26 @@ def test_signed_http_source_three_judge_four_persists_and_publishes(database, tm
         return store_claim(self, *args, **kwargs)
 
     def assemble_at_scored(self, target, **kwargs):
-        run_stage = self.run_stage_with_runners
-
-        def finish_window_with_pending_reviews(count):
-            run_stage(count)
-            pending = [run for run in self.service.store.list_runs(self.round_id, kind='score')
-                       if run['status'] == 'pending' and run['attempt'] == 4]
-            if len(pending) == 2:
-                # Current continuation waits while retry work remains. Reach
-                # the real scheduled phase boundary before the late accepts.
-                assert self.status() == 'stage2_scoring'
-                self.clock.advance_to(self.schedule()['final_scoring_close'])
-
-        if late_completion and target == 'scored':
-            self.run_stage_with_runners = finish_window_with_pending_reviews
-        try:
-            result = advance(self, target, **kwargs)
-        finally:
-            self.run_stage_with_runners = run_stage
+        if target == 'scored' and late_completion:
+            # Retain the real recovered source and pending fourth judge before
+            # crossing the current driver's frozen scoring close boundary.
+            for _ in range(30):
+                row = self.service.store.get_round(self.round_id)
+                if row['status'] in ('stage2','stage2_scoring'):
+                    self.run_stage_with_runners(1)
+                sources = self.service.store.list_runs(self.round_id, kind='execute')
+                judges = self.service.store.list_runs(self.round_id, kind='score')
+                if (row['status'] == 'stage2_scoring'
+                    and any(r['attempt']==3 and r['icp_position']==0 and r['status']=='accepted' for r in sources)
+                    and any(r['attempt']==4 and r['status']=='pending' for r in judges)):
+                    waiting = self.service.advance_round(self.round_id)
+                    assert waiting['status'] == 'waiting' and waiting['round_status'] == 'stage2_scoring'
+                    self.clock.advance_to(self.schedule()['final_scoring_close'])
+                    break
+                self.service.advance_round(self.round_id)
+            else:
+                raise AssertionError('late recovery boundary not reached')
+        result = advance(self, target, **kwargs)
         if target == 'scored':
             row = self.service.store.get_round(self.round_id)
             source = next(r for r in self.service.store.list_runs(self.round_id, kind='execute')

@@ -1,12 +1,12 @@
 """The catalog commit accepts $6 only for full-thinking rounds."""
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from lab_arena.store import ArenaStore, ArenaStoreError, PsycopgTransport
 from tests.lab_arena import restore_recorded_results538_postgres_test as prior
+from tests.lab_arena.round_timing_fixture import commit_dates
 from tests.lab_arena.test_lab_arena_migration_postgres import (
     hotkey,
     round_config,
@@ -46,10 +46,9 @@ def database():
 
 def _open_catalog_round(store, database, *, suffix: int, cap: int, full: bool, v4: bool):
     round_id = "arena-2099-10-%02d" % suffix
-    day = datetime.now(timezone.utc).date()
-    bank = day - timedelta(days=1)
     config = round_config(round_id, [hotkey("catalog-runner")],
                           cost_per_company_microusd=cap)
+    day, bank = commit_dates(config)
     config.update(
         sourcing_cost_eligibility_policy="successful_calls_flat_per_icp_v1",
         execution_icp_cap_microusd=cap,

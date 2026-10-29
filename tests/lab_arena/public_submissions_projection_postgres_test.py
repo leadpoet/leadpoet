@@ -8,19 +8,18 @@ from lab_arena import source_disclosure
 from lab_arena.store import ArenaStore, PsycopgTransport, PUBLIC_CONFIGURATION_FIELDS
 from tests.lab_arena.competition_publication443_postgres_test import _insert_rows
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration, prepare_current_service_reads,
+    current_service_database,
 )
 from tests.lab_arena.public_submissions_projection_test import _row, _service
 
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def test_real_projection_keeps_rankings_validation_disclosure_and_fresh_generation(database):
     pg, dsn = database
-    prepare_current_service_reads(lambda: pg.connect(**dsn), include_run_reads=False)
     row = _row("published")
     row["round_id"] = "arena-2026-10-13"
     row.update(created_at="2026-10-12T00:00:00Z", promotion_required=False,

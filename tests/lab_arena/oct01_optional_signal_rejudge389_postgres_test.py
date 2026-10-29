@@ -7,8 +7,8 @@ import pytest
 
 from lab_arena import contact_policy, provider_observations
 from lab_arena.service import ArenaService
-from lab_arena.store import ArenaStore, PsycopgTransport
-from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
+from lab_arena.store import PsycopgTransport
+from tests.lab_arena.historical_service_harness import HistoricalArenaStore
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena import oct01_optional_signal_hold388_postgres_test as held
 from tests.lab_arena import oct01_corrected_scorer_hold378_postgres_test as hashes
@@ -207,14 +207,14 @@ def test_full_archive_preserves_executions_costs_and_original_credential_ids(dat
             cursor.execute(sql)  # replay is read-only after release
 
 
-def test_rerun_namespace_rejudges_and_resumes_130_accepted_miner_outputs(database, monkeypatch):
+def test_rerun_namespace_rejudges_and_resumes_130_accepted_miner_outputs(database, monkeypatch, request):
     psycopg, dsn = database
-    prepare_current_service_reads(lambda: psycopg.connect(**dsn), include_round_reads=False)
     with psycopg.connect(**dsn) as conn:
         conn.autocommit = True
         with conn.cursor() as cursor:
             cursor.execute(_prepare(cursor))
-    store = ArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    store = HistoricalArenaStore(PsycopgTransport(lambda: psycopg.connect(**dsn)))
+    request.addfinalizer(store.close)
     service = object.__new__(ArenaService)
     service._store = store
     service._round = lambda rid: store.get_round(rid)

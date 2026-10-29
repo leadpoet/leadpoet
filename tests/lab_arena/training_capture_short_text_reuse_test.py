@@ -170,16 +170,44 @@ def test_complete_request_prepare_storage_readback_and_export_bytes(tmp_path):
     expected = dict(source, schema_version=capture.SCHEMA_VERSION,
                     privacy={"redacted": False, "redactions": []})
     assert restored == expected
-    expected_raw = json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
-    # These are the exact pre-900 canonical bytes. Python 3.11 delegates the
-    # gzip OS header to zlib, so compressed parity belongs to the same runtime.
-    assert hashlib.sha256(expected_raw).hexdigest() == "60d48460c751028241280e0db92457a72fd06a418727ad2ff3d895c2c115d566"
-    assert prepared.pointer["sha256"] == "sha256:60d48460c751028241280e0db92457a72fd06a418727ad2ff3d895c2c115d566"
-    assert prepared.compressed == gzip.compress(expected_raw, compresslevel=6, mtime=0)
+    expected_bytes = json.dumps(expected, sort_keys=True, separators=(",", ":"),
+                                ensure_ascii=False, allow_nan=False).encode()
+    # gzip's OS header varies across Python/platforms; content addresses bind
+    # the canonical uncompressed bytes, not that compression metadata.
+    expected_hash = "60d48460c751028241280e0db92457a72fd06a418727ad2ff3d895c2c115d566"
+    assert hashlib.sha256(gzip.decompress(prepared.compressed)).hexdigest() == expected_hash
+    assert pointer["sha256"] == "sha256:" + expected_hash
+    assert prepared.compressed == gzip.compress(expected_bytes, compresslevel=6, mtime=0)
     assert objects.get(pointer["ref"]) == prepared.compressed
     example = {"provider_calls": [{"request_capture": restored}] * 3}
     exported, reasons = capture.sanitize_training_value(example, aggregate_parts=True)
     assert exported == example and reasons == []
     encoded = json.dumps(exported, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
     assert hashlib.sha256(encoded).hexdigest() == "bf7c06ef6bdaf8d8b8c4253ab25c8eb4bca0e4228b038a2cca534408e0a0b6b1"
-    assert gzip.decompress(objects.get(pointer["ref"])) == expected_raw
+    assert gzip.decompress(objects.get(pointer["ref"])) == expected_bytes
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("content", "request_hash_mismatch"), ("privacy", "request_privacy_mismatch"),
+])
+def test_changed_canonical_capture_still_fails_hash_and_privacy_checks(tmp_path, monkeypatch, mutation, reason):
+    objects = LocalObjectStore(tmp_path)
+    prepared = capture.RequestCapture(objects).prepare(_document())
+    assert isinstance(prepared, capture.PreparedRequest)
+    document = json.loads(gzip.decompress(prepared.compressed))
+    if mutation == "content":
+        document["admitted_parameters"]["messages"][0]["content"] = "changed capture content"
+    else:
+        document["privacy"] = {"redacted": True, "redactions": ["credential"]}
+    raw = json.dumps(document, sort_keys=True, separators=(",", ":"),
+                     ensure_ascii=False, allow_nan=False).encode()
+    changed_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
+    assert changed_hash != prepared.pointer["sha256"]
+    compressed = gzip.compress(raw, compresslevel=6, mtime=0)
+    pointer = dict(prepared.pointer, size_bytes=len(raw), compressed_bytes=len(compressed))
+    if mutation == "privacy":
+        # A valid new content hash must not bypass the pointer's privacy binding.
+        pointer.update(sha256=changed_hash, ref=capture.OBJECT_PREFIX + changed_hash[7:] + ".json.gz")
+    monkeypatch.setattr(objects, "get_bounded", lambda *_: compressed)
+    with pytest.raises(capture.CaptureError, match=reason):
+        capture.read_request(objects, pointer)

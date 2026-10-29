@@ -184,6 +184,9 @@ def test_completed_grounded_source_context_survives_real_scorer_trace(monkeypatc
     )
     contexts=receipts[-1]["verification_trace"].get("verified_source_context") or []
     assert bool(contexts) is retained
+    # Exact fetched wrong-entity contradiction text is retained for later
+    # context, while its original rejected verdict and zero score stay intact.
+    assert receipts[-1]["verification_trace"]["intent_verdict"]["signal_evaluations"][0]["signal_status"] == status
     assert result[0]==0
     if status == "wrong_entity":
         # Negative source proof remains available for exact judgment reuse.

@@ -145,8 +145,9 @@ def test_non_success_target_placeholder_has_no_redirect_exception(status):
 
 
 @pytest.mark.parametrize("status", [401, 403, 429, 500])
-def test_failed_provider_fetch_retains_validated_redirect_for_bounded_fallback(status):
-    with pytest.raises(compat.CompatibilityResponseError, match="firecrawl_source_content_unavailable") as captured:
+def test_target_infrastructure_failure_preserves_only_validated_redirect_authority(status):
+    with pytest.raises(compat.CompatibilityResponseError,
+                       match="firecrawl_source_content_unavailable") as captured:
         adapt(route(), firecrawl_document(status=status))
     assert captured.value.trusted_response_url == OBSERVED_FINAL
 

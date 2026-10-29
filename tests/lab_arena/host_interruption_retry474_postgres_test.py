@@ -129,6 +129,13 @@ def test_host_then_two_provider_failures_exhaust_two_normal_attempts(database):
         assert built['zero_rows']==[] and built['work_items']==[]
         assert built['incomplete_rows']==[{'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
         assert [r['execution_attempt'] for r in projected(conn)]==[0,1,2]
+        built = plan(conn,cfg)
+        assert built['zero_rows'] == []
+        assert built['incomplete_rows'] == [{'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
+        assert all(r['status']=='failed' and r['per_icp_score'] is None for r in projected(conn))
+        with conn.cursor() as cur:
+            cur.execute('SELECT publication_doc,reward_activated_at FROM public.lab_arena_rounds WHERE round_id=%s',(ROUND,))
+            assert cur.fetchone() == (None,None)
 
 def test_two_genuine_provider_failures_still_exhaust(database):
     with database[0].connect(**database[1]) as conn:
@@ -141,6 +148,13 @@ def test_two_genuine_provider_failures_still_exhaust(database):
         assert built['zero_rows']==[] and built['work_items']==[]
         assert built['incomplete_rows']==[{'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
         assert [r['execution_attempt'] for r in projected(conn)]==[1,2]
+        built = plan(conn,cfg)
+        assert built['zero_rows'] == []
+        assert built['incomplete_rows'] == [{'submission_id':cutoff.SUB,'icp_position':8,'cause':'provider_error'}]
+        assert all(r['status']=='failed' and r['per_icp_score'] is None for r in projected(conn))
+        with conn.cursor() as cur:
+            cur.execute('SELECT publication_doc,reward_activated_at FROM public.lab_arena_rounds WHERE round_id=%s',(ROUND,))
+            assert cur.fetchone() == (None,None)
 
 @pytest.mark.parametrize('cause',['model_error','invalid_output','credential_error','budget_exhausted'])
 def test_genuine_terminal_failure_is_not_replayed_because_of_host_credit(database,cause):

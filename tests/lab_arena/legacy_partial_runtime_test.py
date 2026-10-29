@@ -15,6 +15,7 @@ from qualification.scoring import contact_verification, lead_scorer
 from tests.test_arena_score_integrity import _icp, _positive_breakdown, _public_company
 from tests.lab_arena.test_lab_arena_runner import BridgingRuntime, scoring_lease
 from tests.lab_arena.trajectory_runner_test import LoggingApi, run_model
+from tests.lab_arena.scorer_environment_fixture import isolated_scorer_environment
 
 
 def _input(companies=None, *, contacts=False):

@@ -1,5 +1,7 @@
 """Saved-result verification of integrity rounds on disposable PostgreSQL."""
 from copy import deepcopy
+from contextlib import closing
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -83,7 +85,12 @@ def test_legacy_rounds_still_publish_and_promote_after_integrity_migrations(data
 
 class IntegrityHarness(fixtures.Harness):
     def objects_key(self):
-        return "integrity-round"
+        # All harnesses on one disposable DB share promoted source objects.
+        # Separate DB fixtures must never reuse a sealed object namespace.
+        with closing(self.connect()) as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT pg_postmaster_start_time()::text")
+            identity = ":".join((str(connection.info.port), connection.info.dbname, cursor.fetchone()[0]))
+        return "integrity-round-" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
     def build_service(self):
         service = super().build_service()
@@ -485,3 +492,221 @@ def test_migrated_inert_bank_finishes_current_round_on_twenty_icps(
     assert runs
     assert all(run["stage"] in (1, 2) for run in runs)
     assert max(run["icp_position"] for run in runs) == 19
+
+
+def test_cutover_keeps_inert_bank_and_finishes_open_round_on_twenty_icps(
+    database_before_251, tmp_path, monkeypatch,
+):
+    psycopg2, dsn = database_before_251
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = _Pre251IntegrityHarness(
+        connect, tmp_path, challengers=["CutoverWinner"], runners=["alpha"]
+    )
+    def judge(companies, icp, reference):
+        indexes, _ = verify.bucket_skip(icp, companies)
+        return [{
+            "final_score": 40.0 if companies[index]["company_name"].startswith(
+                "PublicBaseline"
+            ) else 80.0,
+            "company_index": index,
+            "company_identity_key": canonical_company_identity(companies[index]).key,
+            "company_qualified": True,
+            "duplicate_company": False,
+            "verifier_gate_receipts": [{"gate": "company_fit", "decision": "match"}],
+            "intent_signals_detail": [],
+            "failure_reason": "",
+        } for index in indexes]
+
+    monkeypatch.setattr(fixtures, "deterministic_scorer", judge)
+    harness.clock.now = datetime.now(timezone.utc)
+    harness.service._require_integrity_schema = lambda: None
+    round_id = "arena-2026-11-02-cutover"
+    config = harness.service.create_round(
+        harness.clock.now + timedelta(minutes=30), round_id=round_id
+    )
+    harness.round_id = round_id
+    winner = _seed_pre251_challenger(harness, "CutoverWinner")
+    confirmation_ref = f"arena/{round_id}/confirmation/{'c' * 64}.json"
+    confirmation_hash = "sha256:" + "c" * 64
+    with connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_rounds "
+            "DISABLE TRIGGER lab_arena_rounds_write_once"
+        )
+        cursor.execute(
+            """UPDATE public.lab_arena_rounds
+               SET configuration_doc = jsonb_set(
+                     configuration_doc, '{schedule}',
+                     configuration_doc -> 'schedule' || jsonb_build_object(
+                       'stage_3_start', %s,
+                       'stage_3_close', %s,
+                       'stage_3_scoring_close', %s
+                     )
+                   ),
+                   confirmation_bank_ref = %s,
+                   confirmation_bank_hash = %s
+               WHERE round_id = %s""",
+            (
+                config["schedule"]["final_scoring_close"],
+                config["schedule"]["publication_deadline"],
+                config["schedule"]["publication_deadline"],
+                confirmation_ref,
+                confirmation_hash,
+                round_id,
+            ),
+        )
+        cursor.execute(
+            "ALTER TABLE public.lab_arena_rounds "
+            "ENABLE TRIGGER lab_arena_rounds_write_once"
+        )
+        migration = Path(__file__).resolve().parents[2] / (
+            "scripts/251-lab-arena-twenty-icp-promotion.sql"
+        )
+        cursor.execute(migration.read_text(encoding="utf-8"))
+
+    harness.service = harness.build_service()
+    cutover = harness.service.store.get_round(round_id)
+    assert cutover["confirmation_bank_ref"] == confirmation_ref
+    assert cutover["confirmation_bank_hash"] == confirmation_hash
+    assert not {
+        "stage_3_start", "stage_3_close", "stage_3_scoring_close"
+    }.intersection(cutover["configuration_doc"]["schedule"])
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    published = harness.advance_until("published")
+    assert published["king_outcome"] == "crowned"
+    ranking = {
+        item["submission_id"]: item
+        for item in published["publication_doc"]["final_ranking"]
+    }
+    assert ranking[winner]["final_score"] > 0
+    assert published["confirmation_bank_ref"] == confirmation_ref
+    assert published["confirmation_bank_hash"] == confirmation_hash
+    assert published["confirmation_cohort"] is None
+    assert published["stage3_scoring_plan_doc"] is None
+    runs = harness.service.store.list_runs(round_id)
+    assert runs
+    assert all(run["stage"] in (1, 2) for run in runs)
+    assert max(run["icp_position"] for run in runs) == 19
+
+    # Replaying the exact cutover after publication must retain all evidence.
+    with connect() as connection, connection.cursor() as cursor:
+        def evidence():
+            result = []
+            for table, key in (
+                ("lab_arena_rounds", "round_id"),
+                ("lab_arena_runs", "run_id"),
+                ("lab_arena_ledger", "entry_id"),
+            ):
+                cursor.execute(
+                    f"SELECT md5(COALESCE(string_agg(row_to_json(r)::text, '' "
+                    f"ORDER BY {key}), '')) FROM public.{table} r "
+                    "WHERE round_id = %s", (round_id,),
+                )
+                result.append(cursor.fetchone()[0])
+            return result
+
+        before = evidence()
+        cursor.execute(migration.read_text(encoding="utf-8"))
+        cursor.execute(migration.read_text(encoding="utf-8"))
+        assert evidence() == before
+        cursor.execute("SELECT public.lab_arena_twenty_icp_promotion_schema_v1()")
+        assert cursor.fetchone()[0]["version"] == 251
+        for signature in (
+            "public.lab_arena_prepare_confirmation_bank(text,text,text)",
+            "public.lab_arena_open_confirmation(text,jsonb)",
+            "public.lab_arena__confirmation_account_failure(text,text)",
+        ):
+            cursor.execute("SELECT to_regprocedure(%s)", (signature,))
+            assert cursor.fetchone()[0] is None
+        cursor.execute(
+            "SELECT has_function_privilege('lab_arena_service', "
+            "'public.lab_arena_twenty_icp_promotion_schema_v1()', 'EXECUTE'), "
+            "has_function_privilege('anon', "
+            "'public.lab_arena_twenty_icp_promotion_schema_v1()', 'EXECUTE')"
+        )
+        assert cursor.fetchone() == (True, False)
+
+
+class _FrozenIntegrityHarness(IntegrityHarness):
+    def build_service(self):
+        from tests.lab_arena.historical_service_harness import freeze_historical_intake_dates
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-02")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service
+
+
+class _Pre251IntegrityHarness(_FrozenIntegrityHarness):
+    def advance_until(self, target, *, runners=1, max_steps=80):
+        # Exercise the original SQL stage protocol. The later coordinator's
+        # operator-hold/recovery RPCs do not exist before251.
+        for _ in range(max_steps):
+            status = self.status()
+            if status == target:
+                return self.service.store.get_round(self.round_id)
+            if status == "open":
+                result = self.service.commit_benchmark(self.round_id)
+            elif status == "committed":
+                result = self.service.open_stage(self.round_id, 1)
+            elif status in ("stage1", "stage2"):
+                self.run_stage_with_runners(runners)
+                result = self.service.close_stage(self.round_id, int(status[-1]))
+            elif status in ("stage1_closed", "stage2_closed"):
+                stage = int(status[5])
+                result = self.service.commit_scoring_plan(self.round_id, stage)
+                assert result["status"] in ("ok", "existing"), result
+                result = self.service.open_scoring(self.round_id, stage)
+            elif status in ("stage1_scoring", "stage2_scoring"):
+                self.run_stage_with_runners(runners)
+                result = self.service.close_scoring(self.round_id, int(status[5]))
+            elif status in ("stage1_judged", "stage2_judged"):
+                result = self.service.score_stage(self.round_id, int(status[5]))
+            elif status == "stage1_scored":
+                self.clock.advance_to(self.schedule()["stage_2_start"])
+                result = self.service.open_stage(self.round_id, 2)
+            elif status == "scored":
+                result = self.service.publish(self.round_id)
+            else:
+                raise AssertionError(status)
+            assert result["status"] in ("ok", "closed"), result
+        raise AssertionError((target, self.status()))
+
+    def make_store(self):
+        from tests.lab_arena.historical_service_harness import HistoricalArenaStore
+        from lab_arena.store import PsycopgTransport
+        return HistoricalArenaStore(PsycopgTransport(self.connect), lease_ttl_seconds=420)
+
+
+def _seed_pre251_challenger(harness, flavor):
+    """Set up the exact old SQL boundary, before source-fingerprint admission."""
+    from tests.lab_arena.test_lab_arena_migration_postgres import pass_code_review
+    miner = fixtures.keypair("svc-miner-" + flavor)
+    if miner.ss58_address not in harness.chain.registered:
+        harness.chain.registered.append(miner.ss58_address)
+    payload = fixtures.flavor_source_archive(flavor)
+    facts = fixtures.source_bundle.validate_source_archive(payload)
+    envelope = contracts.build_signed_request(
+        scope=contracts.SCOPE_SUBMISSION_PRESIGN, round_id=harness.round_id,
+        hotkey=miner.ss58_address,
+        body={"source_size_bytes": facts["source_size_bytes"], "consent": {"public_rerun": True}},
+        timestamp=int(harness.clock().timestamp()),
+        sign_message=lambda message: miner.sign(message.encode()).hex(),
+    )
+    target = harness.service.handle_submission_presign(envelope)
+    harness.objects.put(target["source_ref"], payload)
+    submission_id = target["submission_id"]
+    credentials = harness.service.config.credential_manager.validate_and_encrypt(
+        {"openrouter_api_key": fixtures.CANARY_OPENROUTER_KEY,
+         "openrouter_management_key": fixtures.CANARY_OPENROUTER_MANAGEMENT_KEY,
+         "deepline_api_key": fixtures.CANARY_DEEPLINE_KEY},
+        submission_id=submission_id, miner_hotkey=miner.ss58_address,
+    )
+    assert harness.service.store.accept_submission_with_credentials(
+        harness.round_id, submission_id, miner.ss58_address, credentials,
+    )["status"] == "ok"
+    pass_code_review(harness.service.store, submission_id, miner.ss58_address)
+    harness.flavors[submission_id] = flavor
+    return submission_id

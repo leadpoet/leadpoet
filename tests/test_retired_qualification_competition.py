@@ -37,3 +37,15 @@ def test_retired_qualification_runtime_is_removed() -> None:
         "emissions.py",
     ):
         assert not (ROOT / "qualification" / "scoring" / name).exists()
+
+
+def test_public_validator_entrypoint_delegates_to_current_arena_runtime() -> None:
+    # The normal validator was restored as a small process entrypoint. Its
+    # legacy qualification implementation remains removed.
+    assert {path.name for path in (ROOT / "neurons").glob("*.py")} == {
+        "__init__.py", "validator.py",
+    }
+    source = (ROOT / "neurons/validator.py").read_text(encoding="utf-8")
+    assert "from lab_arena.validator import main" in source
+    assert "raise SystemExit(main())" in source
+    assert "qualification" not in source

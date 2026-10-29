@@ -104,6 +104,12 @@ def test_inflight_review_can_finish_after_cutoff_within_existing_benchmark_windo
     (3, True, "unknown_provider_failure", False),
     (1, False, "source_contains_credentials", False),
     (1, False, "code_review_provider_credit", False),
+    (1, False, "source_unreadable", False),
+    (3, True, "review_response_invalid", True),
+    (5, True, "code_review_provider_timeout", True),
+    (6, True, "review_response_invalid", True),
+    (10, False, "review_response_invalid", True),
+    (10, None, "code_review_provider_unavailable", True),
     (3, True, "code_review_provider_timeout", True),
     (50, None, "code_review_provider_rate_limited", True),
     # Persisted retryable=False can predate classification. Explicit transient

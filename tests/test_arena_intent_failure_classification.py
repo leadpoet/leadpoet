@@ -514,7 +514,7 @@ def test_day_present_progressive_series_a_scores_through_arena(monkeypatch):
         observed_company_linkedin="https://linkedin.com/company/day-ai",
         observed_employee_count="11-50",
         employee_size_evidence_url="https://yespress.io/day-ai",
-        employee_size_evidence_quote="The company is roughly 35 people.",
+        employee_size_evidence_quote="Day AI has 11-50 employees.",
         observed_industry="Software",
         observed_subindustry="AI-native CRM platform",
         industry_evidence_url="https://day.ai/",

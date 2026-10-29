@@ -9,6 +9,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 
 from lab_arena import contracts
 from tests.lab_arena import abandoned_host_recovery412_postgres_test as recovery
@@ -55,6 +56,18 @@ NEW_DATES = {
 }
 base_database = recovery.database
 
+
+
+class _FrozenQualityHarness(HistoricalStoreHarnessMixin, QualityHarness):
+    """Only this module's pinned SQL uses the historical client and judge date."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-10-07")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service
 
 @pytest.fixture(scope="module")
 def database(base_database):
@@ -311,7 +324,7 @@ def test_verbatim_candidate_exact_protected_round_and_80_targets(database):
 
 
 
-def test_real_company_only_cutoff_recovery_reuses_old_receipts_and_publishes(database,tmp_path):
+def test_real_company_only_cutoff_recovery_reuses_old_receipts_and_publishes(database,tmp_path, request):
     """Real service/signed runner/SQL transitions with fake provider + judge.
 
     A smaller 10-ICP/2-participant round keeps this focused gate bounded.
@@ -327,7 +340,8 @@ def test_real_company_only_cutoff_recovery_reuses_old_receipts_and_publishes(dat
     with connect() as conn,conn.cursor() as cur:
         cur.execute('SET LOCAL session_replication_role=replica')
         cur.execute('TRUNCATE public.lab_arena_rounds CASCADE')
-    h=QualityHarness(connect,tmp_path,challengers=['PublicBaselineAlternate'],runners=['alpha','beta'])
+    h=_FrozenQualityHarness(connect,tmp_path,challengers=['PublicBaselineAlternate'],runners=['alpha','beta'])
+    request.addfinalizer(h.service.store.close)
     h.service.config.defaults=replace(h.service.config.defaults,benchmark_icp_count=10,runner_slot_ceiling=4,company_quality_from=None,intent_details_from='2026-01-01T00:00:00Z',contacts_from=None,execution_sequence_from='2026-01-01T00:00:00Z',per_icp_cost_policy=True,rewards_enabled=True)
     h.service.config.daily_icp_source=lambda **kwargs:{'status':'ready','set_id':int(kwargs['set_id']),'icps':copy.deepcopy(daily_icps()[:10])}
     observed=_install_company_only_sandbox(h)

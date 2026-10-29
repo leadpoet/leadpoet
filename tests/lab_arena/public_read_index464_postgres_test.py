@@ -13,7 +13,7 @@ from lab_arena.service import ArenaService
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.competition_publication443_postgres_test import _insert_rows, _security_state
 from tests.lab_arena.competition_summary_projection_test import _row
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration, prepare_current_service_reads
+from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, current_service_database, database_with_lab_arena_migration
 
 
 MIGRATION = Path(__file__).resolve().parents[2] / "scripts/464-lab-arena-public-read-index.sql"
@@ -37,6 +37,14 @@ def database():
     )
 
 
+@pytest.fixture
+def current_database_without_index():
+    for database in current_service_database():
+        with database[0].connect(**database[1]) as connection,connection.cursor() as cursor:
+            cursor.execute('DROP INDEX public.' + INDEX)
+        yield database
+
+
 def _plan(cursor, sql):
     cursor.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql)
     return cursor.fetchone()[0][0]
@@ -48,15 +56,15 @@ def _nodes(plan):
         yield from _nodes(child)
 
 
-def test_index_bounds_large_round_reads_preserves_responses_and_security(database, monkeypatch):
-    pg, dsn = database
-    prepare_current_service_reads(lambda: pg.connect(**dsn), include_run_reads=False)
+def test_index_bounds_large_round_reads_preserves_responses_and_security(current_database_without_index, monkeypatch):
+    pg, dsn = current_database_without_index
     connection = pg.connect(**dsn)
     connection.autocommit = True
     transport = PsycopgTransport(lambda: pg.connect(**dsn))
     service = object.__new__(ArenaService)
     service._clock = lambda: datetime(2026, 10, 14, tzinfo=timezone.utc)
     service._store = ArenaStore(transport)
+    service._clock = lambda: datetime(2026, 10, 13, tzinfo=timezone.utc)
     service._config = SimpleNamespace(mode="live", pinned_round_id=None,
         chain=SimpleNamespace(current_settlement_epoch=lambda: 100))
     # Deliberately difficult to compress: public reads must not walk shadow

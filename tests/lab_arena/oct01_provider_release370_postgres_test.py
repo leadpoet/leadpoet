@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -23,21 +24,18 @@ database = hold.database
 
 def _prepare(cursor, *, deadline_expired=False):
     hold._seed_active(cursor)
-    # This exact release checks the wall clock. Move the disposable schedule as
-    # one unit before computing its seals; retain a real expired control below.
+    # Keep October1 intake/evaluation authority while making the release's
+    # execution deadline runnable on the disposable database's real clock.
     cursor.execute("SELECT configuration_doc FROM public.lab_arena_rounds WHERE round_id=%s", (hold.recovery.ROUND,))
-    configuration = cursor.fetchone()[0]
-    schedule = configuration['schedule']
-    deadline = datetime.fromisoformat(schedule['stage_1_scoring_close'].replace('Z', '+00:00'))
-    offset = datetime.now(timezone.utc) + timedelta(hours=-1 if deadline_expired else 1) - deadline
-    configuration['schedule'] = {
-        key: (datetime.fromisoformat(value.replace('Z', '+00:00')) + offset).isoformat()
-        for key,value in schedule.items()
-    }
-    cursor.execute('SET session_replication_role=replica')
-    cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s",
-                   (json.dumps(configuration), hold.recovery.ROUND))
-    cursor.execute('SET session_replication_role=origin')
+    config = cursor.fetchone()[0]
+    shift = datetime.now(timezone.utc) + timedelta(hours=-12 if deadline_expired else 0.5) - datetime.fromisoformat(
+        config["schedule"]["benchmark_deadline"].replace("Z", "+00:00"))
+    for key, value in config["schedule"].items():
+        if key not in ("submission_open", "submission_cutoff"):
+            config["schedule"][key] = (datetime.fromisoformat(value.replace("Z", "+00:00")) + shift).isoformat().replace("+00:00", "Z")
+    cursor.execute("SET session_replication_role=replica")
+    cursor.execute("UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s", (json.dumps(config), hold.recovery.ROUND))
+    cursor.execute("SET session_replication_role=origin")
     cursor.execute(hold._render_hold(cursor))
     cursor.execute("UPDATE public.lab_arena_runs SET status='accepted',"
                    "terminal_cause='accepted',output_ref='arena/test/score2.json' "

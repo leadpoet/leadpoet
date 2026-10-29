@@ -2,14 +2,23 @@
 
 from pathlib import Path
 
+import pytest
+from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+
 from tests.lab_arena.idle_worker_claims416_e2e_test import (
     test_ten_slot_baseline_first_round_publishes_promotes_and_derives_weights
     as _complete_round,
 )
 from tests.lab_arena.parallel_twenty_runtime_e2e_test import (
     bounded_socket_shutdown_poll,
-    database,
 )
+
+
+@pytest.fixture
+def database():
+    # Prove the exact575 upgrade from its own preimage, independently of the
+    # current-runtime fixture used by the imported full-round scenario.
+    yield from full_thinking_database()
 
 
 def test_ten_slot_round_preserves_results_and_weights_after_recovery_fix(

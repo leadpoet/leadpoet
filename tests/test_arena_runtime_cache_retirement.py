@@ -168,7 +168,7 @@ def test_shared_shell_helper_propagates_guard_denial_before_source_permissions(a
     capture = tmp_path/'privileged-arguments'
     harness = 'set -euo pipefail\n'
     for name, value in dict(GATEWAY_PREFLIGHT_TREE='/verified', LEADPOET_REPO_ROOT=kwargs['repo_root'],
-                            GATEWAY_PYTHON_BIN=sys.executable, old_slot=0, old_sha=kwargs['sha'], old_tree=root,
+                            GATEWAY_PYTHON_BIN=sys.executable, old_slot=0, old_tree=root, old_sha=kwargs['sha'],
                             PREPARED_GATEWAY_SHA=kwargs['sha'], ARENA_CANDIDATE_SLOT=0,
                             ARENA_CANDIDATE_TREE=root, ARENA_PREVIOUS_SLOT=0,
                             ARENA_PREVIOUS_SHA=kwargs['sha'], ARENA_PREVIOUS_TREE=root).items():

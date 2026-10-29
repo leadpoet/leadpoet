@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+from tests.lab_arena.test_lab_arena_migration_sql import _assert_migration_numbering
 from tests.lab_arena.complete_baseline_final_authority_postgres_test import (
     test_normal_complete_baseline_publishes_and_activates_with_all_guards as _prove_round,
 )
@@ -34,7 +35,7 @@ _RECORDED_SHARED_SEQUENCES = {
         "4c070d53c5a02cb0b4d44846d13041c49e647bca165dfc415f93aaf7b79bc3db",
     "585-lab-arena-review-deadline-recovery.sql":
         "e54b999380190722216c0f78a84e3ca175f9eadcf51fa68d2387a53669c3bc5a",
-    "585-lab-arena-review-deadline-recovery-rollback.sql":
+    "585-lab-arena-review-deadline-recovery-rollback.sql.template":
         "9c78bc154eb93482cf29f6be10609260efa8d395c6db2969edaaced52ff57e3d",
 }
 
@@ -51,7 +52,7 @@ def _assert_migration_identities(paths):
             forward[int(name.split("-", 1)[0])].add(name)
     recorded_forward = defaultdict(set)
     for name in _RECORDED_SHARED_SEQUENCES:
-        if not name.endswith("-rollback.sql"):
+        if not name.endswith(("-rollback.sql", ".template")):
             recorded_forward[int(name.split("-", 1)[0])].add(name)
     collisions = {number: sorted(identities) for number, identities in forward.items()
                   if len(identities) > 1
@@ -178,3 +179,8 @@ def test_review_guard_read_is_installed_and_preserves_restart_authority(database
     for commit in (False, True):
         guard.test_real_guard_update_blocks_read_until_commit_or_rollback(database, commit)
     guard.test_retained_expired_guard_still_blocks_and_operator_pause_semantics_stay_same(database)
+
+
+def test_new_migrations_have_unique_sequence_numbers():
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+    _assert_migration_numbering(scripts)

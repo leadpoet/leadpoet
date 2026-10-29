@@ -252,12 +252,13 @@ def test_active_work_is_not_a_stalled_poll():
 
 def test_claim_observations_track_effective_capacity_and_bounded_result(tmp_path):
     from lab_arena import runner
-    from tests.lab_arena.test_lab_arena_runner import FakeApi, make_config, lease
+    from tests.lab_arena.test_lab_arena_runner import FakeApi, make_config
 
     log = logger()
     pool = SimpleNamespace(capacity=5, quarantined=0)
     api = FakeApi([{'status': 'no_free_slot'}, {'status': 'no_pending'},
-                   {'status': 'paused'}, lease(),
+                   {'status': 'paused'}, {'status': 'leased', 'run_id': 'fixture-run',
+                                          'lease_token': 'fixture-lease', 'icp': {}},
                    {'status': 'secret=DO-NOT-LOG'}])
     config = replace(make_config(tmp_path, api, None, parallel=5),
                      proxy_worker_pool=pool, operational_logger=log)

@@ -577,6 +577,30 @@ def _publish_rerun328(
     assert harness.service.activate_reward(ROUND)["status"] == "existing"
 
 
+def _assert_incomplete_baseline_and_sealed_sql_stop(harness):
+    # Current service preflight must hold this deliberately incomplete historical
+    # baseline. The pinned SQL stop must independently reject final authority.
+    result = harness.service.publish(ROUND)
+    assert result == {
+        "status": "retry", "round_status": "scored", "reason": "baseline_incomplete",
+    }
+    connection = harness.connect()
+    connection.autocommit = True
+    try:
+        import psycopg2
+        with connection.cursor() as cursor:
+            with pytest.raises(
+                psycopg2.Error,
+                match="Sep20 rejudge332 publication requires sealed review release",
+            ):
+                cursor.execute(
+                    "UPDATE public.lab_arena_rounds SET status='published' WHERE round_id=%s",
+                    (ROUND,),
+                )
+    finally:
+        connection.close()
+
+
 def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
     """Model 24 baseline attempts: 18 accepted and six terminal failures."""
     identity = "sha256:" + hashlib.sha256(b"rerun332-failed-unknown").hexdigest()
@@ -721,7 +745,7 @@ def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
     return identity
 
 
-def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
+def _drive_rejudge_cycle(service, objects, runner_hotkey, *, historical_zeros=False) -> None:
     """Use the real parallel close and score lifecycle without execute claims."""
     assert service.close_stage(ROUND, 1)["status"] == "ok"
     for stage, expected in ((1, 50), (2, 48)):
@@ -782,6 +806,9 @@ def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
                 judgment_evidence_hash=lifecycle.contracts.document_hash(evidence),
             )["status"] == "accepted"
         assert service.close_scoring(ROUND, stage)["status"] == "closed"
+        if historical_zeros:
+            from tests.lab_arena.sep20_frozen_publication_fixture import record_frozen_failed_execution_zeros
+            record_frozen_failed_execution_zeros(service, ROUND, stage)
         scored = service.score_stage(ROUND, stage)
         assert scored["status"] == "ok", scored
         if stage == 1:
@@ -999,9 +1026,7 @@ def test_sep20_rerun332_preserves_history_and_isolates_new_scorer_cache(
         _drive_rejudge_cycle(
             harness.service, harness.objects, harness.runner_keys[0]
         )
-        # Current baseline completeness is stricter than this frozen schema.
-        # Its early hold must preserve the original SQL publication-stop proof.
-        assert_sealed_publication_stop(harness.service, connection, psycopg2.Error)
+        _assert_incomplete_baseline_and_sealed_sql_stop(harness)
         with connection.cursor() as cursor:
             assert _scalar(
                 cursor,

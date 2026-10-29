@@ -12,7 +12,7 @@ import tarfile
 import pytest
 
 from lab_arena import code_review, contracts, training_reader
-from scripts.verify_arena_full_thinking_e2e import full_thinking_database
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_scored_first_postgres_test import (
     _baseline_first_judge, _enable_verified_proxy_runtime,
@@ -25,7 +25,7 @@ from tests.lab_arena.test_lab_arena_service_round import daily_icps
 
 @pytest.fixture()
 def database():
-    yield from full_thinking_database()
+    yield from current_service_database()
 
 
 def _rename_run(value, run_id):

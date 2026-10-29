@@ -1,12 +1,6 @@
-"""Prove the least-privilege PostgREST route with a real container.
+"""Production opaque keys and /rest/v1 through nginx/PostgREST14.5/PostgreSQL17.
 
-A test-only client Authorization header carries the
-``lab_arena_service`` role while ``PostgrestTransport`` keeps its production
-scoped-key headers. The whoami readback shows the exact role, and unauthorized
-roles are denied on every Arena table and function.
-
-This is the local stand-in for the hosted-Supabase role preflight. Hosted
-PostgREST uses the same role claim behavior.
+No positive request injects a backend JWT or rewrites its path in Python.
 """
 
 from __future__ import annotations
@@ -25,13 +19,12 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport
-from tests.lab_arena.lab_arena_pg_harness import current_service_database
-from tests.lab_arena import lab_arena_pg_harness
-from tests.lab_arena.test_lab_arena_migration_postgres import round_config
+from lab_arena import contracts
+from lab_arena.store import ArenaStore, ArenaStoreError, PostgrestTransport, TABLES
 
 DOCKER = shutil.which("docker")
-POSTGREST_IMAGE = "postgrest/postgrest:v12.2.3"
+POSTGREST_IMAGE = "postgrest/postgrest:v14.5@sha256:b574528fe109c8343c1247155734d03df8c34b462f342dca0ccc20244fc36ef9"
+POSTGRES_IMAGE = "postgres:17.9@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545"
 JWT_SECRET = "lab-arena-local-jwt-secret-" + "x" * 40
 
 pytestmark = pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
@@ -59,118 +52,176 @@ def _docker(*args: str, timeout: int = 120) -> subprocess.CompletedProcess:
 
 
 @pytest.fixture(scope="module")
-def stack():
-    # Use the same exact current schema as the service tests. Keep real
-    # PostgREST role switching, HTTP coercion, RLS and RPC execution.
-    database = current_service_database()
+def stack(tmp_path_factory):
+    """Current SQL on PostgreSQL17, real opaque-key nginx, PostgREST14.5."""
+    from functools import partial
+    import os
+    from scripts import aws_subnet_api as api
+    from tests import postgres_migration_harness as pg_harness
+    from tests.lab_arena import lab_arena_pg_harness as arena_pg
+    psycopg2 = pytest.importorskip("psycopg2")
+    suffix = uuid4().hex[:10]
+    network = "lab-arena-api-net-" + suffix
+    rest_name = "lab-arena-api-rest-" + suffix
+    proxy_name = "lab-arena-api-proxy-" + suffix
+    started = []
+    database = None
     connection = None
-    rest_name = "lab-arena-rest-" + uuid4().hex[:10]
-    rest_port = _free_port()
-    started = False
-    try:
-        # A Docker database exposes its password-authenticated host port to
-        # PostgREST on both Linux CI and Docker Desktop.
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setenv("LAB_ARENA_PG_LOCAL", "0")
-            seed_database = lab_arena_pg_harness._database_with_migrations
+    with pytest.MonkeyPatch.context() as patch:
+        try:
+            assert _docker("network", "create", network).returncode == 0
+            started.append(("network", network))
+            factory = partial(pg_harness._database_with_migrations,
+                              image=POSTGRES_IMAGE, network=network)
+            patch.setattr(arena_pg, "_database_with_migrations", factory)
+            patch.delenv("LAB_ARENA_PG_LOCAL", raising=False)
+            database = arena_pg.current_service_database()
+            pg, dsn = next(database)
+            connection = pg.connect(**dsn)
+            connection.autocommit = True
+            with connection.cursor() as cursor:
+                cursor.execute("SHOW server_version_num")
+                assert cursor.fetchone()[0] == "170009"
+                # The schema fixture seeds historical repair controls. HTTP
+                # behavior needs fresh test rounds, not those archived rows.
+                cursor.execute("SET session_replication_role=replica")
+                cursor.execute("TRUNCATE public.lab_arena_rounds CASCADE")
+                cursor.execute("SET session_replication_role=origin")
+                cursor.execute("""
+                    CREATE ROLE authenticator LOGIN PASSWORD 'authenticator-pw'
+                      NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+                    GRANT anon, service_role, lab_arena_service TO authenticator
+                      WITH INHERIT FALSE, SET TRUE;
+                    -- Match source request defaults. PostgREST applies each
+                    -- request role's overrides above the login's fallback.
+                    ALTER ROLE authenticator IN DATABASE postgres SET statement_timeout='8s';
+                    ALTER ROLE authenticator IN DATABASE postgres SET lock_timeout='8s';
+                    ALTER ROLE authenticator IN DATABASE postgres SET idle_in_transaction_session_timeout='0';
+                    ALTER ROLE anon SET statement_timeout='10s';
+                    CREATE TABLE public.lab_arena_test_other_table (id INT);
+                    CREATE FUNCTION public.api_test_identity() RETURNS jsonb
+                    LANGUAGE sql STABLE SECURITY INVOKER AS $$
+                      SELECT jsonb_build_object('role',current_user,
+                        'claims',current_setting('request.jwt.claims',true)::jsonb,
+                        'statement_timeout',current_setting('statement_timeout'),
+                        'lock_timeout',current_setting('lock_timeout'),
+                        'idle_timeout',current_setting('idle_in_transaction_session_timeout'))
+                    $$;
+                    REVOKE ALL ON FUNCTION public.api_test_identity() FROM PUBLIC;
+                    GRANT EXECUTE ON FUNCTION public.api_test_identity()
+                      TO anon,service_role,lab_arena_service;
+                    CREATE FUNCTION public.api_test_row_limit() RETURNS SETOF integer
+                    LANGUAGE sql STABLE SECURITY INVOKER AS $$
+                      SELECT generate_series(1,1001)
+                    $$;
+                    REVOKE ALL ON FUNCTION public.api_test_row_limit() FROM PUBLIC;
+                    GRANT EXECUTE ON FUNCTION public.api_test_row_limit()
+                      TO anon,service_role,lab_arena_service;
+                    CREATE FUNCTION public.api_test_payload(p_body text) RETURNS integer
+                    LANGUAGE sql IMMUTABLE SECURITY INVOKER AS $$ SELECT octet_length(p_body) $$;
+                    REVOKE ALL ON FUNCTION public.api_test_payload(text) FROM PUBLIC;
+                    GRANT EXECUTE ON FUNCTION public.api_test_payload(text) TO lab_arena_service;
+                    CREATE FUNCTION public.api_test_sqlstate() RETURNS void
+                    LANGUAGE plpgsql SECURITY INVOKER AS $$ BEGIN
+                      RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='api_contract_test';
+                    END $$;
+                    REVOKE ALL ON FUNCTION public.api_test_sqlstate() FROM PUBLIC;
+                    GRANT EXECUTE ON FUNCTION public.api_test_sqlstate() TO lab_arena_service;
+                    CREATE SCHEMA IF NOT EXISTS auth;
+                    CREATE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $$
+                      SELECT coalesce(nullif(current_setting('request.jwt.claim.role',true),''),
+                        nullif(current_setting('request.jwt.claims',true),'')::jsonb->>'role')
+                    $$;
+                    GRANT USAGE ON SCHEMA auth TO service_role;
+                    GRANT SELECT,INSERT,UPDATE ON public.qualification_private_icp_sets TO service_role;
+                    CREATE POLICY api_test_service_claim ON public.qualification_private_icp_sets
+                      TO service_role USING (auth.role()='service_role')
+                      WITH CHECK (auth.role()='service_role');
+                """)
+            directory = tmp_path_factory.mktemp("private-api-" + suffix)
+            directory.chmod(0o700)
+            values = {
+                "arena_key": "sb_secret_Arena_Aa1_" + suffix * 4,
+                "gateway_key": "sb_secret_Gateway_Bb2_" + suffix * 4,
+                "public_key": "sb_publishable_Public_Cc3_" + suffix * 4,
+                "jwt_secret": JWT_SECRET,
+                "db_uri": "postgres://authenticator:authenticator-pw@database:5432/postgres",
+            }
+            nginx = directory / "nginx.conf"
+            rest = directory / "postgrest.conf"
+            nginx.write_text(api.render_nginx(values, upstream=rest_name + ":3000", listen="0.0.0.0:8081"))
+            rest.write_text(api.render_postgrest(values, host="0.0.0.0"))
+            nginx.chmod(0o600)
+            rest.chmod(0o600)
+            uid = str(os.getuid())
+            common = ("--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+                      "--user", uid, "--log-driver", "none", "--network", network)
+            assert _docker("run", "--rm", "--detach", "--name", rest_name, *common,
+                "--volume", str(rest) + ":/run/postgrest.conf:ro",
+                api.POSTGREST_IMAGE, "postgrest", "/run/postgrest.conf").returncode == 0
+            started.append(("container", rest_name))
+            proxy_port = _free_port()
+            assert _docker("run", "--rm", "--detach", "--name", proxy_name, *common,
+                "--publish", "127.0.0.1:%d:8081" % proxy_port,
+                "--tmpfs", "/tmp:uid=" + uid + ",mode=0700",
+                "--volume", str(nginx) + ":/run/nginx.conf:ro", "--entrypoint", "nginx",
+                api.NGINX_IMAGE, "-c", "/run/nginx.conf", "-g", "daemon off;").returncode == 0
+            started.append(("container", proxy_name))
+            base_url = "http://127.0.0.1:%d" % proxy_port
+            with httpx.Client(timeout=10, trust_env=False) as client:
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    try:
+                        response = client.post(base_url + "/rest/v1/rpc/api_test_identity",
+                            headers={"apikey": values["arena_key"]}, json={})
+                        if response.status_code == 200:
+                            break
+                    except httpx.HTTPError:
+                        pass
+                    time.sleep(0.25)
+                else:
+                    pytest.fail("private compatibility pair did not become ready")
+            yield {"base_url": base_url, "connection": connection, "values": values,
+                   "proxy_name": proxy_name, "rest_name": rest_name}
+        finally:
+            if connection is not None:
+                connection.close()
+            for kind, name in reversed(started):
+                if kind == "container":
+                    _docker("rm", "--force", name, timeout=60)
+            if database is not None:
+                database.close()
+            for kind, name in reversed(started):
+                if kind == "network":
+                    _docker("network", "rm", name, timeout=60)
 
-            def with_authenticator(migrations, *, setup_sql="", **kwargs):
-                # The real Arena migration must grant its scoped role to an
-                # existing authenticator, as hosted Supabase does.
-                setup_sql += "\nCREATE ROLE authenticator LOGIN PASSWORD 'authenticator-pw' NOINHERIT; GRANT anon,authenticated,service_role TO authenticator;"
-                return seed_database(migrations, setup_sql=setup_sql, **kwargs)
 
-            patch.setattr(lab_arena_pg_harness, "_database_with_migrations", with_authenticator)
-            psycopg2, dsn = next(database)
-        connection = psycopg2.connect(**dsn)
-        connection.autocommit = True
-        with connection.cursor() as cursor:
-            cursor.execute("SELECT granted.rolname FROM pg_auth_members m JOIN pg_roles granted ON granted.oid=m.roleid JOIN pg_roles r ON r.oid=m.member WHERE r.rolname='authenticator' ORDER BY 1")
-            assert "lab_arena_service" in [row[0] for row in cursor.fetchall()]
-            cursor.execute("CREATE TABLE public.lab_arena_test_other_table (id INT)")
-        linux = sys.platform.startswith("linux")
-        host = "127.0.0.1" if linux else "host.docker.internal"
-        networking = ("--network", "host") if linux else (
-            "--publish", "127.0.0.1:%d:%d" % (rest_port, rest_port))
-        rest = _docker(
-            "run", "--rm", "--detach", "--name", rest_name, *networking,
-            "--env", "PGRST_DB_URI=postgres://authenticator:authenticator-pw@%s:%d/postgres" % (host, dsn["port"]),
-            "--env", "PGRST_SERVER_PORT=%d" % rest_port,
-            "--env", "PGRST_DB_SCHEMAS=public", "--env", "PGRST_DB_ANON_ROLE=anon", "--env", "PGRST_JWT_SECRET=%s" % JWT_SECRET,
-            "--env", "PGRST_DB_POOL=4", POSTGREST_IMAGE,
-        )
-        assert rest.returncode == 0, "PostgREST container could not start: %s" % rest.stderr[-200:]
-        started = True
-        base_url = "http://127.0.0.1:%d" % rest_port
-        with httpx.Client(http1=True, http2=False, timeout=httpx.Timeout(10.0)) as client:
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                try:
-                    if client.get(base_url + "/", headers={"Accept": "application/json"}).status_code < 500:
-                        break
-                except httpx.HTTPError:
-                    pass
-                time.sleep(0.5)
-            else:
-                logs = _docker("logs", rest_name)
-                pytest.fail("PostgREST did not become ready: %s" % (logs.stdout + logs.stderr)[-500:])
-        yield {"base_url": base_url, "connection": connection}
-    finally:
-        if started:
-            _docker("rm", "--force", rest_name, timeout=60)
-        if connection is not None:
-            connection.close()
-        database.close()
-
-
-def make_transport(
-    stack, role: str, *, jwt_secret: str = JWT_SECRET
-) -> PostgrestTransport:
-    client = httpx.Client(
-        http1=True,
-        http2=False,
-        timeout=httpx.Timeout(15.0),
-        base_url=stack["base_url"],
-        headers={"Authorization": "Bearer " + mint_jwt(role, secret=jwt_secret)},
-    )
-    transport = PostgrestTransport(
-        "https://placeholder.invalid",
-        service_key="sb_secret_local_postgrest_test",
-        http_client=client,
-    )
-    # Bare PostgREST serves at the root; Supabase adds /rest/v1. Point the transport at the container.
-    transport._base_url = ""
-    transport._client.base_url = httpx.URL(stack["base_url"])
+def make_transport(stack, role: str, *, jwt_secret: str = JWT_SECRET) -> PostgrestTransport:
+    # Every positive request uses exactly the production apikey-only transport.
+    names = {"lab_arena_service": "arena_key", "service_role": "gateway_key", "anon": "public_key"}
+    key = stack["values"].get(names.get(role, ""), "sb_secret_Unknown_" + "z" * 32)
+    transport = PostgrestTransport(stack["base_url"], service_key=stack["values"]["arena_key"])
+    transport._headers["apikey"] = key
+    if jwt_secret != JWT_SECRET:
+        transport._headers["Authorization"] = "Bearer " + mint_jwt(role, secret=jwt_secret)
     return transport
 
 
 def test_service_role_authorization_reaches_whoami_and_functions_through_postgrest(stack):
     transport = make_transport(stack, "lab_arena_service")
-    # PostgREST has no /rest/v1 prefix: rewrite the request paths.
-    original_post = transport._client.post
-    original_get = transport._client.get
-    transport._client.post = lambda url, **kwargs: original_post(url.replace("/rest/v1", ""), **kwargs)
-    transport._client.get = lambda url, **kwargs: original_get(url.replace("/rest/v1", ""), **kwargs)
     store = ArenaStore(transport)
     identity = store.require_service_role()
     assert identity["current_user"] == "lab_arena_service" and identity["jwt_role"] == "lab_arena_service"
     assert identity["rolsuper"] is False and identity["rolbypassrls"] is False and identity["session_user"] == "authenticator"
-    config = round_config("arena-2026-09-02", [], mode="live", rewards_enabled=False)
-    assert store.create_round("arena-2026-09-02", config)["status"] == "created"
-    assert store.get_round("arena-2026-09-02")["status"] == "open"
-    assert store.list_rounds()[0]["round_id"] == "arena-2026-09-02"
+    assert store.list_rounds() == []
     with pytest.raises(ArenaStoreError):
         transport.select("lab_arena_test_other_table")  # not an Arena table: refused client-side
-    response = transport._client.get(stack["base_url"] + "/lab_arena_test_other_table", headers=transport._headers)
+    response = transport._client.get(stack["base_url"] + "/rest/v1/lab_arena_test_other_table", headers=transport._headers)
     assert response.status_code in (401, 403, 404), response.text
 
 
 def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
     transport = make_transport(stack, "lab_arena_service")
-    original_post = transport._client.post
-    original_get = transport._client.get
-    transport._client.post = lambda url, **kwargs: original_post(url.replace("/rest/v1", ""), **kwargs)
-    transport._client.get = lambda url, **kwargs: original_get(url.replace("/rest/v1", ""), **kwargs)
     store = ArenaStore(transport)
     suffix = uuid4().hex[:10]
     shadow_id = "arena-2026-09-04-%s" % suffix
@@ -179,17 +230,15 @@ def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
     shadow_published_ids = ["arena-2026-09-07-%s%02d" % (suffix[:8], index) for index in range(21)]
     live_published_id = "arena-2026-09-08-%s" % suffix
     try:
-        for round_id, mode, rewards in (
-            (shadow_id, "shadow", False),
-            (live_id, "live", True),
-        ):
-            assert store.create_round(
-                round_id,
-                round_config(round_id, [], mode=mode, rewards_enabled=rewards),
-            )["status"] == "created"
         # Seed enough rows to make an unfiltered limit-20 query fail to find
         # the live row. These rows are local PostgREST fixture data only.
         with stack["connection"].cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            for round_id, mode, rewards in ((shadow_id, "shadow", False), (live_id, "live", True)):
+                cursor.execute(
+                    "INSERT INTO public.lab_arena_rounds (round_id,configuration_doc,rewards_enabled) VALUES (%s,%s::jsonb,%s)",
+                    (round_id, json.dumps({"mode": mode, "rewards_enabled": rewards}), rewards),
+                )
             for round_id in shadow_open_ids:
                 cursor.execute(
                     "INSERT INTO public.lab_arena_rounds (round_id, configuration_doc, rewards_enabled) VALUES (%s, %s::jsonb, FALSE)",
@@ -217,6 +266,7 @@ def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
                     '{"public_key_hash":"sha256:' + ("c" * 64) + '"}',
                 ),
             )
+            cursor.execute("SET session_replication_role=origin")
         stack["connection"].commit()
         shadow_rounds = {row["round_id"] for row in store.list_rounds(status="open", mode="shadow", limit=20)}
         live_rounds = {row["round_id"] for row in store.list_rounds(status="open", mode="live", limit=20)}
@@ -236,13 +286,11 @@ def test_postgrest_round_queries_isolate_shadow_and_live_modes(stack):
         live_bases = store.published_reward_bases(mode="live", limit=20)
         assert {row["round_id"] for row in live_bases} == {live_published_id}
     finally:
-        # The module-scoped Postgres container is disposable. Arena rounds are
-        # intentionally write-once, so cleanup must not disable that trigger.
-        for round_id in (shadow_id, live_id):
-            transport.rpc(
-                "lab_arena_cancel_round",
-                {"p_round_id": round_id, "p_reason": "operator_abort"},
-            )
+        # Only synthetic pagination rows in this disposable database.
+        with stack["connection"].cursor() as cursor:
+            cursor.execute("SET session_replication_role=replica")
+            cursor.execute("TRUNCATE public.lab_arena_rounds CASCADE")
+            cursor.execute("SET session_replication_role=origin")
         transport.close()
 
 
@@ -251,10 +299,10 @@ def test_anon_and_service_role_tokens_are_denied_on_arena_tables_and_functions(s
         transport = make_transport(stack, role)
         headers = transport._headers
         client = transport._client
-        assert client.get(stack["base_url"] + "/lab_arena_rounds", headers=headers).status_code in (401, 403), role
-        rpc = client.post(stack["base_url"] + "/rpc/lab_arena_whoami", headers=headers, content=b"{}")
+        assert client.get(stack["base_url"] + "/rest/v1/lab_arena_rounds", headers=headers).status_code in (401, 403), role
+        rpc = client.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_whoami", headers=headers, content=b"{}")
         assert rpc.status_code in (401, 403, 404), (role, rpc.text)
-        create = client.post(stack["base_url"] + "/rpc/lab_arena_create_round", headers=headers, content=json.dumps({"p_round_id": "arena-2026-09-03", "p_configuration_doc": {}}).encode())
+        create = client.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_create_round", headers=headers, content=json.dumps({"p_round_id": "arena-2026-09-03", "p_configuration_doc": {}}).encode())
         assert create.status_code in (401, 403, 404), (role, create.text)
 
 
@@ -264,8 +312,148 @@ def test_wrong_secret_or_unknown_role_is_rejected(stack):
         "lab_arena_service",
         jwt_secret="wrong-secret-" + "y" * 40,
     )
-    response = forged._client.post(stack["base_url"] + "/rpc/lab_arena_whoami", headers=forged._headers, content=b"{}")
+    response = forged._client.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_whoami", headers=forged._headers, content=b"{}")
     assert response.status_code == 401
     unknown = make_transport(stack, "postgres")
-    response = unknown._client.post(stack["base_url"] + "/rpc/lab_arena_whoami", headers=unknown._headers, content=b"{}")
+    response = unknown._client.post(stack["base_url"] + "/rest/v1/rpc/lab_arena_whoami", headers=unknown._headers, content=b"{}")
     assert response.status_code in (401, 403), response.text
+
+
+@pytest.mark.parametrize("variant", [
+    "missing", "unknown", "case_changed", "duplicate_key", "duplicate_header_case",
+    "mismatched_bearer", "forged_role", "bearer_only", "raw_bearer", "duplicate_bearer",
+])
+def test_edge_rejects_credential_confusion(stack, variant):
+    values = stack["values"]
+    key = values["arena_key"]
+    headers = [("apikey", key)]
+    if variant == "missing":
+        headers = []
+    elif variant == "unknown":
+        headers = [("apikey", key + "unknown")]
+    elif variant == "case_changed":
+        headers = [("apikey", key.replace("Arena_Aa1", "arena_aa1"))]
+    elif variant == "duplicate_key":
+        headers += [("apikey", key)]
+    elif variant == "duplicate_header_case":
+        headers += [("ApiKey", values["gateway_key"])]
+    elif variant == "mismatched_bearer":
+        headers += [("Authorization", "Bearer " + values["gateway_key"])]
+    elif variant == "forged_role":
+        headers += [("Authorization", "Bearer " + mint_jwt("postgres"))]
+    elif variant == "bearer_only":
+        headers = [("Authorization", "Bearer " + key)]
+    elif variant == "raw_bearer":
+        headers += [("Authorization", key)]
+    elif variant == "duplicate_bearer":
+        headers += [("Authorization", "Bearer " + key), ("Authorization", "Bearer " + key)]
+    response = httpx.post(stack["base_url"] + "/rest/v1/rpc/api_test_identity", headers=headers, json={})
+    assert response.status_code in (400, 401)
+    assert key not in response.text and values["gateway_key"] not in response.text
+
+
+def test_exact_three_roles_and_untrusted_claim_headers(stack):
+    values = stack["values"]
+    expected = {"arena_key": "lab_arena_service", "gateway_key": "service_role", "public_key": "anon"}
+    for name, role in expected.items():
+        for authorization in (None, "Bearer " + values[name], "bEaReR " + values[name]):
+            headers = {"apikey": values[name], "X-JWT-Claims": '{"role":"postgres"}',
+                       "X-Forwarded-Authorization": "Bearer " + mint_jwt("postgres")}
+            if authorization:
+                headers["Authorization"] = authorization
+            response = httpx.post(stack["base_url"] + "/rest/v1/rpc/api_test_identity", headers=headers, json={})
+            assert response.status_code == 200
+            result = response.json()
+            assert result["role"] == result["claims"]["role"] == role
+            assert result["claims"]["aud"] == "leadpoet-subnet-api"
+            if role == "lab_arena_service":
+                assert (result["statement_timeout"], result["lock_timeout"], result["idle_timeout"]) == ("30s", "5s", "1min")
+
+
+@pytest.mark.parametrize("key_name,role,timeouts", [
+    ("arena_key", "lab_arena_service", ("30s", "5s", "1min")),
+    ("gateway_key", "service_role", ("8s", "8s", "0")),
+    ("public_key", "anon", ("10s", "8s", "0")),
+])
+def test_request_role_timeouts_preserve_source_defaults(stack, key_name, role, timeouts):
+    response = httpx.post(stack["base_url"] + "/rest/v1/rpc/api_test_identity",
+                          headers={"apikey": stack["values"][key_name]}, json={})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["role"] == result["claims"]["role"] == role
+    assert tuple(result[name] for name in
+                 ("statement_timeout", "lock_timeout", "idle_timeout")) == timeouts
+
+
+@pytest.mark.parametrize("key_name", ["arena_key", "gateway_key", "public_key"])
+def test_source_row_cap_and_next_page_use_actual_ingress(stack, key_name):
+    url = stack["base_url"] + "/rest/v1/rpc/api_test_row_limit"
+    headers = {"apikey": stack["values"][key_name]}
+    first = httpx.get(url, headers=headers, params={"limit": 1001})
+    assert first.status_code == 200
+    assert first.json() == list(range(1, 1001))
+    assert first.headers["content-range"] == "0-999/*"
+    last = httpx.get(url, headers={**headers, "Range": "1000-1000"})
+    assert last.status_code in (200, 206)
+    assert last.json() == [1001]
+    assert last.headers["content-range"] == "1000-1000/*"
+
+
+def test_arena_direct_writes_and_private_icps_are_denied(stack):
+    with httpx.Client(base_url=stack["base_url"], timeout=10) as client:
+        for name in ("arena_key", "gateway_key", "public_key"):
+            headers = {"apikey": stack["values"][name]}
+            for table in TABLES:
+                role = {"arena_key": "lab_arena_service", "gateway_key": "service_role", "public_key": "anon"}[name]
+                with stack["connection"].cursor() as cursor:
+                    cursor.execute("SELECT has_table_privilege(%s,%s,'INSERT')", (role, "public." + table))
+                    assert cursor.fetchone() == (False,)
+                response = client.post("/rest/v1/" + table, headers=headers, json=[])
+                if table == "lab_arena_published_results_v1" and response.status_code == 500:
+                    # PostgreSQL checks this non-updatable view's shape before
+                    # INSERT ACLs. Preserve its actual SQLSTATE/error mapping.
+                    assert response.json()["code"] == "55000"
+                else:
+                    assert response.status_code in (401, 403, 404), (name, table, response.status_code)
+            if name != "gateway_key":
+                response = client.get("/rest/v1/qualification_private_icp_sets", headers=headers)
+                assert response.status_code in (401, 403)
+
+
+def test_gateway_sdk_upsert_patch_and_public_helper_use_actual_ingress(stack, monkeypatch):
+    from gateway.db.client import create_http1_sync_client
+    from Leadpoet.utils import public_supabase
+    client = create_http1_sync_client(stack["base_url"], stack["values"]["gateway_key"])
+    try:
+        table = client.table("qualification_private_icp_sets")
+        data = {"set_id": 20991001, "icps": [], "is_active": False}
+        assert table.upsert(data, on_conflict="set_id").execute().data[0]["set_id"] == data["set_id"]
+        table.update({"is_active": True}).eq("set_id", data["set_id"]).execute()
+        result = table.select("set_id,is_active").eq("set_id", data["set_id"]).execute().data
+        assert result == [{"set_id": data["set_id"], "is_active": True}]
+    finally:
+        client.postgrest.session.close()
+    monkeypatch.setattr(public_supabase, "SUPABASE_URL", stack["base_url"])
+    monkeypatch.setattr(public_supabase, "SUPABASE_ANON_KEY", stack["values"]["public_key"])
+    assert public_supabase.call_public_rpc("api_test_identity")["role"] == "anon"
+
+
+def test_large_json_sqlstate_and_non_rest_paths_keep_contract(stack):
+    headers = {"apikey": stack["values"]["arena_key"]}
+    payload = "x" * (2 * 1024 * 1024)
+    response = httpx.post(stack["base_url"] + "/rest/v1/rpc/api_test_payload",
+                          headers=headers, json={"p_body": payload}, timeout=15)
+    assert response.status_code == 200 and response.json() == len(payload)
+    response = httpx.post(stack["base_url"] + "/rest/v1/rpc/api_test_sqlstate", headers=headers, json={})
+    assert response.status_code == 400 and response.json()["code"] == "22023"
+    for path in ("/rpc/api_test_identity", "/auth/v1", "/storage/v1", "/rest/v1-not/rpc/api_test_identity"):
+        assert httpx.get(stack["base_url"] + path, headers=headers).status_code == 404
+    for name in (stack["proxy_name"], stack["rest_name"]):
+        logs = _docker("logs", name)
+        assert not logs.stdout.strip()
+
+
+def test_private_backend_has_no_anonymous_fallback(stack):
+    response = _docker("exec", stack["proxy_name"], "wget", "-q", "-O", "-",
+                       "http://" + stack["rest_name"] + ":3000/rpc/api_test_identity")
+    assert response.returncode != 0 and "401" in response.stderr

@@ -111,6 +111,7 @@ def test_accepted_attempt_keeps_authority_over_deadline_marker():
     plan = _plan([accepted, _deadline_retry()])
 
     assert plan["zero_rows"] == []
+    assert not plan.get("incomplete_rows")
     assert plan["work_items"] == [
         {
             "scored_run_id": accepted["run_id"],

@@ -90,15 +90,16 @@ def _service(monkeypatch, *, disclosed=True):
            "publication_doc": {"participants": [{"submission_id": "miner"}]}}
     runs = [
         {"run_id": f"run-{i}", "icp_position": i, "stage": 1,
-         "submission_id": "miner", "output_ref": f"output-{i}", "status": "accepted"}
+         "round_id": "round", "kind": "execute", "submission_id": "miner",
+         "output_ref": f"output-{i}", "status": "accepted"}
         for i in (0, 1)
     ]
     service = object.__new__(ArenaService)
     _install_completed_scores_cache(service)
     service._round = lambda _: row
     service._public_icp_disclosure = lambda _: {"public_positions": [0]} if disclosed else None
-    judgments = [{"run_id": "judge-0", "scored_run_id": "run-0",
-                  "status": "accepted", "stage": 1, "icp_position": 0}]
+    judgments = [{**run, "run_id": run["run_id"] + ":score", "kind": "score",
+                  "scored_run_id": run["run_id"]} for run in runs]
     service._store = SimpleNamespace(list_runs=lambda *a, **k: copy.deepcopy(
         judgments if k.get("kind") == "score" else runs))
     reads = []
@@ -109,8 +110,7 @@ def _service(monkeypatch, *, disclosed=True):
     service._objects = SimpleNamespace(get_bounded=get_output)
     monkeypatch.setattr(module, "validate_output_document", lambda value: value)
     service._public_scoring_attribution = lambda *a, **k: {}
-    service._scoring_outputs = lambda *a: {"run-0": {"status": "accepted"}}
-    service._benchmark_icps_from_row = lambda _round_id, _row: [{}]
+    service._benchmark_icps_from_row = lambda *a, **k: [{}]
     service._verified_breakdowns = lambda *a, **k: [_breakdown()]
     return service, reads, row
 
@@ -126,8 +126,8 @@ def test_public_api_projects_only_disclosed_accepted_company_checks(monkeypatch)
 
 def test_pending_disclosure_never_fetches_company_or_verifier_evidence(monkeypatch):
     service, reads, _ = _service(monkeypatch, disclosed=False)
-    service._benchmark_icps_from_row = lambda *_args: pytest.fail("private ICPs accessed")
-    service._scoring_outputs = lambda *a: pytest.fail("private judgments accessed")
+    service._benchmark_icps_from_row = lambda *a, **k: pytest.fail("private ICPs accessed")
+    service._verified_breakdowns = lambda *a, **k: pytest.fail("private judgments accessed")
     assert service.public_results("round", "miner")["company_diagnostics"] == []
     assert reads == []
 

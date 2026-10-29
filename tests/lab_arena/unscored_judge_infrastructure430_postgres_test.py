@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin, freeze_historical_intake_dates
 import copy
 import json
 
@@ -63,7 +64,7 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
     connect = lambda: psycopg.connect(**dsn)
     with connect() as conn, conn.cursor() as cur:
         cur.execute(MIGRATION.read_text())
-    harness = IntegrityHarness(
+    harness = _FrozenIntegrityHarness(
         connect, tmp_path, challengers=["JudgeIncompleteMiner"], runners=["alpha"]
     )
     harness.service.config.defaults = replace(
@@ -291,9 +292,20 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
                     'reason': 'judge_incomplete', 'remaining': 1}
     assert harness.service.store.get_round(harness.round_id) == before_round
     assert harness.service.store.list_runs(harness.round_id) == before_runs
-    # The current publisher preserves unfinished judgments until the frozen
-    # final deadline. The historical SQL proofs above retain their own rules.
-    harness.clock.advance_to(harness.schedule()['publication_deadline'])
+    # Current service waits through the frozen publication deadline. Reconstruct
+    # a coherently elapsed execution window only after all real work above.
+    configuration = harness.service.store.get_round(harness.round_id)["configuration_doc"]
+    schedule = configuration["schedule"]
+    elapsed_end = datetime.now(timezone.utc) - timedelta(seconds=1)
+    shift = elapsed_end - datetime.fromisoformat(schedule["publication_deadline"].replace("Z", "+00:00"))
+    for key, value in schedule.items():
+        if key not in ("submission_open", "submission_cutoff"):
+            schedule[key] = (datetime.fromisoformat(value.replace("Z", "+00:00")) + shift).isoformat().replace("+00:00", "Z")
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SET LOCAL session_replication_role=replica")
+        cur.execute("UPDATE public.lab_arena_rounds SET configuration_doc=%s::jsonb WHERE round_id=%s", (json.dumps(configuration), harness.round_id))
+    harness.service._invalidate_hot_round()
+    harness.clock.now = elapsed_end + timedelta(seconds=1)
     scored = harness.service.score_stage(harness.round_id, 2)
     assert scored["status"] == "ok", scored
     assert harness.service.store.get_run(execution_id)["per_icp_score"] is None
@@ -309,3 +321,15 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
     assert rows[ids[False]]["eligibility_reason"] == "execution_incomplete"
     assert rows[ids[True]]["final_score"] is not None
     assert published["publication_doc"]["king_decision"]["outcome"] == "no_king"
+
+
+class _FrozenIntegrityHarness(HistoricalStoreHarnessMixin, IntegrityHarness):
+    """The lifecycle belongs to this file's pinned SQL and original judge."""
+    def build_service(self):
+        service = super().build_service()
+        commit = service.commit_benchmark
+        def commit_frozen(round_id):
+            freeze_historical_intake_dates(self, "2026-09-29")
+            return commit(round_id)
+        service.commit_benchmark = commit_frozen
+        return service

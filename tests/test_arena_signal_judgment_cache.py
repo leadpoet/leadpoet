@@ -409,6 +409,10 @@ def test_full_scoring_input_reuses_a_across_mixed_company_submissions(
         _company as submission_company, _icp as submission_icp,
     )
 
+    # The real scorer entrypoint binds these exact placeholder credentials.
+    for name, value in scorer_entrypoint.PLACEHOLDER_CREDENTIALS.items():
+        monkeypatch.setenv(name, value)
+
     calls = Counter()
     storage = {}
     current_input = None

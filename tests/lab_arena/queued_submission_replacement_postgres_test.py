@@ -19,15 +19,14 @@ from tests.lab_arena.hotkey_admission_postgres_test import (
     _config as _integrity_config,
 )
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.test_lab_arena_source_migration_postgres import _hotkey, _round_config
 
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture
@@ -44,12 +43,7 @@ def _config(round_id: str, *, cutoff_after: timedelta):
         round_id,
         cutoff=(now + cutoff_after).isoformat().replace("+00:00", "Z"),
     )
-    # The source-migration helper predates the dynamic round-count contract.
-    # This fixture runs the current create-round RPC, which requires both.
-    config.update(
-        stage_1_icp_count=contracts.STAGE_1_ICP_COUNT,
-        stage_2_icp_count=contracts.STAGE_2_ICP_COUNT,
-    )
+    config.update(stage_1_icp_count=5, stage_2_icp_count=5)
     return config
 
 

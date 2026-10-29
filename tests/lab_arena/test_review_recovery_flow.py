@@ -209,12 +209,10 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     harness.review_transport = transport
     assert harness.service.store.code_review_schema()["max_transient_attempts"] is None
 
-    # A UTC-midnight round fixes the source replacement boundary at 23:00.
+    # Leave two real hours for admission, including in the last UTC hour.
     now = datetime.now(timezone.utc)
     harness.clock.now = now
-    cutoff = (now + timedelta(days=1)).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
+    cutoff = now + timedelta(hours=2)
     # The test later brings the cutoff into the current UTC day so PostgreSQL
     # can exercise retry timing without sleep. Keep the daily ID on that day.
     round_id = "arena-" + now.date().isoformat()
@@ -223,7 +221,9 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
     replacement_freeze = harness.service._submission_replacement_cutoff(
         {"configuration_doc": configuration}
     )
-    assert (replacement_freeze.hour, replacement_freeze.minute) == (23, 0)
+    assert replacement_freeze == datetime.fromisoformat(
+        configuration["schedule"]["submission_cutoff"].replace("Z", "+00:00")
+    ) - timedelta(hours=1)
 
     original_reserved = _signed_reserve(
         harness, round_id, "SupersededOriginal", "review-recovery"
@@ -465,3 +465,15 @@ def test_transient_review_recovers_after_replacement_and_only_it_is_evaluated(
         404,
     )
     assert run_reads == []
+
+
+@pytest.mark.parametrize("cutoff", [
+    "2026-10-29T00:00:00Z", "2026-11-01T00:00:00Z",
+    "2027-01-01T00:00:00Z", "2028-03-01T00:00:00Z",
+])
+def test_midnight_replacement_freeze_remains_2300_across_date_boundaries(cutoff):
+    row = {"configuration_doc": {"schedule": {"submission_cutoff": cutoff}}}
+    from lab_arena.service import ArenaService
+    freeze = ArenaService._submission_replacement_cutoff(row)
+    assert (freeze.hour, freeze.minute) == (23, 0)
+    assert freeze + timedelta(hours=1) == datetime.fromisoformat(cutoff.replace("Z", "+00:00"))

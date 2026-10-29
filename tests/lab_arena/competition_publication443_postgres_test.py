@@ -11,7 +11,7 @@ from lab_arena import contracts, public_dashboard as dashboard
 from lab_arena.store import ArenaStore, PsycopgTransport
 from tests.lab_arena.competition_summary_projection_test import _row, _service
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration, prepare_current_service_reads,
+    CURRENT_SERVICE_MIGRATIONS, current_service_database, database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_postgrest_route import (
     DOCKER, make_transport, stack,
@@ -50,6 +50,11 @@ def projected_database(database):
         assert _security_state(cursor) == before
     connection.close()
     return psycopg2, dsn, before
+
+
+@pytest.fixture(scope="module")
+def current_database():
+    yield from current_service_database()
 
 
 def _project(cursor, row):
@@ -266,9 +271,8 @@ def _history_rows():
     return [archived, opened, _row("2026-10-10"), _row("2026-10-09")]
 
 
-def test_actual_psycopg_query_and_full_competition_response(projected_database, monkeypatch):
-    psycopg2, dsn, _ = projected_database
-    prepare_current_service_reads(lambda: psycopg2.connect(**dsn), include_run_reads=False)
+def test_actual_psycopg_query_and_full_competition_response(current_database, monkeypatch):
+    psycopg2, dsn = current_database
     rows = _history_rows()
     connection = psycopg2.connect(**dsn)
     connection.autocommit = True
@@ -288,16 +292,11 @@ def test_actual_psycopg_query_and_full_competition_response(projected_database, 
 @pytest.mark.skipif(DOCKER is None, reason="Docker is unavailable")
 def test_actual_postgrest_computed_selection_and_response(stack, monkeypatch):
     psycopg2 = pytest.importorskip('psycopg2')
-    prepare_current_service_reads(
-        lambda: psycopg2.connect(stack['connection'].dsn, password='postgres'), include_run_reads=False,
-    )
     rows = _history_rows()
     with stack["connection"].cursor() as cursor:
         cursor.execute(MIGRATION.read_text(encoding="utf-8"))
     _insert_rows(stack["connection"], rows)
     transport = make_transport(stack, "lab_arena_service")
-    original_get = transport._client.get
-    transport._client.get = lambda url, **kwargs: original_get(url.replace("/rest/v1", ""), **kwargs)
     try:
         store = ArenaStore(transport)
         # NOTIFY reload is asynchronous; poll only this bounded schema read.

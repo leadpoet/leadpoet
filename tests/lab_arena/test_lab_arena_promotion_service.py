@@ -20,80 +20,23 @@ from tests.lab_arena.test_lab_arena_promotion_git import git, repository, source
 from tests.lab_arena.test_lab_arena_promotion_migration_postgres import (
     _plan,
     connections,
-    database as historical_database,
 )
-from tests.lab_arena.lab_arena_pg_harness import prepare_current_service_reads
-from tests.postgres_migration_harness import SCRIPTS
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.test_lab_arena_reward_migration_postgres import (
     BASELINE,
     MINER_A,
     _basis,
-    _publish,
 )
+
+
+@pytest.fixture()
+def database():
+    yield from current_service_database()
 
 
 class _Chain:
     def current_settlement_epoch(self):
         return 900
-
-
-def _current_rewards(control):
-    # Historical DB barrier cases run before this explicit app integration
-    # boundary. Install the full committed v2 reward RPCs and exact predecessors.
-    with control.cursor() as cursor:
-        for migration in (
-            "342-lab-arena-reward-predecessor-barrier.sql",
-            "377-lab-arena-monotonic-day-authority.sql",
-            "428-lab-arena-reward-slots.sql",
-            "429-lab-arena-cumulative-reward-pot.sql",
-            "431-lab-arena-slot-decay.sql",
-        ):
-            cursor.execute((SCRIPTS / migration).read_text())
-
-
-@pytest.fixture()
-def database():
-    generator = historical_database.__wrapped__()
-    pg, dsn = next(generator)
-    try:
-        # Keep historical promotion/reward writes. Current run projections need
-        # the exact champion-run columns before their additive read helpers.
-        with pg.connect(**dsn) as connection, connection.cursor() as cursor:
-            cursor.execute((SCRIPTS / "214-lab-arena-prior-credential-refusal.sql").read_text())
-            cursor.execute((SCRIPTS / "227-lab-arena-champion-funding.sql").read_text())
-        prepare_current_service_reads(lambda: pg.connect(**dsn))
-        yield pg, dsn
-    finally:
-        generator.close()
-
-
-def _accepted_scoring(store, control, round_id, *, missing_judgment=False):
-    """Persist the accepted participant work represented by the publication."""
-    row = store.get_round(round_id)
-    scores = {entry["submission_id"]: entry["final_score"]
-              for entry in row["publication_doc"]["final_ranking"]}
-    with control.cursor() as cursor:
-        for participant in row["participants"]:
-            sid = participant["submission_id"]
-            cursor.execute(
-                "INSERT INTO public.lab_arena_submissions (submission_id,round_id,miner_hotkey,status,is_king) "
-                "VALUES (%s,%s,%s,'frozen',%s) ON CONFLICT (submission_id) DO NOTHING",
-                (sid, round_id, participant["miner_hotkey"], participant["is_king"]))
-            for stage in (1, 2):
-                for position in contracts.execution_positions(stage, None, row["configuration_doc"]):
-                    execution_id = f"{sid}-execute-{position}"
-                    for kind in ("execute", "score"):
-                        if missing_judgment and participant["is_king"] and kind == "score" and position == 0:
-                            continue
-                        run_id = execution_id if kind == "execute" else f"{sid}-score-{position}"
-                        cursor.execute(
-                            "INSERT INTO public.lab_arena_runs "
-                            "(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,icp_position,attempt,"
-                            "kind,scored_run_id,status,terminal_cause,per_icp_score,output_ref,result_doc) "
-                            "VALUES (%s,%s,%s,%s,%s,%s,%s,1,%s,%s,'accepted','accepted',%s,%s,%s::jsonb)",
-                            (run_id, run_id, round_id, sid, participant["miner_hotkey"],
-                             stage, position, kind, execution_id if kind == "score" else None,
-                             scores[sid], run_id + ".json", json.dumps({"terminal_status": "accepted"})))
 
 
 def _git_archive(remote: Path) -> bytes:
@@ -145,7 +88,7 @@ def _service(
     )
 
 
-def _winner(store, control, objects, round_id: str, payload: bytes, *, missing_judgment=False) -> str:
+def _winner(store, control, objects, round_id: str, payload: bytes) -> str:
     _publish(
         store,
         control,
@@ -156,7 +99,6 @@ def _winner(store, control, objects, round_id: str, payload: bytes, *, missing_j
         crowned=True,
         evaluation_date="2026-09-07",
         published_at="2026-09-08T00:00:00Z",
-        eligible=True,
     )
     submission_id = round_id + "-miner"
     source_ref = f"arena/{round_id}/sources/{submission_id}.tar.gz"
@@ -169,72 +111,126 @@ def _winner(store, control, objects, round_id: str, payload: bytes, *, missing_j
             "'{\"public_rerun\":true}'::jsonb)",
             (submission_id, round_id, MINER_A, source_ref, len(payload)),
         )
-    _accepted_scoring(store, control, round_id, missing_judgment=missing_judgment)
     return submission_id
 
 
-def _new_store(database) -> ArenaStore:
+def _new_store(database, request) -> ArenaStore:
     psycopg2, dsn = database
-    return ArenaStore(PsycopgTransport(lambda: psycopg2.connect(**dsn)))
+    store = ArenaStore(PsycopgTransport(lambda: psycopg2.connect(**dsn)))
+    request.addfinalizer(store.close)
+    return store
 
 
-def _reward_disabled_winner(store, control, round_id: str) -> str:
+def _publish(
+    store, control, round_id: str, *, miner, baseline_score, miner_score,
+    crowned, rewards_enabled=True, evaluation_date=None, published_at=None,
+) -> str:
+    """Persist complete authority before using the real publication RPC."""
+    evaluation_date = evaluation_date or round_id[6:16]
+    published_at = published_at or evaluation_date + "T01:00:00Z"
     constants = rewards.reward_constants_document()
     assert store.create_round(
         round_id,
         {
             "mode": "live",
-            "rewards_enabled": False,
+            "rewards_enabled": rewards_enabled,
             "baseline_hotkey": BASELINE,
             "reward_constants": constants,
+            "stage_1_icp_count": 1,
+            "stage_2_icp_count": 1,
         },
     )["status"] == "created"
+    generation_floor = store.get_round(round_id)["scoring_generation_floor"]
     baseline_id = round_id + "-baseline"
     winner_id = round_id + "-miner"
     participants = [
         {"submission_id": baseline_id, "miner_hotkey": BASELINE, "is_king": True},
-        {"submission_id": winner_id, "miner_hotkey": MINER_A, "is_king": False},
+        {"submission_id": winner_id, "miner_hotkey": miner, "is_king": False},
     ]
-    with control.cursor() as cursor:
+    with control, control.cursor() as cursor:
+        cursor.execute("BEGIN")
+        # Only fixture construction bypasses input/accepted-row immutability
+        # triggers. Restore them before publication, promotion and rewards.
+        cursor.execute("SET LOCAL session_replication_role=replica")
         cursor.execute(
             "UPDATE public.lab_arena_rounds SET status = 'scored', participants = %s::jsonb, "
-            "finalists = '[]'::jsonb, evaluation_date='2026-09-05' WHERE round_id = %s",
-            (json.dumps(participants), round_id),
+            "finalists = '[]'::jsonb, evaluation_date=%s WHERE round_id = %s",
+            (json.dumps(participants), evaluation_date, round_id),
         )
         cursor.execute(
             "INSERT INTO public.lab_arena_submissions "
             "(submission_id, round_id, miner_hotkey, status, is_king) "
-            "VALUES (%s, %s, %s, 'frozen', FALSE)",
-            (winner_id, round_id, MINER_A),
+            "VALUES (%s, %s, %s, 'frozen', TRUE)",
+            (baseline_id, round_id, BASELINE),
         )
-    published_at = "2026-09-05T00:00:00Z"
+        for stage, position in ((1, 0), (2, 1)):
+            execution = f"{baseline_id}-execute-{position}"
+            for kind in ("execute", "score"):
+                run_id = f"{baseline_id}-{kind}-{position}"
+                cursor.execute(
+                    "INSERT INTO public.lab_arena_runs "
+                    "(run_id,assignment_id,round_id,submission_id,miner_hotkey,stage,"
+                    "icp_position,attempt,kind,scored_run_id,status,terminal_cause,"
+                    "per_icp_score,result_doc,output_ref,scoring_generation_floor) VALUES "
+                    "(%s,%s,%s,%s,%s,%s,%s,1,%s,%s,'accepted','accepted',%s,%s::jsonb,%s,%s)",
+                    (run_id, run_id + "-assignment", round_id, baseline_id, BASELINE,
+                     stage, position, kind, execution if kind == "score" else None,
+                     baseline_score, json.dumps({"terminal_status": "accepted",
+                         "schema_version": "cached" if kind == "score" else "execution"}),
+                     run_id + "-output", generation_floor),
+                )
+    with control.cursor() as cursor:
+        cursor.execute("SHOW session_replication_role")
+        assert cursor.fetchone() == ("origin",)
+        cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)", (round_id,))
+        assert cursor.fetchone() == (True,)
     publication = {
         "schema_version": contracts.PUBLICATION_SCHEMA_VERSION,
         "round_id": round_id,
         "participants": [
             {"submission_id": baseline_id, "miner_hotkey": BASELINE, "is_baseline": True},
-            {"submission_id": winner_id, "miner_hotkey": MINER_A, "is_baseline": False},
+            {"submission_id": winner_id, "miner_hotkey": miner, "is_baseline": False},
         ],
         "stage1_ranking": [],
         "finalists": [],
         "final_ranking": [
-            {"rank": 1, "submission_id": winner_id, "final_score": 60, "is_baseline": False},
-            {"rank": 2, "submission_id": baseline_id, "final_score": 50, "is_baseline": True},
+            {"rank": 1 if crowned else 2, "submission_id": winner_id,
+             "final_score": miner_score, "is_baseline": False, "eligible": True},
+            {"rank": 2 if crowned else 1, "submission_id": baseline_id,
+             "final_score": baseline_score, "is_baseline": True, "eligible": True},
         ],
         "king_decision": {
-            "outcome": "crowned",
-            "king_submission_id": winner_id,
-            "king_hotkey": MINER_A,
-            "winner_submission_id": winner_id,
+            "outcome": "crowned" if crowned else "no_king",
+            "king_submission_id": winner_id if crowned else None,
+            "king_hotkey": miner if crowned else "",
+            "winner_submission_id": winner_id if crowned else None,
         },
         "published_at": published_at,
     }
+    publication["final_ranking"].sort(key=lambda row: row["rank"])
     assert store.transition_round(
         round_id,
         "scored",
         "published",
         {"publication_doc": publication, "published_at": published_at},
     )["status"] == "ok"
+    return published_at
+
+
+def _reward_disabled_winner(store, control, round_id: str, *,
+                            published_at="2026-09-06T00:00:00Z") -> str:
+    published_at = _publish(
+        store, control, round_id, miner=MINER_A, baseline_score=50,
+        miner_score=60, crowned=True, rewards_enabled=False,
+        published_at=published_at,
+    )
+    with control.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.lab_arena_submissions "
+            "(submission_id,round_id,miner_hotkey,status,is_king) "
+            "VALUES (%s,%s,%s,'frozen',FALSE)",
+            (round_id + "-miner", round_id, MINER_A),
+        )
     return published_at
 
 
@@ -252,6 +248,12 @@ def _assert_promoted_baseline(
             "rewards_enabled": True,
             "baseline_hotkey": BASELINE,
             "reward_constants": rewards.reward_constants_document(),
+            "stage_1_icp_count": 1,
+            "stage_2_icp_count": 1,
+            "schedule": {
+                "submission_open": "2026-09-08T00:00:00Z",
+                "submission_cutoff": "2026-09-08T12:00:00Z",
+            },
         },
     )["status"] == "created"
     baseline = service._initial_baseline(store.get_round(next_round))
@@ -264,10 +266,9 @@ def _assert_promoted_baseline(
 
 
 def test_lost_db_completion_reconciles_git_then_activates_miner_once(
-    connections, database, tmp_path, monkeypatch
+    connections, database, tmp_path, monkeypatch, request,
 ):
     store, control = connections
-    _current_rewards(control)
     remote, _, _ = repository(tmp_path)
     objects = svc.LocalObjectStore(tmp_path / "objects")
     signer = signing.LocalSigner.generate()
@@ -290,7 +291,7 @@ def test_lost_db_completion_reconciles_git_then_activates_miner_once(
     assert git(remote, "rev-parse", "main") == git(remote, "rev-parse", "lab") == commit
     monkeypatch.setattr(store, "complete_promotion", original_complete)
 
-    fresh_store = _new_store(database)
+    fresh_store = _new_store(database, request)
     fresh = _service(
         fresh_store, objects, remote, tmp_path / "git-cache-empty", signer
     )
@@ -315,28 +316,10 @@ def test_lost_db_completion_reconciles_git_then_activates_miner_once(
     _assert_promoted_baseline(fresh, fresh_store, objects, tmp_path)
 
 
-def test_incomplete_baseline_cannot_promote_or_activate_rewards(connections, tmp_path):
-    store, control = connections
-    _current_rewards(control)
-    remote, main, lab = repository(tmp_path)
-    objects = svc.LocalObjectStore(tmp_path / "objects")
-    round_id = "arena-2026-09-07-incomplete"
-    _winner(store, control, objects, round_id, source(), missing_judgment=True)
-    service = _service(store, objects, remote, tmp_path / "git-cache", signing.LocalSigner.generate())
-    assert not service._baseline_final_ready(store.get_round(round_id))
-    assert service.promote_baseline(round_id) == {"status": "waiting_for_baseline"}
-    assert service.activate_reward(round_id) == {"status": "waiting_for_baseline"}
-    assert git(remote, "rev-parse", "main") == main
-    assert git(remote, "rev-parse", "lab") == lab
-    row = store.get_round(round_id)
-    assert row["baseline_promoted_at"] is None and row["reward_activated_at"] is None
-
-
 def test_rejected_atomic_push_blocks_reward_and_next_baseline_until_retry(
     connections, tmp_path
 ):
     store, control = connections
-    _current_rewards(control)
     remote, main, lab = repository(tmp_path)
     hook = remote / "hooks" / "pre-receive"
     hook.write_text("#!/bin/sh\nexit 1\n")
@@ -366,12 +349,111 @@ def test_rejected_atomic_push_blocks_reward_and_next_baseline_until_retry(
     assert service.activate_reward(round_id)["status"] == "activated"
 
 
+def test_missing_baseline_score_blocks_promotion_before_git(
+    connections, tmp_path, monkeypatch,
+):
+    store, control = connections
+    remote, main, lab = repository(tmp_path)
+    objects = svc.LocalObjectStore(tmp_path / "objects")
+    round_id = "arena-2026-09-07-missingscore"
+    _winner(store, control, objects, round_id, source())
+    service = _service(
+        store, objects, remote, tmp_path / "git-cache",
+        signing.LocalSigner.generate(),
+    )
+    with control, control.cursor() as cursor:
+        cursor.execute("BEGIN")
+        cursor.execute("SET LOCAL session_replication_role=replica")
+        cursor.execute(
+            "UPDATE public.lab_arena_runs SET per_icp_score=NULL "
+            "WHERE run_id=%s", (round_id + "-baseline-execute-0",),
+        )
+    with control.cursor() as cursor:
+        cursor.execute("SELECT public.lab_arena__baseline_final_ready_v1(%s)", (round_id,))
+        assert cursor.fetchone() == (False,)
+
+    def unexpected_git():
+        pytest.fail("an incomplete baseline must not create a Git promoter")
+
+    monkeypatch.setattr(service.config, "baseline_promoter_factory", unexpected_git)
+    assert service.promote_baseline(round_id) == {"status": "waiting_for_baseline"}
+    assert service.activate_reward(round_id) == {"status": "waiting_for_baseline"}
+    assert git(remote, "rev-parse", "main") == main
+    assert git(remote, "rev-parse", "lab") == lab
+    row = store.get_round(round_id)
+    assert row["promotion_doc"] is None
+    assert row["baseline_promoted_at"] is None
+    assert row["reward_basis_doc"] is None
+    assert row["reward_activated_at"] is None
+
+
+def test_earlier_reward_disabled_promotion_blocks_same_day_no_winner_reward(
+    connections, tmp_path
+):
+    store, control = connections
+    older = "arena-2026-09-06-globalgateearly"
+    _reward_disabled_winner(store, control, older)
+    later = "arena-2026-09-06-globalgate"
+    later_at = _publish(
+        store,
+        control,
+        later,
+        miner=MINER_A,
+        baseline_score=60,
+        miner_score=50,
+        crowned=False,
+    )
+    signer = signing.LocalSigner.generate()
+    basis = _basis(signer, later, later_at, 901, "no_king", "")
+    key = signing.signing_key_document(signer.public_key_der)
+    with pytest.raises(ArenaStoreError, match="reward_waiting_for_promotion"):
+        store.activate_reward(later, basis, key)
+
+    remote, _, _ = repository(tmp_path)
+    service = _service(
+        store,
+        svc.LocalObjectStore(tmp_path / "objects-global"),
+        remote,
+        tmp_path / "git-cache-global",
+        signer,
+    )
+    assert service.activate_reward(later) == {"status": "waiting_for_promotion"}
+
+    plan = _plan("e")
+    assert store.prepare_promotion(older, plan)["status"] == "prepared"
+    assert store.complete_promotion(older, plan)["status"] == "promoted"
+    assert service.activate_reward(later)["status"] == "activated"
+
+
+def test_incomplete_baseline_cannot_promote_or_activate_rewards(connections, tmp_path):
+    store, control = connections
+    remote, main, lab = repository(tmp_path)
+    objects = svc.LocalObjectStore(tmp_path / "objects")
+    round_id = "arena-2026-09-07-incomplete"
+    _winner(store, control, objects, round_id, source())
+    # Disposable published authority counterexample: remove one accepted judge,
+    # then restore trigger enforcement before invoking either service path.
+    with control, control.cursor() as cursor:
+        cursor.execute("BEGIN")
+        cursor.execute("SET LOCAL session_replication_role=replica")
+        cursor.execute("DELETE FROM public.lab_arena_runs WHERE run_id=%s",
+                       (round_id + "-baseline-score-0",))
+    service = _service(store, objects, remote, tmp_path / "git-cache", signing.LocalSigner.generate())
+    assert not service._baseline_final_ready(store.get_round(round_id))
+    assert service.promote_baseline(round_id) == {"status": "waiting_for_baseline"}
+    assert service.activate_reward(round_id) == {"status": "waiting_for_baseline"}
+    assert git(remote, "rev-parse", "main") == main
+    assert git(remote, "rev-parse", "lab") == lab
+    row = store.get_round(round_id)
+    assert row["baseline_promoted_at"] is None and row["reward_activated_at"] is None
+
+
 def test_historical_db_barrier_is_explicit_while_service_supersedes_older_promotion(
     connections, tmp_path
 ):
     store, control = connections
     older = "arena-2026-09-05-globalgate"
-    _reward_disabled_winner(store, control, older)
+    _reward_disabled_winner(store, control, older, published_at="2026-09-05T00:00:00Z")
     later = "arena-2026-09-06-globalgate"
     later_at = _publish(
         store,
@@ -383,13 +465,11 @@ def test_historical_db_barrier_is_explicit_while_service_supersedes_older_promot
         crowned=False,
         evaluation_date="2026-09-06",
     )
-    _accepted_scoring(store, control, later)
     signer = signing.LocalSigner.generate()
     basis = _basis(signer, later, later_at, 901, "no_king", "")
     key = signing.signing_key_document(signer.public_key_der)
     with pytest.raises(ArenaStoreError, match="reward_waiting_for_promotion"):
         store.activate_reward(later, basis, key)
-    _current_rewards(control)
 
     remote, _, _ = repository(tmp_path)
     service = _service(

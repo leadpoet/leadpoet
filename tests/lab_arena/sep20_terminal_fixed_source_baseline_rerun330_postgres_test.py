@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.lab_arena.sep20_frozen_publication_fixture import frozen_publication_document, publish_frozen_document
+
 from tests.lab_arena import sep18_published_rerun295_postgres_test as lifecycle
 from tests.lab_arena import sep19_terminal309_newjudge_rerun310_postgres_test as rerun310
 from tests.lab_arena import sep20_90m_verifier_baseline_rerun328_postgres_test as rerun328
@@ -617,7 +619,7 @@ def _inject_exhausted_provider_zero_and_failed_unknown(connection) -> str:
     return identity
 
 
-def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
+def _drive_rejudge_cycle(service, objects, runner_hotkey, *, historical_zeros=False) -> None:
     """Use the real parallel close and score lifecycle without execute claims."""
     assert service.close_stage(ROUND, 1)["status"] == "ok"
     for stage, expected in ((1, 50), (2, 48)):
@@ -678,6 +680,9 @@ def _drive_rejudge_cycle(service, objects, runner_hotkey) -> None:
                 judgment_evidence_hash=lifecycle.contracts.document_hash(evidence),
             )["status"] == "accepted"
         assert service.close_scoring(ROUND, stage)["status"] == "closed"
+        if historical_zeros:
+            from tests.lab_arena.sep20_frozen_publication_fixture import record_frozen_failed_execution_zeros
+            record_frozen_failed_execution_zeros(service, ROUND, stage)
         scored = service.score_stage(ROUND, stage)
         assert scored["status"] == "ok", scored
         if stage == 1:
@@ -890,10 +895,8 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
         connection.commit()
 
         _drive_rejudge_cycle(
-            harness.service, harness.objects, harness.runner_keys[0]
+            harness.service, harness.objects, harness.runner_keys[0], historical_zeros=True
         )
-        # Infrastructure failures at two baseline positions remain unmeasured.
-        # Current publication must preserve that partial historical evidence.
         with connection.cursor() as cursor:
             held_before = _json(cursor, "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s", (ROUND,))
             accepted_before = _execution_snapshot(cursor)
@@ -904,6 +907,9 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
         with connection.cursor() as cursor:
             assert _json(cursor, "SELECT to_jsonb(r) FROM public.lab_arena_rounds r WHERE round_id=%s", (ROUND,)) == held_before
             assert _execution_snapshot(cursor) == accepted_before
+        publication = frozen_publication_document(harness.service, ROUND)
+        assert publish_frozen_document(harness.service, ROUND, publication)["status"] == "ok"
+        with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT count(*),count(DISTINCT assignment_id),"
                 "bool_and(status='accepted'),"
@@ -941,9 +947,10 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
             ) == publication_before
             assert _execution_snapshot(cursor) == execution_before
             cursor.execute(
-                "SELECT avg(per_icp_score) FROM public.lab_arena_runs "
-                "WHERE round_id=%s AND submission_id=%s AND kind='execute' "
-                "AND status='accepted' AND terminal_cause='accepted'",
+                "SELECT (entry->>'final_score')::numeric FROM "
+                "public.lab_arena_rounds r CROSS JOIN LATERAL "
+                "jsonb_array_elements(r.publication_doc->'final_ranking') entry "
+                "WHERE r.round_id=%s AND entry->>'submission_id'=%s",
                 (ROUND, BASELINE),
             )
             assert cursor.fetchone()[0] > 0
@@ -954,7 +961,7 @@ def test_sep20_rerun330_preserves_history_and_isolates_new_scorer_cache(
                 (ROUND,),
             )
             assert cursor.fetchone() == (None, None, None, None)
-            # The exact migration remains idempotent after the current publication hold.
+            # The exact migration remains idempotent after its new positive publication.
             cursor.execute(rendered)
 
 

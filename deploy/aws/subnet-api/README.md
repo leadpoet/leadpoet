@@ -33,6 +33,16 @@ default backend; explicit `--rest-backend target` produces the same private
 configuration. Hosted-source selection is rejected. The source rollback window
 closed on October 29, 2026; do not route clients or this pair back to Supabase.
 
+The coordinator can retire the five audited legacy outbound callback RPCs with
+the exact reviewed `scripts/retire_legacy_subnet_outbound_callbacks.sql` through
+the protected target SQL workflow. This is a one-time function retirement, not
+a data migration. It accepts the exact five inventoried definitions and security
+metadata, or an already-empty set; a partial set, changed definition, overload,
+or dependent object aborts the transaction. It preserves tables, publication
+membership and other functions, then notifies PostgREST to reload its schema.
+It needs no app restart. Keep the private exact beforeimage outside Git for
+reviewed rollback; never invoke these callbacks to test them.
+
 Keep existing opaque client keys and the fixed gateway origin. Upgrade or retire
 old validators and auditors that still call the hosted source before retiring
 that project. A client upgrade must preserve its wallet and weight journals.

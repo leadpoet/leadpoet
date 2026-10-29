@@ -221,6 +221,47 @@ def test_exact_known_secret_inside_public_article_slug_still_redacts():
         "[REDACTED]", ["credential"])
 
 
+@pytest.mark.parametrize("secret", ["arena", "public", "slug", "0-end", "a" * 32])
+def test_known_secrets_do_not_redact_internal_public_url_placeholders(monkeypatch, secret):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(capture.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
+    for value in (PUBLIC_ARTICLE_URL, json.dumps({"url": PUBLIC_ARTICLE_URL}),
+                  {"evidence": [PUBLIC_ARTICLE_URL, PUBLIC_ARTICLE_URL]}):
+        for aggregate in (False, True):
+            assert capture.sanitize_training_value(
+                value, secrets=(secret,), aggregate_parts=aggregate) == (value, [])
+
+
+def test_public_url_placeholder_does_not_hide_decoded_query_or_real_secret(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(capture.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
+    secret = "arena"
+    # Mixed percent encoding is decoded by query parsing, after the first
+    # whole-text exact-secret scan. That second check must remain active.
+    value = PUBLIC_ARTICLE_URL + "?next=%61re%6Ea#arena"
+    cleaned, reasons = capture.sanitize_training_value(value, secrets=(secret,))
+    assert cleaned.startswith(PUBLIC_ARTICLE_URL + "?")
+    assert "%5BREDACTED%5D" in cleaned and cleaned.endswith("#[REDACTED]")
+    assert reasons == ["credential"] and "arena-public-slug" not in cleaned
+    assert capture.sanitize_training_value(
+        "Authorization: " + PUBLIC_ARTICLE_URL, secrets=(secret,)) == (
+            "Authorization: [REDACTED]", ["credential"])
+
+
+@pytest.mark.parametrize("prefix", ["Bearer sk-", "sk-abcdefghijklmnop"])
+def test_public_url_placeholder_survives_credential_prefix_removing_scheme(monkeypatch, prefix):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(capture.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
+    value = prefix + PUBLIC_ARTICLE_URL
+    expected = capture.sanitize_training_value(value)
+    assert expected[1] == ["credential"]
+    assert capture.sanitize_training_value(value, secrets=("arena",)) == expected
+    assert "arena-public-slug" not in expected[0]
+
+
 def test_verified_public_url_exception_does_not_cover_other_hosts_or_auth_contexts():
     lookalike = PUBLIC_ARTICLE_URL.replace("www.prnewswire.com", "example.test")
     assert capture.sanitize_training_value(lookalike)[1] == ["credential"]

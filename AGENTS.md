@@ -550,3 +550,17 @@ The coordinating task owns independent review, push, merge, production
 migration, canonical deployment and live verification. Internal implementation
 agents may test and commit only. Do not replay paid work, change frozen inputs,
 or alter concurrent publishers under this scope.
+
+
+## Scoped authorization: canonical validator stop-policy prevention
+
+The coordinating task authorized a narrow fail-closed check of the loaded old
+validator unit before the canonical controller stops it. Require safe signal,
+kill mode, and drain timeout even with an explicit interpreter override.
+Preserve first installation, paired permits, readiness, rollback, credentials,
+and existing leases. This is prevention and does not attribute the Yuma incident.
+Internal implementation work may change the controller, focused tests, and these
+byte-identical instruction files, then test and commit only. The coordinating
+task owns independent review and any later push, merge, or canonical deployment.
+No production writes, restarts, guard changes, or supervisor rewrites are
+permitted under this internal task.

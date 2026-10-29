@@ -296,24 +296,77 @@ def test_current_per_icp_cost_policy_preserves_measured_scores_and_excludes_judg
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
     assert harness.service.advance_round(harness.round_id)["assignments"] == count
     if judge_outage:
-        harness.advance_until('stage2_judged', runners=2)
+        # Current continuation keeps paid judge failures retryable before the
+        # final deadline. Drain admitted work, then prove the live waiting
+        # state rather than demanding closure with a pending successor.
+        harness.advance_until('stage2_scoring', runners=2)
+        harness.run_stage_with_runners(2)
         store = harness.service.store
+        row = store.get_round(harness.round_id)
         before = store.list_runs(harness.round_id)
         ledger = store.list_ledger()
         held = harness.service.advance_round(harness.round_id)
-        assert held['status'] == 'retry' and held['reason'] == 'judge_incomplete'
+        assert held == {'status': 'waiting', 'round_status': 'stage2_scoring'}
         assert store.list_runs(harness.round_id) == before
         assert store.list_ledger() == ledger
+        executions = [run for run in before if run['kind'] == 'execute']
+        icps = harness.service.evaluation_icps(harness.round_id)
         for participant in participants:
-            source = next(run for run in before if run['kind'] == 'execute'
-                and run['submission_id'] == participant['submission_id'] and run['icp_position'] == 16)
+            source = next(run for run in executions
+                if run['submission_id'] == participant['submission_id'] and run['icp_position'] == 16)
             assert source['status'] == 'accepted' and source['output_ref']
             assert source['per_icp_score'] is None
-            assert any(judge['kind'] == 'score' and judge['scored_run_id'] == source['run_id']
-                and judge['status'] == 'failed' and judge['terminal_cause'] == 'judge_error'
-                for judge in before)
+            affected = [judge for judge in before if judge['kind'] == 'score'
+                        and judge['scored_run_id'] == source['run_id']]
+            failed = [judge for judge in affected if judge['status'] == 'failed']
+            assert {1, 2} <= {judge['attempt'] for judge in failed}
+            assert all(judge['terminal_cause'] == 'judge_error' for judge in failed)
+            pending = [judge for judge in affected if judge['status'] == 'pending']
+            assert len(pending) == 1 and pending[0]['attempt'] >= 3
+            successor = pending[0]
+            assert successor['assignment_id'] == failed[0]['assignment_id']
+            assert successor['submission_id'] == source['submission_id']
+            assert successor['miner_hotkey'] == source['miner_hotkey']
+            assert successor['stage'] == source['stage']
+            assert successor['icp_position'] == source['icp_position']
+            assert successor['scoring_generation_floor'] == row['scoring_generation_floor']
+            with connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT LEAST(900,30*power(2,LEAST(attempt-2,5)))::integer,"
+                    "created_at+make_interval(secs=>LEAST(900,30*power(2,LEAST(attempt-2,5)))::integer)"
+                    ">clock_timestamp() FROM public.lab_arena_runs WHERE run_id=%s",
+                    (successor['run_id'],))
+                delay, waiting = cursor.fetchone()
+                assert delay == min(900, 30 * 2 ** min(successor['attempt'] - 2, 5))
+                assert waiting is True
+            healthy = [judge for judge in before if judge['kind'] == 'score'
+                       and judge['submission_id'] == participant['submission_id']
+                       and judge['status'] == 'accepted']
+            assert len(healthy) == count - 1
+            for judge in healthy:
+                execution = next(run for run in executions if run['run_id'] == judge['scored_run_id'])
+                assert harness.service._judgment_matches_execution(row, judge, execution)
+                output = json.loads(harness.objects.get(execution['output_ref']))
+                breakdowns = harness.service._verified_breakdowns(
+                    judge, icp=icps[execution['icp_position']], companies=output['companies'],
+                    policy=row['configuration_doc']['scorer_policy'])
+                assert [item['final_score'] for item in breakdowns] == [
+                    30.0 if participant['is_king'] else 60.0
+                    for _ in output['companies']]
+            # Unknown ICP17 cannot authorize a whole-participant cost report.
+            with pytest.raises(scoring.ScoringError, match='qualified count requires accepted judgment'):
+                harness.service._submission_cost_eligibility(
+                    row, participant['submission_id'], executions, positions=range(count))
+            # Healthy measured positions retain genuine cost eligibility. The
+            # aggregate judge bill is reported but never counted as sourcing.
+            summary = harness.service._submission_cost_eligibility(
+                row, participant['submission_id'], executions, positions=range(count - 1))['cost_summary']
+            assert summary['eligible_icp_count'] == count - 1
+            assert summary['judge']['settled_microusd'] > 0
+            assert summary['competition_sourcing_microusd'] == 0
         row = store.get_round(harness.round_id)
         assert row['publication_doc'] is None and row['reward_activated_at'] is None
+        assert row['reward_basis_doc'] is None
         assert not harness.service._baseline_fully_succeeded(row)
         return
     if count == 5:

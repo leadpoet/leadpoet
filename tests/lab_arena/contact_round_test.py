@@ -22,6 +22,7 @@ from qualification.scoring.contact_verification import verify_contact
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
+    current_service_database,
     CURRENT_REWARD_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
@@ -30,7 +31,7 @@ from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_REWARD_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def _contact_icps(rows: list[dict]) -> list[dict]:

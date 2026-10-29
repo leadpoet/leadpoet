@@ -30,6 +30,7 @@ from qualification.scoring.competition import (
 )
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.lab_arena_pg_harness import (
+    current_service_database,
     CURRENT_SERVICE_MIGRATIONS,
     database_with_lab_arena_migration,
 )
@@ -104,7 +105,7 @@ class QualityHarness(IntegrityHarness):
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.mark.parametrize(

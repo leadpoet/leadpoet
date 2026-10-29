@@ -28,9 +28,10 @@ def test_capture_accepts_slow_transport_with_separate_bounded_timeout():
         required_seconds = 15.0 if request.url.path.endswith("/training-observations") else 3.0
         if min(timeout.values()) < required_seconds:
             raise httpx.ReadTimeout("private response text", request=request)
-        # A stored acknowledgment binds the actual uploaded document.
-        digest = contracts.document_hash(json.loads(request.content))
-        return httpx.Response(200, json={"status": "stored", "payload_sha256": digest})
+        response = {"status": "stored"}
+        if request.url.path.endswith("/training-observations"):
+            response["payload_sha256"] = contracts.document_hash(json.loads(request.content))
+        return httpx.Response(200, json=response)
 
     with httpx.Client(transport=httpx.MockTransport(respond)) as client:
         api = runner.HttpArenaApiClient("https://arena.invalid", client=client)
@@ -73,12 +74,12 @@ def test_capture_failure_stays_observational_and_logs_only_safe_fields(failure, 
     assert "exception_class=RunnerError" in logs
     if failure == "timeout":
         assert "transport_cause=ReadTimeout" in logs
-        assert attempts == [
-            ("POST", f"/arena/v1/runs/{RUN}/training-input"),
-            ("POST", f"/arena/v1/runs/{RUN}/training-input"),
-            ("POST", f"/arena/v1/runs/{RUN}/training-observations"),
-            ("POST", f"/arena/v1/runs/{RUN}/training-observations"),
-            ("HEAD", f"/arena/v1/runs/{RUN}/training-observations"),
-        ]
     else:
         assert "http_status=403" in logs and "transport_cause=-" in logs
+    input_path = f"/arena/v1/runs/{RUN}/training-input"
+    observations_path = f"/arena/v1/runs/{RUN}/training-observations"
+    assert attempts == (
+        [("POST", input_path)] * (2 if failure == "timeout" else 1)
+        + [("POST", observations_path)] * 2
+        + [("HEAD", observations_path)]
+    )

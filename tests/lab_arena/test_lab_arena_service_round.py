@@ -33,6 +33,7 @@ SCORER_IMAGE_DIGEST = "sha256:" + "5" * 64  # the Arena-built judge image valida
 SCORER_IMAGE_REFERENCE = "arena.example/lab-arena/judge@" + SCORER_IMAGE_DIGEST
 from lab_arena.store import (
     ArenaStore,
+    ArenaStoreError,
     PsycopgTransport,
     hash_lease_token,
     new_lease_token,
@@ -294,14 +295,14 @@ def price_table(models=PRICED_MODELS):
 
 
 def deterministic_scorer(companies, icp, is_reference_model):
+    from tests.test_arena_company_quality_policy import _positive_breakdown
+    from qualification.scoring.competition import apply_company_judgment_context
     assert is_reference_model is False
     scored, _ = verify.bucket_skip(icp, companies)
     rows = []
     for index in scored:
         name = str(companies[index]["company_name"])
         score = 30.0 + int(hashlib.sha256(name.encode()).hexdigest(), 16) % 60
-        from tests.test_arena_company_quality_policy import _positive_breakdown
-        from qualification.scoring.competition import apply_company_judgment_context
         domain = urlsplit(companies[index]["company_website"]).hostname
         row = _positive_breakdown(name, domain, name.lower().replace(" ", "-"))
         row.update(final_score=float(score), intent_signal_raw=float(score),
@@ -650,7 +651,7 @@ class Harness:
         )
         return svc.ArenaService(config)
 
-    def submit(self, flavor: str, round_id: str, *, miner_label: str = "") -> str:
+    def submit(self, flavor: str, round_id: str, *, miner_label: str = "", expected_review: str = "passed") -> str:
         """Reserve, upload, and finalize source through the signed miner API.
 
         ``miner_label`` picks the submitting hotkey (default: one per flavor),
@@ -710,7 +711,7 @@ class Harness:
         assert (
             row["status"] == "accepted"
             and row["source_ref"] == target["source_ref"]
-            and row["code_review_status"] == "passed"
+            and row["code_review_status"] == expected_review
         ), row
         return target["submission_id"]
 
@@ -859,6 +860,14 @@ def test_benchmark_commit_rejects_missing_live_cost_policy_without_mutation(
     round_id = "arena-2026-09-26-missing" + suffix
     malformed = {**template, "round_id": round_id}
     malformed.pop(missing_key)
+    if missing_key == "cost_per_company_microusd":
+        # Current integrity SQL rejects this malformed policy before intake.
+        with pytest.raises(ArenaStoreError, match="lab_arena_integrity_configuration_invalid"):
+            harness.service.store.create_round(round_id, malformed)
+        assert harness.service.store.get_round(round_id) is None
+        assert harness.service.store.list_submissions(round_id) == []
+        assert harness.service.store.list_runs(round_id) == []
+        return
     assert harness.service.store.create_round(round_id, malformed)["status"] == "created"
     before = harness.service.store.get_round(round_id)
 
@@ -1231,7 +1240,8 @@ def test_driver_discovers_an_older_live_round_through_unrelated_history_and_publ
         service.cancel(active["round_id"], svc.CANCEL_REASONS["operator"])
 
     harness.chain.epoch = 24950
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    harness.clock.now = datetime.now(timezone.utc)
+    cutoff = harness.clock.now + timedelta(hours=12)
     configuration = service.create_round(
         cutoff, round_id="arena-2026-12-29-discovery"
     )
@@ -2762,6 +2772,7 @@ def test_http_finalize_durably_rejects_noncompliant_license_before_credentials_o
     )
     harness.round_id = configuration["round_id"]
     miner = keypair("svc-miner-License-Missing")
+    harness.chain.registered.append(miner.ss58_address)
     payload = flavor_source_archive(
         rejection_rule,
         include_license=include_license,
@@ -2867,6 +2878,7 @@ def test_validators_complete_a_round_over_the_http_api(connect, tmp_path, monkey
     harness.round_id = configuration["round_id"]
 
     miner = keypair("svc-miner-Http-A")
+    harness.chain.registered.append(miner.ss58_address)
     payload = flavor_source_archive("Http-A")
     facts = source_bundle.validate_source_archive(payload, require_license=True)
     envelope = contracts.build_signed_request(
@@ -2995,15 +3007,20 @@ def test_rounds_overlap_and_every_request_names_its_round(connect, tmp_path):
         harness.flavors.setdefault(participant["submission_id"], "PublicBaseline")
 
     harness.clock.now = datetime.now(timezone.utc)
+    # Keep the new intake window open through the older round's final
+    # deadline; a thirty-minute cutoff closes while that round executes.
+    next_cutoff = datetime.fromisoformat(
+        first["schedule"]["publication_deadline"].replace("Z", "+00:00")
+    ) + timedelta(hours=1)
     second = service.create_round(
-        datetime.now(timezone.utc) + timedelta(minutes=30),
+        next_cutoff,
         round_id="arena-2026-11-03-over",
     )
     second_id = second["round_id"]
     current = service.public_current()
     assert current["open_round"]["round_id"] == second_id
     assert first_id in {row["round_id"] for row in current["running_rounds"]}
-    harness.submit("Over-C", second_id)
+    harness.submit("Over-C", second_id, expected_review="pending")
 
     with pytest.raises(svc.ServiceError) as closed:
         harness.submit("Over-D", first_id)

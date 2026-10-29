@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 # Worker snapshots alone may reach 256 MiB. Parse one bounded export at a
 # time; the dataset builder retains only the much smaller projected records.
 MAX_EXAMPLE_BYTES = 256 * 1024 * 1024
+MAX_REVIEW_BYTES = 16 * 1024 * 1024
 
 
 def _example_paths(paths):
@@ -62,8 +63,19 @@ def _write_private(path: Path, text: str) -> None:
         stream.write(text)
 
 
+def _review_decisions(path: Path):
+    if path.stat().st_size > MAX_REVIEW_BYTES:
+        raise ValueError("review_decisions_too_large")
+    with path.open("rb") as stream:
+        raw = stream.read(MAX_REVIEW_BYTES + 1)
+    if len(raw) > MAX_REVIEW_BYTES:
+        raise ValueError("review_decisions_too_large")
+    rows = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    return rows
+
+
 def main(argv=None):
-    from lab_arena import training_dataset
+    from lab_arena import training_curation, training_dataset
     from lab_arena.contracts import canonical_json
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -79,6 +91,8 @@ def main(argv=None):
     parser.add_argument("--eval-mode", choices=("company", "company_and_icp"), default="company")
     parser.add_argument("--eval-after", help="strict YYYY-MM-DD cutoff; later records only in eval")
     parser.add_argument("--review-sample-size", type=int, default=0)
+    parser.add_argument("--review-decisions", type=Path,
+                        help="exact-record review JSONL; write a separate reviewed dataset")
     args = parser.parse_args(argv)
     if args.review_sample_size < 0:
         parser.error("review-sample-size must be nonnegative")
@@ -93,10 +107,20 @@ def main(argv=None):
         parser.error(str(exc))
     created = False
     try:
-        splits, manifest = training_dataset.build(_examples(args.examples), rules)
+        projections = {}
+        splits, manifest = training_dataset.build(_examples(args.examples), rules,
+                                                  curation_metadata=projections)
+        source_counts = manifest["counts"]
+        curation = training_curation.flag_manifest(splits, manifest["dataset_version"], projections)
         review = None
         if args.review_sample_size:
-            review, manifest["review_sample"] = training_dataset.review_sample(splits, args.review_sample_size)
+            review, review_summary = training_curation.review_sample(
+                splits, args.review_sample_size, manifest, curation)
+        if args.review_decisions:
+            splits, manifest = training_curation.apply_review(
+                splits, manifest, _review_decisions(args.review_decisions), curation)
+        if args.review_sample_size:
+            manifest["review_sample"] = review_summary
         args.output.mkdir(mode=0o700)
         created = True
         for name, records in splits.items():
@@ -104,12 +128,13 @@ def main(argv=None):
                            "".join(canonical_json(record) + "\n" for record in records))
         if review is not None:
             _write_private(args.output / "review.jsonl", "".join(canonical_json(record) + "\n" for record in review))
+        _write_private(args.output / "curation.json", canonical_json(curation) + "\n")
         _write_private(args.output / "manifest.json", canonical_json(manifest) + "\n")
     except Exception as exc:
         if created:
             # Remove only what this run wrote, so a retry can use the path.
             with contextlib.suppress(OSError):
-                for name in ("train.jsonl", "eval.jsonl", "analysis.jsonl", "manifest.json", "review.jsonl"):
+                for name in ("train.jsonl", "eval.jsonl", "analysis.jsonl", "manifest.json", "review.jsonl", "curation.json"):
                     (args.output / name).unlink(missing_ok=True)
                 args.output.rmdir()
         # Inputs hold private evidence. The fixed cohort code is safe to show;
@@ -121,8 +146,8 @@ def main(argv=None):
     print(json.dumps({
         "dataset_version": manifest["dataset_version"],
         "records": {name: len(records) for name, records in splits.items()},
-        "examples_used": manifest["counts"]["examples_used"],
-        "examples_excluded": manifest["counts"]["examples_excluded"],
+        "examples_used": source_counts["examples_used"],
+        "examples_excluded": source_counts["examples_excluded"],
         "training_permission": manifest["training_permission"]["status"],
         "output": str(args.output),
     }, sort_keys=True))

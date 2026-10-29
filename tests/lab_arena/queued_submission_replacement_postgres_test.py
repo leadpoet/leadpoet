@@ -22,6 +22,7 @@ from tests.lab_arena.lab_arena_pg_harness import (
     database_with_lab_arena_migration,
 )
 from tests.lab_arena.test_lab_arena_source_migration_postgres import _hotkey, _round_config
+from tests.lab_arena.test_lab_arena_migration_postgres import round_config
 
 
 @pytest.fixture(scope="module")
@@ -39,10 +40,14 @@ def store(database):
 
 def _config(round_id: str, *, cutoff_after: timedelta):
     now = datetime.now(timezone.utc)
-    config = _round_config(
+    source = _round_config(
         round_id,
         cutoff=(now + cutoff_after).isoformat().replace("+00:00", "Z"),
     )
+    # The source-only historical payload predates required competition fields.
+    # Keep its exact source/replacement inputs with an explicit valid round.
+    config = round_config(round_id, source['runner_hotkeys'], mode='shadow')
+    config.update(source)
     return config
 
 

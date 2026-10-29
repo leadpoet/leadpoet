@@ -70,6 +70,16 @@ class CompleteErrorTransport(ErrorTransport):
         return super().send(**request)
 
 
+class SettlingStore(RetainedErrorStore):
+    def reconcile_deepline_cost(self, **kwargs):
+        self.reconciled = kwargs
+        self.calls[kwargs["call_identity"]].update(kind="settlement",
+            actual=kwargs["actual_microusd"], terminal=br._terminal_response_document(
+                502, {"content-type": "application/json"},
+                operations.GENERIC_UNAVAILABLE_BODY, call_succeeded=False))
+        return {"status": "settled", "actual_microusd": kwargs["actual_microusd"]}
+
+
 @pytest.mark.parametrize("kind", ["execute", "score"])
 @pytest.mark.parametrize("status", [400, 404, 422, 429, 500, 502, 503])
 def test_bound_complete_native_failure_is_a_delivery_fact_not_a_bill(clock, kind, status):
@@ -204,8 +214,10 @@ def test_live_shaped_broker_worker_transition_returns_before_sixty_seconds(clock
 
 
 @pytest.mark.parametrize("written", [False, True])
-def test_host_fact_does_not_change_http_body_receipt_or_final_snapshot(clock, tmp_path, written):
-    initial, _, _, _, arguments = execute(CompleteErrorTransport(clock=clock))
+def test_full_failure_transition_preserves_http_snapshot_late_bill_and_replay(clock, tmp_path, written):
+    transport = CompleteErrorTransport(clock=clock)
+    initial, broker, store, context, arguments = execute(transport, store=SettlingStore())
+    saved = copy.deepcopy(store.calls[initial.call["call_identity"]]["uncertain_doc"])
     parsed = br.parse_broker_document(initial.to_document())
     assert parsed.body == initial.body and parsed.call["deepline_terminal_failure"] is True
     api = Api(parsed.to_document())
@@ -234,6 +246,23 @@ def test_host_fact_does_not_change_http_body_receipt_or_final_snapshot(clock, tm
             assert ref == obs.object_ref(run_id, 1, claim_hash) and len(compressed) <= limit
             return compressed
 
+    assert obs.read_snapshot(Objects(), run_id, "execute", 1, claim_hash) == snapshot
+    transport.bill = billing(credits="0.5")
+    candidate = _candidate(run_id=context.run_id, round_id=context.round_id,
+        assignment_id=context.assignment_id, submission_id=context.submission_id,
+        miner_hotkey=context.miner_hotkey, call_identity=initial.call["call_identity"],
+        request_id=saved["deepline_job_id"], execution_key=saved["deepline_execution_key"],
+        credential_fingerprint=saved["credential_fingerprint"], operation="exa_search",
+        billing_provider="exa", kind=context.kind)
+    assert broker.reconcile_deepline_cost(candidate) == {"status": "settled", "actual_microusd": 50_000}
+    replay = broker.execute(context, **arguments)
+    assert replay.status == initial.status and replay.body == initial.body
+    assert store.calls[initial.call["call_identity"]]["actual"] == 50_000
+    assert store.reconciled["call_identity"] == initial.call["call_identity"]
+    assert store.calls[initial.call["call_identity"]]["uncertain_doc"] == saved
+    assert sum(r["method"] == "POST" for r in transport.sent) == 1
+    assert store.log.count("dispatch") == 1
+    # Later accounting cannot rewrite the earlier successful/failed delivery.
     assert obs.read_snapshot(Objects(), run_id, "execute", 1, claim_hash) == snapshot
 
 

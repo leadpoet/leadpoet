@@ -275,6 +275,7 @@ def plan_database():
                     cursor.execute((ROOT / 'scripts' / migration).read_text())
                 cursor.execute('SELECT pg_get_functiondef(%s::regprocedure)', (SIGNATURE,))
                 assert hashlib.sha256(cursor.fetchone()[0].encode()).hexdigest() == 'ce8691e166d24a87ff6bbf475dca8cc0eb526b6688f3af22fad6ad8b0a8b6c89'
+                cursor.execute((ROOT / 'scripts/590-lab-arena-closed-miner-binding-gate.sql').read_text())
             yield db
         finally:
             generator.close()

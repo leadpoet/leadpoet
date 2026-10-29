@@ -86,6 +86,14 @@ jobs:
         run: python3 .github/scripts/install_attested_nitro_toolchain.py --output "$RUNNER_TEMP/nitro-toolchain"
       - name: Build three clean independent measurements
         run: bash .github/scripts/build_attested_release.sh
+      - name: Retain temporary layer diagnostics for reproduction only
+        if: ${{ always() && needs.source.outputs.mode == 'reproduce' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: v2-layer8-diagnostic-${{ matrix.domain }}-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: ${{ runner.temp }}/gateway-normalization-diagnostics/layer-8-*.json
       - name: Upload only this domain's evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

@@ -7,7 +7,6 @@ import copy
 import hashlib
 import json
 import os
-import re
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -24,33 +23,63 @@ class DockerImageNormalizationError(RuntimeError):
 _EPOCH = "1970-01-01T00:00:00Z"
 
 
-def _emit_canonical_config_diagnostic(config: dict[str, Any], payload: bytes) -> None:
-    # Temporary reproduction-only evidence. Remove after identifying the
-    # cross-host delta and proving the regression fix on both real builders.
-    if os.environ.get("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS") != "1":
+_LAYER_INDEX_LIMIT = 4 * 1024 * 1024
+
+
+def _write_layer_index(layer: Path, digest: str, decisions: list[dict[str, Any]]) -> None:
+    # Temporary reproduction-only evidence. Remove after the remaining layer
+    # delta is fixed and real independent consensus passes. No file bytes/env.
+    root = Path(os.environ["RUNNER_TEMP"]) / "gateway-normalization-diagnostics"
+    if not root.is_absolute():
+        raise DockerImageNormalizationError("diagnostic runner temp must be absolute")
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / ("layer-8-" + digest + ".json")
+    if destination.exists() or len(list(root.glob("layer-8-*.json"))) >= 3:
         return
-    allowed_env = {
-        "PATH", "LANG", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256",
-        "PYTHONDONTWRITEBYTECODE", "PYTHONHASHSEED", "SOURCE_DATE_EPOCH",
-        "LEADPOET_ENCLAVE_ROLE", "PYTHONPATH",
+    payload: dict[str, Any] = {
+        "schema": "leadpoet.layer_index.diagnostic.v1", "layer_index": 8,
+        "normalized_layer_sha256": "sha256:" + digest,
+        "archive_size": layer.stat().st_size, "members": [],
+        "directory_decisions": [], "omitted_members": 0, "omitted_decisions": 0,
     }
-    env = config.get("config", {}).get("Env", [])
-    text = payload.decode("utf-8")
-    sensitive = re.search(
-        r"(?i)(?:password|secret|token|authorization|(?:https?|all)_proxy)[\"\s]*[:=]"
-        r"|(?:AKIA|ASIA)[A-Z0-9]{16}|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+"
-        r"|://[^/\s:\"\\]+:[^/\s@\"\\]+@|BEGIN [A-Z ]*PRIVATE KEY",
-        text,
-    )
-    if (
-        len(payload) > 65536
-        or not isinstance(env, list)
-        or any(not isinstance(item, str) or item.split("=", 1)[0] not in allowed_env for item in env)
-        or sensitive
-    ):
-        print("Canonical Docker config diagnostic withheld by bounds or credential check", file=sys.stderr)
-        return
-    print("Canonical Docker config diagnostic: " + text, file=sys.stderr)
+    remaining = _LAYER_INDEX_LIMIT - 4096
+    for decision in decisions:
+        size = len(json.dumps(decision, sort_keys=True, separators=(",", ":")).encode()) + 1
+        if size <= remaining:
+            payload["directory_decisions"].append(decision)
+            remaining -= size
+        else:
+            payload["omitted_decisions"] += 1
+    with tarfile.open(layer) as archive:
+        members = archive.getmembers()
+        payload["member_count"] = len(members)
+        for member in members:
+            record = {name: getattr(member, name) for name in (
+                "name", "mode", "uid", "gid", "size", "mtime", "linkname",
+                "uname", "gname", "devmajor", "devminor", "pax_headers",
+                "offset", "offset_data",
+            )}
+            record["type"] = member.type.decode("ascii")
+            if member.isfile():
+                content_digest = hashlib.sha256()
+                with archive.extractfile(member) as content:
+                    for chunk in iter(lambda: content.read(1024 * 1024), b""):
+                        content_digest.update(chunk)
+                record["content_sha256"] = content_digest.hexdigest()
+            size = len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()) + 1
+            if size <= remaining:
+                payload["members"].append(record)
+                remaining -= size
+            else:
+                payload["omitted_members"] += 1
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    if len(encoded) > _LAYER_INDEX_LIMIT:
+        raise DockerImageNormalizationError("diagnostic layer index exceeds bound")
+    with destination.open("xb") as output:
+        output.write(encoded)
+    print("Layer 8 diagnostic captured: sha256:%s members=%s omitted=%s" % (
+        digest, payload["member_count"], payload["omitted_members"],
+    ), file=sys.stderr)
 
 
 def _normalization_temp_parent() -> Optional[Path]:
@@ -138,6 +167,11 @@ def normalize_layer_archive(
     # representation as one canonical uncompressed tar stream.
     emitted_ancestors: set[str] = set()
     emitted_directories: set[str] = set()
+    diagnostic = (
+        os.environ.get("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS") == "1"
+        and destination.name == "normalized-layer-8.tar"
+    )
+    decisions: list[dict[str, Any]] = []
     with tarfile.open(source, "r:*") as original, tarfile.open(
         destination, "w:"
     ) as output:
@@ -195,6 +229,14 @@ def normalize_layer_archive(
                             and name not in directories_with_descendants
                             and inherited_directories.get(name) == metadata
                         )
+                        if diagnostic:
+                            decisions.append({
+                                "path": name, "action": "drop" if redundant else "retain",
+                                "inherited_known": name in inherited_directories,
+                                "inherited_equal": inherited_directories.get(name) == metadata,
+                                "has_descendants": name in directories_with_descendants,
+                                "same_layer_directory_count": directory_counts[name],
+                            })
                         if redundant:
                             continue
                         inherited_directories[name] = metadata
@@ -214,7 +256,10 @@ def normalize_layer_archive(
         # an emitted header restoring it, a later matching header is required.
         for parent in emitted_ancestors - emitted_directories:
             inherited_directories.pop(parent, None)
-    return _sha256_file(destination)
+    digest = _sha256_file(destination)
+    if diagnostic:
+        _write_layer_index(destination, digest, decisions)
+    return digest
 
 
 def _load_json(path: Path, label: str) -> Any:
@@ -299,7 +344,6 @@ def normalize_saved_image(
         config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
-        _emit_canonical_config_diagnostic(config, config_bytes)
         config_hash = hashlib.sha256(config_bytes).hexdigest()
         normalized_config_name = "blobs/sha256/%s" % config_hash
         normalized_config_path = root / normalized_config_name

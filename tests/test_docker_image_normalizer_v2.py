@@ -277,29 +277,68 @@ def test_normalizer_rejects_loaded_config_change(
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_temporary_config_diagnostics_require_explicit_gate(monkeypatch, capsys, enabled):
+def test_temporary_layer_index_is_gated_and_has_no_file_bytes(monkeypatch, capsys, tmp_path, enabled):
     monkeypatch.setenv("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS", "1" if enabled else "")
-    config = {"config": {"Env": ["PYTHON_VERSION=3.12.15"]}, "rootfs": {"diff_ids": ["sha256:example"]}}
-    payload = json.dumps(config).encode()
-    normalizer._emit_canonical_config_diagnostic(config, payload)
-    output = capsys.readouterr()
-    assert not output.out
-    assert (payload.decode() in output.err) is enabled
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    source = tmp_path / "source.tar"
+    marker = b"PRIVATE_FILE_BYTES_NEVER_EMITTED"
+    with tarfile.open(source, "w:") as archive:
+        for member, content in [_entry("etc"), _entry("etc/file", marker)]:
+            archive.addfile(member, None if content is None else io.BytesIO(content))
+    layer = tmp_path / "normalized-layer-8.tar"
+    digest = normalizer.normalize_layer_archive(source, layer, inherited_directories={})
+    artifacts = list((tmp_path / "gateway-normalization-diagnostics").glob("*.json"))
+    assert len(artifacts) == int(enabled)
+    if enabled:
+        payload = json.loads(artifacts[0].read_bytes())
+        assert marker not in artifacts[0].read_bytes()
+        assert payload["normalized_layer_sha256"] == "sha256:" + digest
+        assert payload["members"][1]["content_sha256"] == hashlib.sha256(marker).hexdigest()
+        assert payload["members"][0]["offset"] == 0
+        assert payload["members"][1]["offset"] > 0
+        assert payload["directory_decisions"][0]["has_descendants"] is True
+    assert marker.decode() not in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("value", ["UNKNOWN_ENV=private-value", "PATH=https://user:private-value@example.com"])
-def test_temporary_config_diagnostics_withhold_sensitive_material(monkeypatch, capsys, value):
+def test_temporary_layer_index_preserves_bounded_overrun_record(monkeypatch, tmp_path):
     monkeypatch.setenv("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS", "1")
-    config = {"config": {"Env": [value]}}
-    normalizer._emit_canonical_config_diagnostic(config, json.dumps(config).encode())
-    output = capsys.readouterr()
-    assert "private-value" not in output.err
-    assert "withheld" in output.err
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setattr(normalizer, "_LAYER_INDEX_LIMIT", 8192)
+    source = tmp_path / "source.tar"
+    with tarfile.open(source, "w:") as archive:
+        for index in range(300):
+            member, content = _entry(f"file-{index:04}", b"data")
+            archive.addfile(member, io.BytesIO(content))
+    normalizer.normalize_layer_archive(source, tmp_path / "normalized-layer-8.tar")
+    artifact = next((tmp_path / "gateway-normalization-diagnostics").glob("*.json"))
+    payload = json.loads(artifact.read_bytes())
+    assert artifact.stat().st_size <= 8192
+    assert payload["member_count"] == 300
+    assert payload["omitted_members"] > 0
+
+
+def test_temporary_layer_index_preserves_first_three_unique_indices(monkeypatch, tmp_path):
+    monkeypatch.setenv("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS", "1")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    for index in range(4):
+        source = tmp_path / f"source-{index}.tar"
+        with tarfile.open(source, "w:") as archive:
+            member, content = _entry("file", str(index).encode())
+            archive.addfile(member, io.BytesIO(content))
+        digest = normalizer.normalize_layer_archive(source, tmp_path / "normalized-layer-8.tar")
+        if index == 0:
+            first = next((tmp_path / "gateway-normalization-diagnostics").glob("*.json"))
+            original = first.read_bytes()
+            normalizer._write_layer_index(tmp_path / "normalized-layer-8.tar", digest, [{"extra": "ignored"}])
+            assert first.read_bytes() == original
+    assert len(list((tmp_path / "gateway-normalization-diagnostics").glob("*.json"))) == 3
 
 
 def test_workflow_config_diagnostics_are_reproduction_only():
     workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/attested-v2-release.yml").read_text()
     assert "GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS: ${{ needs.source.outputs.mode == 'reproduce' && '1' || '' }}" in workflow
+    assert "if: ${{ always() && needs.source.outputs.mode == 'reproduce' }}" in workflow
+    assert "path: ${{ runner.temp }}/gateway-normalization-diagnostics/layer-8-*.json" in workflow
 
 
 def _entry(name, content=None, **metadata):

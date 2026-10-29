@@ -1,11 +1,14 @@
 """Generic closed-cost plans scan uncertainty history once, with identical bills."""
 from pathlib import Path
+from functools import partial
 import hashlib
 import json
 import re
 
 import pytest
 
+from tests import postgres_migration_harness as pg_harness
+from tests.lab_arena import lab_arena_pg_harness as arena_pg
 from tests.lab_arena import closed_provider_candidate_query_postgres_test as prior
 from tests.lab_arena import closed_openrouter_billing_postgres_test as router
 from tests.lab_arena.flat_per_icp_cost500_postgres_test import (
@@ -16,6 +19,7 @@ ROOT = Path(__file__).parents[2]
 MIGRATION = ROOT / 'scripts/507-lab-arena-closed-provider-round-membership.sql'
 SIGNATURE = 'public.lab_arena_next_closed_deepline_reconciliation_v1(text,text,integer,text,bigint)'
 PREIMAGE = 'a65adc61115dbb1fa7258bffcadc96218cf889534f3de189b82134e2c5effaf0'
+POSTGRES_IMAGE = 'postgres:17.9@sha256:2a0d0fe14825b0939f78a8cad5cd4e6aa68bf94d0e5dd96e24b6d23af4315545'
 
 
 @pytest.fixture(scope='module')
@@ -247,7 +251,12 @@ def test_migration_guard_rejects_drift(database, mutation):
 @pytest.fixture
 def plan_database():
     # Keep representative cardinalities independent of earlier scope controls.
-    yield from database.__wrapped__()
+    # Benchmark the actual deployed PG17 planner, as in the funding-throughput
+    # proof. All ordinary historical fixtures keep their existing PG15 runtime.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(arena_pg, '_database_with_migrations',
+                      partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
+        yield from database.__wrapped__()
 
 
 def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):

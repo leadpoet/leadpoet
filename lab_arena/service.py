@@ -5074,11 +5074,6 @@ class ArenaService:
                 in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
             )
             for entry in effective_final_entries:
-                # Another publisher may finish while an assessment is running.
-                # Stop obsolete work before holding up the next driver round.
-                current = self._round(round_id)
-                if current["status"] != "scored":
-                    return {"status": "stale", "round_status": current["status"]}
                 submission_id = str(entry["submission_id"])
                 if qualifier_audit and (
                     entry["is_king"] or not eligibility[submission_id]["eligible"]
@@ -5087,6 +5082,11 @@ class ArenaService:
                     eligibility[submission_id]["training_data_eligibility"] = {
                         "status": "not_assessed", "eligible": None, "reasons": []}
                     continue
+                # Refresh before actual assessments, not skipped rows. The
+                # final compare-and-swap still protects every publication.
+                current = self._round(round_id)
+                if current["status"] != "scored":
+                    return {"status": "stale", "round_status": current["status"]}
                 training = self._submission_training_eligibility(
                     round_row, submission_id, publication_reads.runs,
                     publication_reads=publication_reads,

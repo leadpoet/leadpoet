@@ -183,15 +183,20 @@ def test_parallel_close_keeps_accepted_and_incomplete_separate(migrated):
         accepted = cur.fetchone()[0]
         cur.execute("SET LOCAL session_replication_role=replica")
         cur.execute("""
-            INSERT INTO public.lab_arena_submissions(
-              submission_id,round_id,miner_hotkey,status,is_king,source_ref,
-              source_size_bytes,submission_doc,code_review_status,
-              code_review_doc,code_review_claim,code_review_started_at,
-              code_review_attempts)
-            VALUES (%s,%s,%s,'frozen',false,%s,123,'{}','passed',
-              '{"decision":"pass"}','sha256:'||repeat('1',64),now(),1)
+            UPDATE public.lab_arena_submissions target SET
+              status='frozen',is_king=false,source_ref=seed.source_ref,
+              source_size_bytes=123,submission_doc='{}',code_review_status='passed',
+              code_review_doc='{"decision":"pass"}',
+              code_review_claim='sha256:'||repeat('1',64),
+              code_review_started_at=now(),code_review_attempts=1
+            FROM (VALUES (%s,%s,%s,%s))
+              AS seed(submission_id,round_id,miner_hotkey,source_ref)
+            WHERE target.submission_id=seed.submission_id
+              AND target.round_id=seed.round_id AND target.miner_hotkey=seed.miner_hotkey
         """, (accepted["submission_id"], round_id, accepted["miner_hotkey"],
               f"arena/{round_id}/sources/{accepted['submission_id']}.tar.gz"))
+        # The shared deadline fixture now creates the participant row.
+        assert cur.rowcount == 1
         cur.execute("SET LOCAL session_replication_role=origin")
         cur.execute("SELECT public.lab_arena_close_parallel_execution_v1(%s)",
                     (round_id,))
@@ -234,15 +239,20 @@ def test_provider_failure_without_retry_is_infrastructure_incomplete(migrated):
         """, (round_id,))
         submission_id, miner_hotkey = cur.fetchone()
         cur.execute("""
-            INSERT INTO public.lab_arena_submissions(
-              submission_id,round_id,miner_hotkey,status,is_king,source_ref,
-              source_size_bytes,submission_doc,code_review_status,
-              code_review_doc,code_review_claim,code_review_started_at,
-              code_review_attempts)
-            VALUES (%s,%s,%s,'frozen',false,%s,123,'{}','passed',
-              '{"decision":"pass"}','sha256:'||repeat('1',64),now(),1)
+            UPDATE public.lab_arena_submissions target SET
+              status='frozen',is_king=false,source_ref=seed.source_ref,
+              source_size_bytes=123,submission_doc='{}',code_review_status='passed',
+              code_review_doc='{"decision":"pass"}',
+              code_review_claim='sha256:'||repeat('1',64),
+              code_review_started_at=now(),code_review_attempts=1
+            FROM (VALUES (%s,%s,%s,%s))
+              AS seed(submission_id,round_id,miner_hotkey,source_ref)
+            WHERE target.submission_id=seed.submission_id
+              AND target.round_id=seed.round_id AND target.miner_hotkey=seed.miner_hotkey
         """, (submission_id, round_id, miner_hotkey,
               f"arena/{round_id}/sources/{submission_id}.tar.gz"))
+        # The shared deadline fixture now creates the participant row.
+        assert cur.rowcount == 1
         cur.execute("SET LOCAL session_replication_role=origin")
         cur.execute("SELECT public.lab_arena_close_parallel_execution_v1(%s)",
                     (round_id,))
@@ -276,15 +286,20 @@ def test_dispatched_exhausted_provider_retry_remains_eligible(migrated):
         """, (round_id,))
         submission_id, miner_hotkey = cur.fetchone()
         cur.execute("""
-            INSERT INTO public.lab_arena_submissions(
-              submission_id,round_id,miner_hotkey,status,is_king,source_ref,
-              source_size_bytes,submission_doc,code_review_status,
-              code_review_doc,code_review_claim,code_review_started_at,
-              code_review_attempts)
-            VALUES (%s,%s,%s,'frozen',false,%s,123,'{}','passed',
-              '{"decision":"pass"}','sha256:'||repeat('1',64),now(),1)
+            UPDATE public.lab_arena_submissions target SET
+              status='frozen',is_king=false,source_ref=seed.source_ref,
+              source_size_bytes=123,submission_doc='{}',code_review_status='passed',
+              code_review_doc='{"decision":"pass"}',
+              code_review_claim='sha256:'||repeat('1',64),
+              code_review_started_at=now(),code_review_attempts=1
+            FROM (VALUES (%s,%s,%s,%s))
+              AS seed(submission_id,round_id,miner_hotkey,source_ref)
+            WHERE target.submission_id=seed.submission_id
+              AND target.round_id=seed.round_id AND target.miner_hotkey=seed.miner_hotkey
         """, (submission_id, round_id, miner_hotkey,
               f"arena/{round_id}/sources/{submission_id}.tar.gz"))
+        # The shared deadline fixture now creates the participant row.
+        assert cur.rowcount == 1
         cur.execute("SET LOCAL session_replication_role=origin")
         cur.execute("SELECT public.lab_arena_close_parallel_execution_v1(%s)",
                     (round_id,))

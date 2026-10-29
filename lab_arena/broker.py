@@ -1197,6 +1197,9 @@ class ProviderResponse:
     # Broker-internal provenance for a synthetic generic response. Never
     # forwarded as a provider header or model-visible response field.
     internal_provenance: Optional[str] = None
+    # Set only by the authenticated, request-bound completed-execution lookup.
+    # This is not provider content or synthetic-response provenance.
+    deepline_completed_execution: bool = False
 
 
 def _response_contains_credential(response: ProviderResponse, secret: str) -> bool:
@@ -1432,6 +1435,41 @@ def _deepline_job_request_id(document: Any) -> Optional[str]:
     return present[0]
 
 
+def _deepline_terminal_failure(
+    response: ProviderResponse, document: Any, *, execution_key: Optional[str],
+    operation: Optional[str] = None, operation_aliases: Sequence[str] = (),
+) -> bool:
+    """Prove a complete failed execution independently of its pending bill."""
+    if (response.internal_provenance is not None
+        or type(response.status) is not int or not 400 <= response.status <= 599
+        or not isinstance(document, Mapping)
+        or not isinstance(execution_key, str)
+        or _DEEPLINE_EXECUTION_KEY_RE.fullmatch(execution_key) is None
+        or document.get("status") not in (None, "completed", "failed", "cancelled")
+        or document.get("result") is not None):
+        return False
+    error = document.get("error") or document.get("tool_error")
+    if not ((isinstance(error, str) and error.strip())
+            or (isinstance(error, Mapping) and error)):
+        return False
+    native_id = _deepline_job_request_id(document)
+    if (native_id is None or _DEEPLINE_NATIVE_REQUEST_ID_RE.fullmatch(native_id) is None
+        or _DEEPLINE_REQUEST_ID_RE.fullmatch(native_id) is not None):
+        return False
+    if any(value != native_id for name, value in response.headers.items()
+           if name.lower() == "x-deepline-request-id"):
+        return False
+    if any(document[key] not in (operation, *operation_aliases)
+           for key in ("operation", "toolId") if key in document):
+        return False
+    if response.deepline_completed_execution is True:
+        return True
+    recovery = document.get("executionRecovery")
+    return (isinstance(recovery, Mapping)
+            and recovery.get("idempotencyKey") == execution_key
+            and recovery.get("state") == "completed")
+
+
 def _deepline_insufficient_credit_response(response: ProviderResponse, document: Any) -> bool:
     """Identify an authenticated payment refusal, without proving its charge."""
 
@@ -1616,7 +1654,8 @@ def _deepline_execution_response_readback(
                 resumed_document.pop("executionRecovery", None)
             body = json.dumps(resumed_document, ensure_ascii=False, allow_nan=False,
                               separators=(",", ":")).encode("utf-8")
-            return ProviderResponse(resumed.status, resumed.headers, body)
+            return ProviderResponse(resumed.status, resumed.headers, body,
+                                    deepline_completed_execution=True)
         # A Vercel trace hint can differ from the keyed native billing ID.
         # The authenticated saved key/tool/body binding is stronger authority.
         if (not isinstance(recovery, Mapping) or recovery.get("idempotencyKey") != execution_key
@@ -1632,7 +1671,8 @@ def _deepline_execution_response_readback(
         body = json.dumps(saved, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
     except (UnicodeError, ValueError, TypeError, RecursionError):
         return None
-    response = ProviderResponse(status, {"content-type": "application/json", "x-deepline-request-id": native_id}, body)
+    response = ProviderResponse(status, {"content-type": "application/json", "x-deepline-request-id": native_id}, body,
+                                deepline_completed_execution=True)
     if len(body) > max_response_bytes or _response_contains_credential(response, secret):
         return None
     return response
@@ -6746,6 +6786,20 @@ class Broker:
                         "provider_status": int(response.status),
                     }
                 )
+                if (effective_operation.provider == "deepline"
+                    and not deepline_lost_response
+                    and summary.get("transport_error_class") is None
+                    and _deepline_terminal_failure(
+                        upstream_response, raw_document,
+                        execution_key=deepline_execution_key,
+                        operation=deepline_operation,
+                        operation_aliases=(deepline_catalog_entry["operation_aliases"]
+                                           if deepline_catalog_entry else ()),
+                    )):
+                    # Worker delivery control only. The completed response is
+                    # already known to have failed; billing and raw receipts
+                    # above remain unchanged and eligible for reconciliation.
+                    summary["deepline_terminal_failure"] = True
                 if (effective_operation.provider == "deepline" and call_succeeded
                     and uncertain_state.get("status") == "settled"):
                     saved_actual = uncertain_state.get("amount_microusd", uncertain_state.get("actual_microusd"))

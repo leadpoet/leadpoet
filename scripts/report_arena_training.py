@@ -2,7 +2,9 @@
 """Report capture gaps and candidate yield from existing private Arena exports.
 
 No database writes, provider calls, scoring, or model execution. The report
-covers only supplied files. Default selection is published production rounds.
+covers only supplied files. Default selection is published production rounds. The --max-example-bytes
+budget bounds both each decompressed export and the complete input batch,
+because the report checks cohorts across all supplied examples.
 """
 from __future__ import annotations
 
@@ -18,19 +20,22 @@ if str(ROOT) not in sys.path:
 
 def main(argv=None):
     from lab_arena import training_readiness
-    from scripts.prepare_arena_training_dataset import _example_paths, _examples
+    from scripts.prepare_arena_training_dataset import _example_limit_argument, _example_paths, _examples
     from scripts.export_arena_training import write_private
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--examples", type=Path, nargs="+", required=True)
     parser.add_argument("--output", type=Path, required=True, help="new private JSON report; never overwritten")
     parser.add_argument("--include-nonproduction-rounds", action="store_true")
+    _example_limit_argument(parser)
     args = parser.parse_args(argv)
+    if args.max_example_bytes <= 0:
+        parser.error("max-example-bytes must be positive")
     try:
         paths = list(_example_paths(args.examples))
-        if not paths or sum(path.stat().st_size for path in paths) > 256 * 1024 * 1024:
-            raise ValueError("input_batch_empty_or_too_large")
-        report = training_readiness.build(_examples(paths), production_rounds_only=not args.include_nonproduction_rounds)
+        if not paths:
+            raise ValueError("input_batch_empty")
+        report = training_readiness.build(_examples(paths, max_example_bytes=args.max_example_bytes, max_total_bytes=args.max_example_bytes), production_rounds_only=not args.include_nonproduction_rounds)
         write_private(args.output, report)
     except Exception as exc:
         # Neither private source values nor exception text belongs in logs.

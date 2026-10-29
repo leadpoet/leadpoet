@@ -489,12 +489,13 @@ def test_cli_rejects_file_above_bounded_256_mib_limit(tmp_path):
 
 def test_splits_never_share_a_company_cluster():
     companies = [claim("Company %d" % index, "company%d.com" % index, "company-%d" % index) for index in range(40)]
-    examples = [example("run-%d" % index, [row(0, company, "qualified" if index % 2 else "wrong_fit")])
+    examples = [example("run-%d" % index, [row(0, company, "qualified" if index % 2 else "wrong_fit")],
+                        submission_id="separate-episode-%d" % index)
                 for index, company in enumerate(companies)]
     # The same company under another name and ICP shares its LinkedIn slug.
     alias = claim("Company Zero Inc", "zero-alias.com", "company-0")
     examples.append(example("run-alias", [row(0, alias, "wrong_fit")],
-                            icp={**ICP, "industry": "Fintech"}))
+                            icp={**ICP, "industry": "Fintech"}, submission_id="alias-episode"))
     splits, manifest = dataset.build(examples, dataset.Rules(eval_percent=50))
     clusters = {name: {record["group_keys"]["company_cluster"] for record in splits[name]} for name in ("train", "eval")}
     assert splits["train"] and splits["eval"]
@@ -514,7 +515,8 @@ def test_manifest_is_deterministic_and_records_permission_status():
     assert manifest["training_permission"]["status"] == "unconfirmed"
     assert manifest["rules"] == {"eval_percent": 20, "seed": "leadpoet-arena-dataset-v1",
                                  "production_rounds_only": True, "scorer_image_digest": None,
-                                 "scorer_policy_hash": None}
+                                 "scorer_policy_hash": None,
+                                 "split_grouping": "original_episode_and_company_v1"}
     other_seed = dataset.build(examples, dataset.Rules(seed="other"))[1]
     assert other_seed["dataset_version"] != manifest["dataset_version"]
 
@@ -605,7 +607,7 @@ def test_temporal_cutoff_rejects_invalid_dates(cutoff):
 def test_temporal_boundary_and_company_purge_and_missing_dates():
     docs = [example("old-shared", [row(0, claim(), "qualified")], evaluation_date="2026-10-17"),
             example("future-shared", [row(0, claim(), "qualified")], evaluation_date="2026-10-19"),
-            example("boundary", [row(0, claim("B", "b.com", "b"), "wrong_fit")]),
+            example("boundary", [row(0, claim("B", "b.com", "b"), "wrong_fit")], submission_id="boundary-episode"),
             example("missing", [row(0, claim("M", "m.com", "m"), "qualified")], evaluation_date=None),
             example("invalid", [row(0, claim("I", "i.com", "i"), "qualified")], evaluation_date="2026-02-30")]
     splits, manifest = dataset.build(docs, dataset.Rules(eval_after="2026-10-18"))
@@ -636,6 +638,171 @@ def test_combined_icp_groups_merge_transitive_company_aliases():
     assert manifest["evaluation_checks"]["train_eval_group_overlap_counts"]["icp_fingerprint"] == 0
     assert dataset.build(docs, dataset.Rules(eval_mode="company_and_icp")) == dataset.build(
         reversed(docs), dataset.Rules(eval_mode="company_and_icp"))
+
+
+def test_qualification_keeps_all_companies_and_retries_in_one_episode_split():
+    documents = []
+    for attempt in (1, 2):
+        rows = [row(index, claim("Company%d" % index, "company%d.example" % index,
+                                 "company%d" % index), "qualified")
+                for index in range((attempt - 1) * 10, attempt * 10)]
+        documents.append(example("retry-%d" % attempt, rows, attempt=attempt,
+                                 assignment_id="same-original-episode"))
+    original = copy.deepcopy(documents)
+    original_records = {record["record_id"]: dataset._hash({key: record[key] for key in ("input", "label")})
+                        for document in documents for record in dataset.records_from_example(document)}
+    splits, manifest = dataset.build(documents)
+    assert not (splits["train"] and splits["eval"])
+    assert len(splits["train"] + splits["eval"]) == 20
+    assert manifest["evaluation_checks"]["train_eval_group_overlap_counts"]["episode"] == 0
+    assert dataset.build(reversed(documents)) == (splits, manifest)
+    assert documents == original
+    assert all(dataset._hash({key: record[key] for key in ("input", "label")}) == original_records[record["record_id"]]
+               for records in splits.values() for record in records)
+
+
+def test_episode_union_preserves_aliases_and_deduplicated_episode_membership():
+    first = example("episode-one", [row(0, claim(), "qualified"),
+                    row(1, claim("OnlyFirst", "onlyfirst.example", "onlyfirst"), "qualified")],
+                    submission_id="episode-one")
+    duplicate = example("episode-two", [row(0, claim(), "qualified"),
+                        row(1, claim("OnlySecond", "onlysecond.example", "onlysecond"), "wrong_fit")],
+                        submission_id="episode-two")
+    duplicate["companies"][0]["judgment"]["company_identity_alias_keys"] = ["verified:link-to-third"]
+    third = example("episode-three", [row(0, claim("Alias", "third.example", "third"), "qualified"),
+                    row(1, claim("OnlyThird", "onlythird.example", "onlythird"), "fit_unproven")],
+                    submission_id="episode-three")
+    third["companies"][0]["judgment"]["company_identity_alias_keys"] = ["verified:link-to-third"]
+    documents = [first, seal(duplicate), seal(third)]
+    splits, manifest = dataset.build(documents)
+    assert manifest["counts"]["duplicate_records_merged"] == 1
+    assert len(splits["train"] + splits["eval"]) == 5
+    assert not (splits["train"] and splits["eval"])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("round_id", None), ("submission_id", ""), ("stage", None),
+    ("stage", True), ("icp_position", None), ("icp_position", False),
+])
+def test_qualification_without_proved_episode_identity_is_analysis_only(field, value):
+    document = example(rows=[row(0, claim(), "qualified")], **{field: value})
+    splits, manifest = dataset.build([document], dataset.Rules(production_rounds_only=False))
+    assert not splits["train"] and not splits["eval"]
+    assert splits["analysis"][0]["selection_exclusion"] == "episode_identity_unverified"
+    assert splits["analysis"][0]["label"]["class"] == "qualified"
+    assert manifest["counts"]["trainable_records_by_evidence_exclusion"] == {"episode_identity_unverified": 1}
+
+
+def test_episode_overlap_is_reported_even_when_company_overlap_is_zero():
+    records = dataset.records_from_example(example(rows=[
+        row(0, claim(), "qualified"),
+        row(1, claim("Other", "other.example", "other"), "qualified"),
+    ]))
+    for index, record in enumerate(records):
+        record["group_keys"]["company_cluster"] = "separate-%d" % index
+    checks = dataset.evaluation_checks({"train": [records[0]], "eval": [records[1]], "analysis": []}, dataset.Rules())
+    assert checks["train_eval_group_overlap_counts"]["company_cluster"] == 0
+    assert checks["train_eval_group_overlap_counts"]["episode"] == 1
+    assert checks["split_viable"] is False
+    assert "group_overlap" in checks["insufficient_split_reasons"]
+
+
+def test_dedup_prefers_a_complete_record_with_proved_episode_identity():
+    valid = example("valid", [row(0, claim(), "qualified")])
+    invalid = example("episode-invalid", [row(0, claim(), "qualified")], stage=None)
+    valid_record = dataset.records_from_example(valid)[0]
+    invalid_record = dataset.records_from_example(invalid)[0]
+    assert invalid_record["record_id"] < valid_record["record_id"]
+    original = copy.deepcopy([valid, invalid])
+    splits, manifest = dataset.build([valid, invalid])
+    retained = splits["train"] + splits["eval"]
+    assert len(retained) == 1 and not splits["analysis"]
+    assert retained[0]["record_id"] == valid_record["record_id"]
+    for key in ("input", "label"):
+        assert dataset._hash(retained[0][key]) == dataset._hash(valid_record[key])
+    assert [valid, invalid] == original
+    assert manifest["counts"]["duplicate_records_merged"] == 1
+    assert dataset.build([invalid, valid]) == (splits, manifest)
+
+
+def test_dedup_still_requires_complete_evidence_and_valid_episode_together():
+    valid_incomplete = example("valid", [row(0, claim(), "qualified")])
+    valid_incomplete["companies"][0]["judgment"]["intent_signals_detail"][0]["judge_verdict"].pop("verification_trace")
+    seal(valid_incomplete)
+    invalid_complete = example("invalid", [row(0, claim(), "qualified")], stage=None)
+    valid_complete = example("complete", [row(0, claim(), "qualified")])
+    splits, _ = dataset.build([valid_incomplete, invalid_complete, valid_complete])
+    retained = splits["train"] + splits["eval"]
+    assert len(retained) == 1 and not splits["analysis"]
+    expected = dataset.records_from_example(valid_complete)[0]
+    assert retained[0]["record_id"] == expected["record_id"]
+    assert retained[0]["input"] == expected["input"]
+    assert retained[0]["label"] == expected["label"]
+    incomplete_only, _ = dataset.build([valid_incomplete, invalid_complete])
+    assert not incomplete_only["train"] and not incomplete_only["eval"]
+    assert len(incomplete_only["analysis"]) == 1
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_builder_releases_previous_source_before_requesting_next_example(excluded):
+    import weakref
+
+    class SourceExample(dict):
+        pass
+
+    previous = None
+
+    def documents():
+        nonlocal previous
+        for index in range(2):
+            if previous is not None:
+                assert previous() is None
+            document = SourceExample(example(
+                "stream-%d" % index, [row(0, claim(), "qualified")],
+                round_status="stage2" if excluded else "published"))
+            previous = weakref.ref(document)
+            yield document
+            del document
+
+    splits, manifest = dataset.build(documents())
+    assert previous() is None
+    assert manifest["counts"]["examples_used"] == (0 if excluded else 2)
+    assert len(splits["train"] + splits["eval"]) == (0 if excluded else 1)
+
+
+def test_unproved_episode_does_not_add_a_trainable_scorer_cohort():
+    valid = example("cohort-a", [row(0, claim(), "qualified")])
+    other = example("cohort-b", [row(0, claim("Other", "other.example", "other"), "qualified")], stage=None)
+    other["configuration"]["scorer_image_digest"] = "sha256:" + "c" * 64
+    seal(other)
+    splits, _ = dataset.build([valid, other])
+    assert len(splits["train"] + splits["eval"]) == 1
+    assert len(splits["analysis"]) == 1
+    assert splits["analysis"][0]["selection_exclusion"] == "episode_identity_unverified"
+    other["stage"] = 1
+    seal(other)
+    with pytest.raises(ValueError, match="mixed_scorer_cohorts"):
+        dataset.build([valid, other])
+
+
+def test_episode_links_from_deduplicated_records_preserve_temporal_purge():
+    shared = claim()
+    bridge = claim("Bridge", "bridge.example", "bridge")
+    docs = [
+        example("past-one", [row(0, shared, "qualified"),
+                row(1, claim("First", "first.example", "first"), "wrong_fit")], submission_id="one"),
+        example("past-two", [row(0, shared, "qualified"), row(1, bridge, "qualified")], submission_id="two"),
+        example("future", [row(0, bridge, "qualified"),
+                row(1, claim("Future", "future.example", "future"), "fit_unproven")],
+                round_id="arena-2026-10-19", evaluation_date="2026-10-19", submission_id="three"),
+    ]
+    splits, manifest = dataset.build(docs, dataset.Rules(eval_after="2026-10-18"))
+    assert not splits["train"]
+    assert len(splits["eval"]) == 2
+    assert all(record["input"]["evaluation_date"] == "2026-10-19" for record in splits["eval"])
+    assert len(splits["analysis"]) == 3
+    assert {record["selection_exclusion"] for record in splits["analysis"]} == {"temporal_group_purged_from_train"}
+    assert manifest["counts"]["duplicate_records_merged"] == 1
 
 
 def test_temporal_icp_purge_does_not_move_old_records_into_eval():

@@ -452,10 +452,19 @@ turns exported executions into company-qualification records. It reads the
 exports only and writes a new private directory: `train.jsonl`, `eval.jsonl`,
 `analysis.jsonl` and `manifest.json`.
 
-The shared example reader accepts one export of up to 256 MiB at a time. Larger
-exports are rejected explicitly; a valid worker snapshot plus other export data
-can exceed this limit. Parsing and hash verification use additional memory.
-The readiness report also keeps its separate 256 MiB total input-batch limit.
+The shared example reader accepts plain `.json` and gzip `.json.gz` exports.
+It checks the complete JSON without shortening source strings. The default
+limit is 256 MiB of decompressed bytes per export. All three preparation commands
+accept `--max-example-bytes` to set an explicit larger input budget. For example,
+`--max-example-bytes 536870912` permits a native episode below 512 MiB.
+Parsing and hash verification need additional memory; a 504 MB native export
+used about 3.05 GiB of resident memory during parsing. Preparation processes one
+raw episode at a time. Full-thinking candidates keep the shared global company,
+ICP and episode split checks and candidate deduplication.
+
+The readiness report accepts the same option. Its budget also bounds the total
+decompressed input batch, because it checks all raw cohort members together.
+The 256 MiB default remains. Raise this budget explicitly for a larger report.
 
 A final verified company-fit `mismatch` or `unavailable` verdict can have no
 signal detail even when signal work was attempted. The exporter retains those

@@ -194,6 +194,16 @@ def test_training_eligibility_drops_unrecognized_reason_text():
     assert "training_data_eligibility" not in baseline
 
 
+def test_unassessed_training_is_explicit_but_extra_private_fields_are_rejected():
+    row = _published_row(policy=True)
+    ranking = row["publication_doc"]["final_ranking"][0]
+    marker = {"status": "not_assessed", "eligible": None, "reasons": []}
+    ranking["training_data_eligibility"] = marker
+    assert public_dashboard.round_summary(row)["baseline"]["training_data_eligibility"] == marker
+    ranking["training_data_eligibility"] = {**marker, "raw_trace": "private"}
+    assert "training_data_eligibility" not in public_dashboard.round_summary(row)["baseline"]
+
+
 def test_training_coverage_failure_retains_reason_and_public_counts():
     row = _published_row(policy=True)
     ranking = row["publication_doc"]["final_ranking"][0]

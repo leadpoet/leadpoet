@@ -898,6 +898,13 @@ def _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger
             return {}
         found = {}
         observations = payload["observations"]
+        # Both callers validate the full hash-bound host payload. The runner
+        # stamps callbacks with its latest started action, which can advance
+        # while an earlier call is in flight. Only host rows in this snapshot
+        # can corroborate that frontier; callbacks cannot corroborate themselves.
+        host_sequences = {item["action_sequence"]
+                          for rows in (observations, payload["response_receipts"]) for item in rows
+                          if type(item.get("action_sequence")) is int}
         for row in candidates:
             identity, sequence = row.get("call_identity"), row.get("action_sequence")
             disposition = row["outcome"]["broker_disposition"]
@@ -949,7 +956,9 @@ def _not_dispatched_host_observations(run, paid, snapshot, configuration, ledger
             # Every callback that is present must still agree with the write.
             if any(training_observations.clean_agent_observation(read) != read
                    or read["privacy"] != {"redacted": False, "redactions": []}
-                   or read["after_action_sequence"] != sequence
+                   or type(read["after_action_sequence"]) is not int
+                   or read["after_action_sequence"] < sequence
+                   or read["after_action_sequence"] not in host_sequences
                    or any(read["data"].get(key) != write[key]
                           for key in ("call_identity", "status", "body_sha256", "body_bytes"))
                    for read in reads):

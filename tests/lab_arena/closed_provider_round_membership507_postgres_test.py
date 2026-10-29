@@ -1,6 +1,10 @@
 """Generic closed-cost plans scan uncertainty history once, with identical bills."""
 from pathlib import Path
+
+from lab_arena import broker as br, contracts
+from lab_arena.store import hash_lease_token
 from functools import partial
+import base64
 import hashlib
 import json
 import re
@@ -259,18 +263,91 @@ def plan_database():
         yield from database.__wrapped__()
 
 
-def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
+def _plan_call_templates(database):
+    """Get each ledger kind from the actual broker and native SQL writers."""
+    from tests.lab_arena.deepline_delayed_cost_reconciliation_postgres_test import _store, _open_scoring
+    from tests.lab_arena.test_lab_arena_migration_postgres import claim, complete
+    from tests.lab_arena.test_lab_arena_broker import price_table, DL_KEY, CHAT, KEY
+
+    class Transport:
+        def __init__(self, provider, settled):
+            self.provider, self.settled = provider, settled
+
+        def send(self, **request):
+            if not self.settled:
+                if request['method'] == 'POST':
+                    raise br.ProviderTransportError('ReadTimeout')
+                if '/executions/by-key/' in request['url']:
+                    return br.ProviderResponse(404,
+                        {'x-deepline-idempotency-supported': 'true'}, b'{}')
+                return br.ProviderResponse(200, {}, b'{"recent":{"entries":[]}}')
+            assert request['method'] == 'POST'
+            if self.provider == 'openrouter':
+                doc = {'id': 'gen-template507', 'choices': [],
+                       'usage': {'cost': '0.000013', 'prompt_tokens': 20, 'completion_tokens': 50}}
+            else:
+                doc = {'job_id': request['headers']['x-deepline-request-id'], 'status': 'completed',
+                       'billing': {'credits_charged': .02, 'pricing_status': 'final'},
+                       'result': {'data': {'rawHtml': '<html>synthetic</html>', 'metadata': {
+                           'url': 'https://example.com/', 'sourceURL': 'https://example.com/',
+                           'statusCode': 200}}}}
+            return br.ProviderResponse(200, {}, json.dumps(doc).encode())
+
+    templates = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(br, '_DEEPLINE_BILLING_MAX_ATTEMPTS', 1)
+        for provider in ('openrouter', 'deepline'):
+            for settled in (False, True):
+                store = _store(database)
+                try:
+                    rid = f'arena-2026-09-14-{provider[:2]}{int(settled)}507'
+                    runners, _ = _open_scoring(store, rid, participants=2, runners=2)
+                    run, token, _, _ = claim(store, rid, runners[0], parallelism=8, ceiling=8)
+                    context = br.RunContext(run_id=run['run_id'], assignment_id=run['assignment_id'],
+                        icp_position=run['icp_position'], lease_token_hash=hash_lease_token(token),
+                        miner_hotkey=run['miner_hotkey'], submission_id=run['submission_id'],
+                        stage=run['stage'], kind='score', attempt=run['attempt'], round_id=rid)
+                    broker = br.Broker(store=store,
+                        key_for=lambda p: DL_KEY if p == 'deepline' else KEY,
+                        credential_for=lambda c, p: DL_KEY if p == 'deepline' else KEY,
+                        funding_source_for=lambda _: 'miner_key',
+                        provider_funding_source_for=lambda *_: 'miner_key',
+                        price_table=price_table(), judge_models=['openai/gpt-4o-mini'],
+                        transport=Transport(provider, settled))
+                    result = broker.execute(context,
+                        operation_id='openrouter.chat' if provider == 'openrouter' else 'scrapingdog.scrape',
+                        parameters=CHAT if provider == 'openrouter' else {'url': 'https://example.com/'},
+                        action_sequence=0, timeout_ms=5000)
+                    assert result.call['outcome'] == ('settled' if settled else 'uncertain')
+                    ledger = store.list_ledger(call_identity=result.call['call_identity'])
+                    assert [row['entry_kind'] for row in ledger] == [
+                        'reservation', 'dispatch', 'settlement' if settled else 'uncertain']
+                    # The native completion writer permits a successful score
+                    # after a failed provider request; keep this lifecycle proof.
+                    completed = complete(store, run['run_id'], hash_lease_token(token),
+                        'accepted', output_ref='s3://fixture/score.json')
+                    assert completed['status'] == 'accepted'
+                    templates.extend((provider, settled, row, result.call) for row in ledger)
+                finally:
+                    store.close()
+    return templates
+
+
+@pytest.mark.parametrize('work_mem,random_page_cost', [('12MB', '1.1'), ('4MB', '4')],
+                         ids=['source-planner', 'target-planner'])
+def test_generic_function_plan_reads_spill_once(plan_database, tmp_path, work_mem, random_page_cost):
     """Actual SQL functions plus exposed generic body; no literal-plan proxy."""
     database = plan_database
+    templates = _plan_call_templates(database)
     pg, dsn = database
     store, rid, run, cid, _ = router._call(database, '507plan')
     try:
         with pg.connect(**dsn) as conn, conn.cursor() as cur:
             cur.execute('SET LOCAL session_replication_role=replica')
             cur.execute("SET LOCAL statement_timeout='20s'")
-            cur.execute("SET LOCAL work_mem='12MB'")
+            cur.execute('SET LOCAL work_mem=%s', (work_mem,))
             cur.execute('SET LOCAL jit=off')
-            cur.execute('SET LOCAL random_page_cost=1.1')
+            cur.execute('SET LOCAL random_page_cost=%s', (random_page_cost,))
             # Sixty closed rounds mirror the observed production cardinality.
             cur.execute("UPDATE lab_arena_rounds SET configuration_doc=configuration_doc || "
                         "'{\"network_name\":\"plan507\"}'::jsonb WHERE round_id=%s", (rid,))
@@ -287,7 +364,10 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
             cols = [r[0] for r in cur.fetchall()]
             repl = {'run_id':"repeat('r',48)||'plan507-'||s", 'assignment_id':"repeat('r',48)||'plan507-'||s",
                     'round_id':"CASE WHEN s%%60=0 THEN r.round_id ELSE 'arena-2026-10-20-plan507'||(s%%60) END",
-                    'status':"'failed'", 'terminal_cause':"'provider_error'", 'claim_request_id':'NULL'}
+                    'status':"'accepted'", 'terminal_cause':"'accepted'",
+                    'result_doc':"'{\"terminal_status\":\"accepted\"}'::jsonb",
+                    'output_ref':"'s3://fixture/score.json'",
+                    'claim_request_id':'NULL'}
             cur.execute('INSERT INTO lab_arena_runs ('+','.join(cols)+') SELECT '+
                         ','.join(repl.get(k,'r.'+k) for k in cols)+
                         ' FROM lab_arena_runs r CROSS JOIN generate_series(1,40000) s WHERE run_id=%s',
@@ -297,25 +377,124 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
             cur.execute("SELECT attname FROM pg_attribute WHERE attrelid='lab_arena_ledger'::regclass "
                         'AND attnum>0 AND NOT attisdropped ORDER BY attnum')
             cols = [r[0] for r in cur.fetchall()]
-            repl = {'entry_id':'%s+s', 'run_id':"repeat('r',48)||'plan507-'||(1+((s-1)/3)%%40000)",
-                    'round_id':"CASE WHEN (1+((s-1)/3)%%40000)%%60=0 THEN l.round_id ELSE "
-                               "'arena-2026-10-20-plan507'||((1+((s-1)/3)%%40000)%%60) END",
-                    'call_identity':"'sha256:'||md5(((s-1)/3)::text)||md5(((s-1)/3)::text)",
-                    'entry_kind':"CASE WHEN s%%3=1 THEN 'reservation' WHEN s%%3=2 THEN 'dispatch' "
-                                 "WHEN ((s-1)/3)%%2=0 THEN 'uncertain' ELSE 'settlement' END",
-                    'provider':"CASE WHEN ((s-1)/3)%%3=0 THEN 'openrouter' ELSE 'deepline' END"}
-            # Seed the identical history in bounded statements. The 20s
-            # timeout and all measured queries stay unchanged.
-            for first in range(1, 500001, 100000):
+            # Keep one native-proven terminal shape for both call outcomes.
+            # Mixing correlated status/cause pairs underestimates eligible runs
+            # and loses the historical 60-round rescan this benchmark measures.
+            # Keep the unresolved/settled and provider mix, using real per-kind
+            # broker documents rather than relabelled OpenRouter uncertainties.
+            cur.execute('CREATE TEMP TABLE plan507_templates (provider text, settled boolean, '
+                        'entry_kind text, amount bigint, doc jsonb, terminal jsonb, cid text, request_hash text)')
+            request_hashes = {}
+            for provider, settled, row, call in templates:
+                request_hashes.setdefault(provider, call['request_hash'])
+                assert request_hashes[provider] == call['request_hash']
+                cur.execute('INSERT INTO plan507_templates VALUES (%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s)',
+                    (provider, settled, row['entry_kind'], row['amount_microusd'],
+                     json.dumps(row['entry_doc']),
+                     None if row['terminal_response'] is None else json.dumps(row['terminal_response']),
+                     row['call_identity'], call['request_hash']))
+            identity = contracts.canonical_json(dict(call=contracts.PROVIDER_CALL_SCHEMA_VERSION,
+                assignment_id='__assignment__', attempt=run['attempt'], icp_position=run['icp_position'],
+                action_sequence='__sequence__', operation_id='__operation__', request_hash='__request__'))
+            cur.execute("""CREATE TEMP TABLE plan507_calls AS
+                SELECT g, 1+g%%40000 AS run_number,
+                  CASE WHEN g%%3=0 THEN 'openrouter' ELSE 'deepline' END AS provider,
+                  g%%2=1 AS settled,
+                  'sha256:'||encode(extensions.digest(
+                    replace(replace(replace(replace(%s,
+                      '__assignment__',repeat('r',48)||'plan507-'||(1+g%%40000)),
+                      '"__sequence__"',(g/40000)::text),
+                      '__operation__',CASE WHEN g%%3=0 THEN 'openrouter.chat' ELSE 'scrapingdog.scrape' END),
+                      '__request__',CASE WHEN g%%3=0 THEN %s ELSE %s END), 'sha256'),'hex') AS cid
+                FROM generate_series(0,166666) g""",
+                (identity, request_hashes['openrouter'], request_hashes['deepline']))
+            # Rebind both JSON and encoded response bodies to the cloned call.
+            cur.execute("""CREATE FUNCTION pg_temp.plan507_rebind(doc jsonb, oldcid text, newcid text, g integer)
+                RETURNS jsonb LANGUAGE sql IMMUTABLE AS $rebind$
+                SELECT CASE WHEN rewritten ? 'body_b64' THEN jsonb_set(rewritten,'{body_b64}',
+                    to_jsonb(replace(encode(convert_to(replace(replace(replace(
+                      convert_from(decode(doc->>'body_b64','base64'),'UTF8'),
+                      substr(oldcid,8),substr(newcid,8)),substr(oldcid,8,32),substr(newcid,8,32)),
+                      'gen-template507','gen-plan507-'||g),'UTF8'),'base64'),chr(10),'')))
+                  ELSE rewritten END
+                FROM (SELECT replace(replace(replace(doc::text,
+                    substr(oldcid,8),substr(newcid,8)),substr(oldcid,8,32),substr(newcid,8,32)),
+                    'gen-template507','gen-plan507-'||g)::jsonb AS rewritten) q
+                $rebind$""")
+            repl = {'entry_id':'%s+s', 'run_id':"repeat('r',48)||'plan507-'||c.run_number",
+                    'round_id':"CASE WHEN c.run_number%%60=0 THEN l.round_id ELSE "
+                               "'arena-2026-10-20-plan507'||(c.run_number%%60) END",
+                    'call_identity':'c.cid', 'entry_kind':'t.entry_kind', 'provider':'c.provider',
+                    'operation_id':"CASE WHEN c.provider='openrouter' THEN 'openrouter.chat' ELSE 'scrapingdog.scrape' END",
+                    'amount_microusd':'t.amount',
+                    'entry_doc':"CASE WHEN t.entry_kind='reservation' THEN jsonb_set("
+                        "pg_temp.plan507_rebind(t.doc,t.cid,c.cid,c.g),'{action_sequence}',to_jsonb(c.g/40000)) "
+                        "ELSE pg_temp.plan507_rebind(t.doc,t.cid,c.cid,c.g) END",
+                    'terminal_response':'pg_temp.plan507_rebind(t.terminal,t.cid,c.cid,c.g)'}
+            # Rebinding native JSON is setup work. Keep every insert bounded
+            # by 20s and retain exactly 500k rows for all measured queries.
+            for first in range(1, 500001, 25000):
                 cur.execute('INSERT INTO lab_arena_ledger SELECT '+','.join(repl.get(k,'l.'+k) for k in cols)+
                             " FROM lab_arena_ledger l CROSS JOIN generate_series(%s,%s) s "
-                            "WHERE call_identity=%s AND entry_kind='uncertain'",
-                            (maximum, first, first + 99999, cid))
-                assert cur.rowcount == 100000
+                            "JOIN plan507_calls c ON c.g=(s-1)/3 JOIN plan507_templates t "
+                            "ON t.provider=c.provider AND t.settled=c.settled AND t.entry_kind="
+                            "CASE WHEN s%%3=1 THEN 'reservation' WHEN s%%3=2 THEN 'dispatch' "
+                            "WHEN c.settled THEN 'settlement' ELSE 'uncertain' END "
+                            "WHERE l.call_identity=%s AND l.entry_kind='uncertain'",
+                            (maximum, first, first + 24999, cid))
+                assert cur.rowcount == 25000
+            cur.execute("SELECT count(*) FROM lab_arena_runs WHERE run_id LIKE repeat('r',48)||'plan507-%%'")
+            assert cur.fetchone() == (40000,)
+            cur.execute("SELECT count(*) FROM lab_arena_rounds WHERE configuration_doc->>'network_name'='plan507'")
+            assert cur.fetchone() == (60,)
+            cur.execute("SELECT count(*),count(*) FILTER(WHERE entry_kind='uncertain'),"
+                        "count(*) FILTER(WHERE provider='deepline' AND operation_id='openrouter.chat') "
+                        "FROM lab_arena_ledger WHERE entry_id>%s", (maximum,))
+            assert cur.fetchone() == (500000, 83333, 0)
+            sequences = set()
+            for order in ('ASC', 'DESC'):
+                cur.execute(f"""SELECT u.entry_id, u.call_identity, r.entry_doc, u.entry_doc,
+                        runs.assignment_id, runs.attempt, runs.icp_position,
+                        public.lab_arena__deepline_cost_binding_v1(u.entry_doc,r.entry_doc,u.call_identity)
+                    FROM lab_arena_ledger u JOIN lab_arena_ledger r USING(call_identity)
+                    JOIN lab_arena_runs runs ON runs.run_id=u.run_id
+                    WHERE u.entry_id>%s AND u.entry_kind='uncertain' AND r.entry_kind='reservation'
+                      AND u.provider='deepline' ORDER BY u.entry_id {order} LIMIT 3""", (maximum,))
+                for _, identity, reservation, uncertainty, assignment, attempt, position, bound in cur.fetchall():
+                    sequences.add(reservation['action_sequence'])
+                    assert bound and uncertainty['call']['call_succeeded'] is False
+                    assert reservation['deepline_execution_key'] == 'arena:'+identity[7:]
+                    assert reservation['deepline_request_id'] == 'ctx-tool-'+identity[7:39]
+                    assert identity == contracts.provider_call_identity(assignment_id=assignment,
+                        attempt=attempt, icp_position=position, action_sequence=reservation['action_sequence'],
+                        operation_id='scrapingdog.scrape', request_hash=reservation['request_hash'])
+                    for field in ('deepline_request_id', 'credential_fingerprint'):
+                        malformed = dict(uncertainty, call=dict(uncertainty['call'], **{field: 'wrong'}))
+                        cur.execute('SELECT public.lab_arena__deepline_cost_binding_v1(%s::jsonb,%s::jsonb,%s)',
+                                    (json.dumps(malformed), json.dumps(reservation), identity))
+                        assert cur.fetchone() == (False,)
+                cur.execute(f"""SELECT call_identity,terminal_response
+                    FROM lab_arena_ledger WHERE entry_id>%s AND provider='deepline'
+                      AND entry_kind='settlement' ORDER BY entry_id {order} LIMIT 3""", (maximum,))
+                for identity, terminal in cur.fetchall():
+                    assert base64.b64decode(terminal['body_b64'], validate=True) == b'<html>synthetic</html>'
+                    assert terminal['provider_cost']['request_id'] == 'ctx-tool-'+identity[7:39]
+                cur.execute(f"""SELECT c.g,l.terminal_response FROM lab_arena_ledger l
+                    JOIN plan507_calls c ON c.cid=l.call_identity
+                    WHERE l.entry_id>%s AND l.provider='openrouter' AND l.entry_kind='settlement'
+                    ORDER BY l.entry_id {order} LIMIT 3""", (maximum,))
+                for sequence, terminal in cur.fetchall():
+                    body = json.loads(base64.b64decode(terminal['body_b64'], validate=True))
+                    assert body['id'] == 'gen-plan507-'+str(sequence)
+            assert sequences == {0, 4}
             for table in ('lab_arena_ledger','lab_arena_runs','lab_arena_rounds'):
                 cur.execute('ANALYZE '+table)
             cur.execute('SET LOCAL plan_cache_mode=force_generic_plan')
-            results = []; plans = {}
+            cur.execute("SELECT current_setting('server_version'),current_setting('jit'),"
+                        "current_setting('work_mem'),current_setting('random_page_cost')")
+            settings = cur.fetchone()
+            assert settings[0].startswith('17.9') and settings[1:] == ('off',work_mem,random_page_cost)
+            results = []; plans = {'settings': settings}
             for name in ('test_before_'+prior.NAMES[0], prior.NAMES[0]):
                 # The obsolete control deliberately rescans spilled history 60
                 # times. Give only that reference a bounded allowance; every

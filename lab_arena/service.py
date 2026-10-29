@@ -465,6 +465,25 @@ class LocalObjectStore:
         raise ServiceError("source_upload_not_configured", 503)
 
 
+# The round driver reads and writes this bucket inside advance_round, whose
+# span never closes while a call is in flight. boto3's defaults are 60 s
+# connect, 60 s read and five legacy retry attempts, so one unreachable S3
+# endpoint can hold the driver for tens of minutes; the heartbeat then stops
+# and competitors are refused their next run. Bound the client instead, so a
+# bad object leg fails in about a minute and the next driver tick retries.
+# (wiring.py already does this for the evidence-capture store, with a much
+# shorter budget because that path must never hold a provider request.)
+OBJECT_STORE_CONNECT_TIMEOUT_SECONDS = float(
+    os.environ.get("LAB_ARENA_OBJECT_CONNECT_TIMEOUT_SECONDS", "10")
+)
+OBJECT_STORE_READ_TIMEOUT_SECONDS = float(
+    os.environ.get("LAB_ARENA_OBJECT_READ_TIMEOUT_SECONDS", "30")
+)
+OBJECT_STORE_MAX_ATTEMPTS = int(
+    os.environ.get("LAB_ARENA_OBJECT_MAX_ATTEMPTS", "3")
+)
+
+
 class S3ObjectStore:
     """Versioned, delete-denied Arena bucket (section 3.1); boto3 imported lazily."""
 
@@ -481,7 +500,19 @@ class S3ObjectStore:
             import boto3  # noqa: WPS433
             from botocore.config import Config
 
-            client = boto3.client("s3", region_name=region_name, config=Config(signature_version="s3v4"))
+            client = boto3.client(
+                "s3",
+                region_name=region_name,
+                config=Config(
+                    signature_version="s3v4",
+                    connect_timeout=OBJECT_STORE_CONNECT_TIMEOUT_SECONDS,
+                    read_timeout=OBJECT_STORE_READ_TIMEOUT_SECONDS,
+                    retries={
+                        "total_max_attempts": OBJECT_STORE_MAX_ATTEMPTS,
+                        "mode": "standard",
+                    },
+                ),
+            )
         self._client = client
         self._bucket = bucket
 

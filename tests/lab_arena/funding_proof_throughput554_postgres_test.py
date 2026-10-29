@@ -1,5 +1,6 @@
 """Keep exact funding proof semantics with bounded historical receipt lookups."""
 from pathlib import Path
+from functools import partial
 from datetime import timedelta
 import hashlib
 import json
@@ -8,6 +9,8 @@ import time
 
 import pytest
 
+from tests import postgres_migration_harness as pg_harness
+from tests.lab_arena import lab_arena_pg_harness as arena_pg
 from tests.lab_arena import funding_proof_scalars526_postgres_test as scalar
 from tests.lab_arena import proven_funding_recovery524_postgres_test as prior
 from tests.lab_arena.quiescence_recovery_gate522_postgres_test import reset
@@ -19,6 +22,9 @@ SQL = ROOT / 'scripts/554-lab-arena-funding-proof-throughput.sql'
 PRE = '46acfd38b92eb7a03613a4d55c72cc9af57339cf6602ed4611955af22b511cf6'
 POST = 'a962ddae017d3e1efbbe05d296bd1b9c895523d4a5081b0a3fd2c78b9c7f3d73'
 NAME = 'public.lab_arena_ledger_paid_native_request_idx'
+# Source Supabase server17.6/170006 verified read-only on2026-10-29.
+# Only this performance fixture uses its planner; functional controls stayPG15.
+POSTGRES_IMAGE = 'postgres:17.6@sha256:00bc86618629af00d2937fdc5a5d63db3ff8450acf52f0636ec813c7f4902929'
 
 
 def definition(q):
@@ -200,10 +206,21 @@ def _queue70(c, run, denial):
     return ids
 
 
-def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history(database):
+@pytest.fixture()
+def plan_database():
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(arena_pg, '_database_with_migrations',
+                      partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
+        yield from database.__wrapped__()
+
+
+def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history(plan_database):
+    database = plan_database
     pg, dsn = database
     run, denial = prior.seed(database)
     with pg.connect(**dsn) as c, c.cursor() as q:
+        q.execute("SELECT current_setting('server_version'), current_setting('server_version_num')")
+        print('FUNDING554_RUNTIME server_version=%s server_version_num=%s' % q.fetchone(), flush=True)
         ids = _queue70(c, run, denial)
         funded = prior.clone(c, run, 'historical-wide')
         for index in range(2500):

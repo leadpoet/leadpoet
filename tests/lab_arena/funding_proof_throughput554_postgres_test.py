@@ -43,8 +43,8 @@ def old_source(post):
 
 @pytest.fixture(scope='module')
 def database():
-    # Throughput must use the production PG17 planner, with its normal JIT
-    # defaults, rather than the shared historical harness's PG15 default.
+    # Throughput uses the deployed PG17 planner. The wide-history benchmark
+    # below also matches source and target configuration-file jit=off.
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(arena_pg, '_database_with_migrations',
                       partial(pg_harness._database_with_migrations, image=POSTGRES_IMAGE))
@@ -213,6 +213,13 @@ def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history
     pg, dsn = database
     run, denial = prior.seed(database)
     with pg.connect(**dsn) as c, c.cursor() as q:
+        # Captured source PG17.6 and target RDS17.9 both have jit=off, with
+        # no database or role overrides. Keep that production setting across
+        # the rollback between the old and new proof; retain both 8s limits.
+        q.execute('SET jit=off')
+        q.execute("SELECT current_setting('jit'), current_setting('server_version_num')")
+        planner = q.fetchone()
+        assert planner == ('off', '170009')
         ids = _queue70(c, run, denial)
         funded = prior.clone(c, run, 'historical-wide')
         for index in range(2500):
@@ -255,5 +262,6 @@ def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history
         assert result == {'status': 'ok', 'expired': 0, 'retried': 70}
         q.execute("SELECT count(*) FROM public.lab_arena_runs WHERE run_id=ANY(%s) AND status='failed' AND terminal_cause='credential_error'", (ids,))
         assert q.fetchone() == (70,)
+        print('FUNDING554_PLANNER jit=%s server_version_num=%s' % planner, flush=True)
         print('FUNDING554_QUEUE70 old_seconds=%.3f proof_seconds=%.3f sweep_seconds=%.3f local_regular_index_build_seconds=%.3f' % (old_seconds, proof_seconds, sweep_seconds, build_seconds), flush=True)
         assert proof_seconds < 8 and sweep_seconds < 8

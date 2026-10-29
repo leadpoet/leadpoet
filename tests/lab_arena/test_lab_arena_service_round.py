@@ -2429,17 +2429,26 @@ def test_missing_scoring_result_reports_incomplete_without_partial_scores(
     monkeypatch.setattr(
         harness.service,
         "_scoring_outputs",
-        lambda round_id, stage: {
+        lambda round_id, stage, *, round_row=None: {
             run_id: run
             for run_id, run in scoring_outputs.items()
             if run_id != missing_run_id
         },
     )
 
-    cancelled = harness.service.advance_round(harness.round_id)
-
+    held = harness.service.advance_round(harness.round_id)
     row = harness.service.store.get_round(harness.round_id)
     assert closed["status"] == "closed" and closed["round_status"] == "stage1_judged"
+    assert held == {"status": "retry", "round_status": "stage1_judged",
+                    "reason": "judge_incomplete", "remaining": 1}
+    assert row["participants"] == participants_before and not row["finalists"]
+    assert all(run["per_icp_score"] is None for run in harness.service.store.list_runs(
+        harness.round_id, stage=1, kind="execute"))
+    # A missing result can recover until the frozen final deadline. Once the
+    # deadline passes with no in-flight work, cancellation remains fail-closed.
+    harness.clock.advance_to(harness.schedule()["publication_deadline"])
+    cancelled = harness.service.advance_round(harness.round_id)
+    row = harness.service.store.get_round(harness.round_id)
     assert cancelled["status"] == "cancelled" and row["status"] == "cancelled"
     assert row["cancel_reason"] == svc.CANCEL_REASONS["scoring_incomplete"]
     assert row["participants"] == participants_before and not row["finalists"]

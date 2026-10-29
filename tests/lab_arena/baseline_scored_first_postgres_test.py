@@ -1,7 +1,8 @@
 """Future baseline-first rounds through the real service and PostgreSQL."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,7 @@ from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena.baseline_cost_zero_round_test import _accepted_state
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
+    current_service_database,
     database_with_lab_arena_migration,
     migrations_before,
 )
@@ -24,7 +25,7 @@ from tests.lab_arena.test_integrity_round import IntegrityHarness
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture()
@@ -47,6 +48,64 @@ def test_baseline_first_migration_replays_at_its_schema_version(
         with connection.cursor() as cursor:
             cursor.execute(migration)
             cursor.execute(migration)
+
+
+def test_historical_347_keeps_miners_closed_until_baseline_scored(
+    baseline_first_database, tmp_path,
+):
+    """The original sequential gate belongs to the exact pre-572 schema."""
+    pg, dsn = baseline_first_database
+    connect = lambda: pg.connect(**dsn)
+    harness = IntegrityHarness(connect, tmp_path, challengers=[], runners=['alpha'])
+    harness.service._require_integrity_schema = lambda: None  # Old-schema seed only.
+    harness.service.config.defaults = replace(harness.service.config.defaults,
+        execution_sequence_from='2000-01-01T00:00:00Z', per_icp_cost_policy=True)
+    round_id = 'arena-2026-09-22-original347'
+    harness.clock.now = datetime.now(timezone.utc)
+    harness.service.create_round(harness.clock.now + timedelta(minutes=30),
+                                 round_id=round_id)
+    participants = [dict(submission_id='historical347-' + name,
+        miner_hotkey=fixtures.keypair('historical347-' + name).ss58_address,
+        is_king=name == 'baseline') for name in ('baseline', 'miner')]
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute('SET LOCAL session_replication_role=replica')
+        cur.execute("UPDATE public.lab_arena_rounds SET status='stage1_scoring',"
+                    "participants=%s::jsonb WHERE round_id=%s",
+                    (json.dumps(participants), round_id))
+        for participant in participants:
+            cur.execute("INSERT INTO public.lab_arena_submissions"
+                        "(submission_id,round_id,miner_hotkey,status) "
+                        "VALUES(%s,%s,%s,'frozen')",
+                        (participant['submission_id'], round_id,
+                         participant['miner_hotkey']))
+        cur.execute('SET LOCAL session_replication_role=origin')
+    for status in ('stage1_scoring', 'stage1_judged'):
+        with connect() as conn, conn.cursor() as cur:
+            cur.execute('SET LOCAL session_replication_role=replica')
+            cur.execute('UPDATE public.lab_arena_rounds SET status=%s WHERE round_id=%s',
+                        (status, round_id))
+            cur.execute('SET LOCAL session_replication_role=origin')
+            cur.execute('SET LOCAL ROLE lab_arena_service')
+            cur.execute('SELECT public.lab_arena_open_stage(%s,2::smallint,%s::jsonb,%s)',
+                        (round_id, json.dumps(participants[1:]), list(range(20))))
+            assert cur.fetchone()[0]['status'] == 'stale'
+            cur.execute('SELECT count(*) FROM public.lab_arena_runs WHERE round_id=%s',
+                        (round_id,))
+            assert cur.fetchone()[0] == 0
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute('SET LOCAL session_replication_role=replica')
+        cur.execute("UPDATE public.lab_arena_rounds SET status='stage1_scored' WHERE round_id=%s",
+                    (round_id,))
+        cur.execute('SET LOCAL session_replication_role=origin')
+        cur.execute('SET LOCAL ROLE lab_arena_service')
+        cur.execute('SELECT public.lab_arena_open_stage(%s,2::smallint,%s::jsonb,%s)',
+                    (round_id, json.dumps(participants[1:]), list(range(20))))
+        assert cur.fetchone()[0] == {'status': 'ok', 'round_status': 'stage2',
+                                    'assignments': 20,
+                                    'stage_generation': 1}
+        cur.execute('SELECT count(*),min(stage),max(stage) FROM public.lab_arena_runs WHERE round_id=%s',
+                    (round_id,))
+        assert cur.fetchone() == (20, 2, 2)
 
 
 def _baseline_first_judge(companies, icp, reference):
@@ -85,7 +144,7 @@ def _enable_verified_proxy_runtime(harness):
     harness.runner = runner
 
 
-def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
+def test_accepted_baseline_opens_five_miners_then_all_scores_publish(
     database, tmp_path, monkeypatch
 ):
     psycopg2, dsn = database
@@ -135,15 +194,13 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
         harness.round_id, stage=2, kind="execute"
     ) == []
 
-    harness.advance_until("stage1_scored", runners=2)
-    scored_baseline = harness.service.store.list_runs(
+    harness.advance_until("stage1_scoring", runners=2)
+    accepted_baseline = harness.service.store.list_runs(
         harness.round_id, stage=1, kind="execute"
     )
-    assert len(scored_baseline) == 20
-    assert all(run["per_icp_score"] is not None for run in scored_baseline)
-    assert harness.service._baseline_fully_succeeded(
-        harness.service.store.get_round(harness.round_id)
-    )
+    assert len(accepted_baseline) == 20
+    assert all(run['status'] == 'accepted' and run['per_icp_score'] is None
+               for run in accepted_baseline)
     assert harness.service.store.list_runs(
         harness.round_id, stage=2, kind="execute"
     ) == []
@@ -159,9 +216,17 @@ def test_baseline_is_fully_scored_before_five_miners_execute_and_publish(
         for submission_id in miner_ids
     )
     assert harness.service.store.get_round(harness.round_id)["status"] == "stage2"
+    # Migration 572 permits miner execution after accepted baseline outputs,
+    # while all immutable judgments and numeric scores still gate publication.
+    assert harness.service.store.list_runs(harness.round_id, stage=1,
+                                         kind='score')
+    assert all(run['per_icp_score'] is None for run in
+               harness.service.store.list_runs(harness.round_id, stage=1,
+                                              kind='execute'))
 
     harness.advance_until("published", runners=2, max_steps=120)
     published = harness.service.store.get_round(harness.round_id)
+    assert harness.service._baseline_fully_succeeded(published)
     assert published["benchmark_ref"] == bank_ref
     assert harness.objects.get(bank_ref) == bank_bytes
     publication = published["publication_doc"]

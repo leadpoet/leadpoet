@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lab_arena import contracts, scoring
+from lab_arena import scoring
 
 
 def _run(
@@ -47,15 +47,16 @@ def _plan(runs: list[dict]) -> dict:
     )
 
 
-def test_deadline_closed_dispatched_retry_uses_prior_provider_error_zero():
+def test_deadline_closed_dispatched_retry_preserves_incomplete_work():
     plan = _plan([_run(1, "provider_error"), _deadline_retry()])
 
     assert plan["work_items"] == []
-    assert plan["zero_rows"] == [
+    assert plan["zero_rows"] == []
+    assert plan["incomplete_rows"] == [
         {
             "submission_id": "submission-1",
             "icp_position": 0,
-            "cause": "provider_error",
+            "cause": "stage_closed",
         }
     ]
 
@@ -78,9 +79,21 @@ def test_deadline_closed_dispatched_retry_uses_prior_provider_error_zero():
         ],
     ],
 )
-def test_unproved_or_unsupported_deadline_retry_stays_fail_closed(runs):
-    with pytest.raises(contracts.ArenaContractError, match="stage must cancel"):
-        _plan(runs)
+def test_deadline_retry_marker_cannot_invent_a_score(runs):
+    plan = _plan(runs)
+    assert plan["work_items"] == []
+    assert plan["zero_rows"] == []
+    assert plan["incomplete_rows"] == [{"submission_id": "submission-1", "icp_position": 0,
+                                        "cause": "stage_closed"}]
+
+
+def test_confirmed_model_failure_keeps_its_zero_after_deadline_retry():
+    plan = _plan([_run(1, "invalid_output"), _deadline_retry()])
+
+    assert plan["work_items"] == []
+    assert plan["zero_rows"] == [{"submission_id": "submission-1", "icp_position": 0,
+                                 "cause": "invalid_output"}]
+    assert "incomplete_rows" not in plan
 
 
 def test_accepted_attempt_keeps_authority_over_deadline_marker():

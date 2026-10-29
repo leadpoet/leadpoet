@@ -97,6 +97,34 @@ def test_request_spans_name_the_operation_without_leaking_the_run_id():
     assert "secret" not in haystack
 
 
+@pytest.mark.parametrize("code, expected", [
+    ("reasoning_capture_activation_not_ready:private-provider-detail", "reasoning_capture_activation_not_ready"),
+    ("unapproved_capture_status:private-provider-detail", "-"),
+])
+def test_reasoning_activation_denial_exports_only_the_approved_literal(code, expected):
+    exp = InMemorySpanExporter()
+    app = FastAPI()
+    recorder = configure_arena_otel(app, span_exporter=exp)
+
+    @app.get("/arena/v1/current")
+    def _current():
+        recorder.note_denial(code)
+        return JSONResponse(status_code=503, content={"status": "unavailable"})
+
+    with TestClient(app) as client:
+        assert client.get("/arena/v1/current?token=private-token").status_code == 503
+
+    (span,) = exp.get_finished_spans()
+    assert dict(span.attributes) == {
+        "http.request.method": "GET",
+        "http.route": "/arena/v1/current",
+        "http.response.status_code": 503,
+        "arena.denial": expected,
+        "duration_ms": pytest.approx(span.attributes["duration_ms"]),
+    }
+    assert "private" not in repr((span.name, dict(span.attributes)))
+
+
 def test_included_arena_route_exports_full_template_and_canonical_round():
     exp = InMemorySpanExporter()
     app = FastAPI()

@@ -1,10 +1,11 @@
-"""The daily driver opens the next submission round in the cutoff tick."""
+"""A due submission round opens before older-round work in the cutoff tick."""
 
 from lab_arena.driver import drive_once
 
 
 class DailyRoundService:
-    def __init__(self, *, close_on_advance=True, fail_advance=False, fail_after_commit=False):
+    def __init__(self, *, close_on_advance=True, fail_advance=False, fail_after_commit=False, cutoff_due=True):
+        self.cutoff_due = cutoff_due
         self.close_on_advance = close_on_advance
         self.fail_advance = fail_advance
         self.fail_after_commit = fail_after_commit
@@ -35,7 +36,9 @@ class DailyRoundService:
 
     def ensure_daily_round(self):
         self.calls.append("ensure")
-        if self.old_status == "open" or self.next_open:
+        # The real open_round excludes an old round after its submission cutoff,
+        # even while its stored status is still open.
+        if not self.cutoff_due or self.next_open:
             return {"status": "existing"}
         self.next_open = True
         self.created += 1
@@ -55,8 +58,8 @@ def test_cutoff_commit_creates_next_round_in_the_same_tick():
 
     result = drive_once(service)
 
-    assert result == "advanced old; created next"
-    assert service.calls == ["advance:old", "ensure", "rewards", "billing"]
+    assert result == "created next; advanced old; advanced next"
+    assert service.calls == ["ensure", "advance:old", "advance:next", "rewards", "billing"]
     assert service.old_status == "committed"
     assert service.next_open
     assert service.created == 1
@@ -66,25 +69,25 @@ def test_cutoff_commit_creates_next_round_in_the_same_tick():
 
 
 def test_existing_open_round_is_not_duplicated():
-    service = DailyRoundService(close_on_advance=False)
+    service = DailyRoundService(close_on_advance=False, cutoff_due=False)
 
     assert drive_once(service) == "advanced old"
-    assert service.calls == ["advance:old", "ensure", "rewards", "billing"]
+    assert service.calls == ["ensure", "advance:old", "rewards", "billing"]
     assert service.old_status == "open"
     assert not service.next_open
     assert service.created == 0
 
 
-def test_failed_advance_does_not_create_a_second_open_round():
+def test_failed_old_advance_does_not_delay_the_due_submission_round():
     service = DailyRoundService(fail_advance=True)
 
     result = drive_once(service)
 
-    assert result == "failed advance_round old: RuntimeError"
-    assert service.calls == ["advance:old", "ensure", "rewards", "billing"]
+    assert result == "created next; failed advance_round old: RuntimeError; advanced next"
+    assert service.calls == ["ensure", "advance:old", "advance:next", "rewards", "billing"]
     assert service.old_status == "open"
-    assert not service.next_open
-    assert service.created == 0
+    assert service.next_open
+    assert service.created == 1
 
 
 def test_ambiguous_post_commit_failure_still_opens_the_next_round():
@@ -92,8 +95,8 @@ def test_ambiguous_post_commit_failure_still_opens_the_next_round():
 
     result = drive_once(service)
 
-    assert result == "failed advance_round old: RuntimeError; created next"
-    assert service.calls == ["advance:old", "ensure", "rewards", "billing"]
+    assert result == "created next; failed advance_round old: RuntimeError; advanced next"
+    assert service.calls == ["ensure", "advance:old", "advance:next", "rewards", "billing"]
     assert service.old_status == "committed"
     assert service.next_open
     assert service.created == 1

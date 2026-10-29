@@ -491,6 +491,7 @@ ARENA_DENIAL_CODES = frozenset(
         "recovered_judgment_binding_invalid",
         "recovered_judgment_scores_not_recorded",
         "reasoning_baseline_source_mismatch",
+        "reasoning_capture_activation_not_ready",
         "reasoning_capture_activation_invalid",
         "request_invalid",
         "results_not_public",

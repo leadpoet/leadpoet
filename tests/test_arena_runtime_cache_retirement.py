@@ -88,9 +88,9 @@ def test_cache_source_requires_exact_tracked_source_name():
     assert cleanup._cache_source(Path('pkg/__pycache__/unknown.txt')) is None
 
 
-def test_all_three_retirement_paths_use_narrow_helper():
+def test_all_retirement_paths_use_narrow_helper():
     script = (Path(__file__).resolve().parents[1]/'gw_restart.sh').read_text()
-    assert script.count('retire_arena_runtime_tree "') == 3
+    assert script.count('retire_arena_runtime_tree "') == 4
     assert 'chmod -R u+w "$old_tree"' not in script
     assert 'chmod -R u+w "$ARENA_CANDIDATE_TREE"' not in script
     assert 'chmod -R u+w "$ARENA_PREVIOUS_TREE"' not in script
@@ -156,7 +156,7 @@ def test_new_mount_before_deletion_is_rejected(archive, monkeypatch):
     (0, 'unknown'), (0, 'planned'), (0, 'malformed'), (0, 'wrong_archive'),
     (0, 'wrong_applied'), (0, 'wrong_cache_count'),
 ])
-@pytest.mark.parametrize('retirement_path', [0, 1, 2])
+@pytest.mark.parametrize('retirement_path', [0, 1, 2, 3])
 def test_shared_shell_helper_propagates_guard_denial_before_source_permissions(archive, tmp_path, privileged_status, report_status, retirement_path):
     import json
     import shlex
@@ -169,7 +169,7 @@ def test_shared_shell_helper_propagates_guard_denial_before_source_permissions(a
     harness = 'set -euo pipefail\n'
     for name, value in dict(GATEWAY_PREFLIGHT_TREE='/verified', LEADPOET_REPO_ROOT=kwargs['repo_root'],
                             GATEWAY_PYTHON_BIN=sys.executable, old_slot=0, old_tree=root,
-                            PREPARED_GATEWAY_SHA=kwargs['sha'], ARENA_CANDIDATE_SLOT=0,
+                            PREPARED_GATEWAY_SHA=kwargs['sha'], old_sha=kwargs['sha'], ARENA_CANDIDATE_SLOT=0,
                             ARENA_CANDIDATE_TREE=root, ARENA_PREVIOUS_SLOT=0,
                             ARENA_PREVIOUS_SHA=kwargs['sha'], ARENA_PREVIOUS_TREE=root).items():
         harness += f'{name}={shlex.quote(str(value))}\n'
@@ -183,7 +183,7 @@ def test_shared_shell_helper_propagates_guard_denial_before_source_permissions(a
     report = 'not JSON' if report_status == 'malformed' else json.dumps(payload)
     harness += f'sudo() {{ printf "%s\\n" "$@" > {shlex.quote(str(capture))}; printf "%s\\n" {shlex.quote(report)}; return {privileged_status}; }}\n'
     calls = [line.strip() for line in script.splitlines() if line.strip().startswith('retire_arena_runtime_tree \"')]
-    assert len(calls) == 3
+    assert len(calls) == 4
     harness += function + '\n' + calls[retirement_path] + '\n'
     result = subprocess.run(['bash', '-c', harness], capture_output=True, text=True, timeout=10)
     expected_status = 0 if privileged_status == 0 and report_status in ('cache_cleanup_complete', 'deferred_in_use') else 1

@@ -24,13 +24,13 @@ def _spy(monkeypatch, marker):
     return calls
 
 
-@pytest.mark.parametrize("aggregate,expected", [(False, 1), (True, 80)])
-def test_repeated_short_schema_text_scans_once_only_outside_aggregate(monkeypatch, aggregate, expected):
+@pytest.mark.parametrize("aggregate", [False, True])
+def test_repeated_short_schema_text_scans_once_in_each_mode(monkeypatch, aggregate):
     marker = "ordinary short schema description"
     calls = _spy(monkeypatch, marker)
     document = {"schema": [marker] * 80}
     assert capture.sanitize_training_value(document, aggregate_parts=aggregate) == (document, [])
-    assert len(calls) == expected
+    assert len(calls) == 1
 
 
 def test_short_entries_do_not_evict_existing_medium_lane(monkeypatch):
@@ -43,13 +43,12 @@ def test_short_entries_do_not_evict_existing_medium_lane(monkeypatch):
 
 @pytest.mark.parametrize("length", [0, 1023, 1024, 16384, 16385])
 @pytest.mark.parametrize("aggregate", [False, True])
-def test_cache_size_boundaries_keep_existing_aggregate_lane(monkeypatch, length, aggregate):
+def test_cache_size_boundaries_include_short_aggregate_strings(monkeypatch, length, aggregate):
     marker = "q" * length
     calls = _spy(monkeypatch, marker)
     value = [marker] * 4
     assert capture.sanitize_training_value(value, aggregate_parts=aggregate) == (value, [])
-    cached = (1024 <= length <= 16384 or
-              (length > 16384 if aggregate else length < 1024))
+    cached = length <= 16384 or aggregate
     assert len(calls) == (1 if cached else 4)
 
 

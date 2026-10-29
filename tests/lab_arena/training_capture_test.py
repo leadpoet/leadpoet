@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import pytest
 
-from lab_arena import broker as br, contracts, operations, trajectory, training_capture as capture
+from lab_arena import broker as br, contracts, operations, trajectory, training_capture as capture, training_export
 from lab_arena.service import LocalObjectStore
 from lab_arena.store import ArenaStoreUnavailable
 from tests.lab_arena.test_lab_arena_broker import (
@@ -143,6 +143,139 @@ def test_escaped_url_boundary_preserves_query_values_and_known_secret_redaction(
 def test_url_component_redaction_preserves_delimiters_and_is_a_fixed_point(value, expected):
     assert capture.sanitize_training_value(value)[0] == expected
     assert capture.sanitize_training_value(expected)[0] == expected
+
+
+PUBLIC_ARTICLE_URL = (
+    "https://www.prnewswire.com/news-releases/"
+    "biohaven-and-sk-biopharmaceuticals-enter-into-strategic-global-licensing-"
+    "agreement-for-novel-kv7-ion-channel-platform-and-opakalim-lead-candidate-"
+    "for-epilepsy-302860299.html"
+)
+
+
+def test_public_article_slug_survives_standalone_nested_and_aggregate_capture():
+    for value in (PUBLIC_ARTICLE_URL,
+                  json.dumps({"url": PUBLIC_ARTICLE_URL}),
+                  {"output": {"companies": [{"intent_signals": [{"url": PUBLIC_ARTICLE_URL}]}]}},
+                  {"provider_calls": [{"response": {"url": PUBLIC_ARTICLE_URL}}],
+                   "output": {"company_stage_evidence": [{"url": PUBLIC_ARTICLE_URL}]}}):
+        assert capture.sanitize_training_value(value) == (value, [])
+        assert capture.sanitize_training_value(value, aggregate_parts=True) == (value, [])
+
+
+def test_public_article_slug_survives_request_storage(tmp_path):
+    document = _document()
+    document["admitted_parameters"]["messages"][0]["content"] = PUBLIC_ARTICLE_URL
+    objects = LocalObjectStore(tmp_path)
+    pointer = capture.RequestCapture(objects)(document)
+    assert pointer["redacted"] is False and pointer["redactions"] == []
+    assert capture.read_request(objects, pointer)["admitted_parameters"]["messages"][0]["content"] == PUBLIC_ARTICLE_URL
+
+
+def test_public_article_slug_survives_native_receipt_export():
+    response = {"company_stage_evidence": [{"url": PUBLIC_ARTICLE_URL}],
+                "intent_signals": [{"url": PUBLIC_ARTICLE_URL}]}
+    terminal = {"body_b64": base64.b64encode(json.dumps(response).encode()).decode()}
+    assert training_export._response_value(terminal, "openrouter") == (response, [])
+
+
+def test_public_article_slug_does_not_hide_real_credentials():
+    token = "sk-TestOnly0123456789AbCdEfGhIjKlMnOpQrStUvWxYz"
+    known = "private+/=credential-value"
+    cases = (
+        PUBLIC_ARTICLE_URL + "?token=" + token,
+        "https://user:password@example.test/path/" + token,
+        PUBLIC_ARTICLE_URL + " Authorization: Bearer " + token,
+        "https://example.test/path/" + token,
+        PUBLIC_ARTICLE_URL + " " + known + " https://example.test/path",
+        "https://example.test/" + known + "/tail " + PUBLIC_ARTICLE_URL,
+        PUBLIC_ARTICLE_URL + "?next=" + quote(known, safe=""),
+        "https://example.test/" + quote(known, safe="") + "/tail " + PUBLIC_ARTICLE_URL,
+    )
+    for value in cases:
+        cleaned, reasons = capture.sanitize_training_value(value, secrets=(known,))
+        assert reasons == ["credential"]
+        assert token not in cleaned and known not in cleaned and quote(known, safe="") not in cleaned
+        assert capture.sanitize_training_value(cleaned)[0] == cleaned
+
+
+@pytest.mark.parametrize("value", [
+    "https://example.test/story-and-sk-abcdefghijklmnop-for-qrstuvwxyz-uvwxzy-foobar",
+    "https://example.test/story-and-sk-abcdefghijklmnop-for-qrstuvwxyz-uvwxzy-foobar.html",
+    "https://example.test/story-and-sk-Abcdefghijklmnop-for-qrstuvwxyz-uvwxzy-123456789.html",
+    "https://example.test/story?next=sk-abcdefghijklmnop-for-qrstuvwxyz-uvwxzy-123456789",
+    "https://example.test/story-and-sk-abcdefghijklmnop-for-qrstuvwxyz-uvwxzy-foobar-bazbaz-123456789.html",
+    "https://example.test/story-and-sk-or-v1-abcdefghijklmnop-for-news-report-123456.html",
+])
+def test_lowercase_hyphenated_secret_shape_in_url_still_redacts(value):
+    cleaned, reasons = capture.sanitize_training_value(value)
+    assert reasons == ["credential"]
+    assert "sk-" not in cleaned
+
+
+def test_exact_known_secret_inside_public_article_slug_still_redacts():
+    known = PUBLIC_ARTICLE_URL.split("and-", 1)[1].removesuffix(".html")
+    cleaned, reasons = capture.sanitize_training_value(PUBLIC_ARTICLE_URL, secrets=(known,))
+    assert known not in cleaned and reasons == ["credential"]
+    assert capture.sanitize_training_value(PUBLIC_ARTICLE_URL, secrets=(PUBLIC_ARTICLE_URL,)) == (
+        "[REDACTED]", ["credential"])
+
+
+@pytest.mark.parametrize("secret", ["arena", "public", "slug", "0-end", "a" * 32])
+def test_known_secrets_do_not_redact_internal_public_url_placeholders(monkeypatch, secret):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(capture.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
+    for value in (PUBLIC_ARTICLE_URL, json.dumps({"url": PUBLIC_ARTICLE_URL}),
+                  {"evidence": [PUBLIC_ARTICLE_URL, PUBLIC_ARTICLE_URL]}):
+        for aggregate in (False, True):
+            assert capture.sanitize_training_value(
+                value, secrets=(secret,), aggregate_parts=aggregate) == (value, [])
+
+
+def test_public_url_placeholder_does_not_hide_decoded_query_or_real_secret(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(capture.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
+    secret = "arena"
+    # Mixed percent encoding is decoded by query parsing, after the first
+    # whole-text exact-secret scan. That second check must remain active.
+    value = PUBLIC_ARTICLE_URL + "?next=%61re%6Ea#arena"
+    cleaned, reasons = capture.sanitize_training_value(value, secrets=(secret,))
+    assert cleaned.startswith(PUBLIC_ARTICLE_URL + "?")
+    assert "%5BREDACTED%5D" in cleaned and cleaned.endswith("#[REDACTED]")
+    assert reasons == ["credential"] and "arena-public-slug" not in cleaned
+    assert capture.sanitize_training_value(
+        "Authorization: " + PUBLIC_ARTICLE_URL, secrets=(secret,)) == (
+            "Authorization: [REDACTED]", ["credential"])
+
+
+@pytest.mark.parametrize("prefix", ["Bearer sk-", "sk-abcdefghijklmnop"])
+def test_public_url_placeholder_survives_credential_prefix_removing_scheme(monkeypatch, prefix):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(capture.uuid, "uuid4", lambda: SimpleNamespace(hex="a" * 32))
+    value = prefix + PUBLIC_ARTICLE_URL
+    expected = capture.sanitize_training_value(value)
+    assert expected[1] == ["credential"]
+    assert capture.sanitize_training_value(value, secrets=("arena",)) == expected
+    assert "arena-public-slug" not in expected[0]
+
+
+def test_verified_public_url_exception_does_not_cover_other_hosts_or_auth_contexts():
+    lookalike = PUBLIC_ARTICLE_URL.replace("www.prnewswire.com", "example.test")
+    assert capture.sanitize_training_value(lookalike)[1] == ["credential"]
+    assert capture.sanitize_training_value("Authorization: " + PUBLIC_ARTICLE_URL) == (
+        "Authorization: [REDACTED]", ["credential"])
+    assert capture.sanitize_training_value("password=" + PUBLIC_ARTICLE_URL) == (
+        "password=[REDACTED]", ["credential"])
+
+
+def test_many_exact_public_article_urls_stay_exact_with_bounded_cache():
+    repeated = " ".join([PUBLIC_ARTICLE_URL] * 12)
+    value = {"input_snapshots": {"run": [repeated] * 12},
+             "provider_calls": [{"response": repeated}]}
+    assert capture.sanitize_training_value(value, aggregate_parts=True) == (value, [])
 
 
 @pytest.mark.parametrize("value,secret", [

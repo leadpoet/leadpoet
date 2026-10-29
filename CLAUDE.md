@@ -49,6 +49,23 @@ recorded-evidence diagnostic proves fresh production retrieval. Authority ends
 when the requested repair and production verification are complete. Keep
 AGENTS.md and CLAUDE.md byte-identical.
 
+## Scoped production authorization: October 28 training readiness fixes
+
+The user authorized all four audited training-readiness changes: preserve valid
+public evidence URLs during credential filtering; expose retained verdict details
+and separate training review flags; prepare reviewed datasets bound to exact
+record hashes; and report missing audit counters as unknown. Implement, test
+against the saved production cases and adversarial controls, independently review,
+safely merge, canonically deploy where applicable, and verify fresh production
+exports. Preserve all raw captured data, original labels and hashes, miner behavior,
+model settings, scoring, billing, rewards, and frozen 80%/1% eligibility rules.
+Training-quality selection must remain separate from raw capture and competition
+eligibility. Do not add new services, dependencies, provider reruns, database
+migrations, or Research Lab machinery. Internal agents own only their assigned
+implementation and tests; the coordinating task owns commits, release and live
+verification. Respect existing deployment locks and other restart owners. This
+authority ends when the four changes and production verification are complete.
+
 ## Scoped authorization: October 28 aggregate exporter text reuse
 
 The user authorized bounded reuse of exact plain-string sanitizer results only

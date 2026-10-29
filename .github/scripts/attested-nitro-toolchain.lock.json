@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "nitro_cli_version": "Nitro CLI 1.4.2",
+  "nitro_cli_sha256": "e49c91405b1bdeec5b253ae2e6058f6ce3ba4755ebc65bf7fe65acebc05ee50c",
+  "packages": [
+    {
+      "name": "aws-nitro-enclaves-cli",
+      "url": "https://cdn.amazonlinux.com/al2023/blobstore/26b2b22d2cfcb92cdc283893ee3f2991daa87bba53867bcafb54c8871405b8b6/aws-nitro-enclaves-cli-1.4.2-0.amzn2023.x86_64.rpm",
+      "sha256": "26b2b22d2cfcb92cdc283893ee3f2991daa87bba53867bcafb54c8871405b8b6"
+    },
+    {
+      "name": "aws-nitro-enclaves-cli-devel",
+      "url": "https://cdn.amazonlinux.com/al2023/blobstore/1f3c79f6a1ca6d19ef56358836704f4bcabe81b353a3784630efa595d887d76b/aws-nitro-enclaves-cli-devel-1.4.2-0.amzn2023.x86_64.rpm",
+      "sha256": "1f3c79f6a1ca6d19ef56358836704f4bcabe81b353a3784630efa595d887d76b"
+    }
+  ],
+  "blobs": {
+    "bzImage": "210eda749c1308eb60671a579d24db5e8a3477cb7a247cf313c286b09fe2d857",
+    "bzImage.config": "9378dea490ed6c698c3d23b346ed08e49dae52d74a59cee2673b8a7b1951fc5b",
+    "cmdline": "10d7d9dd205d4596d45997d17434f26207525f129d171a51f9859b1af9f4a07a",
+    "init": "c4acb866e8925c171b43517f3a88a6989f5a2da3a6d3e6594f75bedc6d116a27",
+    "linuxkit": "e57bb1779b348da7eae118a8e0a034d2aa4c28205c07db07dea8285ff206bb69",
+    "nsm.ko": "6bd2b09422c2f2f58c6ecf1cfd55216bea9b99a6d591261a9eca40027291316b"
+  }
+}

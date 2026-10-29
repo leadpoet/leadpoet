@@ -49,6 +49,19 @@ or restart production in this step. The coordinating task owns AWS writes and
 verification; independent reviewers are read-only. This authority ends after the
 foundation is provisioned and verified, with the next step reported to the user.
 
+## Scoped authorization: October 29 known-failure response recovery
+
+The user authorized the narrow fix that prevents a proved complete failed
+Deepline response from starting an unnecessary worker success-recovery lookup.
+Implement focused regressions, independent review, safe merge, canonical
+deployment and live verification. Preserve initial billing polling, uncertain
+costs and delayed settlement, exact worker responses, lost/unknown response
+recovery, submitted miner behavior, scoring, capture and historical records.
+Internal agents may test and commit only; the coordinating task owns push,
+merge, deployment and production verification. Preserve all active leases,
+restart owners and shared guards, including concurrent AWS migration work.
+This authority ends after the scoped fix and live verification are complete.
+
 ## Scoped production authorization: October 28 training readiness fixes
 
 The user authorized all four audited training-readiness changes: preserve valid

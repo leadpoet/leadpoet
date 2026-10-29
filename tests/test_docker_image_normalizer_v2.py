@@ -276,32 +276,6 @@ def test_normalizer_rejects_loaded_config_change(
         )
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_temporary_config_diagnostics_require_explicit_gate(monkeypatch, capsys, enabled):
-    monkeypatch.setenv("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS", "1" if enabled else "")
-    config = {"config": {"Env": ["PYTHON_VERSION=3.12.15"]}, "rootfs": {"diff_ids": ["sha256:example"]}}
-    payload = json.dumps(config).encode()
-    normalizer._emit_canonical_config_diagnostic(config, payload)
-    output = capsys.readouterr()
-    assert not output.out
-    assert (payload.decode() in output.err) is enabled
-
-
-@pytest.mark.parametrize("value", ["UNKNOWN_ENV=private-value", "PATH=https://user:private-value@example.com"])
-def test_temporary_config_diagnostics_withhold_sensitive_material(monkeypatch, capsys, value):
-    monkeypatch.setenv("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS", "1")
-    config = {"config": {"Env": [value]}}
-    normalizer._emit_canonical_config_diagnostic(config, json.dumps(config).encode())
-    output = capsys.readouterr()
-    assert "private-value" not in output.err
-    assert "withheld" in output.err
-
-
-def test_workflow_config_diagnostics_are_reproduction_only():
-    workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/attested-v2-release.yml").read_text()
-    assert "GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS: ${{ needs.source.outputs.mode == 'reproduce' && '1' || '' }}" in workflow
-
-
 def _entry(name, content=None, **metadata):
     member = tarfile.TarInfo(name)
     member.type = tarfile.DIRTYPE if content is None else tarfile.REGTYPE
@@ -431,7 +405,9 @@ def test_whiteout_precedes_same_layer_recreation_regardless_alias_order(tmp_path
     assert result[2][2] == []
 
 
-@pytest.mark.parametrize("unfamiliar", ["/absolute-directory", "../traversal-directory"])
+@pytest.mark.parametrize("unfamiliar", [
+    "/absolute-directory", "../traversal-directory", "z/../../traversal-directory",
+])
 def test_unfamiliar_layer_paths_preserve_records_and_clear_comparison_state(tmp_path, unfamiliar):
     result = _normalize_layers(tmp_path, "unfamiliar", [
         [_entry("etc")], [_entry(unfamiliar), _entry("etc")],
@@ -493,3 +469,110 @@ def test_elided_child_noop_does_not_invalidate_parent_metadata(tmp_path):
         [_entry("etc"), _entry("etc/sub")], [_entry("etc/sub")], [_entry("etc")],
     ])
     assert result[2][1:] == [[], []]
+
+
+@pytest.mark.parametrize("marker", ["tmp/.wh.enclave_wheelhouse.py", "tmp/.wh..wh..opq"])
+def test_captured_whiteout_mode_and_unused_link_normalize_identically(tmp_path, marker):
+    gateway = _normalize_layers(tmp_path, "whiteout-gateway", [[
+        _entry(marker, b"", mode=0, linkname=""),
+    ]])
+    validator = _normalize_layers(tmp_path, "whiteout-validator", [[
+        _entry(marker, b"", mode=0o600, linkname="tmp/enclave_wheelhouse.py"),
+    ]])
+    assert gateway[0] == validator[0]
+
+
+def test_captured_redundant_parent_with_elided_children_matches_empty_layer(tmp_path):
+    base = [_entry("usr"), _entry("usr/share"), _entry("usr/share/man"),
+            _entry("usr/share/man/man1"), _entry("usr/share/man/man1/topic.1", b"manual")]
+    gateway = _normalize_layers(tmp_path, "man-gateway", [base, []])
+    validator = _normalize_layers(tmp_path, "man-validator", [base, [
+        _entry("usr/share/man"), _entry("usr/share/man/man1"),
+    ]])
+    assert gateway[0] == validator[0]
+    assert validator[2][-1] == []
+    filesystem = tmp_path / "man-filesystem"
+    _replay_oci_layers(tmp_path / "man-validator-normalized.tar", filesystem)
+    assert (filesystem / "usr/share/man").stat().st_mtime_ns == 0
+    assert (filesystem / "usr/share/man/man1").stat().st_mtime_ns == 0
+    assert (filesystem / "usr/share/man/man1/topic.1").read_bytes() == b"manual"
+
+
+@pytest.mark.parametrize("name,content,kind", [
+    ("tmp/.wh.", b"", tarfile.REGTYPE),
+    ("tmp/.wh..", b"", tarfile.REGTYPE),
+    ("tmp/.wh...", b"", tarfile.REGTYPE),
+    ("tmp/.wh.file", b"nonempty", tarfile.REGTYPE),
+    ("tmp/.wh.file", None, tarfile.SYMTYPE),
+    ("tmp/.wh.file", None, tarfile.LNKTYPE),
+    ("tmp/.wh.file", None, tarfile.DIRTYPE),
+    ("/absolute/.wh.file", b"", tarfile.REGTYPE),
+    ("../traversal/.wh.file", b"", tarfile.REGTYPE),
+    ("tmp/ordinary-file", b"", tarfile.REGTYPE),
+])
+def test_noncanonical_whiteout_cases_and_ordinary_files_keep_attributes(name, content, kind):
+    member, _ = _entry(name, content, type=kind, mode=0o600, linkname="target")
+    normalized = normalizer._normalized_member(member)
+    assert normalized.mode == 0o600
+    assert normalized.linkname == "target"
+    assert normalized.type == kind
+
+
+@pytest.mark.parametrize("change", [
+    {"uid": 123}, {"gid": 456},
+    {"pax_headers": {"SCHILY.xattr.user.marker": "changed"}},
+])
+def test_whiteout_ownership_and_pax_stay_bound(tmp_path, change):
+    base = _normalize_layers(tmp_path, "base-whiteout", [[_entry("tmp/.wh.file", b"")]])
+    changed = _normalize_layers(tmp_path, "changed-whiteout", [[_entry("tmp/.wh.file", b"", **change)]])
+    assert base[0] != changed[0]
+
+
+def _replay_oci_layers(path, filesystem):
+    filesystem.mkdir()
+    with tarfile.open(path) as image:
+        manifest = json.load(image.extractfile("manifest.json"))[0]
+        for name in manifest["Layers"]:
+            with tarfile.open(fileobj=image.extractfile(name)) as layer:
+                members = layer.getmembers()
+                for member in members:
+                    relative = Path(member.name)
+                    if not relative.name.startswith(".wh."):
+                        continue
+                    assert member.isreg() and member.size == 0
+                    if relative.name == ".wh..wh..opq":
+                        parent = filesystem / relative.parent
+                        targets = list(parent.iterdir()) if parent.exists() else []
+                    else:
+                        targets = [filesystem / relative.parent / relative.name[4:]]
+                    for target in targets:
+                        if target.is_dir() and not target.is_symlink():
+                            shutil.rmtree(target)
+                        elif target.exists() or target.is_symlink():
+                            target.unlink()
+                layer.extractall(filesystem, members=[
+                    member for member in members
+                    if not Path(member.name).name.startswith(".wh.")
+                ])
+
+
+@pytest.mark.parametrize("opaque", [False, True])
+def test_whiteout_normalization_preserves_actual_deletion_and_directory_times(tmp_path, opaque):
+    base = [_entry("tmp"), _entry("tmp/delete", b"remove"), _entry("tmp/keep", b"preserve")]
+    marker = "tmp/.wh..wh..opq" if opaque else "tmp/.wh.delete"
+    for label, mode, link in [("gateway", 0, ""), ("validator", 0o600, "tmp/enclave_wheelhouse.py")]:
+        overlay = [_entry("tmp"), _entry(marker, b"", mode=mode, linkname=link)]
+        if opaque:
+            overlay.append(_entry("tmp/new", b"new-data"))
+        _normalize_layers(tmp_path, label, [base, overlay])
+        for variant in ["", "-normalized"]:
+            filesystem = tmp_path / (label + variant + "-filesystem")
+            _replay_oci_layers(tmp_path / (label + variant + ".tar"), filesystem)
+            assert not (filesystem / "tmp/delete").exists()
+            assert not list((filesystem / "tmp").glob(".wh.*"))
+            assert (filesystem / "tmp").stat().st_mtime_ns == 0
+            if opaque:
+                assert not (filesystem / "tmp/keep").exists()
+                assert (filesystem / "tmp/new").read_bytes() == b"new-data"
+            else:
+                assert (filesystem / "tmp/keep").read_bytes() == b"preserve"

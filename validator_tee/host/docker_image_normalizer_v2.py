@@ -7,7 +7,6 @@ import copy
 import hashlib
 import json
 import os
-import re
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
@@ -22,35 +21,6 @@ class DockerImageNormalizationError(RuntimeError):
 
 
 _EPOCH = "1970-01-01T00:00:00Z"
-
-
-def _emit_canonical_config_diagnostic(config: dict[str, Any], payload: bytes) -> None:
-    # Temporary reproduction-only evidence. Remove after identifying the
-    # cross-host delta and proving the regression fix on both real builders.
-    if os.environ.get("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS") != "1":
-        return
-    allowed_env = {
-        "PATH", "LANG", "GPG_KEY", "PYTHON_VERSION", "PYTHON_SHA256",
-        "PYTHONDONTWRITEBYTECODE", "PYTHONHASHSEED", "SOURCE_DATE_EPOCH",
-        "LEADPOET_ENCLAVE_ROLE", "PYTHONPATH",
-    }
-    env = config.get("config", {}).get("Env", [])
-    text = payload.decode("utf-8")
-    sensitive = re.search(
-        r"(?i)(?:password|secret|token|authorization|(?:https?|all)_proxy)[\"\s]*[:=]"
-        r"|(?:AKIA|ASIA)[A-Z0-9]{16}|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+"
-        r"|://[^/\s:\"\\]+:[^/\s@\"\\]+@|BEGIN [A-Z ]*PRIVATE KEY",
-        text,
-    )
-    if (
-        len(payload) > 65536
-        or not isinstance(env, list)
-        or any(not isinstance(item, str) or item.split("=", 1)[0] not in allowed_env for item in env)
-        or sensitive
-    ):
-        print("Canonical Docker config diagnostic withheld by bounds or credential check", file=sys.stderr)
-        return
-    print("Canonical Docker config diagnostic: " + text, file=sys.stderr)
 
 
 def _normalization_temp_parent() -> Optional[Path]:
@@ -122,6 +92,17 @@ def _normalized_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
         for key, value in member.pax_headers.items()
         if key not in {"atime", "ctime", "mtime"}
     }
+    path = PurePosixPath(member.name)
+    if (
+        not path.is_absolute() and ".." not in path.parts
+        and path.name.startswith(".wh.") and path.name[4:] not in {"", ".", ".."}
+        and member.type in {tarfile.REGTYPE, tarfile.AREGTYPE} and member.size == 0
+    ):
+        # Docker overlay exports use 0600 and can retain a stale Linkname.
+        # OCI consumes these deletion markers without creating regular files;
+        # neither permission bits nor REGTYPE Linkname affect the deletion.
+        normalized.mode = 0
+        normalized.linkname = ""
     return normalized
 
 
@@ -142,13 +123,11 @@ def normalize_layer_archive(
         destination, "w:"
     ) as output:
         members = sorted(original.getmembers(), key=lambda item: item.name)
+        selected_members: list[tarfile.TarInfo] = []
+        eligible_directories: set[str] = set()
         directory_counts: dict[str, int] = {}
-        directories_with_descendants: set[str] = set()
         for member in members:
             path = PurePosixPath(member.name)
-            directories_with_descendants.update(
-                parent.as_posix() for parent in path.parents
-            )
             if member.isdir():
                 name = path.as_posix()
                 directory_counts[name] = directory_counts.get(name, 0) + 1
@@ -171,6 +150,13 @@ def normalize_layer_archive(
                     for old in list(inherited_directories):
                         if old == target or old.startswith(target + "/"):
                             del inherited_directories[old]
+                elif not member.isdir():
+                    # Resolve type replacement before testing aliases of any
+                    # descendant directory for inherited metadata equality.
+                    name = path.as_posix()
+                    for old in list(inherited_directories):
+                        if old == name or old.startswith(name + "/"):
+                            del inherited_directories[old]
         for member in members:
             normalized = _normalized_member(member)
             if inherited_directories is not None:
@@ -188,22 +174,31 @@ def normalize_layer_archive(
                             "mode", "uid", "gid", "size", "mtime", "type",
                             "linkname", "uname", "gname", "devmajor", "devminor",
                         )) + (tuple(sorted(normalized.pax_headers.items())),)
-                        redundant = (
+                        eligible = (
                             directory_counts[name] == 1
-                            # Child changes can update parent mtime during
-                            # extraction. Its header must restore that time.
-                            and name not in directories_with_descendants
                             and inherited_directories.get(name) == metadata
                         )
-                        if redundant:
-                            continue
+                        if eligible:
+                            eligible_directories.add(name)
                         inherited_directories[name] = metadata
                     else:
                         # A file, symlink, or device replaces any old directory.
                         for old in list(inherited_directories):
                             if old == name or old.startswith(name + "/"):
                                 del inherited_directories[old]
-            content = original.extractfile(member) if member.isfile() else None
+            selected_members.append(normalized)
+        # A parent header is required for every retained child operation, but
+        # not when all descendants are themselves proven directory no-ops.
+        required_ancestors: set[str] = set()
+        for member in selected_members:
+            path = PurePosixPath(member.name)
+            if not member.isdir() or path.as_posix() not in eligible_directories:
+                required_ancestors.update(parent.as_posix() for parent in path.parents)
+        redundant_directories = eligible_directories - required_ancestors
+        for normalized in selected_members:
+            if normalized.isdir() and PurePosixPath(normalized.name).as_posix() in redundant_directories:
+                continue
+            content = original.extractfile(normalized) if normalized.isfile() else None
             output.addfile(normalized, content)
             path = PurePosixPath(normalized.name)
             emitted_ancestors.update(parent.as_posix() for parent in path.parents)
@@ -299,7 +294,6 @@ def normalize_saved_image(
         config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
-        _emit_canonical_config_diagnostic(config, config_bytes)
         config_hash = hashlib.sha256(config_bytes).hexdigest()
         normalized_config_name = "blobs/sha256/%s" % config_hash
         normalized_config_path = root / normalized_config_name

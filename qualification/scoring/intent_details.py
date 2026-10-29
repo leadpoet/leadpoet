@@ -925,13 +925,22 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
                     if context_index is not None:
                         references.append(context_index)
             observed_pairs: set[tuple[str, str]] = set()
-            for quote_key, url_key in (
-                ("quote", "url"), ("evidence_quote", "evidence_url"),
-            ):
-                quote = raw_evidence.get(quote_key)
+            pairs = [
+                (raw_evidence.get(quote_key), raw_evidence.get(url_key))
+                for quote_key, url_key in (
+                    ("quote", "url"), ("evidence_quote", "evidence_url"),
+                )
+            ]
+            # These pairs were validated against the final matched industry
+            # receipt before projection. Keep each citation separately bound;
+            # the optional body window need not include every cited passage.
+            pairs.extend(
+                (item["quote"], item["url"])
+                for item in raw_evidence.get("supporting_evidence", [])
+            )
+            for quote, url in pairs:
                 if not isinstance(quote, str) or not quote:
                     continue
-                url = raw_evidence.get(url_key)
                 url = url if isinstance(url, str) else ""
                 context_url = (
                     company_context.get("url")
@@ -950,13 +959,16 @@ def _project_admitted_evidence(document: dict[str, Any]) -> None:
                 )
                 if company_index is not None:
                     references.append(company_index)
+            source_urls = [
+                raw_evidence[key][:512]
+                for key in ("url", "evidence_url")
+                if isinstance(raw_evidence.get(key), str) and raw_evidence[key]
+            ]
+            for item in raw_evidence.get("supporting_evidence", []):
+                if item["url"][:512] not in source_urls:
+                    source_urls.append(item["url"][:512])
             company_projection[str(dimension)] = {
-                "source_urls": [
-                    raw_evidence[key][:512]
-                    for key in ("url", "evidence_url")
-                    if isinstance(raw_evidence.get(key), str)
-                    and raw_evidence[key]
-                ],
+                "source_urls": source_urls,
                 "evidence_source_indexes": references,
             }
 
@@ -1535,6 +1547,25 @@ def review_evidence(
             if key in {"url", "quote", "evidence_url", "evidence_quote"}
             and isinstance(value, str) and value
         }
+    identity = _mapping(
+        _mapping(dimensions.get("identity")).get("web_identity_receipt")
+    )
+    if (
+        company_fit_receipt.get("decision") == "match"
+        and identity.get("decision") == "match"
+        and all(isinstance(identity.get(key), str) and identity[key].strip()
+                for key in (
+                    "observed_name", "observed_domain", "observed_linkedin_slug",
+                ))
+        and "industry" in company_facts
+    ):
+        from qualification.scoring.lead_scorer import _industry_supporting_pairs
+
+        support = _industry_supporting_pairs(dimensions)
+        if support:
+            company_facts["industry"]["supporting_evidence"] = [
+                {"url": url, "quote": quote} for url, quote in support
+            ]
     paragraph = validate_intent_details_text(company.intent_details)
     paragraph_terms = {
         word[:6] for word in re.findall(r"[\w%$]+", paragraph.casefold())

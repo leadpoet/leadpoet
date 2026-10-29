@@ -170,10 +170,16 @@ def test_complete_request_prepare_storage_readback_and_export_bytes(tmp_path):
     expected = dict(source, schema_version=capture.SCHEMA_VERSION,
                     privacy={"redacted": False, "redactions": []})
     assert restored == expected
-    assert hashlib.sha256(prepared.compressed).hexdigest() == "fdb81e3b6bfa82143568f33ff0875c61c5728f73f3a0dd7a709dd24860ba430b"
+    expected_raw = json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    # These are the exact pre-900 canonical bytes. Python 3.11 delegates the
+    # gzip OS header to zlib, so compressed parity belongs to the same runtime.
+    assert hashlib.sha256(expected_raw).hexdigest() == "60d48460c751028241280e0db92457a72fd06a418727ad2ff3d895c2c115d566"
+    assert prepared.pointer["sha256"] == "sha256:60d48460c751028241280e0db92457a72fd06a418727ad2ff3d895c2c115d566"
+    assert prepared.compressed == gzip.compress(expected_raw, compresslevel=6, mtime=0)
+    assert objects.get(pointer["ref"]) == prepared.compressed
     example = {"provider_calls": [{"request_capture": restored}] * 3}
     exported, reasons = capture.sanitize_training_value(example, aggregate_parts=True)
     assert exported == example and reasons == []
     encoded = json.dumps(exported, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
     assert hashlib.sha256(encoded).hexdigest() == "bf7c06ef6bdaf8d8b8c4253ab25c8eb4bca0e4228b038a2cca534408e0a0b6b1"
-    assert gzip.decompress(objects.get(pointer["ref"])) == json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    assert gzip.decompress(objects.get(pointer["ref"])) == expected_raw

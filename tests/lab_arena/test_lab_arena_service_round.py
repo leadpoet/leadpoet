@@ -16,6 +16,7 @@ import json
 import subprocess
 import tarfile
 import threading
+import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -761,14 +762,41 @@ class Harness:
         self.clock.now = datetime.now(timezone.utc)
         runners = [self.runner(i) for i in range(count)]
         try:
-            while any(r.run_once() for r in runners):
-                pass
+            deadline = time.monotonic() + 60
+            while True:
+                while any(r.run_once() for r in runners):
+                    pass
+                # Real PostgreSQL controls retry admission. A synthetic service
+                # clock cannot make a freshly queued judge retry eligible.
+                if not self.wait_for_score_retry_backoff(deadline=deadline):
+                    break
         finally:
             for r in runners:
                 r.close()
             self.clock.now = scheduled_now
         abandoned = [c for r in runners for c in r.completed if c.get("error")]
         assert not abandoned, "runners abandoned work: %s; api errors: %s" % (abandoned[:3], InProcessApi.errors[:3])
+
+    def wait_for_score_retry_backoff(self, *, deadline=None, max_attempt=2) -> bool:
+        """Wait for pending judge retries on the real database clock."""
+        deadline = deadline if deadline is not None else time.monotonic() + 60
+        waited = False
+        while True:
+            with self.connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT EXISTS (SELECT 1 FROM public.lab_arena_runs "
+                    "WHERE round_id=%s AND kind='score' AND status='pending' "
+                    "AND attempt BETWEEN 2 AND %s AND created_at+make_interval(secs=>"
+                    "LEAST(900::numeric,30*power(2::numeric,LEAST(attempt-2,5)))::integer)"
+                    ">clock_timestamp())",
+                    (self.round_id, max_attempt),
+                )
+                waiting = cursor.fetchone()[0]
+            if not waiting:
+                return waited
+            assert time.monotonic() < deadline, 'judge retry backoff exceeded 60 seconds'
+            waited = True
+            time.sleep(0.25)
 
     def advance_until(self, target: str, *, runners: int = 2, max_steps: int = 60) -> Dict[str, Any]:
         """Drive the round to ``target``; validators claim and score whenever a scoring window is open."""
@@ -784,7 +812,11 @@ class Harness:
                 self.clock.advance_to(self.schedule()["stage_2_start"])
             result = self.service.advance_round(self.round_id)
             assert result.get("status") not in ("cancelled", "terminal", "retry", "stale"), (status, result)
-        raise AssertionError("round did not reach %s (at %s)" % (target, self.status()))
+        from collections import Counter
+        summary = Counter((run['status'], run['attempt'], run['terminal_cause'])
+            for run in self.service.store.list_runs(self.round_id, kind='score'))
+        raise AssertionError("round did not reach %s (at %s), last=%s, score_runs=%s" %
+                             (target, self.status(), result, dict(summary)))
 
     def schedule(self):
         return self.service.store.get_round(self.round_id)["configuration_doc"]["schedule"]
@@ -1489,7 +1521,7 @@ def test_restart_finishes_a_partial_participant_freeze_without_changing_baseline
     harness.service.cancel(harness.round_id, sorted(svc.CANCEL_REASONS.values())[0])
 
 
-def test_infrastructure_gap_cancels_and_model_failures_score_zero(scenario_connect, tmp_path):
+def test_execution_gap_stays_unpublished_and_model_failures_score_zero(scenario_connect, tmp_path):
     harness = Harness(scenario_connect, tmp_path, challengers=["Echo", "Foxtrot"], runners=["alpha", "beta"])
     service = harness.service
     configuration = service.create_round(
@@ -1523,8 +1555,16 @@ def test_infrastructure_gap_cancels_and_model_failures_score_zero(scenario_conne
         harness.clock.now = scheduled_now
     harness.clock.advance_to(harness.schedule()["stage_1_close"])
     closed = service.advance_round(harness.round_id)
-    assert closed["status"] == "cancelled"
-    assert closed["incomplete_assignments"] == assignments - 1
+    assert closed == {'status': 'ok', 'work_items': 1}
+    assert harness.status() == 'stage1_closed'
+    gap_runs = service.store.list_runs(harness.round_id, stage=1, kind='execute')
+    assert sum(run['status'] == 'accepted' for run in gap_runs) == 1
+    assert sum(run['terminal_cause'] == 'stage_closed' for run in gap_runs) == assignments - 1
+    assert all(run['per_icp_score'] is None for run in gap_runs)
+    assert service.store.get_round(harness.round_id)['publication_doc'] is None
+    # Current partial-execution policy retains the measured work. End this
+    # explicit gap scenario before starting the separate model-error scenario.
+    assert service.cancel(harness.round_id, svc.CANCEL_REASONS['operator'])['status'] == 'cancelled'
 
     # Model failure is a miner result. It records zeros when all infrastructure
     # work completes and does not cancel the round.
@@ -1796,7 +1836,39 @@ def test_fresh_completion_signature_keeps_the_same_result_idempotent(scenario_co
     ) == 1
 
 
-def test_persistent_stage_one_judge_failure_zeros_one_icp_and_publishes(scenario_connect, tmp_path):
+def _recover_failed_judgments(harness, failed_runs, *, runners=2, target="published"):
+    """472 retains failed evidence and requires a real accepted successor."""
+    store = harness.service.store
+    failed_before = {run['run_id']: store.get_run(run['run_id']) for run in failed_runs}
+    ledger_before = {run_id: store.list_ledger(run_id=run_id) for run_id in failed_before}
+    assert failed_before
+    assert store.get_round(harness.round_id)['publication_doc'] is None
+    for run in failed_before.values():
+        assert run['status'] == 'failed'
+        assert store.get_run(run['scored_run_id'])['per_icp_score'] is None
+    # The normal transition materializes the successor. Only the real database
+    # clock can make its 30s/60s queue backoff eligible.
+    harness.service.advance_round(harness.round_id)
+    harness.wait_for_score_retry_backoff(max_attempt=3)
+    harness.advance_until(target, runners=runners)
+    for run_id, before in failed_before.items():
+        assert store.get_run(run_id) == before
+        assert store.list_ledger(run_id=run_id) == ledger_before[run_id]
+        accepted = [run for run in store.list_runs(harness.round_id, kind='score')
+                    if run['assignment_id'] == before['assignment_id']
+                    and run['status'] == 'accepted']
+        assert len(accepted) == 1
+        judge = accepted[0]
+        assert judge['attempt'] > before['attempt']
+        source = store.get_run(judge['scored_run_id'])
+        assert source['run_id'] == before['scored_run_id']
+        assert source['kind'] == 'execute' and source['status'] == 'accepted'
+        assert source['per_icp_score'] is not None
+        assert all(judge[field] == source[field] for field in
+                   ('round_id', 'submission_id', 'miner_hotkey', 'stage', 'icp_position'))
+
+
+def test_persistent_stage_one_judge_failure_recovers_before_publication(scenario_connect, tmp_path):
     harness = Harness(
         scenario_connect,
         tmp_path,
@@ -1815,13 +1887,15 @@ def test_persistent_stage_one_judge_failure_zeros_one_icp_and_publishes(scenario
     _run_stage_one_to_scoring(harness, participants, runners=2)
     harness.run_stage_with_runners(2)
 
-    closed = harness.service.advance_round(harness.round_id)
-    harness.advance_until("published", runners=2)
+    held = harness.service.advance_round(harness.round_id)
+    assert held == {'status': 'waiting', 'round_status': 'stage1_scoring'}
+    failed_before = [run for run in harness.service.store.list_runs(
+        harness.round_id, stage=1, kind='score') if run['status'] == 'failed']
+    assert len(failed_before) == 2
+    harness.sandbox.judge_failures.clear()
+    _recover_failed_judgments(harness, failed_before)
 
     row = harness.service.store.get_round(harness.round_id)
-    assert closed["status"] == "closed"
-    assert closed["round_status"] == "stage1_judged"
-    assert closed["incomplete_assignments"] == 1
     assert row["status"] == "published" and row["cancel_reason"] is None
     assert row["publication_doc"] is not None and row["finalists"]
     score_runs = harness.service.store.list_runs(
@@ -1862,7 +1936,7 @@ def test_persistent_stage_one_judge_failure_zeros_one_icp_and_publishes(scenario
         if run["submission_id"] == failed["submission_id"]
         and run["icp_position"] == 0
     ]
-    assert len(affected) == 1 and affected[0]["per_icp_score"] == 0
+    assert len(affected) == 1 and affected[0]["per_icp_score"] > 0
 
 
 def test_systemic_verifier_reason_survives_runner_completion_and_publication(
@@ -1953,11 +2027,10 @@ def test_systemic_verifier_reason_survives_runner_completion_and_publication(
     harness.run_stage_with_runners(1)
     closed = harness.service.advance_round(harness.round_id)
 
-    assert closed["status"] == "closed"
-    assert closed["round_status"] == "stage1_judged"
-    assert closed["incomplete_assignments"] == 1
+    assert closed == {'status': 'waiting', 'round_status': 'stage1_scoring'}
     round_row = harness.service.store.get_round(harness.round_id)
-    assert round_row["status"] == "stage1_judged"
+    assert round_row["status"] == "stage1_scoring"
+    assert round_row['publication_doc'] is None
     failed_runs = [
         run
         for run in harness.service.store.list_runs(
@@ -1979,7 +2052,8 @@ def test_systemic_verifier_reason_survives_runner_completion_and_publication(
     assert {
         run["result_doc"]["failure_diagnostic"]["reason"] for run in reloaded
     } == {"provider_error"}
-    harness.advance_until("published", runners=1)
+    monkeypatch.setattr(harness.sandbox, 'run_icp', original_run_icp)
+    _recover_failed_judgments(harness, failed_runs, runners=1)
     published = harness.service.store.get_round(harness.round_id)
     assert published["status"] == "published"
     assert published["publication_doc"] is not None
@@ -2200,7 +2274,7 @@ def test_exhausted_company_evidence_continues_remaining_companies_and_round(
     assert_canary_absent(harness, scenario_connect)
 
 
-def test_exhausted_judge_failure_leaves_one_icp_unscored(
+def test_two_failed_judgments_stay_unscored_until_an_accepted_successor(
     scenario_connect, tmp_path
 ):
     harness = Harness(
@@ -2246,35 +2320,28 @@ def test_exhausted_judge_failure_leaves_one_icp_unscored(
         assert result["status"] == "leased", result
         return result, token
 
-    accepted, accepted_token = claim_for(visible, 0)
-    accepted_ref = "arena/%s/outputs/%s.json" % (
-        harness.round_id,
-        accepted["run_id"],
-    )
-    scored_execution = store.get_run(accepted["scored_run_id"])
-    companies = json.loads(
-        harness.objects.get(scored_execution["output_ref"]).decode("utf-8")
-    )["companies"]
-    assert companies
-    icp = harness.service.benchmark_icps(harness.round_id)[
-        int(accepted["icp_position"])
-    ]
-    harness.objects.put(
-        accepted_ref,
-        json.dumps(
-            scoring.build_scoring_output(
-                accepted["scored_run_id"],
-                deterministic_scorer(companies, icp, False),
-            )
-        ).encode("utf-8"),
-    )
-    assert store.complete_attempt(
-        run_id=accepted["run_id"],
-        lease_token_hash=hash_lease_token(accepted_token),
-        result={"terminal_status": "accepted"},
-        terminal_cause="accepted",
-        output_ref=accepted_ref,
-    )["status"] == "accepted"
+    # Complete a healthy judgment through the actual runner/API so its raw
+    # output and immutable company-cache evidence have the same authority.
+    scheduled_now = harness.clock.now
+    harness.clock.now = datetime.now(timezone.utc)
+    runner = harness.runner(0, parallel=1)
+    try:
+        assert runner.run_once(max_claims=1) == 1
+        assert len(runner.completed) == 1
+        accepted = store.get_run(runner.completed[0]['run_id'])
+    finally:
+        runner.close()
+        harness.clock.now = scheduled_now
+    assert accepted['status'] == 'accepted'
+    assert accepted.get('company_judgment_refs') or accepted.get('judgment_cache_key')
+    visible = next(participant for participant in round_participants
+                   if participant['submission_id'] == accepted['submission_id'])
+    accepted_ref = accepted['output_ref']
+    scored_execution = store.get_run(accepted['scored_run_id'])
+    companies = json.loads(harness.objects.get(scored_execution['output_ref']))['companies']
+    icp = harness.service.benchmark_icps(harness.round_id)[int(accepted['icp_position'])]
+    assert harness.service._verified_breakdowns(accepted, icp=icp, companies=companies,
+        policy=store.get_round(harness.round_id)['configuration_doc']['scorer_policy'])
 
     first, first_token = claim_for(failing, 0)
     first_failure = store.complete_attempt(
@@ -2290,6 +2357,7 @@ def test_exhausted_judge_failure_leaves_one_icp_unscored(
         "round_status": "stage1_scoring",
     }
 
+    assert harness.wait_for_score_retry_backoff()
     second, second_token = claim_for(failing, 1)
     assert second["assignment_id"] == first["assignment_id"]
     assert int(second["attempt"]) == contracts.MAX_ATTEMPTS_PER_ASSIGNMENT
@@ -2322,7 +2390,8 @@ def test_exhausted_judge_failure_leaves_one_icp_unscored(
     assert store.list_runs(harness.round_id, stage=1, status="pending")
 
     harness.run_stage_with_runners(2)
-    harness.advance_until("stage1_scored", runners=2)
+    _recover_failed_judgments(harness, [store.get_run(first['run_id']),
+        store.get_run(second['run_id'])], target='stage1_scored')
     row = store.get_round(harness.round_id)
     assert row["status"] == "stage1_scored"
     assert row["cancel_reason"] is None
@@ -2338,7 +2407,10 @@ def test_exhausted_judge_failure_leaves_one_icp_unscored(
         request_hash=contracts.document_hash({"request_id": post_close_request_id}),
         lease_token_hash=hash_lease_token(post_close_token),
     )
-    assert post_close == {"status": "stage_closed", "round_status": "stage1_scored"}
+    # Continuation keeps the stage readable for genuine future successors,
+    # but complete accepted authority must not create another assignment.
+    assert post_close == {'status': 'no_pending'}
+    assert store.get_round(harness.round_id)['status'] == 'stage1_scored'
 
     reopened_store = harness.make_store()
     try:
@@ -2363,7 +2435,7 @@ def test_exhausted_judge_failure_leaves_one_icp_unscored(
         if run["submission_id"] == failing["submission_id"]
         and run["icp_position"] == int(first["icp_position"])
     ]
-    assert len(affected) == 1 and affected[0]["per_icp_score"] is None
+    assert len(affected) == 1 and affected[0]["per_icp_score"] > 0
     assert store.get_run(accepted["scored_run_id"])["per_icp_score"] is not None
     assert all(
         run["per_icp_score"] is not None
@@ -2506,7 +2578,7 @@ def test_missing_scoring_result_reports_incomplete_without_partial_scores(
     assert all(run["per_icp_score"] is None for run in execute_runs)
 
 
-def test_persistent_final_judge_failure_zeros_one_icp_and_publishes(scenario_connect, tmp_path):
+def test_persistent_final_judge_failure_recovers_before_publication(scenario_connect, tmp_path):
     harness = Harness(
         scenario_connect,
         tmp_path,
@@ -2537,13 +2609,16 @@ def test_persistent_final_judge_failure_zeros_one_icp_and_publishes(scenario_con
     ).replace(tzinfo=timezone.utc)
     assert harness.clock.now < final_scoring_close
 
-    closed = harness.service.advance_round(harness.round_id)
-    harness.advance_until("published", runners=2)
+    held = harness.service.advance_round(harness.round_id)
+    assert held == {'status': 'waiting', 'round_status': 'stage2_scoring'}
+    failed_before = [run for run in harness.service.store.list_runs(
+        harness.round_id, stage=2, kind='score') if run['status'] == 'failed']
+    assert len(failed_before) == 2
+    assert {run['terminal_cause'] for run in failed_before} == {'judge_error'}
+    harness.sandbox.judge_failures.clear()
+    _recover_failed_judgments(harness, failed_before)
 
     row = harness.service.store.get_round(harness.round_id)
-    assert closed["status"] == "closed"
-    assert closed["round_status"] == "stage2_judged"
-    assert closed["incomplete_assignments"] == 1
     assert row["status"] == "published" and row["cancel_reason"] is None
     assert row["finalists"] == finalists_before
     assert row["publication_doc"] is not None
@@ -2555,7 +2630,7 @@ def test_persistent_final_judge_failure_zeros_one_icp_and_publishes(scenario_con
     )
     assert len(execute_runs) == 10
     affected = [run for run in execute_runs if run["icp_position"] == 10]
-    assert len(affected) == 1 and affected[0]["per_icp_score"] == 0
+    assert len(affected) == 1 and affected[0]["per_icp_score"] > 0
     assert all(
         run["per_icp_score"] is not None
         for run in execute_runs
@@ -2563,58 +2638,106 @@ def test_persistent_final_judge_failure_zeros_one_icp_and_publishes(scenario_con
     )
 
 
-def test_miner_credential_failure_zeros_affected_icps_without_excluding_model(
-    scenario_connect, tmp_path, monkeypatch
+@pytest.mark.parametrize('known_bill', [False, True], ids=['unknown-bill', 'known-zero-bill'])
+def test_miner_credential_refusal_preserves_billing_authority_after_key_restoration(
+    scenario_connect, tmp_path, monkeypatch, known_bill
 ):
-    harness = Harness(
-        scenario_connect,
-        tmp_path,
-        challengers=["CredentialFail", "CredentialPass"],
-        runners=["alpha", "beta"],
-    )
+    harness = Harness(scenario_connect, tmp_path,
+        challengers=['CredentialFail', 'CredentialPass'], runners=['alpha', 'beta'])
     participants = _start_round(harness, day=15, epoch=30275)
-    failed = next(
-        participant
-        for participant in harness.service.store.get_round(harness.round_id)[
-            "participants"
-        ]
-        if harness.flavors[participant["submission_id"]] == "CredentialFail"
-    )
+    store = harness.service.store
+    participants_before = store.get_round(harness.round_id)['participants']
+    failed = next(participant for participant in participants_before
+        if harness.flavors[participant['submission_id']] == 'CredentialFail')
     _run_stage_one_to_scoring(harness, participants, runners=2)
     credentials = harness.service.config.credential_manager
     original_runtime_key = credentials.runtime_key
 
     def runtime_key(row, provider):
-        if row["submission_id"] == failed["submission_id"]:
-            return "miner-refused"
+        if row['submission_id'] == failed['submission_id']:
+            return 'miner-refused'
         return original_runtime_key(row, provider)
 
-    monkeypatch.setattr(credentials, "runtime_key", runtime_key)
-    harness.advance_until("stage1_scored", runners=2)
+    if known_bill:
+        original_send = FakeProviderTransport.send
 
-    row = harness.service.store.get_round(harness.round_id)
-    assert failed["submission_id"] in row["finalists"]
-    score_runs = harness.service.store.list_runs(
-        harness.round_id,
-        stage=1,
-        submission_id=failed["submission_id"],
-        kind="score",
-    )
-    assert score_runs and {run["terminal_cause"] for run in score_runs} == {
-        "credential_error"
-    }
-    assert {int(run["attempt"]) for run in score_runs} == {1}
-    execute_runs = harness.service.store.list_runs(
-        harness.round_id,
-        stage=1,
-        submission_id=failed["submission_id"],
-        kind="execute",
-    )
-    assert all(run["per_icp_score"] == 0 for run in execute_runs)
-    harness.service.cancel(harness.round_id, sorted(svc.CANCEL_REASONS.values())[0])
+        def refusal_with_zero_bill(transport, **kwargs):
+            response = original_send(transport, **kwargs)
+            if response.status == 401:
+                # An identified response from this controlled provider carries
+                # an explicit zero bill. No status code is treated as free.
+                document = json.loads(response.body)
+                document['requestId'] = 'auth-refusal-' + hashlib.sha256(kwargs['body']).hexdigest()[:32]
+                document['billing'] = {'credits_charged': 0}
+                return br.ProviderResponse(response.status, response.headers,
+                                           json.dumps(document).encode())
+            return response
+
+        monkeypatch.setattr(FakeProviderTransport, 'send', refusal_with_zero_bill)
+    monkeypatch.setattr(credentials, 'runtime_key', runtime_key)
+    harness.run_stage_with_runners(2)
+    assert harness.service.advance_round(harness.round_id) == {
+        'status': 'waiting', 'round_status': 'stage1_scoring'}
+    score_runs = store.list_runs(harness.round_id, stage=1,
+        submission_id=failed['submission_id'], kind='score', status='failed')
+    assert {run['attempt'] for run in score_runs} == {1, 2}
+    assert {run['terminal_cause'] for run in score_runs} == {'credential_error'}
+
+    def score_ledger():
+        run_ids = {run['run_id'] for run in store.list_runs(harness.round_id,
+            submission_id=failed['submission_id'], kind='score')}
+        return [row for row in store.list_ledger(submission_id=failed['submission_id'])
+                if row['run_id'] in run_ids]
+
+    before = score_ledger()
+    uncertain = {row['entry_id']: row for row in before if row['entry_kind'] == 'uncertain'}
+    if known_bill:
+        assert uncertain == {}
+        settlements = [entry for entry in before if entry['entry_kind'] == 'settlement']
+        assert len(settlements) == len(score_runs)
+        assert all(entry['amount_microusd'] == 0 for entry in settlements)
+        monkeypatch.setattr(credentials, 'runtime_key', original_runtime_key)
+        _recover_failed_judgments(harness, score_runs)
+        row = store.get_round(harness.round_id)
+        assert failed['submission_id'] in row['finalists']
+        assert row['status'] == 'published' and row['cancel_reason'] is None
+        return
+    # One unknown full-budget reservation prevents every later dispatch.
+    assert len(uncertain) == 1
+    assert all(row['entry_doc']['call']['reason'] == 'missing_provider_cost'
+               and row['entry_doc']['call']['provider_status'] == 401
+               for row in uncertain.values())
+    dispatches = {row['entry_id'] for row in before if row['entry_kind'] == 'dispatch'}
+    assert len(dispatches) == 1
+    refusals = [row for row in before if row['entry_kind'] == 'refusal']
+    assert len(refusals) == 2 * contracts.STAGE_1_ICP_COUNT - 1
+    assert all(row['entry_doc']['reason'] == 'money_cap'
+               and row['entry_doc']['prior_miner_credential_refusal'] is True for row in refusals)
+
+    # Restoring a key is not proof that the earlier failed request was free.
+    # The real successor may claim after its backoff, but must not dispatch.
+    monkeypatch.setattr(credentials, 'runtime_key', original_runtime_key)
+    assert harness.wait_for_score_retry_backoff(max_attempt=3)
+    harness.run_stage_with_runners(2)
+    assert harness.service.advance_round(harness.round_id) == {
+        'status': 'waiting', 'round_status': 'stage1_scoring'}
+    after = score_ledger()
+    assert {row['entry_id'] for row in after if row['entry_kind'] == 'dispatch'} == dispatches
+    assert {row['entry_id']: row for row in after if row['entry_id'] in uncertain} == uncertain
+    third = [run for run in store.list_runs(harness.round_id,
+        submission_id=failed['submission_id'], kind='score') if run['attempt'] == 3]
+    assert len(third) == contracts.STAGE_1_ICP_COUNT
+    assert all(run['status'] == 'failed' and run['terminal_cause'] == 'credential_error' for run in third)
+    row = store.get_round(harness.round_id)
+    assert row['participants'] == participants_before
+    assert row['publication_doc'] is None and row['reward_activated_at'] is None
+    executions = store.list_runs(harness.round_id, stage=1,
+        submission_id=failed['submission_id'], kind='execute')
+    assert len(executions) == contracts.STAGE_1_ICP_COUNT
+    assert all(run['per_icp_score'] is None for run in executions)
 
 
-def test_baseline_judge_failure_zeros_one_icp_and_publishes(scenario_connect, tmp_path):
+def test_baseline_judge_failure_holds_publication_until_recovered(scenario_connect, tmp_path):
     harness = Harness(
         scenario_connect,
         tmp_path,
@@ -2628,10 +2751,13 @@ def test_baseline_judge_failure_zeros_one_icp_and_publishes(scenario_connect, tm
 
     closed = harness.service.advance_round(harness.round_id)
 
-    assert closed["status"] == "closed"
-    assert closed["round_status"] == "stage1_judged"
-    assert closed["incomplete_assignments"] == 1
-    harness.advance_until("published", runners=2)
+    assert closed == {'status': 'waiting', 'round_status': 'stage1_scoring'}
+    failed_before = [run for run in harness.service.store.list_runs(
+        harness.round_id, stage=1, kind='score') if run['status'] == 'failed']
+    assert len(failed_before) == 2
+    assert {run['terminal_cause'] for run in failed_before} == {'judge_error'}
+    harness.sandbox.judge_failures.clear()
+    _recover_failed_judgments(harness, failed_before)
     assert harness.status() == "published"
     baseline_id = next(
         participant["submission_id"]
@@ -2644,7 +2770,7 @@ def test_baseline_judge_failure_zeros_one_icp_and_publishes(scenario_connect, tm
         )
         if run["icp_position"] == 0
     ]
-    assert len(affected) == 1 and affected[0]["per_icp_score"] == 0
+    assert len(affected) == 1 and affected[0]["per_icp_score"] > 0
 
 
 def test_a_prior_miner_winner_submits_fresh_source_as_a_challenger(scenario_connect, tmp_path):
@@ -3186,18 +3312,20 @@ class FlakyObjectStore:
         self._inner = inner
         self._failed_once = set()
         self.failures = 0
+        self.output_prefix = None
+        self.write_counts = {}
+        self._lock = threading.Lock()
 
     def put(self, key, data):
-        if "/sources/" in key:
+        if not self.output_prefix or not key.startswith(self.output_prefix):
             return self._inner.put(key, data)
-        if key not in self._failed_once:
-            self._failed_once.add(key)
-            self.failures += 1
-            raise OSError("object store unavailable")
+        with self._lock:
+            self.write_counts[key] = self.write_counts.get(key, 0) + 1
+            if key not in self._failed_once:
+                self._failed_once.add(key)
+                self.failures += 1
+                raise OSError("object store unavailable")
         return self._inner.put(key, data)
-
-    def allow(self, key):
-        self._failed_once.add(key)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -3217,9 +3345,14 @@ def test_result_writes_retry_after_transient_object_store_failures(scenario_conn
     harness.round_id = configuration["round_id"]
     harness.submit("Flaky-A", harness.round_id)
 
-    # This test targets runner result delivery. The benchmark write has a
-    # separate driver retry boundary and is allowed through here.
-    flaky.allow("arena/%s/benchmark.json" % harness.round_id)
+    # Fault only runner output uploads, using the real HTTP availability
+    # boundary that converts a transient store outage into a retryable500.
+    from fastapi.testclient import TestClient
+    from lab_arena.api import create_app
+    flaky.output_prefix = ("arena/%s/outputs/" % harness.round_id,
+                           "arena/%s/scores/items/" % harness.round_id)
+    client = TestClient(create_app(harness.service), raise_server_exceptions=False)
+    harness.api_factory = lambda: rn.HttpArenaApiClient("http://localhost", client=client)
     harness.clock.advance_to(harness.schedule()["submission_cutoff"])
     assert harness.service.advance_round(harness.round_id)["status"] == "ok"
     participants = harness.service.store.get_round(harness.round_id)["participants"]
@@ -3238,6 +3371,19 @@ def test_result_writes_retry_after_transient_object_store_failures(scenario_conn
     assert len(results["scores"]["stage_1"]) + len(results["scores"]["stage_2"]) == 20
     attempts = harness.service.store.list_runs(harness.round_id)
     assert all(int(run["attempt"]) == 1 for run in attempts)
+    expected_refs = {run["output_ref"] for run in attempts}
+    assert flaky._failed_once == expected_refs
+    assert flaky.failures == len(expected_refs) == len(attempts)
+    assert set(flaky.write_counts) == expected_refs
+    assert set(flaky.write_counts.values()) == {2}
+    with scenario_connect() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT run_id,call_identity,entry_kind,count(*) FROM public.lab_arena_ledger "
+            "WHERE round_id=%s AND entry_kind IN ('dispatch','settlement') "
+            "GROUP BY run_id,call_identity,entry_kind HAVING count(*)>1",
+            (harness.round_id,),
+        )
+        assert cursor.fetchall() == []
     assert_canary_absent(harness, scenario_connect)
 
 

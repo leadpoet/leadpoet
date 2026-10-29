@@ -2102,11 +2102,13 @@ def _call_provider_matches_operation(call: Mapping[str, Any], operation_id: str)
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class _WorkerSocketAdmission:
     permit: threading.BoundedSemaphore
     capture_only: bool
+    completion_deadline: float
     read_deadline: Optional[float] = None
+    provider_deadline: Optional[float] = None
 
 
 class WorkerSocketServer:
@@ -2152,6 +2154,35 @@ class WorkerSocketServer:
         self._server: Optional[socketserver.ThreadingUnixStreamServer] = None
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
+        self._admissions: Dict[socket.socket, _WorkerSocketAdmission] = {}
+        self._handler_context = threading.local()
+
+    def _retain_handler_deadline(self, deadline: float, clock: Callable[[], float]) -> None:
+        """Retain an existing dispatch window, without changing provider behavior."""
+
+        admission = getattr(self._handler_context, "admission", None)
+        if admission is None:
+            return
+        # Dispatch recovery tests can inject a separate monotonic clock. Keep
+        # admission and drain deadlines in the real socket clock domain.
+        socket_deadline = time.monotonic() + max(0.0, deadline - clock())
+        with self._state.lock:
+            if admission.provider_deadline is None:
+                admission.provider_deadline = socket_deadline
+            else:
+                # Responses retries share the first operation window. A later
+                # attempt must never give final capture a fresh lifetime.
+                admission.provider_deadline = min(admission.provider_deadline, socket_deadline)
+            admission.completion_deadline = admission.provider_deadline
+
+    def _retain_socket_write_deadline(self, connection: socket.socket) -> None:
+        """Capture a response write within the socket's unchanged timeout."""
+
+        admission = getattr(self._handler_context, "admission", None)
+        timeout = connection.gettimeout()
+        if admission is not None and timeout is not None:
+            with self._state.lock:
+                admission.completion_deadline = time.monotonic() + timeout
 
     def _quota_snapshot(
         self, *, include_sourcing_cost: bool = False
@@ -2690,6 +2721,7 @@ class WorkerSocketServer:
         deadline = self._monotonic() + max(1, int(timeout_ms)) / 1000.0 + (
             MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
         )
+        self._retain_handler_deadline(deadline, self._monotonic)
         # Compatibility routes and the native execute route share the actual
         # Deepline tool's guard. Catalog reads and other providers stay separate.
         tool = (
@@ -3058,6 +3090,7 @@ class WorkerSocketServer:
         deadline = time.monotonic() + max(1, int(timeout_ms)) / 1000.0 + (
             MAX_PROVIDER_API_TIMEOUT_SECONDS - MAX_PROVIDER_OPERATION_TIMEOUT_SECONDS
         )
+        self._retain_handler_deadline(deadline, time.monotonic)
         attempt_timeout_ms = timeout_ms
         hidden_retry_call_identities: List[str] = []
         for retry in range(RESPONSES_RATE_LIMIT_RETRIES + 1):
@@ -3451,8 +3484,7 @@ class WorkerSocketServer:
         server_self = self
         slots = threading.BoundedSemaphore(self._max_connections)
         capture_slot = threading.BoundedSemaphore(1)
-        admissions: Dict[socket.socket, _WorkerSocketAdmission] = {}
-        admission_lock = threading.Lock()
+        admissions = self._admissions
 
         def connection_closed(connection: socket.socket) -> bool:
             if server_self._stopping.is_set():
@@ -3478,14 +3510,17 @@ class WorkerSocketServer:
                 else:
                     return False
                 try:
+                    read_deadline = time.monotonic() + (
+                        min(server_self._read_timeout_seconds,
+                            lab_arena_checkpoint.TRAINING_SOCKET_TIMEOUT_SECONDS)
+                        if capture_only else server_self._read_timeout_seconds
+                    )
                     admission = _WorkerSocketAdmission(
                         permit, capture_only=capture_only,
-                        read_deadline=(time.monotonic() + min(
-                            server_self._read_timeout_seconds,
-                            lab_arena_checkpoint.TRAINING_SOCKET_TIMEOUT_SECONDS,
-                        )) if capture_only else None,
+                        completion_deadline=read_deadline,
+                        read_deadline=read_deadline if capture_only else None,
                     )
-                    with admission_lock:
+                    with server_self._state.lock:
                         admissions[request] = admission
                 except BaseException:
                     permit.release()
@@ -3493,13 +3528,12 @@ class WorkerSocketServer:
                 return True
 
             def admission_for(self, request: socket.socket) -> _WorkerSocketAdmission:
-                with admission_lock:
+                with server_self._state.lock:
                     return admissions[request]
 
             def release_request(self, request: socket.socket) -> None:
-                with admission_lock:
-                    admission = admissions.pop(request)
                 with server_self._state.lock:
+                    admission = admissions.pop(request)
                     server_self._state.worker_handlers_inflight -= 1
                     admission.permit.release()
 
@@ -3513,9 +3547,11 @@ class WorkerSocketServer:
                     raise
 
             def process_request_thread(self, request: Any, client_address: Any) -> None:
+                server_self._handler_context.admission = self.admission_for(request)
                 try:
                     super().process_request_thread(request, client_address)
                 finally:
+                    del server_self._handler_context.admission
                     self.release_request(request)
 
         class HttpBridge(http.server.BaseHTTPRequestHandler):
@@ -3584,8 +3620,10 @@ class WorkerSocketServer:
                     self.send_header(name, value)
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Connection", "close")
+                server_self._retain_socket_write_deadline(self.connection)
                 self.end_headers()
                 if self.command != "HEAD":
+                    server_self._retain_socket_write_deadline(self.connection)
                     self.wfile.write(payload)
                 self.wfile.flush()
 
@@ -3638,6 +3676,7 @@ class WorkerSocketServer:
                             delivery_report=delivery_report,
                         )
                     try:
+                        server_self._retain_socket_write_deadline(connection)
                         connection.sendall(len(payload).to_bytes(4, "big") + payload)
                     except OSError:
                         server_self._mark_socket_delivery(delivery_report, written=False)
@@ -3664,15 +3703,14 @@ class WorkerSocketServer:
             self._path.unlink()
 
     def wait_for_handlers(self) -> bool:
-        """Let accepted requests finish before final capture, within the socket bound."""
+        """Drain admitted handlers only within their existing remaining windows."""
 
-        deadline = time.monotonic() + min(
-            self._read_timeout_seconds, WORKER_SOCKET_READ_TIMEOUT_SECONDS,
-        )
         while True:
             with self._state.lock:
                 if self._state.worker_handlers_inflight == 0:
                     return True
+                deadline = max(admission.completion_deadline
+                               for admission in self._admissions.values())
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
@@ -4724,7 +4762,8 @@ class AssignmentExecutor:
                 stop_exception = exc
             else:
                 # stop() closes ingress but daemon handlers may still finish a
-                # settled call. Keep the journal and final buffer open briefly.
+                # settled call. Keep the journal and final buffer open only
+                # until the already-admitted handlers' existing deadlines.
                 # This extra evidence wait cannot turn a valid result into an
                 # abandoned run; stop() failure keeps its existing fatal path.
                 try:

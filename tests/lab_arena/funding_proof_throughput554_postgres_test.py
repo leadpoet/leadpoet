@@ -19,6 +19,8 @@ from tests.lab_arena.test_lab_arena_migration_postgres import hotkey
 ROOT = Path(__file__).parents[2]
 INDEX = ROOT / 'scripts/553-lab-arena-paid-native-request-index.sql'
 SQL = ROOT / 'scripts/554-lab-arena-funding-proof-throughput.sql'
+CURRENT_SQL = ROOT / 'scripts/558-lab-arena-funding-proof-keyed-lookups.sql'
+CURRENT_POST = '23fbb6e5d40450916b75110d16d9b3c9c369264014dea51e17db7f3f978786c6'
 PRE = '46acfd38b92eb7a03613a4d55c72cc9af57339cf6602ed4611955af22b511cf6'
 POST = 'a962ddae017d3e1efbbe05d296bd1b9c895523d4a5081b0a3fd2c78b9c7f3d73'
 NAME = 'public.lab_arena_ledger_paid_native_request_idx'
@@ -248,6 +250,11 @@ def test_seventy_failed_assignments_finish_under_eight_seconds_with_wide_history
         c.commit()
         build_seconds = time.monotonic()-started
         q.execute(SQL.read_text())
+        # Performance alone follows the verified live558 function (PG17.6,
+        # read-only source verification2026-10-29). Historical554 semantic,
+        # preimage, security and index controls keep their original fixture.
+        q.execute(CURRENT_SQL.read_text())
+        assert hashlib.sha256(definition(q).encode()).hexdigest() == CURRENT_POST
         c.commit()
         q.execute("SET LOCAL statement_timeout='8s'")
         started = time.monotonic()

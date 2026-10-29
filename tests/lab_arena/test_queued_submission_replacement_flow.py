@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 from lab_arena import contact_policy, contracts, credentials as credentials_module, icp_disclosure, service as svc, source_bundle
 from lab_arena.api import create_app
-from tests.lab_arena.lab_arena_pg_harness import CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.test_lab_arena_service_round import (
     Harness, FixtureObjectStore, CANARY_DEEPLINE_KEY, CANARY_OPENROUTER_KEY,
     CANARY_OPENROUTER_MANAGEMENT_KEY, _run_stage_one_to_scoring,
@@ -35,7 +35,7 @@ class ChecksumObjects(FixtureObjectStore):
 
 @pytest.fixture(scope="module")
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture(scope="module")
@@ -124,7 +124,8 @@ def test_one_replacement_attempt_per_miner_preserves_fallbacks_and_evaluates_onl
     h.service.config.defaults = replace(h.service.config.defaults, benchmark_disclosure_from="2026-01-01T00:00:00Z")
     round_id = "arena-2026-11-01"
     h.round_id = round_id
-    configuration = h.service.create_round(datetime.now(timezone.utc) + timedelta(hours=12), round_id=round_id)
+    h.clock.now = datetime.now(timezone.utc)
+    configuration = h.service.create_round(h.clock.now + timedelta(hours=12), round_id=round_id)
     assert configuration["benchmark_disclosure_policy"] == icp_disclosure.CUTOFF_PUBLIC_POLICY
     expected_freeze = (datetime.fromisoformat(configuration["schedule"]["submission_cutoff"].replace("Z", "+00:00")) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
     public_round = h.service.public_round(round_id)

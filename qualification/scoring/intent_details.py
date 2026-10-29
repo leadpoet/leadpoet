@@ -76,9 +76,7 @@ _EXCLUDED_MARKDOWN_BOUNDARY = "\x00"
 _RESPONSE_FORMAT = {
     "type": "json_schema",
     "json_schema": {
-        # The version selects the host's evidence-first wire encoding. Older
-        # frozen scorer images keep their original name and canonical bytes.
-        "name": "arena_intent_details_review_evidence_first_v1", "strict": True,
+        "name": "arena_intent_details_review", "strict": True,
         "schema": {
             "type": "object", "additionalProperties": False,
             "properties": {

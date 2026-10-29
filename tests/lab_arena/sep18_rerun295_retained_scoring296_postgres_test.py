@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.lab_arena import sep18_published_rerun295_postgres_test as previous
+from tests.lab_arena.lab_arena_pg_harness import current_service_database
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
     test_parallel_execution_preserves_standard_twenty_icp_scoring_and_costs as ordinary_lifecycle,
 )
@@ -20,6 +21,11 @@ MIGRATION = ROOT / "scripts/296-arena-2026-09-18-rerun295-retained-scoring.sql"
 CONFIG_HASH = "a583f20ca7573721258e27b5f80fd9128511a01a4ab50203f234ea8c69db3fb9"
 SOURCE_HASH = "1ba24d1abac3849b8900238cb3f8f2ced3aab41fbe8f30064c0dcbeefc9c3cd3"
 SOURCE_COMMIT = "e21d29698edb60e6b5635f5f27e5a0058709210f"
+
+
+@pytest.fixture()
+def current_database():
+    yield from current_service_database()
 
 
 def _fixture_sql(configuration):
@@ -112,7 +118,7 @@ def _instrument_seal_calls(cursor):
         cursor.execute(f"ALTER FUNCTION public.{name}() OWNER TO lab_arena_owner")
 
 
-def test_canonical_retained_scores_survive_both_stages_and_publication(database, tmp_path, monkeypatch):
+def test_canonical_retained_scores_survive_both_stages_and_publication(database, current_database, tmp_path, monkeypatch):
     monkeypatch.setattr(previous.Harness, "objects_key", lambda self: "repair296-" + tmp_path.name)
     seed = previous._seed_published_terminal
     prepare = previous._prepare
@@ -198,4 +204,7 @@ def test_canonical_retained_scores_survive_both_stages_and_publication(database,
             assert cursor.fetchone() == ("published", True)
     ordinary = tmp_path / "ordinary"
     ordinary.mkdir()
-    ordinary_lifecycle(lambda: psycopg2.connect(**dsn), ordinary)
+    # Keep 296's exact historical SQL proof above on its original schema.
+    # The ordinary current-service control requires the current RPC contract.
+    current_pg, current_dsn = current_database
+    ordinary_lifecycle(lambda: current_pg.connect(**current_dsn), ordinary)

@@ -22,6 +22,19 @@ deployment and fresh production verification after required checks pass.
 For authorized `pranav-admin` access, reuse valid cached credentials across checks and subagents; request new credentials only when none remain valid.
 This authority ends when these fixes and live verification are complete.
 
+## Scoped authorization: October 29 short capture text reuse
+
+The user authorized bounded reuse of exact short builtin-string sanitizer
+results within one non-aggregate capture invocation. Preserve the existing
+medium/custom-string and aggregate long-string lanes, every node/path/key,
+privacy, opaque-reasoning and secret check, exact request/export bytes, raw
+capture, billing, miner behavior, scoring and rewards. Use the existing
+512-entry/8 MiB plain-string lane; add no global cache, dependency or persisted
+state. Internal agents may test and commit only. The coordinating task owns
+independent review, safe push and merge, canonical deployment and live
+verification. Preserve active jobs, shared guards and concurrent work. The
+measured optimization is not proof of complete historical stall recovery.
+
 ## Scoped authorization: October 29 known-failure response recovery
 
 The user authorized the narrow fix that prevents a proved complete failed

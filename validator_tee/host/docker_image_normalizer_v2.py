@@ -23,65 +23,6 @@ class DockerImageNormalizationError(RuntimeError):
 _EPOCH = "1970-01-01T00:00:00Z"
 
 
-_LAYER_INDEX_LIMIT = 4 * 1024 * 1024
-
-
-def _write_layer_index(layer: Path, digest: str, decisions: list[dict[str, Any]]) -> None:
-    # Temporary reproduction-only evidence. Remove after the remaining layer
-    # delta is fixed and real independent consensus passes. No file bytes/env.
-    root = Path(os.environ["RUNNER_TEMP"]) / "gateway-normalization-diagnostics"
-    if not root.is_absolute():
-        raise DockerImageNormalizationError("diagnostic runner temp must be absolute")
-    root.mkdir(parents=True, exist_ok=True)
-    destination = root / ("layer-8-" + digest + ".json")
-    if destination.exists() or len(list(root.glob("layer-8-*.json"))) >= 3:
-        return
-    payload: dict[str, Any] = {
-        "schema": "leadpoet.layer_index.diagnostic.v1", "layer_index": 8,
-        "normalized_layer_sha256": "sha256:" + digest,
-        "archive_size": layer.stat().st_size, "members": [],
-        "directory_decisions": [], "omitted_members": 0, "omitted_decisions": 0,
-    }
-    remaining = _LAYER_INDEX_LIMIT - 4096
-    for decision in decisions:
-        size = len(json.dumps(decision, sort_keys=True, separators=(",", ":")).encode()) + 1
-        if size <= remaining:
-            payload["directory_decisions"].append(decision)
-            remaining -= size
-        else:
-            payload["omitted_decisions"] += 1
-    with tarfile.open(layer) as archive:
-        members = archive.getmembers()
-        payload["member_count"] = len(members)
-        for member in members:
-            record = {name: getattr(member, name) for name in (
-                "name", "mode", "uid", "gid", "size", "mtime", "linkname",
-                "uname", "gname", "devmajor", "devminor", "pax_headers",
-                "offset", "offset_data",
-            )}
-            record["type"] = member.type.decode("ascii")
-            if member.isfile():
-                content_digest = hashlib.sha256()
-                with archive.extractfile(member) as content:
-                    for chunk in iter(lambda: content.read(1024 * 1024), b""):
-                        content_digest.update(chunk)
-                record["content_sha256"] = content_digest.hexdigest()
-            size = len(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()) + 1
-            if size <= remaining:
-                payload["members"].append(record)
-                remaining -= size
-            else:
-                payload["omitted_members"] += 1
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    if len(encoded) > _LAYER_INDEX_LIMIT:
-        raise DockerImageNormalizationError("diagnostic layer index exceeds bound")
-    with destination.open("xb") as output:
-        output.write(encoded)
-    print("Layer 8 diagnostic captured: sha256:%s members=%s omitted=%s" % (
-        digest, payload["member_count"], payload["omitted_members"],
-    ), file=sys.stderr)
-
-
 def _normalization_temp_parent() -> Optional[Path]:
     """Return the root-backed builder workspace when one is configured."""
 
@@ -178,11 +119,6 @@ def normalize_layer_archive(
     # representation as one canonical uncompressed tar stream.
     emitted_ancestors: set[str] = set()
     emitted_directories: set[str] = set()
-    diagnostic = (
-        os.environ.get("GATEWAY_V2_CANONICAL_CONFIG_DIAGNOSTICS") == "1"
-        and destination.name == "normalized-layer-8.tar"
-    )
-    decisions: list[dict[str, Any]] = []
     with tarfile.open(source, "r:*") as original, tarfile.open(
         destination, "w:"
     ) as output:
@@ -190,12 +126,8 @@ def normalize_layer_archive(
         selected_members: list[tarfile.TarInfo] = []
         eligible_directories: set[str] = set()
         directory_counts: dict[str, int] = {}
-        directories_with_descendants: set[str] = set()
         for member in members:
             path = PurePosixPath(member.name)
-            directories_with_descendants.update(
-                parent.as_posix() for parent in path.parents
-            )
             if member.isdir():
                 name = path.as_posix()
                 directory_counts[name] = directory_counts.get(name, 0) + 1
@@ -248,14 +180,6 @@ def normalize_layer_archive(
                         )
                         if eligible:
                             eligible_directories.add(name)
-                        if diagnostic:
-                            decisions.append({
-                                "path": name,
-                                "inherited_known": name in inherited_directories,
-                                "inherited_equal": inherited_directories.get(name) == metadata,
-                                "has_descendants": name in directories_with_descendants,
-                                "same_layer_directory_count": directory_counts[name],
-                            })
                         inherited_directories[name] = metadata
                     else:
                         # A file, symlink, or device replaces any old directory.
@@ -271,9 +195,6 @@ def normalize_layer_archive(
             if not member.isdir() or path.as_posix() not in eligible_directories:
                 required_ancestors.update(parent.as_posix() for parent in path.parents)
         redundant_directories = eligible_directories - required_ancestors
-        for decision in decisions:
-            decision["action"] = "drop" if decision["path"] in redundant_directories else "retain"
-            decision["has_retained_descendants"] = decision["path"] in required_ancestors
         for normalized in selected_members:
             if normalized.isdir() and PurePosixPath(normalized.name).as_posix() in redundant_directories:
                 continue
@@ -288,10 +209,7 @@ def normalize_layer_archive(
         # an emitted header restoring it, a later matching header is required.
         for parent in emitted_ancestors - emitted_directories:
             inherited_directories.pop(parent, None)
-    digest = _sha256_file(destination)
-    if diagnostic:
-        _write_layer_index(destination, digest, decisions)
-    return digest
+    return _sha256_file(destination)
 
 
 def _load_json(path: Path, label: str) -> Any:

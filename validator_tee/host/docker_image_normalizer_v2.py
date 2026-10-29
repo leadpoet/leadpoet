@@ -151,6 +151,17 @@ def _normalized_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
         for key, value in member.pax_headers.items()
         if key not in {"atime", "ctime", "mtime"}
     }
+    path = PurePosixPath(member.name)
+    if (
+        not path.is_absolute() and ".." not in path.parts
+        and path.name.startswith(".wh.") and path.name[4:] not in {"", ".", ".."}
+        and member.type in {tarfile.REGTYPE, tarfile.AREGTYPE} and member.size == 0
+    ):
+        # Docker overlay exports use 0600 and can retain a stale Linkname.
+        # OCI consumes these deletion markers without creating regular files;
+        # neither permission bits nor REGTYPE Linkname affect the deletion.
+        normalized.mode = 0
+        normalized.linkname = ""
     return normalized
 
 
@@ -176,6 +187,8 @@ def normalize_layer_archive(
         destination, "w:"
     ) as output:
         members = sorted(original.getmembers(), key=lambda item: item.name)
+        selected_members: list[tarfile.TarInfo] = []
+        eligible_directories: set[str] = set()
         directory_counts: dict[str, int] = {}
         directories_with_descendants: set[str] = set()
         for member in members:
@@ -205,6 +218,13 @@ def normalize_layer_archive(
                     for old in list(inherited_directories):
                         if old == target or old.startswith(target + "/"):
                             del inherited_directories[old]
+                elif not member.isdir():
+                    # Resolve type replacement before testing aliases of any
+                    # descendant directory for inherited metadata equality.
+                    name = path.as_posix()
+                    for old in list(inherited_directories):
+                        if old == name or old.startswith(name + "/"):
+                            del inherited_directories[old]
         for member in members:
             normalized = _normalized_member(member)
             if inherited_directories is not None:
@@ -222,30 +242,42 @@ def normalize_layer_archive(
                             "mode", "uid", "gid", "size", "mtime", "type",
                             "linkname", "uname", "gname", "devmajor", "devminor",
                         )) + (tuple(sorted(normalized.pax_headers.items())),)
-                        redundant = (
+                        eligible = (
                             directory_counts[name] == 1
-                            # Child changes can update parent mtime during
-                            # extraction. Its header must restore that time.
-                            and name not in directories_with_descendants
                             and inherited_directories.get(name) == metadata
                         )
+                        if eligible:
+                            eligible_directories.add(name)
                         if diagnostic:
                             decisions.append({
-                                "path": name, "action": "drop" if redundant else "retain",
+                                "path": name,
                                 "inherited_known": name in inherited_directories,
                                 "inherited_equal": inherited_directories.get(name) == metadata,
                                 "has_descendants": name in directories_with_descendants,
                                 "same_layer_directory_count": directory_counts[name],
                             })
-                        if redundant:
-                            continue
                         inherited_directories[name] = metadata
                     else:
                         # A file, symlink, or device replaces any old directory.
                         for old in list(inherited_directories):
                             if old == name or old.startswith(name + "/"):
                                 del inherited_directories[old]
-            content = original.extractfile(member) if member.isfile() else None
+            selected_members.append(normalized)
+        # A parent header is required for every retained child operation, but
+        # not when all descendants are themselves proven directory no-ops.
+        required_ancestors: set[str] = set()
+        for member in selected_members:
+            path = PurePosixPath(member.name)
+            if not member.isdir() or path.as_posix() not in eligible_directories:
+                required_ancestors.update(parent.as_posix() for parent in path.parents)
+        redundant_directories = eligible_directories - required_ancestors
+        for decision in decisions:
+            decision["action"] = "drop" if decision["path"] in redundant_directories else "retain"
+            decision["has_retained_descendants"] = decision["path"] in required_ancestors
+        for normalized in selected_members:
+            if normalized.isdir() and PurePosixPath(normalized.name).as_posix() in redundant_directories:
+                continue
+            content = original.extractfile(normalized) if normalized.isfile() else None
             output.addfile(normalized, content)
             path = PurePosixPath(normalized.name)
             emitted_ancestors.update(parent.as_posix() for parent in path.parents)

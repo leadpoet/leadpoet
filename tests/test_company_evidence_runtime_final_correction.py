@@ -6,13 +6,13 @@ import pytest
 
 from qualification.scoring import company_evidence_investigator as investigator
 from tests.test_company_evidence_judgment_reserve import (
-    QUOTE, _Clock, _finding, _response, _run_industry,
+    QUOTE, URL, _Clock, _finding, _response, _run_industry,
 )
 
 
 def _run_correction(monkeypatch, *, final, cross_after=8, positive=False):
     clock = _Clock()
-    clock.now = 80.0
+    clock.now = 0.0
     first_clock_read = True
 
     def monotonic():
@@ -20,8 +20,8 @@ def _run_correction(monkeypatch, *, final, cross_after=8, positive=False):
         if first_clock_read:
             first_clock_read = False
             return 0.0
-        # Loaded evidence has reached the existing judgment reserve. All
-        # ordinary turns submit; no additional research is needed or allowed.
+        # The first seven ordinary replies reuse a loaded page. The eighth
+        # turn is the existing forced judgment; no fresh research is needed.
         return clock.now
 
     monkeypatch.setattr(clock, "monotonic", monotonic)
@@ -34,7 +34,9 @@ def _run_correction(monkeypatch, *, final, cross_after=8, positive=False):
             # The ordinary request was admitted before the deadline. Its
             # response settles late, with no provider cancellation or retry.
             clock.now = 180.0
-        if turn <= investigator.MAX_REASONING_TURNS:
+        if turn < investigator.MAX_REASONING_TURNS:
+            return 200, _response("fetch_page", {"url": URL}, call=turn)
+        if turn == investigator.MAX_REASONING_TURNS:
             return 200, _response("submit_findings", {
                 "findings": [_finding(url="", quote="")],
             }, call=turn)
@@ -84,8 +86,9 @@ def test_late_eighth_judgment_keeps_existing_ninth_correction_and_validation(
     assert len(late_requests) == len(fast_requests) == 9
     assert late_requests == fast_requests
     assert late == fast
-    assert late["_completed_submit"] is True
-    assert late["failure_reason"] == ""
+    rejected = final in {"fabricated_quote", "missing_citation"}
+    assert late["_completed_submit"] is (not rejected)
+    assert late["failure_reason"] == ("malformed_response" if rejected else "")
     assert late["usage"]["reasoning_turns"] == 9
     assert late["usage"]["search_calls"] == late["usage"]["fetch_calls"] == 0
     assert late["claims"]["industry"]["status"] == status
@@ -114,11 +117,15 @@ def test_final_correction_fault_does_not_create_a_tenth_turn(monkeypatch, final,
     assert result["failure_reason"] == reason
 
 
-def test_pending_correction_does_not_revive_an_unadmitted_ordinary_turn(monkeypatch):
-    # Seven ordinary turns cannot claim the ninth-turn allowance. The next
-    # ordinary turn remains subject to the unchanged admission deadline.
+def test_late_research_settlement_allows_only_judgment_and_its_final_correction(monkeypatch):
+    # An admitted research reply may settle late. Loaded evidence gets one
+    # submit-only judgment, then only its existing pending final correction.
     result, requests = _run_correction(monkeypatch, final="verified", cross_after=7)
-    assert len(requests) == 7
-    assert result["_completed_submit"] is False
-    assert result["failure_reason"] == "admission_budget_interrupted"
-    assert result["usage"]["reasoning_turns"] == 7
+    assert len(requests) == 9
+    assert result["_completed_submit"] is True
+    assert result["failure_reason"] == ""
+    assert result["usage"]["reasoning_turns"] == 9
+    assert result["usage"]["fetch_calls"] == result["usage"]["search_calls"] == 0
+    for request in requests[7:]:
+        assert request["tool_choice"]["function"]["name"] == "submit_findings"
+        assert [tool["function"]["name"] for tool in request["tools"]] == ["submit_findings"]

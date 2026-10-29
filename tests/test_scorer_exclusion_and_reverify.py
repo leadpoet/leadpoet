@@ -175,7 +175,10 @@ def _complete_industry_disagreement_verdict():
         "dimension_evidence": {
             dimension: {
                 "url": f"https://evidence.example/{dimension}",
-                "quote": f"Verified {dimension}",
+                "quote": (
+                    "Acme has 51-200 employees." if dimension == "employee_size"
+                    else f"Verified {dimension}"
+                ),
             }
             for dimension in ("employee_size", "industry", "geography")
         },
@@ -667,8 +670,10 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
         "series a",
         icp=icp,
     )
+    # Employee count is a deterministic numeric fact. Semantic dimensions
+    # still require the verifier Boolean to agree with their observation.
     assert inconsistent_match.details["dimension_decisions"][dimension] == (
-        COMPANY_FIT_UNAVAILABLE
+        COMPANY_FIT_MATCH if dimension == "employee_size" else COMPANY_FIT_UNAVAILABLE
     )
 
     observed_conflict_flag_true = {
@@ -689,7 +694,7 @@ def test_web_dimension_boolean_must_agree_with_canonical_observation(
         icp=icp,
     )
     assert inconsistent_conflict.details["dimension_decisions"][dimension] == (
-        COMPANY_FIT_UNAVAILABLE
+        COMPANY_FIT_MISMATCH if dimension == "employee_size" else COMPANY_FIT_UNAVAILABLE
     )
 
     supported_conflict_verdict = {
@@ -1708,7 +1713,10 @@ def test_web_dimension_matches_require_citations_and_bound_identity():
             "dimension_evidence": {
                 dimension: {
                     "url": f"https://evidence.example/{dimension}",
-                    "quote": f"Verified {dimension}",
+                    "quote": (
+                    "Acme has 51-200 employees." if dimension == "employee_size"
+                    else f"Verified {dimension}"
+                ),
                 }
                 for dimension in ("employee_size", "industry", "geography")
             },
@@ -2554,7 +2562,10 @@ def test_null_fit_with_nested_claimed_evidence_remains_retryable(
     verdict = _explicitly_unproven_fit_verdict(dimension)
     verdict["dimension_evidence"] = {
         dimension: {
-            "url": f"https://evidence.example/{dimension}",
+            "url": (
+                "https://www.linkedin.com/company/acme" if dimension == "employee_size"
+                else f"https://evidence.example/{dimension}"
+            ),
             "quote": f"Claimed {dimension} proof.",
         }
     }
@@ -2867,7 +2878,10 @@ def test_shared_verifier_persists_complete_dimension_receipt(monkeypatch):
                 "dimension_evidence": {
                     dimension: {
                         "url": f"https://evidence.example/{dimension}",
-                        "quote": f"Verified {dimension}",
+                        "quote": (
+                    "Acme has 51-200 employees." if dimension == "employee_size"
+                    else f"Verified {dimension}"
+                ),
                     }
                     for dimension in (
                         "employee_size",
@@ -2962,7 +2976,10 @@ def test_homepage_unavailable_can_be_rescued_by_complete_web_receipt(monkeypatch
                 "dimension_evidence": {
                     dimension: {
                         "url": f"https://evidence.example/{dimension}",
-                        "quote": f"Verified {dimension}",
+                        "quote": (
+                    "Acme has 51-200 employees." if dimension == "employee_size"
+                    else f"Verified {dimension}"
+                ),
                     }
                     for dimension in ("employee_size", "industry", "geography")
                 },
@@ -3074,7 +3091,10 @@ def test_stale_homepage_linkedin_alias_requires_complete_web_rebinding(
             verdict[f"{dimension}_evidence_url"] = (
                 f"https://independent.example/{dimension}"
             )
-            verdict[f"{dimension}_evidence_quote"] = f"Verified {dimension}."
+            verdict[f"{dimension}_evidence_quote"] = (
+                "Base Power has 51-200 employees." if dimension == "employee_size"
+                else f"Verified {dimension}."
+            )
         return verdict, ""
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")

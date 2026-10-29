@@ -150,7 +150,7 @@ def _check_case(monkeypatch, phase, fault, mismatch=False, semantic_enabled=True
     ))
     assert len(investigations) == 1
     assert investigations[0]["positive_semantic_review"] is semantic_enabled
-    assert len(requests) == (1 if phase == "initial" else 2)
+    assert len(requests) == (1 if phase == "initial" and fault != "identity" else 2)
     if mismatch:
         assert result.decision == COMPANY_FIT_MISMATCH
     else:

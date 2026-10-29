@@ -5065,6 +5065,14 @@ class ArenaService:
             # face. Other fail-closed cost states do not invent a zero score.
             king_entry["final_score"] = 0.0
         if self._full_thinking_required(round_row):
+            # Keep full source and capture proof for every cost-eligible
+            # challenger that can cross the frozen baseline margin. Other
+            # training evidence stays explicitly unassessed.
+            qualifier_audit = (
+                integrity.enabled(configuration)
+                and configuration.get("sourcing_cost_eligibility_policy")
+                in contracts.PER_ICP_SUCCESSFUL_CALLS_COST_POLICIES
+            )
             for entry in effective_final_entries:
                 # Another publisher may finish while an assessment is running.
                 # Stop obsolete work before holding up the next driver round.
@@ -5072,6 +5080,13 @@ class ArenaService:
                 if current["status"] != "scored":
                     return {"status": "stale", "round_status": current["status"]}
                 submission_id = str(entry["submission_id"])
+                if qualifier_audit and (
+                    entry["is_king"] or not eligibility[submission_id]["eligible"]
+                    or verify.king_decision([entry], king_entry, configuration)["outcome"] != "crowned"
+                ):
+                    eligibility[submission_id]["training_data_eligibility"] = {
+                        "status": "not_assessed", "eligible": None, "reasons": []}
+                    continue
                 training = self._submission_training_eligibility(
                     round_row, submission_id, publication_reads.runs,
                     publication_reads=publication_reads,
@@ -5094,6 +5109,22 @@ class ArenaService:
             king_entry,
             configuration=configuration,
         )
+        if self._full_thinking_required(round_row) and qualifier_audit and decision["outcome"] == "crowned":
+            # A crowned round still needs the organizer's original training
+            # result: reward activation reads its published eligibility.
+            current = self._round(round_id)
+            if current["status"] != "scored":
+                return {"status": "stale", "round_status": current["status"]}
+            baseline_id = str(king_entry["submission_id"])
+            training = self._submission_training_eligibility(
+                round_row, baseline_id, publication_reads.runs,
+                publication_reads=publication_reads,
+            )
+            eligibility[baseline_id]["training_data_eligibility"] = training
+            if not training["eligible"]:
+                if eligibility[baseline_id]["eligible"]:
+                    eligibility[baseline_id]["eligibility_reason"] = "training_data_incomplete"
+                eligibility[baseline_id]["eligible"] = False
         published_at = _iso(self.now())
         final_ranking = verify.final_ranking(effective_final_entries)
         for row in final_ranking:

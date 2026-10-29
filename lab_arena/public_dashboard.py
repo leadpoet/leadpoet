@@ -288,6 +288,9 @@ def _training_eligibility_projection(ranking: Mapping[str, Any]) -> dict:
         return result
 
     raw = ranking.get("training_data_eligibility")
+    if raw == {"status": "not_assessed", "eligible": None, "reasons": []}:
+        return {"training_data_eligibility": {
+            "status": "not_assessed", "eligible": None, "reasons": []}}
     result = project(raw)
     if result is None:
         return {}

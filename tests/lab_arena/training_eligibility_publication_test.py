@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lab_arena import contracts, service, training_reader
+from lab_arena import contracts, integrity, service, training_reader
 from tests.lab_arena.complete_baseline_final_authority_test import fixture as baseline_fixture
 from tests.lab_arena.training_eligibility_test import SOURCE_HASH, captured_example, submission
 from tests.lab_arena.training_eligibility_test import ten_selected_examples
@@ -144,6 +144,154 @@ def test_verified_candidate_is_crowned_with_measured_scores(monkeypatch):
     assert baseline["training_data_eligibility"]["source_review"]["exemption"] == "organizer_baseline"
     assert publication["king_decision"]["outcome"] == "crowned"
     assert publication["king_decision"]["winner_submission_id"] == "miner"
+
+
+@pytest.mark.parametrize("margin,cost_eligible,audited,decision", [
+    (3.0, True, True, "crowned"),  # Equality is a qualifying score.
+    (3.01, True, False, "no_king"),
+    (3.0, False, False, "no_king"),
+])
+def test_per_icp_full_thinking_audits_every_possible_winner_only(
+    monkeypatch, margin, cost_eligible, audited, decision,
+):
+    harness = _publication_harness(monkeypatch)
+    obj, row, _submissions, _runs, _examples, _transitions, _writes, exported = harness
+    row["configuration_doc"].update(
+        integrity_policy=integrity.POLICY,
+        sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+        promotion_margin=margin,
+    )
+    obj._submission_cost_eligibility = lambda _row, submission_id, *_args, **_kwargs: {
+        "cost_summary": None,
+        "eligible": submission_id == BASELINE_ID or cost_eligible,
+        "eligibility_reason": "eligible" if submission_id == BASELINE_ID or cost_eligible
+                              else "cost_per_company_exceeded",
+    }
+    obj._qualified_company_counts = lambda *_args, **_kwargs: {0: 1, 1: 1}
+    obj._per_icp_cost_eligibility = lambda *_args, **_kwargs: {"eligible": True}
+    publication = _published(harness)
+    miner = _ranking(publication, "miner")
+    baseline = _ranking(publication, BASELINE_ID)
+    assert publication["king_decision"]["outcome"] == decision
+    assert miner["final_score"] == 3.0
+    assert miner["eligible"] is cost_eligible
+    if audited:
+        assert miner["training_data_eligibility"]["eligible"] is True
+        assert exported == ["miner-0", "miner-1", "exec-0", "exec-1"]
+    else:
+        assert miner["training_data_eligibility"] == {
+            "status": "not_assessed", "eligible": None, "reasons": [],
+        }
+        assert exported == []
+    if audited:
+        assert baseline["training_data_eligibility"]["eligible"] is True
+    else:
+        assert baseline["training_data_eligibility"] == {
+            "status": "not_assessed", "eligible": None, "reasons": [],
+        }
+
+
+def test_crowned_round_keeps_baseline_training_reward_gate(monkeypatch):
+    harness = _publication_harness(monkeypatch)
+    obj, row, _submissions, _runs, examples = harness[:5]
+    row["configuration_doc"].update(
+        integrity_policy=integrity.POLICY,
+        sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+    )
+    obj._qualified_company_counts = lambda *_args, **_kwargs: {0: 1, 1: 1}
+    obj._per_icp_cost_eligibility = lambda *_args, **_kwargs: {"eligible": True}
+    examples.pop("exec-1")
+    publication = _published(harness)
+    assert publication["king_decision"]["outcome"] == "crowned"
+    baseline = _ranking(publication, BASELINE_ID)
+    assert baseline["final_score"] == 0.0
+    assert baseline["eligible"] is False
+    assert baseline["eligibility_reason"] == "training_data_incomplete"
+    assert "selected_run_export_missing" in baseline["training_data_eligibility"]["reasons"]
+
+
+def test_all_qualifiers_failing_training_leave_baseline_unassessed(monkeypatch):
+    harness = _publication_harness(monkeypatch)
+    obj, row, submissions = harness[:3]
+    row["configuration_doc"].update(
+        integrity_policy=integrity.POLICY,
+        sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+    )
+    obj._qualified_company_counts = lambda *_args, **_kwargs: {0: 1, 1: 1}
+    obj._per_icp_cost_eligibility = lambda *_args, **_kwargs: {"eligible": True}
+    submissions["miner"]["code_review_doc"] = {}
+    publication = _published(harness)
+    miner = _ranking(publication, "miner")
+    assert miner["eligible"] is False
+    assert miner["eligibility_reason"] == "training_data_incomplete"
+    assert publication["king_decision"]["outcome"] == "no_king"
+    assert _ranking(publication, BASELINE_ID)["training_data_eligibility"] == {
+        "status": "not_assessed", "eligible": None, "reasons": [],
+    }
+
+
+def test_tied_qualifiers_are_both_audited_before_stable_winner(monkeypatch):
+    harness = _publication_harness(monkeypatch)
+    obj, row, submissions, executions = harness[:4]
+    row["configuration_doc"].update(
+        integrity_policy=integrity.POLICY,
+        sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+        promotion_margin=3.0,
+    )
+    row["participants"].append({"submission_id": "miner-2", "miner_hotkey": "miner-2-hotkey",
+                                "is_king": False})
+    submissions["miner-2"] = {**submissions["miner"], "submission_id": "miner-2",
+                              "miner_hotkey": "miner-2-hotkey"}
+    executions.extend({**run, "run_id": run["run_id"].replace("miner-", "miner-2-"),
+                       "submission_id": "miner-2", "miner_hotkey": "miner-2-hotkey"}
+                      for run in list(executions) if run["submission_id"] == "miner")
+    obj._qualified_company_counts = lambda *_args, **_kwargs: {0: 1, 1: 1}
+    obj._per_icp_cost_eligibility = lambda *_args, **_kwargs: {"eligible": True}
+    audited = []
+
+    def training(_round, submission_id, _runs, **_kwargs):
+        audited.append(submission_id)
+        return {"eligible": True, "reasons": [], "source_review": {"eligible": True},
+                "capture": {"eligible": True}}
+
+    obj._submission_training_eligibility = training
+    publication = _published(harness)
+    assert set(audited) == {"miner", "miner-2", BASELINE_ID}
+    assert publication["king_decision"]["winner_submission_id"] == "miner"
+    assert _ranking(publication, "miner-2")["training_data_eligibility"]["eligible"] is True
+
+
+def test_baseline_cost_penalty_zero_is_the_qualifier_threshold(monkeypatch):
+    harness = _publication_harness(monkeypatch)
+    obj, row, _submissions, executions = harness[:4]
+    for run in executions:
+        if run["submission_id"] == BASELINE_ID:
+            run["per_icp_score"] = 4.0
+    row["configuration_doc"].update(
+        integrity_policy=integrity.POLICY,
+        sourcing_cost_eligibility_policy=contracts.FLAT_PER_ICP_SUCCESSFUL_CALLS_COST_POLICY,
+    )
+    obj._qualified_company_counts = lambda *_args, **_kwargs: {0: 1, 1: 1}
+    obj._per_icp_cost_eligibility = lambda *_args, **_kwargs: {"eligible": True}
+    obj._submission_cost_eligibility = lambda _round, submission_id, *_args, **_kwargs: {
+        "cost_summary": None,
+        "eligible": submission_id != BASELINE_ID,
+        "eligibility_reason": "cost_per_company_exceeded" if submission_id == BASELINE_ID
+                              else "eligible",
+    }
+    audited = []
+
+    def training(_round, submission_id, _runs, **_kwargs):
+        audited.append(submission_id)
+        return {"eligible": True, "reasons": [], "source_review": {"eligible": True},
+                "capture": {"eligible": True}}
+
+    obj._submission_training_eligibility = training
+    publication = _published(harness)
+    assert _ranking(publication, BASELINE_ID)["final_score"] == 0.0
+    assert _ranking(publication, "miner")["final_score"] == 3.0
+    assert publication["king_decision"]["outcome"] == "crowned"
+    assert audited == ["miner", BASELINE_ID]
 
 
 @pytest.mark.parametrize("damage,reason", [

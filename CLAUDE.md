@@ -434,3 +434,17 @@ use the canonical gateway and normal-validator release controllers. Preserve
 historical rounds, scoring, rewards, credentials, and concurrent work. This
 scope does not authorize one-off promotions, replaying historical competition,
 or unrelated production changes. It ends when verification is complete.
+
+## Scoped production authorization: October 28 qualifier training publication
+
+The user authorized full training assessment for every cost-eligible challenger
+that can meet the frozen baseline promotion margin. Publish an explicit
+`not_assessed` report for other rows, and retain the organizer baseline's
+training result when a challenger is crowned so reward activation keeps its
+existing gate. Preserve complete score, cost, judgment, baseline and winner
+validation, and reject an unassessed possible winner in the database. Apply
+only exact committed migration `588-lab-arena-qualifier-training-publication.sql`.
+The coordinating task owns independent review, push, merge, production
+migration, canonical deployment and live verification. Internal implementation
+agents may test and commit only. Do not replay paid work, change frozen inputs,
+or alter concurrent publishers under this scope.

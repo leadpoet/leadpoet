@@ -145,11 +145,16 @@ def test_gateway_restart_uses_bounded_memory_gates_without_async_termination() -
         '"$LEADPOET_REPO_ROOT/gateway/tee/host_memory_guard_v2.py"'
         in restart
     )
-    assert "--minimum-available-mib 16384" in workflow
-    assert "--minimum-available-mib 4096" in workflow
+    # Release builders now use disposable isolated hosts. The production
+    # restart memory gates above still protect both local maintenance paths.
+    import yaml
+    jobs = yaml.safe_load(workflow)["jobs"]
+    assert "gateway-parent" not in jobs and "gateway-parent-b" not in jobs
+    assert "/runner=attested-v2-isolated/spot=false/retry=false" in jobs["builds"]["runs-on"]
+    assert jobs["builds"]["strategy"]["matrix"]["include"][0]["runner"] == "ubuntu-24.04"
+    assert "host_memory_guard_v2.py" not in workflow
     assert "--watch-parent" not in restart
     assert "--watch-parent" not in (
         root / "gateway" / "tee" / "host_memory_guard_v2.py"
     ).read_text(encoding="utf-8")
-    assert "Guard gateway builder host memory" in workflow
     assert "--watch-parent" not in workflow

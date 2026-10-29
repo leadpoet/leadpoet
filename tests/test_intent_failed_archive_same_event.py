@@ -15,7 +15,7 @@ from tests.test_intent_unavailable_same_event_source import (
 )
 
 
-def install_exact_failures(monkeypatch, *, final_snapshot=SNAPSHOT, exa_documents=None, exa_http_status=200):
+def install_exact_failures(monkeypatch, *, final_snapshot=SNAPSHOT, exa_documents=None, exa_http_status=200, archive=ERROR_FRAME):
     """Saved native sequence: direct502, archive error body, two exact crawl errors."""
     calls = []
     documents = exa_documents or [{"results": [], "statuses": [{
@@ -39,7 +39,7 @@ def install_exact_failures(monkeypatch, *, final_snapshot=SNAPSHOT, exa_document
                     "url": "http" + SNAPSHOT[5:],
                 }}}, request=httpx.Request("GET", url))
             assert url == SNAPSHOT
-            return httpx.Response(200, text=ERROR_FRAME, request=httpx.Request("GET", final_snapshot))
+            return httpx.Response(200, text=archive, request=httpx.Request("GET", final_snapshot))
         async def post(self, url, **kwargs):
             calls.append(("POST", url))
             assert kwargs["json"]["ids"] == [SOURCE]

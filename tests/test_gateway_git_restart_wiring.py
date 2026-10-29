@@ -1840,9 +1840,13 @@ except BlockingIOError:
     assert "Stopping existing gateway" not in result.stdout
 
 
-def test_restart_recovers_lock_inherited_by_detached_relay(tmp_path: Path) -> None:
+@pytest.mark.parametrize("runtime_module,recoverable", [("gateway.main", True),
+                                                       ("gateway.utils.tee_inter_enclave_relay", False)])
+def test_restart_recovers_only_current_gateway_runtime_lock(
+    tmp_path: Path, runtime_module: str, recoverable: bool,
+) -> None:
     if not Path("/proc/self/fd").exists() or shutil.which("flock") is None:
-        return
+        pytest.skip("Linux process descriptors and flock are required")
 
     lock_file = tmp_path / "gateway-restart.lock"
     holder_code = """
@@ -1850,7 +1854,7 @@ import fcntl
 import sys
 import time
 
-with open(sys.argv[2], "w", encoding="utf-8") as handle:
+with open(sys.argv[-1], "w", encoding="utf-8") as handle:
     fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
     print("ready", flush=True)
     time.sleep(30)
@@ -1860,7 +1864,8 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
             sys.executable,
             "-c",
             holder_code,
-            "gateway.utils.tee_inter_enclave_relay",
+            "-m",
+            runtime_module,
             str(lock_file),
         ],
         stdout=subprocess.PIPE,
@@ -1891,11 +1896,13 @@ with open(sys.argv[2], "w", encoding="utf-8") as handle:
         holder.wait(timeout=5)
 
     assert result.returncode != 0
-    assert (
-        "Recovering gateway restart lock inherited by a detached runtime process"
-        in result.stdout
-    )
-    assert "another gateway restart is already running" not in result.stderr
+    recovery_message = "Recovering gateway restart lock inherited by a detached runtime process"
+    if recoverable:
+        assert recovery_message in result.stdout
+        assert "another gateway restart is already running" not in result.stderr
+    else:
+        assert recovery_message not in result.stdout
+        assert "another gateway restart is already running" in result.stderr
 
 
 def test_gateway_restart_pins_all_build_provenance_to_selected_sha() -> None:

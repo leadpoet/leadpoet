@@ -22,6 +22,8 @@ from scripts.verify_arena_full_thinking_e2e import full_thinking_database
 
 MIGRATION = (Path(__file__).resolve().parents[2] /
              "scripts/569-lab-arena-training-publication-eligibility.sql")
+QUALIFIER_MIGRATION = (Path(__file__).resolve().parents[2] /
+                      "scripts/588-lab-arena-qualifier-training-publication.sql")
 GUARD = "public.lab_arena__per_icp_publication_valid(%s,%s::jsonb)"
 
 
@@ -32,7 +34,16 @@ def database():
 
 @pytest.fixture()
 def current_database():
-    yield from full_thinking_database()
+    # Only current-runtime service tests need qualifier publication authority.
+    # The shared full-thinking fixture retains the pre-588 regression boundary.
+    database = full_thinking_database()
+    try:
+        psycopg2, dsn = next(database)
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            cursor.execute(QUALIFIER_MIGRATION.read_text())
+        yield psycopg2, dsn
+    finally:
+        database.close()
 
 
 def _verify(cursor, round_id, ranking):
@@ -138,6 +149,9 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
     from tests.lab_arena.test_integrity_round import IntegrityHarness
 
     psycopg2, dsn = current_database
+    # Each disposable database needs its own write-once object namespace.
+    monkeypatch.setattr(IntegrityHarness, "objects_key",
+                        lambda _self: "training-publication-" + tmp_path.name)
     harness = IntegrityHarness(lambda: psycopg2.connect(**dsn), tmp_path,
                                challengers=["Miner0", "Miner1"], runners=["alpha"])
     harness.service.config.defaults = replace(
@@ -179,7 +193,10 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
 
     # The service's raw export reader is tested separately. Supply controlled
     # evidence outcomes here and exercise its decision plus actual SQL write.
+    assessed = []
+
     def training(_round, submission_id, _runs, **_kwargs):
+        assessed.append(submission_id)
         return _training(harness.flavors[submission_id] == "Miner1")
 
     monkeypatch.setattr(harness.service, "_submission_training_eligibility", training)
@@ -204,8 +221,6 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
                for item in saved["publication_doc"]["final_ranking"]}
     assert all(item["final_score"] is not None for flavor, item in ranking.items()
                if flavor != "Miner0")
-    assert ranking["Miner0"]["eligible"] is False
-    assert ranking["Miner0"]["eligibility_reason"] == "training_data_incomplete"
     if stopped:
         failed_runs = harness.service.store.list_runs(
             harness.round_id, submission_id=failed_id, kind="execute",
@@ -215,8 +230,24 @@ def test_service_publishes_incomplete_contender_and_crowns_eligible_peer(
         # The failed execution has no measured output or score. Publication
         # keeps the unmeasured result, rather than inventing a zero.
         assert ranking["Miner0"]["final_score"] is None
+        assert failed_id not in assessed
+        assert ranking["Miner0"]["training_data_eligibility"] == {
+            "status": "not_assessed", "eligible": None, "reasons": [],
+        }
+        # Cost eligibility alone cannot make an unmeasured row a contender.
+        # No paid sourcing occurred, and no training pass has been claimed.
+        assert ranking["Miner0"]["eligible"] is True
+        assert ranking["Miner0"]["eligibility_reason"] == "eligible"
+        cost = ranking["Miner0"]["cost_summary"]
+        assert cost["competition_sourcing_microusd"] == 0
+        assert cost["returned_company_count"] == cost["qualified_company_count"] == 0
+        assert all(icp["eligible"] is True for icp in cost["per_icp"])
     else:
         assert ranking["Miner0"]["final_score"] is not None
+        assert ranking["Miner0"]["eligible"] is False
+        assert ranking["Miner0"]["eligibility_reason"] == "training_data_incomplete"
+        assert failed_id in assessed
+        assert ranking["Miner0"]["training_data_eligibility"] == _training(False)
     assert ranking["Miner1"]["eligible"] is True
     assert saved["publication_doc"]["king_decision"]["winner_submission_id"] == next(
         submission_id for submission_id, flavor in harness.flavors.items()

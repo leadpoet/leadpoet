@@ -218,6 +218,8 @@ def test_signed_http_source_three_judge_four_persists_and_publishes(database, tm
     failed_reviews = []
     original_source_failures = []
     assembled = []
+    release_fourth = [not late_completion]
+    held_failures = []
 
     def build_http(self):
         service = build(self)
@@ -257,26 +259,43 @@ def test_signed_http_source_three_judge_four_persists_and_publishes(database, tm
         # Disposable DB clock adapter: avoid wall-clock sleeps for 472 backoff.
         with database[0].connect(**database[1]) as conn:
             cool(conn)
-        if late_completion:
-            row = self.get_round(kwargs['round_id'])
-            if row['status'] != 'scored':
-                # Leave fourth reviews in the real backoff period until the
-                # normal forward transition reaches scored.
-                with database[0].connect(**database[1]) as conn, conn.cursor() as cursor:
-                    cursor.execute('SET LOCAL session_replication_role=replica')
-                    cursor.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp() WHERE round_id=%s AND kind='score' AND attempt=4 AND status='pending'", (kwargs['round_id'],))
+        if not release_fourth[0]:
+            # Delay accepted fourth reviews at the current scoring boundary.
+            # An unknown baseline cannot advance to scored merely to release
+            # its own retry; the historical late-write SQL is tested above.
+            with database[0].connect(**database[1]) as conn, conn.cursor() as cursor:
+                cursor.execute('SET LOCAL session_replication_role=replica')
+                cursor.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp() WHERE round_id=%s AND kind='score' AND attempt=4 AND status='pending'", (kwargs['round_id'],))
         return store_claim(self, *args, **kwargs)
 
     def assemble_at_scored(self, target, **kwargs):
+        if target == 'scored' and late_completion:
+            advance(self, 'stage2_scoring', **kwargs)
+            self.run_stage_with_runners(1)
+            held = self.service.store.get_round(self.round_id)
+            held_runs = self.service.store.list_runs(self.round_id)
+            recovered = next(r for r in held_runs if r['kind'] == 'execute'
+                             and r['attempt'] == 3 and r['icp_position'] == 0)
+            assert recovered['status'] == 'accepted'
+            assert recovered['per_icp_score'] is None
+            assert not self.service._baseline_final_ready(held)
+            assert held['publication_doc'] is None and held['reward_basis_doc'] is None
+            assert self.service.publish(self.round_id) == {
+                'status': 'stale', 'round_status': 'stage2_scoring'}
+            fourth = [r for r in held_runs if r['kind'] == 'score'
+                      and r['attempt'] == 4 and r['status'] == 'pending']
+            assert {r['icp_position'] for r in fourth} == {0, 3}
+            assert any(r['scored_run_id'] == recovered['run_id'] for r in fourth)
+            held_failures.extend(r for r in held_runs if r['status'] == 'failed')
+            release_fourth[0] = True
         result = advance(self, target, **kwargs)
         if target == 'scored':
             row = self.service.store.get_round(self.round_id)
             source = next(r for r in self.service.store.list_runs(self.round_id, kind='execute')
                           if r['attempt'] == 3 and r['icp_position'] == 0)
-            if late_completion:
-                assert source['per_icp_score'] is None
-                assert not self.service._baseline_final_ready(row)
-                self.run_stage_with_runners(1)
+            assert source['per_icp_score'] == 80
+            for failed in held_failures:
+                assert self.service.store.get_run(failed['run_id']) == failed
             judge = next(r for r in self.service.store.list_runs(self.round_id, kind='score')
                          if r['scored_run_id'] == source['run_id'] and r['status'] == 'accepted')
             assert judge['attempt'] == 4

@@ -35,7 +35,7 @@ class RestHarness(rt.Harness):
         super().__init__(connect, tmp_path, **kwargs)
 
     def objects_key(self) -> str:
-        return "postgrest"
+        return 'postgrest-' + str(self.tmp)
 
     def make_store(self) -> ArenaStore:
         transport = make_transport(self.stack, "lab_arena_service")
@@ -71,6 +71,7 @@ def placeholder(param: str, sql_type: str):
     return "missing-" + param.replace("p_", "").replace("_", "-")
 
 
+@pytest.mark.parametrize('stack', ['current'], indirect=True)
 def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_path):
     harness = RestHarness(stack, tmp_path, challengers=["Rest-A", "Rest-B", "Rest-C"], runners=["alpha", "beta"])
     service = harness.service
@@ -82,7 +83,7 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     # The operator's first command (--check-only) parses PostgREST error bodies for the function probes.
     checks = service.startup_checks()
     assert checks["database_identity"]["current_user"] == "lab_arena_service" and checks["current_round"] is None
-    cutoff = datetime.now(timezone.utc) + timedelta(hours=12)
+    cutoff = datetime.now(timezone.utc) + timedelta(minutes=30)
     configuration = service.create_round(cutoff, round_id="arena-2026-09-03-rest")
     harness.round_id = configuration["round_id"]
     round_id = harness.round_id
@@ -133,53 +134,68 @@ def test_full_round_through_postgrest_reaches_every_service_function(stack, tmp_
     assert "lab_arena_open_scoring" in reached or "lab_arena_open_scoring_v2" in reached
     assert "lab_arena_complete_attempt" in reached or "lab_arena_complete_attempt_v2" in reached
     # Every function the round did not reach is routed and coerced by PostgREST; only its own domain check refuses.
+    capability_versions = {
+        "lab_arena_schema_version_v1": 197,
+        "lab_arena_weight_state_schema_v1": 202,
+        "lab_arena_code_review_schema_v1": 207,
+        "lab_arena_validator_scoring_authority_schema_v1": 208,
+        "lab_arena_integrity_schema_v1": 213,
+        "lab_arena_contact_schema_v1": 215,
+        "lab_arena_participation_schema_v1": 221,
+        "lab_arena_champion_funding_schema_v1": 227,
+        "lab_arena_successful_call_cost_schema_v1": 230,
+        "lab_arena_twenty_icp_promotion_schema_v1": 251,
+        "lab_arena_baseline_cost_eligibility_schema_v1": 254,
+        "lab_arena_submission_replacement_schema_v1": 258,
+        "lab_arena_per_icp_cost_schema_v1": 289,
+        "lab_arena_dynamic_benchmark_schema_v1": 353,
+        "lab_arena_submission_duplicate_schema_v1": 405,
+        "lab_arena_deepline_catalog_schema_v1": 415,
+        "lab_arena_deepline_response_schema_v1": 426,
+        "lab_arena_infrastructure_retry_cost_schema_v1": 478,
+        "lab_arena_company_quality_schema_v1": 1,
+    }
+    empty_responses = {
+        "lab_arena_current_daily_icp_set": {"status": "unavailable", "set_id": 0},
+        "lab_arena_next_closed_deepline_reconciliation_v1": {"status": "none"},
+        "lab_arena_next_closed_provider_reconciliation_v1": {"status": "none"},
+        "lab_arena_list_deepline_cost_reconciliations_v1": {"status": "ok", "items": []},
+        "lab_arena_list_deepline_cost_reconciliations_v2": {"status": "ok", "items": []},
+        "lab_arena_list_deepline_cost_reconciliations_v3": {"status": "ok", "items": []},
+        "lab_arena_list_openrouter_cost_reconciliations_v1": {"status": "ok", "items": []},
+        "lab_arena_latest_promoted_champion_v1": None,
+        "lab_arena_signal_authority_exclusions_v1": None,
+        "lab_arena__miner_credit_judgment_terminal_v1": False,
+        "lab_arena_operator_hold_active_v1": False,
+        "lab_arena_has_recent_participation_v1": {"eligible": False},
+        "lab_arena_retry_credit_failures_v1": {
+            "status": "no_eligible", "reason": "invalid_request_hash", "requeued_count": 0},
+        "lab_arena_scoring_policy_history_v1": {"round_id": "missing-round-id", "revisions": []},
+        "lab_arena_review_guard_state_v1": {
+            "schema_version": "leadpoet.lab_arena.review_guard_state.v1", "guard_present": False},
+    }
     for function in sorted(set(FUNCTION_SIGNATURES) - reached):
         params = {name: placeholder(name, sql_type) for name, sql_type in FUNCTION_SIGNATURES[function]}
-        if function == "lab_arena_current_daily_icp_set":
-            response = harness.transport.rpc(function, params)
-            assert response["status"] == "unavailable"
+        if function in capability_versions:
+            assert harness.transport.rpc(function, params)["version"] == capability_versions[function], function
             continue
-        if function == "lab_arena_next_closed_deepline_reconciliation_v1":
-            assert harness.transport.rpc(function, params) == {"status": "none"}
+        if function in empty_responses:
+            assert harness.transport.rpc(function, params) == empty_responses[function], function
             continue
-        if function == "lab_arena_weight_state_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 202
-            continue
-        if function == "lab_arena_validator_scoring_authority_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 208
-            continue
-        if function == "lab_arena_code_review_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 207
-            continue
-        if function == "lab_arena_participation_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 221
-            continue
-        if function == "lab_arena_integrity_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 213
-            continue
-        if function == "lab_arena_twenty_icp_promotion_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 251
-            continue
-        if function == "lab_arena_baseline_cost_eligibility_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 254
-            continue
-        if function == "lab_arena_parallel_execution_schema_v1":
+        if function in ("lab_arena_parallel_execution_schema_v1", "lab_arena_parallel_execution_schema_v2"):
+            expanded = function.endswith("v2")
             assert harness.transport.rpc(function, params) == {
-                "schema_version": (
-                    "leadpoet.lab_arena.parallel_execution_schema.v1"
-                ),
-                "version": 255,
-                "max_parallel_icps": 20,
+                "schema_version": "leadpoet.lab_arena.parallel_execution_schema.v" + ("2" if expanded else "1"),
+                "version": 401 if expanded else 255,
+                "max_parallel_icps": 251 if expanded else 20,
             }
             continue
-        if function == "lab_arena_contact_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 215
-            continue
-        if function == "lab_arena_company_quality_schema_v1":
-            assert harness.transport.rpc(function, params)["version"] == 1
-            continue
-        if function == "lab_arena_next_closed_deepline_reconciliation_v1":
-            assert harness.transport.rpc(function, params)["status"] == "none"
+        if function == "lab_arena_restart_guard_state_v1":
+            guard = harness.transport.rpc(function, params)
+            assert guard["schema_version"] == "leadpoet.lab_arena.restart_guard_state.v1"
+            assert all(guard[field] is False for field in ("guard_present", "guard_active", "operator_paused", "paused"))
+            assert guard["drain"]["preserved"] is True
+            assert all(value == 0 for key, value in guard["drain"].items() if key.endswith("_count"))
             continue
         with pytest.raises(ArenaStoreError) as excinfo:
             harness.transport.rpc(function, params)

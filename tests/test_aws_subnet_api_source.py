@@ -45,7 +45,7 @@ def _certificate(directory, name, hostname):
 
 
 @contextmanager
-def _proxy(directory, *, failure=None):
+def _proxy(directory, *, failure=None, echo_location=False, header_padding=0):
     assert shutil.which("docker") and shutil.which("openssl"), "nginx integration tools required"
     directory.mkdir(mode=0o700)
     trusted, trusted_key = _certificate(directory, "trusted", api.SOURCE_REST_HOST)
@@ -66,6 +66,8 @@ def _proxy(directory, *, failure=None):
             self.send_header("Content-Length", str(len(payload)))
             self.send_header("Content-Range", "0-1/2")
             self.send_header("X-Source-Receipt", "unchanged")
+            if echo_location:
+                self.send_header("Content-Location", self.path + "x" * header_padding)
             self.end_headers()
             self.wfile.write(payload)
 
@@ -200,3 +202,34 @@ def test_tls_trust_and_hostname_are_verified_before_any_http_request(tmp_path, f
         assert client.post("/rest/v1/rpc/echo", headers={"apikey": secrets()["arena_key"]}, content=b"{}").status_code == 502
         assert records == []
         assert server_names == [api.SOURCE_REST_HOST]
+
+
+def test_long_read_uri_and_content_location_survive_source_https(tmp_path):
+    # Current evaluation reads can filter 215 runs. PostgREST reflects that URI
+    # in Content-Location, so both request and upstream-header limits matter.
+    run_ids = ["run-" + "x" * 36 + "-%03d" % number for number in range(215)]
+    params = [("select", "run_id"), ("run_id", "in.(" + ",".join(run_ids) + ")"), ("limit", "1")]
+    with _proxy(tmp_path / "private", echo_location=True) as (client, records, server_names):
+        request = client.build_request("GET", "/rest/v1/lab_arena_runs", params=params,
+                                       headers={"apikey": secrets()["arena_key"]})
+        assert 8192 < len(request.url.raw_path) < 16384
+        response = client.send(request)
+        assert response.status_code == 403
+        assert response.content == b'{"code":"42501","message":"wire contract"}'
+        assert response.headers["Content-Location"] == records[-1][1]
+        assert len(response.headers["Content-Location"]) > 8192
+        assert records[-1][0] == "GET" and records[-1][3] == b""
+        assert server_names and set(server_names) == {api.SOURCE_REST_HOST}
+
+
+def test_short_read_uri_with_large_upstream_header_survives_source_https(tmp_path):
+    # A short request independently exercises the response-header limit.
+    with _proxy(tmp_path / "private", echo_location=True, header_padding=10000) as (client, records, server_names):
+        response = client.get("/rest/v1/lab_arena_runs?select=run_id&limit=1",
+                              headers={"apikey": secrets()["arena_key"]})
+        assert len(response.request.url.raw_path) < 100
+        assert response.status_code == 403
+        assert response.content == b'{"code":"42501","message":"wire contract"}'
+        assert response.headers["Content-Location"] == records[-1][1] + "x" * 10000
+        assert len(response.headers["Content-Location"]) > 8192
+        assert server_names and set(server_names) == {api.SOURCE_REST_HOST}

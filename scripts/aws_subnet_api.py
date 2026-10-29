@@ -124,6 +124,7 @@ http {{
     }}
     server {{
         listen {listen};
+        large_client_header_buffers 4 64k;
         # RPC/input contracts own their bounds; do not add nginx's 1 MB cap.
         client_max_body_size 0;
         location ^~ /rest/v1/ {{
@@ -142,6 +143,8 @@ http {{
             proxy_next_upstream off;
             proxy_redirect off;
             proxy_intercept_errors off;
+            proxy_buffer_size 64k;
+            proxy_buffers 3 64k;
             proxy_buffering off;
             proxy_request_buffering off;
             proxy_max_temp_file_size 0;

@@ -149,6 +149,14 @@ def test_release_authority_is_limited_to_separate_protected_publisher():
     assert "|| 'ubuntu" not in runner
 
 
+def test_release_runner_does_not_inherit_custom_image_hooks():
+    config = yaml.safe_load((ROOT / ".github/runs-on.yml").read_text())
+    # RunsOn replaces common top-level keys, so even a same-named image in a
+    # future inherited configuration cannot add hooks to the release runner.
+    assert config["images"] == {}
+    assert config["runners"]["attested-v2-isolated"]["image"] == "ubuntu24-full-x64"
+
+
 def test_artifact_validation_precedes_oidc_and_uses_exact_separate_artifacts():
     for name in ("verify", "publish"):
         steps = _workflow()["jobs"][name]["steps"]

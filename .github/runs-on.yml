@@ -1,5 +1,6 @@
 # This repository's release runner replaces inherited runner definitions.
 # No warm-pool label, persistent disk, cache extras, SSH, or inherited hooks.
+images: {}
 runners:
   attested-v2-isolated:
     cpu: [4]

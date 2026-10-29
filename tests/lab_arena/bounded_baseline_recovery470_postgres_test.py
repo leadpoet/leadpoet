@@ -331,13 +331,8 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
     normal_run = harness.run_stage_with_runners
 
     def run_after_retry_backoff(count=1):
-        # Advance only the disposable retry timestamps, as the 472 tests do.
-        # The real claim RPC still checks backoff, signatures and every guard.
-        with pg.connect(**dsn) as conn, conn.cursor() as cur:
-            cur.execute('SET LOCAL session_replication_role=replica')
-            cur.execute("UPDATE public.lab_arena_runs SET created_at=clock_timestamp()-interval '20 minutes' "
-                        "WHERE round_id=%s AND kind='score' AND status='pending' AND attempt>1",
-                        (harness.round_id,))
+        # Preserve the real queue admission clock for the seeded third judge.
+        harness.wait_for_score_retry_backoff(max_attempt=3)
         return normal_run(count)
 
     monkeypatch.setattr(harness, 'run_stage_with_runners', run_after_retry_backoff)
@@ -375,7 +370,13 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
         harness.sandbox.judge_failures.add(('PublicBaseline',3))
     harness.clock.advance_to(harness.schedule()['stage_2_start'])
     harness.service.advance_round(harness.round_id)
-    harness.advance_until('scored',runners=1)
+    if recover_successfully:
+        harness.advance_until('scored',runners=1)
+    else:
+        harness.advance_until('stage2_scoring',runners=1)
+        harness.run_stage_with_runners(1)
+        assert harness.service.advance_round(harness.round_id) == {
+            'status':'waiting','round_status':'stage2_scoring'}
     final=harness.service.store.get_round(harness.round_id)
     all_exec=harness.service.store.list_runs(harness.round_id,kind='execute')
     all_judges=harness.service.store.list_runs(harness.round_id,kind='score')
@@ -392,15 +393,33 @@ def exercise_signed_baseline_recovery(database, tmp_path, monkeypatch, recover_s
     assert final['stage1_scoring_plan_doc']==frozen_plan
     assert [r for r in all_exec if r['run_id'] in {c['run_id'] for c in complete}]==complete
     miners=[r for r in all_exec if r['submission_id']!=baseline]
-    assert len(miners)==10 and all(r['status']=='accepted' and r['per_icp_score'] is not None for r in miners)
+    assert len(miners)==10 and all(r['status']=='accepted' for r in miners)
     if recover_successfully:
+        assert all(run['per_icp_score'] is not None for run in miners)
         assert new_source['per_icp_score']==80
         assert harness.service._baseline_final_ready(final)
         assert harness.service.publish(harness.round_id)['status']=='ok'
     else:
+        # The incomplete baseline keeps stage scoring open. Healthy work is
+        # retained as accepted, immutable judgments, never invented table zeros.
+        chosen = harness.service._select_scoring_outputs(all_judges, round_row=final)
+        icps = harness.service.evaluation_icps(harness.round_id)
+        for source in miners:
+            judge = chosen[source['run_id']]
+            assert judge['status'] == 'accepted' and judge['terminal_cause'] == 'accepted'
+            assert judge['scored_run_id'] == source['run_id']
+            assert all(judge[field] == source[field] for field in
+                       ('round_id','submission_id','miner_hotkey','stage','icp_position'))
+            companies = json.loads(harness.objects.get(source['output_ref']))['companies']
+            breakdowns = harness.service._verified_breakdowns(judge,
+                icp=icps[source['icp_position']], companies=companies,
+                policy=final['configuration_doc']['scorer_policy'])
+            assert breakdowns and all(isinstance(row['final_score'], (int,float))
+                                      and row['final_score'] > 0 for row in breakdowns)
         assert new_source['per_icp_score'] is None
         assert not harness.service._baseline_final_ready(final)
-        assert harness.service.publish(harness.round_id)['reason']=='baseline_incomplete'
+        assert harness.service.publish(harness.round_id)=={
+            'status':'stale','round_status':'stage2_scoring'}
         assert final['published_at'] is None and final['reward_activated_at'] is None
         retained_judges = [r for r in all_judges if r['scored_run_id']==retained_source['run_id']]
         assert any(r['status']=='failed' and r['attempt']==3 for r in retained_judges)

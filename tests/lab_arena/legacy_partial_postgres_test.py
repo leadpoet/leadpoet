@@ -207,14 +207,10 @@ def test_owner_credit_retry_requires_bound_checkpoint_and_original_credit_gates(
 
 @pytest.fixture()
 def round_database():
-    # Separate complete rounds preserve their own baseline packages and reward
-    # state. Reuse the exact deployed schema fixture, including migration468.
-    generator = database.__wrapped__()
-    value = next(generator)
-    try:
-        yield value
-    finally:
-        generator.close()
+    # Full service reads require the current schema. The checkpoint security
+    # cases above keep the exact historical migration468 fixture.
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
 
 
 @pytest.mark.parametrize('failure', ['judge_error', 'judge_timeout'])
@@ -233,6 +229,29 @@ def test_legacy_partial_round_publishes_original_scores_costs_and_rewards(round_
     connect = lambda: psycopg.connect(**dsn)
     harness = IntegrityHarness(connect, tmp_path, challengers=['Recovered'], runners=['alpha', 'beta'])
     harness.chain.epoch = 25080
+    original_run_stage = harness.run_stage_with_runners
+
+    def run_stage_after_retry_backoff(count=2):
+        # PostgreSQL owns successor queue time. Preserve the real first retry
+        # backoff instead of exhausting the synthetic driver's step budget.
+        import time
+        deadline = time.monotonic() + 60
+        while True:
+            with connect() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT EXISTS (SELECT 1 FROM public.lab_arena_runs "
+                    "WHERE round_id=%s AND kind='score' AND status='pending' "
+                    "AND attempt=2 AND created_at+interval '30 seconds'>clock_timestamp())",
+                    (harness.round_id,),
+                )
+                waiting = cursor.fetchone()[0]
+            if not waiting:
+                break
+            assert time.monotonic() < deadline, 'retry backoff exceeded 60 seconds'
+            time.sleep(0.25)
+        original_run_stage(count)
+
+    harness.run_stage_with_runners = run_stage_after_retry_backoff
     harness.clock.now = datetime.now(timezone.utc)
     harness.service.config.defaults = replace(harness.service.config.defaults, rewards_enabled=True)
     original_runtime = harness.sandbox.run_icp

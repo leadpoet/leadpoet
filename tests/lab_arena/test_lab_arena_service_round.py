@@ -1953,7 +1953,6 @@ def test_systemic_verifier_reason_survives_runner_completion_and_publication(
     scorer_calls = 0
 
     def run_icp(spec, **kwargs):
-        nonlocal scorer_calls
         document = json.loads(
             (spec.input_dir / runtime.INPUT_FILE_NAME).read_text()
         )
@@ -2844,7 +2843,6 @@ def _run_stage_one_to_scoring(harness: Harness, participants: int, *, runners: i
 def test_a_validator_that_dies_mid_scoring_loses_its_lease_and_another_validator_finishes(isolated_lifecycle_connect, tmp_path):
     """Scoring leases expire like execution leases; the second attempt is any validator's."""
 
-    from datetime import timedelta
 
     connect = isolated_lifecycle_connect
     harness = Harness(connect, tmp_path, challengers=["Crash-A"], runners=["alpha", "beta"])
@@ -3399,9 +3397,6 @@ def test_a_banned_miner_cannot_submit_to_the_frozen_round(connect, tmp_path):
 
 @pytest.fixture(scope="module")
 def historical_main_database():
-    from tests.lab_arena.lab_arena_pg_harness import (
-        CURRENT_PROVIDER_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
-    )
     yield from database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS)
 
 
@@ -3439,6 +3434,9 @@ class _FrozenServiceHarness(HistoricalStoreHarnessMixin, Harness):
 
     def build_service(self):
         service = super().build_service()
+        service.config.defaults = replace(
+            service.config.defaults, integrity_from=None, normalize_intent_scale=True,
+        )
         commit = service.commit_benchmark
 
         def commit_historical(round_id):
@@ -3672,7 +3670,6 @@ def test_systemic_verifier_reason_survives_completion_and_blocks_publication(
     scorer_calls = 0
 
     def run_icp(spec, **kwargs):
-        nonlocal scorer_calls
         document = json.loads(
             (spec.input_dir / runtime.INPUT_FILE_NAME).read_text()
         )

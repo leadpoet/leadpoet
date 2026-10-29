@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from lab_arena import broker as br, runtime, scoring, shim, submission_runtime, verify
+from lab_arena import broker as br, rewards, runtime, scoring, shim, submission_runtime, verify
 from lab_arena.promotion import GitPromoter
 from lab_arena.store import ArenaStoreError
 from leadpoet_canonical import arena_weights
@@ -488,6 +488,292 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
     )
     assert derived["champion_share_ppb"] == 0
     assert derived["burned_residual_ppb"] == 1_000_000_000
+
+    # The next daily round freezes the still-current promoted source again.
+    harness.challengers = []
+    harness.expensive_baseline = False
+    harness.expensive_flavors = set()
+    harness.clock.now = datetime.now(timezone.utc)
+    harness.chain.epoch = 42_004
+    configuration = harness.service.create_round(
+        datetime.now(timezone.utc) + timedelta(hours=12),
+        round_id="arena-2026-10-06",
+    )
+    harness.round_id = configuration["round_id"]
+    harness.clock.advance_to(harness.schedule()["submission_cutoff"])
+    assert harness.service.advance_round(harness.round_id)["status"] == "ok"
+    third = harness.service.store.get_round(harness.round_id)
+    next_baseline = _baseline_participant(third)
+    next_submission = harness.service.store.get_submission(
+        next_baseline["submission_id"]
+    )
+    with tarfile.open(
+        fileobj=io.BytesIO(harness.objects.get(next_submission["source_ref"])),
+        mode="r:gz",
+    ) as archive:
+        assert archive.extractfile("flavor.txt").read().decode() == "PriorWinner"
+    fixtures.assert_canary_absent(harness, connect)
+
+
+# These additional cases preserve the pre-428 single-champion contract.
+# The original tests above retain current slot-policy rejection and weights.
+from tests.lab_arena.historical_service_harness import HistoricalStoreHarnessMixin
+
+
+@pytest.fixture
+def historical_baseline_cost_database():
+    from tests.lab_arena.lab_arena_pg_harness import (
+        CURRENT_SERVICE_MIGRATIONS, database_with_lab_arena_migration,
+    )
+    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+
+
+def _activate_single_champion_reward(harness, *, previous=None):
+    """Exercise the fixture's pre-428 v1 reward contract through its real RPC.
+
+    Current slot-policy activation is covered on current SQL. These rounds pin
+    the original one-point margin and single-champion weight authority.
+    """
+    row = harness.service.store.get_round(harness.round_id)
+    decision = row["publication_doc"]["king_decision"]
+    crowned = decision["outcome"] == "crowned"
+    hotkey = decision["king_hotkey"] if crowned else previous["king_hotkey"] if previous else ""
+    basis = harness.service._sign(rewards.reward_basis_document(
+        round_id=harness.round_id,
+        published_at=row["publication_doc"]["published_at"],
+        finalized_epoch=harness.chain.current_settlement_epoch(),
+        king_hotkey=hotkey,
+        king_outcome="crowned" if crowned else "defended" if previous else "no_king",
+        previous_king_start_epoch=previous["king_start_epoch"] if previous and not crowned else None,
+        reward_constants=row["configuration_doc"]["reward_constants"],
+    ), "reward_basis_hash")
+    return harness.service.store.activate_reward(
+        harness.round_id, basis, harness.service.signing_key_document(),
+    )
+
+
+class _HistoricalBaselineCostHarness(HistoricalStoreHarnessMixin, BaselineCostHarness):
+    pass
+
+
+def test_historical_v1_cost_ineligible_baseline_scores_zero_and_eligible_challenger_carries_downstream_authority(
+    historical_baseline_cost_database, tmp_path, fixed_scores
+):
+    psycopg2, dsn = historical_baseline_cost_database
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = _HistoricalBaselineCostHarness(
+        connect, tmp_path, challengers=["EfficientWinner"], runners=["alpha"]
+    )
+    harness.expensive_baseline = True
+    participants = fixtures._start_round(harness, day=3, epoch=41_000)
+    fixtures._run_stage_one_to_scoring(harness, participants, runners=1)
+    harness.advance_until("published", runners=1)
+
+    published = harness.service.store.get_round(harness.round_id)
+    baseline = _baseline_participant(published)
+    winner = _submission_for_flavor(harness, "EfficientWinner")
+    ranking = _ranking_by_id(published)
+    baseline_result = ranking[baseline["submission_id"]]
+    winner_result = ranking[winner["submission_id"]]
+    _assert_cost_evidence(
+        baseline_result,
+        successful_microusd=600,
+        eligible=False,
+        reason="cost_per_company_exceeded",
+    )
+    _assert_cost_evidence(
+        winner_result,
+        successful_microusd=200,
+        eligible=True,
+        reason="eligible",
+    )
+    assert baseline_result["final_score"] == 0.0
+    assert winner_result["final_score"] == fixed_scores["EfficientWinner"]
+    assert published["publication_doc"]["king_decision"] == {
+        "outcome": "crowned",
+        "king_submission_id": winner["submission_id"],
+        "king_hotkey": winner["miner_hotkey"],
+        "winner_submission_id": winner["submission_id"],
+    }
+
+    baseline_runs = [
+        row
+        for row in harness.service.store.list_runs(
+            harness.round_id,
+            submission_id=baseline["submission_id"],
+            kind="execute",
+        )
+        if row["status"] == "accepted"
+    ]
+    assert len(baseline_runs) == 20
+    assert {row["per_icp_score"] for row in baseline_runs} == {
+        fixed_scores["PublicBaseline"]
+    }
+    public_baseline = harness.service.public_results(
+        harness.round_id, baseline["submission_id"]
+    )
+    assert public_baseline["submission_scores"]["final"] == 0.0
+    assert {
+        score["per_icp_score"]
+        for score in public_baseline["scores"]["stage_1"]
+        + public_baseline["scores"]["stage_2"]
+    } == {fixed_scores["PublicBaseline"]}
+
+    # Publication is write-once and survives a fresh service instance.
+    restarted = harness.build_service()
+    assert restarted.public_round(harness.round_id)["publication"] == published[
+        "publication_doc"
+    ]
+
+    promotion_root = tmp_path / "winner-promotion"
+    promotion_root.mkdir()
+    remote = fixtures.promotion_repository(promotion_root)
+    harness.service.config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "winner-promotion-cache"
+    )
+    harness.clock.now = datetime.fromisoformat(
+        published["published_at"].replace("Z", "+00:00")
+    )
+    assert harness.service.promote_pending_baselines() == {
+        "status": "ok",
+        "promoted": 1,
+    }
+    assert (
+        subprocess.check_output(
+            ["git", "--git-dir", str(remote), "show", "lab:flavor.txt"]
+        ).decode()
+        == "EfficientWinner"
+    )
+    assert _activate_single_champion_reward(harness)["status"] == "activated"
+    activated = harness.service.store.get_round(harness.round_id)
+    assert activated["reward_basis_doc"]["king_hotkey"] == winner["miner_hotkey"]
+
+    burn = fixtures.keypair("baseline-cost-zero-burn-one").ss58_address
+    reward_epoch = int(activated["effective_reward_epoch"])
+    state = _accepted_state(harness, reward_epoch, burn)
+    assert state["reward_basis"]["king_hotkey"] == winner["miner_hotkey"]
+    derived = arena_weights.derive_arena_weights(
+        state, [burn, winner["miner_hotkey"]]
+    )
+    assert derived["champion_share_ppb"] == 300_000_000
+    assert derived["burned_residual_ppb"] == 700_000_000
+    assert derived["sparse_uids"] == [0, 1]
+    fixtures.assert_canary_absent(harness, connect)
+
+
+def test_historical_v1_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_baseline(
+    historical_baseline_cost_database, tmp_path, fixed_scores
+):
+    psycopg2, dsn = historical_baseline_cost_database
+    connect = lambda: psycopg2.connect(**dsn)
+    harness = _HistoricalBaselineCostHarness(
+        connect, tmp_path, challengers=["PriorWinner"], runners=["alpha"]
+    )
+
+    first_count = fixtures._start_round(harness, day=4, epoch=42_000)
+    fixtures._run_stage_one_to_scoring(harness, first_count, runners=1)
+    harness.advance_until("published", runners=1)
+    first = harness.service.store.get_round(harness.round_id)
+    first_ranking = _ranking_by_id(first)
+    first_baseline = _baseline_participant(first)
+    assert first_ranking[first_baseline["submission_id"]]["eligible"] is True
+    assert first_ranking[first_baseline["submission_id"]]["final_score"] == fixed_scores[
+        "PublicBaseline"
+    ]
+    prior_winner = _submission_for_flavor(harness, "PriorWinner")
+    assert first["king_hotkey"] == prior_winner["miner_hotkey"]
+
+    promotion_root = tmp_path / "incumbent-promotion"
+    promotion_root.mkdir()
+    remote = fixtures.promotion_repository(promotion_root)
+    harness.service.config.baseline_promoter_factory = lambda: GitPromoter(
+        str(remote), tmp_path / "incumbent-promotion-cache"
+    )
+
+    def promoted_baseline(_url, _limit):
+        return subprocess.run(
+            ("git", "--git-dir", str(remote), "archive", "--format=tar.gz", "lab"),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+
+    harness.service.config.baseline_source_fetcher = promoted_baseline
+    harness.clock.now = datetime.fromisoformat(
+        first["published_at"].replace("Z", "+00:00")
+    )
+    assert harness.service.promote_pending_baselines() == {
+        "status": "ok",
+        "promoted": 1,
+    }
+    assert _activate_single_champion_reward(harness)["status"] == "activated"
+    first_activated = harness.service.store.get_round(harness.round_id)
+    first_basis = first_activated["reward_basis_doc"]
+
+    harness.challengers = ["LowEligible", "ExpensiveHigh"]
+    harness.expensive_baseline = True
+    harness.expensive_flavors = {"ExpensiveHigh"}
+    harness.clock.now = datetime.now(timezone.utc)
+    second_count = fixtures._start_round(harness, day=5, epoch=42_002)
+    fixtures._run_stage_one_to_scoring(harness, second_count, runners=1)
+    harness.advance_until("published", runners=1)
+    second = harness.service.store.get_round(harness.round_id)
+    second_baseline = _baseline_participant(second)
+    low = _submission_for_flavor(harness, "LowEligible")
+    expensive = _submission_for_flavor(harness, "ExpensiveHigh")
+    ranking = _ranking_by_id(second)
+    _assert_cost_evidence(
+        ranking[second_baseline["submission_id"]],
+        successful_microusd=600,
+        eligible=False,
+        reason="cost_per_company_exceeded",
+    )
+    _assert_cost_evidence(
+        ranking[low["submission_id"]],
+        successful_microusd=200,
+        eligible=True,
+        reason="eligible",
+    )
+    _assert_cost_evidence(
+        ranking[expensive["submission_id"]],
+        successful_microusd=600,
+        eligible=False,
+        reason="cost_per_company_exceeded",
+    )
+    assert ranking[second_baseline["submission_id"]]["final_score"] == 0.0
+    assert ranking[low["submission_id"]]["final_score"] == fixed_scores["LowEligible"]
+    assert ranking[expensive["submission_id"]]["final_score"] == fixed_scores[
+        "ExpensiveHigh"
+    ]
+    assert second["publication_doc"]["king_decision"] == {
+        "outcome": "no_king",
+        "king_submission_id": None,
+        "king_hotkey": "",
+        "winner_submission_id": None,
+    }
+    assert harness.service.promote_pending_baselines() == {
+        "status": "ok",
+        "promoted": 0,
+    }
+    assert _activate_single_champion_reward(harness, previous=first_basis)["status"] == "activated"
+    second_activated = harness.service.store.get_round(harness.round_id)
+    second_basis = second_activated["reward_basis_doc"]
+    assert second_basis["king_hotkey"] == prior_winner["miner_hotkey"]
+    assert second_basis["king_outcome"] == "defended"
+    assert second_basis["king_start_epoch"] == first_basis["king_start_epoch"]
+    assert second_basis["champion_reward_factor_ppm"] == first_basis[
+        "champion_reward_factor_ppm"
+    ]
+
+    burn = fixtures.keypair("baseline-cost-zero-burn-two").ss58_address
+    reward_epoch = int(second_activated["effective_reward_epoch"])
+    state = _accepted_state(harness, reward_epoch, burn)
+    assert state["reward_basis"] == second_basis
+    derived = arena_weights.derive_arena_weights(
+        state, [burn, prior_winner["miner_hotkey"]]
+    )
+    assert derived["champion_share_ppb"] == 300_000_000
+    assert derived["burned_residual_ppb"] == 700_000_000
 
     # The next daily round freezes the still-current promoted source again.
     harness.challengers = []

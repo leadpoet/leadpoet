@@ -33,6 +33,12 @@ def database():
     yield from database_with_lab_arena_migration(migrations)
 
 
+@pytest.fixture()
+def service_database():
+    from tests.lab_arena.lab_arena_pg_harness import current_service_database
+    yield from current_service_database()
+
+
 def test_migration_is_exact_repeatable_and_keeps_security_shape(database):
     psycopg, dsn = database
     with psycopg.connect(**dsn) as conn, conn.cursor() as cur:
@@ -56,12 +62,16 @@ def test_migration_is_exact_repeatable_and_keeps_security_shape(database):
 
 
 def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
-    database, tmp_path, monkeypatch,
+    database, tmp_path, monkeypatch, service_database,
 ):
     psycopg, dsn = database
-    connect = lambda: psycopg.connect(**dsn)
+    historical_connect = lambda: psycopg.connect(**dsn)
+    service_psycopg, service_dsn = service_database
+    current_connect = lambda: service_psycopg.connect(**service_dsn)
+    connect = historical_connect
     with connect() as conn, conn.cursor() as cur:
         cur.execute(MIGRATION.read_text())
+    connect = current_connect
     harness = IntegrityHarness(
         connect, tmp_path, challengers=["JudgeIncompleteMiner"], runners=["alpha"]
     )
@@ -74,8 +84,6 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
     monkeypatch.setattr(fixtures, "deterministic_scorer", _baseline_first_judge)
     assert fixtures._start_round(harness, day=29, epoch=62_429) == 2
     harness.clock.advance_to(harness.schedule()["stage_1_start"])
-    harness.advance_until("stage1_scored", runners=1)
-    harness.service.advance_round(harness.round_id)
     harness.advance_until("scored", runners=1)
     round_row = harness.service.store.get_round(harness.round_id)
     ids = {
@@ -98,6 +106,16 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
     finally:
         harness.service.store.transition_round = original_transition
     full_publication = publication_patch["publication_doc"]
+    from tests.lab_arena.publication_round_witness460_postgres_test import (
+        _copy_historical_round, _historical_publication_costs,
+    )
+    _copy_historical_round(current_connect, historical_connect, harness.round_id,
+                           tmp_path / 'source-round.json')
+    (tmp_path / 'source-publication.json').write_text(json.dumps(full_publication, sort_keys=True))
+    full_publication = _historical_publication_costs(
+        historical_connect, harness.round_id, full_publication)
+    connect = historical_connect
+
 
     def probe(*, baseline=False, cause="judge_error", second=True,
               active=False, alias=False, accepted=False,
@@ -192,6 +210,9 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
                     (json.dumps(configuration), harness.round_id),
                 )
                 cur.execute("SET LOCAL session_replication_role=origin")
+                cur.execute("SET LOCAL ROLE lab_arena_owner")
+                cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname=current_user")
+                assert cur.fetchone()[0] is False
                 cur.execute(
                     "SELECT public.lab_arena__publication_execution_incomplete_v1(%s,%s)",
                     (harness.round_id, submission_id),
@@ -235,9 +256,19 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
     probe(accepted=True, expect=False)
     probe(cause="credential_error", expect=False)
 
-    # Now let the real service score and publish an unfinished stage-two ICP.
-    # Only the failed judge state is seeded; ranking and publication are built
-    # by the production methods and checked by the database transition guard.
+    # Current continuation semantics keep retrying before their deadline.
+    # Prove normal current publication separately; the exhausted-two-attempt
+    # service controls below belong to this exact historical schema.
+    assert harness.service.publish(harness.round_id)['status'] == 'ok'
+    from lab_arena.store import ArenaStore, PsycopgTransport
+    transport = PsycopgTransport(historical_connect)
+    historical_store = ArenaStore(transport)
+    connect = historical_connect
+    # Current service scoring requires later judge-credit RPCs. Keep this
+    # legacy exhausted-judge proof on exact historical SQL instead of adding
+    # compatibility functions. The captured real publication supplies the
+    # unchanged baseline, costs and membership; only the unmeasured challenger
+    # ranking is marked incomplete, as in the historical probes above.
     with connect() as conn, conn.cursor() as cur:
         cur.execute("SET LOCAL session_replication_role=replica")
         cur.execute(
@@ -279,15 +310,24 @@ def test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
             "FROM public.lab_arena_runs WHERE run_id=%s", (score_id,)
         )
         cur.execute(
-            "UPDATE public.lab_arena_rounds SET status='stage2_judged' "
+            "UPDATE public.lab_arena_rounds SET status='scored' "
             "WHERE round_id=%s", (harness.round_id,)
         )
         cur.execute("SET LOCAL session_replication_role=origin")
-    scored = harness.service.score_stage(harness.round_id, 2)
-    assert scored["status"] == "ok"
-    assert harness.service.store.get_run(execution_id)["per_icp_score"] is None
-    assert harness.service.publish(harness.round_id)["status"] == "ok"
-    published = harness.service.store.get_round(harness.round_id)
+    assert historical_store.get_run(execution_id)['per_icp_score'] is None
+    publication = copy.deepcopy(full_publication)
+    incomplete = next(item for item in publication['final_ranking']
+                      if item['submission_id'] == ids[False])
+    incomplete.update(final_score=None, cost_summary=None, eligible=False,
+                      eligibility_reason='execution_incomplete')
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute('SET LOCAL ROLE lab_arena_owner')
+        cur.execute("SELECT public.lab_arena_transition_round(%s,'scored','published',%s::jsonb)",
+                    (harness.round_id, json.dumps({'publication_doc': publication,
+                     'published_at': publication['published_at']})))
+        assert cur.fetchone()[0]['status'] == 'ok'
+    published = historical_store.get_round(harness.round_id)
+    historical_store.close()
     assert published["status"] == "published"
     rows = {
         row["submission_id"]: row

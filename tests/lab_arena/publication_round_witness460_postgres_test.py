@@ -28,7 +28,7 @@ OUTER = "public.lab_arena_integrity_publication_guard_v1()"
 BASELINE = "public.lab_arena_publication_baseline_guard_v1()"
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture()
 def database():
     yield from database_with_lab_arena_migration(CURRENT_PROVIDER_SERVICE_MIGRATIONS + (
         "410-lab-arena-publication-transition-timeout.sql",
@@ -136,6 +136,8 @@ def _copy_historical_round(source_connect, target_connect, round_id, artifact_pa
                                         'jsonb_populate_record(NULL::public.{},%s::jsonb)').format(
                         sql.Identifier(table), names, names, sql.Identifier(table)), (json.dumps(payload),))
             dst.execute('SET LOCAL session_replication_role=origin')
+            dst.execute("SELECT current_setting('session_replication_role')")
+            assert dst.fetchone()[0] == 'origin'
             dst.execute("SELECT tgrelid::regclass::text,tgname,tgenabled FROM pg_trigger "
                         "WHERE tgrelid=ANY(%s::regclass[]) ORDER BY 1,2",
                         ([table for table, _ in tables],))
@@ -252,11 +254,11 @@ def test_archived_accepted_judge_blocks_exact_current_incomplete_transition(
         connection.rollback()
 
 
-def test_legacy_current_authority_and_deadline_controls(database, tmp_path, monkeypatch):
+def test_legacy_current_authority_and_deadline_controls(database, service_database, tmp_path, monkeypatch):
     from tests.lab_arena import unscored_judge_infrastructure430_postgres_test as legacy
     monkeypatch.setattr(legacy, "MIGRATION", MIGRATION)
     legacy.test_exhausted_judge_proof_preserves_null_ranking_and_blocks_false_proof(
-        database, tmp_path, monkeypatch
+        database, tmp_path, monkeypatch, service_database
     )
 
 

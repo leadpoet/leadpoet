@@ -205,6 +205,7 @@ def current_service_database():
                 "585-lab-arena-review-deadline-recovery.sql",
                 "586-lab-arena-publication-restart-drain.sql",
                 "587-lab-arena-atomic-review-restart-guard.sql",
+                "588-lab-arena-qualifier-training-publication.sql",
             ):
                 cursor.execute((SCRIPTS / migration).read_text(encoding="utf-8"))
         yield psycopg2, dsn

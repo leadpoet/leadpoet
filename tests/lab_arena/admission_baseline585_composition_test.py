@@ -87,7 +87,12 @@ def test_baseline_snapshot_survives_review_upgrade_and_exact_rollback(database, 
 def test_current_service_fixture_reaches_atomic_review_capability():
     from tests.lab_arena.lab_arena_pg_harness import current_service_database
 
-    database = current_service_database()
+    from scripts.verify_arena_full_thinking_e2e import run_e2e
+
+    # Exercise the paid verifier's actual default, without invoking providers.
+    factory = run_e2e.__kwdefaults__["database_factory"]
+    assert factory is current_service_database
+    database = factory()
     store = None
     try:
         psycopg2, dsn = next(database)
@@ -96,6 +101,21 @@ def test_current_service_fixture_reaches_atomic_review_capability():
         assert schema["retry_policy"] == "deadline_transient_v2"
         assert schema["max_transient_attempts"] is None
         assert schema["atomic_restart_guard"] is True
+        # The current service emits the exact unknown marker for full-thinking
+        # noncontenders. Its current fixture must install both588 validators;
+        # the separate588 migration test retains its pre588 rejection proof.
+        with psycopg2.connect(**dsn) as connection, connection.cursor() as cursor:
+            for signature, expected in (
+                ("public.lab_arena__per_icp_publication_valid(text,jsonb)",
+                 "0de3baf2d97622fd821c5959570a1b680f4c7ca0a565d3fe0b41f975c8c048e4"),
+                ("public.lab_arena_integrity_publication_guard_v1()",
+                 "da7b69efcc26abf82a9c4e187e0445554134b7dc744bf8fe33788763d8bfcbff"),
+            ):
+                cursor.execute(
+                    "SELECT encode(extensions.digest(pg_get_functiondef(%s::regprocedure),"
+                    "'sha256'),'hex')", (signature,),
+                )
+                assert cursor.fetchone()[0] == expected, signature
     finally:
         if store is not None:
             store.close()

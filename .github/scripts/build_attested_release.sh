@@ -12,6 +12,7 @@ case "${GATEWAY_V2_BUILDER_DOMAIN:?}" in
     ;;
   *) echo 'ERROR: unexpected build domain' >&2; exit 1 ;;
 esac
+python3 .github/scripts/verify_attested_builder_isolation.py
 # Neither build needs AWS credentials after the isolated-account check.
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE
 export AWS_EC2_METADATA_DISABLED=true
@@ -34,6 +35,11 @@ test -z "$existing_containers" || {
   echo 'ERROR: release builder must start without Docker containers' >&2
   exit 1
 }
+registry_mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
+case "$registry_mirrors" in
+  '[]'|'null') ;;
+  *) echo 'ERROR: release builder must not use a Docker registry cache mirror' >&2; exit 1 ;;
+esac
 docker version --format 'Client={{.Client.Version}} Server={{.Server.Version}}'
 free -m
 df -h "$RUNNER_TEMP"

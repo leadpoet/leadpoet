@@ -62,7 +62,7 @@ jobs:
             runner: ubuntu-24.04
           - domain: validator
             runner: runs-on
-    runs-on: ${{ matrix.runner == 'runs-on' && format('runs-on={0}-attested-v2-b-{1}/runner=4cpu-linux-x64/spot=false/retry=false', github.run_id, github.run_attempt) || matrix.runner }}
+    runs-on: ${{ matrix.runner == 'runs-on' && format('runs-on={0}-attested-v2-b-{1}/runner=attested-v2-isolated/spot=false/retry=false', github.run_id, github.run_attempt) || matrix.runner }}
     timeout-minutes: 180
     env:
       BUILD_COMMIT: ${{ needs.source.outputs.build_commit }}

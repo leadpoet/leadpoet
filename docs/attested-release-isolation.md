@@ -31,8 +31,14 @@ Release publication must remain unavailable until all of these checks pass:
    runner specifications are not a completed build or a peak-usage measurement.
 3. Builder B runs on a fresh RunsOn Linux x64 runner in the existing dedicated
    `leadpoet-ci` account `899952150628`, separate from production `493765492819`.
-   Its actual stock runner label is
-   `runs-on=<run-id>-attested-v2-b-<attempt>/runner=4cpu-linux-x64/spot=false/retry=false`.
+   Its release runner label is
+   `runs-on=<run-id>-attested-v2-b-<attempt>/runner=attested-v2-isolated/spot=false/retry=false`.
+   The repository's `.github/runs-on.yml` defines the release-only runner with
+   no cache extras, persistent disk, SSH or inherited runner/image hooks.
+   It uses no `pool=` selector. Runtime guards reject warm-pool/sticky-disk/EFS
+   markers, external cache brokers and Docker registry mirrors before a build.
+   Check stack mandatory extras and the inherited `ubuntu24-full-x64` image
+   definition separately; local configuration does not prove their absence.
    Check the installation, main-workflow restriction, repository access and
    network/IAM boundaries. The existing leadpoet-site installation does not
    prove access for this repository. The build helper checks its AWS account
@@ -153,4 +159,6 @@ References: [AWS build-enclave](https://docs.aws.amazon.com/enclaves/latest/user
 [Nitro CLI 1.4.2 source](https://github.com/aws/aws-nitro-enclaves-cli/tree/6e8512e4d9e1ba82e0e5c4c9d9d0b3987724f217),
 [GitHub runner specifications](https://docs.github.com/en/actions/reference/runners/github-hosted-runners),
 [GitHub OIDC in AWS](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws),
-[OIDC subject customization](https://docs.github.com/en/actions/reference/security/oidc).
+[OIDC subject customization](https://docs.github.com/en/actions/reference/security/oidc),
+[RunsOn runner configuration](https://runs-on.com/docs/runners/labels/),
+[RunsOn feature markers](https://runs-on.com/docs/runners/environment/).

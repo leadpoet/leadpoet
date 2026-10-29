@@ -145,7 +145,7 @@ def test_release_authority_is_limited_to_separate_protected_publisher():
         {"domain": "validator", "runner": "runs-on"},
     ]
     runner = workflow["jobs"]["builds"]["runs-on"]
-    assert "/runner=4cpu-linux-x64/spot=false/retry=false" in runner
+    assert "/runner=attested-v2-isolated/spot=false/retry=false" in runner
     assert "|| 'ubuntu" not in runner
 
 

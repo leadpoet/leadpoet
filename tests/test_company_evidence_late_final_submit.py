@@ -202,7 +202,7 @@ def test_late_failure_cannot_create_a_final_judgment(monkeypatch, failure):
 @pytest.mark.parametrize("bad_final", [
     "fabricated_quote", "research_tool", "provider_failure",
 ])
-def test_late_final_turn_cannot_relax_evidence_or_start_another_turn(
+def test_late_final_submit_keeps_only_existing_correction_and_fails_closed(
     monkeypatch, bad_final,
 ):
     clock = _Clock()
@@ -213,7 +213,11 @@ def test_late_final_turn_cannot_relax_evidence_or_start_another_turn(
         if len(requests) == 1:
             clock.now = 122.5
             return 200, _response("fetch_page", {"url": URL})
-        assert len(requests) == 2
+        assert len(requests) <= 3
+        if len(requests) == 3:
+            assert bad_final == "fabricated_quote"
+            assert payload["tool_choice"]["function"]["name"] == "submit_findings"
+            assert [tool["function"]["name"] for tool in payload["tools"]] == ["submit_findings"]
         if bad_final == "provider_failure":
             return 503, {"error": "unavailable"}
         if bad_final == "research_tool":
@@ -224,7 +228,7 @@ def test_late_final_turn_cannot_relax_evidence_or_start_another_turn(
 
     result = _investigate(monkeypatch, post, clock)
 
-    assert len(requests) == 2
+    assert len(requests) == (3 if bad_final == "fabricated_quote" else 2)
     assert result.get("_completed_submit") is not True
     assert result["failure_reason"] in {
         "admission_budget_interrupted", "malformed_response", "provider_error",

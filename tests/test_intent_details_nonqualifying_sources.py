@@ -169,10 +169,10 @@ def test_nonqualifying_context_does_not_consume_positive_page_budget_or_expand_l
 
 @pytest.mark.parametrize("status,entity,retained", [
     ("contradicted","pass",True), ("partially_supported","pass",True),
-    ("wrong_entity","fail",False), ("contradicted","fail",False),
+    ("wrong_entity","fail",True), ("contradicted","fail",False),
     ("unable_to_verify","pass",False),
 ])
-def test_completed_same_entity_source_context_survives_real_scorer_trace(monkeypatch,status,entity,retained):
+def test_completed_grounded_source_context_survives_real_scorer_trace(monkeypatch,status,entity,retained):
     from tests import test_funding_stage_source_reuse as funding
     answer = funding._answer(None,urls=[funding.SECONDARY,funding.PRIMARY])
     evaluation=answer["answer"]["signal_evaluations"][0]
@@ -185,6 +185,13 @@ def test_completed_same_entity_source_context_survives_real_scorer_trace(monkeyp
     contexts=receipts[-1]["verification_trace"].get("verified_source_context") or []
     assert bool(contexts) is retained
     assert result[0]==0
+    if status == "wrong_entity":
+        # Retain exact negative proof for judgment reuse. It remains rejected;
+        # the separate paragraph projection still withholds its company facts.
+        traced = receipts[-1]["verification_trace"]["intent_verdict"]["signal_evaluations"][0]
+        assert traced["signal_status"] == "wrong_entity"
+        assert traced["same_entity_check"] == "fail"
+        assert receipts[-1]["client_ready"] is False
     if retained:
         assert all(len(c["text"])<=700 for c in contexts)
         assert any(c["url"]==funding.SECONDARY and c["source_publication_date"]=="2026-02-14" for c in contexts)

@@ -20,8 +20,7 @@ from lab_arena.service import ServiceError
 from qualification.scoring.competition import apply_company_judgment_context, _merge_contact_breakdown
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.test_lab_arena_migration_postgres import claim
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import _verified_test_pool
@@ -33,13 +32,15 @@ from tests.test_arena_company_quality_policy import _positive_breakdown
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture
-def connect(database):
+def connect(database, tmp_path):
     psycopg2, dsn = database
-    return lambda: psycopg2.connect(**dsn)
+    factory = lambda: psycopg2.connect(**dsn)
+    factory.object_store_namespace = "dynamic-" + tmp_path.name
+    return factory
 
 
 def _bank(count: int) -> list[dict]:

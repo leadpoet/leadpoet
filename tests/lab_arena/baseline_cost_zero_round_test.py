@@ -23,8 +23,7 @@ from qualification.scoring.arena_integrity import canonical_company_identity
 from tests.lab_arena import test_lab_arena_service_round as fixtures
 from tests.lab_arena import test_integrity_round as integrity_fixtures
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 
 
@@ -170,7 +169,7 @@ class BaselineCostHarness(integrity_fixtures.IntegrityHarness):
 
 @pytest.fixture
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 @pytest.fixture
@@ -268,6 +267,7 @@ def test_cost_ineligible_baseline_scores_zero_and_eligible_challenger_carries_do
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
+    connect.object_store_namespace = "current-service-" + tmp_path.name
     harness = BaselineCostHarness(
         connect, tmp_path, challengers=["EfficientWinner"], runners=["alpha"]
     )
@@ -373,6 +373,7 @@ def test_no_qualifying_challenger_keeps_prior_champion_reward_weights_and_next_b
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
+    connect.object_store_namespace = "current-service-" + tmp_path.name
     harness = BaselineCostHarness(
         connect, tmp_path, challengers=["PriorWinner"], runners=["alpha"]
     )

@@ -24,8 +24,7 @@ from leadpoet_canonical import arena_weights
 from qualification.scoring.competition import apply_company_judgment_context
 from tests.lab_arena.icp_fixtures import daily_icps
 from tests.lab_arena.lab_arena_pg_harness import (
-    CURRENT_SERVICE_MIGRATIONS,
-    database_with_lab_arena_migration,
+    current_service_database,
 )
 from tests.lab_arena.company_quality_round_test import QualityHarness
 from tests.lab_arena.parallel_twenty_icp_execution_postgres_test import (
@@ -37,7 +36,7 @@ from tests.test_arena_company_quality_policy import _positive_breakdown
 
 @pytest.fixture()
 def database():
-    yield from database_with_lab_arena_migration(CURRENT_SERVICE_MIGRATIONS)
+    yield from current_service_database()
 
 
 def _company(name: str = "Acme") -> dict:
@@ -142,6 +141,7 @@ def test_company_only_ten_icp_baseline_and_miner_complete_full_lifecycle(
 ):
     psycopg2, dsn = database
     connect = lambda: psycopg2.connect(**dsn)
+    connect.object_store_namespace = "current-service-" + tmp_path.name
     harness = QualityHarness(
         connect,
         tmp_path,

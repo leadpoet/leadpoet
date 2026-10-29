@@ -2350,8 +2350,19 @@ async def _try_wayback(url: str) -> Dict[str, Any]:
                 return {"ok": False, "stage": "wayback_html_empty_body",
                         "content": "", "error": "empty visible HTML body"}
             if _has_wayback_error_body(body):
+                # Discovery may use this failure only when the actual archive
+                # response still belongs to this exact requested source.
+                actual_archive_url = _prompt_exact_url_or_empty(str(r.url))
+                original = _wayback_original_url(actual_archive_url)
+                bound_failure = (
+                    {"requested_url": url, "archive_url": actual_archive_url,
+                     "stage": "wayback_error_body"}
+                    if original and _normalize_url(original) == _normalize_url(url)
+                    else None
+                )
                 return {"ok": False, "stage": "wayback_error_body",
-                        "content": "", "error": "archive error without source body"}
+                        "content": "", "error": "archive error without source body",
+                        **({"archive_failure": bound_failure} if bound_failure else {})}
             snapshot_url = str(r.url)
             ownership_meta = {}
             if _normalize_url(_wayback_original_url(snapshot_url)) == _normalize_url(url):
@@ -2585,6 +2596,7 @@ async def _scrape_sd_hardened(
             "stage_history": history,
         }
 
+    archive_failure = None
     # All ScrapingDog tiers exhausted. Try Wayback as the final source of
     # content — stale snapshot is better than nothing for evidence verification.
     if last_verdict != "pdf_binary" and (
@@ -2592,6 +2604,7 @@ async def _scrape_sd_hardened(
     ):
         wb = await _try_wayback(url)
         history.append(("wayback", wb["stage"]))
+        archive_failure = wb.get("archive_failure")
         if wb["ok"]:
             return {"ok": True, "stage": "wayback",
                     "content": wb["content"], "error": None,
@@ -2610,7 +2623,8 @@ async def _scrape_sd_hardened(
     )
     return {"ok": False, "stage": fail_label,
             "content": "", "error": last_verdict,
-            "stage_history": history}
+            "stage_history": history,
+            **({"archive_failure": archive_failure} if archive_failure else {})}
 
 
 def _exa_target_absence_receipt(
@@ -2679,6 +2693,7 @@ def _canonical_target_absence_receipt(value: Any) -> Optional[Dict[str, Any]]:
 
 
 _EXA_TARGET_CRAWL_FAILURES = {
+    ("CRAWL_EMPTY_CONTENT", 500),
     ("CRAWL_LIVECRAWL_TIMEOUT", 504),
     ("CRAWL_UNKNOWN_ERROR", 500),
     ("SOURCE_NOT_AVAILABLE", 403),
@@ -3469,6 +3484,26 @@ def _unusable_source_allows_same_event_search(
     # Generic 400/403 can also be provider credential or request errors. Do
     # not infer a local denial from those labels alone.
     local_sd_errors = _SD_CONTENT_ESCALATION_VERDICTS | {"http_422", "pdf_binary"}
+    archive_failure = status.get("sd_archive_failure")
+    bound_archive_error = bool(
+        isinstance(archive_failure, Mapping)
+        and set(archive_failure) == {"requested_url", "archive_url", "stage"}
+        and archive_failure.get("requested_url") == requested_url
+        and archive_failure.get("stage") == "wayback_error_body"
+        and _prompt_exact_url_or_empty(archive_failure.get("archive_url"))
+        and (archived_original := _wayback_original_url(archive_failure["archive_url"]))
+        and _normalize_url(archived_original) == _normalize_url(requested_url)
+    )
+    if sd_stage == "all_tiers_exhausted:http_502" and sd_error == "http_502":
+        # A 502 alone is still uncertain. A bound unusable archive plus two
+        # completed exact-target crawl failures permits the existing search;
+        # none of these observations proves absence or a false company claim.
+        return bool(
+            bound_archive_error and status.get("exa_stage") == "exa_no_results"
+            and _canonical_target_crawl_failure_receipt(
+                status.get("exa_target_crawl_failure")
+            ) is not None
+        )
     if not (
         (sd_stage == "genuine_404" and sd_error == "http_404")
         or (sd_error in local_sd_errors
@@ -4031,6 +4066,8 @@ async def _fetch_sd_then_exa(
                 "exa_stage": exa.get("stage"),
                 "exa_error": exa.get("error"),
             }
+            if sd.get("archive_failure"):
+                status["sd_archive_failure"] = sd["archive_failure"]
             target_absence = _canonical_target_absence_receipt(
                 exa.get("target_absence")
             )

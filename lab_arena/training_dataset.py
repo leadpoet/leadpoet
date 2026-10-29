@@ -525,11 +525,26 @@ class _Clusters:
                 self.parent[max(first, second)] = min(first, second)
 
 
+def _episode_key(record: Mapping[str, Any]) -> Optional[str]:
+    """Use original execution coordinates, independently of retry/judge IDs."""
+    meta = record.get("meta") or {}
+    if (not isinstance(meta, Mapping)
+            or any(not isinstance(meta.get(key), str) or not meta[key].strip()
+            for key in ("round_id", "submission_id"))
+            or type(meta.get("stage")) is not int or meta["stage"] not in (1, 2)
+            or type(meta.get("icp_position")) is not int
+            or not 0 <= meta["icp_position"] < contracts.MAX_BENCHMARK_ICP_COUNT):
+        return None
+    return "episode:" + _hash({key: meta[key] for key in (
+        "round_id", "submission_id", "stage", "icp_position")})
+
+
 def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
           curation_metadata: Optional[dict] = None) -> Tuple[Dict[str, List[dict]], Dict[str, Any]]:
     """Return ({train, eval, analysis}: records) and the dataset manifest."""
 
     sources, records, privacy_filtered = [], [], 0
+    clusters, split_clusters = _Clusters(), _Clusters()
     for example in examples:
         reason = example_exclusion(example, rules)
         sources.append({"example_id": example.get("example_id"), "example_hash": example.get("example_hash"),
@@ -540,6 +555,16 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
                           for row in example.get("companies") or () if isinstance(row, Mapping)}
                          if curation_metadata is not None else {})
             for record in records_from_example(example):
+                # Keep all original episode/alias links before privacy selection
+                # and deduplication can remove a bridge between executions.
+                handles = list(record["group_keys"]["company_keys"]) or [record["record_id"]]
+                clusters.union(handles)
+                episode = _episode_key(record)
+                if episode is not None:
+                    handles.append(episode)
+                if rules.eval_mode == "company_and_icp":
+                    handles.append("icp:" + record["group_keys"]["icp_fingerprint"])
+                split_clusters.union(handles)
                 # Redaction elsewhere in the run, mostly URL tokens in fetched
                 # pages, never reaches these fields. One inside the record's
                 # own input would train on a placeholder, so that record goes.
@@ -551,6 +576,9 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
                     curation_metadata[record["record_id"]] = project_judgment(
                         judgments.get(record["meta"]["company_index"]))
                 records.append(record)
+        # The input iterator may parse a large next episode before assigning
+        # this loop variable again. Retain only the derived records above.
+        del example
     # Identical ICP requirements, evaluation date and claim: replays, retries
     # and cached judgments count once. The date is part of the input because
     # intent recency depends on it. Only verdicts can conflict; a claim judged
@@ -569,22 +597,15 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
             conflicts += 1
             continue
         kept.append(min(group, key=lambda item: (
-            bool(_evidence_gap(item)) if item["label"]["class"] in TRAINABLE else False,
+            (bool(_evidence_gap(item)) or _episode_key(item) is None)
+            if item["label"]["class"] in TRAINABLE else False,
             item["record_id"], _hash(item))))
         duplicates += len(group) - 1
     cohorts = {(record["meta"]["scorer_policy_hash"], record["meta"]["scorer_image_digest"])
-               for record in kept if record["label"]["class"] in TRAINABLE and not _evidence_gap(record)}
+               for record in kept if record["label"]["class"] in TRAINABLE
+               and not _evidence_gap(record) and _episode_key(record) is not None}
     if len(cohorts) > 1:
         raise ValueError("mixed_scorer_cohorts")
-    clusters = _Clusters()
-    for record in kept:
-        clusters.union(record["group_keys"]["company_keys"] or [record["record_id"]])
-    split_clusters = _Clusters()
-    for record in kept:
-        handles = list(record["group_keys"]["company_keys"]) or [record["record_id"]]
-        if rules.eval_mode == "company_and_icp":
-            handles.append("icp:" + record["group_keys"]["icp_fingerprint"])
-        split_clusters.union(handles)
     def split_group(record):
         handles = record["group_keys"]["company_keys"] or [record["record_id"]]
         return split_clusters.find(handles[0])
@@ -599,6 +620,8 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
         cluster = clusters.find(handles[0])
         record["group_keys"]["company_cluster"] = cluster
         evidence_gap = _evidence_gap(record) if record["label"]["class"] in TRAINABLE else None
+        if record["label"]["class"] in TRAINABLE and evidence_gap is None and _episode_key(record) is None:
+            evidence_gap = "episode_identity_unverified"
         if record["label"]["class"] not in TRAINABLE or evidence_gap:
             if evidence_gap:
                 record["selection_exclusion"] = evidence_gap
@@ -630,7 +653,8 @@ def build(examples: Iterable[Mapping[str, Any]], rules: Rules = Rules(), *,
         if source["exclusion"]:
             exclusions[source["exclusion"]] = exclusions.get(source["exclusion"], 0) + 1
     rule_document = asdict(rules)
-    # Keep the established default dataset identity and record bytes.
+    rule_document["split_grouping"] = "original_episode_and_company_v1"
+    # Preserve record contents while binding the mandatory grouping policy.
     if rules.eval_mode == "company":
         rule_document.pop("eval_mode")
     if rules.eval_after is None:
@@ -661,13 +685,19 @@ def evaluation_checks(splits, rules):
                 if record["group_keys"].get(key)}
     overlaps = {key: len(values("train", key) & values("eval", key))
                 for key in ("company_cluster", "icp_fingerprint", "source_family")}
+    episodes = {name: {_episode_key(record) for record in splits[name]} - {None}
+                for name in ("train", "eval")}
+    overlaps["episode"] = len(episodes["train"] & episodes["eval"])
     ranges = {}
     for name, records in splits.items():
         dates = sorted(filter(None, (_date(record["input"]["evaluation_date"]) for record in records)))
         ranges[name] = {"min": dates[0] if dates else None, "max": dates[-1] if dates else None,
                         "missing_or_invalid": len(records) - len(dates)}
     reasons = ["empty_" + name for name in ("train", "eval") if not splits[name]]
-    if overlaps["company_cluster"] or (rules.eval_mode == "company_and_icp" and overlaps["icp_fingerprint"]):
+    if any(_episode_key(record) is None for name in ("train", "eval") for record in splits[name]):
+        reasons.append("episode_identity_unverified")
+    if overlaps["company_cluster"] or overlaps["episode"] or (
+            rules.eval_mode == "company_and_icp" and overlaps["icp_fingerprint"]):
         reasons.append("group_overlap")
     return {"split_viable": not reasons, "insufficient_split_reasons": reasons,
             "date_ranges": ranges, "train_eval_group_overlap_counts": overlaps,

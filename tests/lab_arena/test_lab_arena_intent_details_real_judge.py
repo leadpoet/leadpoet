@@ -17,6 +17,12 @@ LAUNCH_SENTENCE = (
     "Acme Robotics launched its Fleet Control platform on August 20, 2026, "
     "for logistics operating teams."
 )
+LAUNCH_PAGE_TEXT = (
+    LAUNCH_SENTENCE + " " + real_judge.PAGE_TEXT
+    + " Fleet Control connects warehouse robots and gives dispatchers a single "
+    "view of active routes, battery status, and maintenance needs. Customers "
+    "can assign jobs and review fleet performance through the platform."
+)
 FUNDING_DESCRIPTION = "Acme Robotics announced a $40 million Series B funding round."
 LAUNCH_DESCRIPTION = "Acme Robotics launched its Fleet Control platform."
 PARAGRAPH = (
@@ -111,7 +117,7 @@ def _source_results() -> Dict[str, Any]:
                 "title": "Acme Robotics launches Fleet Control",
                 "publishedDate": "2026-08-20T00:00:00.000Z",
                 "author": "Acme Robotics",
-                "text": LAUNCH_SENTENCE,
+                "text": LAUNCH_PAGE_TEXT,
                 "highlights": [LAUNCH_SENTENCE],
                 "highlightScores": [0.98],
                 "score": 0.98,
@@ -167,7 +173,7 @@ def _company_fit_reply() -> Dict[str, Any]:
         "observed_company_linkedin": (
             "https://www.linkedin.com/company/acme-robotics"
         ),
-        "observed_employee_count": "51-200",
+        "observed_employee_count": 120,
         "employee_size_matches": True,
         "employee_size_evidence_url": about_url,
         "employee_size_evidence_quote": "Acme Robotics has 120 employees.",
@@ -195,6 +201,11 @@ def _company_fit_reply() -> Dict[str, Any]:
         "required_attribute_evidence_quote": (
             "Acme Robotics sells a robotics fleet-management platform."
         ),
+        "dimension_evidence": {
+            dimension: {"url": about_url, "quote": real_judge.PAGE_TEXT}
+            for dimension in ("identity", "employee_size", "industry", "geography",
+                              "stage", "required_attribute")
+        },
         "reason": "Independent sources support every active fit dimension.",
     }
 
@@ -204,12 +215,28 @@ def _local_responder(
     review_documents: list[Dict[str, Any]],
 ):
     """Return a fake provider that honors the two strict judge contracts."""
+    fallback = real_judge.respond
+
+    def evidence_for_unit(document, unit_id):
+        sources = intent_details._bound_evidence_sources(document)
+        quotes = ([real_judge.SENTENCE] if unit_id == 0 else
+                  [LAUNCH_SENTENCE] if unit_id == 1 else
+                  [real_judge.SENTENCE, LAUNCH_SENTENCE])
+        return [
+            {"source_index": next(index for index, values in sources.items()
+                                  if any(quote in value for value in values)),
+             "quote": quote}
+            for quote in quotes
+        ]
 
     def respond(
         operation_id: str, normalized: Mapping[str, Any]
     ) -> Tuple[int, Dict[str, str], bytes]:
         headers = {"content-type": "application/json"}
         if operation_id == "openrouter.chat":
+            if normalized.get("tools"):
+                body = real_judge.investigator_completion(normalized)
+                return 200, headers, json.dumps(body).encode()
             messages = normalized.get("messages") or []
             prompt = " ".join(str(item.get("content") or "") for item in messages)
             response_format = normalized.get("response_format") or {}
@@ -226,10 +253,6 @@ def _local_responder(
                 }
                 review_document = json.loads(str(messages[-1]["content"]))
                 review_documents.append(review_document)
-                source_index, values = next(iter(
-                    intent_details._bound_evidence_sources(review_document).items()
-                ))
-                quote = values[0][:500]
                 unit_grounding = [
                     {
                         "unit_id": unit["unit_id"],
@@ -246,7 +269,7 @@ def _local_responder(
                             if review_checks is not None
                             and not review_checks["facts_supported"]
                             and unit["unit_id"] == 0
-                            else [{"source_index": source_index, "quote": quote}]
+                            else evidence_for_unit(review_document, unit["unit_id"])
                         ),
                     }
                     for unit in review_document["intent_details_units"]
@@ -261,6 +284,18 @@ def _local_responder(
                         **dict(review_checks),
                     } if review_checks is not None else {}
                 )
+            elif schema_name == "arena_intent_details_semantic_repair":
+                repair = json.loads(str(messages[-1]["content"]))
+                units = repair["bounded_unit_repair_control"]["units"]
+                # The current reviewer rechecks "recent funding" against
+                # source-bound dates. Keep the paragraph and both real
+                # verified sources, and answer its bounded repair contract.
+                assert [unit["unit_id"] for unit in units] == [2]
+                assert units[0]["semantic_recheck_reason"] == "relative_time_grounding_review"
+                content = json.dumps({"repairs": [{
+                    "unit_id": 2, "status": "VERIFIED",
+                    "evidence": evidence_for_unit(repair["review_document"], 2),
+                }]})
             elif schema_name == "verification":
                 content = json.dumps(_stage3_reply(prompt))
             else:
@@ -270,8 +305,14 @@ def _local_responder(
             )
             return 200, headers, json.dumps(body).encode()
         if operation_id in ("exa.search", "exa.contents"):
-            return 200, headers, json.dumps(_source_results()).encode()
+            data = _source_results()
+            if operation_id == "exa.contents":
+                requested = set(normalized.get("urls") or normalized.get("ids") or [])
+                data["results"] = [item for item in data["results"] if item["url"] in requested]
+            return 200, headers, json.dumps(data).encode()
         if operation_id == "deepline.execute":
+            if normalized.get("tool") == "harvestapi_get_company":
+                return fallback(operation_id, normalized)
             envelope = {
                 "job_id": "job-intent-details",
                 "status": "completed",
@@ -280,16 +321,12 @@ def _local_responder(
             }
             return 200, headers, json.dumps(envelope).encode()
         if operation_id.startswith("scrapingdog.scrape"):
-            html = (
-                "<html><head><title>Acme Robotics</title></head><body><p>"
-                + real_judge.PAGE_TEXT
-                + "</p><p>"
-                + LAUNCH_SENTENCE
-                + "</p><p>Acme Robotics sells a robotics fleet-management platform."
-                + "</p></body></html>"
-            )
+            text = (LAUNCH_PAGE_TEXT if normalized.get("url") == LAUNCH_URL
+                    else real_judge.PAGE_TEXT)
+            html = ("<html><head><title>Acme Robotics</title></head><body><article><p>"
+                    + text + "</p></article></body></html>")
             return 200, {"content-type": "text/html; charset=utf-8"}, html.encode()
-        return real_judge.respond(operation_id, normalized)
+        return fallback(operation_id, normalized)
 
     return respond
 

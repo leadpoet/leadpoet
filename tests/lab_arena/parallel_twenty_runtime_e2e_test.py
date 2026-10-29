@@ -125,12 +125,42 @@ def _http_runner(
             work_dir=work_dir,
             max_parallel_runs=local_capacity,
             evaluation_date="2026-09-14",
-            clock=harness.clock,
+            # Keep the default real UTC clock for SQL leases and signed events.
+            # The harness FakeClock controls scheduling and freezes at drain entry.
             proxy_worker_pool=_proxy_pool(local_capacity),
             completion_retry_seconds=(0.0, 0.0),
             claim_retry_seconds=(),
         )
     )
+
+
+def test_http_runner_event_clock_advances_without_changing_schedule(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from tests.lab_arena.test_lab_arena_service_round import FakeClock
+
+    start = datetime(2026, 10, 29, 12, 0, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 10, 29, 12, 0, 2, tzinfo=timezone.utc)
+    wall_times = iter((start, later))
+
+    class WallClock:
+        @staticmethod
+        def now(tz):
+            assert tz is timezone.utc
+            return next(wall_times)
+
+    # Exercise the real RunnerConfig clock default without allocating an image
+    # cache, running a sandbox, opening HTTP, or waiting for wall time to pass.
+    monkeypatch.setattr(rn, "datetime", WallClock)
+    monkeypatch.setattr(rn, "HttpArenaApiClient", lambda *_a, **_k: SimpleNamespace(source=lambda *_: None))
+    monkeypatch.setattr(rn, "ImageCache", lambda *_a, **_k: object())
+    monkeypatch.setattr(rn, "SourceCache", lambda *_a, **_k: object())
+    monkeypatch.setattr(rn, "Runner", lambda config: SimpleNamespace(_config=config))
+    harness = SimpleNamespace(round_id="arena-2026-10-29", sandbox=object(), clock=FakeClock(start))
+    runner = _http_runner(harness, object(), tmp_path,
+                          key_label="svc-runner-alpha", local_capacity=10)
+    assert runner._config.clock() == start
+    assert runner._config.clock() == later
+    assert harness.clock() == start
 
 
 class _ExecutionEvidence:

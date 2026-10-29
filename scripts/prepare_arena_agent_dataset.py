@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.prepare_arena_training_dataset import _examples, _write_private
-from lab_arena import contracts, training_steps
+from scripts.prepare_arena_training_dataset import _examples, _review_decisions, _write_private
+from lab_arena import contracts, training_curation, training_steps
 
 
 def main(argv=None):
@@ -22,20 +22,35 @@ def main(argv=None):
     parser.add_argument('--eval-percent', type=int, default=20)
     parser.add_argument('--seed', default=training_steps.Rules.seed)
     parser.add_argument('--include-nonproduction-rounds', action='store_true')
+    parser.add_argument('--review-sample-size', type=int, default=0)
+    parser.add_argument('--review-decisions', type=Path)
     args = parser.parse_args(argv)
     created = False
     try:
         rules = training_steps.Rules(args.eval_percent, args.seed, not args.include_nonproduction_rounds)
         splits, manifest = training_steps.build(_examples(args.examples), rules)
+        curation = training_curation.flag_manifest(splits, manifest['dataset_version'])
+        review = None
+        if args.review_sample_size:
+            review, review_summary = training_curation.review_sample(
+                splits, args.review_sample_size, manifest, curation)
+        if args.review_decisions:
+            splits, manifest = training_curation.apply_review(
+                splits, manifest, _review_decisions(args.review_decisions), curation)
+        if args.review_sample_size:
+            manifest['review_sample'] = review_summary
         args.output.mkdir(mode=0o700)
         created = True
         for name, rows in splits.items():
             _write_private(args.output / (name + '.jsonl'), ''.join(contracts.canonical_json(row) + '\n' for row in rows))
+        if review is not None:
+            _write_private(args.output / 'review.jsonl', ''.join(contracts.canonical_json(row) + '\n' for row in review))
+        _write_private(args.output / 'curation.json', contracts.canonical_json(curation) + '\n')
         _write_private(args.output / 'manifest.json', contracts.canonical_json(manifest) + '\n')
     except Exception:
         if created:
             with contextlib.suppress(OSError):
-                for name in ('train.jsonl', 'eval.jsonl', 'analysis.jsonl', 'manifest.json'):
+                for name in ('train.jsonl', 'eval.jsonl', 'analysis.jsonl', 'manifest.json', 'review.jsonl', 'curation.json'):
                     (args.output / name).unlink(missing_ok=True)
                 args.output.rmdir()
         print('Arena agent dataset failed: invalid_input_or_output', file=sys.stderr)

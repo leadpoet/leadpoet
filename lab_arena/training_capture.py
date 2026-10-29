@@ -480,7 +480,13 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
                 netloc = parts.netloc
                 if parts.username is not None or parts.password is not None:
                     netloc = netloc.rsplit("@", 1)[-1]
-                netloc, path, fragment = map(redact, (netloc, parts.path, parts.fragment))
+                netloc, fragment = map(redact, (netloc, parts.fragment))
+                # Exact secrets in this un-decoded path were checked before
+                # masking. Do not mistake an internal marker for input data;
+                # decoded query values below still need the exact-secret scan.
+                path = (trajectory.redact_text(parts.path, escape_nul=False)
+                        if slug_prefix and slug_prefix in parts.path
+                        else redact(parts.path))
                 pairs = []
                 query_changed = False
                 for key, child in parse_qsl(parts.query, keep_blank_values=True):
@@ -508,7 +514,11 @@ def sanitize_training_value(value: Any, secrets: Sequence[str] = (), *,
         text = trajectory.redact_auth_schemes(text)
         text = trajectory._BARE_API_KEY_RE.sub("[REDACTED]", text)
         if not _URL_RE.search(text):
-            return restore_slugs(redact(text))
+            # A credential prefix can remove the URL scheme after its path
+            # was masked. The same pre-mask exact-secret check still applies.
+            cleaned = (trajectory.redact_text(text, escape_nul=False)
+                       if slug_prefix and slug_prefix in text else redact(text))
+            return restore_slugs(cleaned)
         # Keep URL delimiters out of the generic credential scan, while a URL
         # used as a credential value still gets removed with its full context.
         # '[' cannot turn Basic/Bearer plus a public URL into a credential.

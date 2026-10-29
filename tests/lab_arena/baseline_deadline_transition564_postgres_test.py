@@ -198,8 +198,8 @@ def test_real_advance_fails_before_migration_and_preserves_live_retry_after(scen
     accepted = h.service.store.get_run(judge['assignment_id'] + ':13')
     assert accepted['status'] == 'accepted'
     assert h.service.store.get_run(judge['scored_run_id'])['per_icp_score'] is None
-    # Normal final-stage scoring materializes the real accepted attempt 13
-    # against the original source before publication. No score is fabricated.
+    # Publication's guarded writer materializes the real accepted attempt 13
+    # against the original source. No score is fabricated.
     h.service._invalidate_hot_round()
     h.advance_until('scored', runners=1)
     assert h.service.publish(rid)['status'] == 'ok'
@@ -238,10 +238,31 @@ def test_normally_claimed_lease_survives_stage_change_and_recovers_baseline(scen
         assert h.service.store.get_run(lease['run_id'])['status']=='accepted'
     finally:
         runner.close()
-    # The normal stage2 score path invokes _score_recovered_baseline while its
-    # accepted source and attempt13 retain their frozen original membership.
+    # Continuation publication materializes the recovered source only after
+    # stage2 scoring, preserving attempt13 and its original frozen membership.
     h.advance_until('scored', runners=1)
-    assert h.service.store.get_run(judge['scored_run_id'])['per_icp_score'] is not None
+    source = h.service.store.get_run(judge['scored_run_id'])
+    accepted = h.service.store.get_run(lease['run_id'])
+    assert source['per_icp_score'] is None and source['qualification_doc'] is None
+    assert accepted['status'] == 'accepted' and accepted['scored_run_id'] == source['run_id']
+    assert json.loads(h.objects.get(source['output_ref']))['companies'] == []
+    with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
+        before = fingerprint(cur, rid)
+        assert scalar(cur, 'public.lab_arena__baseline_final_ready_v1(%s)', (rid,)) is False
+    assert h.service.publish(rid)['status'] == 'ok'
+    assert h.status() == 'published'
+    projected = h.service.store.get_run(source['run_id'])
+    assert projected['per_icp_score'] == 0
+    assert projected['qualification_doc'] == {'companies': []}
+    for key in source.keys() - {'per_icp_score', 'qualification_doc', 'updated_at'}:
+        assert projected[key] == source[key], key
+    assert projected['updated_at'] >= source['updated_at']
+    assert h.service.store.get_run(lease['run_id']) == accepted
+    ranking = h.service.store.get_round(rid)['publication_doc']['final_ranking']
+    assert len(ranking) == 2 and all(item['final_score'] == 0 for item in ranking)
+    with db[0].connect(**db[1]) as conn, conn.cursor() as cur:
+        assert fingerprint(cur, rid) == before
+        assert scalar(cur, 'public.lab_arena__baseline_final_ready_v1(%s)', (rid,)) is True
 
 
 @pytest.mark.parametrize('variant', ['pending','leased','before','accepted','stale',

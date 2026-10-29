@@ -3,7 +3,10 @@ from pathlib import Path
 from functools import partial
 import hashlib
 import json
+import os
+import platform
 import re
+import time
 
 import pytest
 
@@ -336,22 +339,99 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
             cur.execute("SELECT current_setting('server_version'), current_setting('server_version_num')")
             server_version, server_version_num = cur.fetchone()
             results = []; plans = {'server_version': server_version,
-                                   'server_version_num': server_version_num}
+                                   'server_version_num': server_version_num,
+                                   'machine': platform.machine(), 'cpu_count': os.cpu_count()}
+            cur.execute("SELECT name,setting,unit FROM pg_settings WHERE name IN "
+                        "('work_mem','shared_buffers','effective_cache_size','jit','random_page_cost',"
+                        "'plan_cache_mode','max_parallel_workers_per_gather','max_worker_processes') "
+                        'ORDER BY name')
+            plans['settings'] = cur.fetchall()
+            cur.execute("SELECT relname,n_live_tup,n_mod_since_analyze,last_analyze::text "
+                        "FROM pg_stat_user_tables WHERE relname IN "
+                        "('lab_arena_ledger','lab_arena_runs','lab_arena_rounds') ORDER BY relname")
+            plans['table_statistics'] = cur.fetchall()
+            cur.execute("SELECT tablename,indexname,indexdef,index_class.reltuples,index_class.relpages,"
+                        'index_catalog.indisvalid,index_catalog.indisready '
+                        'FROM pg_indexes JOIN pg_class index_class ON index_class.oid='
+                        "(quote_ident(schemaname)||'.'||quote_ident(indexname))::regclass "
+                        'JOIN pg_index index_catalog ON index_catalog.indexrelid=index_class.oid '
+                        "WHERE schemaname='public' AND tablename IN "
+                        "('lab_arena_ledger','lab_arena_runs','lab_arena_rounds') ORDER BY indexname")
+            plans['indexes'] = cur.fetchall()
+            cur.execute('SELECT count(*) FROM lab_arena_ledger')
+            plans['ledger_rows'] = cur.fetchone()[0]
+            cur.execute('SELECT count(*) FROM lab_arena_runs')
+            plans['run_rows'] = cur.fetchone()[0]
+            cur.execute('SELECT count(*) FROM lab_arena_rounds')
+            plans['round_rows'] = cur.fetchone()[0]
+            plans['helper_hashes'] = {}
+            for signature in (SIGNATURE,
+                    'public.lab_arena__closed_score_dynamic_uncertainty_v1(bigint)',
+                    'public.lab_arena__closed_host_score_success_uncertainty_v1(bigint)',
+                    'public.lab_arena__closed_miner_score_success_uncertainty_v1(bigint)',
+                    'public.lab_arena__closed_score_adaptation_uncertainty_v1(bigint)',
+                    'public.lab_arena__deepline_cost_binding_v1(jsonb,jsonb,text)'):
+                cur.execute('SELECT pg_get_functiondef(%s::regprocedure)', (signature,))
+                plans['helper_hashes'][signature] = hashlib.sha256(cur.fetchone()[0].encode()).hexdigest()
+            artifact = (ROOT / 'ci-results' / 'plan507.json'
+                        if os.environ.get('GITHUB_ACTIONS') == 'true' else tmp_path / 'plans.json')
+            def persist_plans():
+                artifact.parent.mkdir(parents=True, exist_ok=True)
+                artifact.write_text(json.dumps(plans, indent=2))
+            def measured_execute(statement, phase):
+                # Save the estimated plans and all completed work even when the
+                # next unchanged acceptance bound cancels its statement.
+                plans['phase'] = phase
+                persist_plans()
+                started = time.monotonic()
+                try:
+                    cur.execute(statement)
+                except pg.Error as error:
+                    plans['failure'] = {'phase': phase, 'sqlstate': error.pgcode,
+                                        'elapsed_seconds': time.monotonic() - started}
+                    persist_plans()
+                    print('PLAN507_FAILURE ' + json.dumps(plans['failure']) +
+                          ' artifact=' + str(artifact), flush=True)
+                    raise
+                plans.setdefault('elapsed_seconds', {})[phase] = time.monotonic() - started
+                persist_plans()
+
+            names = ('test_before_'+prior.NAMES[0], prior.NAMES[0])
+            # Non-executing plans must precede the timed function: a canceled
+            # SQL function otherwise leaves no inspectable generic body plan.
+            for index, name in enumerate(names):
+                cur.execute('SELECT pg_get_functiondef(%s::regprocedure)', ('public.'+name+prior.SUFFIX,))
+                body = cur.fetchone()[0].split('AS $function$',1)[1].split('$function$',1)[0].strip().removesuffix(';')
+                literal = body
+                for key,value in {'p_mode':"'live'",'p_network_name':"'plan507'",'p_netuid':'71',
+                                  'p_round_id':"''",'p_after_entry_id':'0'}.items():
+                    literal = literal.replace(key,value)
+                cur.execute('EXPLAIN (FORMAT JSON, COSTS TRUE) '+literal)
+                plans['literal_'+name] = cur.fetchone()[0][0]
+                for number,key in enumerate(('p_mode','p_network_name','p_netuid','p_round_id','p_after_entry_id'),1):
+                    body = body.replace(key,'$'+str(number))
+                prepared = 'plan507_'+str(index)
+                cur.execute('PREPARE '+prepared+'(text,text,integer,text,bigint) AS '+body)
+                cur.execute('EXPLAIN (FORMAT JSON, COSTS TRUE) EXECUTE '+
+                            prepared+"('live','plan507',71,'',0)")
+                plans['estimated_generic_'+name] = cur.fetchone()[0][0]
+                persist_plans()
             print('PLAN507_RUNTIME server_version=%s server_version_num=%s' %
                   (server_version, server_version_num), flush=True)
-            for name in ('test_before_'+prior.NAMES[0], prior.NAMES[0]):
+            for name in names:
                 # Only the deliberately obsolete 60-scan reference needs a
                 # larger allowance. Optimized507 retains its 20-second bound.
                 cur.execute('SET LOCAL statement_timeout=%s',
                             ('60s' if name.startswith('test_before_') else '20s',))
                 print('PLAN507_FUNCTION name=%s statement_timeout=%s' %
                       (name, '60s' if name.startswith('test_before_') else '20s'), flush=True)
-                cur.execute('SELECT public.'+name+"('live','plan507',71,'',0)")
+                measured_execute('SELECT public.'+name+"('live','plan507',71,'',0)", 'call_'+name)
                 results.append(cur.fetchone()[0])
-                cur.execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) SELECT public.'+
-                            name+"('live','plan507',71,'',0)")
+                measured_execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) SELECT public.'+
+                                 name+"('live','plan507',71,'',0)", 'explain_'+name)
                 full_plan = cur.fetchone()[0][0]
                 plans[name]=full_plan
+                persist_plans()
                 plan = full_plan['Plan']
                 if name.startswith('test_before_'):
                     before_reads = plan['Temp Read Blocks']
@@ -363,28 +443,17 @@ def test_generic_function_plan_reads_spill_once(plan_database, tmp_path):
                 for child in node.get('Plans',[]):
                     values.extend(cte_loops(child))
                 return values
-            for index,name in enumerate(('test_before_'+prior.NAMES[0],prior.NAMES[0])):
+            for index,name in enumerate(names):
                 cur.execute('SET LOCAL statement_timeout=%s',
                             ('60s' if index == 0 else '20s',))
-                cur.execute('SELECT pg_get_functiondef(%s::regprocedure)',('public.'+name+prior.SUFFIX,))
-                body = cur.fetchone()[0].split('AS $function$',1)[1].split('$function$',1)[0].strip().removesuffix(';')
-                literal = body
-                for key,value in {'p_mode':"'live'",'p_network_name':"'plan507'",'p_netuid':'71',
-                                  'p_round_id':"''",'p_after_entry_id':'0'}.items():
-                    literal = literal.replace(key,value)
-                cur.execute('EXPLAIN (FORMAT JSON, COSTS TRUE) '+literal)
-                plans['literal_'+name]=cur.fetchone()[0][0]
-                for number,key in enumerate(('p_mode','p_network_name','p_netuid','p_round_id','p_after_entry_id'),1):
-                    body = body.replace(key,'$'+str(number))
                 prepared = 'plan507_'+str(index)
-                cur.execute('PREPARE '+prepared+'(text,text,integer,text,bigint) AS '+body)
-                cur.execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) EXECUTE '+
-                            prepared+"('live','plan507',71,'',0)")
+                measured_execute('EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, TIMING FALSE) EXECUTE '+
+                                 prepared+"('live','plan507',71,'',0)", 'generic_'+name)
                 full_plan=cur.fetchone()[0][0]
                 plans['generic_'+name]=full_plan
                 generic_reads[index]=full_plan['Plan']['Temp Read Blocks']
                 generic_loops[index]=max(cte_loops(full_plan['Plan']))
-            (tmp_path/'plans.json').write_text(json.dumps(plans,indent=2))
+                persist_plans()
             assert generic_loops=={0:60,1:1}
             assert generic_reads[0]>0 and generic_reads[1]<generic_reads[0]/10
             assert results == [{'status':'none'}]*2
